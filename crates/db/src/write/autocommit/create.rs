@@ -579,7 +579,10 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             }
             _ => None,
         };
-        let doc_short_ids: Vec<_> = identities.iter().map(|identity| identity.doc_short_id).collect();
+        let doc_short_ids: Vec<_> = identities
+            .iter()
+            .map(|identity| identity.doc_short_id)
+            .collect();
         let attempt = CreateManyRetryAttempt {
             db: Arc::clone(&self.db),
             collection_name: collection_name.to_string(),

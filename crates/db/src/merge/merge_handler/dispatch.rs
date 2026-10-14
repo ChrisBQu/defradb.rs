@@ -1,14 +1,13 @@
 use async_trait::async_trait;
 use cid::Cid;
-use defra_core::block::{Block, CrdtDelta};
 use defra_core::merge::{
     BlockMetadata, ExplicitReplayAuthorization, MergeBlock, MergeErrorDisposition, MergeHandler,
     MergeOutcome, RecoveredBlockMetadata,
 };
 use storage::corekv::Store;
 
-use super::{DbMergeHandler, MergeError, cid_set};
-use crate::merge::governance::{REDRIVE_BUDGET, RedrivenMerge};
+use super::{cid_set, DbMergeHandler, MergeError};
+use crate::merge::governance::{RedrivenMerge, REDRIVE_BUDGET};
 use kovan_queue::seg_queue::SegQueue;
 
 struct MergeRetryAttempt<S: Store, B: blockstore::Blockstore> {
@@ -48,7 +47,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> MergeRetryAttempt<
     ) -> Result<MergeOutcome, MergeError> {
         let io = retry
             .begin_attempt_io()
-            .map_err(|error| MergeError::Database(crate::error::Error::Storage(error.into())))?;
+            .map_err(|error| MergeError::Database(crate::error::Error::Storage(error)))?;
         let basic_txn = datastore::BasicTxn::from_retry_attempt_io(io, 0);
         let mut txn = crate::txn::DbTxn::<S>::new(basic_txn);
         let datastore = txn.datastore()?;
@@ -118,31 +117,40 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> MergeRetryAttempt<
         }
         field_cids.sort_unstable();
         field_cids.dedup();
-        txn.on_success_ordered_async(Box::new(move || {
-            Box::pin(async move {
-                handler
-                    .merged_composites
-                    .extend(merged_composites.iter().map(|cid| (*cid, ())));
-                handler
-                    .merged_collections
-                    .extend(merged_collections.iter().map(|cid| (*cid, ())));
-                for cid in &merged_composites {
-                    handler.release_merged_composite(cid, None).await;
+        let after_commit = async move {
+            handler
+                .merged_composites
+                .extend(merged_composites.iter().map(|cid| (*cid, ())));
+            handler
+                .merged_collections
+                .extend(merged_collections.iter().map(|cid| (*cid, ())));
+            for cid in &merged_composites {
+                handler.release_merged_composite(cid, None).await;
+            }
+            for action in actions {
+                if let Err(error) = action.run().await {
+                    tracing::warn!(error = %error, "Post-commit merge action failed");
                 }
-                for action in actions {
-                    if let Err(error) = action.run().await {
-                        tracing::warn!(error = %error, "Post-commit merge action failed");
-                    }
-                }
-                handler
-                    .best_effort_finalize_linked_field_blocks(&field_cids)
-                    .await;
-                Ok(())
-            })
-        }))?;
+            }
+            handler
+                .best_effort_finalize_linked_field_blocks(&field_cids)
+                .await;
+        };
+        if events.is_empty() {
+            // Deferred/schema-only outcomes may have no native writes. Their
+            // follow-up work owns its own commits and needs no receipt slot.
+            txn.on_success_async(Box::new(move || Box::pin(after_commit)))?;
+        } else {
+            txn.on_retry_success_ordered_async(Box::new(move || {
+                Box::pin(async move {
+                    after_commit.await;
+                    Ok(())
+                })
+            }))?;
+        }
         if !events.is_empty() {
             if let Some(bus) = self.handler.db.event_bus().cloned() {
-                txn.on_success_ordered(Box::new(move || bus.publish_batch(events)))?;
+                txn.on_retry_success_ordered(Box::new(move || bus.publish_batch(events)))?;
             }
         }
         let (io, callbacks) = txn
@@ -150,7 +158,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> MergeRetryAttempt<
             .map_err(crate::error::Error::Storage)?;
         retry
             .finish_attempt_io(io, callbacks)
-            .map_err(|error| MergeError::Database(crate::error::Error::Storage(error.into())))?;
+            .map_err(|error| MergeError::Database(crate::error::Error::Storage(error)))?;
         Ok(outcome)
     }
 }
@@ -368,207 +376,6 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
         }
         if self.deferred.has_ready() {
             tracing::debug!("Re-drive budget spent; remaining composites drain on the next merge");
-        }
-    }
-
-    /// One merge attempt for a single block. Conflict retry lives in the
-    /// `MergeHandler::handle_block` wrapper above (Go's `executeMerge` split).
-    pub(crate) async fn merge_block_attempt(
-        &self,
-        cid: &Cid,
-        block_data: &[u8],
-        metadata: BlockMetadata<'_>,
-    ) -> Result<MergeOutcome, MergeError> {
-        tracing::debug!(
-            cid = %cid,
-            block_size = block_data.len(),
-            is_recovery = metadata.is_recovery,
-            "Handling block for merge"
-        );
-
-        // Decode the block from DAG-CBOR
-        let block =
-            Block::from_dag_cbor(block_data).map_err(|e| MergeError::BlockDecode(e.to_string()))?;
-
-        tracing::debug!(
-            cid = %cid,
-            delta_type = ?std::mem::discriminant(&block.delta),
-            heads_count = block.heads.as_ref().map(|h| h.len()).unwrap_or(0),
-            links_count = block.links.as_ref().map(|l| l.len()).unwrap_or(0),
-            "Block decoded successfully"
-        );
-
-        // Verify block signature for P2P blocks (skip during recovery).
-        // On success, populate verified_creator with the cryptographically
-        // verified signer identity. Invalid signatures reject the block.
-        let mut metadata = metadata;
-        if !metadata.is_recovery {
-            let verified = self.verify_block_signature(cid, &block, block_data).await?;
-            metadata.verified_creator = verified;
-        }
-
-        // A standalone encrypted field block can only be merged once the
-        // block-CID -> DocID ownership index names a single owner (recorded
-        // by the composite merge that links it); otherwise it is merged via
-        // its composite instead (see `process_lww_delta`/`process_counter_delta`).
-        // Check that BEFORE attempting decryption: decrypting requires a KMS
-        // fetch that may cross the network, and paying for that round trip
-        // only to discard the result when ownership turns out to be unknown
-        // wastes a fetch the composite merge will redundantly repeat moments
-        // later (and, under load, can blow the caller's retry/poll budget).
-        if block.encryption.is_some()
-            && matches!(block.delta, CrdtDelta::Lww(_) | CrdtDelta::Counter(_))
-            && self.resolve_field_block_doc_id(cid).await?.is_none()
-        {
-            // Still REQUEST the DEK (detached), Go-parity with sync-time
-            // GetKeys: it warms the local key store for the composite merge
-            // and keeps the serve-side authorization decision — including the
-            // observable denial for unauthorized nodes — prompt.
-            if let Some(enc_cid) = block.encryption {
-                self.spawn_dek_prefetch(enc_cid, &metadata);
-            }
-            return Ok(MergeOutcome::terminal_skip(
-                "field block has no unambiguous owner; merged via its composite",
-            ));
-        }
-
-        // Decrypt delta data if the block has encryption.
-        // If decryption fails (encryption key block unavailable), skip the
-        // standalone field merge -- the composite merge will re-attempt
-        // decryption when it processes the linked field blocks.
-        let decrypted_block;
-        let effective_block = if block.encryption.is_some() {
-            match &block.delta {
-                CrdtDelta::Lww(payload) => {
-                    match self
-                        .decrypt_block_data(
-                            &payload.data,
-                            block.encryption.as_ref(),
-                            Some(&metadata),
-                        )
-                        .await
-                    {
-                        Ok(decrypted_data) => {
-                            let mut new_payload = payload.clone();
-                            new_payload.data = decrypted_data;
-                            decrypted_block = Block {
-                                delta: CrdtDelta::Lww(new_payload),
-                                heads: block.heads.clone(),
-                                links: block.links.clone(),
-                                encryption: block.encryption,
-                                signature: block.signature,
-                            };
-                            &decrypted_block
-                        }
-                        Err(error @ MergeError::Kms(kms::Error::AccessDenied { .. })) => {
-                            tracing::debug!(
-                                cid = %cid,
-                                error = %error,
-                                "Cannot decrypt standalone LWW block, skipping (canRead=false)"
-                            );
-                            return Ok(MergeOutcome::terminal_skip(
-                                "encryption key unavailable for standalone field block",
-                            ));
-                        }
-                        Err(error @ MergeError::Kms(_)) => return Err(error),
-                        Err(error) => {
-                            tracing::debug!(
-                                cid = %cid,
-                                error = %error,
-                                "Cannot decrypt standalone LWW block, skipping (canRead=false)"
-                            );
-                            return Ok(MergeOutcome::terminal_skip(
-                                "encryption key unavailable for standalone field block",
-                            ));
-                        }
-                    }
-                }
-                CrdtDelta::Counter(payload) => {
-                    match self
-                        .decrypt_block_data(
-                            &payload.data,
-                            block.encryption.as_ref(),
-                            Some(&metadata),
-                        )
-                        .await
-                    {
-                        Ok(decrypted_data) => {
-                            let mut new_payload = payload.clone();
-                            new_payload.data = decrypted_data;
-                            decrypted_block = Block {
-                                delta: CrdtDelta::Counter(new_payload),
-                                heads: block.heads.clone(),
-                                links: block.links.clone(),
-                                encryption: block.encryption,
-                                signature: block.signature,
-                            };
-                            &decrypted_block
-                        }
-                        Err(error @ MergeError::Kms(kms::Error::AccessDenied { .. })) => {
-                            tracing::debug!(
-                                cid = %cid,
-                                error = %error,
-                                "Cannot decrypt standalone Counter block, skipping (canRead=false)"
-                            );
-                            return Ok(MergeOutcome::terminal_skip(
-                                "encryption key unavailable for standalone field block",
-                            ));
-                        }
-                        Err(error @ MergeError::Kms(_)) => return Err(error),
-                        Err(error) => {
-                            tracing::debug!(
-                                cid = %cid,
-                                error = %error,
-                                "Cannot decrypt standalone Counter block, skipping (canRead=false)"
-                            );
-                            return Ok(MergeOutcome::terminal_skip(
-                                "encryption key unavailable for standalone field block",
-                            ));
-                        }
-                    }
-                }
-                _ => &block,
-            }
-        } else {
-            &block
-        };
-
-        // Process based on delta type
-        match &effective_block.delta {
-            CrdtDelta::Lww(payload) => self.process_lww_delta(cid, payload, &metadata).await,
-            CrdtDelta::Counter(payload) => {
-                self.process_counter_delta(cid, payload, &metadata).await
-            }
-            CrdtDelta::Composite(payload) => {
-                self.process_composite_delta(cid, &block, payload, &metadata, false, 0)
-                    .await
-            }
-            CrdtDelta::Collection(payload) => {
-                self.process_collection_delta(cid, &block, payload, &metadata, 0)
-                    .await
-            }
-            CrdtDelta::FieldDefinition(_) => {
-                // Field definitions are processed as part of CollectionDefinition
-                tracing::debug!(cid = %cid, "FieldDefinition delta - skipping (processed with collection)");
-                Ok(MergeOutcome::terminal_skip(
-                    "field definition processed with collection",
-                ))
-            }
-            CrdtDelta::CollectionDefinition(payload) => {
-                self.process_collection_definition_delta(cid, &block, payload, &metadata)
-                    .await
-            }
-            CrdtDelta::CollectionSet(_) => {
-                tracing::debug!(cid = %cid, "CollectionSet delta - skipping");
-                Ok(MergeOutcome::terminal_skip("collection set delta"))
-            }
-            // Only the variant discriminant is reported — `CrdtDelta` carries
-            // field-value bytes from user documents and must not be formatted
-            // into error strings that may end up in logs.
-            other => Err(MergeError::UnsupportedDelta(format!(
-                "unhandled CrdtDelta variant in merge dispatch: {:?}",
-                std::mem::discriminant(other)
-            ))),
         }
     }
 }

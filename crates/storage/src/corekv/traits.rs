@@ -180,6 +180,7 @@ pub type AsyncOrderedRetryCallback = Box<
 pub type AsyncOrderedRetryCallback =
     Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = std::result::Result<(), String>>>> + 'static>;
 
+#[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
 impl RetryCallbacks {
     pub fn counts(&self) -> RetryCallbackCounts {
         RetryCallbackCounts {

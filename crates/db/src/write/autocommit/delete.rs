@@ -2,6 +2,8 @@ use super::helpers::write_branchable_collection_block;
 use super::*;
 use events::{Message, Update};
 
+type DeleteAttemptResult = (DocID, bool, Option<CommitArtifacts>, Option<u64>);
+
 struct DeleteRetryAttempt<S: Store> {
     db: Arc<DB<S>>,
     collection_name: String,
@@ -315,11 +317,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .transact_retry(storage::corekv::RetryOptions::new(4), Box::new(attempt))
             .await;
         let results = match result {
-            Ok(value) => *value
-                .downcast::<Vec<(DocID, bool, Option<CommitArtifacts>, Option<u64>)>>()
-                .map_err(|_| {
-                    query::error::QueryError::execution("invalid batch delete retry result")
-                })?,
+            Ok(value) => *value.downcast::<Vec<DeleteAttemptResult>>().map_err(|_| {
+                query::error::QueryError::execution("invalid batch delete retry result")
+            })?,
             Err(error) => match error.downcast_abort::<query::error::QueryError>() {
                 Ok(error) => return Err(error),
                 Err(error) => {
@@ -344,7 +344,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         &self,
         retry: &mut dyn storage::corekv::RetryTxn,
         attempt: &DeleteManyRetryAttempt<S>,
-    ) -> query::error::Result<Vec<(DocID, bool, Option<CommitArtifacts>, Option<u64>)>> {
+    ) -> query::error::Result<Vec<DeleteAttemptResult>> {
         let io = retry
             .begin_attempt_io()
             .map_err(|error| crate::error::commit_query_error(error.into()))?;
@@ -370,103 +370,95 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         let headstore = txn.headstore().map_err(|e| {
             query::error::QueryError::execution(format!("failed to get headstore: {e}"))
         })?;
-        let result: query::error::Result<Vec<(DocID, bool, Option<CommitArtifacts>, Option<u64>)>> =
-            async {
-                let index_manager = IndexManager::from_indexes(
-                    attempt.collection.resolved_root_id(),
-                    attempt.collection.schema(),
-                    attempt.collection.write_indexes(),
-                )
-                .map_err(|e| {
-                    query::error::QueryError::execution(format!(
-                        "failed to create index manager: {e}"
-                    ))
-                })?;
-                let mut results = Vec::with_capacity(attempt.doc_ids.len());
-                for requested_id in &attempt.doc_ids {
-                    let Some((doc_short_id, canonical_id)) = attempt
-                        .collection
-                        .resolve_doc_identity(&systemstore, requested_id)
-                        .await
-                        .map_err(|e| {
-                            query::error::QueryError::execution(format!(
-                                "failed to resolve document identity for '{requested_id}': {e}"
-                            ))
-                        })?
-                    else {
-                        results.push((requested_id.clone(), false, None, None));
-                        continue;
-                    };
-                    let existed = attempt
-                        .collection
-                        .delete_with_indexes(
-                            &datastore,
-                            &canonical_id,
-                            doc_short_id,
-                            &index_manager,
-                        )
-                        .await
-                        .map_err(|e| {
-                            query::error::QueryError::execution(format!("delete error: {e}"))
-                        })?;
-                    if !existed {
-                        results.push((canonical_id, false, None, None));
-                        continue;
-                    }
-                    crate::write::autocommit::helpers::unregister_deleted_doc(
-                        self.db.document_acp(),
-                        &systemstore,
-                        &attempt.collection,
-                        &canonical_id,
-                    )
-                    .await?;
-                    let block_result = write_delete_block_with_inputs(
-                        &blockstore,
-                        &headstore,
-                        &canonical_id.to_string(),
-                        doc_short_id,
-                        &attempt.collection.version_id(),
-                        attempt.signing_config.as_ref(),
-                        attempt.prepared_inputs.as_ref(),
-                    )
+        let result: query::error::Result<Vec<DeleteAttemptResult>> = async {
+            let index_manager = IndexManager::from_indexes(
+                attempt.collection.resolved_root_id(),
+                attempt.collection.schema(),
+                attempt.collection.write_indexes(),
+            )
+            .map_err(|e| {
+                query::error::QueryError::execution(format!("failed to create index manager: {e}"))
+            })?;
+            let mut results = Vec::with_capacity(attempt.doc_ids.len());
+            for requested_id in &attempt.doc_ids {
+                let Some((doc_short_id, canonical_id)) = attempt
+                    .collection
+                    .resolve_doc_identity(&systemstore, requested_id)
                     .await
-                    .map_err(|e| match e {
-                        crate::block::builder::BuildError::NeedsInput(request) => {
-                            query::error::QueryError::NeedsInput(request)
-                        }
-                        other => query::error::QueryError::execution(format!(
-                            "failed to write delete block: {other}"
-                        )),
+                    .map_err(|e| {
+                        query::error::QueryError::execution(format!(
+                            "failed to resolve document identity for '{requested_id}': {e}"
+                        ))
+                    })?
+                else {
+                    results.push((requested_id.clone(), false, None, None));
+                    continue;
+                };
+                let existed = attempt
+                    .collection
+                    .delete_with_indexes(&datastore, &canonical_id, doc_short_id, &index_manager)
+                    .await
+                    .map_err(|e| {
+                        query::error::QueryError::execution(format!("delete error: {e}"))
                     })?;
-                    crate::docid::map::set_block_doc_id_mapping(
-                        &systemstore,
-                        &block_result.cid.to_string(),
-                        &canonical_id.to_string(),
-                    )
-                    .await
-                    .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
-                    let col_data = write_branchable_collection_block(
-                        &self.db,
-                        &attempt.collection_name,
-                        &attempt.collection,
-                        &blockstore,
-                        &headstore,
-                        block_result.cid,
-                        doc_short_id,
-                        attempt.signing_config.as_ref(),
-                        attempt.prepared_inputs.as_ref(),
-                    )
-                    .await?;
-                    results.push((
-                        canonical_id,
-                        true,
-                        Some((block_result.cid, block_result.block, col_data)),
-                        Some(doc_short_id),
-                    ));
+                if !existed {
+                    results.push((canonical_id, false, None, None));
+                    continue;
                 }
-                Ok(results)
+                crate::write::autocommit::helpers::unregister_deleted_doc(
+                    self.db.document_acp(),
+                    &systemstore,
+                    &attempt.collection,
+                    &canonical_id,
+                )
+                .await?;
+                let block_result = write_delete_block_with_inputs(
+                    &blockstore,
+                    &headstore,
+                    &canonical_id.to_string(),
+                    doc_short_id,
+                    attempt.collection.version_id(),
+                    attempt.signing_config.as_ref(),
+                    attempt.prepared_inputs.as_ref(),
+                )
+                .await
+                .map_err(|e| match e {
+                    crate::block::builder::BuildError::NeedsInput(request) => {
+                        query::error::QueryError::NeedsInput(request)
+                    }
+                    other => query::error::QueryError::execution(format!(
+                        "failed to write delete block: {other}"
+                    )),
+                })?;
+                crate::docid::map::set_block_doc_id_mapping(
+                    &systemstore,
+                    &block_result.cid.to_string(),
+                    &canonical_id.to_string(),
+                )
+                .await
+                .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+                let col_data = write_branchable_collection_block(
+                    &self.db,
+                    &attempt.collection_name,
+                    &attempt.collection,
+                    &blockstore,
+                    &headstore,
+                    block_result.cid,
+                    doc_short_id,
+                    attempt.signing_config.as_ref(),
+                    attempt.prepared_inputs.as_ref(),
+                )
+                .await?;
+                results.push((
+                    canonical_id,
+                    true,
+                    Some((block_result.cid, block_result.block, col_data)),
+                    Some(doc_short_id),
+                ));
             }
-            .await;
+            Ok(results)
+        }
+        .await;
         drop(datastore);
         drop(systemstore);
         drop(blockstore);

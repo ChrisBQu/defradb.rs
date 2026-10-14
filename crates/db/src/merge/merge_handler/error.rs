@@ -87,20 +87,6 @@ impl MergeError {
         MergeError::DepthExceeded { cid: *cid, depth }
     }
 
-    /// Check if this error is a transaction conflict that can be retried.
-    pub(crate) fn is_txn_conflict(&self) -> bool {
-        match self {
-            MergeError::Database(db_err) => match db_err {
-                crate::error::Error::Datastore(datastore::Error::Storage(storage_err)) => {
-                    storage_err.is_txn_conflict()
-                }
-                crate::error::Error::Storage(storage_err) => storage_err.is_txn_conflict(),
-                _ => false,
-            },
-            _ => false,
-        }
-    }
-
     /// Classify failures that cannot change while replaying the same block.
     pub(crate) fn disposition(&self) -> MergeErrorDisposition {
         match self {

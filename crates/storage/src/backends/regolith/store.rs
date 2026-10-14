@@ -323,7 +323,7 @@ impl Store for RegolithStore {
         let mut committed_callbacks = RetryCallbacks::default();
         let mut attempt_count = 0usize;
         let mut conflict_count = 0usize;
-        let run = || {
+        let outcome = {
             let mut queue = queue_db.db().io_queue();
             let queue_id = queue.id();
             let future = queue_db.transact_async(queue_id, &policy, async |txn, lost| {
@@ -373,10 +373,14 @@ impl Store for RegolithStore {
             // this synchronous bridge owns the thread; an exhausted budget
             // would park an otherwise ready storage operation forever.
             #[cfg(not(target_arch = "wasm32"))]
-            let future = tokio::task::unconstrained(future);
-            queue.block_on(future)
+            {
+                super::blocking(|| queue.block_on(tokio::task::unconstrained(future)))
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                drive_browser_queue(&mut queue, future).await
+            }
         };
-        let outcome = super::blocking(run);
         match outcome {
             Ok((value, receipt)) => {
                 {
@@ -780,4 +784,45 @@ mod retry_order_tests {
         retry_task.await.unwrap();
         assert_eq!(*events.lock().unwrap(), vec![1, 2]);
     }
+}
+
+/// Browser transactions yield to the event loop instead of parking a thread.
+#[cfg(target_arch = "wasm32")]
+async fn drive_browser_queue<F: std::future::Future>(
+    queue: &mut regolith::IoQueue,
+    future: F,
+) -> F::Output {
+    use std::{future::Future, pin::Pin, task::Poll};
+    let mut future = std::pin::pin!(future);
+    type Timer = (web_time::Instant, Pin<Box<dyn Future<Output = ()>>>);
+    let mut timer: Option<Timer> = None;
+    std::future::poll_fn(|cx| {
+        if let Poll::Ready(result) = future.as_mut().poll(cx) {
+            return Poll::Ready(result);
+        }
+        let progress = queue.poll(regolith::IoBudget::ALL);
+        if progress.completed > 0 {
+            cx.waker().wake_by_ref();
+        }
+        queue.idle_waker(cx.waker());
+        if let Some(delay) = progress.wake_in {
+            let deadline = web_time::Instant::now() + delay;
+            if timer
+                .as_ref()
+                .is_none_or(|(current, _)| deadline < *current)
+            {
+                timer = Some((deadline, Box::pin(n0_future::time::sleep(delay))));
+            }
+            if let Some((_, sleep)) = timer.as_mut() {
+                if sleep.as_mut().poll(cx).is_ready() {
+                    timer = None;
+                    cx.waker().wake_by_ref();
+                }
+            }
+        } else {
+            timer = None;
+        }
+        Poll::Pending
+    })
+    .await
 }

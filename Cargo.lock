@@ -12823,6 +12823,7 @@ dependencies = [
  "kovan",
  "kovan-map",
  "kovan-queue",
+ "n0-future",
  "proptest",
  "rapidhash",
  "regolith",

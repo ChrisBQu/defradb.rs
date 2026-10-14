@@ -155,6 +155,8 @@ impl RegolithTxn {
         }
     }
 
+    // Ownership arrives boxed from the sealed attempt IO capability.
+    #[allow(clippy::boxed_local)]
     pub(super) fn into_scoped_engine_txn(
         mut self: Box<Self>,
     ) -> Result<(Box<Transaction>, HeadChanges, bool)> {
