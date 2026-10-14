@@ -125,9 +125,22 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
                 }
             };
 
-            match collection
-                .get_by_doc_id(&datastore, &systemstore, &doc_id)
-                .await
+            let fetched = if let Some(fields) = &self.projection {
+                match collection.resolve_doc_identity(&systemstore, &doc_id).await {
+                    Ok(Some((short_id, canonical))) => {
+                        collection
+                            .get_with_datastore_fields(&datastore, short_id, &canonical, fields)
+                            .await
+                    }
+                    Ok(None) => Ok(None),
+                    Err(error) => Err(error),
+                }
+            } else {
+                collection
+                    .get_by_doc_id(&datastore, &systemstore, &doc_id)
+                    .await
+            };
+            match fetched
                 .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?
             {
                 Some(doc) => docs.push(doc),

@@ -77,11 +77,45 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         // otherwise an unrelated field from the concurrent update is silently
         // replaced by the stale snapshot. Read through the mutation transaction
         // so its comparison, schema and deletion decisions are validated at commit.
-        let fresh_fetcher = LensedDocFetcher::new(
-            Arc::clone(&self.db),
-            self.new_mutation_txn().await?,
-            self.db.lens_store.clone(),
-        );
+        let mut read_dependencies = modified_fields.clone();
+        if expected.is_none() {
+            // If a changed field participates in a composite index, maintenance
+            // needs every component to compare and replace that index entry.
+            for index in collection.write_indexes() {
+                if index
+                    .fields
+                    .iter()
+                    .any(|field| modified_fields.contains(&field.name))
+                {
+                    read_dependencies.extend(index.fields.iter().map(|field| field.name.clone()));
+                }
+            }
+            // Embedding regeneration consumes every source field, including
+            // unchanged sources that may have changed since the caller's plan.
+            for embedding in &collection.schema().vector_embeddings {
+                if embedding
+                    .fields
+                    .iter()
+                    .any(|field| modified_fields.contains(field))
+                {
+                    read_dependencies.extend(embedding.fields.iter().cloned());
+                }
+            }
+        }
+        let fresh_fetcher = if expected.is_none() {
+            LensedDocFetcher::new_projected(
+                Arc::clone(&self.db),
+                self.new_mutation_txn().await?,
+                self.db.lens_store.clone(),
+                read_dependencies.clone(),
+            )
+        } else {
+            LensedDocFetcher::new(
+                Arc::clone(&self.db),
+                self.new_mutation_txn().await?,
+                self.db.lens_store.clone(),
+            )
+        };
         let canonical_id = canonical_lock_id.to_string();
         let Some(mut current_doc) = fresh_fetcher
             .get_by_ids(collection_name, std::slice::from_ref(&canonical_id))
@@ -98,6 +132,25 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 query::error::QueryError::document_not_found(canonical_id)
             });
         };
+        if expected.is_none() {
+            // The projection supplies current values for all write decisions;
+            // retain the caller's snapshot for unrelated fields that this
+            // mutation neither returns nor rewrites.
+            let mut rebased = doc.clone();
+            let copy_all = current_doc.values().len() > read_dependencies.len();
+            let fields_to_copy: Vec<String> = if copy_all {
+                current_doc.values().keys().cloned().collect()
+            } else {
+                read_dependencies.iter().cloned().collect()
+            };
+            for field in &fields_to_copy {
+                if let Some(value) = current_doc.get(field).cloned() {
+                    rebased.set(field.clone(), value);
+                }
+            }
+            rebased.set_id(canonical_lock_id.clone());
+            current_doc = rebased;
+        }
         if let Some(expected) = expected {
             let values_unchanged = expected.values().len() == current_doc.values().len()
                 && expected

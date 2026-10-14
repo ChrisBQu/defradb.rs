@@ -895,6 +895,55 @@ impl IndexManager {
         Ok(())
     }
 
+    /// Update only indexes whose fields intersect a known mutation patch.
+    /// The caller must provide old/new values for every field in each touched
+    /// (including composite) index.
+    pub(crate) async fn on_document_update_modified(
+        &self,
+        datastore: &NamespaceView,
+        old_doc: &Document,
+        new_doc: &Document,
+        doc_short_id: u64,
+        schema: &CollectionVersion,
+        modified: &rapidhash::RapidHashSet<String>,
+    ) -> Result<()> {
+        require_doc_short_id(doc_short_id)?;
+        let mut mutable_datastore = datastore.clone();
+        for index in self.indexes.values() {
+            if !index
+                .description()
+                .fields
+                .iter()
+                .any(|field| modified.contains(&field.name))
+            {
+                continue;
+            }
+            let old_value_sets = self.extract_index_values(old_doc, index.description(), schema)?;
+            let new_value_sets = self.extract_index_values(new_doc, index.description(), schema)?;
+            if old_value_sets == new_value_sets {
+                continue;
+            }
+            Self::validate_unique_value_sets(index, &new_value_sets)?;
+            for old_values in &old_value_sets {
+                index
+                    .delete(&mut mutable_datastore, doc_short_id, old_values)
+                    .await
+                    .map_err(Error::Storage)?;
+            }
+            for new_values in &new_value_sets {
+                self.save_healing_stale_unique(
+                    &mut mutable_datastore,
+                    index,
+                    doc_short_id,
+                    new_values,
+                )
+                .await
+                .map_err(Error::Storage)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Update indexes when a document is deleted.
     pub async fn on_document_delete(
         &self,

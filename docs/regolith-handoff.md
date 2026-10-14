@@ -25,12 +25,42 @@ The intended total is 11 PRs: these six plus one each for steps 4–8. Split int
 |---|---|
 | 1 | Implemented in three separate PRs. Engine key providers replace per-value encryption, including read-only opens. Only genuine block CID keys are ContentAddressed. Writers use DefraLevel; the old head cache is gated off for them, pending deletion in step 6. |
 | 2 | Implemented broadly: transactional document/version/definition/deletion reads, local ACP authorization and owner registration, validated relationship scans, embedded NAC persistence, downsample series uniqueness. Audit remaining writer copies during retry conversion. Remote Vera stays at the network boundary. |
-| 3 | Implemented: commit-ordered arrival append, engine ID allocation, numeric and full-text merges, local document part IDs and field operands, version-key handling, removal of interactive counter finalization, write-free readonly lenses and conservative lens-aware index planning, document head markers and CommutativePrefix classification. HNSW link/count operators are implemented with passing concurrency/operator/recall tests. Remote document composites now use LWW and exact integer operands; floating-point mirror repairs retain validated puts to preserve rounding. **Still open:** document reads still validate all fields; counter reads retain validation for index/materialization correctness. Writable lens retries belong to step 5. |
+| 3 | Implemented: commit-ordered arrival append, engine ID allocation, numeric and full-text merges, local document part IDs and field operands, version-key handling, removal of interactive counter finalization, write-free readonly lenses and conservative lens-aware index planning, document head markers and CommutativePrefix classification. HNSW link/count operators are implemented with passing concurrency/operator/recall tests. Remote document composites now use LWW and exact integer operands; floating-point mirror repairs retain validated puts to preserve rounding. Known modified-field writes now project mutation and touched-index dependencies; general query/output reads and counter reads remain conservative. Writable lens retries belong to step 5. |
 | 4 | In progress on an isolated branch: propagate actual receipts and queue local events before commit; model delayed callbacks and failed commits. Not yet published. |
 | 5 | In progress: engine-owned retries and prepared remote inputs. The bundle is inconsistent: §5.2 asks for synchronous traits, but later accepted D39 adds `transact_async` and D56 explicitly says the async datapath stays. Follow D56 and the pinned engine API; worker-pool redesign remains step 9. |
 | 6 | Local branch removes the head-cache publication lock and obsolete head-cache/forced-read APIs; native storage and DB block/merge tests pass. Performance gates remain pending; this is not yet published. Remaining listed locks must be removed individually with before/after gates. Counter finalization is already gone; batch/document guards remain. The head prune no longer calls has_for_update, but the trait/wrappers still expose it. |
 | 7 | Implemented on an isolated branch: engine commit/policy tickers and per-store on_conflict reason counters, preserving caller instrumentation. Two native regressions and native/WASM Clippy pass. Not yet published above steps 4–6. |
 | 8 | Not started: retire cache/finalizer models and bind arrival proofs to CommitOrderedAppend. HeadSet remains; document heads now use the same marker algebra. |
+
+### Step 3 decision-read audit (2026-10-14)
+
+The remaining document conflict is not fixed by narrowing only the old-document read in
+`Collection::update_with_indexes_parts`. The local autocommit path first reloads the document through
+`LensedDocFetcher::get_by_ids` under its write guard; that calls `get_by_doc_id` and validates all fields in
+`read_document_blob_and_version`. Ordinary query reads use the same full-document path. Both can still reject a
+transaction after a concurrent disjoint field operand changes the blob.
+
+A sound write projection must include every field the mutation actually consumes: changed fields, changed fields
+participating in indexes, changed immutable fields, the downsample `source_doc_id` when it changes, and any embedding
+source fields used to regenerate a vector. Index maintenance must skip indexes untouched by the mutation; otherwise
+the partially materialized old document is mistaken for null values and can delete valid entries. Structural puts,
+schema-version transitions, migrations, and callers without an explicit modified-field set retain whole-value reads.
+Query output reads require the selected fields plus predicate, ordering, join, and computed-field dependencies, so a
+field dependency set must flow from query planning into the fetcher before query reads can be narrowed safely.
+
+Counter reads remain validated. `ValueReader::value` is used to materialize counter values, and the document mirror
+repair path derives an operand from the stored mirror. An advisory counter read could therefore commit a stale
+document mirror and corrupt index/materialized query results even though the authoritative counter accumulator
+itself merges correctly.
+
+The implementation now narrows the explicit-modified-field collection update path and the autocommit mutation reload:
+the reload requests changed fields, all fields of touched composite indexes, and all source fields used by embedding
+regeneration. The old-document index path uses the same dependency set, skips untouched indexes, and only performs
+series-key release/claim when `source_doc_id` changes. Conditional (`expected`) updates, general query/output reads,
+unknown-modification callers, and lens migrations stay conservative. Counter reads stay validated. Validation passed:
+`cargo check -p db`, all 57 `db` write integration tests, all 41 `db` index integration tests, and the explicit
+disjoint and same-indexed-field transaction regressions. This does not claim generic query projection or zero
+incidental conflicts for explicit transactions that already performed a full document read.
 
 ## Latest implementation checkpoints
 

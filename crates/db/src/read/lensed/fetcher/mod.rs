@@ -53,6 +53,9 @@ pub struct LensedDocFetcher<S: Store> {
     /// Cache of collection version histories keyed by collection name.
     pub history_cache:
         async_lock::RwLock<RapidHashMap<String, RapidHashMap<String, TargetedHistoryLink>>>,
+    /// Optional field projection used by mutation rebases whose dependencies
+    /// are known. General query fetches leave this unset.
+    projection: Option<rapidhash::RapidHashSet<String>>,
 }
 
 impl<S: Store> LensedDocFetcher<S> {
@@ -79,7 +82,20 @@ impl<S: Store> LensedDocFetcher<S> {
             lens_store,
             version_cache: Arc::new(async_lock::RwLock::new(RapidHashMap::new())),
             history_cache: async_lock::RwLock::new(RapidHashMap::new()),
+            projection: None,
         }
+    }
+
+    /// Create a fetcher for a mutation whose read dependencies are known.
+    pub fn new_projected(
+        db: Arc<DB<S>>,
+        txn: DbTxn<S>,
+        lens_store: Arc<dyn TransformStore>,
+        fields: rapidhash::RapidHashSet<String>,
+    ) -> Self {
+        let mut fetcher = Self::new(db, txn, lens_store);
+        fetcher.projection = Some(fields);
+        fetcher
     }
 
     /// Build a lightweight fetcher sharing this one's transaction, for use by a `DocStream` that outlives a single
@@ -92,6 +108,7 @@ impl<S: Store> LensedDocFetcher<S> {
             lens_store: self.lens_store.clone(),
             version_cache: self.version_cache.clone(),
             history_cache: async_lock::RwLock::new(RapidHashMap::new()),
+            projection: self.projection.clone(),
         }
     }
 

@@ -1,3 +1,4 @@
+use document::stored::StoredDocument;
 use storage::keys::doc_id_index::decode_doc_short_id;
 
 use super::*;
@@ -41,6 +42,59 @@ impl Collection {
         }
         .map_err(Error::Storage)?;
         Ok((data, version))
+    }
+
+    /// Read only named fields when the stored schema version is current. A
+    /// lens transition needs the complete old value, so those reads retain the
+    /// conservative whole-blob dependency.
+    pub(crate) async fn get_with_datastore_fields(
+        &self,
+        datastore: &NamespaceView,
+        doc_short_id: u64,
+        doc_id: &DocID,
+        fields: &rapidhash::RapidHashSet<String>,
+    ) -> Result<Option<Document>> {
+        if fields.is_empty() {
+            return self
+                .get_with_datastore(datastore, doc_short_id, doc_id)
+                .await;
+        }
+        let deleted_key = self.deleted_key(doc_short_id);
+        if datastore.has(&deleted_key).await.map_err(Error::Storage)? {
+            return Ok(None);
+        }
+        let version = self.load_version(datastore, doc_short_id).await?;
+        let ids = self.part_ids(datastore).await?;
+        let parts = ids.as_ref().and_then(|ids| {
+            fields
+                .iter()
+                .map(|field| ids.get(field).copied())
+                .collect::<Option<Vec<_>>>()
+        });
+        let key = self.doc_key(doc_short_id);
+        let data = match (version.as_deref() == Some(self.version_id()), parts) {
+            (true, Some(parts)) if !parts.is_empty() => {
+                let projected = datastore
+                    .get_parts(&key, &parts)
+                    .await
+                    .map_err(Error::Storage)?;
+                // A legacy or structural whole-value write is not a part map.
+                // Keep its full dependency and let the caller rebase every field.
+                match projected {
+                    Some(bytes) if StoredDocument::decode(&bytes).is_some() => Some(bytes),
+                    Some(_) => datastore.get(&key).await.map_err(Error::Storage)?,
+                    None => None,
+                }
+            }
+            _ => datastore.get(&key).await.map_err(Error::Storage)?,
+        };
+        let Some(data) = data else { return Ok(None) };
+        let mut doc = Document::from_storage_cbor(&data)?;
+        doc.set_id(doc_id.clone());
+        if let Some(version) = version {
+            doc.set_schema_version_id(version);
+        }
+        Ok(Some(doc))
     }
 
     /// Get a document by its public DocID, resolving the short ID through

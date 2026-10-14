@@ -72,19 +72,41 @@ impl Collection {
         }
 
         // Get old document for index update
-        let old_doc = match self.read_document_blob(datastore, doc_short_id).await? {
-            Some(bytes) => {
-                let mut d = Document::from_storage_cbor(&bytes)?;
-                d.set_id(doc_id.clone());
-                d
+        let old_doc = match modified {
+            Some(changed) => {
+                let mut fields = changed.clone();
+                for index in index_manager.get_indexes() {
+                    if index
+                        .fields
+                        .iter()
+                        .any(|field| changed.contains(&field.name))
+                    {
+                        fields.extend(index.fields.iter().map(|field| field.name.clone()));
+                    }
+                }
+                self.get_with_datastore_fields(datastore, doc_short_id, doc_id, &fields)
+                    .await?
             }
+            None => {
+                self.get_with_datastore(datastore, doc_short_id, doc_id)
+                    .await?
+            }
+        };
+        let old_doc = match old_doc {
+            Some(doc) => doc,
             None => return Err(Error::DocumentNotFound(doc_id.to_string())),
         };
 
-        self.validate_immutable_fields_unchanged(&old_doc, doc)?;
+        match modified {
+            Some(changed) => self.validate_modified_immutable_fields(&old_doc, doc, changed)?,
+            None => self.validate_immutable_fields_unchanged(&old_doc, doc)?,
+        }
 
-        self.release_series(datastore, &old_doc).await?;
-        self.claim_series(datastore, doc).await?;
+        let series_changed = modified.is_none_or(|changed| changed.contains("source_doc_id"));
+        if series_changed {
+            self.release_series(datastore, &old_doc).await?;
+            self.claim_series(datastore, doc).await?;
+        }
 
         match modified {
             Some(fields) => {
@@ -101,9 +123,25 @@ impl Collection {
         self.store_version(datastore, doc_short_id).await?;
 
         // Update indexes
-        index_manager
-            .on_document_update(datastore, &old_doc, doc, doc_short_id, &self.def)
-            .await?;
+        match modified {
+            Some(changed) => {
+                index_manager
+                    .on_document_update_modified(
+                        datastore,
+                        &old_doc,
+                        doc,
+                        doc_short_id,
+                        &self.def,
+                        changed,
+                    )
+                    .await?
+            }
+            None => {
+                index_manager
+                    .on_document_update(datastore, &old_doc, doc, doc_short_id, &self.def)
+                    .await?
+            }
+        }
 
         Ok(())
     }

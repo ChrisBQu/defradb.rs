@@ -79,6 +79,28 @@ impl Collection {
         }
         Ok(())
     }
+
+    pub(crate) fn validate_modified_immutable_fields(
+        &self,
+        old_doc: &Document,
+        new_doc: &Document,
+        modified: &rapidhash::RapidHashSet<String>,
+    ) -> Result<()> {
+        for field_def in self
+            .def
+            .fields
+            .iter()
+            .filter(|field| field.immutable && modified.contains(&field.name))
+        {
+            if old_doc.get(&field_def.name) != new_doc.get(&field_def.name) {
+                return Err(Error::InvalidDocument(format!(
+                    "immutable field '{}' cannot be changed",
+                    field_def.name
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Check if a NormalValue is compatible with a FieldKind.
