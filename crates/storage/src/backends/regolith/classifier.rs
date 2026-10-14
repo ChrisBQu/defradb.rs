@@ -11,8 +11,10 @@ impl KeyClassifier for DefraKeyClassifier {
             // merge markers, so it must never inherit block semantics. CID parsing
             // uses fixed-size multihash storage and performs no allocation.
             [b'b', cid @ ..] if cid::Cid::try_from(cid).is_ok() => KeyClass::ContentAddressed,
-            // Head sets still eagerly delete entries, and the arrival journal
-            // still uses puts. Relax these only with their new write protocols.
+            // This family is written exclusively through commit-ordered append.
+            key if key.starts_with(b"s/arrival/") => KeyClass::Log,
+            // Head sets still eagerly delete entries. Relax them only with
+            // their new write protocol.
             // ACP, definitions, uniqueness and exactly-once guards stay ordinary.
             _ => KeyClass::Ordinary,
         }
@@ -36,7 +38,6 @@ mod tests {
             b"h/d/doc/head",
             b"h/c/collection/head",
             b"h/p/applied",
-            b"s/arrival/collection/head",
             b"s/d/p/doc",
             b"a/zanzibar/owner",
             b"d/del/doc",

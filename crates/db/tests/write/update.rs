@@ -192,6 +192,10 @@ impl storage::corekv::private::Sealed for ChangeBeforeBegin {}
 
 #[async_trait::async_trait]
 impl storage::corekv::Store for ChangeBeforeBegin {
+    async fn allocate(&self, key: &[u8], count: u64) -> storage::Result<std::ops::Range<u64>> {
+        self.inner.allocate(key, count).await
+    }
+
     async fn new_txn(&self, readonly: bool) -> storage::Result<Box<dyn storage::Txn>> {
         let pending = if readonly {
             None

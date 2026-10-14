@@ -931,6 +931,10 @@ impl<S: Store> crate::corekv::private::Sealed for Peerstore<S> {}
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store> Store for Peerstore<S> {
+    async fn allocate(&self, key: &[u8], count: u64) -> Result<std::ops::Range<u64>> {
+        self.store.allocate(key, count).await
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     fn transaction_stats_handle(&self) -> Option<crate::backends::TransactionStatsHandle> {
         self.store.transaction_stats_handle()

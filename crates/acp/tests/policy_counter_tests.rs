@@ -97,11 +97,10 @@ async fn persistent_store_counter_survives_reopen() {
     );
 }
 
-/// Stores written before this change have policies but no counter key. Starting
-/// from 1 there would re-mint an id that is already in use, so the absent key is
-/// seeded from the number of policies already stored.
+/// New installations allocate independently of policy enumeration. Explicit
+/// policy IDs do not consume counter reservations.
 #[tokio::test]
-async fn persistent_store_counter_seeds_from_existing_policies() {
+async fn persistent_store_counter_is_independent_of_explicit_policy_ids() {
     let store = PersistentZanzibarStore::from_store(Arc::new(RegolithStore::in_memory().unwrap()));
 
     for id in ["policy-a", "policy-b", "policy-c"] {
@@ -113,8 +112,8 @@ async fn persistent_store_counter_seeds_from_existing_policies() {
 
     assert_eq!(
         store.next_policy_counter().await.unwrap(),
-        4,
-        "three pre-existing policies means counters 1..3 are spent"
+        1,
+        "explicit policy IDs do not consume the engine counter"
     );
 }
 

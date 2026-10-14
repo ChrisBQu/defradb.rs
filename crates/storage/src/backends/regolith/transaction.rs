@@ -274,6 +274,18 @@ impl Reader for RegolithTxn {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Writer for RegolithTxn {
+    async fn append(
+        &mut self,
+        log: &crate::corekv::AppendLog,
+        entry: &[u8],
+        once_key: Option<&[u8]>,
+    ) -> Result<()> {
+        let layout: Arc<dyn regolith::LogLayout> = Arc::new(log.clone());
+        self.writable()?
+            .append(&layout, entry, once_key)
+            .map_err(map_txn_error)
+    }
+
     async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         if key.is_empty() {
             return Err(Error::EmptyKey);
@@ -421,5 +433,18 @@ impl Txn for RegolithTxn {
 
     fn callback_count(&self) -> usize {
         self.callbacks.total()
+    }
+}
+
+impl regolith::LogLayout for crate::corekv::AppendLog {
+    fn head_key(&self) -> &[u8] {
+        &self.head_key
+    }
+    fn entry_key(&self, position: u64, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.entry_prefix);
+        out.extend_from_slice(format!("{position:020}").as_bytes());
+    }
+    fn max_entry_key_len(&self) -> usize {
+        self.entry_prefix.len() + 20
     }
 }

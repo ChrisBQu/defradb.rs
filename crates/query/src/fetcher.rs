@@ -227,6 +227,8 @@ pub trait DocFetcher: MaybeSendSync {
         value: &str,
     ) -> Result<Vec<Document>>;
 
+    /// Read committed arrivals in local commit order. A transaction's own
+    /// creates acquire cursors only at commit and are absent from this result.
     async fn get_document_arrivals(
         &self,
         options: &DocumentArrivalOptions,

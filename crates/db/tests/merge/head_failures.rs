@@ -48,6 +48,10 @@ impl Sealed for FailingHeadStore {}
 
 #[async_trait]
 impl Store for FailingHeadStore {
+    async fn allocate(&self, key: &[u8], count: u64) -> storage::Result<std::ops::Range<u64>> {
+        self.inner.allocate(key, count).await
+    }
+
     async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>> {
         Ok(Box::new(FailingHeadTxn {
             inner: self.inner.new_txn(readonly).await?,
@@ -103,6 +107,15 @@ impl Reader for FailingHeadTxn {
 
 #[async_trait]
 impl Writer for FailingHeadTxn {
+    async fn append(
+        &mut self,
+        log: &storage::corekv::AppendLog,
+        entry: &[u8],
+        once_key: Option<&[u8]>,
+    ) -> storage::Result<()> {
+        self.inner.append(log, entry, once_key).await
+    }
+
     async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         self.check(false, key)?;
         self.inner.set(key, value).await

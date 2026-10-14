@@ -581,8 +581,8 @@ async fn rust_txn_discard_publishes_no_events() {
 }
 
 /// Two overlapping interactive txns creating different documents that share a
-/// field value must not both commit. See crates/db/src/write/doc.rs (#1599).
-async fn txn_create_conflicting_block_aborts_second_commit(cluster: TestCluster) {
+/// field value both commit under DefraLevel. Go still aborts the second commit.
+async fn txn_create_shared_block_commits_both(cluster: TestCluster) {
     let client = cluster.client(0);
 
     client
@@ -606,28 +606,24 @@ async fn txn_create_conflicting_block_aborts_second_commit(cluster: TestCluster)
         .expect("tx1 create Book By Online");
 
     client.tx_commit(&tx0).expect("tx0 commit");
-    let err = client
+    client
         .tx_commit(&tx1)
-        .expect_err("tx1 commit must abort: both creates write the same rating block");
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("transaction conflict"),
-        "expected a transaction conflict, got: {msg}"
-    );
+        .expect("tx1 commit: identical content-addressed blocks do not conflict");
 
     let books = client
         .query("query { Book { name } }")
         .expect("query Book after commits");
     let books = books["Book"].as_array().expect("Book result not array");
-    assert_eq!(books.len(), 1, "only tx0's Book should survive: {books:?}");
-    assert_eq!(books[0]["name"], "Book By Website");
+    assert_eq!(books.len(), 2, "both documents must survive: {books:?}");
+    assert!(books.iter().any(|book| book["name"] == "Book By Website"));
+    assert!(books.iter().any(|book| book["name"] == "Book By Online"));
 }
 
 #[tokio::test]
-async fn rust_txn_create_conflicting_block_aborts_second_commit() {
+async fn rust_txn_create_shared_block_commits_both() {
     let _root = integration_test::workspace_root();
     let cluster = TestCluster::builder().rust_nodes(1).build().await.unwrap();
-    txn_create_conflicting_block_aborts_second_commit(cluster).await;
+    txn_create_shared_block_commits_both(cluster).await;
 }
 
 /// An `encrypt: true` create inside an interactive txn must commit: the KMS

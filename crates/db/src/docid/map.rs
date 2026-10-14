@@ -20,7 +20,6 @@ use storage::stores::Systemstore;
 use crate::error::{Error, Result};
 
 const DOC_SHORT_ID_RESERVATION_SIZE: u64 = 1024;
-const MAX_RESERVATION_CONFLICT_RETRIES: u32 = 16;
 
 #[derive(Clone, Copy, Default)]
 struct ReservedRange {
@@ -113,49 +112,11 @@ impl<S: Store> DocShortIdAllocator<S> {
     }
 
     async fn reserve_range(&self) -> Result<u64> {
-        let key = DocShortIDSequenceKey::new().bytes();
-        let mut conflicts = 0;
-        loop {
-            let mut txn = self
-                .systemstore
-                .new_txn(false)
-                .await
-                .map_err(Error::Storage)?;
-            let current = decode_sequence(txn.get(&key).await.map_err(Error::Storage)?)?;
-            let start = current
-                .checked_add(1)
-                .ok_or_else(|| Error::Other("document short-ID sequence exhausted".into()))?;
-            let end = current
-                .checked_add(self.reservation_size)
-                .ok_or_else(|| Error::Other("document short-ID sequence exhausted".into()))?;
-            txn.set(&key, &end.to_be_bytes())
-                .await
-                .map_err(Error::Storage)?;
-
-            match txn.commit().await {
-                Ok(()) => {
-                    if conflicts > 0 {
-                        telemetry::record_retry_success(
-                            telemetry::RetryLayer::DocShortIdReservation,
-                        );
-                    }
-                    return Ok(start);
-                }
-                Err(error)
-                    if error.is_txn_conflict() && conflicts < MAX_RESERVATION_CONFLICT_RETRIES =>
-                {
-                    telemetry::record_retry_attempt(telemetry::RetryLayer::DocShortIdReservation);
-                    conflicts += 1;
-                }
-                Err(error) if error.is_txn_conflict() => {
-                    telemetry::record_retry_exhaustion(
-                        telemetry::RetryLayer::DocShortIdReservation,
-                    );
-                    return Err(Error::Storage(error));
-                }
-                Err(error) => return Err(Error::Storage(error)),
-            }
-        }
+        self.systemstore
+            .allocate(&DocShortIDSequenceKey::new().bytes(), self.reservation_size)
+            .await
+            .map(|range| range.start)
+            .map_err(Error::Storage)
     }
 }
 

@@ -63,6 +63,10 @@ impl<S: Store> Sealed for CountingStore<S> {}
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store> Store for CountingStore<S> {
+    async fn allocate(&self, key: &[u8], count: u64) -> storage::Result<std::ops::Range<u64>> {
+        self.inner.allocate(key, count).await
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     fn transaction_stats_handle(&self) -> Option<storage::backends::TransactionStatsHandle> {
         self.inner.transaction_stats_handle()
@@ -118,6 +122,15 @@ impl Reader for CountingTxn {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Writer for CountingTxn {
+    async fn append(
+        &mut self,
+        log: &storage::corekv::AppendLog,
+        entry: &[u8],
+        once_key: Option<&[u8]>,
+    ) -> storage::Result<()> {
+        self.inner.append(log, entry, once_key).await
+    }
+
     async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         self.inner.set(key, value).await
     }

@@ -39,6 +39,22 @@ impl SharedTxn {
             .release_savepoint()
     }
 
+    pub async fn append(
+        &self,
+        namespace: Namespace,
+        log: &storage::corekv::AppendLog,
+        entry: &[u8],
+        once_key: Option<&[u8]>,
+    ) -> Result<()> {
+        let log = log.prefixed(&[namespace.prefix()]);
+        let once_key = once_key.map(|key| prefix_key(namespace, key));
+        self.txn
+            .write()
+            .await
+            .append(&log, entry, once_key.as_deref())
+            .await
+    }
+
     /// Create a new shared transaction.
     // `Txn` drops its `Send + Sync` bounds on wasm32 (see `MaybeSendSync`), so
     // there the Arc wraps a non-Send value. That is sound in the
@@ -184,6 +200,15 @@ pub struct NamespaceView {
 }
 
 impl NamespaceView {
+    pub async fn append(
+        &self,
+        log: &storage::corekv::AppendLog,
+        entry: &[u8],
+        once_key: Option<&[u8]>,
+    ) -> Result<()> {
+        self.txn.append(self.namespace, log, entry, once_key).await
+    }
+
     /// Create a new namespace view.
     pub fn new(txn: Arc<SharedTxn>, namespace: Namespace) -> Self {
         Self { txn, namespace }
@@ -304,6 +329,15 @@ impl Reader for NamespaceView {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Writer for NamespaceView {
+    async fn append(
+        &mut self,
+        log: &storage::corekv::AppendLog,
+        entry: &[u8],
+        once_key: Option<&[u8]>,
+    ) -> Result<()> {
+        self.txn.append(self.namespace, log, entry, once_key).await
+    }
+
     async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         self.txn.set(self.namespace, key, value).await
     }

@@ -117,6 +117,12 @@ impl<S: Store> crate::corekv::private::Sealed for NamespacedStore<S> {}
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store> Store for NamespacedStore<S> {
+    async fn allocate(&self, key: &[u8], count: u64) -> Result<std::ops::Range<u64>> {
+        self.store
+            .allocate(&self.namespace.prefix_key(key), count)
+            .await
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     fn transaction_stats_handle(&self) -> Option<crate::backends::TransactionStatsHandle> {
         self.store.transaction_stats_handle()
@@ -231,6 +237,17 @@ impl Reader for NamespacedTxn {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Writer for NamespacedTxn {
+    async fn append(
+        &mut self,
+        log: &crate::corekv::AppendLog,
+        entry: &[u8],
+        once_key: Option<&[u8]>,
+    ) -> Result<()> {
+        let log = log.prefixed(&[self.namespace.prefix()]);
+        let once_key = once_key.map(|key| self.namespace.prefix_key(key));
+        self.txn.append(&log, entry, once_key.as_deref()).await
+    }
+
     async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         let prefixed = self.namespace.prefix_key(key);
         self.txn.set(&prefixed, value).await

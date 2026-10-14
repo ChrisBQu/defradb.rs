@@ -184,6 +184,18 @@ pub trait Reader: MaybeSendSync + private::Sealed {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait Writer: MaybeSendSync + private::Sealed {
+    /// Queue an entry whose position becomes visible only after commit.
+    async fn append(
+        &mut self,
+        _log: &super::types::AppendLog,
+        _entry: &[u8],
+        _once_key: Option<&[u8]>,
+    ) -> Result<()> {
+        Err(super::errors::Error::Other(
+            "commit-ordered append is unsupported by this store".into(),
+        ))
+    }
+
     /// Store a key-value pair.
     ///
     /// If the key already exists, its value is overwritten.
@@ -234,6 +246,13 @@ impl<T> ReaderWriter for T where T: Reader + Writer {}
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait Store: MaybeSendSync + private::Sealed {
+    /// Reserve IDs outside a transaction. Reservations survive aborted mutations.
+    async fn allocate(&self, _key: &[u8], _count: u64) -> Result<std::ops::Range<u64>> {
+        Err(super::errors::Error::Other(
+            "ID allocation is unsupported by this store".into(),
+        ))
+    }
+
     /// Transaction diagnostics for stores that keep them.
     fn transaction_stats_handle(&self) -> Option<crate::backends::TransactionStatsHandle> {
         None
@@ -508,6 +527,15 @@ impl Reader for Box<dyn Txn> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Writer for Box<dyn Txn> {
+    async fn append(
+        &mut self,
+        log: &super::types::AppendLog,
+        entry: &[u8],
+        once_key: Option<&[u8]>,
+    ) -> Result<()> {
+        (**self).append(log, entry, once_key).await
+    }
+
     async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         (**self).set(key, value).await
     }

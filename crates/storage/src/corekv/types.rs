@@ -226,3 +226,20 @@ mod tests {
         assert!(display.contains("reverse: true"));
     }
 }
+
+/// Layout of an append-only journal. Entry keys append a zero-padded, 20-digit
+/// decimal position to `entry_prefix`; positions are assigned only at commit.
+#[derive(Debug, Clone)]
+pub struct AppendLog {
+    pub head_key: Vec<u8>,
+    pub entry_prefix: Vec<u8>,
+}
+
+impl AppendLog {
+    pub fn prefixed(&self, prefix: &[u8]) -> Self {
+        Self {
+            head_key: [prefix, self.head_key.as_slice()].concat(),
+            entry_prefix: [prefix, self.entry_prefix.as_slice()].concat(),
+        }
+    }
+}

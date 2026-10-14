@@ -3705,3 +3705,45 @@ async fn first_materialization_arrivals_include_peer_batches_once() {
         vec![first_id.as_str(), second_id.as_str()]
     );
 }
+
+#[tokio::test]
+async fn first_materialization_and_local_create_arrive_in_commit_order() {
+    use query::fetcher::{DocFetcher, DocumentArrivalOptions};
+    use query::DocMutator;
+    let (handler, blockstore, _) = make_handler_with_schema_and_bus().await;
+    let local = db::DbDocMutator::new(
+        handler.db().clone(),
+        handler.db().new_txn(false).await.unwrap(),
+    );
+    let mut document = document::Document::new();
+    document.set("name", "local");
+    let local_id = local
+        .create("Users", document)
+        .await
+        .unwrap()
+        .doc_id
+        .to_string();
+    let peer = build_merge_block(&blockstore, "peer", 30).await;
+    let peer_id = peer.doc_id.clone();
+    let results = handler.handle_block_batch(&[peer]).await;
+    assert!(
+        results
+            .iter()
+            .all(|result| matches!(result, Ok(MergeOutcome::Merged))),
+        "{results:?}"
+    );
+    local.take_txn().await.unwrap().commit().await.unwrap();
+    let fetcher = db::LensedAutoCommitFetcher::new(handler.db().clone());
+    let page = fetcher
+        .get_document_arrivals(&DocumentArrivalOptions {
+            collection: "Users".into(),
+            after: 0,
+            limit: 10,
+            doc_ids: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(page.head, 2);
+    assert_eq!(page.entries[0].doc_id, peer_id);
+    assert_eq!(page.entries[1].doc_id, local_id);
+}

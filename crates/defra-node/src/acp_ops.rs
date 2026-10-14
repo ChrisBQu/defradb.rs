@@ -1,6 +1,5 @@
 //! Type-erased document-ACP operations bridging DB to EmbeddedNode's public DAC API.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail};
@@ -81,7 +80,6 @@ pub(crate) struct DbAcpOps<S: storage::corekv::Store + 'static> {
     document_acp: Arc<dyn acp::DocumentACP>,
     policy_lookup: PolicyLookup,
     event_bus: Arc<dyn events::Bus>,
-    policy_counter: AtomicU64,
 }
 
 /// Everything a relationship call needs from the collection and its policy.
@@ -105,7 +103,6 @@ impl<S: storage::corekv::Store + 'static> DbAcpOps<S> {
             document_acp,
             policy_lookup,
             event_bus,
-            policy_counter: AtomicU64::new(1),
         }
     }
 
@@ -255,7 +252,10 @@ impl<S: storage::corekv::Store + 'static> DbAcpOps<S> {
         };
         let counter = match counter_override {
             Some(counter) => counter,
-            None => self.policy_counter.fetch_add(1, Ordering::SeqCst),
+            None => store
+                .next_policy_counter()
+                .await
+                .map_err(|error| anyhow!("failed to allocate policy ID: {error}"))?,
         };
         let built = acp::policy_yaml::build_policy(&parsed, counter)
             .map_err(|error| anyhow!("invalid policy: {error}"))?;

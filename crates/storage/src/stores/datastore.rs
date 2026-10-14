@@ -31,6 +31,10 @@ impl<S: Store> crate::corekv::private::Sealed for Datastore<S> {}
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store> Store for Datastore<S> {
+    async fn allocate(&self, key: &[u8], count: u64) -> Result<std::ops::Range<u64>> {
+        self.store.allocate(key, count).await
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     fn transaction_stats_handle(&self) -> Option<crate::backends::TransactionStatsHandle> {
         self.store.transaction_stats_handle()
@@ -283,6 +287,15 @@ impl Reader for DatastoreTxn {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Writer for DatastoreTxn {
+    async fn append(
+        &mut self,
+        log: &crate::corekv::AppendLog,
+        entry: &[u8],
+        once_key: Option<&[u8]>,
+    ) -> Result<()> {
+        self.txn.append(log, entry, once_key).await
+    }
+
     async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         self.txn.set(key, value).await
     }

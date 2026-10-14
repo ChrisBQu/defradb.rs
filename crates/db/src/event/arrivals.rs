@@ -26,29 +26,20 @@ async fn number(store: &NamespaceView, key: &[u8]) -> Result<u64> {
     }
 }
 
-/// The head and arrival row share the document transaction. The shared head
-/// key is an OCC write conflict: a stale writer must retry its entire transaction,
-/// so no lower cursor can commit after a higher one. This journal starts at
-/// installation; existing documents are deliberately not assigned fake history.
-pub(crate) async fn record(store: &NamespaceView, collection: u32, doc: &str) -> Result<u64> {
-    let existing = number(store, &doc_key(collection, doc)).await?;
-    if existing != 0 {
-        return Ok(existing);
-    }
-    let cursor = number(store, &head_key(collection))
-        .await?
-        .checked_add(1)
-        .ok_or_else(|| Error::Serialization("arrival cursor exhausted".into()))?;
+/// Queue an arrival in the document transaction. Its cursor is assigned in
+/// commit order and cannot be read until that transaction commits.
+pub(crate) async fn record(store: &NamespaceView, collection: u32, doc: &str) -> Result<()> {
     store
-        .set(&head_key(collection), &cursor.to_be_bytes())
-        .await?;
-    store
-        .set(&doc_key(collection, doc), &cursor.to_be_bytes())
-        .await?;
-    store
-        .set(&row_key(collection, cursor), doc.as_bytes())
-        .await?;
-    Ok(cursor)
+        .append(
+            &storage::corekv::AppendLog {
+                head_key: head_key(collection),
+                entry_prefix: format!("/arrival/{collection}/row/").into_bytes(),
+            },
+            doc.as_bytes(),
+            Some(&doc_key(collection, doc)),
+        )
+        .await
+        .map_err(Error::Storage)
 }
 
 pub(crate) async fn read<S: Store>(
