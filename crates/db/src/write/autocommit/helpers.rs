@@ -650,6 +650,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         )
         .map_err(|error| query::error::QueryError::execution(error.to_string()))
     }
+
 }
 
 /// Local ownership disappears in the same commit as the deletion marker.
