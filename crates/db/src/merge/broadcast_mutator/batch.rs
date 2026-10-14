@@ -32,6 +32,7 @@ struct PendingBroadcast {
     collection_name: String,
     document_json: Option<serde_json::Value>,
     creator_did: Option<String>,
+    se_artifacts: Vec<p2p::message::SEArtifact>,
     broadcast_cid: Option<Cid>,
     broadcast_block: Option<Bytes>,
 }
@@ -42,6 +43,7 @@ struct BroadcastCapture<'a> {
     commit_cid: Option<Cid>,
     commit_block: Option<&'a Bytes>,
     document_json: Option<serde_json::Value>,
+    se_artifacts: Vec<p2p::message::SEArtifact>,
     broadcast_cid: Option<Cid>,
     broadcast_block: Option<&'a Bytes>,
 }
@@ -52,6 +54,7 @@ pub(crate) struct BroadcastBatchMutator<S: Store, B: Blockstore, T: P2PTransport
     db: Arc<DB<S>>,
     pending_broadcasts: SegQueue<PendingBroadcast>,
     inner_controller: Arc<dyn MutationBatchController>,
+    se_options: super::BroadcastSeOptions,
 }
 
 impl<S: Store, B: Blockstore + 'static, T: P2PTransport + 'static> BroadcastBatchMutator<S, B, T> {
@@ -60,6 +63,7 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport + 'static> BroadcastBatc
         inner_controller: Arc<dyn MutationBatchController>,
         sync: Arc<SyncCoordinator<B, T>>,
         db: Arc<DB<S>>,
+        se_options: super::BroadcastSeOptions,
     ) -> Self {
         Self {
             inner,
@@ -67,6 +71,7 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport + 'static> BroadcastBatc
             db,
             pending_broadcasts: SegQueue::new(),
             inner_controller,
+            se_options,
         }
     }
 
@@ -87,6 +92,31 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport + 'static> BroadcastBatc
         Ok(collection.collection_id().to_string())
     }
 
+    fn generate_se_artifacts(
+        &self,
+        collection_name: &str,
+        doc: &Document,
+        fields: &[String],
+    ) -> query::error::Result<Vec<p2p::message::SEArtifact>> {
+        let collection = self
+            .db
+            .get_collection(collection_name)
+            .map_err(|error| query::error::QueryError::execution(error.to_string()))?
+            .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
+        let Some(doc_id) = doc.id() else {
+            return Ok(Vec::new());
+        };
+        Ok(
+            super::BroadcastMutator::<S, B, T>::generate_se_artifacts_with_options(
+                self.se_options.clone(),
+                collection.schema(),
+                &doc_id.to_string(),
+                doc,
+                fields,
+            ),
+        )
+    }
+
     async fn capture_broadcast(&self, capture: BroadcastCapture<'_>) -> query::error::Result<()> {
         let BroadcastCapture {
             collection_name,
@@ -94,6 +124,7 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport + 'static> BroadcastBatc
             commit_cid,
             commit_block,
             document_json,
+            se_artifacts,
             broadcast_cid,
             broadcast_block,
         } = capture;
@@ -118,6 +149,7 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport + 'static> BroadcastBatc
             collection_id,
             collection_name: collection_name.to_string(),
             document_json,
+            se_artifacts,
             creator_did: defra_core::signing::get_broadcast_creator_did(),
             broadcast_cid,
             broadcast_block: broadcast_block.cloned(),
@@ -175,11 +207,21 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport + 'static> BroadcastBatc
             doc_id,
             collection_id,
             collection_name,
-            document_json: _,
+            document_json,
+            se_artifacts,
             creator_did,
             broadcast_cid,
             broadcast_block,
         } = pending;
+
+        if let Some(document_json) = &document_json {
+            sync.push_se_artifacts_to_replicators_for_document(
+                &collection_id,
+                se_artifacts,
+                document_json,
+            )
+            .await;
+        }
 
         let creator_ref = creator_did.as_deref();
 
@@ -256,6 +298,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             commit_cid: result.commit_cid,
             commit_block: result.commit_block.as_ref(),
             document_json,
+            se_artifacts: self.generate_se_artifacts(collection_name, &result.document, &[])?,
             broadcast_cid: result.broadcast_cid,
             broadcast_block: result.broadcast_block.as_ref(),
         })
@@ -269,6 +312,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         doc: Document,
         modified_fields: RapidHashSet<String>,
     ) -> query::error::Result<UpdateResult> {
+        let se_fields: Vec<String> = modified_fields.iter().cloned().collect();
         let result = self
             .inner
             .update(collection_name, doc, modified_fields)
@@ -283,6 +327,11 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
                 commit_cid: result.commit_cid,
                 commit_block: result.commit_block.as_ref(),
                 document_json,
+                se_artifacts: self.generate_se_artifacts(
+                    collection_name,
+                    &result.document,
+                    &se_fields,
+                )?,
                 broadcast_cid: result.broadcast_cid,
                 broadcast_block: result.broadcast_block.as_ref(),
             })
@@ -318,6 +367,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             commit_cid: result.commit_cid,
             commit_block: result.commit_block.as_ref(),
             document_json,
+            se_artifacts: Vec::new(),
             broadcast_cid: result.broadcast_cid,
             broadcast_block: result.broadcast_block.as_ref(),
         })

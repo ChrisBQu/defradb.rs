@@ -130,11 +130,26 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport> BroadcastMutator<S, B, 
         doc: &Document,
         field_names: &[String],
     ) -> Vec<SEArtifact> {
+        Self::generate_se_artifacts_with_options(
+            self.load_se_options(),
+            collection,
+            doc_id,
+            doc,
+            field_names,
+        )
+    }
+
+    pub(super) fn generate_se_artifacts_with_options(
+        se_options: BroadcastSeOptions,
+        collection: &CollectionVersion,
+        doc_id: &str,
+        doc: &Document,
+        field_names: &[String],
+    ) -> Vec<SEArtifact> {
         if collection.encrypted_indexes.is_empty() {
             return Vec::new();
         }
 
-        let se_options = self.load_se_options();
         let Some(se_key) = se_options.encryption_key else {
             return Vec::new();
         };
@@ -440,6 +455,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             inner_controller,
             self.sync.clone(),
             self.db.clone(),
+            self.load_se_options(),
         ));
         let mutator: Arc<dyn DocMutator> = broadcast_batch.clone();
         let controller: Arc<dyn MutationBatchController> = broadcast_batch;
