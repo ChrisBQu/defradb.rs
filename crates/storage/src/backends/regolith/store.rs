@@ -511,7 +511,6 @@ impl RegolithRetryTxn<'_> {
         }
         Ok(())
     }
-
     fn disable_projection_for_key(&self, key: &[u8]) -> Result<()> {
         if head_cache::is_projection_key(key) {
             head_cache::lock(&self.head_cache)?.disable();

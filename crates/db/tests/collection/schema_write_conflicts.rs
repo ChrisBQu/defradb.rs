@@ -21,6 +21,13 @@ fn schema(name: &str, version: &str, id: &str) -> CollectionVersion {
     )
 }
 
+fn is_txn_conflict(error: db::Error) -> bool {
+    matches!(
+        error,
+        db::Error::Datastore(datastore::Error::Storage(error)) if error.is_txn_conflict()
+    )
+}
+
 async fn stage_create(db: &Arc<DB<RegolithStore>>, collection: &str) -> db::DbTxn<RegolithStore> {
     let mutator = DbDocMutator::new(db.clone(), db.new_txn(false).await.unwrap());
     let mut doc = Document::new();
@@ -44,12 +51,7 @@ async fn document_write_conflicts_with_collection_drop() {
 
     db.delete_collection("race").await.unwrap();
 
-    assert!(matches!(
-        writer.commit().await,
-        Err(db::Error::Datastore(datastore::Error::Storage(
-            storage::Error::TxnConflict
-        )))
-    ));
+    assert!(is_txn_conflict(writer.commit().await.unwrap_err()));
 }
 
 #[tokio::test]
@@ -68,12 +70,7 @@ async fn document_write_conflicts_with_schema_patch() {
     .await
     .unwrap();
 
-    assert!(matches!(
-        writer.commit().await,
-        Err(db::Error::Datastore(datastore::Error::Storage(
-            storage::Error::TxnConflict
-        )))
-    ));
+    assert!(is_txn_conflict(writer.commit().await.unwrap_err()));
 }
 
 #[tokio::test]
@@ -96,12 +93,7 @@ async fn document_write_conflicts_with_index_definition() {
     .await
     .unwrap();
 
-    assert!(matches!(
-        writer.commit().await,
-        Err(db::Error::Datastore(datastore::Error::Storage(
-            storage::Error::TxnConflict
-        )))
-    ));
+    assert!(is_txn_conflict(writer.commit().await.unwrap_err()));
 }
 
 #[tokio::test]

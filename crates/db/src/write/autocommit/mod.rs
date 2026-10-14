@@ -154,12 +154,12 @@ impl<S: Store> AutoCommitMutator<S> {
             let resource_name = resource_name.clone();
             let doc_id = doc_id.clone();
             Box::pin(async move {
-                if let Err(error) = acp.unregister_doc_object(&policy_id, &resource_name, &doc_id).await {
-                    tracing::warn!(%doc_id, %policy_id, %error, "Deferred ACP unregister failed after commit");
-                }
-                Ok(())
+                acp.unregister_doc_object(&policy_id, &resource_name, &doc_id)
+                    .await
+                    .map_err(|error| format!("failed to unregister ACP document {doc_id}: {error}"))
             })
-        })).map_err(|error| query::error::QueryError::execution(error.to_string()))
+        }))
+        .map_err(|error| query::error::QueryError::execution(error.to_string()))
     }
 
     pub async fn new_batch_components(
