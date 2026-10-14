@@ -1,0 +1,61 @@
+# Regolith adoption handoff
+
+This is the review entry point for Theo (vertexclique). It follows §5.2 of the supplied `regolith_defralevel_docs` bundle. **The stack is incomplete and remains draft.** This file is updated as implementation and verification progress; an implemented item is not a claim that its PR is ready to merge.
+
+Target: new installations. Jack explicitly waived compatibility with existing encrypted/value layouts and migrations. Regolith is pinned to `d1e36aa747913f6b1ecc14c821f4e5e6314674cf`. Worker-pool/runtime redesign (§5.2 step 9) is outside these eight adoption steps. No PR has been merged.
+
+## Stack and merge order
+
+Merge from the bottom upward, retargeting the next PR after each merge. The branch name on #1920 predates its replacement implementation; its current content is engine encryption, not the old marker proposal.
+
+| Order | Plan | PR | Branch | Base |
+|---|---|---|---|---|
+| 1 | Prep / step 0 | [#1922](https://github.com/sourcenetwork/defradb.rs/pull/1922) | `fix/step0-kms-writes` | `main` |
+| 2 | 1a API bump, still RepeatableRead | [#1949](https://github.com/sourcenetwork/defradb.rs/pull/1949) | `chore/regolith-defralevel-api` | `fix/step0-kms-writes` |
+| 3 | 1b engine encryption | [#1920](https://github.com/sourcenetwork/defradb.rs/pull/1920) | `defralevel/s0-change-markers` | `chore/regolith-defralevel-api` |
+| 4 | 1c classifier / DefraLevel | [#1951](https://github.com/sourcenetwork/defradb.rs/pull/1951) | `defralevel/01c-key-classifier` | `defralevel/s0-change-markers` |
+| 5 | 2 transactional decisions | [#1952](https://github.com/sourcenetwork/defradb.rs/pull/1952) | `defralevel/02-transaction-decisions` | `defralevel/01c-key-classifier` |
+| 6 | 3 mechanisms, in progress | [#1953](https://github.com/sourcenetwork/defradb.rs/pull/1953) | `defralevel/03-engine-mechanisms` | `defralevel/02-transaction-decisions` |
+
+The intended total is 11 PRs: these six plus one each for steps 4–8. Split into two stacks if further necessary splits exceed 11. Do not merge superseded generated implementations (#1897/#1899/#1911); their closure remains pending completion of this adoption.
+
+## Implementation status
+
+| Step | Status and remaining work |
+|---|---|
+| 1 | Implemented in three separate PRs. Engine key providers replace per-value encryption, including read-only opens. Only genuine block CID keys are ContentAddressed. Writers use DefraLevel; the old head cache is gated off for them, pending deletion in step 6. |
+| 2 | Implemented broadly: transactional document/version/definition/deletion reads, local ACP authorization and owner registration, validated relationship scans, embedded NAC persistence, downsample series uniqueness. Audit remaining writer copies during retry conversion. Remote Vera stays at the network boundary. |
+| 3 | Implemented: commit-ordered arrival append, engine ID allocation, numeric and full-text merges, local document part IDs and field operands, version-key handling, removal of interactive counter finalization, write-free readonly lenses and conservative lens-aware index planning, document head markers and CommutativePrefix classification. **Still open:** HNSW operators; remote document composites still materialize with validated whole puts; document reads still validate all fields; counter reads retain validation for index/materialization correctness. Writable lens retries belong to step 5. |
+| 4 | Not started: propagate CommitReceipt.seq and order events by it. Receipts are currently discarded at the storage adapter. |
+| 5 | Not started: synchronous datapath traits, engine transact retries, business handling by conflict reason, prepared embeddings/IDs/KMS/signatures outside retries. |
+| 6 | Not started: remove listed locks individually, with before/after performance gates. Counter finalization is already gone; batch/document guards remain. The head prune no longer calls has_for_update, but the trait/wrappers still expose it. |
+| 7 | Not started: engine commit/policy tickers and on_conflict reason counters. |
+| 8 | Not started: retire cache/finalizer models and bind arrival proofs to CommitOrderedAppend. HeadSet remains; document heads now use the same marker algebra. |
+
+## Latest implementation checkpoints
+
+- `c8146173`: document value integration. Local schema field CIDs remain unchanged; separately allocated immutable part IDs drive projected validation. Stored document format is `DFV\x01`; block wire CBOR stays canonical. Remote tombstones preserve winning LWW priority/raw bytes. A standalone counter block followed by a local increment repairs a stale blob with a validated put. Field heads keep field priorities rather than inheriting composite priorities.
+- `9e146e42`: document head markers. `/d/` and `/ds/`, and collection `/c/` and `/cs/`, are exact commutative families. Pruning removes parent+markers atomically in a separate transaction. Ordinary `/r/` publication guards survive pruning: they prevent replay from resurrecting reclaimed heads and are separate from counter application markers. Truncation removes publication guards too. Late-parent and old-snapshot cases have regression tests.
+
+## Validation and review limits
+
+Local checks passed at the document/head checkpoint:
+
+- Database block, merge, write and read integration suites; the read suite has one pre-existing ignored test. Earlier collection/definition/query suites passed during document and readonly-lens integration.
+- New document-head tests: overlapping writers both commit; prune preserves live heads and old snapshots; a marker received before its parent survives; replay before/after prune cannot resurrect a parent.
+- Remote tombstone and independent field/composite priority tests. The stale counter mirror regression was also run with its repair disabled and failed with 13 instead of 18, then passed with the repair restored.
+- Native workspace all-targets Clippy and `defra-wasm` Clippy, warnings denied.
+- HeadSet TLC GREEN passed (12 distinct states); the eager-delete RED failed `INV_NoWriteConflict`, as expected. Lean was not rerun at this checkpoint.
+- Earlier storage operator contract/property tests cover malformed operands, integer exact folding, ordered float/stat operands, document touches/folding, encrypted reopen, and concurrent full-text updates.
+
+**CI is not all green.** At the 2026-10-14 checkpoint, lower PRs have failing surface-test jobs; #1949 also has a failing build job and #1952 has signed-docs/Go-compat failures. Investigation is pending. Many macOS jobs and latest-tip checks are queued/running. Consult each PR's current checks rather than treating this snapshot as current CI status.
+
+External-node integration has not been run locally. No step-6 performance gates or recall measurements have run. No zero-incidental-conflict or throughput improvement claim is made. Do not remove guards merely because the functional suites pass.
+
+## Review focus / next work
+
+1. Finish step 3's HNSW link/counter operators and structural validation, including recall and concurrent insert tests.
+2. Finish the remote document operand path and narrow reads only where decision/index dependencies are known. In particular, do not make counter reads advisory while the document/index mirror still depends on them.
+3. Investigate lower-stack CI failures and apply fixes at the earliest affected PR, carrying them upward without dropping newer work.
+4. Implement steps 4–8 in order, updating this handoff and the top PR link after each checkpoint.
+5. Verify all stack bases, final CI, external integration, proof gates and required benchmarks before marking any incomplete PR ready.
