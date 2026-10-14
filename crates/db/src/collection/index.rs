@@ -97,6 +97,35 @@ impl Collection {
             None => return Err(Error::DocumentNotFound(doc_id.to_string())),
         };
 
+        // Mutation callers may hold a document fetched before this
+        // transaction began. For touched composite indexes, use fresh values
+        // for their unmodified components while preserving the caller's patch
+        // fields. The projected read above includes every such dependency.
+        let mut indexed_new_doc = doc.clone();
+        if let Some(changed) = modified {
+            for index in index_manager.get_indexes() {
+                if !index
+                    .fields
+                    .iter()
+                    .any(|field| changed.contains(&field.name))
+                {
+                    continue;
+                }
+                for field in &index.fields {
+                    if changed.contains(&field.name) {
+                        continue;
+                    }
+                    indexed_new_doc.set(
+                        field.name.clone(),
+                        old_doc
+                            .get(&field.name)
+                            .cloned()
+                            .unwrap_or(NormalValue::Null),
+                    );
+                }
+            }
+        }
+
         match modified {
             Some(changed) => self.validate_modified_immutable_fields(&old_doc, doc, changed)?,
             None => self.validate_immutable_fields_unchanged(&old_doc, doc)?,
@@ -129,7 +158,7 @@ impl Collection {
                     .on_document_update_modified(
                         datastore,
                         &old_doc,
-                        doc,
+                        &indexed_new_doc,
                         doc_short_id,
                         &self.def,
                         changed,

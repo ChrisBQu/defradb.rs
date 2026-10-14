@@ -133,23 +133,10 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             });
         };
         if expected.is_none() {
-            // The projection supplies current values for all write decisions;
-            // retain the caller's snapshot for unrelated fields that this
-            // mutation neither returns nor rewrites.
-            let mut rebased = doc.clone();
-            let copy_all = current_doc.values().len() > read_dependencies.len();
-            let fields_to_copy: Vec<String> = if copy_all {
-                current_doc.values().keys().cloned().collect()
-            } else {
-                read_dependencies.iter().cloned().collect()
-            };
-            for field in &fields_to_copy {
-                if let Some(value) = current_doc.get(field).cloned() {
-                    rebased.set(field.clone(), value);
-                }
-            }
-            rebased.set_id(canonical_lock_id.clone());
-            current_doc = rebased;
+            // `current_doc` decodes the complete blob even when the projected
+            // read validates only dependencies. Keep this fresh full value so
+            // removals and schema metadata cannot be resurrected from `doc`.
+            current_doc.set_id(canonical_lock_id.clone());
         }
         if let Some(expected) = expected {
             let values_unchanged = expected.values().len() == current_doc.values().len()
