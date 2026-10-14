@@ -218,6 +218,32 @@ impl BasicTxn {
         Ok(())
     }
 
+    /// Move callbacks collected by a mutation attempt into an owned bundle.
+    pub fn take_ordered_callbacks(&mut self) -> storage::corekv::OrderedTxnCallbacks {
+        let mut callbacks = storage::corekv::OrderedTxnCallbacks::default();
+        for callback in self.ordered_callbacks.drain(..) {
+            callbacks.push_sync(callback);
+        }
+        for callback in self.ordered_async_callbacks.drain(..) {
+            callbacks.push_async(callback);
+        }
+        callbacks
+    }
+
+    /// Attach callbacks from a winning attempt to this transaction.
+    pub fn register_ordered_callbacks(
+        &mut self,
+        callbacks: storage::corekv::OrderedTxnCallbacks,
+    ) -> Result<()> {
+        if self.readonly {
+            return Err(Error::Storage(storage::Error::ReadOnlyTxn));
+        }
+        let (sync, asynchronous) = callbacks.into_parts();
+        self.ordered_callbacks.extend(sync);
+        self.ordered_async_callbacks.extend(asynchronous);
+        Ok(())
+    }
+
     /// Register a callback to be called on commit error.
     pub fn on_error(&mut self, callback: TxnCallback) {
         self.callbacks.push(RegisteredCallback::Sync {
@@ -324,12 +350,11 @@ impl BasicTxn {
 
         let mut txn = shared.into_txn();
         for callback in ordered_callbacks {
-            txn.on_success_ordered(callback)
-                .map_err(|error| Error::Storage(error.into()))?;
+            txn.on_success_ordered(callback).map_err(Error::Storage)?;
         }
         for callback in ordered_async_callbacks {
             txn.on_success_ordered_async(callback)
-                .map_err(|error| Error::Storage(error.into()))?;
+                .map_err(Error::Storage)?;
         }
         let result = txn.commit().await;
 

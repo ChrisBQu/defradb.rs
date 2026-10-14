@@ -112,6 +112,19 @@ impl<S: Store> BatchMutator<S> {
 }
 
 impl<S: Store + 'static> BatchMutator<S> {
+    async fn register_created_doc_with_acp(
+        &self,
+        collection: &crate::collection::Collection,
+        doc_id: String,
+    ) -> query::error::Result<()> {
+        let mut txn_guard = self.txn.lock().await;
+        let txn = txn_guard.as_mut().ok_or_else(|| {
+            query::error::QueryError::execution("mutation batch transaction is no longer active")
+        })?;
+        super::AutoCommitMutator::new(Arc::clone(&self.db))
+            .register_created_doc_with_acp(txn, collection, doc_id)
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn register_update_callback(
         &self,
@@ -281,6 +294,8 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 &block_result,
             )
             .await?;
+            self.register_created_doc_with_acp(&collection, doc_id.to_string())
+                .await?;
             doc.set_id(doc_id.clone());
 
             write_local_create(&datastore, &collection, &doc, doc_short_id, &index_manager).await?;

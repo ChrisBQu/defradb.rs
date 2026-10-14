@@ -368,6 +368,27 @@ impl<S: Store> DbTxn<S> {
         }
     }
 
+    /// Move ordered callbacks out of a completed mutation attempt.
+    pub fn take_ordered_callbacks(&mut self) -> Result<storage::corekv::OrderedTxnCallbacks> {
+        self.txn
+            .as_mut()
+            .map(BasicTxn::take_ordered_callbacks)
+            .ok_or(Error::TxnNotActive)
+    }
+
+    /// Register callbacks from a winning attempt on this commit transaction.
+    pub fn register_ordered_callbacks(
+        &mut self,
+        callbacks: storage::corekv::OrderedTxnCallbacks,
+    ) -> Result<()> {
+        if let Some(txn) = &mut self.txn {
+            txn.register_ordered_callbacks(callbacks)?;
+            Ok(())
+        } else {
+            Err(Error::TxnNotActive)
+        }
+    }
+
     /// Register a callback for commit error.
     ///
     /// Returns an error if the transaction has been committed or discarded.

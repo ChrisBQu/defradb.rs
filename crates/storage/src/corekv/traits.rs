@@ -43,14 +43,14 @@ pub type TxnCallback = Box<dyn FnOnce() + Send + 'static>;
 /// Callback function type for transaction lifecycle events (WASM version).
 ///
 /// These callbacks are executed synchronously when transaction events occur.
-/// No Send bound required in single-threaded WASM environment.
+/// Lifecycle callbacks do not require `Send` in the single-threaded WASM environment.
 pub type TxnCallback = Box<dyn FnOnce() + 'static>;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub type OrderedTxnCallback = std::sync::Arc<dyn Fn() + Send + Sync + 'static>;
 
 #[cfg(target_arch = "wasm32")]
-pub type OrderedTxnCallback = std::sync::Arc<dyn Fn() + 'static>;
+pub type OrderedTxnCallback = std::sync::Arc<dyn Fn() + Send + Sync + 'static>;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub type AsyncOrderedTxnCallback = std::sync::Arc<
@@ -59,6 +59,38 @@ pub type AsyncOrderedTxnCallback = std::sync::Arc<
         + Sync
         + 'static,
 >;
+
+/// Receipt-ordered callbacks collected while evaluating a mutation attempt.
+/// A retrying caller can keep the bundle with its attempt and register only
+/// the winning attempt on the transaction that receives the commit receipt.
+#[derive(Default)]
+pub struct OrderedTxnCallbacks {
+    sync: Vec<OrderedTxnCallback>,
+    asynchronous: Vec<AsyncOrderedTxnCallback>,
+}
+
+impl OrderedTxnCallbacks {
+    pub fn push_sync(&mut self, callback: OrderedTxnCallback) {
+        self.sync.push(callback);
+    }
+
+    pub fn push_async(&mut self, callback: AsyncOrderedTxnCallback) {
+        self.asynchronous.push(callback);
+    }
+
+    pub fn append(&mut self, mut other: Self) {
+        self.sync.append(&mut other.sync);
+        self.asynchronous.append(&mut other.asynchronous);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.sync.is_empty() && self.asynchronous.is_empty()
+    }
+
+    pub fn into_parts(self) -> (Vec<OrderedTxnCallback>, Vec<AsyncOrderedTxnCallback>) {
+        (self.sync, self.asynchronous)
+    }
+}
 #[cfg(target_arch = "wasm32")]
 pub type AsyncOrderedTxnCallback = std::sync::Arc<
     dyn Fn() -> Pin<Box<dyn Future<Output = std::result::Result<(), String>>>> + 'static,
@@ -412,6 +444,11 @@ pub trait Txn: ReaderWriter + private::Sealed {
     }
 
     /// Register a synchronous event to dispatch in commit receipt order.
+    ///
+    /// The transaction must contain a write that obtains a commit receipt.
+    /// Regolith rejects eventful write-free and append-only transactions:
+    /// an append can be deduplicated by its once-key and reuse its snapshot
+    /// receipt, which cannot establish event order.
     /// Backends without receipt sequencing retain ordinary success semantics.
     fn on_success_ordered(&mut self, callback: OrderedTxnCallback) -> Result<()> {
         let callback = callback.clone();
@@ -424,6 +461,18 @@ pub trait Txn: ReaderWriter + private::Sealed {
         Err(crate::Error::Other(
             "ordered async callbacks are unsupported by this store".into(),
         ))
+    }
+
+    /// Register a bundle collected from a winning transaction attempt.
+    fn register_ordered_callbacks(&mut self, callbacks: OrderedTxnCallbacks) -> Result<()> {
+        let (sync, asynchronous) = callbacks.into_parts();
+        for callback in sync {
+            self.on_success_ordered(callback)?;
+        }
+        for callback in asynchronous {
+            self.on_success_ordered_async(callback)?;
+        }
+        Ok(())
     }
 
     /// Discard the transaction, rolling back all changes.

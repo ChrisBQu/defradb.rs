@@ -618,6 +618,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn register_ordered_update_event(
         &self,
         txn: &mut crate::txn::DbTxn<S>,

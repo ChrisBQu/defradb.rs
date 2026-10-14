@@ -5,6 +5,7 @@
 //! commit is still in flight. Event-free and idle transactions never join.
 
 use std::collections::BTreeMap;
+use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -43,13 +44,20 @@ pub(crate) struct EventOrder {
 pub(super) struct EventToken {
     order: Arc<EventOrder>,
     token: Option<u64>,
+    floor: u64,
 }
 
 impl EventToken {
-    pub(super) fn finish(mut self, seq: u64, events: Vec<Event>) {
+    pub(super) fn finish(mut self, seq: u64, events: Vec<Event>) -> bool {
         if let Some(token) = self.token.take() {
+            if seq <= self.floor {
+                self.order.finish_token(token, None, Vec::new());
+                return false;
+            }
             self.order.finish_token(token, Some(seq), events);
+            return true;
         }
+        false
     }
 }
 
@@ -69,9 +77,11 @@ impl EventOrder {
             next.active.insert(token, state.highest_completed);
             next
         });
+        let floor = self.state.peek(|state| state.active[&token]);
         EventToken {
             order: Arc::clone(self),
             token: Some(token),
+            floor,
         }
     }
 
@@ -105,6 +115,7 @@ impl EventOrder {
             draining: &self.draining,
             armed: true,
         };
+        let mut first_panic = None;
 
         loop {
             let mut dispatch = None;
@@ -139,10 +150,17 @@ impl EventOrder {
                     guard.armed = true;
                     continue;
                 }
+                if let Some(payload) = first_panic {
+                    resume_unwind(payload);
+                }
                 return;
             };
             for event in events {
-                event();
+                if let Err(payload) = catch_unwind(AssertUnwindSafe(|| event())) {
+                    if first_panic.is_none() {
+                        first_panic = Some(payload);
+                    }
+                }
             }
         }
     }
@@ -199,7 +217,35 @@ mod tests {
         let order = Arc::new(EventOrder::default());
         let out = Arc::new(Atom::new(Vec::new()));
         let token = order.begin();
-        token.finish(1, vec![event(out.clone(), 10), event(out.clone(), 11)]);
+        assert!(token.finish(1, vec![event(out.clone(), 10), event(out.clone(), 11)]));
         assert_eq!(*out.load(), vec![10, 11]);
+    }
+
+    #[test]
+    fn receipt_must_advance_past_the_completed_floor() {
+        let order = Arc::new(EventOrder::default());
+        let out = Arc::new(Atom::new(Vec::new()));
+        assert!(order.begin().finish(1, vec![event(out.clone(), 1)]));
+        assert!(!order.begin().finish(1, vec![event(out.clone(), 2)]));
+        assert_eq!(*out.load(), vec![1]);
+        assert!(order.begin().finish(2, vec![event(out.clone(), 3)]));
+        assert_eq!(*out.load(), vec![1, 3]);
+    }
+
+    #[test]
+    fn callback_panic_does_not_drop_later_events_or_stick_the_drainer() {
+        let order = Arc::new(EventOrder::default());
+        let out = Arc::new(Atom::new(Vec::new()));
+        let token = order.begin();
+        let panic_event: Event = Arc::new(|| panic!("subscriber panic"));
+        let second = event(out.clone(), 2);
+        assert!(std::panic::catch_unwind(AssertUnwindSafe(|| {
+            token.finish(1, vec![panic_event, second]);
+        }))
+        .is_err());
+        assert_eq!(*out.load(), vec![2]);
+
+        order.begin().finish(2, vec![event(out.clone(), 3)]);
+        assert_eq!(*out.load(), vec![2, 3]);
     }
 }

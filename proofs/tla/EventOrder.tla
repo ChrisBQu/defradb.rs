@@ -4,6 +4,11 @@ EXTENDS Naturals, FiniteSets, Sequences, TLC
 CONSTANTS Txns, Receipts, NoTxn
 ASSUME NoTxn \notin Txns
 
+Max2(a, b) == IF a >= b THEN a ELSE b
+MinSeq(items) == CHOOSE x \in {e.seq : e \in items} :
+                    \A y \in {e.seq : e \in items} : x <= y
+FloorAllows(floor, seq) == IF floor = NoTxn THEN TRUE ELSE floor >= seq
+
 VARIABLES active, committed, ready, published, high, lastReceipt
 
 vars == <<active, committed, ready, published, high, lastReceipt>>
@@ -34,13 +39,20 @@ NativeCommit(t, seq) ==
     /\ lastReceipt' = seq
     /\ UNCHANGED high
 
+EmptyCommitReusesReceipt(t) ==
+    /\ t \in Txns
+    /\ active[t] # NoTxn
+    /\ committed[t] = NoTxn
+    /\ committed' = [committed EXCEPT ![t] = lastReceipt]
+    /\ UNCHANGED <<active, ready, published, high, lastReceipt>>
+
 EventReady(t) ==
     /\ t \in Txns
     /\ active[t] # NoTxn
     /\ committed[t] # NoTxn
     /\ ready' = ready \cup { [seq |-> committed[t], txn |-> t] }
     /\ active' = [active EXCEPT ![t] = NoTxn]
-    /\ high' = Max({high, committed[t]})
+    /\ high' = Max2(high, committed[t])
     /\ UNCHANGED <<committed, published, lastReceipt>>
 
 Fail(t) ==
@@ -54,8 +66,8 @@ Fail(t) ==
 Dispatch ==
     /\ ready # {}
     /\ LET item == CHOOSE e \in ready :
-              e.seq = Min({x.seq : x \in ready})
-       IN /\ \A t \in Txns : active[t] = NoTxn \/ active[t] >= item.seq
+              e.seq = MinSeq(ready)
+       IN /\ \A t \in Txns : FloorAllows(active[t], item.seq)
           /\ ready' = ready \ {item}
           /\ published' = Append(published, item.seq)
     /\ UNCHANGED <<active, committed, high, lastReceipt>>
@@ -63,7 +75,7 @@ Dispatch ==
 RedDispatch ==
     /\ ready # {}
     /\ LET item == CHOOSE e \in ready :
-              e.seq = Min({x.seq : x \in ready})
+              e.seq = MinSeq(ready)
        IN /\ ready' = ready \ {item}
           /\ published' = Append(published, item.seq)
     /\ UNCHANGED <<active, committed, high, lastReceipt>>
@@ -79,6 +91,7 @@ RedNext ==
     \/ \E t \in Txns : Begin(t)
     \/ \E t \in Txns, seq \in Receipts : NativeCommit(t, seq)
     \/ \E t \in Txns : EventReady(t)
+    \/ \E t \in Txns : EmptyCommitReusesReceipt(t)
     \/ \E t \in Txns : Fail(t)
     \/ RedDispatch
 

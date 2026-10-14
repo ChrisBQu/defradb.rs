@@ -100,8 +100,7 @@ pub(crate) fn register_update_event_callback<S: Store + 'static>(
                     false,
                 )));
             }
-        }))
-        .map_err(crate::error::Error::from)?;
+        }))?;
     }
     if release.is_some() || broadcaster.is_some() {
         txn.on_success_async(Box::new(move || {

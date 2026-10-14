@@ -50,6 +50,7 @@ struct SavepointState {
     head_changes: HeadChanges,
     ordered_events: usize,
     ordered_async_callbacks: usize,
+    has_writes: bool,
 }
 
 impl RegolithTxn {
@@ -80,6 +81,7 @@ impl RegolithTxn {
             event_order: Arc::new(EventOrder::default()),
             ordered_events: Vec::new(),
             ordered_async_callbacks: Vec::new(),
+            has_writes: false,
         })
     }
 
@@ -116,6 +118,7 @@ impl RegolithTxn {
                 event_order,
                 ordered_events: Vec::new(),
                 ordered_async_callbacks: Vec::new(),
+                has_writes: false,
             })
         })
     }
@@ -292,7 +295,11 @@ impl Writer for RegolithTxn {
         if key.is_empty() {
             return Err(Error::EmptyKey);
         }
-        self.writable()?.merge(key, operand).map_err(map_txn_error)
+        self.writable()?
+            .merge(key, operand)
+            .map_err(map_txn_error)?;
+        self.has_writes = true;
+        Ok(())
     }
 
     async fn append(
@@ -304,7 +311,11 @@ impl Writer for RegolithTxn {
         let layout: Arc<dyn regolith::LogLayout> = Arc::new(log.clone());
         self.writable()?
             .append(&layout, entry, once_key)
-            .map_err(map_txn_error)
+            .map_err(map_txn_error)?;
+        // An append with an already-present once-key is elided by Regolith
+        // during commit planning. Append-only commits therefore cannot
+        // authorize an ordered event receipt here.
+        Ok(())
     }
 
     async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
@@ -312,6 +323,7 @@ impl Writer for RegolithTxn {
             return Err(Error::EmptyKey);
         }
         self.writable()?.put(key, value).map_err(map_txn_error)?;
+        self.has_writes = true;
         self.head_changes.record(key, Some(value));
         Ok(())
     }
@@ -321,6 +333,7 @@ impl Writer for RegolithTxn {
             return Err(Error::EmptyKey);
         }
         self.writable()?.delete(key).map_err(map_txn_error)?;
+        self.has_writes = true;
         self.head_changes.record(key, None);
         Ok(())
     }
@@ -330,6 +343,13 @@ impl Writer for RegolithTxn {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Txn for RegolithTxn {
     async fn commit(mut self: Box<Self>) -> Result<()> {
+        if !self.ordered_events.is_empty() && !self.has_writes {
+            self.release();
+            self.callbacks.run_error().await;
+            return Err(Error::Other(
+                "cannot publish ordered events from a transaction with no writes".to_string(),
+            ));
+        }
         let handle = self.handle.take().ok_or(Error::DiscardedTxn)?;
         self.active_txns.fetch_sub(1, Ordering::AcqRel);
         // regolith's `commit` consumes the transaction, so this has to be
@@ -344,7 +364,10 @@ impl Txn for RegolithTxn {
         })?;
         // Native commit and cache publication are one boundary. Never run
         // user callbacks under it, and never publish a failed transaction.
-        let mut ordered_token = None;
+        // Register before entering native commit. Keep the token outside the
+        // cache-lock closure so a failed commit cannot drain while that lock
+        // is held when the token is dropped.
+        let ordered_token = (!self.ordered_events.is_empty()).then(|| self.event_order.begin());
         let mut ordered_seq = None;
         let outcome = match handle {
             Handle::ReadOnly(snapshot) => {
@@ -353,10 +376,8 @@ impl Txn for RegolithTxn {
             }
             Handle::Writable(txn) => super::blocking(|| {
                 let mut cache = head_cache::lock(&self.head_cache)?;
-                let token = (!self.ordered_events.is_empty()).then(|| self.event_order.begin());
                 let outcome = txn.commit().map_err(map_txn_error);
-                if let (Some(token), Ok(receipt)) = (token, &outcome) {
-                    ordered_token = Some(token);
+                if let (Some(_token), Ok(receipt)) = (&ordered_token, &outcome) {
                     ordered_seq = Some(receipt.seq());
                 }
                 let outcome = outcome.map(|_| ());
@@ -379,12 +400,19 @@ impl Txn for RegolithTxn {
                     }
                 }
                 if let (Some(token), Some(seq)) = (ordered_token, ordered_seq) {
-                    token.finish(seq, std::mem::take(&mut self.ordered_events));
+                    if !token.finish(seq, std::mem::take(&mut self.ordered_events)) {
+                        self.callbacks.run_success().await;
+                        return Err(Error::Other(
+                            "ordered event receipt did not advance beyond its ordering floor"
+                                .to_string(),
+                        ));
+                    }
                 }
                 self.callbacks.run_success().await;
                 Ok(())
             }
             Err(error) => {
+                drop(ordered_token);
                 if matches!(error, Error::TxnConflict) {
                     self.stats.record_conflict();
                 }
