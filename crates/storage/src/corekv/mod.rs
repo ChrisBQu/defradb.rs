@@ -79,5 +79,6 @@ pub use traits::{
     ReaderWriter, RetryAttempt, RetryAttemptError, RetryAttemptFn, RetryAttemptFuture, RetryAttemptIO,
     RetryAttemptValue, RetryOptions, RetryTxn, Store, Txn, TxnCallback, TxnStore, Writer,
 
+
 };
 pub use types::{AppendLog, IterOptions, Key};

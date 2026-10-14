@@ -274,6 +274,17 @@ impl Default for HeadChanges {
 }
 
 impl HeadChanges {
+    pub(super) fn append(&mut self, other: Self) {
+        let Some(writes) = other.writes else {
+            self.writes = None;
+            self.bytes = CACHE_BYTES + 1;
+            return;
+        };
+        for (key, value) in writes {
+            self.record(&key, value.as_deref());
+        }
+    }
+
     pub(super) fn record(&mut self, key: &[u8], value: Option<&[u8]>) {
         if collection(key).is_none() {
             return;

@@ -207,6 +207,112 @@ async fn engine_retry_attempt_returns_typed_business_abort_unchanged() {
 }
 
 #[tokio::test]
+async fn scoped_retry_io_restores_the_real_transaction_before_engine_commit() {
+    let store = RegolithStore::in_memory().unwrap();
+    let result = store
+        .transact_retry(
+            crate::corekv::RetryOptions::new(2),
+            Box::new(ScopedRetryIoAttempt {
+                retain_iterator: false,
+                abort_after_write: false,
+            }),
+        )
+        .await
+        .unwrap();
+    result.downcast::<()>().unwrap();
+
+    let txn = store.new_txn(true).await.unwrap();
+    assert_eq!(
+        txn.get(b"scoped-retry").await.unwrap().as_deref(),
+        Some(b"persisted".as_slice())
+    );
+    txn.discard();
+}
+
+#[tokio::test]
+async fn scoped_retry_io_rejects_an_iterator_retained_past_attempt() {
+    let store = RegolithStore::in_memory().unwrap();
+    let result = store
+        .transact_retry(
+            crate::corekv::RetryOptions::new(2),
+            Box::new(ScopedRetryIoAttempt {
+                retain_iterator: true,
+                abort_after_write: false,
+            }),
+        )
+        .await;
+    assert!(result.is_err());
+
+    let txn = store.new_txn(true).await.unwrap();
+    assert_eq!(txn.get(b"must-rollback").await.unwrap(), None);
+    txn.discard();
+}
+
+#[tokio::test]
+async fn scoped_retry_io_business_abort_rolls_back_actual_transaction() {
+    let store = RegolithStore::in_memory().unwrap();
+    let result = store
+        .transact_retry(
+            crate::corekv::RetryOptions::new(2),
+            Box::new(ScopedRetryIoAttempt {
+                retain_iterator: false,
+                abort_after_write: true,
+            }),
+        )
+        .await;
+    assert!(matches!(
+        result,
+        Err(crate::corekv::RetryAttemptError::Abort(_))
+    ));
+
+    let txn = store.new_txn(true).await.unwrap();
+    assert_eq!(txn.get(b"scoped-retry").await.unwrap(), None);
+    txn.discard();
+}
+
+struct ScopedRetryIoAttempt {
+    retain_iterator: bool,
+    abort_after_write: bool,
+}
+
+impl crate::corekv::RetryAttemptFn for ScopedRetryIoAttempt {
+    fn run<'a>(
+        &'a mut self,
+        retry: &'a mut dyn crate::corekv::RetryTxn,
+    ) -> crate::corekv::RetryAttemptFuture<'a> {
+        Box::pin(async move {
+            let mut io = retry.begin_attempt_io()?;
+            let key = if self.retain_iterator {
+                b"must-rollback".as_slice()
+            } else {
+                b"scoped-retry".as_slice()
+            };
+            let value = if self.retain_iterator {
+                b"value".as_slice()
+            } else {
+                b"persisted".as_slice()
+            };
+            io.set(key, value).await?;
+            if self.abort_after_write {
+                return Err(crate::corekv::RetryAttemptError::Abort(Box::new(
+                    RetryAbortSentinel("scoped-abort"),
+                )));
+            }
+            if !self.retain_iterator {
+                assert_eq!(io.get(key).await?.as_deref(), Some(value));
+            }
+            let _retained = if self.retain_iterator {
+                Some(io.iterator(crate::corekv::IterOptions::default()).await?)
+            } else {
+                None
+            };
+            retry.finish_attempt_io(io)?;
+            Ok(Box::new(()) as crate::corekv::RetryAttemptValue)
+        })
+    }
+}
+
+#[tokio::test]
 async fn transient_marker_io_failure_recovers_durable_scopes() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store.clone());

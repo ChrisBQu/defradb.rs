@@ -54,6 +54,9 @@ struct SavepointState {
     ordered_events: usize,
     ordered_async_callbacks: usize,
     has_writes: bool,
+    scoped_attempt: bool,
+    owns_active_slot: bool,
+
 }
 
 impl RegolithTxn {
@@ -85,6 +88,9 @@ impl RegolithTxn {
             ordered_events: Vec::new(),
             ordered_async_callbacks: Vec::new(),
             has_writes: false,
+            scoped_attempt: false,
+            owns_active_slot: true,
+
         })
     }
 
@@ -122,8 +128,46 @@ impl RegolithTxn {
                 ordered_events: Vec::new(),
                 ordered_async_callbacks: Vec::new(),
                 has_writes: false,
+                scoped_attempt: false,
+                owns_active_slot: true,
+
             })
         })
+    }
+
+    pub(super) fn scoped_attempt(
+        txn: Box<Transaction>,
+        stats: TransactionStatsHandle,
+        head_cache: SharedHeadCache,
+    ) -> Self {
+        Self {
+            handle: Some(Arc::new(Handle::Writable(txn))),
+            active_txns: Arc::new(AtomicUsize::new(0)),
+            stats,
+            callbacks: CallbackManager::default(),
+            readonly: false,
+            head_cache,
+            head_snapshot: None,
+            head_changes: HeadChanges::default(),
+            scoped_attempt: true,
+            owns_active_slot: false,
+        }
+    }
+
+    pub(super) fn into_scoped_engine_txn(
+        mut self: Box<Self>,
+    ) -> Result<(Box<Transaction>, HeadChanges)> {
+        if !self.scoped_attempt {
+            return Err(Error::Other("not a scoped retry transaction".into()));
+        }
+        let handle = self.handle.take().ok_or(Error::DiscardedTxn)?;
+        let handle = Arc::try_unwrap(handle).map_err(|_| {
+            Error::Other("retry transaction still has retained views or iterators".into())
+        })?;
+        let Handle::Writable(txn) = handle else {
+            return Err(Error::ReadOnlyTxn);
+        };
+        Ok((txn, std::mem::take(&mut self.head_changes)))
     }
 
     fn handle(&self) -> Result<&Arc<Handle>> {
@@ -152,7 +196,9 @@ impl RegolithTxn {
     /// left waiting on something already finished.
     fn release(&mut self) {
         if self.handle.take().is_some() {
-            self.active_txns.fetch_sub(1, Ordering::AcqRel);
+            if self.owns_active_slot {
+                self.active_txns.fetch_sub(1, Ordering::AcqRel);
+            }
         }
     }
 }
@@ -185,6 +231,16 @@ pub(super) fn map_txn_error(error: TransactionError) -> Error {
 }
 
 impl crate::corekv::private::Sealed for RegolithTxn {}
+
+impl crate::corekv::RetryAttemptIO for RegolithTxn {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
+        self
+    }
+}
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -345,11 +401,15 @@ impl Writer for RegolithTxn {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Txn for RegolithTxn {
     async fn commit(mut self: Box<Self>) -> Result<()> {
+        if self.scoped_attempt {
+            return Err(Error::Other("scoped retry transaction cannot commit independently".into()));
+        }
         if !self.ordered_events.is_empty() && !self.has_writes {
             self.release();
             self.callbacks.run_error().await;
             return Err(Error::Other(
                 "cannot publish ordered events from a transaction with no writes".to_string(),
+
             ));
         }
         let handle = self.handle.take().ok_or(Error::DiscardedTxn)?;

@@ -148,6 +148,9 @@ pub trait RetryTxn: MaybeSendSync + private::Sealed {
 pub trait RetryAttemptIO: ReaderWriter + private::Sealed {
     #[doc(hidden)]
     fn as_any(&self) -> &dyn Any;
+
+    #[doc(hidden)]
+    fn into_any(self: Box<Self>) -> Box<dyn Any>;
 }
 
 #[cfg(not(target_arch = "wasm32"))]

@@ -8,11 +8,11 @@
 #![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use async_trait::async_trait;
-use regolith::{OptimisticTransactionDb, StreamOptions};
+use regolith::{OptimisticTransactionDb, StreamOptions, TxnOptions};
 
 use super::background_errors::BackgroundErrorListener;
 use super::config::RegolithStoreOptions;
@@ -21,8 +21,8 @@ use super::head_cache::{self, SharedHeadCache};
 use super::transaction::RegolithTxn;
 use crate::backends::shared::TransactionStatsHandle;
 use crate::corekv::{
-    Dropable, Error, Result, RetryAttempt, RetryAttemptError, RetryAttemptValue, RetryOptions,
-    RetryTxn, Store, Txn,
+    Dropable, Error, Result, RetryAttempt, RetryAttemptError, RetryAttemptIO, RetryAttemptValue,
+    RetryOptions, RetryTxn, Store, Txn,
 };
 
 /// Key-value store backed by regolith.
@@ -333,8 +333,17 @@ impl Store for RegolithStore {
                     txn,
                     changes: head_cache::HeadChanges::default(),
                     head_cache: Arc::clone(&self.inner.head_cache),
+                    db: Arc::clone(&self.inner.db),
+                    isolation: self.inner.options.isolation,
+                    stats: self.inner.stats.clone(),
+                    attempt_io_active: false,
                 };
-                let value = attempt.run(&mut retry_txn).await;
+                let mut value = attempt.run(&mut retry_txn).await;
+                if value.is_ok() && retry_txn.attempt_io_active {
+                    value = Err(RetryAttemptError::Storage(Error::Other(
+                        "retry attempt returned with scoped IO still active".into(),
+                    )));
+                }
                 if value.is_ok() {
                     committed_changes = std::mem::take(&mut retry_txn.changes);
                 }
@@ -396,9 +405,22 @@ struct RegolithRetryTxn<'a> {
     txn: &'a mut regolith::Transaction,
     changes: head_cache::HeadChanges,
     head_cache: SharedHeadCache,
+    db: Arc<OptimisticTransactionDb>,
+    isolation: regolith::IsolationLevel,
+    stats: TransactionStatsHandle,
+    attempt_io_active: bool,
 }
 
 impl RegolithRetryTxn<'_> {
+    fn ensure_no_active_attempt_io(&self) -> Result<()> {
+        if self.attempt_io_active {
+            return Err(Error::Other(
+                "raw retry operations are unavailable while scoped IO is active".into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn disable_projection_for_key(&self, key: &[u8]) -> Result<()> {
         if head_cache::is_projection_key(key) {
             head_cache::lock(&self.head_cache)?.disable();
@@ -413,6 +435,7 @@ impl crate::corekv::private::Sealed for RegolithRetryTxn<'_> {}
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl RetryTxn for RegolithRetryTxn<'_> {
     async fn get(&self, key: &[u8]) -> Result<Option<bytes::Bytes>> {
+        self.ensure_no_active_attempt_io()?;
         if key.is_empty() {
             return Err(Error::EmptyKey);
         }
@@ -424,6 +447,7 @@ impl RetryTxn for RegolithRetryTxn<'_> {
     }
 
     async fn has(&self, key: &[u8]) -> Result<bool> {
+        self.ensure_no_active_attempt_io()?;
         if key.is_empty() {
             return Err(Error::EmptyKey);
         }
@@ -435,6 +459,7 @@ impl RetryTxn for RegolithRetryTxn<'_> {
     }
 
     async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+        self.ensure_no_active_attempt_io()?;
         if key.is_empty() {
             return Err(Error::EmptyKey);
         }
@@ -447,6 +472,7 @@ impl RetryTxn for RegolithRetryTxn<'_> {
     }
 
     async fn delete(&mut self, key: &[u8]) -> Result<()> {
+        self.ensure_no_active_attempt_io()?;
         if key.is_empty() {
             return Err(Error::EmptyKey);
         }
@@ -455,6 +481,32 @@ impl RetryTxn for RegolithRetryTxn<'_> {
             .await
             .map_err(super::transaction::map_txn_error)?;
         self.changes.record(key, None);
+        Ok(())
+    }
+
+    fn begin_attempt_io(&mut self) -> Result<Box<dyn RetryAttemptIO>> {
+        if self.attempt_io_active {
+            return Err(Error::Other("scoped retry IO is already active".into()));
+        }
+        let placeholder = self.db.begin(&TxnOptions::new().isolation(self.isolation));
+        let actual = Box::new(std::mem::replace(self.txn, placeholder));
+        self.attempt_io_active = true;
+        Ok(Box::new(RegolithTxn::scoped_attempt(
+            actual,
+            self.stats.clone(),
+            Arc::clone(&self.head_cache),
+        )))
+    }
+
+    fn finish_attempt_io(&mut self, io: Box<dyn RetryAttemptIO>) -> Result<()> {
+        let io = io
+            .into_any()
+            .downcast::<RegolithTxn>()
+            .map_err(|_| Error::Other("retry IO belongs to a different backend".into()))?;
+        let (actual, changes) = io.into_scoped_engine_txn()?;
+        *self.txn = *actual;
+        self.changes.append(changes);
+        self.attempt_io_active = false;
         Ok(())
     }
 }
