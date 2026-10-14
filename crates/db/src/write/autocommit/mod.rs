@@ -75,40 +75,6 @@ impl<S: Store> AutoCommitMutator<S> {
         })
     }
 
-    async fn finish_mutation<T>(
-        &self,
-        txn: DbTxn<S>,
-        result: query::error::Result<T>,
-        collection_name: &str,
-        operation: &str,
-    ) -> query::error::Result<T> {
-        match result {
-            Ok(value) => {
-                if let Err(error) = txn.commit().await {
-                    warn!(
-                        collection = %collection_name,
-                        error = %error,
-                        "Failed to commit transaction after {}",
-                        operation
-                    );
-                    return Err(crate::error::commit_query_error(error));
-                }
-                Ok(value)
-            }
-            Err(error) => {
-                if let Err(discard_error) = txn.discard() {
-                    warn!(
-                        collection = %collection_name,
-                        error = %discard_error,
-                        "Failed to discard transaction after {} error",
-                        operation
-                    );
-                }
-                Err(error)
-            }
-        }
-    }
-
     pub(super) fn register_created_doc_with_acp(
 
         &self,
@@ -155,6 +121,7 @@ impl<S: Store> AutoCommitMutator<S> {
         }));
         registration.map_err(|error| query::error::QueryError::execution(error.to_string()))
     }
+
 
     pub async fn new_batch_components(
         &self,

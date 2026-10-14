@@ -6,8 +6,7 @@ use events::{Message, Update};
 use crate::block::builder::DocStorageIdentity;
 
 use crate::block::builder::{
-    ComputedBlocks, compute_document_blocks, compute_document_blocks_with_inputs,
-    insert_computed_blocks,
+    ComputedBlocks, compute_document_blocks_with_inputs, insert_computed_blocks,
 };
 use crate::write::prepare::PreparedCreateBlocks;
 
@@ -35,6 +34,36 @@ impl<S: Store + 'static> storage::corekv::RetryAttemptFn for CreateRetryAttempt<
                 prepared_inputs: self.prepared_inputs.clone(),
             };
             match mutator.run_create_attempt(retry, self).await {
+                Ok(value) => Ok(Box::new(value) as storage::corekv::RetryAttemptValue),
+                Err(error) => Err(storage::corekv::RetryAttemptError::Abort(Box::new(error))),
+            }
+        })
+    }
+}
+
+struct CreateManyRetryAttempt<S: Store> {
+    db: Arc<DB<S>>,
+    collection_name: String,
+    collection: Collection,
+    docs: Vec<Document>,
+    identities: Vec<DocStorageIdentity>,
+    computed: Vec<ComputedBlocks>,
+    signing_config: Option<defra_core::signing::SigningConfig>,
+    acp_registration: Option<(Arc<dyn acp::DocumentACP>, identity::Did, String, String)>,
+    prepared_inputs: Option<query::prepared::PreparedInputMemo>,
+}
+
+impl<S: Store + 'static> storage::corekv::RetryAttemptFn for CreateManyRetryAttempt<S> {
+    fn run<'a>(
+        &'a mut self,
+        retry: &'a mut dyn storage::corekv::RetryTxn,
+    ) -> storage::corekv::RetryAttemptFuture<'a> {
+        Box::pin(async move {
+            let mutator = AutoCommitMutator {
+                db: Arc::clone(&self.db),
+                prepared_inputs: self.prepared_inputs.clone(),
+            };
+            match mutator.run_create_many_attempt(retry, self).await {
                 Ok(value) => Ok(Box::new(value) as storage::corekv::RetryAttemptValue),
                 Err(error) => Err(storage::corekv::RetryAttemptError::Abort(Box::new(error))),
             }
@@ -396,16 +425,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         let sign_config = get_signing_config();
         let enc_config = get_encryption_config();
 
-        // Build IndexManager once for the entire batch (schema is identical for all docs)
-        let index_manager =
-            IndexManager::from_indexes(short_id, collection.schema(), collection.write_indexes())
-                .map_err(|e| {
-                query::error::QueryError::execution(format!(
-                    "failed to create index manager for collection '{}': {}",
-                    collection_name, e
-                ))
-            })?;
-
         // === Phase 1: Prepare documents (sequential — embeddings are async/external) ===
         let mut prepared_docs: Vec<Document> = Vec::with_capacity(docs.len());
         let embedding_config = self.db.options().embedding_config();
@@ -426,20 +445,12 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         // No per-doc write guards for creates: identities are derived inside
         // the txn; the DocID-mapping duplicate check is the gate.
 
-        // === Phase 2: Transaction — allocate identities, then compute blocks ===
+        // === Phase 2: Prepare identities, keys, and deterministic blocks ===
         let _arrival_guard = self
             .db
             .doc_write_queue()
             .acquire_arrival(collection.collection_id())
             .await;
-        let mut txn = self.new_mutation_txn().await?;
-        self.db
-            .check_node_access_in_txn(
-                txn.acpstore().map_err(crate::error::commit_query_error)?,
-                acp::nac::NodePermission::DocumentUpdate,
-            )
-            .await
-            .map_err(crate::error::commit_query_error)?;
 
         let mut identities = Vec::with_capacity(prepared_docs.len());
         for doc in &mut prepared_docs {
@@ -453,8 +464,16 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                         .map_err(|e| query::error::QueryError::execution(e.to_string()))?,
                 ),
             };
-            crate::write::prepare::prepare_keys(&self.db, doc, identity, None, enc_config.as_ref())
+            if crate::write::prepare::prepared_identity(doc).is_none() {
+                crate::write::prepare::prepare_keys(
+                    &self.db,
+                    doc,
+                    identity,
+                    None,
+                    enc_config.as_ref(),
+                )
                 .await?;
+            }
             identities.push(identity);
         }
 
@@ -471,13 +490,15 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     let identity = *identity;
                     let enc = enc_config.clone();
                     let sign = sign_config.clone();
+                    let memo = self.prepared_inputs.clone();
                     tokio::task::spawn_blocking(move || {
-                        compute_document_blocks(
+                        compute_document_blocks_with_inputs(
                             &doc_clone,
                             &schema,
                             identity,
                             enc.as_ref(),
                             sign.as_ref(),
+                            memo.as_ref(),
                         )
                     })
                 })
@@ -489,10 +510,12 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             for join_result in computed_results {
                 let blocks = match join_result {
                     Ok(Ok(blocks)) => blocks,
-                    Ok(Err(e)) => {
+                    Ok(Err(crate::block::builder::BuildError::NeedsInput(request))) => {
+                        return Err(query::error::QueryError::NeedsInput(request));
+                    }
+                    Ok(Err(error)) => {
                         return Err(query::error::QueryError::execution(format!(
-                            "failed to compute document blocks: {}",
-                            e
+                            "failed to compute document blocks: {error}"
                         )));
                     }
                     Err(e) => {
@@ -511,137 +534,79 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         let computed_blocks: Vec<ComputedBlocks> = {
             let mut computed = Vec::with_capacity(prepared_docs.len());
             for (doc, identity) in prepared_docs.iter().zip(identities.iter()) {
-                let blocks = compute_document_blocks(
+                let blocks = compute_document_blocks_with_inputs(
                     doc,
                     &schema_version_id,
                     *identity,
                     enc_config.as_ref(),
                     sign_config.as_ref(),
+                    self.prepared_inputs.as_ref(),
                 )
-                .map_err(|e| {
-                    query::error::QueryError::execution(format!(
-                        "failed to compute document blocks: {}",
-                        e
-                    ))
+                .map_err(|error| match error {
+                    crate::block::builder::BuildError::NeedsInput(request) => {
+                        query::error::QueryError::NeedsInput(request)
+                    }
+                    other => query::error::QueryError::execution(format!(
+                        "failed to compute document blocks: {other}"
+                    )),
                 })?;
                 computed.push(blocks);
             }
             computed
         };
 
-        // === Phase 3: Sequential writes ===
-        let mut results: Vec<(DocID, Document, Cid, Bytes, Option<(Cid, Bytes)>)> =
-            Vec::with_capacity(prepared_docs.len());
-
-        for ((mut doc, identity), computed) in prepared_docs
-            .into_iter()
-            .zip(identities)
-            .zip(computed_blocks)
-        {
-            let datastore = txn.datastore().map_err(|e| {
-                query::error::QueryError::execution(format!(
-                    "failed to get datastore for collection '{}': {}",
-                    collection_name, e
-                ))
-            })?;
-            let systemstore = txn.systemstore().map_err(|e| {
-                query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
-            })?;
-            let blockstore = txn.blockstore().map_err(|e| {
-                query::error::QueryError::execution(format!("failed to get blockstore: {}", e))
-            })?;
-            let headstore = txn.headstore().map_err(|e| {
-                query::error::QueryError::execution(format!("failed to get headstore: {}", e))
-            })?;
-
-            self.db
-                .validate_downsample_write(
-                    &datastore,
-                    &systemstore,
-                    collection.schema(),
-                    &doc,
-                    None,
-                )
-                .await
-                .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
-
-            insert_computed_blocks(&blockstore, &headstore, &computed)
-                .await
-                .map_err(|e| {
+        let acp_registration = match (
+            collection.schema().policy.as_ref(),
+            defra_core::signing::get_broadcast_creator_did(),
+            self.db.document_acp().cloned(),
+        ) {
+            (Some(policy), Some(creator), Some(acp)) if !acp.supports_transactions() => {
+                let creator = identity::Did::new(&creator).map_err(|error| {
                     query::error::QueryError::execution(format!(
-                        "failed to insert pre-computed blocks: {}",
-                        e
+                        "invalid mutation creator DID: {error}"
                     ))
                 })?;
+                Some((
+                    acp,
+                    creator,
+                    policy.id.clone(),
+                    policy.resource_name.clone(),
+                ))
+            }
+            _ => None,
+        };
+        let attempt = CreateManyRetryAttempt {
+            db: Arc::clone(&self.db),
+            collection_name: collection_name.to_string(),
+            collection: collection.clone(),
+            docs: prepared_docs,
+            identities,
+            computed: computed_blocks,
+            signing_config: sign_config,
+            acp_registration,
+            prepared_inputs: self.prepared_inputs.clone(),
+        };
+        let result = self
+            .db
+            .store()
+            .transact_retry(storage::corekv::RetryOptions::new(4), Box::new(attempt))
+            .await;
+        let results = match result {
+            Ok(value) => *value
+                .downcast::<Vec<(DocID, Document, Cid, Bytes, Option<(Cid, Bytes)>)>>()
+                .map_err(|_| {
+                    query::error::QueryError::execution("invalid batch create retry result")
+                })?,
+            Err(error) => match error.downcast_abort::<query::error::QueryError>() {
+                Ok(error) => return Err(error),
+                Err(error) => {
+                    return Err(crate::error::commit_query_error(
+                        crate::error::Error::Storage(error.into_storage()),
+                    ));
+                }
+            },
+        };
 
-            let doc_id = register_created_doc(
-                self.db.document_acp(),
-                &systemstore,
-                &datastore,
-                &collection,
-                identity.doc_short_id,
-                &computed.block_result,
-            )
-            .await?;
-            doc.set_id(doc_id.clone());
-
-            write_local_create(
-                &datastore,
-                &collection,
-                &doc,
-                identity.doc_short_id,
-                &index_manager,
-            )
-            .await?;
-
-            let col_block_data = write_branchable_collection_block(
-                &self.db,
-                collection_name,
-                &collection,
-                &blockstore,
-                &headstore,
-                computed.block_result.cid,
-                identity.doc_short_id,
-                sign_config.as_ref(),
-                self.prepared_inputs.as_ref(),
-            )
-            .await?;
-
-            results.push((
-                doc_id,
-                doc,
-                computed.block_result.cid,
-                computed.block_result.block,
-                col_block_data,
-            ));
-        }
-
-        for (doc_id, _, _, _, _) in &results {
-            self.register_created_doc_with_acp(&mut txn, &collection, doc_id.to_string())?;
-        }
-        for (doc_id, _, cid, block, col_data) in &results {
-            self.register_ordered_update_event(
-                &mut txn,
-                collection_name,
-                &collection,
-                doc_id.to_string(),
-                *cid,
-                block.clone(),
-                col_data.clone(),
-            )?;
-        }
-
-        // Commit ONCE for the entire batch
-        if let Err(e) = txn.commit().await {
-            warn!(
-                collection = %collection_name,
-                error = %e,
-                "Failed to commit batch transaction"
-            );
-            return Err(crate::error::commit_query_error(e));
-        }
-
-        // Emit events and build results
         let mut create_results = Vec::with_capacity(results.len());
         for (doc_id, mut doc, cid, block, col_data) in results {
             doc.clear_write_preparation();
@@ -652,7 +617,190 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             }
             create_results.push(result);
         }
-
         Ok(create_results)
+    }
+
+    async fn run_create_many_attempt(
+        &self,
+        retry: &mut dyn storage::corekv::RetryTxn,
+        attempt: &CreateManyRetryAttempt<S>,
+    ) -> query::error::Result<Vec<(DocID, Document, Cid, Bytes, Option<(Cid, Bytes)>)>> {
+        let io = retry
+            .begin_attempt_io()
+            .map_err(|error| crate::error::commit_query_error(error.into()))?;
+        let basic_txn = datastore::BasicTxn::from_retry_attempt_io(io, 0);
+        let mut txn = DbTxn::<S>::new(basic_txn);
+        self.db
+            .check_node_access_in_txn(
+                txn.acpstore().map_err(crate::error::commit_query_error)?,
+                acp::nac::NodePermission::DocumentUpdate,
+            )
+            .await
+            .map_err(crate::error::commit_query_error)?;
+        let datastore = txn.datastore().map_err(|error| {
+            query::error::QueryError::execution(format!("failed to get datastore: {error}"))
+        })?;
+        let systemstore = txn.systemstore().map_err(|error| {
+            query::error::QueryError::execution(format!("failed to get systemstore: {error}"))
+        })?;
+        let blockstore = txn.blockstore().map_err(|error| {
+            query::error::QueryError::execution(format!("failed to get blockstore: {error}"))
+        })?;
+        let headstore = txn.headstore().map_err(|error| {
+            query::error::QueryError::execution(format!("failed to get headstore: {error}"))
+        })?;
+        let result: query::error::Result<Vec<(DocID, Document, Cid, Bytes, Option<(Cid, Bytes)>)>> =
+            async {
+                let index_manager = IndexManager::from_indexes(
+                    attempt.collection.resolved_root_id(),
+                    attempt.collection.schema(),
+                    attempt.collection.write_indexes(),
+                )
+                .map_err(|error| {
+                    query::error::QueryError::execution(format!(
+                        "failed to create index manager: {error}"
+                    ))
+                })?;
+                let mut results = Vec::with_capacity(attempt.docs.len());
+                for ((mut doc, identity), computed) in attempt
+                    .docs
+                    .iter()
+                    .cloned()
+                    .zip(attempt.identities.iter().copied())
+                    .zip(&attempt.computed)
+                {
+                    self.db
+                        .validate_downsample_write(
+                            &datastore,
+                            &systemstore,
+                            attempt.collection.schema(),
+                            &doc,
+                            None,
+                        )
+                        .await
+                        .map_err(|error| query::error::QueryError::execution(error.to_string()))?;
+                    insert_computed_blocks(&blockstore, &headstore, computed)
+                        .await
+                        .map_err(|error| {
+                            query::error::QueryError::execution(format!(
+                                "failed to insert precomputed blocks: {error}"
+                            ))
+                        })?;
+                    let doc_id = register_created_doc(
+                        self.db.document_acp(),
+                        &systemstore,
+                        &datastore,
+                        &attempt.collection,
+                        identity.doc_short_id,
+                        &computed.block_result,
+                    )
+                    .await?;
+                    doc.set_id(doc_id.clone());
+                    write_local_create(
+                        &datastore,
+                        &attempt.collection,
+                        &doc,
+                        identity.doc_short_id,
+                        &index_manager,
+                    )
+                    .await?;
+                    let col_data = write_branchable_collection_block(
+                        &self.db,
+                        &attempt.collection_name,
+                        &attempt.collection,
+                        &blockstore,
+                        &headstore,
+                        computed.block_result.cid,
+                        identity.doc_short_id,
+                        attempt.signing_config.as_ref(),
+                        attempt.prepared_inputs.as_ref(),
+                    )
+                    .await?;
+                    results.push((
+                        doc_id,
+                        doc,
+                        computed.block_result.cid,
+                        computed.block_result.block.clone(),
+                        col_data,
+                    ));
+                }
+                Ok(results)
+            }
+            .await;
+        drop(datastore);
+        drop(systemstore);
+        drop(blockstore);
+        drop(headstore);
+        let results = match result {
+            Ok(results) => results,
+            Err(error) => {
+                if let Err(discard_error) = txn.discard() {
+                    warn!(error = %discard_error, "Failed to discard retry transaction after batch create error");
+                }
+                return Err(error);
+            }
+        };
+        for (doc_id, _, cid, block, col_data) in &results {
+            if let Some((acp, creator, policy_id, resource_name)) =
+                attempt.acp_registration.as_ref()
+            {
+                let acp = Arc::clone(acp);
+                let creator = creator.clone();
+                let policy_id = policy_id.clone();
+                let resource_name = resource_name.clone();
+                let doc_id = doc_id.to_string();
+                txn.on_retry_success_ordered_async(Box::new(move || {
+                    Box::pin(async move {
+                        if !acp
+                            .is_doc_registered(&policy_id, &resource_name, &doc_id)
+                            .await
+                            .map_err(|error| error.to_string())?
+                        {
+                            acp.register_doc_object(&creator, &policy_id, &resource_name, &doc_id)
+                                .await
+                                .map_err(|error| error.to_string())?;
+                        }
+                        Ok(())
+                    })
+                }))
+                .map_err(|error| crate::error::commit_query_error(error.into()))?;
+            }
+            if let Some(bus) = self.db.event_bus().cloned() {
+                let collection = attempt.collection.clone();
+                let doc_id = doc_id.to_string();
+                let cid = *cid;
+                let block = block.clone();
+                let col_data = col_data.clone();
+                txn.on_retry_success_ordered(Box::new(move || {
+                    bus.publish(Message::update(Update::new(
+                        doc_id.clone(),
+                        cid,
+                        collection.collection_id().to_string(),
+                        block,
+                        false,
+                        false,
+                    )));
+                    if let Some((col_cid, col_block)) = col_data {
+                        bus.publish(Message::update(Update::new_with_subject_doc_id(
+                            String::new(),
+                            doc_id,
+                            col_cid,
+                            collection.collection_id().to_string(),
+                            col_block,
+                            false,
+                            false,
+                        )));
+                    }
+                }))
+                .map_err(|error| crate::error::commit_query_error(error.into()))?;
+            }
+        }
+        let (io, callbacks) = txn
+            .into_retry_attempt()
+            .map_err(|error| crate::error::commit_query_error(error.into()))?;
+        retry
+            .finish_attempt_io(io, callbacks)
+            .map_err(|error| crate::error::commit_query_error(error.into()))?;
+        Ok(results)
     }
 }
