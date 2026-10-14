@@ -165,11 +165,9 @@ pub(crate) async fn cache_migrated_document(
         return Ok(false);
     }
 
-    let data = doc.to_cbor()?;
-    datastore
-        .set(&collection.doc_key(doc_short_id), &data)
-        .await
-        .map_err(Error::Storage)?;
+    collection
+        .put_document_value(datastore, doc_short_id, doc, false, None)
+        .await?;
     collection.store_version(datastore, doc_short_id).await?;
 
     Ok(true)
@@ -210,13 +208,12 @@ pub(crate) async fn cache_migrated_document_with_indexes(
     let Some(old_data) = datastore.get(&key).await.map_err(Error::Storage)? else {
         return Ok(false);
     };
-    let mut old_doc = Document::from_cbor(&old_data)?;
+    let mut old_doc = Document::from_storage_cbor(&old_data)?;
     old_doc.set_id(doc_id.clone());
 
-    datastore
-        .set(&key, &doc.to_cbor()?)
-        .await
-        .map_err(Error::Storage)?;
+    collection
+        .put_document_value(datastore, doc_short_id, doc, false, None)
+        .await?;
     collection.store_version(datastore, doc_short_id).await?;
 
     // Deleted documents have already been removed from secondary indexes.

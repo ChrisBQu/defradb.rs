@@ -1178,6 +1178,19 @@ async fn interactive_counter_increment_conflicts_with_concurrent_same_doc_merge(
         18,
         "retry on a fresh snapshot must converge to N+D2+D1 = 18"
     );
+    let collection = db.get_collection("Counters").unwrap().unwrap();
+    let reader = db.new_txn(true).await.unwrap();
+    let doc = collection
+        .get_by_doc_id(
+            &reader.datastore().unwrap(),
+            &reader.systemstore().unwrap(),
+            &document::DocID::from_string(&doc_id).unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(doc.get("score"), Some(&NormalValue::Int(18)),
+        "the blob must include the earlier standalone field merge as well as the retried local increment");
 }
 
 #[tokio::test]
@@ -3717,4 +3730,92 @@ async fn first_materialization_and_local_create_arrive_in_commit_order() {
     assert_eq!(page.head, 2);
     assert_eq!(page.entries[0].doc_id, peer_id);
     assert_eq!(page.entries[1].doc_id, local_id);
+}
+
+#[tokio::test]
+async fn remote_field_tombstone_clears_materialized_value_and_keeps_its_priority() {
+    let (handler, blockstore) = make_handler_with_immutable_schema().await;
+    let collection = handler
+        .db()
+        .find_collection_by_id("col-agentdocs")
+        .unwrap()
+        .unwrap();
+    let mut doc =
+        Document::from_json_str(r#"{"agent_did":"did:key:alice","body":"before"}"#).unwrap();
+    doc.set_schema_version_id("v1");
+    let (doc_id, short_id, created) =
+        create_doc_locally(&handler, &collection, &mut doc, "v1").await;
+    let field = Block::new(
+        CrdtDelta::Lww(LwwDeltaPayload {
+            field_name: "body".into(),
+            schema_version_id: "v1".into(),
+            priority: 2,
+            data: Vec::new(),
+        }),
+        created.field_cids,
+        vec![],
+    );
+    let field_cid = field.generate_cid().unwrap();
+    blockstore
+        .put(&field_cid, &field.to_dag_cbor().unwrap())
+        .await
+        .unwrap();
+    let payload = CompositeDeltaPayload {
+        schema_version_id: "v1".into(),
+        priority: 7,
+        status: 1,
+    };
+    let block = Block::new(
+        CrdtDelta::Composite(payload.clone()),
+        vec![created.cid],
+        vec![DAGLink::new("body", field_cid)],
+    );
+    let cid = block.generate_cid().unwrap();
+    blockstore
+        .put(&cid, &block.to_dag_cbor().unwrap())
+        .await
+        .unwrap();
+    let id = doc_id.to_string();
+    let result = handler
+        .process_composite_delta(
+            &cid,
+            &block,
+            &payload,
+            &BlockMetadata::normal(&id, "col-agentdocs", "did:key:z6MkrClr", None, false),
+            false,
+            0,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result, MergeOutcome::Merged);
+    let txn = handler.db().new_txn(true).await.unwrap();
+    let bytes = txn
+        .datastore()
+        .unwrap()
+        .get(&collection.doc_key(short_id))
+        .await
+        .unwrap()
+        .unwrap();
+    let stored = document::stored::StoredDocument::decode(&bytes).unwrap();
+    let body = stored
+        .fields
+        .values()
+        .find(|field| field.name == "body")
+        .unwrap();
+    let field_key = storage::keys::headstore::HeadstoreDocKey::new(short_id, "body", field_cid);
+    let priority = txn
+        .headstore()
+        .unwrap()
+        .get(&storage::corekv::Key::bytes(&field_key))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        db::block::builder::decode_priority_varint(&priority),
+        2,
+        "field heads retain their own priority, independent of the composite"
+    );
+    assert_eq!(body.priority, 2);
+    assert!(body.value.is_empty());
+    assert!(stored.materialize().unwrap().get("body").is_none());
 }

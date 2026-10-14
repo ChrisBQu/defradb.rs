@@ -126,6 +126,9 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         for (link_cid, effective) in pending {
             match effective {
                 CrdtDelta::Lww(lww_payload) => {
+                    state
+                        .field_block_priorities
+                        .insert(link_cid, lww_payload.priority);
                     let result = self
                         .process_lww_delta_in_txn(
                             datastore,
@@ -137,6 +140,13 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                             context.doc_short_id,
                         )
                         .await?;
+                    state.field_priorities.insert(
+                        lww_payload.field_name.clone(),
+                        crate::collection::value::FieldOrder {
+                            priority: result.priority,
+                            raw_value: Some(result.raw_value),
+                        },
+                    );
                     if result.applied {
                         state.any_field_applied = true;
                     }
@@ -147,6 +157,9 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                     }
                 }
                 CrdtDelta::Counter(counter_payload) => {
+                    state
+                        .field_block_priorities
+                        .insert(link_cid, counter_payload.priority);
                     let result = self
                         .process_counter_delta_in_txn(
                             datastore,

@@ -40,7 +40,7 @@ async fn document_matches_filter<R: Reader + ?Sized>(
         return Ok(false);
     };
 
-    let doc = document::Document::from_cbor(&doc_data)
+    let doc = document::Document::from_storage_cbor(&doc_data)
         .map_err(|e| format!("failed to decode document for replication filter: {}", e))?;
     let document_json = serde_json::Value::Object(
         doc.to_map()
@@ -620,7 +620,7 @@ async fn push_existing_docs_with_config_and_allowlist<S: Store + 'static, T: P2P
                     _ => continue,
                 };
 
-                let doc = match document::Document::from_cbor(&doc_data) {
+                let doc = match document::Document::from_storage_cbor(&doc_data) {
                     Ok(d) => d,
                     Err(e) => {
                         tracing::warn!(doc_id = %doc_id, error = %e, "SE: failed to deserialize document");

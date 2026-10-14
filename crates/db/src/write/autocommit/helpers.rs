@@ -89,7 +89,13 @@ pub(crate) async fn write_local_update(
         modified_fields.extend(generated);
     }
     collection
-        .update_with_indexes(datastore, doc, doc_short_id, index_manager)
+        .update_with_indexes_parts(
+            datastore,
+            doc,
+            doc_short_id,
+            index_manager,
+            Some(modified_fields),
+        )
         .await
         .map_err(|e| match e {
             crate::error::Error::DocumentNotFound(id) => {

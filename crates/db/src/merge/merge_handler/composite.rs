@@ -52,6 +52,8 @@ impl<'a, 'b> CompositeMergeContext<'a, 'b> {
 
 #[derive(Default)]
 pub struct CompositeMergeState {
+    pub(crate) field_block_priorities: RapidHashMap<Cid, u64>,
+    pub(crate) field_priorities: RapidHashMap<String, crate::collection::value::FieldOrder>,
     pub(crate) field_values: RapidHashMap<String, NormalValue>,
     pub(crate) any_field_applied: bool,
     pub(crate) encrypted_policy_checked: bool,

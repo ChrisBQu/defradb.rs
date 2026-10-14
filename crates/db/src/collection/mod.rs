@@ -454,3 +454,5 @@ impl Collection {
 }
 
 pub(crate) mod parts;
+
+pub(crate) mod value;

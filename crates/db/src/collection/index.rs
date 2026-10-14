@@ -24,12 +24,8 @@ impl Collection {
 
         self.claim_series(datastore, doc).await?;
 
-        // Serialize document to CBOR
-        let data = doc.to_cbor()?;
-
-        // Store document
-        let key = self.doc_key(doc_short_id);
-        datastore.set(&key, &data).await.map_err(Error::Storage)?;
+        self.put_document_value(datastore, doc_short_id, doc, true, None)
+            .await?;
 
         // Store schema version for lens migration support
         self.store_version(datastore, doc_short_id).await?;
@@ -52,14 +48,24 @@ impl Collection {
         doc_short_id: u64,
         index_manager: &IndexManager,
     ) -> Result<()> {
+        self.update_with_indexes_parts(datastore, doc, doc_short_id, index_manager, None)
+            .await
+    }
+
+    pub(crate) async fn update_with_indexes_parts(
+        &self,
+        datastore: &NamespaceView,
+        doc: &Document,
+        doc_short_id: u64,
+        index_manager: &IndexManager,
+        modified: Option<&rapidhash::RapidHashSet<String>>,
+    ) -> Result<()> {
         // Validate document against schema
         self.validate_document(doc)?;
 
         let doc_id = doc
             .id()
             .ok_or_else(|| Error::InvalidDocument("Document must have an ID".into()))?;
-
-        let key = self.doc_key(doc_short_id);
 
         if self.is_deleted(datastore, doc_short_id).await? {
             return Err(Error::DocumentNotFound(doc_id.to_string()));
@@ -68,7 +74,7 @@ impl Collection {
         // Get old document for index update
         let old_doc = match self.read_document_blob(datastore, doc_short_id).await? {
             Some(bytes) => {
-                let mut d = Document::from_cbor(&bytes)?;
+                let mut d = Document::from_storage_cbor(&bytes)?;
                 d.set_id(doc_id.clone());
                 d
             }
@@ -80,10 +86,16 @@ impl Collection {
         self.release_series(datastore, &old_doc).await?;
         self.claim_series(datastore, doc).await?;
 
-        // Serialize and store
-        let data = doc.to_cbor()?;
-
-        datastore.set(&key, &data).await.map_err(Error::Storage)?;
+        match modified {
+            Some(fields) => {
+                self.merge_local_document_value(datastore, doc_short_id, doc, fields)
+                    .await?
+            }
+            None => {
+                self.put_document_value(datastore, doc_short_id, doc, false, None)
+                    .await?
+            }
+        }
 
         // Update schema version to current collection version
         self.store_version(datastore, doc_short_id).await?;
@@ -121,7 +133,7 @@ impl Collection {
         // Get the document for index cleanup
         let doc = match datastore.get(&key).await.map_err(Error::Storage)? {
             Some(bytes) => {
-                let mut d = Document::from_cbor(&bytes)?;
+                let mut d = Document::from_storage_cbor(&bytes)?;
                 d.set_id(doc_id.clone());
                 d
             }

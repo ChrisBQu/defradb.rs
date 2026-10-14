@@ -77,6 +77,8 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                     }
                 }
 
+                let field_priority = state.field_block_priorities[&dag_link.link];
+                let field_priority_bytes = encode_priority_varint(field_priority);
                 let field_head_key = storage::keys::headstore::HeadstoreDocKey::new(
                     context.doc_short_id,
                     &dag_link.name,
@@ -87,14 +89,14 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                         &<storage::keys::headstore::HeadstoreDocKey as storage::corekv::Key>::bytes(
                             &field_head_key,
                         ),
-                        &priority_bytes,
+                        &field_priority_bytes,
                     )
                     .await
                     .map_err(|e| MergeError::Storage(e.to_string()))?;
 
                 let field_priority_key = storage::keys::headstore::HeadstorePriorityKey::new(
                     context.doc_short_id,
-                    context.payload.priority,
+                    field_priority,
                     dag_link.link,
                 );
                 headstore

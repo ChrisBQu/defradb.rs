@@ -113,7 +113,7 @@ impl Collection {
 
         match data {
             Some(bytes) => {
-                let mut doc = Document::from_cbor(&bytes)?;
+                let mut doc = Document::from_storage_cbor(&bytes)?;
                 // The blob stores values only; identity lives in the mapping.
                 doc.set_id(doc_id.clone());
 
@@ -199,7 +199,7 @@ impl Collection {
                 continue;
             };
 
-            let doc = Document::from_cbor(&pair.value)
+            let doc = Document::from_storage_cbor(&pair.value)
                 .map_err(|e| Error::document_at_key(&pair.key, e))?;
             entries.push((doc_short_id, doc));
         }
@@ -244,7 +244,7 @@ impl Collection {
             else {
                 continue;
             };
-            let doc = Document::from_cbor(&bytes)
+            let doc = Document::from_storage_cbor(&bytes)
                 .map_err(|e| Error::document_at_key(&self.doc_key(doc_short_id), e))?;
             if let Some(hydrated) = self
                 .hydrate(datastore, systemstore, doc_short_id, doc, show_deleted)
@@ -311,12 +311,8 @@ impl Collection {
 
         self.claim_series(datastore, doc).await?;
 
-        // Serialize document to CBOR
-        let data = doc.to_cbor()?;
-
-        // Store document
-        let key = self.doc_key(doc_short_id);
-        datastore.set(&key, &data).await.map_err(Error::Storage)?;
+        self.put_document_value(datastore, doc_short_id, doc, true, None)
+            .await?;
 
         // Store schema version
         self.store_version(datastore, doc_short_id).await?;
@@ -341,14 +337,12 @@ impl Collection {
             .id()
             .ok_or_else(|| Error::InvalidDocument("Document must have an ID".into()))?;
 
-        let key = self.doc_key(doc_short_id);
-
         if self.is_deleted(datastore, doc_short_id).await? {
             return Err(Error::DocumentNotFound(doc_id.to_string()));
         }
         let old_doc = match self.read_document_blob(datastore, doc_short_id).await? {
             Some(bytes) => {
-                let mut d = Document::from_cbor(&bytes)?;
+                let mut d = Document::from_storage_cbor(&bytes)?;
                 d.set_id(doc_id.clone());
                 d
             }
@@ -360,10 +354,8 @@ impl Collection {
         self.release_series(datastore, &old_doc).await?;
         self.claim_series(datastore, doc).await?;
 
-        // Serialize and store
-        let data = doc.to_cbor()?;
-
-        datastore.set(&key, &data).await.map_err(Error::Storage)?;
+        self.put_document_value(datastore, doc_short_id, doc, false, None)
+            .await?;
 
         // Update schema version to current collection version
         self.store_version(datastore, doc_short_id).await?;
@@ -456,21 +448,54 @@ impl Collection {
         doc: &Document,
         doc_short_id: u64,
     ) -> Result<DocID> {
+        self.save_with_datastore_priorities(datastore, doc, doc_short_id, None)
+            .await
+    }
+
+    pub(crate) async fn save_with_datastore_priorities(
+        &self,
+        datastore: &NamespaceView,
+        doc: &Document,
+        doc_short_id: u64,
+        priorities: Option<&rapidhash::RapidHashMap<String, super::value::FieldOrder>>,
+    ) -> Result<DocID> {
+        let target = if let Some(version) = doc
+            .schema_version_id()
+            .filter(|version| *version != self.version_id())
+        {
+            let system = datastore.sibling(storage::namespace::Namespace::Systemstore);
+            crate::definition::loader::get_collection_by_version_id(&system, version)
+                .await?
+                .map(Collection::new)
+        } else {
+            None
+        };
+        let value_collection = target.as_ref().unwrap_or(self);
         let doc_id = doc
             .id()
             .cloned()
             .ok_or_else(|| Error::InvalidDocument("Document must have an ID".into()))?;
 
-        let key = self.doc_key(doc_short_id);
-
         if !self.is_deleted(datastore, doc_short_id).await? {
             self.claim_series(datastore, doc).await?;
         }
 
-        // Serialize and store (upsert)
-        let data = doc.to_cbor()?;
-
-        datastore.set(&key, &data).await.map_err(Error::Storage)?;
+        if target.is_none()
+            && doc
+                .schema_version_id()
+                .is_some_and(|version| version != self.version_id())
+        {
+            // An as-yet unknown definition has no local part IDs. A plain put
+            // stays whole-value validated until that definition can be loaded.
+            datastore
+                .set(&self.doc_key(doc_short_id), &doc.to_cbor()?)
+                .await
+                .map_err(Error::Storage)?;
+        } else {
+            value_collection
+                .put_document_value(datastore, doc_short_id, doc, false, priorities)
+                .await?;
+        }
 
         // Store schema version - preserve document's version if set, otherwise use collection's
         let version = doc.schema_version_id().unwrap_or(&self.def.version_id);

@@ -118,6 +118,8 @@ impl MergeError {
 /// Result of processing an LWW delta, including whether it was applied
 /// and the value to use for document reconstruction.
 pub(crate) struct LwwMergeResult {
+    pub(crate) raw_value: Vec<u8>,
+    pub(crate) priority: u64,
     /// Whether the merge was applied (vs rejected/skipped)
     pub(crate) applied: bool,
     /// The winning value for document reconstruction (if applied, use incoming; else read from store)

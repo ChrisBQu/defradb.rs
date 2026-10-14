@@ -56,9 +56,9 @@ impl StoredField {
             ValueKind::Int64 => Some(NormalValue::Int(i64::from_be_bytes(
                 self.value.as_slice().try_into().ok()?,
             ))),
-            ValueKind::Float32 => Some(NormalValue::Float32(f32::from_be_bytes(
+            ValueKind::Float32 => Some(NormalValue::Float64(f64::from(f32::from_be_bytes(
                 self.value.as_slice().try_into().ok()?,
-            ))),
+            )))),
             ValueKind::Float64 => Some(NormalValue::Float64(f64::from_be_bytes(
                 self.value.as_slice().try_into().ok()?,
             ))),
@@ -203,4 +203,17 @@ fn take<'a>(input: &mut &'a [u8], length: usize) -> Option<&'a [u8]> {
 fn take_sized<'a>(input: &mut &'a [u8]) -> Option<&'a [u8]> {
     let length = u32::from_be_bytes(take(input, 4)?.try_into().ok()?) as usize;
     take(input, length)
+}
+
+impl Document {
+    /// Decode a local stored value without changing the wire CBOR decoder.
+    pub fn from_storage_cbor(bytes: &[u8]) -> Result<Self> {
+        if bytes.starts_with(MAGIC) {
+            StoredDocument::decode(bytes)
+                .and_then(|value| value.materialize())
+                .ok_or_else(|| Error::CborDecode("invalid local document value".into()))
+        } else {
+            Self::from_cbor(bytes)
+        }
+    }
 }

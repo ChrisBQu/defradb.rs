@@ -349,74 +349,26 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             .await
             .map_err(|e| MergeError::MergeFailed(e.to_string()))?;
 
-        // Determine the winning value for document reconstruction
-        let (applied, value) = if merge_result.was_applied() {
-            // Incoming value won - use it
-            tracing::debug!(
-                cid = %cid,
-                field_name = %payload.field_name,
-                "LWW delta applied - using incoming value"
-            );
-            let value = if !payload.data.is_empty() {
-                match ciborium::from_reader::<NormalValue, _>(&payload.data[..]) {
-                    Ok(v) => Some(v),
-                    Err(e) => {
-                        tracing::error!(
-                            field_name = %payload.field_name,
-                            error = %e,
-                            "Failed to decode applied field value from CBOR"
-                        );
-                        return Err(MergeError::BlockDecode(format!(
-                            "Failed to decode field '{}': {}",
-                            payload.field_name, e
-                        )));
-                    }
-                }
-            } else {
-                None // Tombstone
-            };
-            (true, value)
+        let applied = merge_result.was_applied();
+        let raw_value = lww
+            .value_or_tombstone(datastore)
+            .await
+            .map_err(|error| MergeError::MergeFailed(error.to_string()))?;
+        let value = Some(if raw_value.is_empty() {
+            NormalValue::Null
         } else {
-            // Incoming value was rejected - read the winning value from CRDT storage
-            tracing::debug!(
-                cid = %cid,
-                field_name = %payload.field_name,
-                result = ?merge_result,
-                "LWW delta rejected - reading winning value from storage"
-            );
+            ciborium::from_reader::<NormalValue, _>(raw_value.as_ref())
+                .map_err(|error| MergeError::BlockDecode(error.to_string()))?
+        });
 
-            // Read the current (winning) value from storage
-            let value = match crdt::traits::ValueReader::value(&lww, datastore).await {
-                Ok(data) => {
-                    if data.is_empty() {
-                        None // Tombstone/deleted
-                    } else {
-                        match ciborium::from_reader::<NormalValue, _>(&data[..]) {
-                            Ok(v) => Some(v),
-                            Err(e) => {
-                                tracing::warn!(
-                                    field_name = %payload.field_name,
-                                    error = %e,
-                                    "Failed to decode existing field value from CBOR - skipping field"
-                                );
-                                None
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    // Field may not exist yet - this is not an error
-                    tracing::debug!(
-                        field_name = %payload.field_name,
-                        error = %e,
-                        "Could not read existing field value - field may not exist"
-                    );
-                    None
-                }
-            };
-            (false, value)
-        };
-
-        Ok(LwwMergeResult { applied, value })
+        let priority = crdt::traits::PriorityReader::priority(&lww, datastore)
+            .await
+            .map_err(|error| MergeError::MergeFailed(error.to_string()))?;
+        Ok(LwwMergeResult {
+            applied,
+            value,
+            priority,
+            raw_value: raw_value.to_vec(),
+        })
     }
 }

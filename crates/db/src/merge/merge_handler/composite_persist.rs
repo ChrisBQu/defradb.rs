@@ -68,7 +68,8 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                 let old = existing.clone();
                 (existing, Some(old))
             }
-            _ => {
+            Err(error) => return Err(MergeError::Database(error)),
+            Ok(None) => {
                 let mut new_doc = Document::new();
                 new_doc.set_id(doc_id.clone());
                 (new_doc, None)
@@ -99,7 +100,12 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         // partial write.
 
         collection
-            .save_with_datastore(datastore, &doc, context.doc_short_id)
+            .save_with_datastore_priorities(
+                datastore,
+                &doc,
+                context.doc_short_id,
+                Some(&state.field_priorities),
+            )
             .await
             .map_err(MergeError::Database)?;
 

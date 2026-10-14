@@ -99,7 +99,7 @@ impl DocStream for CollectionDocStream {
                 continue;
             };
 
-            let mut doc = Document::from_cbor(&pair.value)
+            let mut doc = Document::from_storage_cbor(&pair.value)
                 .map_err(|e| self.fuse_err("document decode error", e))?;
 
             let Some(doc_id_str) = crate::docid::map::get_doc_id(&self.systemstore, doc_short_id)
