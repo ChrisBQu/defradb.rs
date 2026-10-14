@@ -1,3 +1,4 @@
+use events::{Message, Update};
 use super::helpers::{
     register_block_doc_id_mappings, write_branchable_collection_block, write_local_update,
 };
