@@ -22,7 +22,7 @@ async fn check_projection(store: impl Store) {
         reader.set(b"effect", b"written").await.unwrap();
         let result = reader.commit().await;
         if validates {
-            assert!(matches!(result, Err(Error::TxnConflict)));
+            assert!(matches!(result, Err(Error::TxnConflictDetails(_))));
         } else {
             result.unwrap();
         }
