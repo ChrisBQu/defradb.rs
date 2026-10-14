@@ -1056,45 +1056,17 @@ async fn put_counter_delta_block(
     (cid, payload)
 }
 
-/// #1044 residual coverage gap: an interactive/explicit-transaction counter
-/// increment racing a same-document P2P merge.
-///
-/// PROPERTY (proven DETERMINISTICALLY by controlling ordering, not a real
-/// race): an interactive counter txn must NOT silently clobber a concurrent
-/// same-doc merge. The per-doc guard excludes partial-RMW interleaving during
-/// the finalize's held window, but a merge that COMMITS *before* the
-/// interactive finalize makes the interactive txn's `begin()` snapshot stale →
-/// on commit the storage SSI/OCC conflict tracker (`ConflictTracker` in
-/// `storage::backends::shared`, used by `RegolithStore`) aborts the interactive
-/// commit with a `TxnConflict` ("transaction conflict. Please retry"), and the
-/// merge's value survives. No data loss, no double-apply — the client retries.
-/// This matches Go's storage-txn isolation.
-///
-/// CONSTRUCTION (real merge handler, no fallback):
-///   1. Seed doc with `score` (PNCounter) at N=10 via the registry auto-finalize
-///      path; confirm the accumulation store == 10.
-///   2. `begin()` an explicit txn and `update` +3 through the interactive
-///      mutator — this RECORDS the pending op and writes the provisional blob but
-///      does NOT finalize. The txn's `read_version` snapshot is fixed here.
-///   3. BEFORE committing, apply a same-doc merge of +5 through the REAL merge
-///      handler (`process_counter_delta`, which takes its own `merge_queue`
-///      guard and commits its own txn). Confirm the store advanced to 15.
-///   4. Commit the interactive txn. ASSERT: commit returns a conflict ERROR and
-///      the store STILL == 15 (the merge survived; no clobber to 13).
-///   5. RETRY the +3 in a fresh explicit txn (snapshot now sees 15) → store == 18.
-///
-/// REGRESSION CAUGHT: if the finalize ignored OCC and force-wrote its stale RMW,
-/// the interactive commit would succeed and the store would be 13 (the merge's
-/// +5 lost) — both assertions (error + store==15) would fail.
+/// The accumulator accepts blind operands, but the materialized document/index
+/// update still depends on the value read. A competing committed field merge
+/// must invalidate that decision; retry then applies each increment once.
 #[tokio::test]
 async fn interactive_counter_increment_conflicts_with_concurrent_same_doc_merge() {
     let (handler, blockstore) = make_handler_with_counter_schema().await;
     let db = Arc::clone(handler.db());
-    // Same DB / same RegolithStore => same ConflictTracker shared across the
-    // interactive registry txn and the merge handler's own txn.
+    // Both writers use the same engine.
     let registry = DbTransactionRegistry::new(Arc::clone(&db));
 
-    // (1) Seed the doc with score = 10 via the registry (auto-finalize on commit).
+    // (1) Seed the doc with score = 10.
     let handle = registry.begin(false).await.expect("begin seed");
     let ctx = registry.get(&handle).into_result().unwrap().unwrap();
     let mutator = ctx.doc_mutator().expect("mutator");
@@ -1116,8 +1088,7 @@ async fn interactive_counter_increment_conflicts_with_concurrent_same_doc_merge(
     );
 
     // (2) Begin an EXPLICIT txn and increment +3 through the interactive
-    // mutator. This records the pending op + writes the provisional blob but
-    // does NOT finalize; the txn's read_version snapshot is fixed at begin().
+    // mutator. Its operand and document update belong to the open snapshot.
     let handle = registry.begin(false).await.expect("begin interactive");
     let ctx = registry.get(&handle).into_result().unwrap().unwrap();
     let mutator = ctx.doc_mutator().expect("mutator");

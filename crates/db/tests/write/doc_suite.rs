@@ -869,6 +869,22 @@ async fn explicit_txn_multiple_updates_same_field_sum_once() {
     m2.insert("count".to_string());
     mutator.update("Counters", up2, m2).await.expect("update 2");
 
+    let visible = ctx
+        .doc_fetcher()
+        .get_by_ids("Counters", std::slice::from_ref(&doc_id))
+        .await
+        .unwrap()
+        .into_docs();
+    assert_eq!(
+        visible[0].get("count"),
+        Some(&document::NormalValue::Int(5))
+    );
+    assert_eq!(
+        read_counter_store(&db, "cv1", &doc_id, "count").await,
+        0,
+        "uncommitted operands stay inside their transaction"
+    );
+
     drop(mutator);
     drop(ctx);
     registry.commit(&handle).await.expect("commit updates");

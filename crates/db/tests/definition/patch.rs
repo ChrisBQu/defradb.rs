@@ -573,3 +573,41 @@ async fn patch_relation_version_switching_preserves_go_canonical_versions() {
     assert_eq!(author.get_indexes().len(), 1);
     assert_eq!(author.get_indexes()[0].name, "Author__publishedID_ASC");
 }
+
+#[tokio::test]
+async fn local_document_part_ids_are_persistent_and_never_reused_by_new_versions() {
+    use std::collections::{BTreeMap, BTreeSet};
+    async fn ids(db: &DB<RegolithStore>, version: &str) -> BTreeMap<String, u32> {
+        let txn = db.new_txn(true).await.unwrap();
+        let bytes = txn
+            .systemstore()
+            .unwrap()
+            .get(format!("/parts/{version}").as_bytes())
+            .await
+            .unwrap()
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+    let db = users_db().await;
+    let original = db.get_collection("Users").unwrap().unwrap();
+    let before = ids(&db, original.version_id()).await;
+    assert_eq!(before.len(), original.schema().fields.len());
+    let updated = db
+        .patch_collection("Users", ADD_AGE_PATCH, None)
+        .await
+        .unwrap();
+    let after = ids(&db, &updated.version_id).await;
+    assert_eq!(after.len(), updated.fields.len());
+    let first: BTreeSet<_> = before.values().collect();
+    let second: BTreeSet<_> = after.values().collect();
+    assert!(first.is_disjoint(&second));
+    // Definition CIDs are unchanged by local part allocation.
+    assert!(updated
+        .fields
+        .iter()
+        .any(|field| field.id.parse::<cid::Cid>().is_ok()));
+    let store = db.store().clone();
+    drop(db);
+    let reopened = DB::open_from_arc(store).await.unwrap();
+    assert_eq!(ids(&reopened, &updated.version_id).await, after);
+}

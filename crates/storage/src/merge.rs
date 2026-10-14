@@ -7,6 +7,7 @@ const INT64: u8 = 1;
 const FLOAT32: u8 = 2;
 const FLOAT64: u8 = 3;
 const STATS: u8 = 4;
+const DOCUMENT: u8 = 5;
 
 fn encode(kind: u8, value: &[u8]) -> Vec<u8> {
     let mut result = Vec::with_capacity(4 + value.len());
@@ -37,6 +38,11 @@ pub fn stats_delta(documents: i128, field_length: i128) -> Vec<u8> {
     )
 }
 
+/// Only the named fields are changed. The base must use the local value format.
+pub fn document_parts(parts: &document::stored::StoredDocument) -> Option<Vec<u8>> {
+    Some(encode(DOCUMENT, &parts.encode()?))
+}
+
 pub struct DefraMergeOperator;
 
 impl MergeOperator for DefraMergeOperator {
@@ -49,6 +55,20 @@ impl MergeOperator for DefraMergeOperator {
             return base.map(<[u8]>::to_vec);
         };
         let (kind, _) = decode(first)?;
+        if kind == DOCUMENT {
+            let mut document = match base {
+                Some(bytes) => document::stored::StoredDocument::decode(bytes)?,
+                None => document::stored::StoredDocument::default(),
+            };
+            for operand in operands {
+                let (DOCUMENT, bytes) = decode(operand)? else {
+                    return None;
+                };
+                document.apply(document::stored::StoredDocument::decode(bytes)?)?;
+            }
+            return document.encode();
+        }
+
         let mut value = base.map(<[u8]>::to_vec).unwrap_or_else(|| {
             vec![
                 0;
@@ -94,7 +114,33 @@ impl MergeOperator for DefraMergeOperator {
         Some(value)
     }
 
+    fn touches(&self, _key: &[u8], operand: &[u8], parts: &[u32]) -> bool {
+        let Some((DOCUMENT, bytes)) = decode(operand) else {
+            return true;
+        };
+        let Some(document) = document::stored::StoredDocument::decode(bytes) else {
+            return true;
+        };
+        document.fields.keys().any(|id| parts.contains(id))
+    }
+
     fn partial_merge(&self, _key: &[u8], left: &[u8], right: &[u8]) -> Option<Vec<u8>> {
+        if let (Some((DOCUMENT, left)), Some((DOCUMENT, right))) = (decode(left), decode(right)) {
+            let mut left = document::stored::StoredDocument::decode(left)?;
+            let right = document::stored::StoredDocument::decode(right)?;
+            // A join of LWW fields is associative, including deletion markers.
+            // Counter operands retain order (especially floating-point sums).
+            if left
+                .fields
+                .values()
+                .chain(right.fields.values())
+                .any(|field| field.kind != document::stored::ValueKind::Lww)
+            {
+                return None;
+            }
+            left.apply(right)?;
+            return document_parts(&left);
+        }
         let (INT64, left) = decode(left)? else {
             return None;
         };

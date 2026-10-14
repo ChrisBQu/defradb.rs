@@ -296,12 +296,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             (doc_id, block_result.cid, block_result.block, col_block_data)
         };
 
-        // #1044 record-then-finalize: write the doc blob + indexes WITHOUT seeding
-        // the counter store and WITHOUT taking any per-doc guard/batch gate. The
-        // counter-store seeding (and its per-doc guard) is deferred to the
-        // commit-time finalize so an interactive txn holds no gate over its
-        // user-controlled lifetime. See `InteractiveTxnCounter.tla`.
-        crate::write::autocommit::helpers::write_local_create_deferred(
+        crate::write::autocommit::helpers::write_local_create(
             &datastore,
             &collection,
             &doc,
@@ -309,38 +304,6 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             &index_manager,
         )
         .await?;
-
-        // Record a seed op for each counter field present so the finalize seeds
-        // the authoritative accumulation store (the created value is absolute).
-        {
-            let mut counter_ops = Vec::new();
-            for field in &collection.schema().fields {
-                if !field.crdt_type.is_counter() {
-                    continue;
-                }
-                let Some(value) = doc.get(&field.name) else {
-                    continue;
-                };
-                counter_ops.push(crate::txn::PendingCounterOp {
-                    collection_name: collection_name.to_string(),
-                    schema_version_id: collection.version_id().to_string(),
-                    doc_id: doc_id.to_string(),
-                    field: field.name.clone(),
-                    delta: value.clone(),
-                    base: None,
-                    is_create: true,
-                });
-            }
-            if !counter_ops.is_empty() {
-                let mut txn_guard = self.txn.lock().await;
-                let txn = txn_guard.as_mut().ok_or_else(|| {
-                    query::error::QueryError::execution("transaction is no longer active")
-                })?;
-                for op in counter_ops {
-                    txn.record_counter_op(op);
-                }
-            }
-        }
 
         self.register_update_callback(
             collection_name.to_string(),
@@ -416,74 +379,16 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
-        // #1044 record-then-finalize: write the doc blob + indexes with the
-        // query-plan's provisional counter value, but do NOT do the counter RMW
-        // here and take NO per-doc guard/batch gate. Each counter field carrying a
-        // delta is RECORDED on the txn; the RMW (under a per-doc guard) and the
-        // blob correction happen at the commit-time finalize. This keeps an
-        // interactive txn from holding the process-wide gate over its
-        // user-controlled lifetime. See `InteractiveTxnCounter.tla`.
-        let mut counter_ops = Vec::new();
-        // Read the PRE-WRITE committed doc ONCE (before the provisional blob write
-        // below) so each counter op records its pre-update committed value as the
-        // reconcile base — replicating the inline `apply_local_counter_deltas`
-        // semantics. Re-reading at finalize would observe the already-overwritten
-        // provisional blob and double-apply the delta for a PCounter (#1044).
-        let committed_pre_write = if collection
-            .schema()
-            .fields
-            .iter()
-            .any(|f| f.crdt_type.is_counter() && doc.get_counter_delta(&f.name).is_some())
-        {
-            collection
-                .get_with_datastore(&datastore, doc_short_id, &canonical_doc_id)
-                .await
-                .map_err(|e| query::error::QueryError::execution(e.to_string()))?
-        } else {
-            None
-        };
-        for field in &collection.schema().fields {
-            if !field.crdt_type.is_counter() {
-                continue;
-            }
-            let Some(delta) = doc.get_counter_delta(&field.name) else {
-                continue;
-            };
-            if let Some(id) = doc.id().map(|id| id.to_string()) {
-                let base = committed_pre_write
-                    .as_ref()
-                    .and_then(|d| d.get(&field.name))
-                    .cloned();
-                counter_ops.push(crate::txn::PendingCounterOp {
-                    collection_name: collection_name.to_string(),
-                    schema_version_id: collection.version_id().to_string(),
-                    doc_id: id,
-                    field: field.name.clone(),
-                    delta: delta.clone(),
-                    base,
-                    is_create: false,
-                });
-            }
-        }
-
-        crate::write::autocommit::helpers::write_local_update_deferred(
+        crate::write::autocommit::helpers::write_local_update(
             &datastore,
             &collection,
-            &doc,
+            &mut doc,
             doc_short_id,
             &index_manager,
+            &mut modified_fields,
+            None,
         )
         .await?;
-
-        if !counter_ops.is_empty() {
-            let mut txn_guard = self.txn.lock().await;
-            let txn = txn_guard.as_mut().ok_or_else(|| {
-                query::error::QueryError::execution("transaction is no longer active")
-            })?;
-            for op in counter_ops {
-                txn.record_counter_op(op);
-            }
-        }
 
         let (doc_cid, doc_block, col_block_data) = {
             let txn_guard = self.txn.lock().await;

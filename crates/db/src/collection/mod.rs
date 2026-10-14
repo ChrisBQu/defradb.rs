@@ -452,3 +452,5 @@ impl Collection {
         datastore.delete(&key).await.map_err(Error::Storage)
     }
 }
+
+pub(crate) mod parts;

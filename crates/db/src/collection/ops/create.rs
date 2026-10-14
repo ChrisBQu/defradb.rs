@@ -137,6 +137,8 @@ impl<S: Store> crate::database::DB<S> {
                 .map_err(Error::Storage)?;
         }
 
+        crate::collection::parts::prepare(self.store().as_ref(), &systemstore, &schema).await?;
+
         // 1. Store full schema at /collection/id/{version_id}
         let collection_key = CollectionKey::new(version_id.as_str());
         let data = serde_json::to_vec(&schema).map_err(|e| {

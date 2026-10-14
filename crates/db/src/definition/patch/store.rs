@@ -353,6 +353,9 @@ impl<S: Store> crate::database::DB<S> {
         {
             let systemstore = txn.systemstore()?;
 
+            crate::collection::parts::prepare(self.store().as_ref(), &systemstore, &new_schema)
+                .await?;
+
             // 1. Store old version at /collection/id/{old_version_id} with is_active = false
             systemstore
                 .set(&old_version_key.bytes(), &old_version_data)

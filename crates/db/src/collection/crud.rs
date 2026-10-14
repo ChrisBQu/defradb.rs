@@ -10,20 +10,37 @@ impl Collection {
         datastore: &NamespaceView,
         doc_short_id: u64,
     ) -> Result<Option<bytes::Bytes>> {
+        self.read_document_blob_and_version(datastore, doc_short_id)
+            .await
+            .map(|(data, _)| data)
+    }
+
+    async fn read_document_blob_and_version(
+        &self,
+        datastore: &NamespaceView,
+        doc_short_id: u64,
+    ) -> Result<(Option<bytes::Bytes>, Option<String>)> {
         let key = self.doc_key(doc_short_id);
-        let parts = self
-            .def
-            .fields
-            .iter()
-            .map(|field| field.id.parse::<u32>())
-            .collect::<std::result::Result<Vec<_>, _>>();
-        match parts {
-            Ok(parts) if !parts.is_empty() => datastore.get_parts(&key, &parts).await,
-            // Empty projections do not validate presence. Unassigned field IDs
-            // must conservatively record a whole-value dependency.
+        // A schema transition replaces the whole value. Until that happens,
+        // old-version blobs require a whole-value dependency: their local IDs
+        // belong to the old definition, not this collection's projection.
+        let version = self.load_version(datastore, doc_short_id).await?;
+        let ids = self.part_ids(datastore).await?;
+        let parts = ids.as_ref().and_then(|ids| {
+            self.def
+                .fields
+                .iter()
+                .map(|field| ids.get(&field.name).copied())
+                .collect::<Option<Vec<_>>>()
+        });
+        let data = match parts {
+            Some(parts) if !parts.is_empty() && version.as_deref() == Some(self.version_id()) => {
+                datastore.get_parts(&key, &parts).await
+            }
             _ => datastore.get(&key).await,
         }
-        .map_err(Error::Storage)
+        .map_err(Error::Storage)?;
+        Ok((data, version))
     }
 
     /// Get a document by its public DocID, resolving the short ID through
@@ -90,7 +107,9 @@ impl Collection {
         doc_id: &DocID,
         check_deleted: bool,
     ) -> Result<Option<(Document, bool)>> {
-        let data = self.read_document_blob(datastore, doc_short_id).await?;
+        let (data, version) = self
+            .read_document_blob_and_version(datastore, doc_short_id)
+            .await?;
 
         match data {
             Some(bytes) => {
@@ -99,7 +118,7 @@ impl Collection {
                 doc.set_id(doc_id.clone());
 
                 // Load and set the schema version
-                if let Some(version) = self.load_version(datastore, doc_short_id).await? {
+                if let Some(version) = version {
                     doc.set_schema_version_id(version);
                 }
 

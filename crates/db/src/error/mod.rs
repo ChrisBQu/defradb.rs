@@ -71,9 +71,6 @@ pub enum Error {
     #[error("explicit transaction must use force_commit/force_discard")]
     ExplicitTxnMustUseForce,
 
-    #[error("transaction has unfinalized counter ops; commit via the transaction registry")]
-    UnfinalizedCounterOps,
-
     #[error("serialization error: {0}")]
     Serialization(String),
 

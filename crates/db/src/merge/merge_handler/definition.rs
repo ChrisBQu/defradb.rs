@@ -222,6 +222,10 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             .await
             .map_err(MergeError::Database)?;
 
+            crate::collection::parts::prepare(self.db.store().as_ref(), &systemstore, &schema)
+                .await
+                .map_err(MergeError::Database)?;
+
             // 1. Store full schema at /collection/id/{version_id}
             let collection_key = CollectionKey::new(&version_id);
             let data = serde_json::to_vec(&schema).map_err(|e| {

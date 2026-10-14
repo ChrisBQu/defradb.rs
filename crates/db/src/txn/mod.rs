@@ -22,36 +22,6 @@ pub mod context;
 pub(crate) mod lenses;
 pub mod registry;
 
-/// A counter mutation RECORDED during an interactive/explicit transaction but
-/// not yet applied to the authoritative CRDT accumulation store. The
-/// read-modify-write (and the per-doc guard that protects it) is deferred to the
-/// commit-time finalize (#1044) so the interactive txn holds no guard/gate over
-/// its user-controlled lifetime. See `InteractiveTxnCounter.tla`.
-#[derive(Clone, Debug)]
-pub struct PendingCounterOp {
-    /// Collection name (used to reload the collection + index manager at finalize).
-    pub collection_name: String,
-    /// Schema version id of the collection at record time.
-    pub schema_version_id: String,
-    /// Document id the counter belongs to.
-    pub doc_id: String,
-    /// Counter field name.
-    pub field: String,
-    /// For updates: the recorded increment delta. For creates: the seeded value.
-    pub delta: document::NormalValue,
-    /// For UPDATE ops: the PRE-WRITE committed counter value, captured at record
-    /// time, used as the reconcile (init-if-absent) base at finalize. This must
-    /// be read BEFORE the provisional deferred blob write so the finalize does not
-    /// re-read the already-overwritten provisional blob as the "committed" value —
-    /// re-reading it would double-apply the delta for an increment-only PCounter
-    /// (whose reconcile migrates a present store UPWARD when blob > store). `None`
-    /// when the doc had no committed value for the field (seed 0). Unused for
-    /// creates.
-    pub base: Option<document::NormalValue>,
-    /// Whether this op was recorded on a CREATE (seed) vs an UPDATE (delta RMW).
-    pub is_create: bool,
-}
-
 #[derive(Clone)]
 struct PendingCollectionAcpRegistration {
     acp: Arc<dyn acp::DocumentACP>,
@@ -63,7 +33,6 @@ struct PendingCollectionAcpRegistration {
 struct StatementSavepoint {
     collection_cache: CollectionCache,
     locally_created_collection_ids: RapidHashSet<String>,
-    pending_counter_ops: Vec<PendingCounterOp>,
     pending_collection_acp_registrations: Vec<PendingCollectionAcpRegistration>,
     doc_guard_ids: Vec<String>,
     collection_guard_ids: Vec<String>,
@@ -137,21 +106,11 @@ pub struct DbTxn<S: Store> {
     /// Collection IDs created inside this transaction.
     locally_created_collection_ids: RapidHashSet<String>,
     /// Per-doc write guards held so a local counter read-modify-write and a P2P
-    /// merge on the same document never interleave (#1021). The merge handler
-    /// shares the same `DocWriteQueue`. For the interactive/explicit path
-    /// (#1044) these are acquired at the commit-time finalize (under the briefly
-    /// held batch gate, a finalize local) and inserted here, so they release
-    /// only when the `DbTxn` is consumed by
-    /// `commit`/`discard`/`force_commit`/`force_discard` — i.e. AFTER the durable
-    /// commit. See the finalize driver in `txn/registry/lifecycle.rs` and
-    /// `InteractiveTxnCounter.tla`.
+    /// merge on the same document never interleave. Explicit counter updates
+    /// use transaction-local merge operands and acquire no finalize guards.
     doc_guards: BTreeMap<String, MutexGuardArc<()>>,
     /// Collection locks held until this transaction commits or rolls back.
     collection_guards: BTreeMap<String, CollectionGuard>,
-    /// Counter deltas RECORDED by the interactive mutator during the txn but not
-    /// yet applied to the authoritative CRDT accumulation store. Drained and
-    /// RMW'd at the commit-time finalize under per-doc guards (#1044).
-    pending_counter_ops: Vec<PendingCounterOp>,
     /// Branchable collection ACP registrations that must succeed before the
     /// storage commit, otherwise a protected collection could be persisted
     /// without its collection-level ACP object.
@@ -173,7 +132,6 @@ impl<S: Store> DbTxn<S> {
             locally_created_collection_ids: RapidHashSet::new(),
             doc_guards: BTreeMap::new(),
             collection_guards: BTreeMap::new(),
-            pending_counter_ops: Vec::new(),
             pending_collection_acp_registrations: Vec::new(),
             vector_codes: Arc::default(),
             statement_savepoint: None,
@@ -199,7 +157,6 @@ impl<S: Store> DbTxn<S> {
             locally_created_collection_ids: RapidHashSet::new(),
             doc_guards: BTreeMap::new(),
             collection_guards: BTreeMap::new(),
-            pending_counter_ops: Vec::new(),
             pending_collection_acp_registrations: Vec::new(),
             vector_codes: Arc::default(),
             statement_savepoint: None,
@@ -225,7 +182,6 @@ impl<S: Store> DbTxn<S> {
         let snapshot = StatementSavepoint {
             collection_cache: self.collection_cache.clone(),
             locally_created_collection_ids: self.locally_created_collection_ids.clone(),
-            pending_counter_ops: self.pending_counter_ops.clone(),
             pending_collection_acp_registrations: self.pending_collection_acp_registrations.clone(),
             doc_guard_ids: self.doc_guards.keys().cloned().collect(),
             collection_guard_ids: self.collection_guards.keys().cloned().collect(),
@@ -252,7 +208,6 @@ impl<S: Store> DbTxn<S> {
             .expect("savepoint checked above");
         self.collection_cache = snapshot.collection_cache;
         self.locally_created_collection_ids = snapshot.locally_created_collection_ids;
-        self.pending_counter_ops = snapshot.pending_counter_ops;
         self.pending_collection_acp_registrations = snapshot.pending_collection_acp_registrations;
         self.doc_guards
             .retain(|key, _| snapshot.doc_guard_ids.contains(key));
@@ -731,26 +686,6 @@ impl<S: Store> DbTxn<S> {
         self.collection_guards.remove(collection_id);
     }
 
-    // =========================================================================
-    // Pending counter ops (#1044): recorded during the txn, RMW'd at finalize.
-    // =========================================================================
-
-    /// Record a counter op to be applied to the authoritative store at the
-    /// commit-time finalize (under a per-doc guard).
-    pub fn record_counter_op(&mut self, op: PendingCounterOp) {
-        self.pending_counter_ops.push(op);
-    }
-
-    /// Drain the recorded counter ops (consumed by the finalize driver).
-    pub fn take_counter_ops(&mut self) -> Vec<PendingCounterOp> {
-        std::mem::take(&mut self.pending_counter_ops)
-    }
-
-    /// Whether any counter ops were recorded on this txn.
-    pub fn has_pending_counter_ops(&self) -> bool {
-        !self.pending_counter_ops.is_empty()
-    }
-
     /// Stage branchable collection ACP registration to run before commit.
     pub(crate) fn stage_collection_acp_registration(
         &mut self,
@@ -792,9 +727,6 @@ impl<S: Store> DbTxn<S> {
     pub async fn commit(mut self) -> Result<()> {
         if self.explicit {
             return Err(Error::ExplicitTxnMustUseForce);
-        }
-        if !self.pending_counter_ops.is_empty() {
-            return Err(Error::UnfinalizedCounterOps);
         }
 
         if let Err(error) = self.run_pending_collection_acp_registrations().await {
@@ -843,9 +775,6 @@ impl<S: Store> DbTxn<S> {
     ///
     /// This should only be called by the transaction creator.
     pub async fn force_commit(mut self) -> Result<()> {
-        if !self.pending_counter_ops.is_empty() {
-            return Err(Error::UnfinalizedCounterOps);
-        }
         if let Err(error) = self.run_pending_collection_acp_registrations().await {
             if let Err(discard_error) = self.discard_active_txn() {
                 tracing::warn!(
