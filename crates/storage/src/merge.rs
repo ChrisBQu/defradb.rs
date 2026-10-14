@@ -8,6 +8,9 @@ const FLOAT32: u8 = 2;
 const FLOAT64: u8 = 3;
 const STATS: u8 = 4;
 const DOCUMENT: u8 = 5;
+const VECTOR_LINKS: u8 = 6;
+const VECTOR_COUNTS: u8 = 7;
+pub mod vector;
 
 fn encode(kind: u8, value: &[u8]) -> Vec<u8> {
     let mut result = Vec::with_capacity(4 + value.len());
@@ -55,6 +58,9 @@ impl MergeOperator for DefraMergeOperator {
             return base.map(<[u8]>::to_vec);
         };
         let (kind, _) = decode(first)?;
+        if matches!(kind, VECTOR_LINKS | VECTOR_COUNTS) {
+            return vector::full(kind, base, operands);
+        }
         if kind == DOCUMENT {
             let mut document = match base {
                 Some(bytes) => document::stored::StoredDocument::decode(bytes)?,
@@ -115,6 +121,9 @@ impl MergeOperator for DefraMergeOperator {
     }
 
     fn touches(&self, _key: &[u8], operand: &[u8], parts: &[u32]) -> bool {
+        if let Some((kind @ (VECTOR_LINKS | VECTOR_COUNTS), bytes)) = decode(operand) {
+            return vector::touches(kind, bytes, parts);
+        }
         let Some((DOCUMENT, bytes)) = decode(operand) else {
             return true;
         };
@@ -125,6 +134,9 @@ impl MergeOperator for DefraMergeOperator {
     }
 
     fn partial_merge(&self, _key: &[u8], left: &[u8], right: &[u8]) -> Option<Vec<u8>> {
+        if matches!(decode(left), Some((VECTOR_LINKS, _))) {
+            return vector::fold(left, right);
+        }
         if let (Some((DOCUMENT, left)), Some((DOCUMENT, right))) = (decode(left), decode(right)) {
             let mut left = document::stored::StoredDocument::decode(left)?;
             let right = document::stored::StoredDocument::decode(right)?;

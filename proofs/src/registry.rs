@@ -48,6 +48,14 @@ use Tier::{Behavioral, Boundary, Contract};
 
 pub const PROPERTIES: &[Property] = &[
     Property {
+        family: "Vector index link maintenance",
+        name: "INV_NoLostLinks — blind additions preserve links and stale structural pruning aborts",
+        axis: Tla,
+        anchor: "crates/storage/src/merge/vector.rs; crates/db/src/index/vector/engine/hnsw/insert.rs; crates/db/tests/vector/concurrent_hnsw.rs",
+        model_ref: "MC_VectorLinks_Green.cfg / MC_VectorLinks_Red_Puts.cfg / MC_VectorLinks_Red_Prune.cfg",
+        tiers: &[Contract],
+    },
+    Property {
         // Two writers appending to one collection without seeing each other must
         // both land, leaving two tips for a later merge: that is what makes the
         // head set a CRDT rather than a last-writer-wins cell. The eager-delete

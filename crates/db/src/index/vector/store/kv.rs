@@ -1,8 +1,8 @@
 //! [`VectorNodeStore`] over a transaction.
 //!
 //! Borrows the transaction rather than owning it, so every write lands in the
-//! caller's transaction. That is also what gives the engine its single-writer
-//! discipline without a lock.
+//! caller's transaction. Traversal is advisory, additions are operands, and
+//! structural replacements retain validated reads.
 
 use bytes::Bytes;
 use defra_core::thread_bounds::MaybeSend;
@@ -80,6 +80,34 @@ impl<T: Reader + Writer + MaybeSend> VectorNodeStore for KvNodeStore<'_, T> {
         }
     }
 
+    async fn get_node_advisory(&self, id: NodeId) -> Result<Option<Node>> {
+        self.txn
+            .get_parts(&self.node_key(id), &[])
+            .await?
+            .map(|bytes| decode_node(&bytes))
+            .transpose()
+    }
+
+    async fn get_node_for_links(&self, id: NodeId) -> Result<Option<Node>> {
+        self.txn
+            .get_parts(&self.node_key(id), &[0])
+            .await?
+            .map(|bytes| decode_node(&bytes))
+            .transpose()
+    }
+
+    async fn add_link(&mut self, id: NodeId, layer: usize, neighbor: NodeId) -> Result<()> {
+        let layer = u32::try_from(layer)
+            .map_err(|_| crate::index::error::Error::Other("link layer overflow".into()))?;
+        self.txn
+            .merge(
+                &self.node_key(id),
+                &storage::merge::vector::links(layer, neighbor.0),
+            )
+            .await?;
+        Ok(())
+    }
+
     async fn put_node(&mut self, node: Node) -> Result<()> {
         let key = self.node_key(node.id);
         self.txn.set(&key, &encode_node(&node)).await?;
@@ -91,6 +119,24 @@ impl<T: Reader + Writer + MaybeSend> VectorNodeStore for KvNodeStore<'_, T> {
             Some(bytes) => Ok(Some(decode_meta(&bytes)?)),
             None => Ok(None),
         }
+    }
+
+    async fn get_meta_advisory(&self) -> Result<Option<Meta>> {
+        match self.txn.get_parts(&self.meta_key(), &[]).await? {
+            Some(bytes) => Ok(Some(decode_meta(&bytes)?)),
+            // Creating the first entry point is an ordinary one-winner decision.
+            None => self.get_meta().await,
+        }
+    }
+
+    async fn add_counts(&mut self, live: i64, waste: u64) -> Result<()> {
+        self.txn
+            .merge(
+                &self.meta_key(),
+                &storage::merge::vector::counts(live, waste),
+            )
+            .await?;
+        Ok(())
     }
 
     async fn put_meta(&mut self, meta: Meta) -> Result<()> {

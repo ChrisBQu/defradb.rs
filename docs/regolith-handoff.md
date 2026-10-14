@@ -1,6 +1,6 @@
 # Regolith adoption handoff
 
-This is the review entry point for Theo (vertexclique). It follows §5.2 of the supplied `regolith_defralevel_docs` bundle. **The stack is incomplete and remains draft.** This file is updated as implementation and verification progress; an implemented item is not a claim that its PR is ready to merge.
+This is the review entry point for Theo (vertexclique). [PR #1953](https://github.com/sourcenetwork/defradb.rs/pull/1953) is the permanent handoff link: its description will point to the latest stack tip even when later steps add PRs above it. It follows §5.2 of the supplied `regolith_defralevel_docs` bundle. **The stack is incomplete and remains draft.** This file is updated as implementation and verification progress; an implemented item is not a claim that its PR is ready to merge.
 
 Target: new installations. Jack explicitly waived compatibility with existing encrypted/value layouts and migrations. Regolith is pinned to `d1e36aa747913f6b1ecc14c821f4e5e6314674cf`. Worker-pool/runtime redesign (§5.2 step 9) is outside these eight adoption steps. No PR has been merged.
 
@@ -25,7 +25,7 @@ The intended total is 11 PRs: these six plus one each for steps 4–8. Split int
 |---|---|
 | 1 | Implemented in three separate PRs. Engine key providers replace per-value encryption, including read-only opens. Only genuine block CID keys are ContentAddressed. Writers use DefraLevel; the old head cache is gated off for them, pending deletion in step 6. |
 | 2 | Implemented broadly: transactional document/version/definition/deletion reads, local ACP authorization and owner registration, validated relationship scans, embedded NAC persistence, downsample series uniqueness. Audit remaining writer copies during retry conversion. Remote Vera stays at the network boundary. |
-| 3 | Implemented: commit-ordered arrival append, engine ID allocation, numeric and full-text merges, local document part IDs and field operands, version-key handling, removal of interactive counter finalization, write-free readonly lenses and conservative lens-aware index planning, document head markers and CommutativePrefix classification. **Still open:** HNSW operators; remote document composites still materialize with validated whole puts; document reads still validate all fields; counter reads retain validation for index/materialization correctness. Writable lens retries belong to step 5. |
+| 3 | Implemented: commit-ordered arrival append, engine ID allocation, numeric and full-text merges, local document part IDs and field operands, version-key handling, removal of interactive counter finalization, write-free readonly lenses and conservative lens-aware index planning, document head markers and CommutativePrefix classification. HNSW link/count operators are implemented with passing concurrency/operator/recall tests. **Still open:** remote document composites still materialize with validated whole puts; document reads still validate all fields; counter reads retain validation for index/materialization correctness. Writable lens retries belong to step 5. |
 | 4 | Not started: propagate CommitReceipt.seq and order events by it. Receipts are currently discarded at the storage adapter. |
 | 5 | Not started: synchronous datapath traits, engine transact retries, business handling by conflict reason, prepared embeddings/IDs/KMS/signatures outside retries. |
 | 6 | Not started: remove listed locks individually, with before/after performance gates. Counter finalization is already gone; batch/document guards remain. The head prune no longer calls has_for_update, but the trait/wrappers still expose it. |
@@ -39,22 +39,23 @@ The intended total is 11 PRs: these six plus one each for steps 4–8. Split int
 
 ## Validation and review limits
 
-Local checks passed at the document/head checkpoint:
+Local checks passed at the document/head checkpoint and subsequent HNSW integration:
 
 - Database block, merge, write and read integration suites; the read suite has one pre-existing ignored test. Earlier collection/definition/query suites passed during document and readonly-lens integration.
 - New document-head tests: overlapping writers both commit; prune preserves live heads and old snapshots; a marker received before its parent survives; replay before/after prune cannot resurrect a parent.
 - Remote tombstone and independent field/composite priority tests. The stale counter mirror regression was also run with its repair disabled and failed with 13 instead of 18, then passed with the repair restored.
 - Native workspace all-targets Clippy and `defra-wasm` Clippy, warnings denied.
 - HeadSet TLC GREEN passed (12 distinct states); the eager-delete RED failed `INV_NoWriteConflict`, as expected. Lean was not rerun at this checkpoint.
+- HNSW: 227 vector tests passed, 12 measurements remain ignored; concurrent inserts preserve both shared back-links and metadata counts, stale structural pruning conflicts; encrypted reopen and put terminators pass. VectorLinks TLC GREEN passes; stale-put and unvalidated-prune REDs fail as expected. Native/WASM Clippy pass.
 - Earlier storage operator contract/property tests cover malformed operands, integer exact folding, ordered float/stat operands, document touches/folding, encrypted reopen, and concurrent full-text updates.
 
 **CI is not all green.** At the 2026-10-14 checkpoint, lower PRs have failing surface-test jobs; #1949 also has a failing build job and #1952 has signed-docs/Go-compat failures. Investigation is pending. Many macOS jobs and latest-tip checks are queued/running. Consult each PR's current checks rather than treating this snapshot as current CI status.
 
-External-node integration has not been run locally. No step-6 performance gates or recall measurements have run. No zero-incidental-conflict or throughput improvement claim is made. Do not remove guards merely because the functional suites pass.
+External-node integration has not been run locally. No step-6 performance gates have run. HNSW clustered-corpus recall@10 (N=2000, ef=64) is 0.9967 at d=16 and 0.9767 at d=128; these are corpus-specific gates, not a real-embedding workload claim. No zero-incidental-conflict or throughput improvement claim is made. Do not remove guards merely because the functional suites pass.
 
 ## Review focus / next work
 
-1. Finish step 3's HNSW link/counter operators and structural validation, including recall and concurrent insert tests.
+1. Finish step 3's remote document operand adoption and remaining decision-read audit. HNSW operators are now implemented; retain validated pruning and structural replacements.
 2. Finish the remote document operand path and narrow reads only where decision/index dependencies are known. In particular, do not make counter reads advisory while the document/index mirror still depends on them.
 3. Investigate lower-stack CI failures and apply fixes at the earliest affected PR, carrying them upward without dropping newer work.
 4. Implement steps 4–8 in order, updating this handoff and the top PR link after each checkpoint.
