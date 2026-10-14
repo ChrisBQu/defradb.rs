@@ -74,13 +74,13 @@ async fn assert_hint_prevents_resend(path: PushPath) {
             }
             PushPath::Document => {
                 pusher
-                    .retry_doc(&peer, &created.doc_id.to_string(), "collection-users")
+                    .retry_doc(&peer, &created.doc_id.to_string(), "collection-users", 0)
                     .await
                     .unwrap_err();
             }
             PushPath::Collection => {
                 pusher
-                    .retry_collection_commit(&peer, "collection-users")
+                    .retry_collection_commit(&peer, "collection-users", 0)
                     .await
                     .unwrap_err();
             }

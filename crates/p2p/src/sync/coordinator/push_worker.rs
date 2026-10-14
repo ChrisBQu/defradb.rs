@@ -49,14 +49,16 @@ pub(super) async fn report_push_failure(
         false,
         None,
         false,
+        None,
     )
     .await
+    .is_some()
 }
 
 pub(super) async fn report_observed_head(
     failure_tx: &Arc<AtomOption<tokio::sync::mpsc::Sender<PushFailure>>>,
     job: &PushJobSpec,
-) -> bool {
+) -> Option<u64> {
     report_push_event(
         failure_tx,
         &job.peer_id,
@@ -68,6 +70,7 @@ pub(super) async fn report_observed_head(
         false,
         None,
         false,
+        None,
     )
     .await
 }
@@ -87,8 +90,10 @@ pub(super) async fn report_push_ack(
         true,
         None,
         false,
+        job.marker_generation,
     )
     .await
+    .is_some()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -103,7 +108,8 @@ async fn report_push_event(
     acknowledged: bool,
     retry_after: Option<Duration>,
     admission_only: bool,
-) -> bool {
+    marker_generation: Option<u64>,
+) -> Option<u64> {
     // Collection commits are doc-less. Their durable obligation is a collection
     // marker whose retry rederives the current collection heads. The CID below
     // identifies only this live attempt and is never persisted as delivery state.
@@ -118,16 +124,11 @@ async fn report_push_event(
                 "Versionless collection-scoped push failed with no CID; nothing to replay"
             );
         }
-        return false;
+        return None;
     }
     let tx = failure_tx.load().as_deref().cloned();
     if let Some(tx) = tx {
-        let (durable_tx, durable_rx) = if create_retry || acknowledged {
-            (None, None)
-        } else {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            (Some(tx), Some(rx))
-        };
+        let (durable_tx, durable_rx) = tokio::sync::oneshot::channel();
         let failure = PushFailure {
             peer_id: peer_id.to_string(),
             doc_id,
@@ -136,9 +137,10 @@ async fn report_push_event(
             head_priority,
             create_retry,
             acknowledged,
+            marker_generation,
             retry_after,
             admission_only,
-            durable_tx,
+            durable_tx: Some(durable_tx),
         };
         // reserve() is cancel-safe, so waiting in a loop lets sustained
         // recorder backpressure surface in the logs instead of silently
@@ -147,10 +149,7 @@ async fn report_push_event(
             match n0_future::time::timeout(Duration::from_secs(5), tx.reserve()).await {
                 Ok(Ok(permit)) => {
                     permit.send(failure);
-                    return match durable_rx {
-                        Some(rx) => rx.await.unwrap_or(false),
-                        None => true,
-                    };
+                    return durable_rx.await.ok().flatten();
                 }
                 Ok(Err(_closed)) => {
                     tracing::warn!(
@@ -158,7 +157,7 @@ async fn report_push_event(
                         doc_id = %failure.doc_id,
                         "Push failure recorder is gone; dropping retry record"
                     );
-                    return false;
+                    return None;
                 }
                 Err(_elapsed) => {
                     tracing::warn!(
@@ -170,7 +169,7 @@ async fn report_push_event(
             }
         }
     }
-    false
+    None
 }
 
 pub(super) fn spawn_push_workers<T>(
@@ -212,8 +211,10 @@ where
             false,
             None,
             true,
+            job.marker_generation,
         )
         .await
+        .is_none()
     {
         return JobCompletion::Failed;
     }
@@ -274,6 +275,7 @@ where
                 false,
                 send_outcome.retry_after,
                 false,
+                queued_job.marker_generation,
             )
             .await;
         }
@@ -293,6 +295,7 @@ where
             false,
             send_outcome.retry_after,
             false,
+            job.marker_generation,
         )
         .await;
         JobCompletion::Failed

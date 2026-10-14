@@ -518,6 +518,7 @@ async fn report_push_failure_backpressures_instead_of_dropping() {
         head_priority: 0,
         create_retry: true,
         acknowledged: false,
+        marker_generation: None,
         durable_tx: None,
         retry_after: None,
         admission_only: false,

@@ -88,16 +88,17 @@ pub enum RetryScope {
     CollectionCommit,
 }
 
-/// Presence-only retry scope returned to the sender retry sweep.
-///
-/// Durable marker values remain empty. The peer-scoped `RetryInfo` schedule is
-/// joined onto each marker only while dispatching a sweep.
+/// Retry scope returned to the sender retry sweep, with its durable marker
+/// generation used to reject stale acknowledgements.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PushRetryMarker {
     pub doc_id: String,
     pub collection_id: String,
     pub scope: RetryScope,
     pub retry_info: RetryInfo,
+    /// Changes on every registration, even when the scope was already dirty.
+    #[serde(default)]
+    pub generation: u64,
 }
 
 impl PushRetryMarker {

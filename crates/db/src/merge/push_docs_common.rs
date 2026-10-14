@@ -202,15 +202,9 @@ pub async fn complete_document_retry_if_current<S: storage::corekv::Store>(
     collection_id: &str,
     doc_short_id: u64,
     attempted_heads: &[Cid],
+    marker_generation: u64,
 ) -> Result<(), String> {
     let peerstore = storage::stores::Peerstore::new(db.store().clone());
-    let Some(_guard) = peerstore
-        .acquire_replicator_retry_guard(peer_id)
-        .await
-        .map_err(|error| format!("retry completion guard: {error}"))?
-    else {
-        return Ok(());
-    };
     let txn = db
         .new_txn(true)
         .await
@@ -223,9 +217,11 @@ pub async fn complete_document_retry_if_current<S: storage::corekv::Store>(
         return Err("document heads changed during retry; retaining dirty marker".to_string());
     }
     peerstore
-        .complete_retry_scope(peer_id, doc_id, collection_id, false)
+        .complete_retry_scope(peer_id, doc_id, collection_id, false, marker_generation)
         .await
-        .map_err(|error| format!("failed to clear current document retry marker: {error}"))
+        .map_err(|error| format!("failed to clear current document retry marker: {error}"))?
+        .then_some(())
+        .ok_or_else(|| "document retry marker changed during replay; retaining dirty marker".into())
 }
 
 pub(crate) async fn complete_document_retry_if_absent<S: storage::corekv::Store>(
@@ -233,15 +229,9 @@ pub(crate) async fn complete_document_retry_if_absent<S: storage::corekv::Store>
     peer_id: &str,
     doc_id: &str,
     collection_id: &str,
+    marker_generation: u64,
 ) -> Result<(), String> {
     let peerstore = storage::stores::Peerstore::new(db.store().clone());
-    let Some(_guard) = peerstore
-        .acquire_replicator_retry_guard(peer_id)
-        .await
-        .map_err(|error| format!("retry completion guard: {error}"))?
-    else {
-        return Ok(());
-    };
     let txn = db
         .new_txn(true)
         .await
@@ -255,9 +245,11 @@ pub(crate) async fn complete_document_retry_if_absent<S: storage::corekv::Store>
         return Err("document appeared during retry; retaining dirty marker".to_string());
     }
     peerstore
-        .complete_retry_scope(peer_id, doc_id, collection_id, false)
+        .complete_retry_scope(peer_id, doc_id, collection_id, false, marker_generation)
         .await
-        .map_err(|error| format!("failed to clear absent document retry marker: {error}"))
+        .map_err(|error| format!("failed to clear absent document retry marker: {error}"))?
+        .then_some(())
+        .ok_or_else(|| "document retry marker changed during replay; retaining dirty marker".into())
 }
 
 pub(crate) async fn complete_collection_retry_if_current<S: storage::corekv::Store>(
@@ -265,15 +257,9 @@ pub(crate) async fn complete_collection_retry_if_current<S: storage::corekv::Sto
     peer_id: &str,
     collection_id: &str,
     attempted_heads: &[Cid],
+    marker_generation: u64,
 ) -> Result<(), String> {
     let peerstore = storage::stores::Peerstore::new(db.store().clone());
-    let Some(_guard) = peerstore
-        .acquire_replicator_retry_guard(peer_id)
-        .await
-        .map_err(|error| format!("retry completion guard: {error}"))?
-    else {
-        return Ok(());
-    };
     let txn = db
         .new_txn(true)
         .await
@@ -290,9 +276,13 @@ pub(crate) async fn complete_collection_retry_if_current<S: storage::corekv::Sto
         return Err("collection heads changed during retry; retaining dirty marker".to_string());
     }
     peerstore
-        .complete_retry_scope(peer_id, "", collection_id, true)
+        .complete_retry_scope(peer_id, "", collection_id, true, marker_generation)
         .await
-        .map_err(|error| format!("failed to clear current collection retry marker: {error}"))
+        .map_err(|error| format!("failed to clear current collection retry marker: {error}"))?
+        .then_some(())
+        .ok_or_else(|| {
+            "collection retry marker changed during replay; retaining dirty marker".into()
+        })
 }
 
 fn extract_block_links(block_data: &[u8]) -> Vec<Cid> {

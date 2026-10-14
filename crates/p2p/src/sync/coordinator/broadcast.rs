@@ -214,12 +214,11 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         // Register every peer/scope obligation before queueing. The bounded
         // backlog owns newest-head coalescing; a second debounce owner here
         // would hold every local commit open even with no replication peers.
-        // The marker is presence-only, so observing a newer head remains
-        // idempotent while making a storage failure visible to the committed
-        // write path instead of silently dropping delivery.
-        let jobs = self.push_jobs(&push).await?;
-        for job in &jobs {
-            if !report_observed_head(&self.runtime.failure_tx, job).await {
+        // Register the observed head before enqueueing so its generation can
+        // fence any later ACK against a newer update to the same scope.
+        let mut jobs = self.push_jobs(&push).await?;
+        for job in &mut jobs {
+            let Some(generation) = report_observed_head(&self.runtime.failure_tx, job).await else {
                 self.runtime.push_backlog.record_head_hint_failure(
                     crate::sync::push_backlog::HeadHintFailureReason::Local,
                 );
@@ -233,7 +232,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     "failed to register peer {} scope {}/{}",
                     job.peer_id, job.collection_id, job.doc_id
                 )));
-            }
+            };
+            job.marker_generation = Some(generation);
         }
 
         for job in jobs {

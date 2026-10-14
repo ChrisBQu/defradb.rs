@@ -57,73 +57,6 @@ use crate::backends::RegolithStore;
 use crate::corekv::Key;
 use crate::keys::peerstore::ReplicatorKey;
 
-#[test]
-fn retry_peer_lock_is_recreated_after_the_last_caller() {
-    let lock = retry_peer_lock("expired-retry-lock");
-    let original = Arc::downgrade(&lock);
-    drop(lock);
-    assert!(original.upgrade().is_none());
-    let next = retry_peer_lock("expired-retry-lock");
-    assert!(!Weak::ptr_eq(&original, &Arc::downgrade(&next)));
-    assert!(Arc::ptr_eq(&next, &retry_peer_lock("expired-retry-lock")));
-}
-
-#[test]
-fn concurrent_retry_callers_share_a_fresh_entry() {
-    const CALLERS: usize = 16;
-    let barrier = std::sync::Barrier::new(CALLERS);
-    std::thread::scope(|scope| {
-        let callers: Vec<_> = (0..CALLERS)
-            .map(|_| {
-                scope.spawn(|| {
-                    barrier.wait();
-                    retry_peer_lock("concurrent-retry-lock")
-                })
-            })
-            .collect();
-        let locks: Vec<_> = callers
-            .into_iter()
-            .map(|caller| caller.join().unwrap())
-            .collect();
-        assert!(locks.iter().all(|lock| Arc::ptr_eq(lock, &locks[0])));
-    });
-    assert!(!Arc::ptr_eq(
-        &retry_peer_lock("concurrent-retry-lock"),
-        &retry_peer_lock("other-retry-lock")
-    ));
-}
-
-#[test]
-fn expired_entry_cleanup_preserves_a_live_successor() {
-    let locks = RetryPeerLocks::with_hasher(RandomState::default());
-    let expired = Arc::new(RetryPeerLock::new(()));
-    locks.insert("peer".to_string(), Arc::downgrade(&expired));
-    drop(expired);
-    let (observed, wait_observed) = std::sync::mpsc::channel();
-    let (resume, wait_resume) = std::sync::mpsc::channel();
-    let timeout = std::time::Duration::from_secs(5);
-
-    std::thread::scope(|scope| {
-        let locks = &locks;
-        let delayed = scope.spawn(move || {
-            let candidate = Arc::new(RetryPeerLock::new(()));
-            let stale = locks.get_or_insert("peer".to_string(), Arc::downgrade(&candidate));
-            assert!(stale.upgrade().is_none());
-            observed.send(()).unwrap();
-            wait_resume.recv_timeout(timeout).unwrap();
-
-            remove_expired_retry_peer_lock(locks, "peer");
-            retry_peer_lock_from(locks, "peer")
-        });
-        wait_observed.recv_timeout(timeout).unwrap();
-        let live = retry_peer_lock_from(locks, "peer");
-        resume.send(()).unwrap();
-        let resumed = delayed.join().unwrap();
-        assert!(Arc::ptr_eq(&live, &resumed));
-        assert!(Arc::ptr_eq(&live, &retry_peer_lock_from(locks, "peer")));
-    });
-}
-
 #[tokio::test]
 async fn push_transaction_conflicts_retry_to_success() {
     let attempts = AtomicUsize::new(0);
@@ -322,6 +255,10 @@ impl crate::corekv::RetryAttemptFn for ScopedRetryIoAttempt {
 async fn transient_marker_io_failure_recovers_durable_scopes() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store.clone());
+    peerstore
+        .create_replicator("peer", b"replicator")
+        .await
+        .unwrap();
     let retry_info = super::super::RetryInfo::new_initial().to_bytes().unwrap();
 
     for (doc_id, collection_id, error) in [
@@ -455,7 +392,7 @@ async fn test_delete_replicator() {
 }
 
 #[tokio::test]
-async fn forget_waits_for_selected_retry_and_blocks_future_retries() {
+async fn forget_and_readd_preserves_marker_generation_fencing() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store.clone());
     let peer_id = "coordinated-peer";
@@ -464,38 +401,32 @@ async fn forget_waits_for_selected_retry_and_blocks_future_retries() {
         .await
         .unwrap();
 
-    let retry_guard = peerstore
-        .acquire_replicator_retry_guard(peer_id)
+    let old_generation = peerstore
+        .observe_push_head_with_generation(peer_id, "doc", "collection")
         .await
         .unwrap()
-        .expect("replicator should be eligible for retry");
-    let delete_store = Peerstore::new(store);
-    let mut delete_task =
-        tokio::spawn(async move { delete_store.delete_replicator(peer_id).await });
-
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(25), &mut delete_task)
-            .await
-            .is_err(),
-        "forget completed while a retry still held permission to replay"
-    );
-
-    drop(retry_guard);
-    tokio::time::timeout(std::time::Duration::from_secs(1), delete_task)
+        .unwrap();
+    peerstore.delete_replicator(peer_id).await.unwrap();
+    peerstore
+        .create_replicator(peer_id, b"new replicator incarnation")
         .await
-        .expect("forget remained blocked after retry completed")
-        .expect("forget task panicked")
-        .expect("forget failed");
-
-    assert!(peerstore
-        .acquire_replicator_retry_guard(peer_id)
+        .unwrap();
+    let new_generation = peerstore
+        .observe_push_head_with_generation(peer_id, "doc", "collection")
         .await
         .unwrap()
-        .is_none());
+        .unwrap();
+    assert!(new_generation > old_generation);
+    assert!(!peerstore
+        .complete_retry_scope(peer_id, "doc", "collection", false, old_generation)
+        .await
+        .unwrap());
+    let markers = peerstore.get_retry_documents(peer_id).await.unwrap();
+    assert_eq!(markers[0].generation, new_generation);
 }
 
 #[tokio::test]
-async fn same_peer_retry_transitions_have_one_storage_owner() {
+async fn concurrent_scope_registrations_get_distinct_generations() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store.clone());
     peerstore
@@ -503,73 +434,48 @@ async fn same_peer_retry_transitions_have_one_storage_owner() {
         .await
         .unwrap();
 
-    let first = peerstore
-        .acquire_replicator_retry_guard("peer")
+    let (first, second) = tokio::join!(
+        peerstore.observe_push_head_with_generation("peer", "doc", "collection"),
+        peerstore.observe_push_head_with_generation("peer", "doc", "collection"),
+    );
+    let first = first.unwrap().unwrap();
+    let second = second.unwrap().unwrap();
+    assert_ne!(first, second);
+    let current = peerstore.get_retry_documents("peer").await.unwrap()[0].generation;
+    assert!(current == first || current == second);
+    let stale = if current == first { second } else { first };
+    assert!(!peerstore
+        .complete_retry_scope("peer", "doc", "collection", false, stale)
         .await
-        .unwrap()
-        .unwrap();
-    let second_store = Peerstore::new(store);
-    let mut second = tokio::spawn(async move {
-        second_store
-            .acquire_replicator_retry_guard("peer")
-            .await
-            .unwrap()
-    });
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(25), &mut second)
-            .await
-            .is_err(),
-        "two same-peer marker writers acquired ownership concurrently"
-    );
-
-    drop(first);
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_secs(1), second)
-            .await
-            .unwrap()
-            .unwrap()
-            .is_some()
-    );
+        .unwrap());
 }
 
 #[tokio::test]
-async fn reconnect_activation_uses_the_same_peer_retry_writer() {
+async fn stale_ack_cannot_erase_a_concurrent_dirty_registration() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store.clone());
-    let peer_id = "peer";
     peerstore
-        .create_replicator(peer_id, b"replicator")
+        .create_replicator("peer", b"replicator")
         .await
         .unwrap();
-    peerstore
-        .observe_push_head(peer_id, "doc", "collection")
-        .await
-        .unwrap();
-
-    let writer = peerstore
-        .acquire_replicator_retry_guard(peer_id)
+    let old_generation = peerstore
+        .observe_push_head_with_generation("peer", "doc", "collection")
         .await
         .unwrap()
         .unwrap();
-    let activation_store = Peerstore::new(store);
-    let mut activation =
-        tokio::spawn(async move { activation_store.activate_retry_peer(peer_id).await });
 
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(25), &mut activation)
-            .await
-            .is_err(),
-        "reconnect activation bypassed the peer retry writer"
+    let ack_store = Peerstore::new(store.clone());
+    let update_store = Peerstore::new(store);
+    let (ack, update) = tokio::join!(
+        ack_store.complete_retry_scope("peer", "doc", "collection", false, old_generation),
+        update_store.observe_push_head_with_generation("peer", "doc", "collection"),
     );
-
-    drop(writer);
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_secs(1), activation)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap()
-    );
+    let _ = ack.unwrap();
+    let update_generation = update.unwrap().unwrap();
+    let markers = peerstore.get_retry_documents("peer").await.unwrap();
+    assert_eq!(markers.len(), 1);
+    assert_eq!(markers[0].generation, update_generation);
+    assert_ne!(update_generation, old_generation);
 }
 
 #[tokio::test]
@@ -577,6 +483,11 @@ async fn delete_replicator_clears_orphaned_retry_state() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store);
     let retry_info = super::super::RetryInfo::new_initial().to_bytes().unwrap();
+
+    peerstore
+        .create_replicator("orphan", b"replicator")
+        .await
+        .unwrap();
 
     peerstore
         .record_push_failure("orphan", "doc", "collection", &retry_info)
@@ -600,14 +511,15 @@ async fn retry_sweep_peers_require_persisted_replicators() {
 
     for peer_id in ["active", "orphan"] {
         peerstore
+            .create_replicator(peer_id, b"replicator")
+            .await
+            .unwrap();
+        peerstore
             .record_push_failure(peer_id, "doc", "collection", &retry_info)
             .await
             .unwrap();
     }
-    peerstore
-        .create_replicator("active", b"replicator")
-        .await
-        .unwrap();
+    peerstore.delete_replicator("orphan").await.unwrap();
 
     let peers = peerstore.get_replicator_retry_peers().await.unwrap();
     assert_eq!(peers.len(), 1);
@@ -682,9 +594,13 @@ async fn test_update_replicator() {
 }
 
 #[tokio::test]
-async fn scope_markers_are_presence_only_and_share_the_peer_clock() {
+async fn scope_markers_are_generation_fenced_and_share_the_peer_clock() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store);
+    peerstore
+        .create_replicator("peer", b"replicator")
+        .await
+        .unwrap();
     let initial = super::super::RetryInfo::new_initial().to_bytes().unwrap();
 
     peerstore
@@ -701,18 +617,19 @@ async fn scope_markers_are_presence_only_and_share_the_peer_clock() {
         .unwrap();
 
     let txn = peerstore.store.new_txn(true).await.unwrap();
-    assert_eq!(
-        txn.get(&ReplicatorRetryDocIDKey::new("peer", "doc").bytes())
-            .await
-            .unwrap(),
-        Some(Bytes::new())
-    );
-    assert_eq!(
-        txn.get(&ReplicatorRetryCollectionKey::new("peer", "collection").bytes())
-            .await
-            .unwrap(),
-        Some(Bytes::new())
-    );
+    let document_marker = txn
+        .get(&ReplicatorRetryDocIDKey::new("peer", "doc").bytes())
+        .await
+        .unwrap()
+        .unwrap();
+    let collection_marker = txn
+        .get(&ReplicatorRetryCollectionKey::new("peer", "collection").bytes())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(decode_retry_marker_generation(&document_marker).is_some());
+    assert!(decode_retry_marker_generation(&collection_marker).is_some());
+    assert_ne!(document_marker, collection_marker);
     drop(txn);
 
     let retries = peerstore.get_retry_documents("peer").await.unwrap();
@@ -727,6 +644,10 @@ async fn scope_markers_are_presence_only_and_share_the_peer_clock() {
 async fn completing_one_scope_preserves_other_scope_and_peer_clock() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store);
+    peerstore
+        .create_replicator("peer", b"replicator")
+        .await
+        .unwrap();
     let initial = super::super::RetryInfo::new_initial().to_bytes().unwrap();
 
     peerstore
@@ -766,6 +687,10 @@ async fn completing_one_scope_preserves_other_scope_and_peer_clock() {
 async fn collection_updates_coalesce_to_one_rederivable_scope() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store);
+    peerstore
+        .create_replicator("peer", b"replicator")
+        .await
+        .unwrap();
     let initial = super::super::RetryInfo::new_initial().to_bytes().unwrap();
 
     peerstore
@@ -787,6 +712,12 @@ async fn collection_updates_coalesce_to_one_rederivable_scope() {
 async fn retry_marker_stats_report_scope_counts_and_oldest_peer_clock() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store);
+    for peer_id in ["peer-a", "peer-b"] {
+        peerstore
+            .create_replicator(peer_id, b"replicator")
+            .await
+            .unwrap();
+    }
     let initial = super::super::RetryInfo::new_initial().to_bytes().unwrap();
 
     peerstore
@@ -835,6 +766,9 @@ async fn dormant_legacy_payload_document_retry_migrates_and_arms_due_schedule() 
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store);
     let mut txn = peerstore.store.new_txn(false).await.unwrap();
+    txn.set(&ReplicatorKey::new("peer").bytes(), b"replicator")
+        .await
+        .unwrap();
     txn.set(
         &ReplicatorRetryDocIDKey::new("peer", "doc").bytes(),
         b"collection",
@@ -849,12 +783,12 @@ async fn dormant_legacy_payload_document_retry_migrates_and_arms_due_schedule() 
     assert_eq!(legacy[0].doc_id, "doc");
     assert!(legacy[0].collection_id.is_empty());
     let txn = peerstore.store.new_txn(true).await.unwrap();
-    assert_eq!(
-        txn.get(&ReplicatorRetryDocIDKey::new("peer", "doc").bytes())
-            .await
-            .unwrap(),
-        Some(Bytes::new())
-    );
+    let marker = txn
+        .get(&ReplicatorRetryDocIDKey::new("peer", "doc").bytes())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(decode_retry_marker_generation(&marker).is_some());
     let schedule = txn
         .get(&ReplicatorRetryIDKey::new("peer").bytes())
         .await
@@ -938,6 +872,9 @@ async fn legacy_cid_scoped_commits_collapse_to_one_collection_marker() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store);
     let mut txn = peerstore.store.new_txn(false).await.unwrap();
+    txn.set(&ReplicatorKey::new("peer").bytes(), b"replicator")
+        .await
+        .unwrap();
     for cid in ["commit-a", "commit-b"] {
         txn.set(
             &legacy_retry_commit_key("peer", "collection", cid),
@@ -962,18 +899,22 @@ async fn legacy_cid_scoped_commits_collapse_to_one_collection_marker() {
             .unwrap()
             .is_none());
     }
-    assert_eq!(
-        txn.get(&ReplicatorRetryCollectionKey::new("peer", "collection").bytes())
-            .await
-            .unwrap(),
-        Some(Bytes::new())
-    );
+    let marker = txn
+        .get(&ReplicatorRetryCollectionKey::new("peer", "collection").bytes())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(decode_retry_marker_generation(&marker).is_some());
 }
 
 #[tokio::test]
 async fn sweep_clear_removes_preexisting_empty_document_retry() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store);
+    peerstore
+        .create_replicator("peer", b"replicator")
+        .await
+        .unwrap();
     let mut txn = peerstore.store.new_txn(false).await.unwrap();
     txn.set(
         &ReplicatorRetryIDKey::new("peer").bytes(),
@@ -1007,6 +948,9 @@ async fn sweep_clear_cannot_orphan_a_concurrently_registered_marker() {
     let register_store = Peerstore::new(Arc::clone(&store));
     let peerstore = Peerstore::new(store);
     let mut txn = peerstore.store.new_txn(false).await.unwrap();
+    txn.set(&ReplicatorKey::new("peer").bytes(), b"replicator")
+        .await
+        .unwrap();
     txn.set(
         &ReplicatorRetryIDKey::new("peer").bytes(),
         &super::super::RetryInfo::new_initial().to_bytes().unwrap(),
@@ -1033,6 +977,10 @@ async fn sweep_clear_cannot_orphan_a_concurrently_registered_marker() {
 async fn peer_reconnect_activates_schedule_without_resetting_ladder() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store);
+    peerstore
+        .create_replicator("peer", b"replicator")
+        .await
+        .unwrap();
     let mut retry = super::super::RetryInfo::new_initial();
     retry.bump();
     retry.bump();

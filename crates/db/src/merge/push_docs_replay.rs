@@ -107,9 +107,8 @@ pub async fn check_retry_admission<S: storage::corekv::Store>(
 }
 
 /// Persist documents that did not finish their initial replay so the normal
-/// retry sweep owns them after the bounded attempt. Replay intentionally does
-/// not hold the peer writer across network waits, so the failure handoff must
-/// reacquire it before mutating the shared peer schedule.
+/// retry sweep owns them after the bounded attempt. Peer existence and marker
+/// writes are validated together by Peerstore transactions.
 pub async fn persist_replay_failures<S: storage::corekv::Store>(
     peerstore: &storage::stores::Peerstore<S>,
     peer_id: &PeerId,
@@ -119,15 +118,6 @@ pub async fn persist_replay_failures<S: storage::corekv::Store>(
         return Ok(());
     }
 
-    let Some(_retry_guard) = peerstore
-        .acquire_replicator_retry_guard(peer_id.as_str())
-        .await
-        .map_err(|error| format!("failed to coordinate replay failure persistence: {error}"))?
-    else {
-        // Forget won the race with the completed network attempt.  The removed
-        // replicator no longer owns a durable delivery obligation.
-        return Ok(());
-    };
     for failure in failures {
         let retry_info = storage::stores::RetryInfo::new_initial()
             .to_bytes()

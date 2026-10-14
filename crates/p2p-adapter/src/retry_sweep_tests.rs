@@ -65,6 +65,7 @@ impl TransportDocPusher for ScriptedPusher {
         peer_id: &PeerId,
         doc_id: &str,
         _collection_id: &str,
+        generation: u64,
     ) -> P2PResult<()> {
         self.attempted.rcu(|attempted| {
             let mut next = attempted.clone();
@@ -79,7 +80,7 @@ impl TransportDocPusher for ScriptedPusher {
         {
             Outcome::Delivered => {
                 self.peerstore
-                    .complete_retry_scope(peer_id.as_str(), doc_id, "", false)
+                    .complete_retry_scope(peer_id.as_str(), doc_id, "", false, generation)
                     .await
                     .unwrap();
                 Ok(())
@@ -97,7 +98,7 @@ impl TransportDocPusher for ScriptedPusher {
                 started.notify_one();
                 finish.notified().await;
                 self.peerstore
-                    .complete_retry_scope(peer_id.as_str(), doc_id, "", false)
+                    .complete_retry_scope(peer_id.as_str(), doc_id, "", false, generation)
                     .await
                     .unwrap();
                 Ok(())
@@ -110,6 +111,7 @@ impl TransportDocPusher for ScriptedPusher {
         &self,
         _peer_id: &PeerId,
         _collection_id: &str,
+        _generation: u64,
     ) -> P2PResult<()> {
         unreachable!("document markers only")
     }

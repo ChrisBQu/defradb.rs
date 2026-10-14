@@ -51,43 +51,15 @@ fn is_peer_level_failure(error: &str) -> bool {
     error.starts_with(p2p::error::TRANSPORT_UNAVAILABLE_PREFIX)
 }
 
-/// Record head announcements and acknowledgements behind the peer-scoped
-/// retry writer. A success acknowledgement clears only the marker still
-/// covered by the acknowledged head fence.
+/// Record head announcements and compare-delete only the exact durable marker
+/// generation returned to the sender before its PushLog attempt.
 pub fn spawn_failure_recorder<S: storage::corekv::Store + 'static>(
     peerstore: storage::stores::Peerstore<S>,
     mut failures: tokio::sync::mpsc::Receiver<p2p::sync::PushFailure>,
 ) -> n0_future::task::JoinHandle<()> {
     n0_future::task::spawn(async move {
-        let mut ack_fence = p2p::sync::HeadAckFence::default();
         while let Some(mut failure) = failures.recv().await {
             let durable_tx = failure.durable_tx.take();
-            if failure.acknowledged && !ack_fence.ack_is_current(&failure) {
-                tracing::debug!(
-                    peer_id = %failure.peer_id,
-                    doc_id = %failure.doc_id,
-                    collection_id = %failure.collection_id,
-                    "Ignoring stale head acknowledgement"
-                );
-                let _ = durable_tx.map(|tx| tx.send(false));
-                continue;
-            }
-
-            let _retry_guard = match peerstore
-                .acquire_replicator_retry_guard(&failure.peer_id)
-                .await
-            {
-                Ok(Some(guard)) => guard,
-                Ok(None) => {
-                    let _ = durable_tx.map(|tx| tx.send(false));
-                    continue;
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "failed to coordinate push failure recording");
-                    let _ = durable_tx.map(|tx| tx.send(false));
-                    continue;
-                }
-            };
 
             if failure.admission_only {
                 let allowed = match peerstore.get_retry_info(&failure.peer_id).await {
@@ -99,19 +71,26 @@ pub fn spawn_failure_recorder<S: storage::corekv::Store + 'static>(
                         false
                     }
                 };
-                let _ = durable_tx.map(|tx| tx.send(allowed));
+                let generation = allowed.then_some(failure.marker_generation).flatten();
+                let _ = durable_tx.map(|tx| tx.send(generation));
                 continue;
             }
 
-            let result = if failure.acknowledged {
+            let result: storage::corekv::Result<Option<u64>> = if failure.acknowledged {
+                let Some(generation) = failure.marker_generation else {
+                    let _ = durable_tx.map(|tx| tx.send(None));
+                    continue;
+                };
                 peerstore
                     .complete_retry_scope(
                         &failure.peer_id,
                         &failure.doc_id,
                         &failure.collection_id,
                         failure.doc_id.is_empty(),
+                        generation,
                     )
                     .await
+                    .map(|cleared| cleared.then_some(generation))
             } else if failure.create_retry {
                 let mut info = storage::stores::RetryInfo::new_initial();
                 if let Some(delay) = failure.retry_after {
@@ -125,12 +104,12 @@ pub fn spawn_failure_recorder<S: storage::corekv::Store + 'static>(
                     Ok(bytes) => bytes,
                     Err(error) => {
                         tracing::warn!(%error, "failed to serialize retry info");
-                        let _ = durable_tx.map(|tx| tx.send(false));
+                        let _ = durable_tx.map(|tx| tx.send(None));
                         continue;
                     }
                 };
                 peerstore
-                    .record_push_failure(
+                    .record_push_failure_with_generation(
                         &failure.peer_id,
                         &failure.doc_id,
                         &failure.collection_id,
@@ -139,22 +118,27 @@ pub fn spawn_failure_recorder<S: storage::corekv::Store + 'static>(
                     .await
             } else {
                 peerstore
-                    .observe_push_head(&failure.peer_id, &failure.doc_id, &failure.collection_id)
+                    .observe_push_head_with_generation(
+                        &failure.peer_id,
+                        &failure.doc_id,
+                        &failure.collection_id,
+                    )
                     .await
             };
-            if let Err(error) = result {
-                tracing::warn!(%error, "failed to record push failure");
-                let _ = durable_tx.map(|tx| tx.send(false));
-                continue;
-            }
+            let marker_generation = match result {
+                Ok(generation) => generation,
+                Err(error) => {
+                    tracing::warn!(%error, "failed to record push failure");
+                    let _ = durable_tx.map(|tx| tx.send(None));
+                    continue;
+                }
+            };
 
-            if !failure.create_retry && !failure.acknowledged {
-                ack_fence.observe_durable(&failure);
-            }
-            let _ = durable_tx.map(|tx| tx.send(true));
+            let _ = durable_tx.map(|tx| tx.send(marker_generation));
             if failure.acknowledged {
-                ack_fence.clear_current_ack(&failure);
-                let _ = peerstore.clear_retry_peer(&failure.peer_id).await;
+                if marker_generation.is_some() {
+                    let _ = peerstore.clear_retry_peer(&failure.peer_id).await;
+                }
             } else if failure.create_retry {
                 if let Err(error) = crate::set_persisted_replicator_status(
                     &peerstore,
@@ -408,11 +392,16 @@ pub async fn run_retry_pass<S, T>(
             let replay = async {
                 if marker.is_collection_commit() {
                     doc_pusher
-                        .retry_collection_commit(&peer_id, &marker.collection_id)
+                        .retry_collection_commit(&peer_id, &marker.collection_id, marker.generation)
                         .await
                 } else {
                     doc_pusher
-                        .retry_doc(&peer_id, &marker.doc_id, &marker.collection_id)
+                        .retry_doc(
+                            &peer_id,
+                            &marker.doc_id,
+                            &marker.collection_id,
+                            marker.generation,
+                        )
                         .await
                 }
             };
@@ -1175,6 +1164,7 @@ mod tests {
             head_priority: 7,
             create_retry: false,
             acknowledged,
+            marker_generation: None,
             durable_tx: None,
             retry_after: None,
             admission_only: false,
@@ -1202,7 +1192,7 @@ mod tests {
         let mut announced = failure(false);
         announced.durable_tx = Some(registered_tx);
         tx.send(announced).await.unwrap();
-        assert!(registered_rx.await.unwrap());
+        let generation = registered_rx.await.unwrap().unwrap();
         assert_eq!(
             peerstore.get_retry_documents("peer-a").await.unwrap().len(),
             1
@@ -1210,9 +1200,10 @@ mod tests {
 
         let (cleared_tx, cleared_rx) = tokio::sync::oneshot::channel();
         let mut acknowledged = failure(true);
+        acknowledged.marker_generation = Some(generation);
         acknowledged.durable_tx = Some(cleared_tx);
         tx.send(acknowledged).await.unwrap();
-        assert!(cleared_rx.await.unwrap());
+        assert_eq!(cleared_rx.await.unwrap(), Some(generation));
         assert!(peerstore
             .get_retry_documents("peer-a")
             .await
@@ -1250,7 +1241,7 @@ mod tests {
             check.admission_only = true;
             check.durable_tx = Some(response);
             tx.send(check).await.unwrap();
-            assert!(!allowed.await.unwrap());
+            assert!(allowed.await.unwrap().is_none());
             drop(tx);
             recorder.await.unwrap();
         }

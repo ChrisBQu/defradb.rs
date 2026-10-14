@@ -115,9 +115,10 @@ async fn stale_retry_heads_cannot_clear_a_newer_document_marker() {
         .create_replicator(peer_id, b"replicator")
         .await
         .unwrap();
-    peerstore
-        .observe_push_head(peer_id, doc_id, collection_id)
+    let marker_generation = peerstore
+        .observe_push_head_with_generation(peer_id, doc_id, collection_id)
         .await
+        .unwrap()
         .unwrap();
 
     let old = Block::new_with_options(
@@ -174,6 +175,7 @@ async fn stale_retry_heads_cannot_clear_a_newer_document_marker() {
         collection_id,
         doc_short_id,
         &[old_cid],
+        marker_generation,
     )
     .await
     .unwrap_err();
@@ -190,6 +192,7 @@ async fn stale_retry_heads_cannot_clear_a_newer_document_marker() {
         collection_id,
         doc_short_id,
         &[current_cid],
+        marker_generation,
     )
     .await
     .unwrap();

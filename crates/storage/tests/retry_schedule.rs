@@ -73,6 +73,10 @@ async fn info(peerstore: &Peerstore<RegolithStore>) -> RetryInfo {
 #[tokio::test]
 async fn no_hint_registration_preserves_supplied_rung_and_cursor() {
     let peerstore = Peerstore::new(Arc::new(RegolithStore::in_memory().unwrap()));
+    peerstore
+        .create_replicator("peer", b"replicator")
+        .await
+        .unwrap();
     let mut requested = RetryInfo::new_initial();
     requested.num_retries = 3;
     requested.dispatch_cursor = 17;
@@ -211,10 +215,11 @@ async fn last_scope_ack_preserves_peer_hint_until_expiry_or_forget() {
         .await
         .unwrap();
     let deadline = info(&peerstore).await.not_before_unix;
-    peerstore
-        .complete_retry_scope("peer", "doc", "collection", false)
+    let doc_generation = peerstore.get_retry_documents("peer").await.unwrap()[0].generation;
+    assert!(peerstore
+        .complete_retry_scope("peer", "doc", "collection", false, doc_generation)
         .await
-        .unwrap();
+        .unwrap());
     peerstore.clear_retry_peer("peer").await.unwrap();
     assert!(peerstore
         .get_retry_documents("peer")
@@ -227,10 +232,11 @@ async fn last_scope_ack_preserves_peer_hint_until_expiry_or_forget() {
         .await
         .unwrap();
     assert!(!info(&peerstore).await.is_backpressure_elapsed());
-    peerstore
-        .complete_retry_scope("peer", "new", "collection", false)
+    let new_generation = peerstore.get_retry_documents("peer").await.unwrap()[0].generation;
+    assert!(peerstore
+        .complete_retry_scope("peer", "new", "collection", false, new_generation)
         .await
-        .unwrap();
+        .unwrap());
 
     // Move only the persisted deadline into the past; no wall-clock sleep.
     let mut expired = info(&peerstore).await;

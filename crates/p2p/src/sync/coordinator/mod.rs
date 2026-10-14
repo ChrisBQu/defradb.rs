@@ -114,83 +114,10 @@ pub struct PushFailure {
     pub admission_only: bool,
     /// Successful acknowledgement for this exact scope/head.
     pub acknowledged: bool,
+    /// Durable generation installed before this push was admitted.
+    pub marker_generation: Option<u64>,
     /// Register-before-send handshake with the durable recorder.
-    pub durable_tx: Option<tokio::sync::oneshot::Sender<bool>>,
-}
-
-/// Volatile fence for acknowledgements of presence-only durable markers.
-///
-/// The durable marker intentionally stores no CID. This fence covers the only
-/// acknowledgements that can survive long enough to race a newer live head in
-/// the same process. Across restart there are no surviving in-flight sends, so
-/// the presence marker alone is the conservative source of truth.
-#[derive(Default)]
-pub struct HeadAckFence {
-    current: rapidhash::RapidHashMap<(String, String, String), (u64, String)>,
-}
-
-impl HeadAckFence {
-    fn scope_key(event: &PushFailure) -> (String, String, String) {
-        (
-            event.peer_id.clone(),
-            event.doc_id.clone(),
-            event.collection_id.clone(),
-        )
-    }
-
-    fn head_token(event: &PushFailure) -> (u64, String) {
-        (event.head_priority, event.cid.clone())
-    }
-
-    pub fn observe_durable(&mut self, event: &PushFailure) {
-        self.current
-            .insert(Self::scope_key(event), Self::head_token(event));
-    }
-
-    pub fn ack_is_current(&self, event: &PushFailure) -> bool {
-        self.current.get(&Self::scope_key(event)) == Some(&Self::head_token(event))
-    }
-
-    pub fn clear_current_ack(&mut self, event: &PushFailure) {
-        if self.ack_is_current(event) {
-            self.current.remove(&Self::scope_key(event));
-        }
-    }
-}
-
-#[cfg(test)]
-mod head_ack_fence_tests {
-    use super::*;
-
-    fn event(cid: &str, priority: u64) -> PushFailure {
-        PushFailure {
-            peer_id: "peer".to_string(),
-            doc_id: "doc".to_string(),
-            collection_id: "collection".to_string(),
-            cid: cid.to_string(),
-            head_priority: priority,
-            create_retry: false,
-            acknowledged: false,
-            durable_tx: None,
-            retry_after: None,
-            admission_only: false,
-        }
-    }
-
-    #[test]
-    fn stale_ack_cannot_clear_a_newer_scope_head() {
-        let mut fence = HeadAckFence::default();
-        let old = event("old", 1);
-        let new = event("new", 2);
-        fence.observe_durable(&old);
-        fence.observe_durable(&new);
-
-        assert!(!fence.ack_is_current(&old));
-        fence.clear_current_ack(&old);
-        assert!(fence.ack_is_current(&new));
-        fence.clear_current_ack(&new);
-        assert!(!fence.ack_is_current(&new));
-    }
+    pub durable_tx: Option<tokio::sync::oneshot::Sender<Option<u64>>>,
 }
 
 /// Stable diagnostic snapshot of P2P-owned sync resources (#1099).

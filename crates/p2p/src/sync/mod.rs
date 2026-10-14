@@ -36,8 +36,8 @@ pub use coordinator::IrohSyncCoordinator;
 #[cfg(feature = "libp2p-transport")]
 pub use coordinator::Libp2pSyncCoordinator;
 pub use coordinator::{
-    CreateReplicatorResult, HeadAckFence, HeadHintCarAuthority, HeadHintCarGrant,
-    LoadReplicatorsResult, PushFailure, SyncCoordinator, SyncShutdownHandle, SyncStatus,
+    CreateReplicatorResult, HeadHintCarAuthority, HeadHintCarGrant, LoadReplicatorsResult,
+    PushFailure, SyncCoordinator, SyncShutdownHandle, SyncStatus,
 };
 pub use dag_sync::{DagSync, DagSyncConfig, DagSyncState, NeedsFetchData, SyncPlan};
 pub(crate) use event_dispatcher::classify_p2p_event;

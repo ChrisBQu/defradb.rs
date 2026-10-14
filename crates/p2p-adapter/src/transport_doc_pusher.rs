@@ -38,15 +38,24 @@ pub trait TransportDocPusher: defra_core::thread_bounds::MaybeSendSync {
         ))
     }
 
-    async fn retry_doc(&self, peer_id: &PeerId, doc_id: &str, collection_id: &str)
-        -> P2PResult<()>;
+    async fn retry_doc(
+        &self,
+        peer_id: &PeerId,
+        doc_id: &str,
+        collection_id: &str,
+        generation: u64,
+    ) -> P2PResult<()>;
 
     /// Replay a failed collection scope by rederiving current collection heads.
     ///
     /// Collection commits are doc-less, so they cannot be replayed through
     /// `retry_doc`, which resolves work from a document's composite heads.
-    async fn retry_collection_commit(&self, peer_id: &PeerId, collection_id: &str)
-        -> P2PResult<()>;
+    async fn retry_collection_commit(
+        &self,
+        peer_id: &PeerId,
+        collection_id: &str,
+        generation: u64,
+    ) -> P2PResult<()>;
 
     async fn load_document_head_blocks(&self, doc_id: &str) -> P2PResult<Vec<(Cid, Bytes)>>;
 
@@ -213,6 +222,7 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
         peer_id: &PeerId,
         doc_id: &str,
         collection_id: &str,
+        generation: u64,
     ) -> P2PResult<()> {
         let peer_id_str = peer_id.to_string();
         let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
@@ -229,6 +239,7 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
             peer_id,
             doc_id,
             collection_id,
+            generation,
             &filters,
             &replication_filter::QueryReplicationFilterMatcher::new(),
             &self.car_authority,
@@ -241,12 +252,14 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
         &self,
         peer_id: &PeerId,
         collection_id: &str,
+        generation: u64,
     ) -> P2PResult<()> {
         db::merge::retry_collection_commit(
             &self.transport,
             &self.db,
             peer_id,
             collection_id,
+            generation,
             &self.car_authority,
         )
         .await
