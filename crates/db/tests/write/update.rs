@@ -187,7 +187,8 @@ async fn stale_update_uses_fresh_unmodified_composite_index_component() {
 
     let mut left_update = stale;
     left_update.set("left", NormalValue::Int(2));
-    mutator
+    let explicit = DbDocMutator::new(Arc::clone(&db), db.new_txn(false).await.unwrap());
+    explicit
         .update(
             "Patch",
             left_update,
@@ -195,6 +196,7 @@ async fn stale_update_uses_fresh_unmodified_composite_index_component() {
         )
         .await
         .unwrap();
+    explicit.take_txn().await.unwrap().commit().await.unwrap();
 
     let txn = db.new_txn(true).await.unwrap();
     let indexed_ids = DbDocFetcher::new(txn)
