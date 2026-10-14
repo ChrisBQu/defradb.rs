@@ -470,7 +470,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         doc_id_str: &str,
         collection_lookup: Option<Collection>,
     ) -> std::result::Result<MergeOutcome, MergeError> {
-        let txn = self.db.new_txn(false).await?;
+        let mut txn = self.db.new_txn(false).await?;
         let doc_short_id = {
             let collection = collection_lookup.as_ref().ok_or_else(|| {
                 MergeError::MissingMetadata(format!(
@@ -606,6 +606,43 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                         error
                     ))
                 })?;
+                let mut committed_events = Vec::new();
+                committed_events.push(Message::update(Update::new(
+                    doc_id_str.to_string(),
+                    *cid,
+                    payload.schema_version_id.clone(),
+                    event_block,
+                    false,
+                    true,
+                )));
+                committed_events.push(Message::merge_complete(MergeCompleteData {
+                    doc_id: doc_id_str.to_string(),
+                    subject_doc_id: None,
+                    cid: *cid,
+                    collection_id: metadata
+                        .collection_id
+                        .unwrap_or(&payload.schema_version_id)
+                        .to_string(),
+                    by_peer: metadata.sender_peer.unwrap_or("").to_string(),
+                }));
+                if state.is_branchable {
+                    committed_events.push(Message::merge_complete(MergeCompleteData {
+                        doc_id: String::new(),
+                        subject_doc_id: Some(doc_id_str.to_string()),
+                        cid: *cid,
+                        collection_id: metadata
+                            .collection_id
+                            .unwrap_or(&payload.schema_version_id)
+                            .to_string(),
+                        by_peer: metadata.sender_peer.unwrap_or("").to_string(),
+                    }));
+                }
+                crate::event::emission::register_ordered_events(
+                    &mut txn,
+                    self.db.event_bus(),
+                    committed_events,
+                )
+                .map_err(MergeError::Database)?;
                 txn.force_commit().await?;
 
                 self.best_effort_finalize_linked_field_blocks(&state.linked_field_cids)
@@ -657,46 +694,6 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                                 "Post-commit SE artifact push failed"
                             );
                         }
-                    }
-                }
-
-                if let Some(bus) = self.db.event_bus() {
-                    let update = Update::new(
-                        doc_id_str.to_string(),
-                        *cid,
-                        payload.schema_version_id.clone(),
-                        event_block,
-                        false,
-                        true,
-                    );
-                    bus.publish(Message::update(update));
-
-                    if !from_collection {
-                        let merge_complete = MergeCompleteData {
-                            doc_id: doc_id_str.to_string(),
-                            subject_doc_id: None,
-                            cid: *cid,
-                            collection_id: metadata
-                                .collection_id
-                                .unwrap_or(&payload.schema_version_id)
-                                .to_string(),
-                            by_peer: metadata.sender_peer.unwrap_or("").to_string(),
-                        };
-                        bus.publish(Message::merge_complete(merge_complete));
-                    }
-
-                    if state.is_branchable {
-                        let merge_complete = MergeCompleteData {
-                            doc_id: String::new(),
-                            subject_doc_id: Some(doc_id_str.to_string()),
-                            cid: *cid,
-                            collection_id: metadata
-                                .collection_id
-                                .unwrap_or(&payload.schema_version_id)
-                                .to_string(),
-                            by_peer: metadata.sender_peer.unwrap_or("").to_string(),
-                        };
-                        bus.publish(Message::merge_complete(merge_complete));
                     }
                 }
 

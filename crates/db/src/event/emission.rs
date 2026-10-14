@@ -74,51 +74,73 @@ pub(crate) fn register_update_event_callback<S: Store + 'static>(
     let bus = bus.map(Arc::clone);
     let broadcaster = broadcaster.map(Arc::clone);
     let release = release.map(Arc::clone);
-    txn.on_success_async(Box::new(move || {
-        Box::pin(async move {
-            if let Some(bus) = bus {
-                let subject_doc_id = doc_id.clone();
-                let update = Update::new(
-                    doc_id.clone(),
-                    doc_cid,
-                    collection_id.clone(),
-                    doc_block.clone(),
+    if let Some(ordered_bus) = bus.clone() {
+        let ordered_doc_id = doc_id.clone();
+        let ordered_collection_id = collection_id.clone();
+        let ordered_block = doc_block.clone();
+        let ordered_collection_block = collection_block.clone();
+        txn.on_success_ordered(Arc::new(move || {
+            let update = Update::new(
+                ordered_doc_id.clone(),
+                doc_cid,
+                ordered_collection_id.clone(),
+                ordered_block.clone(),
+                false,
+                false,
+            );
+            ordered_bus.publish(Message::update(update));
+            if let Some((col_cid, ref col_block)) = ordered_collection_block {
+                ordered_bus.publish(Message::update(Update::new_with_subject_doc_id(
+                    String::new(),
+                    ordered_doc_id.clone(),
+                    col_cid,
+                    ordered_collection_id.clone(),
+                    col_block.clone(),
                     false,
                     false,
-                );
-                bus.publish(Message::update(update));
-
-                if let Some((col_cid, ref col_block)) = collection_block {
-                    let collection_update = Update::new_with_subject_doc_id(
-                        String::new(),
-                        subject_doc_id,
-                        col_cid,
-                        collection_id.clone(),
-                        col_block.clone(),
-                        false,
-                        false,
-                    );
-                    bus.publish(Message::update(collection_update));
+                )));
+            }
+        }))
+        .map_err(crate::error::Error::from)?;
+    }
+    if release.is_some() || broadcaster.is_some() {
+        txn.on_success_async(Box::new(move || {
+            Box::pin(async move {
+                if let Some(release) = release {
+                    release.committed(doc_cid, doc_block.clone());
                 }
-            }
 
-            if let Some(release) = release {
-                release.committed(doc_cid, doc_block.clone());
-            }
+                if let Some(broadcaster) = broadcaster {
+                    let event = TxnBroadcastEvent {
+                        collection_name,
+                        collection_id,
+                        doc_id,
+                        doc_cid,
+                        doc_block,
+                        document_json,
+                        collection_block,
+                        creator_did,
+                    };
+                    broadcaster.broadcast_update(event).await;
+                }
+            })
+        }))?;
+    }
+    Ok(())
+}
 
-            if let Some(broadcaster) = broadcaster {
-                let event = TxnBroadcastEvent {
-                    collection_name,
-                    collection_id,
-                    doc_id,
-                    doc_cid,
-                    doc_block,
-                    document_json,
-                    collection_block,
-                    creator_did,
-                };
-                broadcaster.broadcast_update(event).await;
-            }
-        })
-    }))
+/// Register a batch of committed events for receipt-ordered publication.
+pub(crate) fn register_ordered_events<S: Store>(
+    txn: &mut DbTxn<S>,
+    bus: Option<&Arc<dyn Bus>>,
+    messages: Vec<Message>,
+) -> Result<()> {
+    let Some(bus) = bus.map(Arc::clone) else {
+        return Ok(());
+    };
+    if messages.is_empty() {
+        return Ok(());
+    }
+    txn.on_success_ordered(Arc::new(move || bus.publish_batch(messages.clone())))?;
+    Ok(())
 }

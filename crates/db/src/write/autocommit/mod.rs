@@ -16,7 +16,6 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use cid::Cid;
 use document::{DocID, Document};
-use events::{Message, Update};
 use query::mutator::{CreateResult, DeleteResult, DocMutator, MutationBatch, UpdateResult};
 use std::sync::Arc;
 use storage::corekv::Store;
@@ -103,10 +102,11 @@ impl<S: Store> AutoCommitMutator<S> {
         }
     }
 
-    async fn register_created_doc_with_acp(
+    fn register_created_doc_with_acp(
         &self,
+        txn: &mut crate::txn::DbTxn<S>,
         collection: &Collection,
-        doc_id: &str,
+        doc_id: String,
     ) -> query::error::Result<()> {
         let Some(policy) = collection.schema().policy.as_ref() else {
             return Ok(());
@@ -114,7 +114,7 @@ impl<S: Store> AutoCommitMutator<S> {
         let Some(creator_did) = defra_core::signing::get_broadcast_creator_did() else {
             return Ok(());
         };
-        let Some(acp) = self.db.document_acp() else {
+        let Some(acp) = self.db.document_acp().cloned() else {
             return Ok(());
         };
         if acp.supports_transactions() {
@@ -124,25 +124,28 @@ impl<S: Store> AutoCommitMutator<S> {
             query::error::QueryError::execution(format!("invalid mutation creator DID: {error}"))
         })?;
 
-        if !acp
-            .is_doc_registered(&policy.id, &policy.resource_name, doc_id)
-            .await
-            .map_err(|error| {
-                query::error::QueryError::execution(format!(
-                    "failed to check ACP registration before publishing update: {error}"
-                ))
-            })?
-        {
-            acp.register_doc_object(&creator, &policy.id, &policy.resource_name, doc_id)
-                .await
-                .map_err(|error| {
-                    query::error::QueryError::execution(format!(
-                        "failed to register document with ACP before publishing update: {error}"
-                    ))
-                })?;
-        }
-
-        Ok(())
+        let policy_id = policy.id.clone();
+        let resource_name = policy.resource_name.clone();
+        let registration = txn.on_success_ordered_async(Arc::new(move || {
+            let acp = Arc::clone(&acp);
+            let policy_id = policy_id.clone();
+            let resource_name = resource_name.clone();
+            let doc_id = doc_id.clone();
+            let creator = creator.clone();
+            Box::pin(async move {
+                if !acp
+                    .is_doc_registered(&policy_id, &resource_name, &doc_id)
+                    .await
+                    .map_err(|error| format!("failed to check ACP registration before publishing update: {error}"))?
+                {
+                    acp.register_doc_object(&creator, &policy_id, &resource_name, &doc_id)
+                        .await
+                        .map_err(|error| format!("failed to register document with ACP before publishing update: {error}"))?;
+                }
+                Ok(())
+            })
+        }));
+        registration.map_err(|error| query::error::QueryError::execution(error.to_string()))
     }
 
     pub async fn new_batch_components(

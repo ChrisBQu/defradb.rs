@@ -74,7 +74,8 @@ pub use errors::{Error, Result, UNIQUE_CONSTRAINT_VIOLATION_MESSAGE};
 pub use iterator::{Iterator, KvPair};
 pub use traits::private;
 pub use traits::{
-    make_async_callback, make_callback, AsyncTxnCallback, Dropable, MaybeSend, MaybeSendSync,
-    MaybeSync, Reader, ReaderWriter, Store, Txn, TxnCallback, TxnStore, Writer,
+    make_async_callback, make_callback, AsyncOrderedTxnCallback, AsyncTxnCallback, Dropable,
+    MaybeSend, MaybeSendSync, MaybeSync, OrderedTxnCallback, Reader, ReaderWriter, Store, Txn,
+    TxnCallback, TxnStore, Writer,
 };
 pub use types::{AppendLog, IterOptions, Key};

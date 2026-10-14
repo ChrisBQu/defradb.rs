@@ -14,6 +14,7 @@ use regolith::{OptimisticTransactionDb, StreamOptions};
 
 use super::background_errors::BackgroundErrorListener;
 use super::config::RegolithStoreOptions;
+use super::event_order::EventOrder;
 use super::head_cache::{self, SharedHeadCache};
 use super::transaction::RegolithTxn;
 use crate::backends::shared::TransactionStatsHandle;
@@ -36,6 +37,7 @@ struct StoreInner {
     active_txns: Arc<AtomicUsize>,
     stats: TransactionStatsHandle,
     head_cache: SharedHeadCache,
+    event_order: Arc<EventOrder>,
     path: PathBuf,
     /// The mounted OPFS environment, kept so `persist` can reach it.
     ///
@@ -85,6 +87,7 @@ impl RegolithStore {
                 active_txns: Arc::new(AtomicUsize::new(0)),
                 stats: TransactionStatsHandle::for_backend("regolith"),
                 head_cache: Arc::default(),
+                event_order: Arc::default(),
                 path,
                 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
                 opfs: None,
@@ -277,6 +280,7 @@ impl Store for RegolithStore {
             Arc::clone(&self.inner.active_txns),
             self.inner.stats.clone(),
             Arc::clone(&self.inner.head_cache),
+            Arc::clone(&self.inner.event_order),
         );
         match txn {
             Ok(txn) => Ok(Box::new(txn)),

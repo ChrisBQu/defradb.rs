@@ -342,6 +342,32 @@ impl<S: Store> DbTxn<S> {
         }
     }
 
+    /// Register a synchronous post-commit event for receipt-ordered dispatch.
+    pub fn on_success_ordered(
+        &mut self,
+        callback: storage::corekv::OrderedTxnCallback,
+    ) -> Result<()> {
+        if let Some(txn) = &mut self.txn {
+            txn.on_success_ordered(callback)?;
+            Ok(())
+        } else {
+            Err(Error::TxnNotActive)
+        }
+    }
+
+    /// Register an async post-commit hook that must finish before ordered events publish.
+    pub fn on_success_ordered_async(
+        &mut self,
+        callback: storage::corekv::AsyncOrderedTxnCallback,
+    ) -> Result<()> {
+        if let Some(txn) = &mut self.txn {
+            txn.on_success_ordered_async(callback)?;
+            Ok(())
+        } else {
+            Err(Error::TxnNotActive)
+        }
+    }
+
     /// Register a callback for commit error.
     ///
     /// Returns an error if the transaction has been committed or discarded.

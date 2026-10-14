@@ -244,6 +244,17 @@ impl Txn for BlockstoreTxn {
         self.txn.on_success(callback)
     }
 
+    fn on_success_ordered(&mut self, callback: crate::corekv::OrderedTxnCallback) -> Result<()> {
+        self.txn.on_success_ordered(callback)
+    }
+
+    fn on_success_ordered_async(
+        &mut self,
+        callback: crate::corekv::AsyncOrderedTxnCallback,
+    ) -> Result<()> {
+        self.txn.on_success_ordered_async(callback)
+    }
+
     fn on_success_async(&mut self, callback: crate::corekv::AsyncTxnCallback) {
         self.txn.on_success_async(callback)
     }

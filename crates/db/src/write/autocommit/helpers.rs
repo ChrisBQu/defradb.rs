@@ -618,44 +618,31 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))
     }
 
-    /// Emit update events for subscriptions, carrying the actual block bytes
-    /// so downstream consumers can traverse the DAG without an extra fetch.
-    ///
-    /// For branchable collections, emits a second event keyed by collection_id
-    /// using the collection block's own cid/bytes (Go publishes the collection
-    /// block separately at internal/db/collection.go:789).
-    pub(super) fn emit_update_events(
+    pub(super) fn register_ordered_update_event(
         &self,
+        txn: &mut crate::txn::DbTxn<S>,
+        collection_name: &str,
         collection: &Collection,
-        doc_id_str: &str,
+        doc_id: String,
         doc_cid: Cid,
         doc_block: Bytes,
         collection_block: Option<(Cid, Bytes)>,
-    ) {
-        if let Some(bus) = self.db.event_bus() {
-            let update = Update::new(
-                doc_id_str.to_string(),
-                doc_cid,
-                collection.collection_id().to_string(),
-                doc_block,
-                false, // is_retry
-                false, // is_relay (local mutation)
-            );
-            bus.publish(Message::update(update));
-
-            if let Some((col_cid, col_block)) = collection_block {
-                let col_update = Update::new_with_subject_doc_id(
-                    String::new(), // empty doc_id → keyed by collection_id
-                    doc_id_str.to_string(),
-                    col_cid,
-                    collection.collection_id().to_string(),
-                    col_block,
-                    false,
-                    false,
-                );
-                bus.publish(Message::update(col_update));
-            }
-        }
+    ) -> query::error::Result<()> {
+        crate::event::emission::register_update_event_callback(
+            txn,
+            self.db.event_bus(),
+            None,
+            None,
+            collection_name.to_owned(),
+            collection.collection_id().to_string(),
+            doc_id,
+            doc_cid,
+            doc_block,
+            None,
+            collection_block,
+            None,
+        )
+        .map_err(|error| query::error::QueryError::execution(error.to_string()))
     }
 }
 

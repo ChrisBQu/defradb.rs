@@ -295,22 +295,6 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                             Ok(MergeOutcome::Merged) => {
                                 tracing::debug!(link_cid = %link_cid, "Composite merged successfully");
                                 any_merged = true;
-
-                                // Publish per-document MergeComplete so the Go test
-                                // framework's WaitForSync can track each document.
-                                if let Some(bus) = self.db.event_bus() {
-                                    let col_id = metadata
-                                        .collection_id
-                                        .unwrap_or(&payload.schema_version_id)
-                                        .to_string();
-                                    bus.publish(Message::merge_complete(MergeCompleteData {
-                                        doc_id: doc_id_str,
-                                        subject_doc_id: None,
-                                        cid: *link_cid,
-                                        collection_id: col_id,
-                                        by_peer: metadata.sender_peer.unwrap_or("").to_string(),
-                                    }));
-                                }
                             }
                             Ok(outcome) if outcome.is_terminal_skip() => {
                                 tracing::debug!(

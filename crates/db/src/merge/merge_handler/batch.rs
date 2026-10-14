@@ -166,7 +166,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
             }
         }
 
-        let txn = self.db.new_txn(false).await?;
+        let mut txn = self.db.new_txn(false).await?;
         let batch_merged = cid_set();
         let batch_merged_collections = cid_set();
         let pending_events: SegQueue<PendingMergeEvent> = SegQueue::new();
@@ -244,6 +244,16 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
             return Err(e);
         }
 
+        let mut committed_events = Vec::with_capacity(pending_events.len());
+        while let Some(event) = pending_events.pop() {
+            committed_events.push(event.message);
+        }
+        crate::event::emission::register_ordered_events(
+            &mut txn,
+            self.db.event_bus(),
+            committed_events,
+        )
+        .map_err(MergeError::Database)?;
         txn.force_commit().await?;
 
         // Move batch-merged CIDs into the permanent dedup set
@@ -276,15 +286,6 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
         field_cids.dedup();
         self.best_effort_finalize_linked_field_blocks(&field_cids)
             .await;
-
-        // Emit all collected events
-        if let Some(bus) = self.db.event_bus() {
-            let mut events = Vec::with_capacity(pending_events.len());
-            while let Some(event) = pending_events.pop() {
-                events.push(event.message);
-            }
-            bus.publish_batch(events);
-        }
 
         Ok(results)
     }

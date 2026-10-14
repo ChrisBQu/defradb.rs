@@ -149,6 +149,9 @@ impl Txn for FailingHeadTxn {
     fn on_success(&mut self, callback: TxnCallback) {
         self.inner.on_success(callback)
     }
+    fn on_success_ordered(&mut self, callback: storage::corekv::OrderedTxnCallback) -> Result<()> {
+        self.inner.on_success_ordered(callback)
+    }
     fn on_success_async(&mut self, callback: AsyncTxnCallback) {
         self.inner.on_success_async(callback)
     }

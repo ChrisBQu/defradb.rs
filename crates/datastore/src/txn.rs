@@ -9,7 +9,7 @@ use crate::multistore::{NamespaceView, RootView, SharedTxn};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use storage::corekv::{Store, Txn, TxnCallback};
+use storage::corekv::{OrderedTxnCallback, Store, Txn, TxnCallback};
 use storage::namespace::Namespace;
 
 /// Asynchronous callback for transaction events.
@@ -56,7 +56,16 @@ pub struct BasicTxn {
     readonly: bool,
     state: TxnState,
     callbacks: Vec<RegisteredCallback>,
-    savepoints: Vec<usize>,
+    savepoints: Vec<BasicTxnSavepoint>,
+    ordered_callbacks: Vec<OrderedTxnCallback>,
+    ordered_async_callbacks: Vec<storage::corekv::AsyncOrderedTxnCallback>,
+}
+
+#[derive(Clone, Copy)]
+struct BasicTxnSavepoint {
+    callbacks: usize,
+    ordered_callbacks: usize,
+    ordered_async_callbacks: usize,
 }
 
 impl BasicTxn {
@@ -79,6 +88,8 @@ impl BasicTxn {
             state: TxnState::Active,
             callbacks: Vec::new(),
             savepoints: Vec::new(),
+            ordered_callbacks: Vec::new(),
+            ordered_async_callbacks: Vec::new(),
         }
     }
 
@@ -91,12 +102,16 @@ impl BasicTxn {
             }));
         }
         self.shared_txn.set_savepoint().map_err(Error::Storage)?;
-        self.savepoints.push(self.callbacks.len());
+        self.savepoints.push(BasicTxnSavepoint {
+            callbacks: self.callbacks.len(),
+            ordered_callbacks: self.ordered_callbacks.len(),
+            ordered_async_callbacks: self.ordered_async_callbacks.len(),
+        });
         Ok(())
     }
 
     pub fn rollback_to_savepoint(&mut self) -> Result<()> {
-        let callback_count = *self.savepoints.last().ok_or_else(|| {
+        let state = *self.savepoints.last().ok_or_else(|| {
             Error::Storage(storage::corekv::Error::Other(
                 "transaction has no active savepoint".into(),
             ))
@@ -105,7 +120,10 @@ impl BasicTxn {
             .rollback_to_savepoint()
             .map_err(Error::Storage)?;
         self.savepoints.pop();
-        self.callbacks.truncate(callback_count);
+        self.callbacks.truncate(state.callbacks);
+        self.ordered_callbacks.truncate(state.ordered_callbacks);
+        self.ordered_async_callbacks
+            .truncate(state.ordered_async_callbacks);
         Ok(())
     }
 
@@ -178,6 +196,26 @@ impl BasicTxn {
             phase: TxnCallbackPhase::Success,
             callback,
         });
+    }
+
+    /// Register a post-commit event for receipt-ordered dispatch.
+    pub fn on_success_ordered(&mut self, callback: OrderedTxnCallback) -> Result<()> {
+        if self.readonly {
+            return Err(Error::Storage(storage::Error::ReadOnlyTxn));
+        }
+        self.ordered_callbacks.push(callback);
+        Ok(())
+    }
+
+    pub fn on_success_ordered_async(
+        &mut self,
+        callback: storage::corekv::AsyncOrderedTxnCallback,
+    ) -> Result<()> {
+        if self.readonly {
+            return Err(Error::Storage(storage::Error::ReadOnlyTxn));
+        }
+        self.ordered_async_callbacks.push(callback);
+        Ok(())
     }
 
     /// Register a callback to be called on commit error.
@@ -276,13 +314,23 @@ impl BasicTxn {
         // The SharedTxn holds it in an Arc<RwLock<Box<dyn Txn>>>
         // We need to get ownership to call commit
         let callbacks = std::mem::take(&mut self.callbacks);
+        let ordered_callbacks = std::mem::take(&mut self.ordered_callbacks);
+        let ordered_async_callbacks = std::mem::take(&mut self.ordered_async_callbacks);
         let shared = Arc::try_unwrap(self.shared_txn).map_err(|_| {
             Error::Storage(storage::corekv::Error::Other(
                 "Cannot commit: transaction still has references".into(),
             ))
         })?;
 
-        let txn = shared.into_txn();
+        let mut txn = shared.into_txn();
+        for callback in ordered_callbacks {
+            txn.on_success_ordered(callback)
+                .map_err(|error| Error::Storage(error.into()))?;
+        }
+        for callback in ordered_async_callbacks {
+            txn.on_success_ordered_async(callback)
+                .map_err(|error| Error::Storage(error.into()))?;
+        }
         let result = txn.commit().await;
 
         let (sync_fns, async_fns, retained_callbacks) = if result.is_ok() {

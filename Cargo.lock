@@ -12820,6 +12820,7 @@ dependencies = [
  "futures",
  "getrandom 0.2.17",
  "hex",
+ "kovan",
  "kovan-map",
  "kovan-queue",
  "proptest",

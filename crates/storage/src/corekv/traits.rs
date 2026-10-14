@@ -47,6 +47,24 @@ pub type TxnCallback = Box<dyn FnOnce() + Send + 'static>;
 pub type TxnCallback = Box<dyn FnOnce() + 'static>;
 
 #[cfg(not(target_arch = "wasm32"))]
+pub type OrderedTxnCallback = std::sync::Arc<dyn Fn() + Send + Sync + 'static>;
+
+#[cfg(target_arch = "wasm32")]
+pub type OrderedTxnCallback = std::sync::Arc<dyn Fn() + 'static>;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub type AsyncOrderedTxnCallback = std::sync::Arc<
+    dyn Fn() -> Pin<Box<dyn Future<Output = std::result::Result<(), String>> + Send>>
+        + Send
+        + Sync
+        + 'static,
+>;
+#[cfg(target_arch = "wasm32")]
+pub type AsyncOrderedTxnCallback = std::sync::Arc<
+    dyn Fn() -> Pin<Box<dyn Future<Output = std::result::Result<(), String>>>> + 'static,
+>;
+
+#[cfg(not(target_arch = "wasm32"))]
 /// Asynchronous callback function type for transaction lifecycle events.
 ///
 /// These callbacks are executed asynchronously when transaction events occur.
@@ -390,6 +408,21 @@ pub trait Txn: ReaderWriter + private::Sealed {
     fn release_savepoint(&mut self) -> Result<()> {
         Err(crate::Error::Other(
             "transaction savepoints are unsupported by this backend".into(),
+        ))
+    }
+
+    /// Register a synchronous event to dispatch in commit receipt order.
+    /// Backends without receipt sequencing retain ordinary success semantics.
+    fn on_success_ordered(&mut self, callback: OrderedTxnCallback) -> Result<()> {
+        let callback = callback.clone();
+        self.on_success(Box::new(move || callback()));
+        Ok(())
+    }
+
+    /// Register an async post-commit hook that must complete before ordered events become visible.
+    fn on_success_ordered_async(&mut self, _callback: AsyncOrderedTxnCallback) -> Result<()> {
+        Err(crate::Error::Other(
+            "ordered async callbacks are unsupported by this store".into(),
         ))
     }
 

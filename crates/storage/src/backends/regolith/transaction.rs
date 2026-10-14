@@ -18,12 +18,14 @@ use regolith::{
     IsolationLevel, OptimisticTransactionDb, Transaction, TransactionError, TxnOptions,
 };
 
+use super::event_order::{Event, EventOrder};
 use super::handle::Handle;
 use super::head_cache::{self, HeadChanges, HeadSnapshot, SharedHeadCache};
 use super::iterator::RegolithIterator;
 use crate::backends::shared::{CallbackCounts, CallbackManager, TransactionStatsHandle};
 use crate::corekv::{
-    AsyncTxnCallback, Error, IterOptions, Iterator, Reader, Result, Txn, TxnCallback, Writer,
+    AsyncOrderedTxnCallback, AsyncTxnCallback, Error, IterOptions, Iterator, Reader, Result, Txn,
+    TxnCallback, Writer,
 };
 
 /// Transaction over a regolith store.
@@ -36,6 +38,9 @@ pub struct RegolithTxn {
     pub(super) head_cache: SharedHeadCache,
     head_snapshot: Option<HeadSnapshot>,
     head_changes: HeadChanges,
+    event_order: Arc<EventOrder>,
+    ordered_events: Vec<Event>,
+    ordered_async_callbacks: Vec<AsyncOrderedTxnCallback>,
     savepoints: Vec<SavepointState>,
 }
 
@@ -43,6 +48,8 @@ pub struct RegolithTxn {
 struct SavepointState {
     callbacks: CallbackCounts,
     head_changes: HeadChanges,
+    ordered_events: usize,
+    ordered_async_callbacks: usize,
 }
 
 impl RegolithTxn {
@@ -70,6 +77,9 @@ impl RegolithTxn {
             head_snapshot: None,
             head_changes: HeadChanges::default(),
             savepoints: Vec::new(),
+            event_order: Arc::new(EventOrder::default()),
+            ordered_events: Vec::new(),
+            ordered_async_callbacks: Vec::new(),
         })
     }
 
@@ -80,6 +90,7 @@ impl RegolithTxn {
         active_txns: Arc<AtomicUsize>,
         stats: TransactionStatsHandle,
         head_cache: SharedHeadCache,
+        event_order: Arc<EventOrder>,
     ) -> Result<Self> {
         super::blocking(|| {
             let cache = head_cache::lock(&head_cache)?;
@@ -102,6 +113,9 @@ impl RegolithTxn {
                 head_snapshot,
                 head_changes: HeadChanges::default(),
                 savepoints: Vec::new(),
+                event_order,
+                ordered_events: Vec::new(),
+                ordered_async_callbacks: Vec::new(),
             })
         })
     }
@@ -330,6 +344,8 @@ impl Txn for RegolithTxn {
         })?;
         // Native commit and cache publication are one boundary. Never run
         // user callbacks under it, and never publish a failed transaction.
+        let mut ordered_token = None;
+        let mut ordered_seq = None;
         let outcome = match handle {
             Handle::ReadOnly(snapshot) => {
                 drop(snapshot);
@@ -337,7 +353,13 @@ impl Txn for RegolithTxn {
             }
             Handle::Writable(txn) => super::blocking(|| {
                 let mut cache = head_cache::lock(&self.head_cache)?;
-                let outcome = txn.commit().map(|_receipt| ()).map_err(map_txn_error);
+                let token = (!self.ordered_events.is_empty()).then(|| self.event_order.begin());
+                let outcome = txn.commit().map_err(map_txn_error);
+                if let (Some(token), Ok(receipt)) = (token, &outcome) {
+                    ordered_token = Some(token);
+                    ordered_seq = Some(receipt.seq());
+                }
+                let outcome = outcome.map(|_| ());
                 if outcome.is_ok() {
                     cache.publish(&self.head_changes);
                 }
@@ -347,6 +369,18 @@ impl Txn for RegolithTxn {
         match outcome {
             Ok(()) => {
                 self.stats.record_commit();
+                for callback in std::mem::take(&mut self.ordered_async_callbacks) {
+                    if let Err(error) = callback().await {
+                        drop(ordered_token);
+                        self.callbacks.run_success().await;
+                        return Err(Error::Other(format!(
+                            "ordered post-commit hook failed: {error}"
+                        )));
+                    }
+                }
+                if let (Some(token), Some(seq)) = (ordered_token, ordered_seq) {
+                    token.finish(seq, std::mem::take(&mut self.ordered_events));
+                }
                 self.callbacks.run_success().await;
                 Ok(())
             }
@@ -364,6 +398,8 @@ impl Txn for RegolithTxn {
         let state = SavepointState {
             callbacks: self.callbacks.counts(),
             head_changes: self.head_changes.clone(),
+            ordered_events: self.ordered_events.len(),
+            ordered_async_callbacks: self.ordered_async_callbacks.len(),
         };
         self.writable_mut()?.set_savepoint();
         self.savepoints.push(state);
@@ -382,6 +418,9 @@ impl Txn for RegolithTxn {
         self.savepoints.pop();
         self.callbacks.truncate(state.callbacks);
         self.head_changes = state.head_changes;
+        self.ordered_events.truncate(state.ordered_events);
+        self.ordered_async_callbacks
+            .truncate(state.ordered_async_callbacks);
         Ok(())
     }
 
@@ -404,6 +443,22 @@ impl Txn for RegolithTxn {
 
     fn on_success(&mut self, callback: TxnCallback) {
         self.callbacks.on_success(callback);
+    }
+
+    fn on_success_ordered(&mut self, callback: crate::corekv::OrderedTxnCallback) -> Result<()> {
+        if self.readonly {
+            return Err(Error::ReadOnlyTxn);
+        }
+        self.ordered_events.push(callback);
+        Ok(())
+    }
+
+    fn on_success_ordered_async(&mut self, callback: AsyncOrderedTxnCallback) -> Result<()> {
+        if self.readonly {
+            return Err(Error::ReadOnlyTxn);
+        }
+        self.ordered_async_callbacks.push(callback);
+        Ok(())
     }
 
     fn on_success_async(&mut self, callback: AsyncTxnCallback) {

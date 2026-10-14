@@ -1061,24 +1061,28 @@ async fn auto_commit_create_registers_acp_before_publishing_update() {
     mutator.set_document_acp(acp.clone());
     let mut sub = bus.subscribe(&[EventName::Update]);
     let owner = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
-    let created = defra_core::signing::scope_broadcast_creator_did(
-        Some(owner.to_string()),
-        mutator.create(
-            "TestDoc",
-            Document::from_json_str(r#"{"x": 1}"#).expect("doc"),
-        ),
-    )
-    .await
-    .expect("create");
+    let create = tokio::spawn(async move {
+        defra_core::signing::scope_broadcast_creator_did(
+            Some(owner.to_string()),
+            mutator.create(
+                "TestDoc",
+                Document::from_json_str(r#"{"x": 1}"#).expect("doc"),
+            ),
+        )
+        .await
+    });
 
     let message = tokio::time::timeout(std::time::Duration::from_secs(1), sub.recv())
         .await
         .expect("event arrived within timeout")
         .expect("subscription not closed");
-    assert_eq!(
-        message.as_update().expect("update").doc_id,
-        created.doc_id.to_string()
-    );
+    let doc_id = message.as_update().expect("update").doc_id.clone();
+    assert!(acp
+        .is_doc_registered("policy1", "test-docs", &doc_id)
+        .await
+        .expect("registration check at event delivery"));
+    let created = create.await.expect("create task").expect("create");
+    assert_eq!(doc_id, created.doc_id.to_string());
     assert!(acp
         .is_doc_registered("policy1", "test-docs", &created.doc_id.to_string())
         .await

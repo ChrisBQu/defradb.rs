@@ -4,6 +4,7 @@ mod background_errors;
 mod classifier;
 mod config;
 mod encryption;
+mod event_order;
 mod handle;
 mod head_cache;
 pub(crate) mod iterator;

@@ -14,7 +14,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
         let (_collection_guard, collection) = self.guarded_collection(collection_name).await?;
 
-        let txn = self.new_mutation_txn().await?;
+        let mut txn = self.new_mutation_txn().await?;
         self.db
             .check_node_access_in_txn(
                 txn.acpstore().map_err(crate::error::commit_query_error)?,
@@ -139,6 +139,17 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         } else {
             "delete"
         };
+        if let Ok(Some((canonical_doc_id, (cid, block, col_data)))) = &result {
+            self.register_ordered_update_event(
+                &mut txn,
+                collection_name,
+                &collection,
+                canonical_doc_id.to_string(),
+                *cid,
+                block.clone(),
+                col_data.clone(),
+            )?;
+        }
         let deleted = self
             .finish_mutation(txn, result, collection_name, operation)
             .await?;
@@ -148,14 +159,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         };
 
         let (cid, block, col_data) = commit_result;
-        self.emit_update_events(
-            &collection,
-            &canonical_doc_id.to_string(),
-            cid,
-            block.clone(),
-            col_data.clone(),
-        );
-
         let mut result = DeleteResult::with_commit(canonical_doc_id, true, cid, block);
         if let Some((col_cid, col_bytes)) = col_data {
             result.broadcast_cid = Some(col_cid);
@@ -201,7 +204,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             })?;
 
         // Single transaction for all deletes
-        let txn = self.new_mutation_txn().await?;
+        let mut txn = self.new_mutation_txn().await?;
         self.db
             .check_node_access_in_txn(
                 txn.acpstore().map_err(crate::error::commit_query_error)?,
@@ -325,6 +328,20 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             results.push((canonical_doc_id, existed, commit_result));
         }
 
+        for (doc_id, _, commit_result) in &results {
+            if let Some((cid, block, col_data)) = commit_result {
+                self.register_ordered_update_event(
+                    &mut txn,
+                    collection_name,
+                    &collection,
+                    doc_id.to_string(),
+                    *cid,
+                    block.clone(),
+                    col_data.clone(),
+                )?;
+            }
+        }
+
         // Single commit for entire batch
         if let Err(e) = txn.commit().await {
             warn!(
@@ -337,10 +354,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
         // Emit events after commit, only when blocks were written.
         let mut delete_results = Vec::with_capacity(results.len());
-        for (doc_id, existed, commit_result) in results {
-            if let Some((cid, block, col_data)) = commit_result {
-                self.emit_update_events(&collection, &doc_id.to_string(), cid, block, col_data);
-            }
+        for (doc_id, existed, _commit_result) in results {
             delete_results.push(DeleteResult::new(doc_id, existed));
         }
 

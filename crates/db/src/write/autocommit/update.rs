@@ -181,7 +181,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
         let embedding_config = self.db.options().embedding_config();
 
-        let txn = fresh_fetcher.take_txn().await.ok_or_else(|| {
+        let mut txn = fresh_fetcher.take_txn().await.ok_or_else(|| {
             query::error::QueryError::execution("update transaction already consumed")
         })?;
         drop(fresh_fetcher);
@@ -321,20 +321,20 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         drop(blockstore);
         drop(headstore);
 
-        let commit_result = self
-            .finish_mutation(txn, result, collection_name, "update")
-            .await?;
-
-        if let Some(doc_id) = doc.id() {
-            let (cid, block, col_data) = &commit_result;
-            self.emit_update_events(
+        if let (Some(doc_id), Ok((cid, block, col_data))) = (doc.id(), &result) {
+            self.register_ordered_update_event(
+                &mut txn,
+                collection_name,
                 &collection,
-                &doc_id.to_string(),
+                doc_id.to_string(),
                 *cid,
                 block.clone(),
                 col_data.clone(),
-            );
+            )?;
         }
+        let commit_result = self
+            .finish_mutation(txn, result, collection_name, "update")
+            .await?;
 
         // Count modified fields
         let fields_modified = doc.values().len();

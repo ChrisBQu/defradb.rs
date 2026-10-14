@@ -59,7 +59,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .doc_write_queue()
             .acquire_arrival(collection.collection_id())
             .await;
-        let txn = self.new_mutation_txn().await?;
+        let mut txn = self.new_mutation_txn().await?;
         self.db
             .check_node_access_in_txn(
                 txn.acpstore().map_err(crate::error::commit_query_error)?,
@@ -181,21 +181,21 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         drop(blockstore);
         drop(headstore);
 
+        if let Ok((doc_id, cid, block, col_data)) = &result {
+            self.register_created_doc_with_acp(&mut txn, &collection, doc_id.to_string())?;
+            self.register_ordered_update_event(
+                &mut txn,
+                collection_name,
+                &collection,
+                doc_id.to_string(),
+                *cid,
+                block.clone(),
+                col_data.clone(),
+            )?;
+        }
         let (doc_id, cid, block, col_data) = self
             .finish_mutation(txn, result, collection_name, "create")
             .await?;
-
-        self.register_created_doc_with_acp(&collection, &doc_id.to_string())
-            .await?;
-
-        // Emit update event for subscriptions
-        self.emit_update_events(
-            &collection,
-            &doc_id.to_string(),
-            cid,
-            block.clone(),
-            col_data.clone(),
-        );
 
         doc.clear_write_preparation();
         let mut result = CreateResult::with_commit(doc_id, doc, cid, block);
@@ -272,7 +272,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .doc_write_queue()
             .acquire_arrival(collection.collection_id())
             .await;
-        let txn = self.new_mutation_txn().await?;
+        let mut txn = self.new_mutation_txn().await?;
         self.db
             .check_node_access_in_txn(
                 txn.acpstore().map_err(crate::error::commit_query_error)?,
@@ -455,6 +455,21 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             ));
         }
 
+        for (doc_id, _, _, _, _) in &results {
+            self.register_created_doc_with_acp(&mut txn, &collection, doc_id.to_string())?;
+        }
+        for (doc_id, _, cid, block, col_data) in &results {
+            self.register_ordered_update_event(
+                &mut txn,
+                collection_name,
+                &collection,
+                doc_id.to_string(),
+                *cid,
+                block.clone(),
+                col_data.clone(),
+            )?;
+        }
+
         // Commit ONCE for the entire batch
         if let Err(e) = txn.commit().await {
             warn!(
@@ -465,22 +480,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             return Err(crate::error::commit_query_error(e));
         }
 
-        for (doc_id, ..) in &results {
-            self.register_created_doc_with_acp(&collection, &doc_id.to_string())
-                .await?;
-        }
-
         // Emit events and build results
         let mut create_results = Vec::with_capacity(results.len());
         for (doc_id, mut doc, cid, block, col_data) in results {
-            self.emit_update_events(
-                &collection,
-                &doc_id.to_string(),
-                cid,
-                block.clone(),
-                col_data.clone(),
-            );
-
             doc.clear_write_preparation();
             let mut result = CreateResult::with_commit(doc_id, doc, cid, block);
             if let Some((col_cid, col_bytes)) = col_data {
