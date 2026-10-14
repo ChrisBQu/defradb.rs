@@ -328,11 +328,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         // No per-doc write guard for creates: the DocID is derived from the
         // genesis block inside the txn, so no identity exists to guard yet.
         // The DocID-mapping duplicate check is the gate.
-        let _arrival_guard = self
-            .db
-            .doc_write_queue()
-            .acquire_arrival(collection.collection_id())
-            .await;
         let attempt = CreateRetryAttempt {
             db: Arc::clone(&self.db),
             collection_name: collection_name.to_string(),
@@ -611,11 +606,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         // the txn; the DocID-mapping duplicate check is the gate.
 
         // === Phase 2: Prepare identities, keys, and deterministic blocks ===
-        let _arrival_guard = self
-            .db
-            .doc_write_queue()
-            .acquire_arrival(collection.collection_id())
-            .await;
 
         let mut identities = Vec::with_capacity(prepared_docs.len());
         for doc in &mut prepared_docs {

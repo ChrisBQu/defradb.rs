@@ -306,10 +306,6 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
         for collection_id in &batch_collection_ids {
             _collection_guards.push(self.db.collection_read_guard(collection_id).await?);
         }
-        let mut _arrival_guards = Vec::with_capacity(batch_collection_ids.len());
-        for collection_id in &batch_collection_ids {
-            _arrival_guards.push(self.merge_queue.acquire_arrival(collection_id).await);
-        }
         let mut batch_doc_ids: Vec<String> =
             blocks.iter().map(|block| block.doc_id.clone()).collect();
         batch_doc_ids.sort();
