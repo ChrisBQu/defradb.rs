@@ -1,8 +1,10 @@
 use db::DB;
-use db::{AutoCommitMutator, DbDocMutator};
+use db::{AutoCommitMutator, DbDocFetcher, DbDocMutator};
 use document::Document;
 use document::NormalValue;
 use query::mutator::DocMutator;
+use query::planner::index_selection::{IndexScanParams, IndexScanType};
+use query::runner::DocFetcher;
 use rapidhash::RapidHashSet;
 use schema::CollectionVersion;
 use schema::FieldDescription;
@@ -144,6 +146,75 @@ async fn explicit_disjoint_field_updates_on_one_document_both_commit() {
         .unwrap();
     assert_eq!(result.get("left"), Some(&NormalValue::Int(1)));
     assert_eq!(result.get("right"), Some(&NormalValue::Int(1)));
+}
+
+#[tokio::test]
+async fn stale_update_uses_fresh_unmodified_composite_index_component() {
+    let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).expect("create db"));
+    db.create_collection(
+        test_collection().with_index(
+            IndexDescription::new("by_left_right")
+                .with_field("left", false)
+                .with_field("right", false),
+        ),
+    )
+    .await
+    .expect("schema");
+    let mutator = AutoCommitMutator::new(Arc::clone(&db));
+    let created = mutator
+        .create(
+            "Patch",
+            Document::from_json_str(r#"{"left": 0, "right": 0}"#).unwrap(),
+        )
+        .await
+        .expect("create document");
+    let stale = mutator
+        .get_for_update("Patch", &created.doc_id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let mut right_update = stale.clone();
+    right_update.set("right", NormalValue::Int(1));
+    mutator
+        .update(
+            "Patch",
+            right_update,
+            RapidHashSet::from_iter(["right".to_string()]),
+        )
+        .await
+        .unwrap();
+
+    let mut left_update = stale;
+    left_update.set("left", NormalValue::Int(2));
+    mutator
+        .update(
+            "Patch",
+            left_update,
+            RapidHashSet::from_iter(["left".to_string()]),
+        )
+        .await
+        .unwrap();
+
+    let txn = db.new_txn(true).await.unwrap();
+    let indexed_ids = DbDocFetcher::new(txn)
+        .get_by_index_scan(
+            "Patch",
+            &IndexScanParams {
+                index_name: "by_left_right".to_string(),
+                scan_type: IndexScanType::ExactMatch {
+                    values: vec![NormalValue::Int(2), NormalValue::Int(1)],
+                },
+                limit: None,
+                offset: 0,
+                value_filter: None,
+                cursor_seek: None,
+            },
+        )
+        .await
+        .expect("exact composite index lookup")
+        .into_doc_ids();
+    assert_eq!(indexed_ids, vec![created.doc_id.to_string()]);
 }
 
 #[tokio::test]
