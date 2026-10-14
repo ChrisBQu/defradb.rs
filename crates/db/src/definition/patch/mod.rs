@@ -104,10 +104,6 @@ impl<S: Store> crate::database::DB<S> {
         let actual_name = old_schema.name.clone();
         let old_version_id = old_schema.version_id.clone();
         let collection_id = old_schema.collection_id.clone();
-        let _collection_guards = self
-            .collection_write_guards(std::iter::once(collection_id.clone()))
-            .await?;
-
         // Collect known collection names for Kind validation
         let known_collection_names: Vec<String> = self
             .list_collections()
@@ -306,21 +302,23 @@ impl<S: Store> crate::database::DB<S> {
                         .map_err(Error::Storage)?;
                 }
             }
+            let cached_collection =
+                Collection::load_index_actions(new_schema.clone(), &txn.systemstore()?).await?;
+            let collections = std::sync::Arc::clone(&self.collections);
+            let registered_name = actual_name.clone();
+            let active = new_schema.is_active;
+            txn.on_success_ordered(std::sync::Arc::new(move || {
+                collections.rcu(|old| {
+                    let mut cache = old.clone();
+                    if active {
+                        cache.put_named(&registered_name, cached_collection.clone());
+                    } else {
+                        cache.remove(&registered_name);
+                    }
+                    cache
+                });
+            }))?;
             txn.commit().await?;
-
-            // Update cache
-            let cached_collection = self
-                .collection_with_index_actions(new_schema.clone())
-                .await?;
-            self.collections.rcu(|old| {
-                let mut cache = old.clone();
-                if new_schema.is_active {
-                    cache.put_named(actual_name.as_str(), cached_collection.clone());
-                } else {
-                    cache.remove(actual_name.as_str());
-                }
-                cache
-            });
 
             tracing::info!(
                 collection = %actual_name,

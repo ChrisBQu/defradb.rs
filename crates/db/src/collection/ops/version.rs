@@ -22,11 +22,11 @@ impl<S: Store> crate::database::DB<S> {
         }
 
         // Load the target collection from persistent store by version_id
-        let txn = self.new_txn(false).await?;
+        let mut txn = self.new_txn(false).await?;
 
         // Extract the target schema and perform all systemstore operations in a block
         // so the systemstore reference is dropped before calling txn.commit()
-        let (target_schema, name, _collection_guards) = {
+        let (target_schema, name) = {
             let systemstore = txn.systemstore()?;
 
             let collection_key = CollectionKey::new(version_id);
@@ -61,9 +61,6 @@ impl<S: Store> crate::database::DB<S> {
 
             let name = target_schema.name.clone();
             let collection_id = target_schema.collection_id.clone();
-            let collection_guards = self
-                .collection_write_guards(std::iter::once(collection_id.clone()))
-                .await?;
 
             // Update target to be active
             target_schema.is_active = true;
@@ -121,20 +118,21 @@ impl<S: Store> crate::database::DB<S> {
             }
             iter.close().await.map_err(Error::Storage)?;
 
-            (target_schema, name, collection_guards)
+            (target_schema, name)
         };
 
+        let collection =
+            Collection::load_index_actions(target_schema.clone(), &txn.systemstore()?).await?;
+        let cache = std::sync::Arc::clone(&self.collections);
+        let registered_name = name.clone();
+        txn.on_success_ordered(std::sync::Arc::new(move || {
+            cache.rcu(|old| {
+                let mut cache = old.clone();
+                cache.put_named(registered_name.as_str(), collection.clone());
+                cache
+            });
+        }))?;
         txn.commit().await?;
-        let collection = self
-            .collection_with_index_actions(target_schema.clone())
-            .await?;
-
-        // Update the process-wide cache (scoped to drop lock before reindex)
-        self.collections.rcu(|old| {
-            let mut cache = old.clone();
-            cache.put_named(name.as_str(), collection.clone());
-            cache
-        });
 
         tracing::info!(
             collection_name = %name,
@@ -310,7 +308,7 @@ impl<S: Store> crate::database::DB<S> {
         }
 
         // Perform the actual deletion
-        let txn = self.new_txn(false).await?;
+        let mut txn = self.new_txn(false).await?;
         {
             let systemstore = txn.systemstore()?;
 
@@ -355,16 +353,20 @@ impl<S: Store> crate::database::DB<S> {
             }
         }
 
+        if target_schema.is_active {
+            let cache = std::sync::Arc::clone(&self.collections);
+            let name_for_cache = name.clone();
+            txn.on_success_ordered(std::sync::Arc::new(move || {
+                cache.rcu(|old| {
+                    let mut cache = old.clone();
+                    cache.remove(&name_for_cache);
+                    cache
+                });
+            }))?;
+        }
         txn.commit().await?;
 
-        // 5. Remove from in-memory cache if active
-        if target_schema.is_active {
-            self.collections.rcu(|old| {
-                let mut cache = old.clone();
-                cache.remove(&name);
-                cache
-            });
-        }
+        // 5. Remove from in-memory cache if active (ordered callback above).
         if is_deleting_last_local_version {
             self.forbid_collection_id(&collection_id)?;
         }
@@ -405,14 +407,6 @@ impl<S: Store> crate::database::DB<S> {
                 return Err(Error::CollectionVersionNotFound(version_id.clone()));
             }
         }
-
-        let _collection_guards = self
-            .collection_write_guards(version_ids.iter().filter_map(|version_id| {
-                version_map
-                    .get(version_id.as_str())
-                    .map(|version| version.collection_id.clone())
-            }))
-            .await?;
 
         for version in &all_versions {
             if deleting_versions.contains(version.version_id.as_str()) {

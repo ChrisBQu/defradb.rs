@@ -56,6 +56,7 @@ impl<S: Store> crate::database::DB<S> {
     /// - Auto-determining primary sides for one-to-many relations
     #[instrument(skip(self), name = "db.load_collections")]
     pub async fn load_collections(&self) -> Result<()> {
+        let cache_epoch = self.collections.epoch();
         let txn = self.new_txn(true).await?;
         let prefix = CollectionNameKey::name_prefix();
         let mut schemas: rapidhash::RapidHashMap<String, CollectionVersion> =
@@ -216,8 +217,8 @@ impl<S: Store> crate::database::DB<S> {
                 })
                 .collect();
 
-            self.collections.rcu(|old| {
-                let mut cache = old.clone();
+            let published = self.collections.rcu_if_epoch(cache_epoch, |_| {
+                let mut cache = crate::collection::CollectionMap::default();
                 // Cached under the name the index was read from: a schema's
                 // own name can differ until the name index moves, and the
                 // cache must answer the name that is registered.
@@ -226,6 +227,9 @@ impl<S: Store> crate::database::DB<S> {
                 }
                 cache
             });
+            if !published {
+                tracing::debug!("Discarded stale collection cache reload");
+            }
 
             tracing::info!(collection_count = loaded.len(), "Loaded collections");
         }

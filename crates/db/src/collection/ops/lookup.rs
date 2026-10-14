@@ -43,10 +43,12 @@ impl<S: Store> crate::database::DB<S> {
         result
     }
 
+    /// Offer a previously committed definition to the runtime cache.
+    /// Transactional merge paths register this publication on their ordered
+    /// commit callback; this helper is retained for explicit cache refreshes.
     pub async fn add_collection_to_cache(&self, schema: CollectionVersion) -> Result<Cached> {
         let name = schema.name.clone();
         let collection = self.collection_with_index_actions(schema.clone()).await?;
-
         let offered = schema.collection_id.clone();
         let mut cached = Cached::Taken;
         self.collections.rcu(|old| {

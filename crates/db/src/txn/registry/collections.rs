@@ -90,12 +90,8 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         crate::collection::populate_collection_root_id(&systemstore, &mut target).await?;
         let was_active = target.is_active;
 
-        self.db
-            .acquire_collection_write_locks_for_txn(
-                txn,
-                std::iter::once(target.collection_id.clone()),
-            )
-            .await?;
+        // The exact CollectionKey read above is a commit dependency. Document
+        // writes read that same key, so a concurrent schema change conflicts.
 
         if was_active && !is_active && target.is_materialized {
             let datastore = txn.datastore()?;
@@ -200,7 +196,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
 
         let db = self.db.clone();
         let committed = Collection::load_index_actions(target.clone(), &txn.systemstore()?).await?;
-        txn.on_success(Box::new(move || {
+        txn.on_success_ordered(Arc::new(move || {
             db.collections.rcu(|old| {
                 let mut cache = old.clone();
                 if committed.schema().is_active {
@@ -334,15 +330,8 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
             ));
         }
 
-        self.db
-            .acquire_collection_write_locks_for_txn(
-                txn,
-                versions
-                    .iter()
-                    .filter(|version| deleting.contains(&version.version_id))
-                    .map(|version| version.collection_id.clone()),
-            )
-            .await?;
+        // Deletion writes every selected CollectionKey and active name key;
+        // document writers read those same keys before staging their writes.
 
         let datastore = txn.datastore()?;
         for version in versions
@@ -428,7 +417,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         drop(blockstore);
 
         let db = self.db.clone();
-        txn.on_success(Box::new(move || {
+        txn.on_success_ordered(Arc::new(move || {
             db.collections.rcu(|old| {
                 let mut cache = old.clone();
                 for name in &removed_names {
@@ -436,8 +425,8 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
                 }
                 cache
             });
-            for collection_id in removed_collection_ids {
-                let _ = db.forbid_collection_id(&collection_id);
+            for collection_id in &removed_collection_ids {
+                let _ = db.forbid_collection_id(collection_id);
             }
         }))?;
 

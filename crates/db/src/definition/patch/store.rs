@@ -500,11 +500,30 @@ impl<S: Store> crate::database::DB<S> {
         if let Ok(new_cid) = cid::Cid::try_from(new_version_id.as_str()) {
             let schema_heads = std::sync::Arc::clone(&self.schema_heads);
             let head_name = actual_name.to_string();
-            txn.on_success(Box::new(move || {
-                schema_heads.insert(head_name, (vec![new_cid], collection_priority));
+            txn.on_success_ordered(std::sync::Arc::new(move || {
+                schema_heads.insert(head_name.clone(), (vec![new_cid], collection_priority));
             }))?;
         }
 
+        let collections = std::sync::Arc::clone(&self.collections);
+        let registered_name = actual_name.to_string();
+        let active = new_schema.is_active;
+        let cached_collection = if active {
+            Some(Collection::load_index_actions(new_schema.clone(), &txn.systemstore()?).await?)
+        } else {
+            None
+        };
+        txn.on_success_ordered(std::sync::Arc::new(move || {
+            collections.rcu(|old| {
+                let mut cache = old.clone();
+                if let Some(collection) = &cached_collection {
+                    cache.put_named(&registered_name, collection.clone());
+                } else {
+                    cache.remove(&registered_name);
+                }
+                cache
+            });
+        }))?;
         txn.commit().await?;
 
         if let Some((transform_id, config)) = committed_migration {
@@ -524,23 +543,6 @@ impl<S: Store> crate::database::DB<S> {
 
         // Clean up any pending migration that was linked to this version
         self.pending_migrations.remove(&new_version_id);
-
-        // Update cache based on which version is active.
-        // An inactive new version leaves the old version cached, as it already is.
-        if new_schema.is_active {
-            // Cached under the actual collection name — the same name the
-            // name index, schema_heads and the reindex switch were written
-            // under — not new_schema.name, which for a placeholder rename
-            // has not become the registered name yet.
-            let cached_collection = self
-                .collection_with_index_actions(new_schema.clone())
-                .await?;
-            self.collections.rcu(|old| {
-                let mut cache = old.clone();
-                cache.put_named(actual_name, cached_collection.clone());
-                cache
-            });
-        }
 
         // Cross-collection one-to-one index creation.
         // When collections are patched sequentially (e.g., Author then Book), the
@@ -636,7 +638,7 @@ impl<S: Store> crate::database::DB<S> {
 
             if needs_update {
                 // Store updated schema with new indexes
-                let txn = self.new_txn(false).await?;
+                let mut txn = self.new_txn(false).await?;
                 let key = CollectionKey::new(&updated_schema.version_id);
                 let data = serde_json::to_vec(&updated_schema).map_err(|e| {
                     Error::collection_schema_json(
@@ -654,15 +656,19 @@ impl<S: Store> crate::database::DB<S> {
                         .await
                         .map_err(Error::Storage)?;
                 }
+                let cached_collection =
+                    Collection::load_index_actions(updated_schema.clone(), &txn.systemstore()?)
+                        .await?;
+                let collections = std::sync::Arc::clone(&self.collections);
+                let registered_name = coll_name.to_string();
+                txn.on_success_ordered(std::sync::Arc::new(move || {
+                    collections.rcu(|old| {
+                        let mut cache = old.clone();
+                        cache.put_named(&registered_name, cached_collection.clone());
+                        cache
+                    });
+                }))?;
                 txn.commit().await?;
-
-                // Update cache
-                let cached_collection = self.collection_with_index_actions(updated_schema).await?;
-                self.collections.rcu(|old| {
-                    let mut cache = old.clone();
-                    cache.put_named(coll_name, cached_collection.clone());
-                    cache
-                });
             }
         }
 

@@ -175,7 +175,7 @@ pub struct DB<S: Store> {
     /// Whether the database has been closed.
     closed: AtomicBool,
     /// In-memory collection cache (name -> Collection).
-    pub(crate) collections: crate::collection::epoch::EpochedCollections,
+    pub(crate) collections: Arc<crate::collection::epoch::EpochedCollections>,
     /// PQ codes of resident-codes DiskANN indexes, shared by every search.
     vector_codes: Arc<crate::index::vector::engine::diskann::CodeCaches>,
     /// Event bus for subscription notifications.
@@ -232,8 +232,6 @@ pub struct DB<S: Store> {
     /// behind. The registry provides cancellation-safe mutual exclusion for
     /// operations running in this database instance.
     pub active_actions: Arc<crate::database::action::ActionRegistry>,
-    /// Per-collection locks coordinating document writes with schema changes.
-    pub(crate) collection_locks: HopscotchMap<String, Arc<async_lock::RwLock<()>>, RandomState>,
 }
 
 impl<S: Store> DB<S> {
@@ -261,9 +259,9 @@ impl<S: Store> DB<S> {
             document_head_prune_tick: AtomicU64::new(0),
             migration_generation: AtomicU64::new(0),
             closed: AtomicBool::new(false),
-            collections: crate::collection::epoch::EpochedCollections::new(
+            collections: Arc::new(crate::collection::epoch::EpochedCollections::new(
                 crate::collection::CollectionMap::default(),
-            ),
+            )),
             vector_codes: Arc::default(),
             event_bus: None,
             lens_store,
@@ -277,7 +275,6 @@ impl<S: Store> DB<S> {
             merge_governance: std::sync::OnceLock::new(),
             local_commit_release: std::sync::OnceLock::new(),
             active_actions: Arc::new(crate::database::action::ActionRegistry::default()),
-            collection_locks: HopscotchMap::with_hasher(RandomState::default()),
         })
     }
 
@@ -330,9 +327,9 @@ impl<S: Store> DB<S> {
             document_head_prune_tick: AtomicU64::new(0),
             migration_generation: AtomicU64::new(0),
             closed: AtomicBool::new(false),
-            collections: crate::collection::epoch::EpochedCollections::new(
+            collections: Arc::new(crate::collection::epoch::EpochedCollections::new(
                 crate::collection::CollectionMap::default(),
-            ),
+            )),
             vector_codes: Arc::default(),
             event_bus: None,
             lens_store,
@@ -346,7 +343,6 @@ impl<S: Store> DB<S> {
             merge_governance: std::sync::OnceLock::new(),
             local_commit_release: std::sync::OnceLock::new(),
             active_actions: Arc::new(crate::database::action::ActionRegistry::default()),
-            collection_locks: HopscotchMap::with_hasher(RandomState::default()),
         })
     }
 

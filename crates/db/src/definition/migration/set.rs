@@ -44,7 +44,7 @@ impl<S: Store> DB<S> {
         let source_version_id = config.source_schema_version_id.clone();
         let config_for_persistence = config.clone();
 
-        let txn = self.new_txn(false).await?;
+        let mut txn = self.new_txn(false).await?;
 
         let (source_col, mut dst_col) = {
             let systemstore = txn.systemstore()?;
@@ -222,22 +222,30 @@ impl<S: Store> DB<S> {
                 .await
                 .map_err(Error::Storage)?;
         }
+        if !collection_name.is_empty() {
+            let cached_collection = crate::collection::Collection::load_index_actions(
+                dst_col.clone(),
+                &txn.systemstore()?,
+            )
+            .await?;
+            let collections = std::sync::Arc::clone(&self.collections);
+            let collection_name = collection_name.clone();
+            let dest_version_id = dest_version_id.clone();
+            txn.on_success_ordered(std::sync::Arc::new(move || {
+                collections.rcu(|old| {
+                    let mut cache = old.clone();
+                    let matches_dest = cache
+                        .get(collection_name.as_str())
+                        .is_some_and(|cached| cached.schema().version_id == dest_version_id);
+                    if matches_dest {
+                        cache.put_named(collection_name.as_str(), cached_collection.clone());
+                    }
+                    cache
+                });
+            }))?;
+        }
         txn.commit().await?;
         self.bump_migration_generation();
-
-        if !collection_name.is_empty() {
-            let cached_collection = self.collection_with_index_actions(dst_col.clone()).await?;
-            self.collections.rcu(|old| {
-                let mut cache = old.clone();
-                let matches_dest = cache
-                    .get(collection_name.as_str())
-                    .is_some_and(|cached| cached.schema().version_id == dest_version_id);
-                if matches_dest {
-                    cache.put_named(collection_name.as_str(), cached_collection.clone());
-                }
-                cache
-            });
-        }
 
         if !collection_name.is_empty() {
             if let Err(e) = self

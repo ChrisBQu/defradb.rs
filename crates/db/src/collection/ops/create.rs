@@ -326,18 +326,18 @@ impl<S: Store> crate::database::DB<S> {
             );
         }
 
+        let collection =
+            Collection::load_index_actions(finalized_schema.clone(), &txn.systemstore()?).await?;
+        let cache = std::sync::Arc::clone(&self.collections);
+        txn.on_success_ordered(std::sync::Arc::new(move || {
+            cache.rcu(|old| {
+                let mut cache = old.clone();
+                cache.put(collection.clone());
+                cache
+            });
+        }))?;
         txn.commit().await?;
         self.unforbid_collection_id(finalized_schema.collection_id.as_str())?;
-
-        // Update the process-wide cache after successful commit
-        let collection = self
-            .collection_with_index_actions(finalized_schema.clone())
-            .await?;
-        self.collections.rcu(|old| {
-            let mut cache = old.clone();
-            cache.put(collection.clone());
-            cache
-        });
 
         Ok(finalized_schema)
     }
@@ -465,23 +465,25 @@ impl<S: Store> crate::database::DB<S> {
             txn.stage_collection_acp_registration(document_acp, creator, finalized_schemas.clone());
         }
 
+        let mut collections = Vec::with_capacity(finalized_schemas.len());
+        for schema in &finalized_schemas {
+            collections
+                .push(Collection::load_index_actions(schema.clone(), &txn.systemstore()?).await?);
+        }
+        let cache = std::sync::Arc::clone(&self.collections);
+        txn.on_success_ordered(std::sync::Arc::new(move || {
+            cache.rcu(|old| {
+                let mut cache = old.clone();
+                for collection in &collections {
+                    cache.put(collection.clone());
+                }
+                cache
+            });
+        }))?;
         txn.commit().await?;
         for schema in &finalized_schemas {
             self.unforbid_collection_id(schema.collection_id.as_str())?;
         }
-
-        // Update the process-wide cache after successful commit
-        let mut collections = Vec::with_capacity(finalized_schemas.len());
-        for schema in &finalized_schemas {
-            collections.push(self.collection_with_index_actions(schema.clone()).await?);
-        }
-        self.collections.rcu(|old| {
-            let mut cache = old.clone();
-            for collection in &collections {
-                cache.put(collection.clone());
-            }
-            cache
-        });
 
         Ok(finalized_schemas)
     }

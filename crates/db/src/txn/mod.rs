@@ -7,11 +7,9 @@
 use crate::collection::cache::CollectionCache;
 use crate::collection::{populate_collection_root_id, Collection};
 use crate::error::{Error, Result};
-use async_lock::{RwLockReadGuardArc, RwLockWriteGuardArc};
 use datastore::{AsyncCallback, BasicTxn, NamespaceView, RootView, TxnCallback};
 use rapidhash::{HashSetExt, RapidHashSet};
 use schema::CollectionVersion;
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::index::vector::engine::diskann::CodeCaches;
@@ -34,12 +32,6 @@ struct StatementSavepoint {
     collection_cache: CollectionCache,
     locally_created_collection_ids: RapidHashSet<String>,
     pending_collection_acp_registrations: Vec<PendingCollectionAcpRegistration>,
-    collection_guard_ids: Vec<String>,
-}
-
-enum CollectionGuard {
-    Read { _guard: RwLockReadGuardArc<()> },
-    Write { _guard: RwLockWriteGuardArc<()> },
 }
 
 impl PendingCollectionAcpRegistration {
@@ -95,8 +87,6 @@ pub struct DbTxn<S: Store> {
     collection_cache: CollectionCache,
     /// Collection IDs created inside this transaction.
     locally_created_collection_ids: RapidHashSet<String>,
-    /// Collection locks held until this transaction commits or rolls back.
-    collection_guards: BTreeMap<String, CollectionGuard>,
     /// Branchable collection ACP registrations that must succeed before the
     /// storage commit, otherwise a protected collection could be persisted
     /// without its collection-level ACP object.
@@ -116,7 +106,6 @@ impl<S: Store> DbTxn<S> {
             explicit: false,
             collection_cache: CollectionCache::new(),
             locally_created_collection_ids: RapidHashSet::new(),
-            collection_guards: BTreeMap::new(),
             pending_collection_acp_registrations: Vec::new(),
             vector_codes: Arc::default(),
             statement_savepoint: None,
@@ -140,7 +129,6 @@ impl<S: Store> DbTxn<S> {
             explicit: true,
             collection_cache: CollectionCache::new(),
             locally_created_collection_ids: RapidHashSet::new(),
-            collection_guards: BTreeMap::new(),
             pending_collection_acp_registrations: Vec::new(),
             vector_codes: Arc::default(),
             statement_savepoint: None,
@@ -166,12 +154,8 @@ impl<S: Store> DbTxn<S> {
             .txn
             .take()
             .ok_or(storage::corekv::Error::DiscardedTxn)?;
-        let (io, mut callbacks) = txn.into_retry_attempt()?;
+        let (io, callbacks) = txn.into_retry_attempt()?;
 
-        let collection_guards = std::mem::take(&mut self.collection_guards);
-        if !collection_guards.is_empty() {
-            callbacks.push_sync(Box::new(move || drop(collection_guards)));
-        }
         Ok((io, callbacks))
     }
 
@@ -194,7 +178,6 @@ impl<S: Store> DbTxn<S> {
             collection_cache: self.collection_cache.clone(),
             locally_created_collection_ids: self.locally_created_collection_ids.clone(),
             pending_collection_acp_registrations: self.pending_collection_acp_registrations.clone(),
-            collection_guard_ids: self.collection_guards.keys().cloned().collect(),
         };
         self.txn
             .as_mut()
@@ -219,8 +202,6 @@ impl<S: Store> DbTxn<S> {
         self.collection_cache = snapshot.collection_cache;
         self.locally_created_collection_ids = snapshot.locally_created_collection_ids;
         self.pending_collection_acp_registrations = snapshot.pending_collection_acp_registrations;
-        self.collection_guards
-            .retain(|key, _| snapshot.collection_guard_ids.contains(key));
         Ok(())
     }
 
@@ -724,38 +705,74 @@ impl<S: Store> DbTxn<S> {
         self.locally_created_collection_ids.contains(collection_id)
     }
 
-    pub(crate) fn has_collection_guard(&self, collection_id: &str) -> bool {
-        self.collection_guards.contains_key(collection_id)
-    }
-
-    pub(crate) fn has_collection_write_guard(&self, collection_id: &str) -> bool {
-        matches!(
-            self.collection_guards.get(collection_id),
-            Some(CollectionGuard::Write { .. })
-        )
-    }
-
-    pub(crate) fn insert_collection_read_guard(
+    /// Validate the active collection name and immutable schema through this
+    /// transaction so concurrent DDL changes conflict at commit.
+    pub(crate) async fn validate_collection_for_write(
         &mut self,
-        collection_id: String,
-        guard: RwLockReadGuardArc<()>,
-    ) {
-        self.collection_guards
-            .entry(collection_id)
-            .or_insert(CollectionGuard::Read { _guard: guard });
+        collection: &Collection,
+    ) -> Result<()> {
+        let systemstore = self.systemstore()?;
+        let version_id = systemstore
+            .get(&CollectionNameKey::new(collection.name()).bytes())
+            .await
+            .map_err(Error::Storage)?
+            .and_then(|bytes| String::from_utf8(bytes.into()).ok());
+        if version_id.as_deref() != Some(collection.version_id()) {
+            return Err(Error::CollectionNotFound(collection.name().to_string()));
+        }
+        drop(systemstore);
+        self.validate_collection_schema_for_write(collection).await
     }
 
-    pub(crate) fn insert_collection_write_guard(
+    /// Validate an immutable schema key for a remote merge, even if it is not
+    /// the currently active version associated with its collection name.
+    pub(crate) async fn validate_collection_schema_for_write(
         &mut self,
-        collection_id: String,
-        guard: RwLockWriteGuardArc<()>,
-    ) {
-        self.collection_guards
-            .insert(collection_id, CollectionGuard::Write { _guard: guard });
-    }
-
-    pub(crate) fn remove_collection_guard(&mut self, collection_id: &str) {
-        self.collection_guards.remove(collection_id);
+        collection: &Collection,
+    ) -> Result<()> {
+        let systemstore = self.systemstore()?;
+        let schema_bytes = systemstore
+            .get(&CollectionKey::new(collection.version_id()).bytes())
+            .await
+            .map_err(Error::Storage)?
+            .ok_or_else(|| Error::CollectionNotFound(collection.name().to_string()))?;
+        let mut persisted_schema: CollectionVersion = serde_json::from_slice(&schema_bytes)
+            .map_err(|error| {
+                Error::collection_schema_json(
+                    format!("failed to deserialize schema for collection '{}'", collection.name()),
+                    error,
+                )
+            })?;
+        populate_collection_root_id(&systemstore, &mut persisted_schema).await?;
+        let mut cached_schema = collection.schema().clone();
+        cached_schema.indexes = cached_schema
+            .indexes
+            .into_iter()
+            .map(schema::IndexDescription::normalized)
+            .collect();
+        if persisted_schema != cached_schema {
+            return Err(Error::Other(format!(
+                "cached schema differs from persisted version '{}'",
+                collection.version_id()
+            )));
+        }
+        let persisted = Collection::load_index_actions(persisted_schema, &systemstore).await?;
+        let normalize = |indexes: &[schema::IndexDescription]| {
+            indexes
+                .iter()
+                .cloned()
+                .map(schema::IndexDescription::normalized)
+                .collect::<Vec<_>>()
+        };
+        if normalize(persisted.write_indexes()) != normalize(collection.write_indexes())
+            || normalize(persisted.queryable_indexes()) != normalize(collection.queryable_indexes())
+        {
+            return Err(Error::Other(format!(
+                "cached index actions differ for collection '{}'",
+                collection.name()
+            )));
+        }
+        Ok(())
     }
 
     /// Stage branchable collection ACP registration to run before commit.
@@ -814,7 +831,6 @@ impl<S: Store> DbTxn<S> {
         match self.txn.take() {
             Some(txn) => {
                 txn.commit().await.map_err(Error::Datastore)?;
-                self.release_collection_guards();
                 Ok(())
             }
             None => Err(Error::TxnNotActive),
@@ -833,7 +849,6 @@ impl<S: Store> DbTxn<S> {
         match self.txn.take() {
             Some(txn) => {
                 txn.discard().map_err(Error::Datastore)?;
-                self.release_collection_guards();
                 Ok(())
             }
             None => Err(Error::TxnNotActive),
@@ -856,7 +871,6 @@ impl<S: Store> DbTxn<S> {
         match self.txn.take() {
             Some(txn) => {
                 txn.commit().await.map_err(Error::Datastore)?;
-                self.release_collection_guards();
                 Ok(())
             }
             None => Err(Error::TxnNotActive),
@@ -870,23 +884,16 @@ impl<S: Store> DbTxn<S> {
         match self.txn.take() {
             Some(txn) => {
                 txn.discard().map_err(Error::Datastore)?;
-                self.release_collection_guards();
                 Ok(())
             }
             None => Err(Error::TxnNotActive),
         }
     }
 
-    /// Release mutation guards after the transaction is durably committed or discarded.
-    fn release_collection_guards(&mut self) {
-        self.collection_guards.clear();
-    }
-
     fn discard_active_txn(&mut self) -> Result<()> {
         match self.txn.take() {
             Some(txn) => {
                 let result = txn.discard().map_err(Error::Datastore);
-                self.release_collection_guards();
                 result
             }
             None => Err(Error::TxnNotActive),

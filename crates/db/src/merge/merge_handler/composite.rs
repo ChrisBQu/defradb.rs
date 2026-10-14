@@ -130,22 +130,6 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             }
         };
 
-        let collection = self
-            .block_collection(&payload.schema_version_id, metadata.collection_id)
-            .await?;
-        // Lock order: collection read guard, then merge queue, then transaction
-        // (matches local writes via DB::collection_read_guard); reversed, a
-        // truncate waiting on the write lock can deadlock against a write that
-        // holds this read guard while waiting on the merge queue.
-        let _collection_guard = match collection.as_ref() {
-            Some(collection) => Some(
-                self.db
-                    .collection_read_guard(collection.collection_id())
-                    .await?,
-            ),
-            None => None,
-        };
-
         self.process_composite_delta_locked(
             cid,
             block,
@@ -462,6 +446,11 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         collection_lookup: Option<Collection>,
     ) -> std::result::Result<MergeOutcome, MergeError> {
         let mut txn = self.db.new_txn(false).await?;
+        if let Some(collection) = collection_lookup.as_ref() {
+            txn.validate_collection_schema_for_write(collection)
+                .await
+                .map_err(MergeError::Database)?;
+        }
         let doc_short_id = {
             let collection = collection_lookup.as_ref().ok_or_else(|| {
                 MergeError::MissingMetadata(format!(

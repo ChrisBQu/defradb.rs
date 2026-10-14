@@ -1,8 +1,5 @@
-//! `DB::create_index`: the definition waits on the collection write guard,
-//! the documents that already exist are indexed in batches that hold no
-//! guard, writers landing meanwhile keep the index exact, a batch that read
-//! a document that changed underneath aborts, and a restart resumes an
-//! interrupted backfill.
+//! `DB::create_index`: schema reads and index definitions share the transaction
+//! validation path, while backfill remains restartable and exact.
 
 use rapidhash::RapidHashSet;
 use std::sync::Arc;
@@ -20,8 +17,6 @@ use storage::index::IndexIterator;
 use storage::keys::datastore::IndexDataStoreKey;
 use storage::keys::systemstore::{ActionProgressKey, CollectionKey, CollectionNameKey};
 use storage::RegolithStore;
-
-use crate::common::guard_events::{recorder, WRITE_HOLDING, WRITE_WAITING};
 
 fn users_schema(name: &str, version_id: &str, collection_id: &str) -> CollectionVersion {
     CollectionVersion::new(
@@ -208,68 +203,22 @@ async fn create_index_backfills_more_documents_than_a_batch_holds() {
     );
 }
 
-/// Stand in for a truncate, delete or patch by holding the collection write
-/// guard; the definition must wait on it, write nothing meanwhile, and land
-/// once it is released. The guard events are counted per collection: the
-/// test's own acquisition is the first waiting and holding pair.
 #[tokio::test]
-async fn create_index_waits_for_the_collection_write_guard() {
-    const COLLECTION_ID: &str = "col-index-guard";
-    let recorder = recorder();
-    let (_store, db) = open_with_collection("Guarded", "guarded-v1", COLLECTION_ID).await;
+async fn create_index_commits_schema_and_publishes_cache() {
+    let (_store, db) = open_with_collection("Guarded", "guarded-v1", "col-index-guard").await;
     create_user(&AutoCommitMutator::new(db.clone()), "Guarded", "ada").await;
 
-    let guards = db
-        .collection_write_guards(std::iter::once(COLLECTION_ID.to_string()))
+    let (fields, kind) = by_name();
+    let index = db
+        .create_index("Guarded", Some("by_name"), fields, kind)
         .await
         .unwrap();
-    assert_eq!(recorder.count(COLLECTION_ID, WRITE_HOLDING), 1);
-
-    let creator = db.clone();
-    let mut task = tokio::spawn(async move {
-        let (fields, kind) = by_name();
-        creator
-            .create_index("Guarded", Some("by_name"), fields, kind)
-            .await
-    });
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while recorder.count(COLLECTION_ID, WRITE_WAITING) < 2 {
-        if task.is_finished() {
-            let outcome = (&mut task).await;
-            panic!("index creation ended without waiting on the collection guard: {outcome:?}");
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "index creation never reached the collection guard"
-        );
-        tokio::task::yield_now().await;
-    }
-    for _ in 0..64 {
-        tokio::task::yield_now().await;
-    }
-
-    assert_eq!(
-        recorder.count(COLLECTION_ID, WRITE_HOLDING),
-        1,
-        "index creation must not acquire the collection guard while it is held"
-    );
-    assert!(!task.is_finished());
-    assert!(
-        db.require_collection("Guarded")
-            .unwrap()
-            .get_indexes()
-            .is_empty(),
-        "no definition may land while the guard is held"
-    );
-
-    drop(guards);
-
-    let index = task
-        .await
-        .expect("index creation panicked")
-        .expect("index creation should succeed once the guard is released");
-    assert_eq!(recorder.count(COLLECTION_ID, WRITE_HOLDING), 2);
+    assert!(db
+        .require_collection("Guarded")
+        .unwrap()
+        .get_indexes()
+        .iter()
+        .any(|cached| cached.id == index.id));
     assert_eq!(index_entries(&db, "Guarded", index.id).await, 1);
 }
 

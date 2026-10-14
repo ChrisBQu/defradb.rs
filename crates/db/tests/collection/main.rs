@@ -10,6 +10,7 @@ mod map;
 mod name;
 mod retriever;
 mod selector;
+mod schema_write_conflicts;
 mod snapshot;
 mod stream;
 mod truncate;

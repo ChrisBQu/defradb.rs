@@ -212,7 +212,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         }
 
         // Store in systemstore
-        let txn = self.db.new_txn(false).await.map_err(MergeError::Database)?;
+        let mut txn = self.db.new_txn(false).await.map_err(MergeError::Database)?;
         {
             let systemstore = txn.systemstore().map_err(MergeError::Database)?;
             schema.root_id = crate::collection::ensure_persisted_collection_short_id(
@@ -245,8 +245,6 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                     MergeError::Storage(format!("Failed to store version index: {}", e))
                 })?;
         }
-        txn.commit().await.map_err(MergeError::Database)?;
-
         // Add to runtime cache so it's visible via list_collections/get_collection.
         // Synced collections are inactive but still need to be in the cache for
         // GetCollections with GetInactive=true to find them.
@@ -270,12 +268,28 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                 .map(|existing| uncarried_commitments(existing.schema(), &schema))
                 .unwrap_or_default(),
         };
-        let cached = if uncarried.is_empty() {
-            self.db
-                .add_collection_to_cache(schema.clone())
-                .await
-                .map_err(MergeError::Database)?
-                == crate::collection::Cached::Taken
+        let cache_result = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        if uncarried.is_empty() {
+            let collection = crate::collection::Collection::load_index_actions(
+                schema.clone(),
+                &txn.systemstore().map_err(MergeError::Database)?,
+            )
+            .await
+            .map_err(MergeError::Database)?;
+            let collections = std::sync::Arc::clone(&self.db.collections);
+            let cache_result_for_commit = cache_result.clone();
+            txn.on_success_ordered(std::sync::Arc::new(move || {
+                collections.rcu(|old| {
+                    let mut cache = old.clone();
+                    let offered = cache.offer(collection.clone());
+                    cache_result_for_commit.store(
+                        offered == crate::collection::Cached::Taken,
+                        std::sync::atomic::Ordering::Release,
+                    );
+                    cache
+                });
+            }))
+            .map_err(MergeError::Database)?;
         } else {
             tracing::warn!(
                 collection_name = %collection_name,
@@ -284,8 +298,9 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                 "Synced collection definition kept out of the cache: it cannot carry what the \
                  collection of that name already commits to"
             );
-            false
-        };
+        }
+        txn.commit().await.map_err(MergeError::Database)?;
+        let cached = cache_result.load(std::sync::atomic::Ordering::Acquire);
 
         tracing::debug!(
             collection_name = %collection_name,

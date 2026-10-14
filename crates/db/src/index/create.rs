@@ -1,6 +1,6 @@
-//! Index creation: the definition and its `BACKFILL_INDEX` action commit
-//! under the collection's write guard; the documents that already exist are
-//! indexed afterwards by the batches in [`backfill`](crate::index::backfill).
+//! Index creation commits a schema-version dependency and its `BACKFILL_INDEX`
+//! action; the documents that already exist are indexed afterwards by the
+//! batches in [`backfill`](crate::index::backfill).
 
 use std::sync::Arc;
 
@@ -61,18 +61,13 @@ impl<S: Store> DB<S> {
         fields: Vec<IndexedFieldDescription>,
         kind: IndexKind,
     ) -> Result<(IndexDescription, ActionExecutionLease, BackfillPlan)> {
-        let collection_id = self
-            .require_collection(collection_name)?
-            .collection_id()
-            .to_string();
-        let _guards = self
-            .collection_write_guards(std::iter::once(collection_id.clone()))
-            .await?;
         let collection = self.require_collection(collection_name)?;
+        let collection_id = collection.collection_id().to_string();
         let fence = self.peek_doc_short_id().await?;
 
-        let txn = self.new_txn(false).await?;
-        let (index, lease) = {
+        let mut txn = self.new_txn(false).await?;
+        txn.validate_collection_for_write(&collection).await?;
+        let (index, lease, committed_schema) = {
             let datastore = txn.datastore()?;
             let systemstore = txn.systemstore()?;
             let mut manager = IndexManager::from_collection(
@@ -118,11 +113,23 @@ impl<S: Store> DB<S> {
             systemstore
                 .set(&plan.progress_key().bytes(), &encode_progress(fence, 0))
                 .await?;
-            (index, lease)
+            (index, lease, schema)
         };
+        let cached_collection = crate::collection::Collection::load_index_actions(
+            committed_schema,
+            &txn.systemstore()?,
+        )
+        .await?;
+        let cache = std::sync::Arc::clone(&self.collections);
+        txn.on_success_ordered(std::sync::Arc::new(move || {
+            cache.rcu(|old| {
+                let mut cache = old.clone();
+                cache.put(cached_collection.clone());
+                cache
+            });
+        }))?;
         txn.commit().await?;
         self.publish_started_action(&lease);
-        self.reload_cache().await?;
         let plan = BackfillPlan::new(collection_name, &collection_id, &index, fence, 0);
         Ok((index, lease, plan))
     }

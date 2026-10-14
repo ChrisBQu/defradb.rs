@@ -195,6 +195,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .map_err(|error| crate::error::commit_query_error(error.into()))?;
         let basic_txn = datastore::BasicTxn::from_retry_attempt_io(io, 0);
         let mut txn = self.db.new_db_txn(basic_txn);
+        txn.validate_collection_for_write(&attempt.collection)
+            .await
+            .map_err(crate::error::commit_query_error)?;
 
         self.db
             .check_node_access_in_txn(
@@ -419,6 +422,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .map_err(|error| crate::error::commit_query_error(error.into()))?;
         let basic_txn = datastore::BasicTxn::from_retry_attempt_io(io, 0);
         let mut txn = self.db.new_db_txn(basic_txn);
+        txn.validate_collection_for_write(&attempt.collection)
+            .await
+            .map_err(crate::error::commit_query_error)?;
 
         self.db
             .check_node_access_in_txn(

@@ -108,18 +108,16 @@ impl<S: Store> DbDocMutator<S> {
         collection_name: &str,
         collection: &Collection,
     ) -> query::error::Result<()> {
-        self.db
-            .acquire_collection_read_lock(&self.txn, collection)
+        let mut txn_guard = self.txn.lock().await;
+        let txn = txn_guard.as_mut().ok_or_else(|| {
+            query::error::QueryError::execution("transaction is no longer active")
+        })?;
+        txn.validate_collection_for_write(collection)
             .await
-            .map_err(|error| query::error::QueryError::execution(error.to_string()))?;
+            .map_err(crate::error::commit_query_error)?;
 
-        let was_created_in_txn = {
-            let txn_guard = self.txn.lock().await;
-            let txn = txn_guard.as_ref().ok_or_else(|| {
-                query::error::QueryError::execution("transaction is no longer active")
-            })?;
-            txn.was_collection_created(collection.collection_id())
-        };
+        let was_created_in_txn = txn.was_collection_created(collection.collection_id());
+        drop(txn_guard);
 
         if was_created_in_txn {
             return Ok(());

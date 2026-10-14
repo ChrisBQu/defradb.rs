@@ -30,7 +30,6 @@ mod crud;
 pub(crate) mod epoch;
 mod index;
 pub mod loader;
-pub(crate) mod locks;
 pub mod map;
 pub mod name;
 pub(crate) mod ops;

@@ -385,15 +385,13 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         // Only remove heads that this block explicitly supersedes (listed in block.heads),
         // preserving concurrent branches for later merge via write_collection_block.
         let collection_id = metadata.collection_id.unwrap_or(&payload.schema_version_id);
-        let _collection_guard = match self.db.find_collection_by_id(collection_id)? {
-            Some(collection) => Some(
-                self.db
-                    .collection_read_guard(collection.collection_id())
-                    .await?,
-            ),
-            None => None,
-        };
-        let txn = self.db.new_txn(false).await?;
+        let collection = self.db.find_collection_by_id(collection_id)?;
+        let mut txn = self.db.new_txn(false).await?;
+        if let Some(collection) = collection.as_ref() {
+            txn.validate_collection_schema_for_write(collection)
+                .await
+                .map_err(MergeError::Database)?;
+        }
         let short_id = if let Ok(systemstore) = txn.systemstore() {
             crate::collection::require_persisted_collection_short_id(&systemstore, collection_id)
                 .await?

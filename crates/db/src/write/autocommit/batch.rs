@@ -74,14 +74,17 @@ impl<S: Store> BatchMutator<S> {
         Ok((blockstore, headstore))
     }
 
-    async fn acquire_collection_read_lock(
+    async fn validate_collection_for_write(
         &self,
         collection: &crate::collection::Collection,
     ) -> query::error::Result<()> {
-        self.db
-            .acquire_collection_read_lock(&self.txn, collection)
+        let mut txn_guard = self.txn.lock().await;
+        let txn = txn_guard.as_mut().ok_or_else(|| {
+            query::error::QueryError::execution("mutation batch transaction is no longer active")
+        })?;
+        txn.validate_collection_for_write(collection)
             .await
-            .map_err(|error| query::error::QueryError::execution(error.to_string()))
+            .map_err(crate::error::commit_query_error)
     }
 
     pub async fn take_txn(&self) -> query::error::Result<DbTxn<S>> {
@@ -311,7 +314,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             )
             .await
             .map_err(crate::error::commit_query_error)?;
-        self.acquire_collection_read_lock(&collection).await?;
+        self.validate_collection_for_write(&collection).await?;
         ensure_collection_is_active(&self.db, collection_name, &collection)?;
         let embedding_config = self.db.options().embedding_config();
 
@@ -457,7 +460,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             )
             .await
             .map_err(crate::error::commit_query_error)?;
-        self.acquire_collection_read_lock(&collection).await?;
+        self.validate_collection_for_write(&collection).await?;
         ensure_collection_is_active(&self.db, collection_name, &collection)?;
         let embedding_config = self.db.options().embedding_config();
 
@@ -620,7 +623,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             )
             .await
             .map_err(crate::error::commit_query_error)?;
-        self.acquire_collection_read_lock(&collection).await?;
+        self.validate_collection_for_write(&collection).await?;
         ensure_collection_is_active(&self.db, collection_name, &collection)?;
 
         let Some((doc_short_id, canonical_doc_id)) = collection

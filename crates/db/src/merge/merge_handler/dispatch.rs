@@ -240,25 +240,6 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
             .creator
             .map(str::to_owned)
             .or_else(|| recovered.as_ref().map(|value| value.creator.clone()));
-        // Keep the collection guard around every engine retry until schema
-        // validation can replace it in the next removal step.
-        let guard_collection_id = if let Some(schema_or_collection_id) = collection_id.as_deref() {
-            self.block_collection(schema_or_collection_id, None)
-                .await?
-                .map(|collection| collection.collection_id().to_string())
-        } else {
-            None
-        };
-        let _collection_guard = if let Some(collection_id) = guard_collection_id.as_deref() {
-            Some(
-                self.db
-                    .collection_read_guard(collection_id)
-                    .await
-                    .map_err(MergeError::Database)?,
-            )
-        } else {
-            None
-        };
         let retry_deks = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let prefetch_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let retry_metadata = BlockMetadata {

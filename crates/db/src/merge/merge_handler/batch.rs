@@ -57,6 +57,17 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> BatchMergeRetryAtt
             .map_err(|error| MergeError::Database(crate::error::Error::Storage(error)))?;
         let basic_txn = datastore::BasicTxn::from_retry_attempt_io(io, 0);
         let mut txn = self.handler.db.new_db_txn(basic_txn);
+        for block in &self.blocks {
+            if let Some(collection) = self
+                .handler
+                .block_collection(&block.collection_id, None)
+                .await?
+            {
+                txn.validate_collection_schema_for_write(&collection)
+                    .await
+                    .map_err(MergeError::Database)?;
+            }
+        }
         let batch_merged = cid_set();
         let batch_merged_collections = cid_set();
         let pending_events: SegQueue<PendingMergeEvent> = SegQueue::new();
@@ -281,20 +292,6 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
             return Ok(Vec::new());
         }
 
-        // Preserve the existing guard order until the collection/document lock
-        // removal is restacked onto this retry conversion.
-        let mut batch_collection_ids = Vec::with_capacity(blocks.len());
-        for block in blocks {
-            if let Some(collection) = self.block_collection(&block.collection_id, None).await? {
-                batch_collection_ids.push(collection.collection_id().to_string());
-            }
-        }
-        batch_collection_ids.sort();
-        batch_collection_ids.dedup();
-        let mut _collection_guards = Vec::with_capacity(batch_collection_ids.len());
-        for collection_id in &batch_collection_ids {
-            _collection_guards.push(self.db.collection_read_guard(collection_id).await?);
-        }
         // Authorization is immutable request input, so validate it before the
         // engine starts replaying transaction attempts.
         for block in blocks {

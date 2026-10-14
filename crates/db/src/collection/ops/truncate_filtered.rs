@@ -35,9 +35,6 @@ impl<S: Store> crate::database::DB<S> {
 
         let collection_id = collection.collection_id().to_string();
         let short_id = collection.resolved_root_id();
-        let _collection_guards = self
-            .collection_write_guards(std::iter::once(collection_id.clone()))
-            .await?;
         let action_execution = self
             .register_action(&collection_id, crate::Action::TRUNCATE)
             .await?;
@@ -93,7 +90,8 @@ impl<S: Store> crate::database::DB<S> {
         collection: &Collection,
         doc_ids: &[String],
     ) -> Result<usize> {
-        let txn = self.new_txn(false).await?;
+        let mut txn = self.new_txn(false).await?;
+        txn.validate_collection_for_write(collection).await?;
         let datastore = txn.datastore()?;
         let headstore = txn.headstore()?;
         let blockstore = txn.blockstore()?;

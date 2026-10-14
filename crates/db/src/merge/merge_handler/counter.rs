@@ -33,16 +33,6 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             .block_collection(&payload.schema_version_id, metadata.collection_id)
             .await?
             .ok_or_else(missing_collection)?;
-        let _collection_guard = self
-            .db
-            .collection_read_guard(collection.collection_id())
-            .await?;
-        // Resolved again under the guard: a definition committed under the
-        // write guard since is the one this merge writes with.
-        let collection = self
-            .block_collection(&payload.schema_version_id, metadata.collection_id)
-            .await?
-            .ok_or_else(missing_collection)?;
 
         tracing::debug!(
             cid = %cid,
@@ -80,7 +70,10 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         let allow_decrement = field.crdt_type.allows_decrement();
 
         // Create a new transaction for this merge
-        let txn = self.db.new_txn(false).await?;
+        let mut txn = self.db.new_txn(false).await?;
+        txn.validate_collection_schema_for_write(&collection)
+            .await
+            .map_err(MergeError::Database)?;
         let doc_short_id = crate::docid::map::get_doc_ref(&txn.systemstore()?, &doc_id_str)
             .await
             .map_err(MergeError::Database)?

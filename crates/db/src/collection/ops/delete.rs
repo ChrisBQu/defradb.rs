@@ -73,24 +73,20 @@ impl<S: Store> crate::database::DB<S> {
     pub async fn delete_collection(&self, name: &str) -> Result<()> {
         self.check_node_access(None, acp::nac::NodePermission::CollectionPatch)
             .await?;
-        let collection = self
-            .get_collection(name)?
-            .ok_or_else(|| Error::CollectionNotFound(name.to_string()))?;
-        let _collection_guards = self
-            .collection_write_guards(std::iter::once(collection.collection_id().to_string()))
-            .await?;
         let mut txn = self.new_txn(false).await?;
 
         match self.delete_collection_with_txn(&mut txn, name).await {
             Ok(()) => {
+                let collections = std::sync::Arc::clone(&self.collections);
+                let name = name.to_owned();
+                txn.on_success_ordered(std::sync::Arc::new(move || {
+                    collections.rcu(|old| {
+                        let mut cache = old.clone();
+                        cache.remove(&name);
+                        cache
+                    });
+                }))?;
                 txn.commit().await?;
-
-                // Update the process-wide cache after successful commit
-                self.collections.rcu(|old| {
-                    let mut cache = old.clone();
-                    cache.remove(name);
-                    cache
-                });
 
                 Ok(())
             }
