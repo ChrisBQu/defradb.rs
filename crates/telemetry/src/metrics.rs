@@ -18,10 +18,11 @@ pub enum RetryLayer {
     EmbeddedExecute,
     Merge,
     PushMarker,
+    DocShortIdReservation,
 }
 
 impl RetryLayer {
-    const COUNT: usize = 4;
+    const COUNT: usize = 5;
 
     #[cfg(feature = "otlp")]
     const fn labels(self) -> &'static [&'static str] {
@@ -32,6 +33,7 @@ impl RetryLayer {
             // Preserve the pre-stage-3 label for one compatibility window
             // while exposing the marker-based name to new dashboards.
             Self::PushMarker => &["push_marker", "push_ledger"],
+            Self::DocShortIdReservation => &["doc_short_id_reservation"],
         }
     }
 }
@@ -54,6 +56,7 @@ pub struct ConflictMetricsSnapshot {
     pub embedded_execute: RetryLayerSnapshot,
     pub merge: RetryLayerSnapshot,
     pub push_marker: RetryLayerSnapshot,
+    pub doc_short_id_reservation: RetryLayerSnapshot,
     /// Typed transaction conflicts returned through a client API.
     pub escaped_to_clients: u64,
 }
@@ -94,6 +97,7 @@ pub fn conflict_metrics_snapshot() -> ConflictMetricsSnapshot {
         embedded_execute: RETRIES.layer(RetryLayer::EmbeddedExecute),
         merge: RETRIES.layer(RetryLayer::Merge),
         push_marker: RETRIES.layer(RetryLayer::PushMarker),
+        doc_short_id_reservation: RETRIES.layer(RetryLayer::DocShortIdReservation),
         escaped_to_clients: RETRIES.escaped_to_clients.load(Ordering::Relaxed),
     }
 }

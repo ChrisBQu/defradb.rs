@@ -133,11 +133,25 @@ impl<S: Store> DocShortIdAllocator<S> {
                 .map_err(Error::Storage)?;
 
             match txn.commit().await {
-                Ok(()) => return Ok(start),
+                Ok(()) => {
+                    if conflicts > 0 {
+                        telemetry::record_retry_success(
+                            telemetry::RetryLayer::DocShortIdReservation,
+                        );
+                    }
+                    return Ok(start);
+                }
                 Err(error)
                     if error.is_txn_conflict() && conflicts < MAX_RESERVATION_CONFLICT_RETRIES =>
                 {
+                    telemetry::record_retry_attempt(telemetry::RetryLayer::DocShortIdReservation);
                     conflicts += 1;
+                }
+                Err(error) if error.is_txn_conflict() => {
+                    telemetry::record_retry_exhaustion(
+                        telemetry::RetryLayer::DocShortIdReservation,
+                    );
+                    return Err(Error::Storage(error));
                 }
                 Err(error) => return Err(Error::Storage(error)),
             }

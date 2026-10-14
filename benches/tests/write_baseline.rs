@@ -13,7 +13,11 @@ async fn concurrent_workloads_account_for_every_request_and_persist_their_writes
             result.storage_conflicts
                 <= result.retries_after.http_auto_commit.attempts
                     - result.retries_before.http_auto_commit.attempts
-                    + result.exhaustions
+                    + result.retries_after.doc_short_id_reservation.attempts
+                    - result.retries_before.doc_short_id_reservation.attempts
+                    + result.exhaustions,
+            "{} storage conflicts must be accounted for by HTTP retries or short-ID reservation retries",
+            scenario.name(),
         );
         assert_eq!(
             result.retries_before.embedded_execute,

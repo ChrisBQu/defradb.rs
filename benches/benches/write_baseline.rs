@@ -69,6 +69,14 @@ fn metrics(sample: &Measurement) -> Vec<(&'static str, &'static str, bool, f64)>
             (after.embedded_execute.attempts - before.embedded_execute.attempts) as f64 / commits,
         ),
         (
+            "short ID reservation retries",
+            "retries/commit",
+            true,
+            (after.doc_short_id_reservation.attempts - before.doc_short_id_reservation.attempts)
+                as f64
+                / commits,
+        ),
+        (
             "merge retries",
             "retries/commit",
             true,
