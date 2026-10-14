@@ -145,7 +145,6 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             ),
             None => None,
         };
-        let _guard = self.merge_queue.acquire(&doc_id_str).await;
 
         self.process_composite_delta_locked(
             cid,

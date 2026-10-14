@@ -141,7 +141,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             query::error::QueryError::execution(format!("invalid canonical document ID: {error}"))
         })?);
 
-        let _doc_guard = self.db.doc_write_queue().acquire(&canonical_doc_id).await;
         let attempt = UpdateRetryAttempt {
             db: Arc::clone(&self.db),
             collection_name: collection_name.to_string(),

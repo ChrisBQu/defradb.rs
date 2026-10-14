@@ -2,4 +2,3 @@
 pub mod autocommit;
 pub mod doc;
 pub(crate) mod prepare;
-pub mod queue;

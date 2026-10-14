@@ -247,17 +247,6 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
 
             match self.try_batch_merge(blocks).await {
                 Ok(results) => results,
-                Err(MergeError::GateContended) => {
-                    // A long-lived local/interactive txn holds the per-doc batch
-                    // gate. Don't block node-wide inbound replication — degrade to
-                    // the gate-free per-block path, which is correct and takes only
-                    // single per-doc guards (#1041).
-                    tracing::debug!(
-                        batch_size = blocks.len(),
-                        "batch gate contended; merging per-block"
-                    );
-                    self.merge_blocks_individually(blocks).await
-                }
                 Err(e) => {
                     if blocks.len() == 1 {
                         return self.merge_blocks_individually(blocks).await;
@@ -306,21 +295,6 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
         for collection_id in &batch_collection_ids {
             _collection_guards.push(self.db.collection_read_guard(collection_id).await?);
         }
-        let mut batch_doc_ids: Vec<String> =
-            blocks.iter().map(|block| block.doc_id.clone()).collect();
-        batch_doc_ids.sort();
-        batch_doc_ids.dedup();
-        let mut _doc_guards = Vec::with_capacity(batch_doc_ids.len());
-        {
-            let _batch_gate = self
-                .merge_queue
-                .try_acquire_batch_gate()
-                .ok_or(MergeError::GateContended)?;
-            for doc_id in &batch_doc_ids {
-                _doc_guards.push(self.merge_queue.acquire(doc_id).await);
-            }
-        }
-
         // Authorization is immutable request input, so validate it before the
         // engine starts replaying transaction attempts.
         for block in blocks {

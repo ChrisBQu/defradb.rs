@@ -240,9 +240,8 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
             .creator
             .map(str::to_owned)
             .or_else(|| recovered.as_ref().map(|value| value.creator.clone()));
-        // Keep the established lock order: collection guard, then per-document
-        // merge queue, then a transaction snapshot. The guards span every
-        // engine retry so a local write cannot interleave between attempts.
+        // Keep the collection guard around every engine retry until schema
+        // validation can replace it in the next removal step.
         let guard_collection_id = if let Some(schema_or_collection_id) = collection_id.as_deref() {
             self.block_collection(schema_or_collection_id, None)
                 .await?
@@ -257,11 +256,6 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
                     .await
                     .map_err(MergeError::Database)?,
             )
-        } else {
-            None
-        };
-        let _doc_guard = if let Some(doc_id) = doc_id.as_deref() {
-            Some(self.merge_queue.acquire(doc_id).await)
         } else {
             None
         };

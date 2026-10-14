@@ -1,14 +1,12 @@
-use async_lock::{Mutex as TokioMutex, MutexGuardArc};
+use async_lock::Mutex as TokioMutex;
 use async_trait::async_trait;
 use bytes::Bytes;
 use cid::Cid;
 use document::{DocID, Document};
-use parking_lot::Mutex as PlMutex;
 use query::mutator::{
     CreateResult, DeleteResult, DocMutator, MutationBatchController, UpdateResult,
 };
 use rapidhash::RapidHashSet;
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use storage::corekv::Store;
 
@@ -30,14 +28,6 @@ pub struct BatchMutator<S: Store> {
     db: Arc<DB<S>>,
     prepared_inputs: Option<query::prepared::PreparedInputMemo>,
     txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
-    /// Per-doc write guards held across the WHOLE batch txn so a local counter
-    /// read-modify-write and a P2P merge on the same document never interleave
-    /// (#1021). The merge handler shares the same `DocWriteQueue`. Released only
-    /// after the batch commits/rolls back, so a concurrent merge observes the
-    /// committed counter state, never a partial. `batch_gate` keeps this
-    /// incremental multi-doc acquirer deadlock-free (see `ensure_doc_guard`).
-    doc_guards: PlMutex<BTreeMap<String, MutexGuardArc<()>>>,
-    batch_gate: PlMutex<Option<MutexGuardArc<()>>>,
 }
 
 impl<S: Store> BatchMutator<S> {
@@ -54,8 +44,6 @@ impl<S: Store> BatchMutator<S> {
             db,
             txn,
             prepared_inputs,
-            doc_guards: PlMutex::new(BTreeMap::new()),
-            batch_gate: PlMutex::new(None),
         }
     }
 
@@ -67,39 +55,7 @@ impl<S: Store> BatchMutator<S> {
             db,
             prepared_inputs,
             txn: Arc::new(TokioMutex::new(None)),
-            doc_guards: PlMutex::new(BTreeMap::new()),
-            batch_gate: PlMutex::new(None),
         }
-    }
-
-    /// Serialize this batch's writes to `doc_id` against concurrent merges/writes
-    /// on the same document, holding the guard until the batch commits/rolls back
-    /// (#1021). Idempotent per doc within the batch. The first guard taken also
-    /// acquires the shared batch gate, held for the whole batch: because this
-    /// acquirer discovers its documents incrementally (one mutation at a time) it
-    /// cannot pre-sort, so the gate — taken by every other multi-doc acquirer
-    /// (batch merges, `create_many`) while they acquire — is what prevents a
-    /// lock-ordering deadlock.
-    async fn ensure_doc_guard(&self, doc_id: &str) {
-        if self.doc_guards.lock().contains_key(doc_id) {
-            return;
-        }
-        if self.batch_gate.lock().is_none() {
-            let gate = self.db.doc_write_queue().acquire_batch_gate().await;
-            let mut slot = self.batch_gate.lock();
-            if slot.is_none() {
-                *slot = Some(gate);
-            }
-        }
-        let guard = self.db.doc_write_queue().acquire(doc_id).await;
-        self.doc_guards.lock().insert(doc_id.to_string(), guard);
-    }
-
-    /// Release the per-doc guards and the batch gate. Called only AFTER the batch
-    /// txn is durably committed or discarded.
-    fn release_doc_guards(&self) {
-        self.doc_guards.lock().clear();
-        *self.batch_gate.lock() = None;
     }
 
     async fn block_and_head_stores(
@@ -262,8 +218,6 @@ impl<S: Store + 'static> MutationBatchController for BatchMutator<S> {
     async fn commit(&self) -> query::error::Result<()> {
         let txn = self.take_txn().await?;
         let result = txn.commit().await.map_err(crate::error::commit_query_error);
-        // Release per-doc guards only after the durable commit (#1021).
-        self.release_doc_guards();
         result
     }
 
@@ -272,7 +226,6 @@ impl<S: Store + 'static> MutationBatchController for BatchMutator<S> {
         let result = txn
             .discard()
             .map_err(|e| query::error::QueryError::execution(format!("discard error: {}", e)));
-        self.release_doc_guards();
         result
     }
 }
@@ -314,7 +267,6 @@ impl<S: Store + 'static> storage::corekv::RetryAttemptFn for BatchRetryAttempt<S
                     if let Ok(txn) = batch.take_txn().await {
                         let _ = txn.discard();
                     }
-                    batch.release_doc_guards();
                     return Err(storage::corekv::RetryAttemptError::Abort(Box::new(error)));
                 }
             };
@@ -323,16 +275,9 @@ impl<S: Store + 'static> storage::corekv::RetryAttemptFn for BatchRetryAttempt<S
                 .take_txn()
                 .await
                 .map_err(|error| storage::corekv::RetryAttemptError::Abort(Box::new(error)))?;
-            let (io, mut callbacks) = txn
+            let (io, callbacks) = txn
                 .into_retry_attempt()
-                .map_err(storage::corekv::RetryAttemptError::Storage)?;
-            let mut guards = batch.doc_guards.lock();
-            let doc_guards = std::mem::take(&mut *guards);
-            drop(guards);
-            let batch_gate = batch.batch_gate.lock().take();
-            if !doc_guards.is_empty() || batch_gate.is_some() {
-                callbacks.push_sync(Box::new(move || drop((doc_guards, batch_gate))));
-            }
+                .map_err(|error| storage::corekv::RetryAttemptError::Storage(error.into()))?;
             drop(batch);
             retry
                 .finish_attempt_io(io, callbacks)
@@ -544,10 +489,6 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 other => query::error::QueryError::execution(other.to_string()),
             })?;
         doc.set_id(canonical_doc_id.clone());
-
-        // Serialize this update's counter read-modify-write against concurrent
-        // merges/writes on the canonical document, held until the batch commits.
-        self.ensure_doc_guard(&canonical_doc_id.to_string()).await;
 
         self.db
             .validate_downsample_write(

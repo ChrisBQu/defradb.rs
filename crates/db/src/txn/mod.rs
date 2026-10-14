@@ -7,7 +7,7 @@
 use crate::collection::cache::CollectionCache;
 use crate::collection::{populate_collection_root_id, Collection};
 use crate::error::{Error, Result};
-use async_lock::{MutexGuardArc, RwLockReadGuardArc, RwLockWriteGuardArc};
+use async_lock::{RwLockReadGuardArc, RwLockWriteGuardArc};
 use datastore::{AsyncCallback, BasicTxn, NamespaceView, RootView, TxnCallback};
 use rapidhash::{HashSetExt, RapidHashSet};
 use schema::CollectionVersion;
@@ -34,7 +34,6 @@ struct StatementSavepoint {
     collection_cache: CollectionCache,
     locally_created_collection_ids: RapidHashSet<String>,
     pending_collection_acp_registrations: Vec<PendingCollectionAcpRegistration>,
-    doc_guard_ids: Vec<String>,
     collection_guard_ids: Vec<String>,
 }
 
@@ -96,10 +95,6 @@ pub struct DbTxn<S: Store> {
     collection_cache: CollectionCache,
     /// Collection IDs created inside this transaction.
     locally_created_collection_ids: RapidHashSet<String>,
-    /// Per-doc write guards held so a local counter read-modify-write and a P2P
-    /// merge on the same document never interleave. Explicit counter updates
-    /// use transaction-local merge operands and acquire no finalize guards.
-    doc_guards: BTreeMap<String, MutexGuardArc<()>>,
     /// Collection locks held until this transaction commits or rolls back.
     collection_guards: BTreeMap<String, CollectionGuard>,
     /// Branchable collection ACP registrations that must succeed before the
@@ -121,7 +116,6 @@ impl<S: Store> DbTxn<S> {
             explicit: false,
             collection_cache: CollectionCache::new(),
             locally_created_collection_ids: RapidHashSet::new(),
-            doc_guards: BTreeMap::new(),
             collection_guards: BTreeMap::new(),
             pending_collection_acp_registrations: Vec::new(),
             vector_codes: Arc::default(),
@@ -146,7 +140,6 @@ impl<S: Store> DbTxn<S> {
             explicit: true,
             collection_cache: CollectionCache::new(),
             locally_created_collection_ids: RapidHashSet::new(),
-            doc_guards: BTreeMap::new(),
             collection_guards: BTreeMap::new(),
             pending_collection_acp_registrations: Vec::new(),
             vector_codes: Arc::default(),
@@ -175,10 +168,6 @@ impl<S: Store> DbTxn<S> {
             .ok_or(storage::corekv::Error::DiscardedTxn)?;
         let (io, mut callbacks) = txn.into_retry_attempt()?;
 
-        let doc_guards = std::mem::take(&mut self.doc_guards);
-        if !doc_guards.is_empty() {
-            callbacks.push_sync(Box::new(move || drop(doc_guards)));
-        }
         let collection_guards = std::mem::take(&mut self.collection_guards);
         if !collection_guards.is_empty() {
             callbacks.push_sync(Box::new(move || drop(collection_guards)));
@@ -205,7 +194,6 @@ impl<S: Store> DbTxn<S> {
             collection_cache: self.collection_cache.clone(),
             locally_created_collection_ids: self.locally_created_collection_ids.clone(),
             pending_collection_acp_registrations: self.pending_collection_acp_registrations.clone(),
-            doc_guard_ids: self.doc_guards.keys().cloned().collect(),
             collection_guard_ids: self.collection_guards.keys().cloned().collect(),
         };
         self.txn
@@ -231,8 +219,6 @@ impl<S: Store> DbTxn<S> {
         self.collection_cache = snapshot.collection_cache;
         self.locally_created_collection_ids = snapshot.locally_created_collection_ids;
         self.pending_collection_acp_registrations = snapshot.pending_collection_acp_registrations;
-        self.doc_guards
-            .retain(|key, _| snapshot.doc_guard_ids.contains(key));
         self.collection_guards
             .retain(|key, _| snapshot.collection_guard_ids.contains(key));
         Ok(())
@@ -738,16 +724,6 @@ impl<S: Store> DbTxn<S> {
         self.locally_created_collection_ids.contains(collection_id)
     }
 
-    // =========================================================================
-    // Per-doc write guards (#1021)
-    // =========================================================================
-
-    /// Store a per-doc write guard on this txn, held until the txn is consumed
-    /// by commit/discard. Idempotent per doc: a duplicate guard is dropped.
-    pub fn insert_doc_guard(&mut self, doc_id: String, guard: MutexGuardArc<()>) {
-        self.doc_guards.entry(doc_id).or_insert(guard);
-    }
-
     pub(crate) fn has_collection_guard(&self, collection_id: &str) -> bool {
         self.collection_guards.contains_key(collection_id)
     }
@@ -838,10 +814,7 @@ impl<S: Store> DbTxn<S> {
         match self.txn.take() {
             Some(txn) => {
                 txn.commit().await.map_err(Error::Datastore)?;
-                // Release per-doc guards only AFTER the durable commit so a
-                // concurrent merge observes the committed counter state, never a
-                // partial RMW (#1021).
-                self.release_doc_guards();
+                self.release_collection_guards();
                 Ok(())
             }
             None => Err(Error::TxnNotActive),
@@ -860,7 +833,7 @@ impl<S: Store> DbTxn<S> {
         match self.txn.take() {
             Some(txn) => {
                 txn.discard().map_err(Error::Datastore)?;
-                self.release_doc_guards();
+                self.release_collection_guards();
                 Ok(())
             }
             None => Err(Error::TxnNotActive),
@@ -883,9 +856,7 @@ impl<S: Store> DbTxn<S> {
         match self.txn.take() {
             Some(txn) => {
                 txn.commit().await.map_err(Error::Datastore)?;
-                // Release per-doc guards only AFTER the durable commit so a
-                // concurrent merge observes the committed counter state (#1021).
-                self.release_doc_guards();
+                self.release_collection_guards();
                 Ok(())
             }
             None => Err(Error::TxnNotActive),
@@ -899,7 +870,7 @@ impl<S: Store> DbTxn<S> {
         match self.txn.take() {
             Some(txn) => {
                 txn.discard().map_err(Error::Datastore)?;
-                self.release_doc_guards();
+                self.release_collection_guards();
                 Ok(())
             }
             None => Err(Error::TxnNotActive),
@@ -907,8 +878,7 @@ impl<S: Store> DbTxn<S> {
     }
 
     /// Release mutation guards after the transaction is durably committed or discarded.
-    fn release_doc_guards(&mut self) {
-        self.doc_guards.clear();
+    fn release_collection_guards(&mut self) {
         self.collection_guards.clear();
     }
 
@@ -916,7 +886,7 @@ impl<S: Store> DbTxn<S> {
         match self.txn.take() {
             Some(txn) => {
                 let result = txn.discard().map_err(Error::Datastore);
-                self.release_doc_guards();
+                self.release_collection_guards();
                 result
             }
             None => Err(Error::TxnNotActive),

@@ -77,13 +77,6 @@ pub enum MergeError {
     #[error("block signature verification failed for cid={cid}: {reason}")]
     SignatureVerificationFailed { cid: Cid, reason: String },
 
-    /// The shared per-doc batch gate is currently held (e.g. by a long-lived
-    /// local/interactive transaction). Batch merging is an optimization, so the
-    /// caller should degrade to the gate-free per-block merge path rather than
-    /// block node-wide. Transient signal, not a block-content rejection (#1041).
-    #[error("batch gate contended")]
-    GateContended,
-
     /// DAG traversal depth limit exceeded.
     ///
     /// A maliciously crafted deeply-nested DAG could otherwise consume unbounded resources.
@@ -119,8 +112,7 @@ impl MergeError {
             | Self::Storage(_)
             | Self::Kms(_)
             | Self::NeedsDecryptionKey(_)
-            | Self::NeedsBatchDecryptionKey { .. }
-            | Self::GateContended => MergeErrorDisposition::Retryable,
+            | Self::NeedsBatchDecryptionKey { .. } => MergeErrorDisposition::Retryable,
         }
     }
 }

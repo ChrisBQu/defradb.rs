@@ -223,10 +223,6 @@ pub struct DB<S: Store> {
     /// awaiting what the write created are released.
     local_commit_release:
         std::sync::OnceLock<Arc<dyn crate::merge::governance::LocalCommitRelease>>,
-    /// Per-document write serialization queue. Shared with the merge handler so
-    /// local writes and P2P merges that touch the same document never interleave
-    /// their CRDT read-modify-write (#1021 counter convergence).
-    doc_write_queue: Arc<crate::write::queue::DocWriteQueue>,
     /// Process-local document short-ID range allocator.
     doc_short_id_allocator: crate::docid::map::DocShortIdAllocator<S>,
     /// Process-local claims for collection-wide actions.
@@ -280,7 +276,6 @@ impl<S: Store> DB<S> {
             nac_manager: std::sync::OnceLock::new(),
             merge_governance: std::sync::OnceLock::new(),
             local_commit_release: std::sync::OnceLock::new(),
-            doc_write_queue: Arc::new(crate::write::queue::DocWriteQueue::new()),
             active_actions: Arc::new(crate::database::action::ActionRegistry::default()),
             collection_locks: HopscotchMap::with_hasher(RandomState::default()),
         })
@@ -350,7 +345,6 @@ impl<S: Store> DB<S> {
             nac_manager: std::sync::OnceLock::new(),
             merge_governance: std::sync::OnceLock::new(),
             local_commit_release: std::sync::OnceLock::new(),
-            doc_write_queue: Arc::new(crate::write::queue::DocWriteQueue::new()),
             active_actions: Arc::new(crate::database::action::ActionRegistry::default()),
             collection_locks: HopscotchMap::with_hasher(RandomState::default()),
         })
@@ -404,13 +398,6 @@ impl<S: Store> DB<S> {
     /// Get a reference to the event bus, if configured.
     pub fn event_bus(&self) -> Option<&Arc<dyn Bus>> {
         self.event_bus.as_ref()
-    }
-
-    /// Get the shared per-document write serialization queue. The merge handler
-    /// acquires this same queue so local writes and merges that touch the same
-    /// document are mutually serialized (#1021).
-    pub fn doc_write_queue(&self) -> Arc<crate::write::queue::DocWriteQueue> {
-        self.doc_write_queue.clone()
     }
 
     /// Allocate a globally unique document short ID.

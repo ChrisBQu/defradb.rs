@@ -127,12 +127,6 @@ pub struct DbMergeHandler<S: Store, B: blockstore::Blockstore> {
     /// `None` means this handler is on the legacy non-retry path.
     retry_decryption_keys: Option<RetryDecryptionKeys>,
     retry_prefetch_requested: Option<Arc<AtomicBool>>,
-    /// Per-document write serialization queue, shared with the DB so that local
-    /// writes and P2P merges that touch the same document are mutually
-    /// serialized. Ensures concurrent merges (and concurrent local writes) for
-    /// the same document are processed one at a time, preventing read-modify-write
-    /// races on the CRDT accumulation store (#1021).
-    pub(crate) merge_queue: Arc<crate::DocWriteQueue>,
     /// Encryption CIDs with a background DEK prefetch currently in flight, so
     /// repeated deliveries of the same deferred field block
     /// (pushlog + gossip + retries) don't fan out duplicate cross-peer
@@ -166,7 +160,6 @@ impl<S: Store, B: blockstore::Blockstore> Clone for DbMergeHandler<S, B> {
             kms: Arc::clone(&self.kms),
             retry_decryption_keys: self.retry_decryption_keys.clone(),
             retry_prefetch_requested: self.retry_prefetch_requested.clone(),
-            merge_queue: Arc::clone(&self.merge_queue),
             prefetched_dek_cids: Arc::clone(&self.prefetched_dek_cids),
             deferred: Arc::clone(&self.deferred),
             rejected_governed: Arc::clone(&self.rejected_governed),
@@ -250,9 +243,6 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     }
 
     /// The per-document write queue serialising merges.
-    pub fn merge_queue(&self) -> &Arc<crate::DocWriteQueue> {
-        &self.merge_queue
-    }
 
     /// Collection-definition blocks already merged in this process.
     pub fn merged_collections(&self) -> &CidSet {
@@ -276,7 +266,6 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         blockstore: Arc<B>,
         max_merge_depth: usize,
     ) -> Self {
-        let merge_queue = db.doc_write_queue();
         Self {
             db,
             blockstore,
@@ -290,7 +279,6 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             kms: Arc::new(std::sync::OnceLock::new()),
             retry_decryption_keys: None,
             retry_prefetch_requested: None,
-            merge_queue,
             prefetched_dek_cids: Arc::new(cid_set()),
             deferred: Arc::new(Default::default()),
             rejected_governed: Arc::new(cid_set()),

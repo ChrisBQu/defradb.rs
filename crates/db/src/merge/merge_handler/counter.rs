@@ -43,7 +43,6 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             .block_collection(&payload.schema_version_id, metadata.collection_id)
             .await?
             .ok_or_else(missing_collection)?;
-        let _guard = self.merge_queue.acquire(&doc_id_str).await;
 
         tracing::debug!(
             cid = %cid,

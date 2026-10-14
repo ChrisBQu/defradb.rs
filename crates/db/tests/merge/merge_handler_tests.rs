@@ -1107,7 +1107,7 @@ async fn interactive_counter_increment_conflicts_with_concurrent_same_doc_merge(
     // NOTE: NOT committed yet.
 
     // (3) BEFORE committing, apply a concurrent same-doc merge of +5 through the
-    // REAL merge handler. process_counter_delta takes its own merge_queue guard
+    // REAL merge handler. Its transaction validates the counter application marker
     // and commits its OWN txn, advancing the accumulation store to N+D2 = 15.
     let (merge_cid, merge_payload) =
         put_counter_delta_block(&blockstore, &doc_id, 5, 2, 7777).await;
@@ -1192,66 +1192,6 @@ async fn interactive_counter_increment_conflicts_with_concurrent_same_doc_merge(
         .unwrap();
     assert_eq!(doc.get("score"), Some(&NormalValue::Int(18)),
         "the blob must include the earlier standalone field merge as well as the retried local increment");
-}
-
-#[tokio::test]
-async fn handle_block_serializes_standalone_counter_by_doc_id() {
-    let (handler, blockstore) = make_handler_with_counter_schema().await;
-    let doc_id_str = DocID::new_v0(
-        "bafyreidwus7muqrpwwf22gvpqpow6xg37woh4ikztgl27deo37ehs5ehaa"
-            .parse()
-            .unwrap(),
-    )
-    .to_string();
-
-    let mut delta_data = Vec::new();
-    ciborium::into_writer(&5_i64, &mut delta_data).unwrap();
-
-    let payload = CounterDeltaPayload {
-        field_name: "score".to_string(),
-        schema_version_id: "v1".to_string(),
-        priority: 1,
-        data: delta_data,
-        nonce: 4243,
-    };
-    let block = Block {
-        delta: CrdtDelta::Counter(payload),
-        heads: None,
-        links: None,
-        encryption: None,
-        signature: None,
-    };
-    let cid = block.generate_cid().unwrap();
-    let block_data = block.to_dag_cbor().unwrap();
-    blockstore.put(&cid, &block_data).await.unwrap();
-    register_test_block_owner(&handler, 1, &doc_id_str, &cid).await;
-
-    let metadata = BlockMetadata::normal(
-        &doc_id_str,
-        "col-counters",
-        "did:key:z6MkrCounterMergeQueueTest",
-        None,
-        false,
-    );
-
-    let guard = handler.merge_queue().acquire(&doc_id_str).await;
-    let merge = handler.handle_block(&cid, &block_data, metadata);
-    tokio::pin!(merge);
-
-    assert!(
-        timeout(Duration::from_millis(50), merge.as_mut())
-            .await
-            .is_err(),
-        "standalone counter merge should wait on the per-document queue"
-    );
-
-    drop(guard);
-    let outcome = timeout(Duration::from_secs(1), merge)
-        .await
-        .expect("counter merge should complete after releasing the queue")
-        .unwrap();
-    assert_eq!(outcome, MergeOutcome::Merged);
-    assert!(blockstore.is_merged(&cid).await.unwrap());
 }
 
 #[tokio::test]
