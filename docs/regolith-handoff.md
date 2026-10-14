@@ -72,6 +72,9 @@ restoring it: untouched index components come from the transaction snapshot, not
 
 ## Validation and review limits
 
+The stack has been rebased onto main `532aac3f`. Its newly added DiskANN disk-cost test used the private Regolith `Options.statistics` field; step 1a now uses the public builder. This addresses the current tip CI lint/optional-feature compile failures. Fresh CI and validation of the combined main/stack changes are pending; earlier local test results predate this rebase.
+
+
 Local checks passed at the document/head checkpoint and subsequent HNSW integration:
 
 - Database block, merge, write and read integration suites; the read suite has one pre-existing ignored test. Earlier collection/definition/query suites passed during document and readonly-lens integration.
