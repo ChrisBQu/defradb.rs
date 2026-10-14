@@ -15,7 +15,6 @@ use zanzibar::types::{ObjectRef, Policy, Relationship, Subject};
 /// Persistent Zanzibar store backed by any Store implementation.
 pub struct PersistentZanzibarStore<S: Store> {
     store: NamespacedStore<S>,
-    counter_lock: async_lock::Mutex<()>,
 }
 
 impl<S: Store> PersistentZanzibarStore<S> {
@@ -23,7 +22,6 @@ impl<S: Store> PersistentZanzibarStore<S> {
     pub fn from_store(store: Arc<S>) -> Self {
         Self {
             store: NamespacedStore::new(store, Namespace::Acpstore),
-            counter_lock: async_lock::Mutex::new(()),
         }
     }
 }
@@ -162,8 +160,6 @@ impl<S: Store> ZanzibarStore for PersistentZanzibarStore<S> {
     }
 
     async fn next_policy_counter(&self) -> Result<u64> {
-        // Removed with the remaining serialization gates in adoption step 6.
-        let _guard = self.counter_lock.lock().await;
         self.store
             .allocate(POLICY_COUNTER_KEY.as_bytes(), 1)
             .await
