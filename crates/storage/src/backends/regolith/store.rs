@@ -14,7 +14,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use regolith::{OptimisticTransactionDb, StreamOptions, TxnOptions};
 
-use super::background_errors::BackgroundErrorListener;
+use super::background_errors::{BackgroundErrorListener, ConflictListener};
 use super::config::RegolithStoreOptions;
 use super::event_order::{Event, EventOrder};
 use super::transaction::RegolithTxn;
@@ -73,10 +73,14 @@ impl RegolithStore {
                 })?;
             }
         }
+        let engine_stats = options.engine.get_statistics().cloned().unwrap_or_default();
+        let stats = TransactionStatsHandle::from_engine(engine_stats.clone());
         let engine = options
             .engine
             .clone()
+            .statistics(Some(engine_stats))
             .add_listener(Arc::new(BackgroundErrorListener))
+            .add_listener(Arc::new(ConflictListener(stats.clone())))
             .merge_operator(Some(Arc::new(crate::merge::DefraMergeOperator)));
         let db = OptimisticTransactionDb::open(&path, engine)
             .map_err(|error| Error::Backend(format!("failed to open regolith: {error}")))?
@@ -88,7 +92,7 @@ impl RegolithStore {
                 options,
                 closed: AtomicBool::new(false),
                 active_txns: Arc::new(AtomicUsize::new(0)),
-                stats: TransactionStatsHandle::for_backend("regolith"),
+                stats,
                 event_order: Arc::default(),
                 path,
                 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -271,7 +275,6 @@ impl Store for RegolithStore {
             readonly,
             self.inner.options.isolation,
             Arc::clone(&self.inner.active_txns),
-            self.inner.stats.clone(),
             Arc::clone(&self.inner.event_order),
         );
         match txn {
@@ -306,15 +309,11 @@ impl Store for RegolithStore {
         let policy = regolith::RetryPolicy::new(options.max_attempts.max(1));
         let mut event_token = None;
         let mut committed_callbacks = RetryCallbacks::default();
-        let mut attempt_count = 0usize;
-        let mut conflict_count = 0usize;
         let outcome = {
             let mut queue = queue_db.db().io_queue();
             let queue_id = queue.id();
             let future = queue_db.transact_async(queue_id, &policy, async |txn, lost| {
-                attempt_count += 1;
                 if lost.is_some() {
-                    conflict_count += 1;
                     telemetry::record_retry_attempt(telemetry::RetryLayer::Engine);
                 }
                 committed_callbacks = RetryCallbacks::default();
@@ -328,7 +327,6 @@ impl Store for RegolithStore {
                     txn,
                     db: Arc::clone(&self.inner.db),
                     isolation: self.inner.options.isolation,
-                    stats: self.inner.stats.clone(),
                     attempt_io_active: false,
                     has_writes: false,
                     callbacks: RetryCallbacks::default(),
@@ -371,12 +369,6 @@ impl Store for RegolithStore {
         };
         match outcome {
             Ok((value, receipt)) => {
-                {
-                    self.inner.stats.record_commit();
-                    for _ in 0..conflict_count {
-                        self.inner.stats.record_conflict();
-                    }
-                }
                 let (callbacks, async_callbacks, ordered_callbacks, ordered_async_callbacks) =
                     committed_callbacks.into_parts();
                 for callback in async_callbacks {
@@ -431,7 +423,6 @@ impl Store for RegolithStore {
             }
             Err(regolith::TransactError::Closure(error)) => Err(error),
             Err(regolith::TransactError::Exhausted(conflict)) => {
-                self.inner.stats.record_conflict();
                 Err(RetryAttemptError::Exhausted(
                     crate::corekv::TransactionConflict {
                         access: conflict.mine(),
@@ -473,7 +464,6 @@ struct RegolithRetryTxn<'a> {
     txn: &'a mut regolith::Transaction,
     db: Arc<OptimisticTransactionDb>,
     isolation: regolith::IsolationLevel,
-    stats: TransactionStatsHandle,
     attempt_io_active: bool,
     has_writes: bool,
     callbacks: RetryCallbacks,
@@ -556,7 +546,6 @@ impl RetryTxn for RegolithRetryTxn<'_> {
         self.attempt_io_active = true;
         Ok(Box::new(RegolithTxn::scoped_attempt(
             actual,
-            self.stats.clone(),
         )))
     }
 

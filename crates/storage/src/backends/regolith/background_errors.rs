@@ -13,6 +13,14 @@ use regolith::{BackgroundErrorReason, Error, EventListener};
 #[derive(Debug, Default)]
 pub(super) struct BackgroundErrorListener;
 
+pub(super) struct ConflictListener(pub(super) crate::backends::shared::TransactionStatsHandle);
+
+impl EventListener for ConflictListener {
+    fn on_conflict(&self, conflict: &regolith::Conflict) {
+        self.0.record_conflict(conflict);
+    }
+}
+
 impl EventListener for BackgroundErrorListener {
     fn on_background_error(&self, reason: BackgroundErrorReason, _err: &Error) {
         telemetry::record_storage_background_error("regolith", reason_label(reason));

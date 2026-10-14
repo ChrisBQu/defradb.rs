@@ -232,58 +232,104 @@ impl CallbackManager {
     }
 }
 
-/// What a store reports about its transactions.
-///
-/// Deliberately small. regolith reports that a commit conflicted, not
-/// which dependency edge caused it, so there is no per-rule breakdown
-/// here: a field that could only ever be zero would read as a measurement
-/// rather than an absence.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+/// Engine-owned commit/policy counters and listener-owned conflict reasons.
+/// Snapshots are observational: concurrent commits may advance between reads.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct TransactionStatsSnapshot {
-    /// Backend that owns these numbers.
     pub backend: &'static str,
-    /// Transactions that committed.
+    /// Native transaction commits; read-only adapter snapshots do not commit.
     pub commits: u64,
-    /// Transactions the engine refused at commit because their read or
-    /// write set had moved underneath them.
     pub conflicts: u64,
+    /// Regolith's commit.* and policy.* tickers, using their native names.
+    pub engine: std::collections::BTreeMap<&'static str, u64>,
+    /// Conflict counts by losing access and winning write, without key data.
+    pub conflict_reasons: std::collections::BTreeMap<String, u64>,
 }
 
-#[derive(Default)]
+const ACCESS_LABELS: [&str; 10] = [
+    "read",
+    "read_parts",
+    "read_presence",
+    "read_for_update",
+    "scanned_then_wrote",
+    "scanned_range",
+    "put",
+    "delete",
+    "merge",
+    "other",
+];
+const WRITE_LABELS: [&str; 5] = ["put", "delete", "range_delete", "merge", "other"];
+
 struct TransactionMetrics {
-    commits: AtomicU64,
-    conflicts: AtomicU64,
+    engine: Arc<regolith::Statistics>,
+    reasons: [[AtomicU64; 5]; 10],
 }
 
-/// Cloneable handle for reading a live store's transaction diagnostics.
+/// Cloneable handle for reading a live store's engine diagnostics.
 #[derive(Clone)]
 pub struct TransactionStatsHandle {
-    backend: &'static str,
     metrics: Arc<TransactionMetrics>,
 }
 
 impl TransactionStatsHandle {
-    pub(crate) fn for_backend(backend: &'static str) -> Self {
+    pub(crate) fn from_engine(engine: Arc<regolith::Statistics>) -> Self {
         Self {
-            backend,
-            metrics: Arc::new(TransactionMetrics::default()),
+            metrics: Arc::new(TransactionMetrics {
+                engine,
+                reasons: std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))),
+            }),
         }
     }
 
-    pub(crate) fn record_commit(&self) {
-        self.metrics.commits.fetch_add(1, Ordering::Relaxed);
+    pub(crate) fn record_conflict(&self, conflict: &regolith::Conflict) {
+        use regolith::{Access, WriteKind};
+        let mine = match conflict.mine() {
+            Access::Read => 0,
+            Access::ReadParts => 1,
+            Access::ReadPresence => 2,
+            Access::ReadForUpdate => 3,
+            Access::ScannedThenWrote => 4,
+            Access::ScannedRange => 5,
+            Access::Put => 6,
+            Access::Delete => 7,
+            Access::Merge => 8,
+            _ => 9,
+        };
+        let theirs = match conflict.theirs() {
+            WriteKind::Put => 0,
+            WriteKind::Delete => 1,
+            WriteKind::RangeDelete => 2,
+            WriteKind::Merge => 3,
+            _ => 4,
+        };
+        self.metrics.reasons[mine][theirs].fetch_add(1, Ordering::Relaxed);
+        telemetry::record_storage_conflict("regolith", ACCESS_LABELS[mine], WRITE_LABELS[theirs]);
     }
 
-    pub(crate) fn record_conflict(&self) {
-        self.metrics.conflicts.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Read the counters as of now.
     pub fn snapshot(&self) -> TransactionStatsSnapshot {
+        let engine = &self.metrics.engine;
+        let mut conflict_reasons = std::collections::BTreeMap::new();
+        for (mine, access) in ACCESS_LABELS.iter().enumerate() {
+            for (theirs, write) in WRITE_LABELS.iter().enumerate() {
+                let count = self.metrics.reasons[mine][theirs].load(Ordering::Relaxed);
+                if count != 0 {
+                    conflict_reasons.insert(format!("{access}/{write}"), count);
+                }
+            }
+        }
         TransactionStatsSnapshot {
-            backend: self.backend,
-            commits: self.metrics.commits.load(Ordering::Relaxed),
-            conflicts: self.metrics.conflicts.load(Ordering::Relaxed),
+            backend: "regolith",
+            commits: engine.get_ticker(regolith::Ticker::CommitCount),
+            conflicts: engine.get_ticker(regolith::Ticker::CommitConflicts),
+            engine: regolith::Ticker::ALL
+                .iter()
+                .filter(|ticker| {
+                    ticker.name().starts_with("regolith.commit.")
+                        || ticker.name().starts_with("regolith.policy.")
+                })
+                .map(|ticker| (ticker.name(), engine.get_ticker(*ticker)))
+                .collect(),
+            conflict_reasons,
         }
     }
 }

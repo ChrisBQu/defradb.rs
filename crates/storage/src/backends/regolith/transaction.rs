@@ -22,7 +22,7 @@ use regolith::{
 use super::event_order::{Event, EventOrder};
 use super::handle::Handle;
 use super::iterator::RegolithIterator;
-use crate::backends::shared::{CallbackCounts, CallbackManager, TransactionStatsHandle};
+use crate::backends::shared::{CallbackCounts, CallbackManager};
 use crate::corekv::{
     AsyncOrderedTxnCallback, AsyncTxnCallback, Error, IterOptions, Iterator, Reader, Result, Txn,
     TxnCallback, Writer,
@@ -32,7 +32,6 @@ use crate::corekv::{
 pub struct RegolithTxn {
     handle: Option<Arc<Handle>>,
     active_txns: Arc<AtomicUsize>,
-    stats: TransactionStatsHandle,
     callbacks: CallbackManager,
     readonly: bool,
     event_order: Arc<EventOrder>,
@@ -70,7 +69,6 @@ impl RegolithTxn {
         Ok(Self {
             handle: Some(Arc::new(Handle::ReadOnly(db.snapshot()))),
             active_txns: Arc::new(AtomicUsize::new(1)),
-            stats: TransactionStatsHandle::for_backend("regolith"),
             callbacks: CallbackManager::default(),
             readonly: true,
             savepoints: Vec::new(),
@@ -88,7 +86,6 @@ impl RegolithTxn {
         readonly: bool,
         isolation: IsolationLevel,
         active_txns: Arc<AtomicUsize>,
-        stats: TransactionStatsHandle,
         event_order: Arc<EventOrder>,
     ) -> Result<Self> {
         super::blocking(|| {
@@ -100,7 +97,6 @@ impl RegolithTxn {
             Ok(Self {
                 handle: Some(Arc::new(handle)),
                 active_txns,
-                stats,
                 callbacks: CallbackManager::default(),
                 readonly,
                 savepoints: Vec::new(),
@@ -114,11 +110,10 @@ impl RegolithTxn {
         })
     }
 
-    pub(super) fn scoped_attempt(txn: Box<Transaction>, stats: TransactionStatsHandle) -> Self {
+    pub(super) fn scoped_attempt(txn: Box<Transaction>) -> Self {
         Self {
             handle: Some(Arc::new(Handle::Writable(txn))),
             active_txns: Arc::new(AtomicUsize::new(0)),
-            stats,
             callbacks: CallbackManager::default(),
             readonly: false,
             event_order: Arc::new(EventOrder::default()),
@@ -401,7 +396,6 @@ impl Txn for RegolithTxn {
         };
         match outcome {
             Ok(()) => {
-                self.stats.record_commit();
                 for callback in std::mem::take(&mut self.ordered_async_callbacks) {
                     if let Err(error) = callback().await {
                         drop(ordered_token);
@@ -425,9 +419,6 @@ impl Txn for RegolithTxn {
             }
             Err(error) => {
                 drop(ordered_token);
-                if error.is_txn_conflict() {
-                    self.stats.record_conflict();
-                }
                 self.callbacks.run_error().await;
                 Err(error)
             }

@@ -133,6 +133,24 @@ pub fn record_escaped_conflict(surface: &'static str) {
     emit_escaped_conflict(surface);
 }
 
+/// Count one engine conflict by its bounded access/write categories.
+/// Keys and document identities are deliberately not metric labels.
+pub fn record_storage_conflict(backend: &'static str, access: &'static str, write: &'static str) {
+    #[cfg(feature = "otlp")]
+    with_instruments(|metrics| {
+        metrics.storage_conflicts.add(
+            1,
+            &[
+                KeyValue::new("backend", backend),
+                KeyValue::new("access", access),
+                KeyValue::new("write", write),
+            ],
+        );
+    });
+    #[cfg(not(feature = "otlp"))]
+    let _ = (backend, access, write);
+}
+
 static STORAGE_BACKGROUND_ERRORS: AtomicU64 = AtomicU64::new(0);
 
 /// Record a failed background storage job (flush, compaction, manifest
@@ -216,6 +234,7 @@ fn emit_storage_background_error(_backend: &'static str, _reason: &'static str) 
 
 #[cfg(feature = "otlp")]
 struct Instruments {
+    storage_conflicts: Counter<u64>,
     storage_background_errors: Counter<u64>,
     retry_attempts: Counter<u64>,
     retry_successes: Counter<u64>,
@@ -234,6 +253,10 @@ static INSTRUMENTS: OnceLock<InstrumentRegistry> = OnceLock::new();
 pub(crate) fn install(provider: &opentelemetry_sdk::metrics::SdkMeterProvider) -> u64 {
     let meter = provider.meter("defradb");
     let instruments = Arc::new(Instruments {
+        storage_conflicts: meter
+            .u64_counter("defradb.storage.conflicts")
+            .with_description("Engine commit conflicts by losing access and winning write")
+            .build(),
         storage_background_errors: meter
             .u64_counter("defradb.storage.background.errors")
             .with_description("Failed background storage jobs")
