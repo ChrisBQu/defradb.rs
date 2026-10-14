@@ -338,7 +338,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     &blockstore,
                     &headstore,
                     &current_doc,
-                    &attempt.collection.version_id(),
+                    attempt.collection.version_id(),
                     DocStorageIdentity::new(attempt.collection.resolved_root_id(), doc_short_id),
                     Some(&modified_fields),
                     attempt.encryption_config.as_ref(),
@@ -423,7 +423,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     )));
                 }
             }))
-            .map_err(|error| crate::error::commit_query_error(error.into()))?;
+            .map_err(crate::error::commit_query_error)?;
         }
         let (io, callbacks) = txn
             .into_retry_attempt()

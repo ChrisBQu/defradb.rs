@@ -196,10 +196,8 @@ impl RegolithTxn {
     /// Release this transaction's slot exactly once, so `close` is not
     /// left waiting on something already finished.
     fn release(&mut self) {
-        if self.handle.take().is_some() {
-            if self.owns_active_slot {
-                self.active_txns.fetch_sub(1, Ordering::AcqRel);
-            }
+        if self.handle.take().is_some() && self.owns_active_slot {
+            self.active_txns.fetch_sub(1, Ordering::AcqRel);
         }
     }
 }

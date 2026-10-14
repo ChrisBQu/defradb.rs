@@ -173,6 +173,7 @@ pub(crate) async fn inherited_encryption_policy(
 ///
 /// Shared by the explicit-config path and the document-policy path so both
 /// route through the KMS whenever one is configured.
+#[allow(clippy::too_many_arguments)]
 async fn encrypt_with_new_key(
     blockstore: &NamespaceView,
     kms: Option<&std::sync::Arc<dyn kms::KmsService>>,

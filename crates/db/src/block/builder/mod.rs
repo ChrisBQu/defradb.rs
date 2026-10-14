@@ -257,7 +257,7 @@ fn compute_signature_prepared(
     let response = inputs
         .expect("checked above")
         .get(&request)
-        .ok_or_else(|| BuildError::NeedsInput(request))?;
+        .ok_or(BuildError::NeedsInput(request))?;
     let signature = Signature::new(
         SignatureHeader::new(sig_type, signer.public_key_hex.as_bytes().to_vec()),
         response.to_vec(),

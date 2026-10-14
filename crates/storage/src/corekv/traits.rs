@@ -225,6 +225,7 @@ impl RetryCallbacks {
             .push(Arc::new(Mutex::new(Some(callback))));
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn into_parts(
         self,
     ) -> (

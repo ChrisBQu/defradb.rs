@@ -24,7 +24,10 @@ async fn phantom_race(store: impl Store) {
             .unwrap();
         concurrent.commit().await.unwrap();
         decision.set(b"authorized", b"effect").await.unwrap();
-        assert!(matches!(decision.commit().await, Err(Error::TxnConflictDetails(_))));
+        assert!(matches!(
+            decision.commit().await,
+            Err(Error::TxnConflictDetails(_))
+        ));
     }
 }
 

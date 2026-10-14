@@ -78,5 +78,8 @@ async fn deleting_a_block_invalidates_a_presence_decision() {
     let mut delete = store.new_txn(false).await.unwrap();
     delete.delete(b"b\x01\x55\x00\x03abc").await.unwrap();
     delete.commit().await.unwrap();
-    assert!(matches!(reader.commit().await, Err(Error::TxnConflictDetails(_))));
+    assert!(matches!(
+        reader.commit().await,
+        Err(Error::TxnConflictDetails(_))
+    ));
 }

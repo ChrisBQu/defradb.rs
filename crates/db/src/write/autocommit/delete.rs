@@ -178,7 +178,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 &headstore,
                 &doc_id_string,
                 doc_short_id,
-                &attempt.collection.version_id(),
+                attempt.collection.version_id(),
                 attempt.signing_config.as_ref(),
                 attempt.prepared_inputs.as_ref(),
             )
@@ -257,7 +257,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                         )));
                     }
                 }))
-                .map_err(|error| crate::error::commit_query_error(error.into()))?;
+                .map_err(crate::error::commit_query_error)?;
             }
         }
         let (io, callbacks) = txn
@@ -403,7 +403,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     &headstore,
                     &canonical_id.to_string(),
                     doc_short_id,
-                    &attempt.collection.version_id(),
+                    attempt.collection.version_id(),
                     attempt.signing_config.as_ref(),
                     attempt.prepared_inputs.as_ref(),
                 )
@@ -487,7 +487,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                         )));
                     }
                 }))
-                .map_err(|e| crate::error::commit_query_error(e.into()))?;
+                .map_err(crate::error::commit_query_error)?;
             }
         }
         let (io, callbacks) = txn

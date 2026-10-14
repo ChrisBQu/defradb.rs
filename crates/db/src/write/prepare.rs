@@ -285,7 +285,7 @@ impl<S: Store + 'static> crate::AutoCommitMutator<S> {
             if let Some(signing_config) = signing_config.as_ref() {
                 let blocks = crate::block::builder::compute_document_blocks(
                     &doc,
-                    &collection.version_id(),
+                    collection.version_id(),
                     identity,
                     effective_encryption_config.as_ref(),
                     Some(signing_config),

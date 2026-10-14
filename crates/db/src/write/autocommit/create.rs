@@ -356,7 +356,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         if let Some(bus) = self.db.event_bus().cloned() {
             let collection = attempt.collection.clone();
             let doc_id = doc_id.to_string();
-            let cid = cid;
             let block = block.clone();
             let col_data = col_data.clone();
             txn.on_retry_success_ordered(Box::new(move || {
@@ -761,7 +760,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                         Ok(())
                     })
                 }))
-                .map_err(|error| crate::error::commit_query_error(error.into()))?;
+                .map_err(crate::error::commit_query_error)?;
             }
             if let Some(bus) = self.db.event_bus().cloned() {
                 let collection = attempt.collection.clone();
@@ -790,7 +789,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                         )));
                     }
                 }))
-                .map_err(|error| crate::error::commit_query_error(error.into()))?;
+                .map_err(crate::error::commit_query_error)?;
             }
         }
         let (io, callbacks) = txn
