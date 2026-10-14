@@ -61,12 +61,12 @@ impl<S: Store + 'static> crate::database::DB<S> {
     async fn current_head_cids(&self, doc_short_id: u64) -> Result<RapidHashSet<Cid>> {
         let txn = self.new_txn(true).await?;
         let headstore = txn.headstore()?;
-        let mut iter = headstore
-            .iterator(
-                IterOptions::new().with_prefix(HeadstoreDocKey::document_prefix(doc_short_id)),
-            )
-            .await
-            .map_err(Error::Storage)?;
+        let mut iter = crate::block::heads::document::iterator(
+            &headstore,
+            IterOptions::new().with_prefix(HeadstoreDocKey::document_prefix(doc_short_id)),
+        )
+        .await
+        .map_err(Error::Storage)?;
 
         let mut cids = RapidHashSet::new();
         while let Some(pair) = iter.next().await.map_err(Error::Storage)? {

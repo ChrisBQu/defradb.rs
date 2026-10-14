@@ -408,7 +408,9 @@ impl<S: Store> CommitsFetcher<S> {
         };
 
         let opts = IterOptions::new().with_prefix(doc_prefix);
-        let mut iter = headstore.iterator(opts).await.map_err(Error::Storage)?;
+        let mut iter = crate::block::heads::document::iterator(&headstore, opts)
+            .await
+            .map_err(Error::Storage)?;
 
         while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
             // Key: /d/{short_id uvarint}/{field}/{cid} — the short-ID segment

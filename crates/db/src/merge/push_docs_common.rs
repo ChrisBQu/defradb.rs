@@ -79,9 +79,11 @@ pub async fn load_latest_composite_head_cids<R: Reader + ?Sized, B: Reader + ?Si
     // Go's getHeadsForDocShortID path.
     let head_prefix = HeadstoreDocKey::field_prefix(doc_short_id, "C");
     let head_prefix_len = head_prefix.len();
-    if let Ok(mut iter) = head_reader
-        .iterator(IterOptions::new().with_prefix(head_prefix))
-        .await
+    if let Ok(mut iter) = crate::block::heads::document::iterator(
+        head_reader,
+        IterOptions::new().with_prefix(head_prefix),
+    )
+    .await
     {
         while let Ok(Some(pair)) = iter.next().await {
             let cid_str = String::from_utf8_lossy(&pair.key[head_prefix_len..]);

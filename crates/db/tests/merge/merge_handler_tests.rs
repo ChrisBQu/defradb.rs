@@ -2385,12 +2385,14 @@ async fn composite_parent_replay_updates_headstore_for_merged_parent() {
             .unwrap()
             .expect("merged doc has a short-ID mapping")
             .doc_short_id;
-        let mut iter = headstore
-            .iterator(storage::corekv::IterOptions::new().with_prefix(
+        let mut iter = db::block::heads::document::iterator(
+            &headstore,
+            storage::corekv::IterOptions::new().with_prefix(
                 storage::keys::headstore::HeadstoreDocKey::field_prefix(doc_short_id, "name"),
-            ))
-            .await
-            .unwrap();
+            ),
+        )
+        .await
+        .unwrap();
         let mut keys = Vec::new();
         while let Some(pair) = iter.next().await.unwrap() {
             keys.push(pair.key);

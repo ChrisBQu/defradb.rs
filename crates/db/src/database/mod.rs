@@ -164,6 +164,7 @@ pub struct DB<S: Store> {
     /// [`HEAD_PRUNE_INTERVAL`] appends holds the backlog at a small constant
     /// per collection for one atomic per mutation.
     head_prune_tick: AtomicU64,
+    document_head_prune_tick: AtomicU64,
     /// Generation of the committed migration graph.
     ///
     /// Lensed fetchers include this in their history-cache validity checks so
@@ -261,6 +262,7 @@ impl<S: Store> DB<S> {
             options,
             txn_id_counter: AtomicU64::new(0),
             head_prune_tick: AtomicU64::new(0),
+            document_head_prune_tick: AtomicU64::new(0),
             migration_generation: AtomicU64::new(0),
             closed: AtomicBool::new(false),
             collections: crate::collection::epoch::EpochedCollections::new(
@@ -330,6 +332,7 @@ impl<S: Store> DB<S> {
             options,
             txn_id_counter: AtomicU64::new(0),
             head_prune_tick: AtomicU64::new(0),
+            document_head_prune_tick: AtomicU64::new(0),
             migration_generation: AtomicU64::new(0),
             closed: AtomicBool::new(false),
             collections: crate::collection::epoch::EpochedCollections::new(
@@ -596,6 +599,46 @@ impl<S: Store> DB<S> {
                 "collection head reclamation failed"
             ),
         }
+    }
+
+    /// Reclaim document head groups in a separate transaction. Never add this
+    /// work to the mutation: a reclamation race may lose without losing a write.
+    pub(crate) async fn maybe_prune_document_heads(&self, doc_short_id: u64) {
+        if !self
+            .document_head_prune_tick
+            .fetch_add(1, Ordering::Relaxed)
+            .is_multiple_of(HEAD_PRUNE_INTERVAL)
+        {
+            return;
+        }
+        if let Err(error) = self.prune_document_heads(doc_short_id).await {
+            if error.is_txn_conflict() {
+                tracing::debug!(doc_short_id, %error, "document head reclamation lost a write race");
+            } else {
+                tracing::warn!(doc_short_id, %error, "document head reclamation failed");
+            }
+        }
+    }
+
+    pub async fn prune_document_heads(
+        &self,
+        doc_short_id: u64,
+    ) -> Result<crate::block::heads::PruneOutcome> {
+        let txn = self.new_txn(false).await?;
+        let outcome = {
+            let headstore = txn.headstore()?;
+            let prefix = storage::keys::headstore::HeadstoreDocKey::document_prefix(doc_short_id);
+            let markers = crate::block::heads::document::marker_prefix(&prefix);
+            crate::block::heads::prune_prefixes(&headstore, prefix, markers, HEAD_PRUNE_MAX_KEYS)
+                .await
+                .map_err(Error::Storage)?
+        };
+        if outcome == crate::block::heads::PruneOutcome::default() {
+            txn.discard()?;
+        } else {
+            txn.commit().await?;
+        }
+        Ok(outcome)
     }
 
     /// Delete collection head keys that a marker supersedes, with their

@@ -17,7 +17,7 @@ use storage::RegolithStore;
 #[derive(Clone, Copy, Debug)]
 enum FailPoint {
     SetHead(Cid),
-    DeleteHead(Cid),
+    SupersedeHead(Cid),
     SetPriority(Cid),
 }
 
@@ -29,7 +29,15 @@ impl FailPoint {
         let head = storage::keys::headstore::HeadstoreDocKey::parse(key);
         match self {
             Self::SetHead(cid) => !delete && head.is_some_and(|head| head.cid == cid),
-            Self::DeleteHead(cid) => delete && head.is_some_and(|head| head.cid == cid),
+            Self::SupersedeHead(cid) => {
+                !delete
+                    && key.strip_prefix(b"/ds/").is_some_and(|rest| {
+                        let Some(last) = rest.iter().rposition(|byte| *byte == b'/') else {
+                            return false;
+                        };
+                        rest[..last].ends_with(cid.to_string().as_bytes())
+                    })
+            }
             Self::SetPriority(cid) => {
                 !delete && key.starts_with(b"/p/") && key.ends_with(&cid.to_bytes())
             }
@@ -366,8 +374,8 @@ async fn assert_update_rolls_back(point: impl FnOnce(&Update) -> FailPoint) {
 }
 
 #[tokio::test]
-async fn composite_parent_delete_failure_aborts_update_merge() {
-    assert_update_rolls_back(|update| FailPoint::DeleteHead(update.genesis)).await;
+async fn composite_parent_marker_failure_aborts_update_merge() {
+    assert_update_rolls_back(|update| FailPoint::SupersedeHead(update.genesis)).await;
 }
 
 #[tokio::test]
@@ -381,8 +389,8 @@ async fn composite_priority_write_failure_aborts_update_merge() {
 }
 
 #[tokio::test]
-async fn field_parent_delete_failure_aborts_update_merge() {
-    assert_update_rolls_back(|update| FailPoint::DeleteHead(update.genesis_name)).await;
+async fn field_parent_marker_failure_aborts_update_merge() {
+    assert_update_rolls_back(|update| FailPoint::SupersedeHead(update.genesis_name)).await;
 }
 
 #[tokio::test]

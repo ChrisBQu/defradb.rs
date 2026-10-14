@@ -117,6 +117,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 &blockstore,
                 &headstore,
                 composite_cid,
+                doc_short_id,
                 sign_config.as_ref(),
             )
             .await?;
@@ -313,6 +314,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     &blockstore,
                     &headstore,
                     composite_cid,
+                    doc_short_id,
                     sign_config.as_ref(),
                 )
                 .await?;

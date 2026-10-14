@@ -278,8 +278,7 @@ pub async fn get_all_field_heads(
     let prefix_len = prefix.len();
     let opts = IterOptions::new().with_prefix(prefix);
 
-    let mut iter = headstore
-        .iterator(opts)
+    let mut iter = crate::block::heads::document::iterator(headstore, opts)
         .await
         .map_err(|e| format!("Failed to create headstore iterator: {}", e))?;
 
@@ -325,8 +324,7 @@ impl DocHeadsSnapshot {
         let prefix_len = prefix.len();
         let opts = IterOptions::new().with_prefix(prefix);
 
-        let mut iter = headstore
-            .iterator(opts)
+        let mut iter = crate::block::heads::document::iterator(headstore, opts)
             .await
             .map_err(|e| format!("Failed to create headstore iterator: {}", e))?;
 

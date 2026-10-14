@@ -8,12 +8,14 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         doc_short_id: u64,
         field_name: &str,
     ) -> std::result::Result<u64, MergeError> {
-        let mut iter = headstore
-            .iterator(storage::corekv::IterOptions::new().with_prefix(
+        let mut iter = crate::block::heads::document::iterator(
+            headstore,
+            storage::corekv::IterOptions::new().with_prefix(
                 storage::keys::headstore::HeadstoreDocKey::field_prefix(doc_short_id, field_name),
-            ))
-            .await
-            .map_err(|e| MergeError::Storage(e.to_string()))?;
+            ),
+        )
+        .await
+        .map_err(|e| MergeError::Storage(e.to_string()))?;
 
         let mut max_priority = 0_u64;
         while let Some(pair) = iter

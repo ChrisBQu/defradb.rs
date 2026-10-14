@@ -292,6 +292,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 &blockstore,
                 &headstore,
                 block_result.cid,
+                doc_short_id,
                 sign_config.as_ref(),
             )
             .await?;
@@ -452,6 +453,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 &blockstore,
                 &headstore,
                 block_result.cid,
+                doc_short_id,
                 sign_config.as_ref(),
             )
             .await?;
@@ -566,6 +568,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 &blockstore,
                 &headstore,
                 composite_cid,
+                doc_short_id,
                 sign_config.as_ref(),
             )
             .await?;

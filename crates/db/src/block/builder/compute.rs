@@ -150,6 +150,10 @@ pub fn compute_document_blocks(
         // Head entry: /d/{doc_short_id}/{field_name}/{cid} -> priority
         let head_key = HeadstoreDocKey::new(identity.doc_short_id, field_name, field_cid);
         let priority_bytes = encode_priority_varint(priority);
+        headstore_entries.push((
+            crate::block::heads::document::publication_key(&head_key.bytes()),
+            vec![],
+        ));
         headstore_entries.push((head_key.bytes(), priority_bytes));
         headstore_entries.push((
             priority_index_key(identity.doc_short_id, priority, field_cid),
@@ -214,6 +218,10 @@ pub fn compute_document_blocks(
 
     let composite_head_key = HeadstoreDocKey::new(identity.doc_short_id, "C", composite_cid);
     let priority_bytes = encode_priority_varint(priority);
+    headstore_entries.push((
+        crate::block::heads::document::publication_key(&composite_head_key.bytes()),
+        vec![],
+    ));
     headstore_entries.push((composite_head_key.bytes(), priority_bytes));
     headstore_entries.push((
         priority_index_key(identity.doc_short_id, priority, composite_cid),

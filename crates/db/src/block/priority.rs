@@ -41,10 +41,12 @@ impl<S: Store> DB<S> {
             let headstore = write_txn.headstore()?;
             let blockstore = write_txn.blockstore()?;
 
-            let mut head_iter = headstore
-                .iterator(IterOptions::new().with_prefix(b"/d/".to_vec()))
-                .await
-                .map_err(Error::Storage)?;
+            let mut head_iter = crate::block::heads::document::iterator(
+                &headstore,
+                IterOptions::new().with_prefix(b"/d/".to_vec()),
+            )
+            .await
+            .map_err(Error::Storage)?;
 
             // Deltas no longer carry docIDs (Go #4838): the doc short ID is
             // recovered from the head key ("/d/{short_id uvarint}/...") and

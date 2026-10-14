@@ -511,6 +511,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             collection_lookup.clone(),
             CompositeMergeMode::Standalone,
         );
+        self.db.maybe_prune_document_heads(doc_short_id).await;
         let mut state = CompositeMergeState::default();
 
         let process_result: std::result::Result<Option<MergeOutcome>, MergeError> = {
@@ -953,6 +954,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             collection_lookup.clone(),
             CompositeMergeMode::Batch,
         );
+        self.db.maybe_prune_document_heads(doc_short_id).await;
         let mut state = CompositeMergeState::default();
 
         let process_result: std::result::Result<Option<MergeOutcome>, MergeError> = {

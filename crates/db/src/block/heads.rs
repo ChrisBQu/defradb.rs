@@ -32,6 +32,7 @@ use cid::Cid;
 use datastore::NamespaceView;
 use storage::corekv::{Iterator, Reader, Result};
 
+pub mod document;
 mod scan;
 use scan::head_iterators;
 use storage::keys::headstore::{HeadstoreColKey, HeadstoreColSuperseded};
@@ -170,12 +171,33 @@ pub async fn prune_superseded_heads(
     collection_short_id: u32,
     max_keys: usize,
 ) -> Result<PruneOutcome> {
-    let head_prefix = HeadstoreColKey::collection_prefix(collection_short_id);
-    let head_prefix_len = head_prefix.len();
-    let marker_prefix = HeadstoreColSuperseded::collection_prefix(collection_short_id);
-    let marker_prefix_len = marker_prefix.len();
+    prune_prefixes(
+        headstore,
+        HeadstoreColKey::collection_prefix(collection_short_id),
+        HeadstoreColSuperseded::collection_prefix(collection_short_id),
+        max_keys,
+    )
+    .await
+}
 
-    let (mut head_iter, mut marker_iter) = head_iterators(headstore, collection_short_id).await?;
+pub(crate) async fn prune_prefixes(
+    headstore: &NamespaceView,
+    head_prefix: Vec<u8>,
+    marker_prefix: Vec<u8>,
+    max_keys: usize,
+) -> Result<PruneOutcome> {
+    let head_prefix_len = head_prefix.len();
+    let marker_prefix_len = marker_prefix.len();
+    let mut head_iter = headstore
+        .iterator(storage::corekv::IterOptions::new().with_prefix(head_prefix))
+        .await?;
+    let mut marker_iter = headstore
+        .iterator(
+            storage::corekv::IterOptions::new()
+                .with_prefix(marker_prefix)
+                .with_keys_only(true),
+        )
+        .await?;
 
     // Collected rather than deleted in place: deleting from under an iterator
     // that is rebuilt from its last key would skip entries. The budget is what
@@ -229,7 +251,7 @@ pub async fn prune_superseded_heads(
         // A materialized head read does not add native scan observations.
         // Prune writes shared keys, so anchor each deletion to this snapshot;
         // a concurrent sweep remains the side allowed to lose the race.
-        headstore.has_for_update(&key).await?;
+        headstore.get(&key).await?;
         headstore.delete(&key).await?;
     }
     Ok(outcome)
@@ -242,7 +264,7 @@ async fn next_marker(
 ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
     while let Some(pair) = iter.next().await? {
         let rest = &pair.key[prefix_len..];
-        let Some(sep) = rest.iter().position(|byte| *byte == b'/') else {
+        let Some(sep) = rest.iter().rposition(|byte| *byte == b'/') else {
             continue;
         };
         return Ok(Some((rest[..sep].to_vec(), pair.key)));

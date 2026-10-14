@@ -63,9 +63,11 @@ impl<S: Store + 'static> DocumentHeadProvider for DbHeadProvider<S> {
         let prefix_len = prefix.len();
         let opts = IterOptions::new().with_prefix(prefix);
 
-        let mut iter = headstore.iterator(opts).await.map_err(|e| {
-            p2p::error::Error::HeadProvider(format!("failed to iterate headstore: {}", e))
-        })?;
+        let mut iter = crate::block::heads::document::iterator(&headstore, opts)
+            .await
+            .map_err(|e| {
+                p2p::error::Error::HeadProvider(format!("failed to iterate headstore: {}", e))
+            })?;
 
         let mut cids = Vec::new();
 

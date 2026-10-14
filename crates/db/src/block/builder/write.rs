@@ -455,8 +455,7 @@ pub async fn write_document_blocks(
                 .map_err(|e| format!("Failed to store field block: {}", e))?;
 
             for old_head in &field_head_entries {
-                headstore
-                    .delete(&old_head.key)
+                crate::block::heads::document::supersede(headstore, &old_head.key, field_cid)
                     .await
                     .map_err(|e| format!("Failed to delete old field head: {}", e))?;
             }
@@ -467,6 +466,13 @@ pub async fn write_document_blocks(
                 .set(&head_key.bytes(), &priority_bytes)
                 .await
                 .map_err(|e| format!("Failed to write field head: {}", e))?;
+            headstore
+                .set(
+                    &crate::block::heads::document::publication_key(&head_key.bytes()),
+                    &[],
+                )
+                .await
+                .map_err(|e| e.to_string())?;
             headstore
                 .set(
                     &priority_index_key(identity.doc_short_id, field_priority, field_cid),
@@ -543,8 +549,7 @@ pub async fn write_document_blocks(
         .map_err(|e| format!("Failed to store composite block: {}", e))?;
 
     for old_head in &composite_head_entries {
-        headstore
-            .delete(&old_head.key)
+        crate::block::heads::document::supersede(headstore, &old_head.key, composite_cid)
             .await
             .map_err(|e| format!("Failed to delete old composite head: {}", e))?;
     }
@@ -555,6 +560,13 @@ pub async fn write_document_blocks(
         .set(&composite_head_key.bytes(), &priority_bytes)
         .await
         .map_err(|e| format!("Failed to write composite head: {}", e))?;
+    headstore
+        .set(
+            &crate::block::heads::document::publication_key(&composite_head_key.bytes()),
+            &[],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
     headstore
         .set(
             &priority_index_key(identity.doc_short_id, composite_priority, composite_cid),
@@ -643,8 +655,7 @@ pub async fn write_delete_block(
         .map_err(|e| format!("Failed to store delete composite block: {}", e))?;
 
     for old_head in &composite_head_entries {
-        headstore
-            .delete(&old_head.key)
+        crate::block::heads::document::supersede(headstore, &old_head.key, composite_cid)
             .await
             .map_err(|e| format!("Failed to delete old composite head: {}", e))?;
     }
@@ -655,6 +666,13 @@ pub async fn write_delete_block(
         .set(&composite_head_key.bytes(), &priority_bytes)
         .await
         .map_err(|e| format!("Failed to write delete composite head: {}", e))?;
+    headstore
+        .set(
+            &crate::block::heads::document::publication_key(&composite_head_key.bytes()),
+            &[],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
     headstore
         .set(
             &priority_index_key(doc_short_id, priority, composite_cid),

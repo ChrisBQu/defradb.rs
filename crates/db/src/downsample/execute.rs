@@ -25,13 +25,12 @@ impl<S: Store + 'static> crate::database::DB<S> {
         };
 
         let headstore = txn.headstore()?;
-        let mut iter = headstore
-            .iterator(
-                IterOptions::new()
-                    .with_prefix(HeadstoreDocKey::document_prefix(doc_ref.doc_short_id)),
-            )
-            .await
-            .map_err(Error::Storage)?;
+        let mut iter = crate::block::heads::document::iterator(
+            &headstore,
+            IterOptions::new().with_prefix(HeadstoreDocKey::document_prefix(doc_ref.doc_short_id)),
+        )
+        .await
+        .map_err(Error::Storage)?;
 
         let mut max_priority = 0;
         while let Some(pair) = iter.next().await.map_err(Error::Storage)? {

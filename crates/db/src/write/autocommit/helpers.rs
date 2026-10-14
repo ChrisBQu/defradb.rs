@@ -10,6 +10,7 @@ use defra_core::types::DocId as CrdtDocId;
 use document::NormalValue;
 use schema::{FieldKind, ScalarKind};
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn write_branchable_collection_block<S: storage::corekv::Store + 'static>(
     db: &crate::database::DB<S>,
     collection_name: &str,
@@ -17,8 +18,10 @@ pub(crate) async fn write_branchable_collection_block<S: storage::corekv::Store 
     blockstore: &NamespaceView,
     headstore: &NamespaceView,
     doc_cid: Cid,
+    doc_short_id: u64,
     signing_config: Option<&defra_core::signing::SigningConfig>,
 ) -> query::error::Result<Option<(Cid, Bytes)>> {
+    db.maybe_prune_document_heads(doc_short_id).await;
     if !collection.schema().is_branchable {
         return Ok(None);
     }

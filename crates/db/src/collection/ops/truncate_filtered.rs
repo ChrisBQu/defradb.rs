@@ -213,6 +213,16 @@ impl<S: Store> crate::database::DB<S> {
                     }
                 }
                 head_iter.close().await.map_err(Error::Storage)?;
+                delete_prefix(
+                    &headstore,
+                    crate::block::heads::document::marker_prefix(&head_prefix),
+                )
+                .await?;
+                delete_prefix(
+                    &headstore,
+                    crate::block::heads::document::publication_key(&head_prefix),
+                )
+                .await?;
                 delete_prefix(&headstore, head_prefix).await?;
                 delete_prefix(
                     &headstore,
