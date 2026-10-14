@@ -24,8 +24,8 @@ storage::generate_backend_dropable_tests!(store);
 #[tokio::test]
 async fn caller_listener_receives_transaction_conflicts() {
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use storage::corekv::{Error, Reader, Store, Writer};
     use storage::RegolithStoreOptions;
+    use storage::corekv::{Reader, Store, Writer};
 
     #[derive(Default)]
     struct Conflicts(AtomicUsize);
@@ -48,6 +48,12 @@ async fn caller_listener_receives_transaction_conflicts() {
     first.set(b"claim", b"first").await.unwrap();
     second.set(b"claim", b"second").await.unwrap();
     first.commit().await.unwrap();
-    assert!(matches!(second.commit().await, Err(Error::TxnConflict)));
+    let error = second.commit().await.unwrap_err();
+    let storage::Error::TxnConflictDetails(conflict) = error else {
+        panic!("Regolith validation conflicts should preserve safe reason metadata");
+    };
+    assert_eq!(conflict.access, regolith::Access::Read);
+    assert_eq!(conflict.winning_write, regolith::WriteKind::Put);
+    assert!(conflict.latest_seq > conflict.observed_seq);
     assert_eq!(listener.0.load(Ordering::Relaxed), 1);
 }

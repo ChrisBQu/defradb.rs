@@ -68,6 +68,19 @@ incidental conflicts for explicit transactions that already performed a full doc
 regression was verified RED with the dependency repair disabled (missing expected index row), then GREEN after
 restoring it: untouched index components come from the transaction snapshot, not the caller’s stale document.
 
+### Step 5 execution choice
+
+The plan has an unresolved mismatch: §5.2 step 5 says to make data-path traits synchronous so retry closures can use
+`transact`, while later decision D56 says the data path stays async on a pinned local executor. The pinned Regolith
+API provides both `transact` and `transact_async` (D39). This stack follows the later D56 decision: keep the data path
+async and use `transact_async` for retry-owned transactions. The synchronous-trait conversion in §5.2 is superseded
+for this adoption. Retry integration must preserve engine ownership of the transaction and must not adapt an engine
+borrow into a fake owning `Txn` or extend its lifetime unsafely. The current backend may drive a per-call Regolith
+`IoQueue` through the existing `blocking()` bridge until step 9 replaces that execution boundary; it does not add a
+queue worker or hold a shared transaction lock across the attempt. The attempt view has no commit, discard, callback,
+iterator, or borrowed-result interface, and an operation error is returned without retry. Thus callers can return
+domain outcomes such as `NeedsInput` to their resolver outside the transaction attempt.
+
 ## Latest implementation checkpoints
 
 - `c8146173`: document value integration. Local schema field CIDs remain unchanged; separately allocated immutable part IDs drive projected validation. Stored document format is `DFV\x01`; block wire CBOR stays canonical. Remote tombstones preserve winning LWW priority/raw bytes. A standalone counter block followed by a local increment repairs a stale blob with a validated put. Field heads keep field priorities rather than inheriting composite priorities.

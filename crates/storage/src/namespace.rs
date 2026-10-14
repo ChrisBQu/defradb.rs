@@ -136,8 +136,72 @@ impl<S: Store> Store for NamespacedStore<S> {
         }))
     }
 
+    async fn transact_retry(
+        &self,
+        options: crate::corekv::RetryOptions,
+        attempt: crate::corekv::RetryAttempt,
+    ) -> std::result::Result<crate::corekv::RetryAttemptValue, crate::corekv::RetryAttemptError>
+    {
+        self.store
+            .transact_retry(
+                options,
+                Box::new(NamespacedRetryAttempt {
+                    attempt,
+                    namespace: self.namespace,
+                }),
+            )
+            .await
+    }
+
     async fn close(&self) -> Result<()> {
         self.store.close().await
+    }
+}
+
+struct NamespacedRetryTxn<'a> {
+    txn: &'a mut dyn crate::corekv::RetryTxn,
+    namespace: Namespace,
+}
+
+struct NamespacedRetryAttempt {
+    attempt: crate::corekv::RetryAttempt,
+    namespace: Namespace,
+}
+
+impl crate::corekv::RetryAttemptFn for NamespacedRetryAttempt {
+    fn run<'a>(
+        &'a mut self,
+        txn: &'a mut dyn crate::corekv::RetryTxn,
+    ) -> crate::corekv::RetryAttemptFuture<'a> {
+        Box::pin(async move {
+            let mut namespaced = NamespacedRetryTxn {
+                txn,
+                namespace: self.namespace,
+            };
+            self.attempt.run(&mut namespaced).await
+        })
+    }
+}
+
+impl crate::corekv::private::Sealed for NamespacedRetryTxn<'_> {}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl crate::corekv::RetryTxn for NamespacedRetryTxn<'_> {
+    async fn get(&self, key: &[u8]) -> Result<Option<bytes::Bytes>> {
+        self.txn.get(&self.namespace.prefix_key(key)).await
+    }
+
+    async fn has(&self, key: &[u8]) -> Result<bool> {
+        self.txn.has(&self.namespace.prefix_key(key)).await
+    }
+
+    async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+        self.txn.set(&self.namespace.prefix_key(key), value).await
+    }
+
+    async fn delete(&mut self, key: &[u8]) -> Result<()> {
+        self.txn.delete(&self.namespace.prefix_key(key)).await
     }
 }
 

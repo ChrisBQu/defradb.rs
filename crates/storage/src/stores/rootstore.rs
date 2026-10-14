@@ -38,6 +38,15 @@ impl<S: Store> Store for RootStore<S> {
         self.store.new_txn(readonly).await
     }
 
+    async fn transact_retry(
+        &self,
+        options: crate::corekv::RetryOptions,
+        attempt: crate::corekv::RetryAttempt,
+    ) -> std::result::Result<crate::corekv::RetryAttemptValue, crate::corekv::RetryAttemptError>
+    {
+        self.store.transact_retry(options, attempt).await
+    }
+
     async fn close(&self) -> Result<()> {
         self.store.close().await
     }

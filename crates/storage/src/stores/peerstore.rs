@@ -1,4 +1,7 @@
-use crate::corekv::{IterOptions, Key, Reader, Result, Store, Txn, Writer};
+use crate::corekv::{
+    IterOptions, Key, Reader, Result, RetryAttemptFn, RetryAttemptFuture, RetryOptions, RetryTxn,
+    Store, Txn, Writer,
+};
 use crate::keys::peerstore::{
     ReplicatorKey, ReplicatorRetryCollectionKey, ReplicatorRetryDocIDKey, ReplicatorRetryIDKey,
 };
@@ -124,11 +127,10 @@ where
 }
 
 fn is_retryable_marker_write(error: &crate::corekv::Error) -> bool {
-    error.is_retriable()
-        || matches!(
-            error,
-            crate::corekv::Error::Io(_) | crate::corekv::Error::Backend(_)
-        )
+    matches!(
+        error,
+        crate::corekv::Error::Io(_) | crate::corekv::Error::Backend(_)
+    )
 }
 
 async fn wait_before_marker_retry(_attempt: usize) {
@@ -140,6 +142,58 @@ async fn wait_before_marker_retry(_attempt: usize) {
 pub struct Peerstore<S: Store> {
     store: NamespacedStore<S>,
     retry_schedule: super::RetrySchedule,
+}
+
+struct RegisterScopeMarkerAttempt {
+    peer_id: String,
+    doc_id: String,
+    collection_id: String,
+    retry_info_bytes: Vec<u8>,
+    retry_schedule: super::RetrySchedule,
+}
+
+impl RetryAttemptFn for RegisterScopeMarkerAttempt {
+    fn run<'a>(&'a mut self, txn: &'a mut dyn RetryTxn) -> RetryAttemptFuture<'a> {
+        Box::pin(async move {
+            let id_key = ReplicatorRetryIDKey::new(&self.peer_id);
+            let requested = super::RetryInfo::from_bytes(&self.retry_info_bytes)
+                .unwrap_or_else(|_| super::RetryInfo::new_initial());
+            let existing = txn.get(&id_key.bytes()).await?;
+            if existing.is_none() || requested.not_before_unix > 0 {
+                let mut info = match existing {
+                    Some(bytes) => {
+                        super::RetryInfo::from_bytes(&bytes).map_err(crate::corekv::Error::Other)?
+                    }
+                    None => requested.clone(),
+                };
+                if requested.not_before_unix > 0 {
+                    if requested.not_before_unix > info.not_before_unix {
+                        info.not_before_unix = requested.not_before_unix;
+                        info.deferred_at_unix = requested.deferred_at_unix;
+                    }
+                    info.next_retry_unix = info.not_before_unix;
+                } else {
+                    info.bump_with_schedule(&self.peer_id, &self.retry_schedule);
+                }
+                txn.set(
+                    &id_key.bytes(),
+                    &info.to_bytes().map_err(crate::corekv::Error::Other)?,
+                )
+                .await?;
+            }
+
+            if self.doc_id.is_empty() && self.collection_id.is_empty() {
+                return Ok(Box::new(()) as crate::corekv::RetryAttemptValue);
+            }
+            let marker = if self.doc_id.is_empty() {
+                ReplicatorRetryCollectionKey::new(&self.peer_id, &self.collection_id).bytes()
+            } else {
+                ReplicatorRetryDocIDKey::new(&self.peer_id, &self.doc_id).bytes()
+            };
+            txn.set(&marker, &[]).await?;
+            Ok(Box::new(()) as crate::corekv::RetryAttemptValue)
+        })
+    }
 }
 
 impl<S: Store> Peerstore<S> {
@@ -370,43 +424,29 @@ impl<S: Store> Peerstore<S> {
         collection_id: &str,
         retry_info_bytes: &[u8],
     ) -> Result<()> {
-        let mut txn = self.store.new_txn(false).await?;
-        let id_key = ReplicatorRetryIDKey::new(peer_id);
-        let requested = super::RetryInfo::from_bytes(retry_info_bytes)
-            .unwrap_or_else(|_| super::RetryInfo::new_initial());
-        let existing = txn.get(&id_key.bytes()).await?;
-        if existing.is_none() || requested.not_before_unix > 0 {
-            let mut info = match existing {
-                Some(bytes) => {
-                    super::RetryInfo::from_bytes(&bytes).map_err(crate::corekv::Error::Other)?
-                }
-                None => requested.clone(),
-            };
-            if requested.not_before_unix > 0 {
-                if requested.not_before_unix > info.not_before_unix {
-                    info.not_before_unix = requested.not_before_unix;
-                    info.deferred_at_unix = requested.deferred_at_unix;
-                }
-                info.next_retry_unix = info.not_before_unix;
-            } else {
-                info.bump_with_schedule(peer_id, &self.retry_schedule);
-            }
-            txn.set(
-                &id_key.bytes(),
-                &info.to_bytes().map_err(crate::corekv::Error::Other)?,
+        let peer_id = peer_id.to_owned();
+        let doc_id = doc_id.to_owned();
+        let collection_id = collection_id.to_owned();
+        let retry_info_bytes = retry_info_bytes.to_vec();
+        let retry_schedule = self.retry_schedule.clone();
+        let value = self
+            .store
+            .transact_retry(
+                RetryOptions::new(PUSH_RETRY_TXN_MAX_ATTEMPTS as u32),
+                Box::new(RegisterScopeMarkerAttempt {
+                    peer_id,
+                    doc_id,
+                    collection_id,
+                    retry_info_bytes,
+                    retry_schedule,
+                }),
             )
-            .await?;
-        }
-        let marker = if doc_id.is_empty() {
-            if collection_id.is_empty() {
-                return txn.commit().await;
-            }
-            ReplicatorRetryCollectionKey::new(peer_id, collection_id).bytes()
-        } else {
-            ReplicatorRetryDocIDKey::new(peer_id, doc_id).bytes()
-        };
-        txn.set(&marker, &[]).await?;
-        txn.commit().await
+            .await
+            .map_err(crate::corekv::RetryAttemptError::into_storage)?;
+        value
+            .downcast::<()>()
+            .map(|_| ())
+            .map_err(|_| crate::corekv::Error::Other("invalid retry attempt result".into()))
     }
 
     /// One-way conversion of payload-valued document records and CID-scoped
@@ -942,6 +982,15 @@ impl<S: Store> Store for Peerstore<S> {
 
     async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>> {
         self.store.new_txn(readonly).await
+    }
+
+    async fn transact_retry(
+        &self,
+        options: crate::corekv::RetryOptions,
+        attempt: crate::corekv::RetryAttempt,
+    ) -> std::result::Result<crate::corekv::RetryAttemptValue, crate::corekv::RetryAttemptError>
+    {
+        self.store.transact_retry(options, attempt).await
     }
 
     async fn close(&self) -> Result<()> {

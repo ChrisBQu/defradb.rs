@@ -70,12 +70,13 @@ pub mod traits;
 pub mod types;
 
 // Re-export commonly used types and traits for convenience
-pub use errors::{Error, Result, UNIQUE_CONSTRAINT_VIOLATION_MESSAGE};
+pub use errors::{Error, Result, TransactionConflict, UNIQUE_CONSTRAINT_VIOLATION_MESSAGE};
 pub use iterator::{Iterator, KvPair};
 pub use traits::private;
 pub use traits::{
     make_async_callback, make_callback, AsyncOrderedTxnCallback, AsyncTxnCallback, Dropable,
     MaybeSend, MaybeSendSync, MaybeSync, OrderedTxnCallback, OrderedTxnCallbacks, Reader,
-    ReaderWriter, Store, Txn, TxnCallback, TxnStore, Writer,
+    ReaderWriter, RetryAttempt, RetryAttemptError, RetryAttemptFn, RetryAttemptFuture,
+    RetryAttemptValue, RetryOptions, RetryTxn, Store, Txn, TxnCallback, TxnStore, Writer,
 };
 pub use types::{AppendLog, IterOptions, Key};

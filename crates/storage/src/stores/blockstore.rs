@@ -1,5 +1,5 @@
 use crate::corekv::{IterOptions, Iterator, Key, Reader, Result, Store, Txn, Writer};
-use crate::keys::blockstore::{BlockstoreKey, ToMergeIndexKey, OBJECT_MARKER};
+use crate::keys::blockstore::{BlockstoreKey, OBJECT_MARKER, ToMergeIndexKey};
 use crate::namespace::{Namespace, NamespacedStore};
 use async_trait::async_trait;
 /// Blockstore - IPLD blocks and merkle tree nodes
@@ -52,6 +52,15 @@ impl<S: Store> Store for Blockstore<S> {
             txn,
             is_p2p: self.is_p2p,
         }))
+    }
+
+    async fn transact_retry(
+        &self,
+        options: crate::corekv::RetryOptions,
+        attempt: crate::corekv::RetryAttempt,
+    ) -> std::result::Result<crate::corekv::RetryAttemptValue, crate::corekv::RetryAttemptError>
+    {
+        self.store.transact_retry(options, attempt).await
     }
 
     async fn close(&self) -> Result<()> {
@@ -144,7 +153,8 @@ impl BlockstoreTxn {
             return Err(crate::corekv::Error::Other(format!(
                 "Data corruption detected: {} merge index keys could not be parsed (recovered {} CIDs). \
                 This may indicate storage corruption or a version mismatch.",
-                parse_errors, cids.len()
+                parse_errors,
+                cids.len()
             )));
         }
 

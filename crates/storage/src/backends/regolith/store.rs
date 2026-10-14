@@ -8,8 +8,8 @@
 #![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use regolith::{OptimisticTransactionDb, StreamOptions};
@@ -20,7 +20,10 @@ use super::event_order::EventOrder;
 use super::head_cache::{self, SharedHeadCache};
 use super::transaction::RegolithTxn;
 use crate::backends::shared::TransactionStatsHandle;
-use crate::corekv::{Dropable, Error, Result, Store, Txn};
+use crate::corekv::{
+    Dropable, Error, Result, RetryAttempt, RetryAttemptError, RetryAttemptValue, RetryOptions,
+    RetryTxn, Store, Txn,
+};
 
 /// Key-value store backed by regolith.
 ///
@@ -293,6 +296,73 @@ impl Store for RegolithStore {
         }
     }
 
+    async fn transact_retry(
+        &self,
+        options: RetryOptions,
+        mut attempt: RetryAttempt,
+    ) -> std::result::Result<RetryAttemptValue, RetryAttemptError> {
+        self.ensure_open()?;
+        self.inner.active_txns.fetch_add(1, Ordering::AcqRel);
+        if self.inner.closed.load(Ordering::Acquire) {
+            self.inner.active_txns.fetch_sub(1, Ordering::AcqRel);
+            return Err(RetryAttemptError::Storage(Error::DBClosed));
+        }
+
+        struct ActiveTxnGuard(Arc<AtomicUsize>);
+        impl Drop for ActiveTxnGuard {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
+        let _active = ActiveTxnGuard(Arc::clone(&self.inner.active_txns));
+        let queue_db = Arc::clone(&self.inner.db);
+        let policy = regolith::RetryPolicy::new(options.max_attempts.max(1));
+        let mut committed_changes = head_cache::HeadChanges::default();
+        let mut attempt_count = 0usize;
+        let run = || {
+            let mut queue = queue_db.db().io_queue();
+            let queue_id = queue.id();
+            let future = queue_db.transact_async(queue_id, &policy, async |txn, _lost| {
+                attempt_count += 1;
+                committed_changes = head_cache::HeadChanges::default();
+                let mut retry_txn = RegolithRetryTxn {
+                    txn,
+                    changes: head_cache::HeadChanges::default(),
+                    head_cache: Arc::clone(&self.inner.head_cache),
+                };
+                let value = attempt.run(&mut retry_txn).await;
+                if value.is_ok() {
+                    committed_changes = std::mem::take(&mut retry_txn.changes);
+                }
+                value
+            });
+            queue.block_on(future)
+        };
+        let outcome = super::blocking(run);
+        match outcome {
+            Ok((value, _receipt)) => {
+                let mut cache = head_cache::lock(&self.inner.head_cache)?;
+                cache.publish(&committed_changes);
+                self.inner.stats.record_commit();
+                for _ in 1..attempt_count {
+                    self.inner.stats.record_conflict();
+                }
+                Ok(value)
+            }
+            Err(regolith::TransactError::Closure(error)) => Err(error),
+            Err(regolith::TransactError::Exhausted(_)) => {
+                self.inner.stats.record_conflict();
+                Err(RetryAttemptError::Storage(Error::TxnConflict))
+            }
+            Err(regolith::TransactError::Engine(error)) => Err(RetryAttemptError::Storage(
+                super::transaction::map_txn_error(error),
+            )),
+            Err(other) => Err(RetryAttemptError::Storage(Error::Backend(format!(
+                "{other:?}"
+            )))),
+        }
+    }
+
     async fn close(&self) -> Result<()> {
         if self.inner.closed.swap(true, Ordering::AcqRel) {
             return Ok(());
@@ -308,6 +378,73 @@ impl Store for RegolithStore {
             .db()
             .close()
             .map_err(|error| Error::Backend(format!("failed to close regolith: {error}")))
+    }
+}
+
+struct RegolithRetryTxn<'a> {
+    txn: &'a mut regolith::Transaction,
+    changes: head_cache::HeadChanges,
+    head_cache: SharedHeadCache,
+}
+
+impl RegolithRetryTxn<'_> {
+    fn disable_projection_for_key(&self, key: &[u8]) -> Result<()> {
+        if head_cache::is_projection_key(key) {
+            head_cache::lock(&self.head_cache)?.disable();
+        }
+        Ok(())
+    }
+}
+
+impl crate::corekv::private::Sealed for RegolithRetryTxn<'_> {}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl RetryTxn for RegolithRetryTxn<'_> {
+    async fn get(&self, key: &[u8]) -> Result<Option<bytes::Bytes>> {
+        if key.is_empty() {
+            return Err(Error::EmptyKey);
+        }
+        let txn: &regolith::Transaction = self.txn;
+        regolith::ready(|| txn.get_for_update(key))
+            .await
+            .map(|value| value.map(bytes::Bytes::from))
+            .map_err(super::transaction::map_txn_error)
+    }
+
+    async fn has(&self, key: &[u8]) -> Result<bool> {
+        if key.is_empty() {
+            return Err(Error::EmptyKey);
+        }
+        let txn: &regolith::Transaction = self.txn;
+        regolith::ready(|| txn.get_for_update(key))
+            .await
+            .map(|value| value.is_some())
+            .map_err(super::transaction::map_txn_error)
+    }
+
+    async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+        if key.is_empty() {
+            return Err(Error::EmptyKey);
+        }
+        self.disable_projection_for_key(key)?;
+        regolith::ready(|| self.txn.put(key, value))
+            .await
+            .map_err(super::transaction::map_txn_error)?;
+        self.changes.record(key, Some(value));
+        Ok(())
+    }
+
+    async fn delete(&mut self, key: &[u8]) -> Result<()> {
+        if key.is_empty() {
+            return Err(Error::EmptyKey);
+        }
+        self.disable_projection_for_key(key)?;
+        regolith::ready(|| self.txn.delete(key))
+            .await
+            .map_err(super::transaction::map_txn_error)?;
+        self.changes.record(key, None);
+        Ok(())
     }
 }
 

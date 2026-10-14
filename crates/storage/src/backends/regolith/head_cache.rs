@@ -137,6 +137,10 @@ impl HeadCache {
 
 pub(crate) type SharedHeadCache = Arc<Mutex<HeadCache>>;
 
+pub(super) fn is_projection_key(key: &[u8]) -> bool {
+    collection(key).is_some()
+}
+
 pub(super) fn lock(cache: &SharedHeadCache) -> Result<MutexGuard<'_, HeadCache>> {
     cache
         .lock()
@@ -435,7 +439,7 @@ mod tests {
         assert_eq!(rows(losing.as_ref()).await.heads.len(), 1);
         first.commit().await.unwrap();
         assert!(rows(stale.as_ref()).await.heads.is_empty());
-        assert!(matches!(losing.commit().await, Err(Error::TxnConflict)));
+        assert!(losing.commit().await.unwrap_err().is_txn_conflict());
         let now = store.new_txn(true).await.unwrap();
         assert_eq!(rows(now.as_ref()).await.heads[0].key, b"h/c/1/a");
         assert_eq!(rows(now.as_ref()).await.heads.len(), 1);
@@ -481,12 +485,14 @@ mod tests {
         let store = cache_store();
         let txn = store.new_txn(true).await.unwrap();
         for id in 0..4096 {
-            assert!(head_entries(txn.as_ref(), id)
-                .await
-                .unwrap()
-                .unwrap()
-                .heads
-                .is_empty());
+            assert!(
+                head_entries(txn.as_ref(), id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .heads
+                    .is_empty()
+            );
         }
         let shared = cache(txn.as_ref());
         assert_eq!(lock(&shared).unwrap().rows.len(), CACHE_BYTES / 128);
@@ -524,16 +530,18 @@ mod tests {
         txn.set(b"h/c/01/not-in-prefix", b"2").await.unwrap();
         txn.commit().await.unwrap();
         let root = store.new_txn(true).await.unwrap();
-        assert!(root
-            .collection_head_entries(b"/c/1/", b"/cs/1/")
-            .await
-            .unwrap()
-            .is_none());
-        assert!(root
-            .collection_head_entries(b"h/c/1/", b"h/cs/2/")
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            root.collection_head_entries(b"/c/1/", b"/cs/1/")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            root.collection_head_entries(b"h/c/1/", b"h/cs/2/")
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(rows(root.as_ref()).await.heads.len(), 1);
         let head = NamespacedTxn::new(root, Namespace::Headstore);
         let view = head
@@ -543,11 +551,13 @@ mod tests {
             .unwrap();
         assert_eq!(view.heads[0].key, b"/c/1/a");
         let nested = NamespacedTxn::new(Box::new(head), Namespace::Headstore);
-        assert!(nested
-            .collection_head_entries(b"/c/1/", b"/cs/1/")
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            nested
+                .collection_head_entries(b"/c/1/", b"/cs/1/")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

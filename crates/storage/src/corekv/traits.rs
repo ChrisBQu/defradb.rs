@@ -17,6 +17,7 @@ use async_trait::async_trait;
 /// single-threaded. The `#[cfg_attr]` pattern is used to conditionally
 /// apply `async_trait(?Send)` for WASM builds.
 use bytes::Bytes;
+use std::any::Any;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -109,6 +110,136 @@ pub type AsyncTxnCallback =
 /// These callbacks are executed asynchronously when transaction events occur.
 /// No Send bound required in single-threaded WASM environment.
 pub type AsyncTxnCallback = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()>>> + 'static>;
+
+/// A retry attempt's restricted transaction view. It deliberately has no
+/// commit, discard, iterator, or callback methods: the store owns the attempt
+/// lifetime and commit, and the view cannot escape through this API.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait RetryTxn: MaybeSendSync + private::Sealed {
+    async fn get(&self, key: &[u8]) -> Result<Option<Bytes>>;
+    async fn has(&self, key: &[u8]) -> Result<bool>;
+    async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()>;
+    async fn delete(&mut self, key: &[u8]) -> Result<()>;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub type RetryAttemptValue = Box<dyn Any + Send>;
+#[cfg(target_arch = "wasm32")]
+pub type RetryAttemptValue = Box<dyn Any>;
+
+/// Result of an engine-owned retry operation. Storage failures remain typed;
+/// domain aborts cross the engine boundary untouched and are never retried.
+pub enum RetryAttemptError {
+    Storage(super::errors::Error),
+    #[cfg(not(target_arch = "wasm32"))]
+    Abort(Box<dyn Any + Send>),
+    #[cfg(target_arch = "wasm32")]
+    Abort(Box<dyn Any>),
+}
+
+impl std::fmt::Debug for RetryAttemptError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Storage(error) => formatter.debug_tuple("Storage").field(error).finish(),
+            Self::Abort(_) => formatter.write_str("Abort(<typed domain error>)"),
+        }
+    }
+}
+
+impl From<super::errors::Error> for RetryAttemptError {
+    fn from(error: super::errors::Error) -> Self {
+        Self::Storage(error)
+    }
+}
+
+impl RetryAttemptError {
+    pub fn into_storage(self) -> super::errors::Error {
+        match self {
+            Self::Storage(error) => error,
+            Self::Abort(_) => super::errors::Error::Other(
+                "transaction attempt aborted with a domain error".to_string(),
+            ),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn downcast_abort<T: Any + Send>(self) -> std::result::Result<T, Self> {
+        match self {
+            Self::Abort(error) => match error.downcast::<T>() {
+                Ok(value) => Ok(*value),
+                Err(error) => Err(Self::Abort(error)),
+            },
+            storage => Err(storage),
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn downcast_abort<T: Any>(self) -> std::result::Result<T, Self> {
+        match self {
+            Self::Abort(error) => match error.downcast::<T>() {
+                Ok(value) => Ok(*value),
+                Err(error) => Err(Self::Abort(error)),
+            },
+            storage => Err(storage),
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub type RetryAttemptFuture<'a> = Pin<
+    Box<dyn Future<Output = std::result::Result<RetryAttemptValue, RetryAttemptError>> + Send + 'a>,
+>;
+#[cfg(target_arch = "wasm32")]
+pub type RetryAttemptFuture<'a> =
+    Pin<Box<dyn Future<Output = std::result::Result<RetryAttemptValue, RetryAttemptError>> + 'a>>;
+#[cfg(not(target_arch = "wasm32"))]
+pub trait RetryAttemptFn: Send {
+    fn run<'a>(&'a mut self, txn: &'a mut dyn RetryTxn) -> RetryAttemptFuture<'a>;
+}
+#[cfg(target_arch = "wasm32")]
+pub trait RetryAttemptFn {
+    fn run<'a>(&'a mut self, txn: &'a mut dyn RetryTxn) -> RetryAttemptFuture<'a>;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub type RetryAttempt = Box<dyn RetryAttemptFn>;
+#[cfg(target_arch = "wasm32")]
+pub type RetryAttempt = Box<dyn RetryAttemptFn>;
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<F> RetryAttemptFn for F
+where
+    F: Send + for<'a> FnMut(&'a mut dyn RetryTxn) -> RetryAttemptFuture<'a>,
+{
+    fn run<'a>(&'a mut self, txn: &'a mut dyn RetryTxn) -> RetryAttemptFuture<'a> {
+        self(txn)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl<F> RetryAttemptFn for F
+where
+    F: for<'a> FnMut(&'a mut dyn RetryTxn) -> RetryAttemptFuture<'a>,
+{
+    fn run<'a>(&'a mut self, txn: &'a mut dyn RetryTxn) -> RetryAttemptFuture<'a> {
+        self(txn)
+    }
+}
+
+/// Number of total transaction attempts, including the first run.
+#[derive(Clone, Copy, Debug)]
+pub struct RetryOptions {
+    pub max_attempts: u32,
+}
+
+impl RetryOptions {
+    pub fn new(max_attempts: u32) -> Self {
+        Self {
+            max_attempts: max_attempts.max(1),
+        }
+    }
+}
 
 pub use defra_core::thread_bounds::{MaybeSend, MaybeSendSync, MaybeSync};
 
@@ -327,6 +458,36 @@ pub trait Store: MaybeSendSync + private::Sealed {
     /// * `Err(Error)` for other errors
     async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>>;
 
+    /// Run an attempt in a transaction owned and committed by the store.
+    /// Only commit conflicts are retried; an error returned by the operation
+    /// is returned immediately. The restricted view cannot commit or escape.
+    async fn transact_retry(
+        &self,
+        options: RetryOptions,
+        mut attempt: RetryAttempt,
+    ) -> std::result::Result<RetryAttemptValue, RetryAttemptError> {
+        let max_attempts = options.max_attempts.max(1);
+        for attempt_number in 1..=max_attempts {
+            let mut txn = self.new_txn(false).await?;
+            let result = {
+                let mut retry_txn = RetryTxnAdapter(txn.as_mut());
+                attempt.run(&mut retry_txn).await
+            };
+            match result {
+                Err(error) => {
+                    txn.discard();
+                    return Err(error);
+                }
+                Ok(value) => match txn.commit().await {
+                    Ok(()) => return Ok(value),
+                    Err(error) if error.is_txn_conflict() && attempt_number < max_attempts => {}
+                    Err(error) => return Err(RetryAttemptError::Storage(error)),
+                },
+            }
+        }
+        unreachable!("retry loop always returns")
+    }
+
     /// Close the store and release resources.
     ///
     /// After closing, no further operations can be performed on this store.
@@ -337,6 +498,27 @@ pub trait Store: MaybeSendSync + private::Sealed {
     /// * `Ok(())` on success
     /// * `Err(Error)` if an error occurred during close
     async fn close(&self) -> Result<()>;
+}
+
+struct RetryTxnAdapter<'a>(&'a mut dyn Txn);
+
+impl private::Sealed for RetryTxnAdapter<'_> {}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl RetryTxn for RetryTxnAdapter<'_> {
+    async fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
+        self.0.get(key).await
+    }
+    async fn has(&self, key: &[u8]) -> Result<bool> {
+        self.0.has(key).await
+    }
+    async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+        self.0.set(key, value).await
+    }
+    async fn delete(&mut self, key: &[u8]) -> Result<()> {
+        self.0.delete(key).await
+    }
 }
 
 /// Dropable trait for stores that support bulk deletion.

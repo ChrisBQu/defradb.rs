@@ -169,18 +169,17 @@ impl Drop for RegolithTxn {
 pub(super) fn map_txn_error(error: TransactionError) -> Error {
     match error {
         TransactionError::Conflict(conflict) => {
-            // `Error::TxnConflict` carries no key, and a conflict without one
-            // sends the reader guessing at which of a transaction's writes
-            // collided. The engine knows; say so.
-            tracing::warn!(
-                key = %String::from_utf8_lossy(conflict.key()),
-                observed_seq = conflict.observed_seq(),
-                latest_seq = conflict.latest_seq(),
-                "transaction conflict"
-            );
-            Error::TxnConflict
+            Error::TxnConflictDetails(crate::corekv::TransactionConflict {
+                access: conflict.mine(),
+                winning_write: conflict.theirs(),
+                observed_seq: conflict.observed_seq(),
+                latest_seq: conflict.latest_seq(),
+            })
         }
-        TransactionError::Busy(_) => Error::TxnConflict,
+        // Lock admission failure is not an optimistic validation conflict.
+        // Keep it transient and typed as a backend failure so outer callers
+        // do not count it as another storage-conflict retry.
+        busy @ TransactionError::Busy(_) => Error::Backend(busy.to_string()),
         other => Error::Backend(other.to_string()),
     }
 }
@@ -416,7 +415,7 @@ impl Txn for RegolithTxn {
             }
             Err(error) => {
                 drop(ordered_token);
-                if matches!(error, Error::TxnConflict) {
+                if error.is_txn_conflict() {
                     self.stats.record_conflict();
                 }
                 self.callbacks.run_error().await;

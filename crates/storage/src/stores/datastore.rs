@@ -45,6 +45,19 @@ impl<S: Store> Store for Datastore<S> {
         Ok(Box::new(DatastoreTxn { txn }))
     }
 
+    async fn transact_retry(
+        &self,
+        options: crate::corekv::RetryOptions,
+        attempt: crate::corekv::RetryAttempt,
+    ) -> std::result::Result<crate::corekv::RetryAttemptValue, crate::corekv::RetryAttemptError>
+    {
+        // RetryTxn exposes the same raw Reader/Writer operations as
+        // DatastoreTxn. Chunking is an explicit put/get_value helper rather
+        // than an implicit trait behavior, so namespace forwarding preserves
+        // its transaction semantics.
+        self.store.transact_retry(options, attempt).await
+    }
+
     async fn close(&self) -> Result<()> {
         self.store.close().await
     }

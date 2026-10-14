@@ -9,7 +9,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::corekv::{private, Result, Store, Txn};
+use crate::corekv::{
+    Result, RetryAttempt, RetryAttemptError, RetryAttemptValue, RetryOptions, Store, Txn, private,
+};
 
 /// A [`Store`] that erases the concrete backend behind `Arc<dyn Store>`.
 #[derive(Clone)]
@@ -39,6 +41,14 @@ impl Store for DynStore {
 
     async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>> {
         self.inner.new_txn(readonly).await
+    }
+
+    async fn transact_retry(
+        &self,
+        options: RetryOptions,
+        attempt: RetryAttempt,
+    ) -> std::result::Result<RetryAttemptValue, RetryAttemptError> {
+        self.inner.transact_retry(options, attempt).await
     }
 
     async fn close(&self) -> Result<()> {
