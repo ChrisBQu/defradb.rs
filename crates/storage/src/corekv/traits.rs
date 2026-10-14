@@ -122,28 +122,32 @@ pub trait RetryTxn: MaybeSendSync + private::Sealed {
     async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()>;
     async fn delete(&mut self, key: &[u8]) -> Result<()>;
 
-    /// Open the backend's sealed, attempt-scoped transaction adapter for
-    /// datastore facades that need the full Reader/Writer surface. The
-    /// returned transaction must refuse commit/discard; ownership remains
-    /// with this retry attempt and the adapter must be returned before the
-    /// closure completes. Backends without an owned attempt adapter reject
-    /// this bridge and continue to use the restricted methods above.
+    /// Open a sealed, attempt-scoped Reader/Writer capability for datastore
+    /// facades. It has no transaction lifecycle methods and cannot commit.
     #[doc(hidden)]
-    fn take_attempt_txn(&mut self) -> Result<Box<dyn Txn>> {
+    fn begin_attempt_io(&mut self) -> Result<Box<dyn RetryAttemptIO>> {
         Err(super::errors::Error::Other(
-            "backend does not expose a scoped transaction facade".into(),
+            "backend does not expose scoped retry IO".into(),
         ))
     }
 
-    /// Return the adapter from [`RetryTxn::take_attempt_txn`]. This fails if
-    /// namespace views or iterators still retain it, so the engine never
-    /// commits while attempt-local access is live.
+    /// Return the attempt capability after all namespace views and iterators
+    /// have been dropped. Backends reject retained references before commit.
     #[doc(hidden)]
-    fn restore_attempt_txn(&mut self, _txn: Box<dyn Txn>) -> Result<()> {
+    fn finish_attempt_io(&mut self, _io: Box<dyn RetryAttemptIO>) -> Result<()> {
         Err(super::errors::Error::Other(
-            "backend does not accept a scoped transaction facade".into(),
+            "backend does not accept scoped retry IO".into(),
         ))
     }
+}
+
+/// Engine-owned Reader/Writer access scoped to one retry attempt. This
+/// intentionally omits `Txn`, callbacks, commit, and discard.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait RetryAttemptIO: ReaderWriter + private::Sealed {
+    #[doc(hidden)]
+    fn as_any(&self) -> &dyn Any;
 }
 
 #[cfg(not(target_arch = "wasm32"))]
