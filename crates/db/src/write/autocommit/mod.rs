@@ -110,6 +110,7 @@ impl<S: Store> AutoCommitMutator<S> {
     }
 
     pub(super) fn register_created_doc_with_acp(
+
         &self,
         txn: &mut crate::txn::DbTxn<S>,
         collection: &Collection,

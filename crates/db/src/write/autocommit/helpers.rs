@@ -495,7 +495,7 @@ fn build_local_counter_delta(
                 other => {
                     return Err(query::error::QueryError::execution(format!(
                         "counter Int64 field got non-int delta: {other:?}"
-                    )))
+                    )));
                 }
             };
             CounterDelta::new_int64(
@@ -516,7 +516,7 @@ fn build_local_counter_delta(
                 other => {
                     return Err(query::error::QueryError::execution(format!(
                         "counter Float64 field got non-numeric delta: {other:?}"
-                    )))
+                    )));
                 }
             };
             CounterDelta::new_float64(
@@ -537,7 +537,7 @@ fn build_local_counter_delta(
                 other => {
                     return Err(query::error::QueryError::execution(format!(
                         "counter Float32 field got non-numeric delta: {other:?}"
-                    )))
+                    )));
                 }
             };
             CounterDelta::new_float32(
