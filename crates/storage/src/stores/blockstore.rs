@@ -171,6 +171,10 @@ impl Reader for BlockstoreTxn {
         self.txn.get(key).await
     }
 
+    async fn get_parts(&self, key: &[u8], parts: &[u32]) -> Result<Option<Bytes>> {
+        self.txn.get_parts(key, parts).await
+    }
+
     async fn has(&self, key: &[u8]) -> Result<bool> {
         self.txn.has(key).await
     }

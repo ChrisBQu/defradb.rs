@@ -178,6 +178,11 @@ impl Reader for NamespacedTxn {
         self.txn.get(&prefixed).await
     }
 
+    async fn get_parts(&self, key: &[u8], parts: &[u32]) -> Result<Option<Bytes>> {
+        let prefixed = self.namespace.prefix_key(key);
+        self.txn.get_parts(&prefixed, parts).await
+    }
+
     async fn has(&self, key: &[u8]) -> Result<bool> {
         let prefixed = self.namespace.prefix_key(key);
         self.txn.has(&prefixed).await

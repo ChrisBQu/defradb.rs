@@ -166,6 +166,19 @@ impl Reader for RegolithTxn {
         Ok(slice.map(Bytes::from_owner))
     }
 
+    async fn get_parts(&self, key: &[u8], parts: &[u32]) -> Result<Option<Bytes>> {
+        if key.is_empty() {
+            return Err(Error::EmptyKey);
+        }
+        let slice = match self.handle()?.as_ref() {
+            Handle::ReadOnly(snapshot) => snapshot
+                .get_slice(key)
+                .map_err(|error| Error::Backend(error.to_string()))?,
+            Handle::Writable(txn) => txn.get_parts(key, parts).map_err(map_txn_error)?,
+        };
+        Ok(slice.map(Bytes::from_owner))
+    }
+
     async fn has(&self, key: &[u8]) -> Result<bool> {
         if key.is_empty() {
             return Err(Error::EmptyKey);

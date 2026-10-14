@@ -82,6 +82,14 @@ pub trait Reader: MaybeSendSync + private::Sealed {
     /// * `Err(Error)` if an error occurred
     async fn get(&self, key: &[u8]) -> Result<Option<Bytes>>;
 
+    /// Read a value while validating only the named logical parts at commit.
+    /// Part IDs belong to the value's merge operator. An empty list requests
+    /// an unvalidated read; it must not drive an authoritative decision.
+    /// Backends without projection support conservatively validate the whole value.
+    async fn get_parts(&self, key: &[u8], _parts: &[u32]) -> Result<Option<Bytes>> {
+        self.get(key).await
+    }
+
     /// Check if a key exists in the store.
     ///
     /// # Arguments
@@ -439,6 +447,10 @@ impl<T> TxnStore for T where T: Store {}
 impl Reader for Box<dyn Txn> {
     async fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         (**self).get(key).await
+    }
+
+    async fn get_parts(&self, key: &[u8], parts: &[u32]) -> Result<Option<Bytes>> {
+        (**self).get_parts(key, parts).await
     }
 
     async fn has(&self, key: &[u8]) -> Result<bool> {

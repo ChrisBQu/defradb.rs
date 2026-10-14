@@ -35,6 +35,17 @@ impl SharedTxn {
         txn.get(&prefixed).await
     }
 
+    /// Read selected logical parts through the shared engine transaction.
+    pub async fn get_parts(
+        &self,
+        namespace: Namespace,
+        key: &[u8],
+        parts: &[u32],
+    ) -> Result<Option<Bytes>> {
+        let prefixed = prefix_key(namespace, key);
+        self.txn.read().await.get_parts(&prefixed, parts).await
+    }
+
     /// Check if a key exists with namespace prefix.
     pub async fn has(&self, namespace: Namespace, key: &[u8]) -> Result<bool> {
         let prefixed = prefix_key(namespace, key);
@@ -171,6 +182,11 @@ impl NamespaceView {
         self.txn.get(self.namespace, key).await
     }
 
+    /// Read logical parts while retaining this view's namespace.
+    pub async fn get_parts(&self, key: &[u8], parts: &[u32]) -> Result<Option<Bytes>> {
+        self.txn.get_parts(self.namespace, key, parts).await
+    }
+
     /// Check if a key exists.
     pub async fn has(&self, key: &[u8]) -> Result<bool> {
         self.txn.has(self.namespace, key).await
@@ -225,6 +241,10 @@ impl storage::corekv::private::Sealed for NamespaceView {}
 impl Reader for NamespaceView {
     async fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         self.txn.get(self.namespace, key).await
+    }
+
+    async fn get_parts(&self, key: &[u8], parts: &[u32]) -> Result<Option<Bytes>> {
+        self.txn.get_parts(self.namespace, key, parts).await
     }
 
     async fn has(&self, key: &[u8]) -> Result<bool> {

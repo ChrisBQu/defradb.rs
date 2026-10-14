@@ -7,6 +7,8 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 
 # rows: <cfg> <module> <GREEN|RED>
 RUNS=(
+  "MC_TransactionDecisions_Green.cfg TransactionDecisions.tla GREEN"
+  "MC_TransactionDecisions_Red_OutsideRead.cfg TransactionDecisions.tla RED"
   "MC_DefraKeyClassifier_Green.cfg DefraKeyClassifier.tla GREEN"
   "MC_DefraKeyClassifier_Red_BroadBlockPrefix.cfg DefraKeyClassifier.tla RED"
   "MC_DefraKeyClassifier_Red_BlockConcurrency.cfg DefraKeyClassifier.tla RED"

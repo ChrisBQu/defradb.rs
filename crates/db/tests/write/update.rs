@@ -179,3 +179,79 @@ async fn conditional_update_of_concurrently_deleted_document_returns_conflict() 
         "unexpected error: {error:?}"
     );
 }
+
+/// Inject an external committed write immediately before the next mutation
+/// transaction opens. This bypasses the application document queue, as a
+/// storage-level writer can, and pins the old read-before-begin race.
+struct ChangeBeforeBegin {
+    inner: RegolithStore,
+    pending: std::sync::Mutex<Option<(Vec<u8>, Vec<u8>)>>,
+}
+
+impl storage::corekv::private::Sealed for ChangeBeforeBegin {}
+
+#[async_trait::async_trait]
+impl storage::corekv::Store for ChangeBeforeBegin {
+    async fn new_txn(&self, readonly: bool) -> storage::Result<Box<dyn storage::Txn>> {
+        let pending = if readonly {
+            None
+        } else {
+            self.pending.lock().unwrap().take()
+        };
+        if let Some((key, value)) = pending {
+            let mut change = self.inner.new_txn(false).await?;
+            change.set(&key, &value).await?;
+            change.commit().await?;
+        }
+        self.inner.new_txn(readonly).await
+    }
+
+    async fn close(&self) -> storage::Result<()> {
+        self.inner.close().await
+    }
+}
+
+#[tokio::test]
+async fn update_reads_fresh_values_in_the_transaction_that_writes_them() {
+    let store = Arc::new(ChangeBeforeBegin {
+        inner: RegolithStore::in_memory().unwrap(),
+        pending: std::sync::Mutex::new(None),
+    });
+    let db = Arc::new(DB::open_from_arc(store.clone()).await.unwrap());
+    db.create_collection(test_collection()).await.unwrap();
+    let mutator = AutoCommitMutator::new(db.clone());
+    let created = mutator
+        .create(
+            "Patch",
+            Document::from_json_str(r#"{"left":0,"right":0}"#).unwrap(),
+        )
+        .await
+        .unwrap();
+    let collection = db.get_collection("Patch").unwrap().unwrap();
+    let txn = db.new_txn(true).await.unwrap();
+    let short_id = collection
+        .resolve_doc_short_id(&txn.systemstore().unwrap(), &created.doc_id)
+        .await
+        .unwrap()
+        .unwrap();
+    txn.discard().unwrap();
+    let mut key = vec![b'd'];
+    key.extend(collection.doc_key(short_id));
+    let mut external = created.document.clone();
+    external.set("left", 7_i64);
+    *store.pending.lock().unwrap() = Some((key, external.to_cbor().unwrap()));
+    let mut patch = created.document;
+    patch.set("right", 9_i64);
+    mutator
+        .update("Patch", patch, ["right".to_string()].into_iter().collect())
+        .await
+        .unwrap();
+    let result = mutator
+        .get_for_update("Patch", &created.doc_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.get("left"), Some(&NormalValue::Int(7)));
+    assert_eq!(result.get("right"), Some(&NormalValue::Int(9)));
+    assert!(store.pending.lock().unwrap().is_none());
+}

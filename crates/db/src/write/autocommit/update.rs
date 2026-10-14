@@ -75,9 +75,14 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         // call is waiting, leaving `doc` stale. Reload through the lensed
         // fetcher under the guard and rebase only the caller's declared patch;
         // otherwise an unrelated field from the concurrent update is silently
-        // replaced by the stale snapshot.
-        let fresh_fetcher =
-            crate::LensedAutoCommitFetcher::new_without_write_back(Arc::clone(&self.db));
+        // replaced by the stale snapshot. Read through the mutation transaction
+        // so its comparison, schema and deletion decisions are validated at commit.
+        let fresh_fetcher = LensedDocFetcher::new(
+            Arc::clone(&self.db),
+            self.new_mutation_txn().await?,
+            self.db.lens_store.clone(),
+            false,
+        );
         let canonical_id = canonical_lock_id.to_string();
         let Some(mut current_doc) = fresh_fetcher
             .get_by_ids(collection_name, std::slice::from_ref(&canonical_id))
@@ -137,7 +142,10 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
         let embedding_config = self.db.options().embedding_config();
 
-        let txn = self.new_mutation_txn().await?;
+        let txn = fresh_fetcher.take_txn().await.ok_or_else(|| {
+            query::error::QueryError::execution("update transaction already consumed")
+        })?;
+        drop(fresh_fetcher);
 
         // Acquire store views up front (dropped before commit); the mutation
         // itself runs in an async block so errors fall through to the discard.
