@@ -1,3 +1,5 @@
+#![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
+
 /// Multistore - Coordinator for all specialized stores
 ///
 /// The Multistore provides a unified interface to access all 7 specialized stores:

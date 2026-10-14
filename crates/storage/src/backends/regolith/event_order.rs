@@ -9,9 +9,52 @@ use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
+#[cfg(not(target_arch = "wasm32"))]
 use kovan::Atom;
+#[cfg(target_arch = "wasm32")]
+use std::cell::RefCell;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(super) type Event = Arc<dyn Fn() + Send + Sync + 'static>;
+#[cfg(target_arch = "wasm32")]
+pub(super) type Event = Arc<dyn Fn() + 'static>;
+
+#[cfg(not(target_arch = "wasm32"))]
+struct StateCell(Atom<State>);
+#[cfg(target_arch = "wasm32")]
+struct StateCell(RefCell<State>);
+
+impl Default for StateCell {
+    fn default() -> Self {
+        Self::new(State::default())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl StateCell {
+    fn new(state: State) -> Self {
+        Self(Atom::new(state))
+    }
+    fn peek<R>(&self, f: impl FnOnce(&State) -> R) -> R {
+        self.0.peek(f)
+    }
+    fn rcu(&self, f: impl FnMut(&State) -> State) {
+        self.0.rcu(f);
+    }
+}
+#[cfg(target_arch = "wasm32")]
+impl StateCell {
+    fn new(state: State) -> Self {
+        Self(RefCell::new(state))
+    }
+    fn peek<R>(&self, f: impl FnOnce(&State) -> R) -> R {
+        f(&self.0.borrow())
+    }
+    fn rcu(&self, mut f: impl FnMut(&State) -> State) {
+        let mut state = self.0.borrow_mut();
+        *state = f(&state);
+    }
+}
 
 #[derive(Clone, Default)]
 struct State {
@@ -38,7 +81,7 @@ impl Drop for DrainGuard<'_> {
 pub(crate) struct EventOrder {
     next_token: AtomicU64,
     draining: AtomicBool,
-    state: Atom<State>,
+    state: StateCell,
 }
 
 pub(super) struct EventToken {

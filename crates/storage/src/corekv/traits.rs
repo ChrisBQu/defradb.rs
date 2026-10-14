@@ -50,7 +50,7 @@ pub type TxnCallback = Box<dyn FnOnce() + 'static>;
 pub type OrderedTxnCallback = std::sync::Arc<dyn Fn() + Send + Sync + 'static>;
 
 #[cfg(target_arch = "wasm32")]
-pub type OrderedTxnCallback = std::sync::Arc<dyn Fn() + Send + Sync + 'static>;
+pub type OrderedTxnCallback = std::sync::Arc<dyn Fn() + 'static>;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub type AsyncOrderedTxnCallback = std::sync::Arc<

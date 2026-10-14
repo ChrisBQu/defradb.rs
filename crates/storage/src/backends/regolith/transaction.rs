@@ -9,6 +9,8 @@
 //! which is the same view without the commit-time validation nothing will
 //! ever ask for.
 
+#![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 

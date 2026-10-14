@@ -5,6 +5,8 @@
 //! transaction may land. Snapshot capture and native commit share a short
 //! publication boundary with the collection-head cache (HeadSet.Cache).
 
+#![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
