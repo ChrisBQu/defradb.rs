@@ -1,6 +1,7 @@
 //! regolith-backed storage: the one backend, on every target.
 
 mod background_errors;
+mod classifier;
 mod config;
 mod encryption;
 mod handle;

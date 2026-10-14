@@ -74,7 +74,8 @@ impl RegolithStore {
             .add_listener(Arc::new(BackgroundErrorListener));
         let db = OptimisticTransactionDb::open(&path, engine)
             .map_err(|error| Error::Backend(format!("failed to open regolith: {error}")))?
-            .with_isolation(options.isolation);
+            .with_isolation(options.isolation)
+            .with_policy(Arc::new(super::classifier::DefraKeyClassifier));
         Ok(Self {
             inner: Arc::new(StoreInner {
                 db: Arc::new(db),

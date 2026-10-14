@@ -294,6 +294,23 @@ mod tests {
     use crate::backends::regolith::{RegolithStore, RegolithStoreOptions, RegolithTxn};
     use crate::corekv::{Dropable, Store, Txn};
 
+    fn cache_store() -> RegolithStore {
+        RegolithStore::open_with_options(
+            "cache-test",
+            RegolithStoreOptions::memory().with_isolation(regolith::IsolationLevel::RepeatableRead),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn defralevel_writers_bypass_cache_while_readers_can_use_it() {
+        let store = RegolithStore::in_memory().unwrap();
+        let writer = store.new_txn(false).await.unwrap();
+        assert!(head_entries(writer.as_ref(), 1).await.unwrap().is_none());
+        let reader = store.new_txn(true).await.unwrap();
+        assert!(head_entries(reader.as_ref(), 1).await.unwrap().is_some());
+    }
+
     fn cache(txn: &dyn Txn) -> SharedHeadCache {
         txn.as_any()
             .downcast_ref::<RegolithTxn>()
@@ -316,7 +333,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cache_publication_wait_does_not_starve_executor() {
-        let store = RegolithStore::in_memory().unwrap();
+        let store = cache_store();
         let first = store.new_txn(true).await.unwrap();
         let shared = cache(first.as_ref());
         first.discard();
@@ -356,7 +373,7 @@ mod tests {
 
     #[tokio::test]
     async fn readonly_commit_does_not_wait_for_publication() {
-        let store = RegolithStore::in_memory().unwrap();
+        let store = cache_store();
         let txn = store.new_txn(true).await.unwrap();
         let shared = cache(txn.as_ref());
         let (locked_tx, locked_rx) = std::sync::mpsc::channel();
@@ -380,7 +397,7 @@ mod tests {
 
     #[tokio::test]
     async fn warm_reads_do_not_rescan_tombstone_history() {
-        let store = RegolithStore::in_memory().unwrap();
+        let store = cache_store();
         let first = store.new_txn(false).await.unwrap();
         let shared = cache(first.as_ref());
         assert!(rows(first.as_ref()).await.heads.is_empty());
@@ -406,7 +423,7 @@ mod tests {
 
     #[tokio::test]
     async fn stale_fill_and_failed_commit_cannot_publish() {
-        let store = RegolithStore::in_memory().unwrap();
+        let store = cache_store();
         let stale = store.new_txn(true).await.unwrap();
         let mut first = store.new_txn(false).await.unwrap();
         let mut losing = store.new_txn(false).await.unwrap();
@@ -425,7 +442,7 @@ mod tests {
 
     #[tokio::test]
     async fn eviction_keeps_old_snapshots_and_raw_root_writes_update_new_ones() {
-        let store = RegolithStore::in_memory().unwrap();
+        let store = cache_store();
         let mut seed = store.new_txn(false).await.unwrap();
         seed.set(b"h/c/1/a", b"1").await.unwrap();
         seed.commit().await.unwrap();
@@ -444,7 +461,7 @@ mod tests {
 
     #[tokio::test]
     async fn budget_falls_back_and_commit_evicts_oversized_journal() {
-        let store = RegolithStore::in_memory().unwrap();
+        let store = cache_store();
         let mut txn = store.new_txn(false).await.unwrap();
         let shared = cache(txn.as_ref());
         rows(txn.as_ref()).await;
@@ -460,7 +477,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_collections_are_bounded_too() {
-        let store = RegolithStore::in_memory().unwrap();
+        let store = cache_store();
         let txn = store.new_txn(true).await.unwrap();
         for id in 0..4096 {
             assert!(head_entries(txn.as_ref(), id)
@@ -476,7 +493,7 @@ mod tests {
 
     #[tokio::test]
     async fn reset_and_streaming_writes_cannot_leave_a_shared_cache() {
-        let store = RegolithStore::in_memory().unwrap();
+        let store = cache_store();
         let mut txn = store.new_txn(false).await.unwrap();
         txn.set(b"h/c/1/a", b"1").await.unwrap();
         txn.commit().await.unwrap();
@@ -499,7 +516,7 @@ mod tests {
     async fn projection_respects_exact_prefixes_and_namespace_layers() {
         use crate::corekv::Reader;
         use crate::namespace::{Namespace, NamespacedTxn};
-        let store = RegolithStore::in_memory().unwrap();
+        let store = cache_store();
         let mut txn = store.new_txn(false).await.unwrap();
         rows(txn.as_ref()).await;
         txn.set(b"h/c/1/a", b"1").await.unwrap();
@@ -535,7 +552,12 @@ mod tests {
     #[tokio::test]
     async fn reopen_reconstructs_the_same_head_projection() {
         let dir = tempfile::tempdir().unwrap();
-        let store = RegolithStore::open(dir.path()).unwrap();
+        let store = RegolithStore::open_with_options(
+            dir.path(),
+            RegolithStoreOptions::default()
+                .with_isolation(regolith::IsolationLevel::RepeatableRead),
+        )
+        .unwrap();
         let mut txn = store.new_txn(false).await.unwrap();
         txn.set(b"h/c/1/child", b"2").await.unwrap();
         txn.set(b"h/cs/1/parent/child", b"").await.unwrap();
@@ -545,7 +567,12 @@ mod tests {
         txn.discard();
         store.close().await.unwrap();
         drop(store);
-        let store = RegolithStore::open(dir.path()).unwrap();
+        let store = RegolithStore::open_with_options(
+            dir.path(),
+            RegolithStoreOptions::default()
+                .with_isolation(regolith::IsolationLevel::RepeatableRead),
+        )
+        .unwrap();
         let txn = store.new_txn(true).await.unwrap();
         let after = rows(txn.as_ref()).await;
         assert_eq!(before.heads, after.heads);
@@ -554,7 +581,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn racing_snapshots_match_native_scans() {
-        let store = RegolithStore::in_memory().unwrap();
+        let store = cache_store();
         let mut tasks = vec![];
         for writer in 0..4 {
             let store = store.clone();

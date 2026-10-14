@@ -13,13 +13,9 @@ pub struct RegolithStoreOptions {
     /// needs a different memory budget picks it up by construction rather
     /// than by a caller remembering to tune it.
     pub engine: Options,
-    /// Commit-time validation. Defaults to [`IsolationLevel::RepeatableRead`]:
-    /// every point read is validated, which is what the index and docid
-    /// paths need, and a scan is recorded per stretch rather than per key.
-    /// The head set is a scan over entries that concurrent appends add to
-    /// and reclamation removes by design; recorded per key it would abort
-    /// appends no serial order needed to abort, and hold one commit check
-    /// per head and marker walked.
+    /// Commit-time validation. DefraLevel uses the installed key classifier
+    /// to allow identical content-addressed block writes. Other key families
+    /// retain ordinary validation until their write protocols are adopted.
     pub isolation: IsolationLevel,
     /// How long `close` waits for in-flight transactions to finish.
     pub close_timeout: Duration,
@@ -39,11 +35,11 @@ impl RegolithStoreOptions {
         self
     }
 
-    /// Server defaults: repeatable read, fsync on every commit.
+    /// Server defaults: DefraLevel, fsync on every commit.
     pub fn new() -> Self {
         Self {
             engine: Options::default().durability(EngineDurability::Immediate),
-            isolation: IsolationLevel::RepeatableRead,
+            isolation: IsolationLevel::DefraLevel,
             close_timeout: Duration::from_secs(30),
         }
     }
@@ -93,9 +89,8 @@ impl RegolithStoreOptions {
         opts
     }
 
-    /// Change commit validation. `RepeatableRead` is the default because it is
-    /// what the merge, index and head-set paths need together; a caller
-    /// that knows its unit of work is a blind write can ask for less.
+    /// Override commit validation. The Defra key policy only applies at
+    /// `DefraLevel`; other levels retain Regolith's native semantics.
     pub fn with_isolation(mut self, isolation: IsolationLevel) -> Self {
         self.isolation = isolation;
         self
