@@ -1,6 +1,6 @@
 //! What a transaction reads and writes through.
 
-use regolith::{OwnedTransaction, Snapshot};
+use regolith::{Snapshot, Transaction};
 
 /// A read-only transaction pins a point in time; a writing one begins a
 /// regolith transaction that validates at commit.
@@ -16,5 +16,5 @@ pub(crate) enum Handle {
     /// Boxed because it is by far the larger of the two and read-only is the
     /// common case: inline it would cost every query's handle the size of a
     /// transaction it does not have.
-    Writable(Box<OwnedTransaction>),
+    Writable(Box<Transaction>),
 }

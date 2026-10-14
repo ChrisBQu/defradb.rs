@@ -25,6 +25,7 @@ fn reason_label(reason: BackgroundErrorReason) -> &'static str {
         BackgroundErrorReason::Compaction => "compaction",
         BackgroundErrorReason::Manifest => "manifest",
         BackgroundErrorReason::WriteAheadLog => "wal",
+        _ => "other",
     }
 }
 

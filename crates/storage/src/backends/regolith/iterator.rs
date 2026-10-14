@@ -207,16 +207,16 @@ impl RegolithIterator {
 
     /// Fill the page buffer from the transaction, resuming where the last
     /// page stopped.
-    fn refill(&mut self) {
+    fn refill(&mut self) -> Result<()> {
         let (anchor, mut filled, mut last) = match &mut self.source {
             Source::Paged { resume, .. } => match resume.take() {
                 Some(anchor) => (anchor, VecDeque::new(), None),
-                None => return,
+                None => return Ok(()),
             },
-            _ => return,
+            _ => return Ok(()),
         };
         let Handle::Writable(txn) = self.handle.as_ref() else {
-            return;
+            return Ok(());
         };
         let (target, already_returned) = anchor.seek_target();
         let mut page_bytes = 0usize;
@@ -244,16 +244,18 @@ impl RegolithIterator {
 
         // The borrow of the transaction opens and closes inside this
         // call, so the iterator outlives no borrow.
-        let entries: Box<dyn std::iter::Iterator<Item = (Vec<u8>, regolith::DbSlice)>> =
-            match &reverse_end {
-                Some(end) => Box::new(txn.scan_stream_in(
-                    self.start.as_deref(),
-                    end.as_deref(),
-                    regolith::ScanDirection::Reverse,
-                )),
-                None => Box::new(txn.scan_stream(floor.as_deref(), self.end.as_deref())),
-            };
-        for (key, value) in entries {
+        let entries: Box<
+            dyn std::iter::Iterator<Item = regolith::TxResult<(Vec<u8>, regolith::DbSlice)>>,
+        > = match &reverse_end {
+            Some(end) => Box::new(txn.scan_stream_in(
+                self.start.as_deref(),
+                end.as_deref(),
+                regolith::ScanDirection::Reverse,
+            )),
+            None => Box::new(txn.scan_stream(floor.as_deref(), self.end.as_deref())),
+        };
+        for entry in entries {
+            let (key, value) = entry.map_err(super::transaction::map_txn_error)?;
             // A resume key was returned by the previous page; a seek key was
             // not, and skipping it would make `seek` land past its target.
             // Only forward pages need this: a reverse page excludes the key
@@ -285,20 +287,24 @@ impl RegolithIterator {
             // left to resume from.
             *resume = if full { last.map(Anchor::After) } else { None };
         }
+        Ok(())
     }
 
-    fn step(&mut self) -> Option<KvPair> {
+    fn step(&mut self) -> Result<Option<KvPair>> {
         let (key, value) = match &mut self.source {
-            Source::Empty => return None,
-            Source::Cursor(entries) => entries.next()?,
+            Source::Empty => return Ok(None),
+            Source::Cursor(entries) => match entries.next() {
+                Some(entry) => entry.map_err(|error| Error::Backend(error.to_string()))?,
+                None => return Ok(None),
+            },
             Source::Paged { page, .. } => {
                 if page.is_empty() {
-                    self.refill();
+                    self.refill()?;
                 }
-                return match &mut self.source {
+                return Ok(match &mut self.source {
                     Source::Paged { page, .. } => page.pop_front(),
                     _ => None,
-                };
+                });
             }
         };
         let value = if self.keys_only {
@@ -306,24 +312,24 @@ impl RegolithIterator {
         } else {
             Bytes::from_owner(value)
         };
-        Some(KvPair { key, value })
+        Ok(Some(KvPair { key, value }))
     }
 
     /// The next entry inside the range, or `None` at its end.
-    fn next_in_range(&mut self) -> Option<KvPair> {
-        while let Some(pair) = self.step() {
+    fn next_in_range(&mut self) -> Result<Option<KvPair>> {
+        while let Some(pair) = self.step()? {
             // A reverse walk runs down to `start`, which is inclusive, so it
             // stops at the first key below it; a forward walk runs up to
             // `end`, which is not.
             if self.reverse {
                 if let Some(start) = &self.start {
                     if pair.key.as_slice() < start.as_slice() {
-                        return None;
+                        return Ok(None);
                     }
                 }
             } else if let Some(end) = &self.end {
                 if pair.key.as_slice() >= end.as_slice() {
-                    return None;
+                    return Ok(None);
                 }
             }
             if let Some(prefix) = &self.prefix {
@@ -331,9 +337,9 @@ impl RegolithIterator {
                     continue;
                 }
             }
-            return Some(pair);
+            return Ok(Some(pair));
         }
-        None
+        Ok(None)
     }
 }
 
@@ -392,7 +398,7 @@ impl Iterator for RegolithIterator {
         if let Some(peeked) = self.peeked.take() {
             return Ok(Some(peeked));
         }
-        Ok(self.next_in_range())
+        self.next_in_range()
     }
 
     async fn close(&mut self) -> Result<()> {
@@ -408,7 +414,7 @@ impl Iterator for RegolithIterator {
         self.position(Anchor::At(key.to_vec()));
         // Pull the entry the seek landed on so the caller learns whether
         // one exists; `next` hands back that same entry.
-        self.peeked = self.next_in_range();
+        self.peeked = self.next_in_range()?;
         Ok(self.peeked.is_some())
     }
 

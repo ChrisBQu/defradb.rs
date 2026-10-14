@@ -29,10 +29,7 @@ impl RegolithStoreOptions {
     /// Server defaults: repeatable read, fsync on every commit.
     pub fn new() -> Self {
         Self {
-            engine: Options {
-                durability: EngineDurability::Immediate,
-                ..Options::default()
-            },
+            engine: Options::default().durability(EngineDurability::Immediate),
             isolation: IsolationLevel::RepeatableRead,
             close_timeout: Duration::from_secs(30),
         }
@@ -41,10 +38,7 @@ impl RegolithStoreOptions {
     /// A 1-4 MiB working set, for a phone or an edge device.
     pub fn embedded() -> Self {
         Self {
-            engine: Options {
-                durability: EngineDurability::Immediate,
-                ..Options::embedded()
-            },
+            engine: Options::embedded().durability(EngineDurability::Immediate),
             ..Self::new()
         }
     }
@@ -54,10 +48,7 @@ impl RegolithStoreOptions {
     /// [`RegolithStoreOptions::engine`]'s `env` before opening.
     pub fn wasm() -> Self {
         Self {
-            engine: Options {
-                durability: EngineDurability::Immediate,
-                ..Options::wasm()
-            },
+            engine: Options::wasm().durability(EngineDurability::Immediate),
             ..Self::new()
         }
     }
@@ -75,11 +66,17 @@ impl RegolithStoreOptions {
         // caller can hit rather than a memory-tuning knob: a document larger
         // than that is ordinary here, and an in-memory store that refuses what
         // the on-disk one accepts is a different database, not a faster one.
+        //
+        // With no worker, a write that a stall stops has to run the
+        // compaction itself, or nothing ever clears the stall.
         let preset = Options::memory();
         let mut opts = Self::new();
-        opts.engine.env = preset.env;
-        opts.engine.max_background_compactions = preset.max_background_compactions;
-        opts.engine.durability = preset.durability;
+        opts.engine = opts
+            .engine
+            .env(preset.get_env().clone())
+            .max_background_compactions(preset.get_max_background_compactions())
+            .inline_compaction(true)
+            .durability(preset.get_durability());
         opts
     }
 
@@ -94,10 +91,10 @@ impl RegolithStoreOptions {
     /// Trade durability for throughput: `Eventual` survives a process
     /// crash but not a power cut.
     pub fn with_durability(mut self, durability: DurabilityMode) -> Self {
-        self.engine.durability = match durability {
+        self.engine = self.engine.durability(match durability {
             DurabilityMode::Immediate => EngineDurability::Immediate,
             DurabilityMode::Eventual => EngineDurability::Eventual,
-        };
+        });
         self
     }
 }
@@ -112,7 +109,7 @@ impl std::fmt::Debug for RegolithStoreOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RegolithStoreOptions")
             .field("isolation", &self.isolation)
-            .field("durability", &self.engine.durability)
+            .field("durability", &self.engine.get_durability())
             .field("close_timeout", &self.close_timeout)
             .finish_non_exhaustive()
     }

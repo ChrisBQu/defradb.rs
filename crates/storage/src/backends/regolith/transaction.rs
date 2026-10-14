@@ -14,7 +14,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use regolith::{IsolationLevel, OptimisticTransactionDb, OwnedTransaction, TransactionError};
+use regolith::{
+    IsolationLevel, OptimisticTransactionDb, Transaction, TransactionError, TxnOptions,
+};
 
 use super::handle::Handle;
 use super::head_cache::{self, HeadChanges, HeadSnapshot, SharedHeadCache};
@@ -68,7 +70,7 @@ impl RegolithTxn {
             let handle = if readonly {
                 Handle::ReadOnly(db.db().snapshot())
             } else {
-                Handle::Writable(Box::new(db.begin_transaction_owned(isolation)))
+                Handle::Writable(Box::new(db.begin(&TxnOptions::new().isolation(isolation))))
             };
             let head_snapshot = (!cache.disabled
                 && (readonly || isolation == IsolationLevel::RepeatableRead))
@@ -91,7 +93,7 @@ impl RegolithTxn {
         self.handle.as_ref().ok_or(Error::DiscardedTxn)
     }
 
-    fn writable(&self) -> Result<&OwnedTransaction> {
+    fn writable(&self) -> Result<&Transaction> {
         match self.handle()?.as_ref() {
             Handle::Writable(txn) => Ok(txn),
             Handle::ReadOnly(_) => Err(Error::ReadOnlyTxn),
@@ -116,20 +118,16 @@ impl Drop for RegolithTxn {
     }
 }
 
-fn map_txn_error(error: TransactionError) -> Error {
+pub(super) fn map_txn_error(error: TransactionError) -> Error {
     match error {
-        TransactionError::Conflict {
-            key,
-            observed_seq,
-            latest_seq,
-        } => {
+        TransactionError::Conflict(conflict) => {
             // `Error::TxnConflict` carries no key, and a conflict without one
             // sends the reader guessing at which of a transaction's writes
             // collided. The engine knows; say so.
             tracing::warn!(
-                key = %String::from_utf8_lossy(&key),
-                observed_seq,
-                latest_seq,
+                key = %String::from_utf8_lossy(conflict.key()),
+                observed_seq = conflict.observed_seq(),
+                latest_seq = conflict.latest_seq(),
                 "transaction conflict"
             );
             Error::TxnConflict
@@ -279,7 +277,7 @@ impl Txn for RegolithTxn {
             }
             Handle::Writable(txn) => super::blocking(|| {
                 let mut cache = head_cache::lock(&self.head_cache)?;
-                let outcome = txn.commit().map_err(map_txn_error);
+                let outcome = txn.commit().map(|_receipt| ()).map_err(map_txn_error);
                 if outcome.is_ok() {
                     cache.publish(&self.head_changes);
                 }

@@ -1874,7 +1874,7 @@ mod tests {
             builder
                 .regolith_options
                 .as_ref()
-                .map(|options| options.engine.write_buffer_size),
+                .map(|options| options.engine.get_write_buffer_size()),
             Some(256 * 1024)
         );
     }
@@ -1886,12 +1886,12 @@ mod tests {
         let server = storage::RegolithStoreOptions::default();
 
         assert_eq!(
-            resolved.engine.write_buffer_size,
-            server.engine.write_buffer_size
+            resolved.engine.get_write_buffer_size(),
+            server.engine.get_write_buffer_size()
         );
         assert_eq!(
-            resolved.engine.block_cache_size,
-            server.engine.block_cache_size
+            resolved.engine.get_block_cache_size(),
+            server.engine.get_block_cache_size()
         );
     }
 
@@ -1904,8 +1904,8 @@ mod tests {
         let expected = storage::RegolithStoreOptions::embedded()
             .with_durability(storage::backends::DurabilityMode::Eventual);
 
-        assert_eq!(resolved.engine.write_buffer_size, 256 * 1024);
-        assert_eq!(resolved.engine.block_cache_size, 0);
+        assert_eq!(resolved.engine.get_write_buffer_size(), 256 * 1024);
+        assert_eq!(resolved.engine.get_block_cache_size(), 0);
         assert_eq!(format!("{resolved:?}"), format!("{expected:?}"));
     }
 

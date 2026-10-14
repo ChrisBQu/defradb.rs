@@ -330,7 +330,7 @@ fn regolith_options(config: &Config) -> storage::RegolithStoreOptions {
     let mut opts =
         storage::RegolithStoreOptions::default().with_durability(config.datastore.durability);
     if let Some(bytes) = config.datastore.valuelogfilesize {
-        opts.engine.target_file_size = bytes;
+        opts.engine = opts.engine.target_file_size(bytes);
     }
     opts
 }
@@ -377,7 +377,7 @@ mod valuelogfilesize_tests {
     #[test]
     fn an_explicitly_set_value_reaches_the_engine() {
         let opts = regolith_options(&config_with(DatastoreType::Regolith, Some(4 * 1024 * 1024)));
-        assert_eq!(opts.engine.target_file_size, 4 * 1024 * 1024);
+        assert_eq!(opts.engine.get_target_file_size(), 4 * 1024 * 1024);
     }
 
     /// An unset flag must leave the profile's own value alone. Asserted
@@ -387,8 +387,8 @@ mod valuelogfilesize_tests {
     fn an_unset_flag_keeps_the_profile_default() {
         let expected = storage::RegolithStoreOptions::default()
             .engine
-            .target_file_size;
+            .get_target_file_size();
         let opts = regolith_options(&config_with(DatastoreType::Regolith, None));
-        assert_eq!(opts.engine.target_file_size, expected);
+        assert_eq!(opts.engine.get_target_file_size(), expected);
     }
 }

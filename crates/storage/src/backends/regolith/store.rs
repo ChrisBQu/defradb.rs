@@ -68,10 +68,10 @@ impl RegolithStore {
                 })?;
             }
         }
-        let mut engine = options.engine.clone();
-        engine
-            .listeners
-            .push(Arc::new(BackgroundErrorListener) as Arc<dyn regolith::EventListener>);
+        let engine = options
+            .engine
+            .clone()
+            .add_listener(Arc::new(BackgroundErrorListener));
         let db = OptimisticTransactionDb::open(&path, engine)
             .map_err(|error| Error::Backend(format!("failed to open regolith: {error}")))?
             .with_isolation(options.isolation);
@@ -141,9 +141,11 @@ impl RegolithStore {
         // this target durability comes from `persist`, which writes the
         // database back to OPFS, not from an fsync that does nothing.
         if !env.as_env().capabilities().durable_sync {
-            options.engine.durability = regolith::DurabilityMode::Eventual;
+            options.engine = options
+                .engine
+                .durability(regolith::DurabilityMode::Eventual);
         }
-        options.engine.env = env.as_env();
+        options.engine = options.engine.env(env.as_env());
         let store = Self::open_with_options(db_name, options)?;
         // Safe to reach in: nothing else holds this store yet.
         let mut inner = Arc::try_unwrap(store.inner)
