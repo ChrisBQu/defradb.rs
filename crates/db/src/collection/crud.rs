@@ -492,9 +492,18 @@ impl Collection {
                 .await
                 .map_err(Error::Storage)?;
         } else {
-            value_collection
-                .put_document_value(datastore, doc_short_id, doc, false, priorities)
-                .await?;
+            let merged = if let Some(priorities) = priorities {
+                value_collection
+                    .merge_resolved_document_value(datastore, doc_short_id, doc, priorities)
+                    .await?
+            } else {
+                false
+            };
+            if !merged {
+                value_collection
+                    .put_document_value(datastore, doc_short_id, doc, false, priorities)
+                    .await?;
+            }
         }
 
         // Store schema version - preserve document's version if set, otherwise use collection's

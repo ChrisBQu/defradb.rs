@@ -123,6 +123,115 @@ impl Collection {
             .map_err(Error::Storage)
     }
 
+    /// Materialize CRDT-resolved values through operands when the schema is
+    /// unchanged. Integer mirror differences are exact modulo 2^64. Floating
+    /// point subtraction cannot reconstruct an exact delta, so those repairs
+    /// retain a validated put instead of silently changing rounding.
+    pub(crate) async fn merge_resolved_document_value(
+        &self,
+        datastore: &NamespaceView,
+        doc_short_id: u64,
+        doc: &Document,
+        priorities: &Priorities,
+    ) -> Result<bool> {
+        if self.load_version(datastore, doc_short_id).await?.as_deref() != Some(self.version_id()) {
+            return Ok(false);
+        }
+        let Some(ids) = self.part_ids(datastore).await? else {
+            return Ok(false);
+        };
+        let counter_parts: Vec<u32> = self
+            .def
+            .fields
+            .iter()
+            .filter(|field| field.crdt_type.is_counter())
+            .filter_map(|field| ids.get(&field.name).copied())
+            .collect();
+        let key = self.doc_key(doc_short_id);
+        let Some(bytes) = datastore
+            .get_parts(&key, &counter_parts)
+            .await
+            .map_err(Error::Storage)?
+        else {
+            return Ok(false);
+        };
+        let Some(stored) = StoredDocument::decode(&bytes) else {
+            return Ok(false);
+        };
+        let mut parts = StoredDocument::default();
+        for field in &self.def.fields {
+            let order = priorities.get(&field.name);
+            if !field.crdt_type.is_counter() && order.is_none() {
+                continue;
+            }
+            let Some(id) = ids.get(&field.name) else {
+                return Ok(false);
+            };
+            let old = stored.fields.get(id);
+            let value = doc.get(&field.name).unwrap_or(&NormalValue::Null);
+            if field.crdt_type.is_counter() && value.is_nil() {
+                if old.is_some() {
+                    return Ok(false);
+                }
+                continue;
+            }
+            let priority = order
+                .map(|order| order.priority)
+                .or_else(|| old.map(|field| field.priority))
+                .unwrap_or(0);
+            let mut resolved = field_value(field, value, priority)?;
+            if let Some(old) = old {
+                if old.name != resolved.name || old.kind != resolved.kind {
+                    return Ok(false);
+                }
+            }
+            match resolved.kind {
+                ValueKind::Lww => {
+                    if let Some(raw) = order.and_then(|order| order.raw_value.as_ref()) {
+                        resolved.value.clone_from(raw);
+                    }
+                }
+                ValueKind::Int64 => {
+                    let target =
+                        i64::from_be_bytes(resolved.value.as_slice().try_into().map_err(|_| {
+                            Error::InvalidDocument("invalid integer mirror".into())
+                        })?);
+                    let previous = old
+                        .map(|old| {
+                            i64::from_be_bytes(
+                                old.value.as_slice().try_into().expect("decoded integer"),
+                            )
+                        })
+                        .unwrap_or(0);
+                    let delta = target.wrapping_sub(previous);
+                    if delta == 0 && old.is_some() {
+                        continue;
+                    }
+                    resolved.value = delta.to_be_bytes().to_vec();
+                }
+                ValueKind::Float32 | ValueKind::Float64 => {
+                    if let Some(old) = old {
+                        if old.value == resolved.value {
+                            continue;
+                        }
+                        return Ok(false);
+                    }
+                }
+            }
+            parts.fields.insert(*id, resolved);
+        }
+        if !parts.fields.is_empty() {
+            let operand = storage::merge::document_parts(&parts).ok_or_else(|| {
+                Error::InvalidDocument("invalid resolved document operand".into())
+            })?;
+            datastore
+                .merge(&key, &operand)
+                .await
+                .map_err(Error::Storage)?;
+        }
+        Ok(true)
+    }
+
     pub(crate) async fn merge_local_document_value(
         &self,
         datastore: &NamespaceView,
