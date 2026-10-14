@@ -191,8 +191,10 @@ impl PipelineProcessor {
 
 /// Transform a document to the target schema version.
 ///
-/// Shared between spawned and inline modes.
-async fn transform_to_target(
+/// Runs on the caller task without spawning work on another executor.
+/// Transaction attempts use this entry point so a local transform cannot
+/// depend on the runtime thread currently driving their storage I/O queue.
+pub async fn transform_to_target(
     store: &Arc<dyn TransformStore>,
     target_version_id: &str,
     collection_history: &RapidHashMap<String, TargetedHistoryLink>,

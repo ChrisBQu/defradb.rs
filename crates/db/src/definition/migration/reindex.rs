@@ -1,6 +1,5 @@
 //! Datastore materialization and reindexing after schema migration.
 
-use lens::Lens;
 use rapidhash::HashMapExt;
 use storage::corekv::Store;
 use tracing::{instrument, warn};
@@ -112,14 +111,70 @@ impl<S: Store> DB<S> {
         let collection = self
             .get_collection(collection_name)?
             .ok_or_else(|| Error::CollectionNotFound(collection_name.to_string()))?;
+        let attempt = MaterializeAttempt {
+            collection,
+            collection_name: collection_name.to_owned(),
+            materialize_identity_paths,
+            lens_store: self.lens_store.clone(),
+        };
+        match self
+            .store()
+            .transact_retry(storage::corekv::RetryOptions::new(4), Box::new(attempt))
+            .await
+        {
+            Ok(value) => value
+                .downcast::<usize>()
+                .map(|value| *value)
+                .map_err(|_| Error::Other("invalid materialization retry result".into())),
+            Err(error) => match error.downcast_abort::<Error>() {
+                Ok(error) => Err(error),
+                Err(error) => Err(Error::Storage(error.into_storage())),
+            },
+        }
+    }
+}
+
+struct MaterializeAttempt {
+    collection: crate::collection::Collection,
+    collection_name: String,
+    materialize_identity_paths: bool,
+    lens_store: std::sync::Arc<dyn lens::TransformStore>,
+}
+
+impl storage::corekv::RetryAttemptFn for MaterializeAttempt {
+    fn run<'a>(
+        &'a mut self,
+        retry: &'a mut dyn storage::corekv::RetryTxn,
+    ) -> storage::corekv::RetryAttemptFuture<'a> {
+        Box::pin(async move {
+            let io = retry.begin_attempt_io()?;
+            let mut txn = datastore::BasicTxn::from_retry_attempt_io(io, 0);
+            let count = self
+                .materialize(&mut txn)
+                .await
+                .map_err(|error| storage::corekv::RetryAttemptError::Abort(Box::new(error)))?;
+            let (io, callbacks) = txn.into_retry_attempt()?;
+            retry.finish_attempt_io(io, callbacks)?;
+            Ok(Box::new(count) as storage::corekv::RetryAttemptValue)
+        })
+    }
+}
+
+impl MaterializeAttempt {
+    async fn materialize(&self, write_txn: &mut datastore::BasicTxn) -> Result<usize> {
+        let collection = &self.collection;
+        let collection_name = &self.collection_name;
+        let materialize_identity_paths = self.materialize_identity_paths;
+        collection
+            .validate_write_definition(&write_txn.datastore(), true)
+            .await?;
         let collection_id = collection.collection_id().to_string();
         let target_version_id = collection.version_id().to_string();
         let short_id = collection.resolved_root_id();
 
-        let read_txn = self.new_txn(true).await?;
-        let systemstore = read_txn.systemstore()?;
+        let systemstore = write_txn.systemstore();
         let versions = get_collections_by_collection_id(&systemstore, &collection_id).await?;
-        let _ = read_txn.discard();
+        drop(systemstore);
 
         let history =
             crate::definition::lens::build_collection_history(&versions, &target_version_id)
@@ -130,12 +185,11 @@ impl<S: Store> DB<S> {
                     ))
                 })?;
 
-        let write_txn = self.new_txn(false).await?;
         let mut materialized_count = 0usize;
 
         {
-            let datastore = write_txn.datastore()?;
-            let txn_systemstore = write_txn.systemstore()?;
+            let datastore = write_txn.datastore();
+            let txn_systemstore = write_txn.systemstore();
 
             let raw_docs = collection
                 .get_all_with_datastore_short_ids(&datastore, &txn_systemstore, false)
@@ -154,7 +208,7 @@ impl<S: Store> DB<S> {
                     if materialize_identity_paths {
                         let mut restamped = doc.clone();
                         restamped.set_schema_version_id(&target_version_id);
-                        if cache_document_version(&datastore, &txn_systemstore, &collection, &doc)
+                        if cache_document_version(&datastore, &txn_systemstore, collection, &doc)
                             .await?
                         {
                             materialized_count += 1;
@@ -190,7 +244,7 @@ impl<S: Store> DB<S> {
                 if !path_has_transform {
                     if materialize_identity_paths {
                         let cached =
-                            cache_document_version(&datastore, &txn_systemstore, &collection, &doc)
+                            cache_document_version(&datastore, &txn_systemstore, collection, &doc)
                                 .await?;
                         let mut restamped = doc;
                         restamped.set_schema_version_id(&target_version_id);
@@ -210,27 +264,20 @@ impl<S: Store> DB<S> {
                         doc.id()
                     ))
                 })?;
-                let mut lens =
-                    Lens::new(self.lens_store.clone(), &target_version_id, history.clone());
-                lens.put(&doc_version, lens_doc)
-                    .await
-                    .map_err(|e| Error::Lens(e.to_string()))?;
-                let migrated_lens_doc = lens
-                    .next()
-                    .await
-                    .ok_or_else(|| {
-                        Error::Lens(format!(
-                            "lens produced no document while materializing {:?}",
-                            doc.id()
-                        ))
-                    })?
-                    .map_err(|e| Error::Lens(e.to_string()))?;
-                let migrated = lens_doc_to_document(migrated_lens_doc, &doc, &collection);
+                let migrated_lens_doc = lens::transform_to_target(
+                    &self.lens_store,
+                    &target_version_id,
+                    &history,
+                    lens::LensInput::new(&doc_version, lens_doc),
+                )
+                .await
+                .map_err(|error| Error::Lens(error.to_string()))?;
+                let migrated = lens_doc_to_document(migrated_lens_doc, &doc, collection);
                 original_keys.insert(
                     doc_short_id,
                     index_manager.unique_index_keys(&doc, collection.schema())?,
                 );
-                if cache_migrated_document(&datastore, &txn_systemstore, &collection, &migrated)
+                if cache_migrated_document(&datastore, &txn_systemstore, collection, &migrated)
                     .await?
                 {
                     materialized_count += 1;
@@ -269,8 +316,6 @@ impl<S: Store> DB<S> {
                 "Materialized collection datastore and rebuilt indexes"
             );
         }
-
-        write_txn.commit().await?;
 
         Ok(materialized_count)
     }

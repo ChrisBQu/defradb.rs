@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use datastore::NamespaceView;
 use document::Document;
-use lens::{build_targeted_history, CollectionHistoryLink, Lens, LensDoc, TargetedHistoryLink};
+use lens::{build_targeted_history, CollectionHistoryLink, LensDoc, TargetedHistoryLink};
 use schema::CollectionVersion;
 use storage::corekv::Store;
 use tracing::debug;
@@ -284,35 +284,20 @@ impl<S: Store> LensedDocFetcher<S> {
             ))
         })?;
 
-        // Create and run the lens pipeline
-        let mut lens = Lens::new(self.lens_store.clone(), target_version_id, history);
-
-        // Put document into pipeline
-        lens.put(&doc_version, original_lens_doc.clone())
-            .await
-            .map_err(|e| {
-                query::error::QueryError::execution(format!(
-                    "failed to put document {} into lens pipeline: {}",
-                    doc_id_str, e
-                ))
-            })?;
-
-        // Get migrated document
-        let migrated_lens_doc = match lens.next().await {
-            Some(Ok(migrated)) => migrated,
-            Some(Err(e)) => {
-                return Err(query::error::QueryError::execution(format!(
-                    "lens migration failed for document {}: {}",
-                    doc_id_str, e
-                )));
-            }
-            None => {
-                return Err(query::error::QueryError::execution(format!(
-                    "lens pipeline produced no output for document {}",
-                    doc_id_str
-                )));
-            }
-        };
+        // Stay on the transaction's task: retry attempts are driven by the
+        // engine I/O queue and cannot wait for a spawned Tokio lens task.
+        let migrated_lens_doc = lens::transform_to_target(
+            &self.lens_store,
+            target_version_id,
+            &history,
+            lens::LensInput::new(&doc_version, original_lens_doc),
+        )
+        .await
+        .map_err(|error| {
+            query::error::QueryError::execution(format!(
+                "lens migration failed for document {doc_id_str}: {error}"
+            ))
+        })?;
 
         debug!(
             doc_id = ?doc.id(),

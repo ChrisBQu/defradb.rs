@@ -368,6 +368,12 @@ impl Store for RegolithStore {
                 }
                 value
             });
+            // Regolith drives this future on its own I/O queue. Tokio's
+            // cooperative budget cannot be replenished by its scheduler while
+            // this synchronous bridge owns the thread; an exhausted budget
+            // would park an otherwise ready storage operation forever.
+            #[cfg(not(target_arch = "wasm32"))]
+            let future = tokio::task::unconstrained(future);
             queue.block_on(future)
         };
         let outcome = super::blocking(run);
@@ -612,6 +618,33 @@ impl Dropable for RegolithStore {
 #[cfg(test)]
 mod retry_cold_io_tests {
     use super::*;
+
+    struct CooperativeBudgetAttempt;
+    impl crate::corekv::RetryAttemptFn for CooperativeBudgetAttempt {
+        fn run<'a>(
+            &'a mut self,
+            _retry: &'a mut dyn RetryTxn,
+        ) -> crate::corekv::RetryAttemptFuture<'a> {
+            Box::pin(async move {
+                // More ready operations than Tokio's per-poll budget. The
+                // engine queue must not wait for the suspended outer runtime
+                // scheduler to replenish that budget.
+                for _ in 0..1024 {
+                    tokio::task::consume_budget().await;
+                }
+                Ok(Box::new(()) as RetryAttemptValue)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_queue_does_not_depend_on_outer_tokio_cooperative_budget() {
+        let store = RegolithStore::in_memory().unwrap();
+        store
+            .transact_retry(RetryOptions::new(1), Box::new(CooperativeBudgetAttempt))
+            .await
+            .unwrap();
+    }
 
     struct ColdReadAttempt;
     impl crate::corekv::RetryAttemptFn for ColdReadAttempt {

@@ -38,6 +38,7 @@ struct SetVerifiedStore {
     transforms: TransformIdSet,
     transform_calls: AtomicUsize,
     verified_value: Option<serde_json::Value>,
+    before_transform: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 /// The set of transform ids a test double has registered.
@@ -89,6 +90,10 @@ impl TransformStore for SetVerifiedStore {
             return Err(lens::Error::TransformNotFound(id.to_string()));
         }
         self.transform_calls.fetch_add(1, Ordering::SeqCst);
+        let hook = self.before_transform.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook();
+        }
         let value = self
             .verified_value
             .clone()
@@ -1227,4 +1232,77 @@ async fn readonly_snapshot_history_reuse_preserves_migrated_values() {
         load_user(&db, &doc_id).await.schema_version_id(),
         Some(v1.as_str())
     );
+}
+
+#[tokio::test]
+async fn eager_materialization_retries_from_the_concurrent_document() {
+    let transforms = Arc::new(SetVerifiedStore::default());
+    let mut raw_db = DB::from_arc(Arc::new(RegolithStore::in_memory().unwrap())).unwrap();
+    raw_db.set_lens_store(transforms.clone());
+    let db = Arc::new(raw_db);
+    db.create_collection(users_schema()).await.unwrap();
+    let v1 = db
+        .get_collection("Users")
+        .unwrap()
+        .unwrap()
+        .version_id()
+        .to_owned();
+    let doc_id = seed_user(&db).await;
+    let v2 = add_verified_version(&db).await;
+    db.set_migration(
+        LensConfig::new(
+            &v1,
+            &v2,
+            LensModule::from_bytes(b"\0asm\x01\0\0\0".to_vec()),
+        ),
+        None,
+    )
+    .await
+    .unwrap();
+    let writer_db = db.clone();
+    let writer_id = doc_id.clone();
+    *transforms.before_transform.lock().unwrap() = Some(Box::new(move || {
+        // Commit from another thread after the materializer read the old
+        // document, but before it writes the transformed value.
+        std::thread::spawn(move || {
+            futures::executor::block_on(async move {
+                let collection = writer_db.get_collection("Users").unwrap().unwrap();
+                let txn = writer_db.new_txn(false).await.unwrap();
+                let data = txn.datastore().unwrap();
+                let system = txn.systemstore().unwrap();
+                let short = collection
+                    .resolve_doc_short_id(&system, &writer_id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let mut doc = collection
+                    .get_by_doc_id(&data, &system, &writer_id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                doc.set("name", document::NormalValue::String("Concurrent".into()));
+                collection
+                    .save_with_datastore(&data, &doc, short)
+                    .await
+                    .unwrap();
+                drop(data);
+                drop(system);
+                txn.commit().await.unwrap();
+            })
+        })
+        .join()
+        .unwrap();
+    }));
+    assert_eq!(db.materialize_collection("Users").await.unwrap(), 1);
+    let persisted = load_user(&db, &doc_id).await;
+    assert_eq!(
+        persisted.get("name"),
+        Some(&document::NormalValue::String("Concurrent".into()))
+    );
+    assert_eq!(
+        persisted.get("verified"),
+        Some(&document::NormalValue::Bool(true))
+    );
+    assert_eq!(persisted.schema_version_id(), Some(v2.as_str()));
+    assert_eq!(transforms.transform_calls.load(Ordering::SeqCst), 2);
 }

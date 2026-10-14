@@ -19,7 +19,7 @@ pub use config::{LensConfig, LensModule};
 pub use doc::{LensDoc, DELETED_FIELD, DOC_ID_FIELD};
 pub use error::{Error, Result};
 pub use history::{build_targeted_history, CollectionHistoryLink, TargetedHistoryLink};
-pub use pipeline::{Lens, LensInput};
+pub use pipeline::{transform_to_target, Lens, LensInput};
 pub use store::{
     LensDocResultStream, LensDocStream, MemoryTransformStore, TransformId, TransformStore,
 };
