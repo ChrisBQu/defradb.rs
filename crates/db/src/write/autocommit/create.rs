@@ -6,7 +6,8 @@ use events::{Message, Update};
 use crate::block::builder::DocStorageIdentity;
 
 use crate::block::builder::{
-    ComputedBlocks, compute_document_blocks_with_inputs, insert_computed_blocks,
+    ComputedBlocks, compute_document_blocks, compute_document_blocks_with_inputs,
+    insert_computed_blocks,
 };
 use crate::write::prepare::PreparedCreateBlocks;
 
@@ -170,7 +171,8 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 Err(error) => {
                     return Err(crate::error::commit_query_error(
                         crate::error::Error::Storage(error.into_storage()),
-                    ))
+                    ));
+
                 }
             },
         };
