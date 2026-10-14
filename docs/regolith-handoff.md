@@ -43,7 +43,8 @@ transaction after a concurrent disjoint field operand changes the blob.
 A sound write projection must include every field the mutation actually consumes: changed fields, changed fields
 participating in indexes, changed immutable fields, the downsample `source_doc_id` when it changes, and any embedding
 source fields used to regenerate a vector. Index maintenance must skip indexes untouched by the mutation; otherwise
-the partially materialized old document is mistaken for null values and can delete valid entries. Structural puts,
+index maintenance unnecessarily depends on unchanged fields. Projected reads return the complete value bytes; only
+the validation dependency set is narrowed. Structural puts,
 schema-version transitions, migrations, and callers without an explicit modified-field set retain whole-value reads.
 Query output reads require the selected fields plus predicate, ordering, join, and computed-field dependencies, so a
 field dependency set must flow from query planning into the fetcher before query reads can be narrowed safely.
@@ -58,9 +59,11 @@ the reload requests changed fields, all fields of touched composite indexes, and
 regeneration. The old-document index path uses the same dependency set, skips untouched indexes, and only performs
 series-key release/claim when `source_doc_id` changes. Conditional (`expected`) updates, general query/output reads,
 unknown-modification callers, and lens migrations stay conservative. Counter reads stay validated. Validation passed:
-`cargo check -p db`, all 57 `db` write integration tests, all 41 `db` index integration tests, and the explicit
+`cargo check -p db`; after review corrections, all 58 write and all 58 index tests pass on the integrated stack, including the explicit
 disjoint and same-indexed-field transaction regressions. This does not claim generic query projection or zero
-incidental conflicts for explicit transactions that already performed a full document read.
+incidental conflicts for explicit transactions that already performed a full document read. A stale composite-index
+regression was verified RED with the dependency repair disabled (missing expected index row), then GREEN after
+restoring it: untouched index components come from the transaction snapshot, not the caller’s stale document.
 
 ## Latest implementation checkpoints
 
