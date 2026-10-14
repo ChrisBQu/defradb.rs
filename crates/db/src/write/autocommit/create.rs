@@ -4,7 +4,35 @@ use bytes::Bytes;
 
 use crate::block::builder::DocStorageIdentity;
 
-use crate::block::builder::{compute_document_blocks, insert_computed_blocks, ComputedBlocks};
+use crate::block::builder::{ComputedBlocks, compute_document_blocks, insert_computed_blocks};
+
+struct CreateRetryAttempt<S: Store> {
+    db: Arc<DB<S>>,
+    collection_name: String,
+    collection: Collection,
+    doc: Document,
+    computed_blocks: ComputedBlocks,
+    doc_short_id: u64,
+    sign_config: Option<defra_core::signing::SigningConfig>,
+    acp_registration: Option<(Arc<dyn acp::DocumentACP>, identity::Did, String, String)>,
+}
+
+impl<S: Store + 'static> storage::corekv::RetryAttemptFn for CreateRetryAttempt<S> {
+    fn run<'a>(
+        &'a mut self,
+        retry: &'a mut dyn storage::corekv::RetryTxn,
+    ) -> storage::corekv::RetryAttemptFuture<'a> {
+        Box::pin(async move {
+            let mutator = AutoCommitMutator {
+                db: Arc::clone(&self.db),
+            };
+            match mutator.run_create_attempt(retry, self).await {
+                Ok(value) => Ok(Box::new(value) as storage::corekv::RetryAttemptValue),
+                Err(error) => Err(storage::corekv::RetryAttemptError::Abort(Box::new(error))),
+            }
+        })
+    }
+}
 
 #[allow(clippy::type_complexity)]
 impl<S: Store + 'static> AutoCommitMutator<S> {
@@ -51,6 +79,65 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             get_encryption_config().as_ref(),
         )
         .await?;
+
+        let schema_version_id = collection.version_id().to_string();
+        let enc_config = get_encryption_config();
+        let sign_config = get_signing_config();
+        let acp_registration = match (
+            collection.schema().policy.as_ref(),
+            defra_core::signing::get_broadcast_creator_did(),
+            self.db.document_acp().cloned(),
+        ) {
+            (Some(policy), Some(creator), Some(acp)) if !acp.supports_transactions() => {
+                let creator = identity::Did::new(&creator).map_err(|error| {
+                    query::error::QueryError::execution(format!(
+                        "invalid mutation creator DID: {error}"
+                    ))
+                })?;
+                Some((
+                    acp,
+                    creator,
+                    policy.id.clone(),
+                    policy.resource_name.clone(),
+                ))
+            }
+            _ => None,
+        };
+        #[cfg(feature = "native")]
+        let computed_blocks = {
+            let doc = doc.clone();
+            let schema = schema_version_id.clone();
+            let enc = enc_config.clone();
+            let sign = sign_config.clone();
+            tokio::task::spawn_blocking(move || {
+                compute_document_blocks(&doc, &schema, identity, enc.as_ref(), sign.as_ref())
+            })
+            .await
+            .map_err(|error| {
+                query::error::QueryError::execution(format!(
+                    "block computation task panicked: {error}"
+                ))
+            })?
+            .map_err(|error| {
+                query::error::QueryError::execution(format!(
+                    "failed to compute document blocks: {error}"
+                ))
+            })?
+        };
+        #[cfg(not(feature = "native"))]
+        let computed_blocks = compute_document_blocks(
+            &doc,
+            &schema_version_id,
+            identity,
+            enc_config.as_ref(),
+            sign_config.as_ref(),
+        )
+        .map_err(|error| {
+            query::error::QueryError::execution(format!(
+                "failed to compute document blocks: {error}"
+            ))
+        })?;
+
         // No per-doc write guard for creates: the DocID is derived from the
         // genesis block inside the txn, so no identity exists to guard yet.
         // The DocID-mapping duplicate check is the gate.
@@ -59,143 +146,35 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .doc_write_queue()
             .acquire_arrival(collection.collection_id())
             .await;
-        let mut txn = self.new_mutation_txn().await?;
-        self.db
-            .check_node_access_in_txn(
-                txn.acpstore().map_err(crate::error::commit_query_error)?,
-                acp::nac::NodePermission::DocumentUpdate,
-            )
-            .await
-            .map_err(crate::error::commit_query_error)?;
+        let attempt = CreateRetryAttempt {
+            db: Arc::clone(&self.db),
+            collection_name: collection_name.to_string(),
+            collection: collection.clone(),
+            doc: doc.clone(),
+            computed_blocks,
+            doc_short_id,
+            sign_config,
+            acp_registration,
+        };
+        let result = self
+            .db
+            .store()
+            .transact_retry(storage::corekv::RetryOptions::new(4), Box::new(attempt))
+            .await;
+        let (doc_id, mut doc, cid, block, col_data) = match result {
+            Ok(value) => *value
+                .downcast::<(DocID, Document, Cid, Bytes, Option<(Cid, Bytes)>)>()
+                .map_err(|_| query::error::QueryError::execution("invalid create retry result"))?,
+            Err(error) => match error.downcast_abort::<query::error::QueryError>() {
+                Ok(error) => return Err(error),
+                Err(error) => {
+                    return Err(crate::error::commit_query_error(crate::error::Error::Storage(
+                        error.into_storage(),
+                    )))
+                }
+            },
+        };
 
-        // Acquire store views up front (dropped before commit); the mutation
-        // itself runs in an async block so errors fall through to the discard.
-        let datastore = txn.datastore().map_err(|e| {
-            query::error::QueryError::execution(format!(
-                "failed to get datastore for collection '{}': {}",
-                collection_name, e
-            ))
-        })?;
-        let systemstore = txn.systemstore().map_err(|e| {
-            query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
-        })?;
-        let blockstore = txn.blockstore().map_err(|e| {
-            query::error::QueryError::execution(format!("failed to get blockstore: {}", e))
-        })?;
-        let headstore = txn.headstore().map_err(|e| {
-            query::error::QueryError::execution(format!("failed to get headstore: {}", e))
-        })?;
-
-        let result: query::error::Result<(DocID, Cid, Bytes, Option<(Cid, Bytes)>)> = async {
-            // Create an IndexManager for unique constraint enforcement
-            let short_id = collection.resolved_root_id();
-            let index_manager = IndexManager::from_indexes(
-                short_id,
-                collection.schema(),
-                collection.write_indexes(),
-            )
-            .map_err(|e| {
-                query::error::QueryError::execution(format!(
-                    "failed to create index manager for collection '{}': {}",
-                    collection_name, e
-                ))
-            })?;
-
-            self.db
-                .validate_downsample_write(
-                    &datastore,
-                    &systemstore,
-                    collection.schema(),
-                    &doc,
-                    None,
-                )
-                .await
-                .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
-
-            // Use version_id for collectionVersionID (matches Go's VersionID())
-            let schema_version_id = collection.version_id();
-            let enc_config = get_encryption_config();
-            let sign_config = get_signing_config();
-            tracing::debug!(
-                has_signing_config = sign_config.is_some(),
-                has_encryption_config = enc_config.is_some(),
-                "Auto-commit create mutation configs"
-            );
-
-            // Blocks are written FIRST: the public DocID is derived from the
-            // genesis composite block CID (Go #4838).
-            let block_result = write_document_blocks(
-                &blockstore,
-                &headstore,
-                &doc,
-                schema_version_id,
-                identity,
-                None,
-                enc_config.as_ref(),
-                sign_config.as_ref(),
-                self.db.kms().as_ref(),
-            )
-            .await
-            .map_err(|e| {
-                query::error::QueryError::execution(format!(
-                    "failed to write document blocks for create on collection {}: {}",
-                    collection_name, e
-                ))
-            })?;
-
-            let doc_id = register_created_doc(
-                self.db.document_acp(),
-                &systemstore,
-                &datastore,
-                &collection,
-                doc_short_id,
-                &block_result,
-            )
-            .await?;
-            doc.set_id(doc_id.clone());
-
-            // Bundle the doc blob + index write with the counter-store seeding so
-            // the authoritative CRDT accumulation store is always seeded on create
-            // (#1021 single-store invariant) — enforced by construction in
-            // `write_local_create`.
-            write_local_create(&datastore, &collection, &doc, doc_short_id, &index_manager).await?;
-
-            let col_block_data = write_branchable_collection_block(
-                &self.db,
-                collection_name,
-                &collection,
-                &blockstore,
-                &headstore,
-                block_result.cid,
-                doc_short_id,
-                sign_config.as_ref(),
-            )
-            .await?;
-
-            Ok((doc_id, block_result.cid, block_result.block, col_block_data))
-        }
-        .await;
-
-        drop(datastore);
-        drop(systemstore);
-        drop(blockstore);
-        drop(headstore);
-
-        if let Ok((doc_id, cid, block, col_data)) = &result {
-            self.register_created_doc_with_acp(&mut txn, &collection, doc_id.to_string())?;
-            self.register_ordered_update_event(
-                &mut txn,
-                collection_name,
-                &collection,
-                doc_id.to_string(),
-                *cid,
-                block.clone(),
-                col_data.clone(),
-            )?;
-        }
-        let (doc_id, cid, block, col_data) = self
-            .finish_mutation(txn, result, collection_name, "create")
-            .await?;
 
         doc.clear_write_preparation();
         let mut result = CreateResult::with_commit(doc_id, doc, cid, block);
@@ -204,6 +183,185 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             result.broadcast_block = Some(col_bytes);
         }
         Ok(result)
+    }
+
+    async fn run_create_attempt(
+        &self,
+        retry: &mut dyn storage::corekv::RetryTxn,
+        attempt: &CreateRetryAttempt<S>,
+    ) -> query::error::Result<(DocID, Document, Cid, Bytes, Option<(Cid, Bytes)>)> {
+        let io = retry
+            .begin_attempt_io()
+            .map_err(|error| crate::error::commit_query_error(error.into()))?;
+        let basic_txn = datastore::BasicTxn::from_retry_attempt_io(io, 0);
+        let mut txn = DbTxn::<S>::new(basic_txn);
+        self.db
+            .check_node_access_in_txn(
+                txn.acpstore().map_err(crate::error::commit_query_error)?,
+                acp::nac::NodePermission::DocumentUpdate,
+            )
+            .await
+            .map_err(crate::error::commit_query_error)?;
+
+        let datastore = txn.datastore().map_err(|error| {
+            query::error::QueryError::execution(format!("failed to get datastore: {error}"))
+        })?;
+        let systemstore = txn.systemstore().map_err(|error| {
+            query::error::QueryError::execution(format!("failed to get systemstore: {error}"))
+        })?;
+        let blockstore = txn.blockstore().map_err(|error| {
+            query::error::QueryError::execution(format!("failed to get blockstore: {error}"))
+        })?;
+        let headstore = txn.headstore().map_err(|error| {
+            query::error::QueryError::execution(format!("failed to get headstore: {error}"))
+        })?;
+
+        let mut doc = attempt.doc.clone();
+        let result: query::error::Result<(DocID, Cid, Bytes, Option<(Cid, Bytes)>)> = async {
+            let index_manager = IndexManager::from_indexes(
+                attempt.collection.resolved_root_id(),
+                attempt.collection.schema(),
+                attempt.collection.write_indexes(),
+            )
+            .map_err(|error| {
+                query::error::QueryError::execution(format!(
+                    "failed to create index manager for collection '{}': {error}",
+                    attempt.collection_name
+                ))
+            })?;
+
+            self.db
+                .validate_downsample_write(
+                    &datastore,
+                    &systemstore,
+                    attempt.collection.schema(),
+                    &doc,
+                    None,
+                )
+                .await
+                .map_err(|error| query::error::QueryError::execution(error.to_string()))?;
+
+            insert_computed_blocks(&blockstore, &headstore, &attempt.computed_blocks)
+                .await
+                .map_err(|error| {
+                    query::error::QueryError::execution(format!(
+                        "failed to write document blocks for create on collection {}: {error}",
+                        attempt.collection_name
+                    ))
+                })?;
+            let block_result = &attempt.computed_blocks.block_result;
+            let doc_id = register_created_doc(
+                self.db.document_acp(),
+                &systemstore,
+                &datastore,
+                &attempt.collection,
+                attempt.doc_short_id,
+                block_result,
+            )
+            .await?;
+            doc.set_id(doc_id.clone());
+            write_local_create(
+                &datastore,
+                &attempt.collection,
+                &doc,
+                attempt.doc_short_id,
+                &index_manager,
+            )
+            .await?;
+
+            let col_block_data = write_branchable_collection_block(
+                &self.db,
+                &attempt.collection_name,
+                &attempt.collection,
+                &blockstore,
+                &headstore,
+                block_result.cid,
+                attempt.doc_short_id,
+                attempt.sign_config.as_ref(),
+            )
+            .await?;
+            Ok((
+                doc_id,
+                block_result.cid,
+                block_result.block.clone(),
+                col_block_data,
+            ))
+        }
+        .await;
+
+        drop(datastore);
+        drop(systemstore);
+        drop(blockstore);
+        drop(headstore);
+        let (doc_id, cid, block, col_data) = match result {
+            Ok(result) => result,
+            Err(error) => {
+                if let Err(discard_error) = txn.discard() {
+                    warn!(error = %discard_error, "Failed to discard retry transaction after create error");
+                }
+                return Err(error);
+            }
+        };
+        if let Some((acp, creator, policy_id, resource_name)) = attempt.acp_registration.as_ref() {
+            let acp = Arc::clone(acp);
+            let creator = creator.clone();
+            let policy_id = policy_id.clone();
+            let resource_name = resource_name.clone();
+            let doc_id = doc_id.to_string();
+            txn.on_retry_success_ordered_async(Box::new(move || {
+                Box::pin(async move {
+                    if !acp
+                        .is_doc_registered(&policy_id, &resource_name, &doc_id)
+                        .await
+                        .map_err(|error| error.to_string())?
+                    {
+                        acp.register_doc_object(&creator, &policy_id, &resource_name, &doc_id)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                    }
+                    Ok(())
+                })
+            }))
+            .map_err(crate::error::commit_query_error)?;
+        }
+        if let Some(bus) = self.db.event_bus().cloned() {
+            let collection = attempt.collection.clone();
+            let doc_id = doc_id.to_string();
+            let cid = cid;
+            let block = block.clone();
+            let col_data = col_data.clone();
+            txn.on_retry_success_ordered(Box::new(move || {
+                let update = Update::new(
+                    doc_id.clone(),
+                    cid,
+                    collection.collection_id().to_string(),
+                    block,
+                    false,
+                    false,
+                );
+                bus.publish(Message::update(update));
+                if let Some((col_cid, col_block)) = col_data {
+                    let col_update = Update::new_with_subject_doc_id(
+                        String::new(),
+                        doc_id,
+                        col_cid,
+                        collection.collection_id().to_string(),
+                        col_block,
+                        false,
+                        false,
+                    );
+                    bus.publish(Message::update(col_update));
+                }
+            }))
+            .map_err(crate::error::commit_query_error)?;
+        }
+        let (io, callbacks) = txn
+            .into_retry_attempt()
+            .map_err(|error| crate::error::commit_query_error(error.into()))?;
+        retry
+            .finish_attempt_io(io, callbacks)
+            .map_err(|error| crate::error::commit_query_error(error.into()))?;
+        Ok((doc_id, doc, cid, block, col_data))
     }
 
     pub(super) async fn create_many_impl(
@@ -333,13 +491,13 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                         return Err(query::error::QueryError::execution(format!(
                             "failed to compute document blocks: {}",
                             e
-                        )))
+                        )));
                     }
                     Err(e) => {
                         return Err(query::error::QueryError::execution(format!(
                             "block computation task panicked: {}",
                             e
-                        )))
+                        )));
                     }
                 };
                 computed.push(blocks);

@@ -74,10 +74,12 @@ pub use errors::{Error, Result, TransactionConflict, UNIQUE_CONSTRAINT_VIOLATION
 pub use iterator::{Iterator, KvPair};
 pub use traits::private;
 pub use traits::{
-    make_async_callback, make_callback, AsyncOrderedTxnCallback, AsyncTxnCallback, Dropable,
+    AsyncOrderedRetryCallback, OrderedRetryCallback, RetryCallbacks, make_async_callback, make_callback, AsyncOrderedTxnCallback, AsyncTxnCallback, Dropable,
     MaybeSend, MaybeSendSync, MaybeSync, OrderedTxnCallback, OrderedTxnCallbacks, Reader,
     ReaderWriter, RetryAttempt, RetryAttemptError, RetryAttemptFn, RetryAttemptFuture, RetryAttemptIO,
-    RetryAttemptValue, RetryOptions, RetryTxn, Store, Txn, TxnCallback, TxnStore, Writer,
+    RetryAttemptValue, RetryCallbackCounts, RetryOptions, RetryTxn, Store, Txn, TxnCallback,
+    TxnStore, Writer,
+
 
 
 };

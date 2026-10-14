@@ -39,6 +39,12 @@ impl SharedTxn {
             .release_savepoint()
     }
 
+    pub(crate) fn try_into_txn(shared: Arc<Self>) -> Result<Box<dyn Txn>> {
+        let shared = Arc::try_unwrap(shared)
+            .map_err(|_| Error::Other("transaction still has namespace references".into()))?;
+        Ok(shared.txn.into_inner())
+    }
+
     pub async fn merge(&self, namespace: Namespace, key: &[u8], operand: &[u8]) -> Result<()> {
         self.txn
             .write()
@@ -483,8 +489,8 @@ impl Iterator for NamespacedIterator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use storage::corekv::Store;
     use storage::RegolithStore;
+    use storage::corekv::Store;
 
     #[tokio::test]
     async fn test_shared_txn_namespace_isolation() {

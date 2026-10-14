@@ -38,6 +38,7 @@ thiserror.workspace = true
 rapidhash.workspace = true
 
 # Lock-free shared state
+kovan.workspace = true
 kovan-map.workspace = true
 kovan-queue.workspace = true
 kovan.workspace = true

@@ -16,13 +16,14 @@ use regolith::{OptimisticTransactionDb, StreamOptions, TxnOptions};
 
 use super::background_errors::BackgroundErrorListener;
 use super::config::RegolithStoreOptions;
-use super::event_order::EventOrder;
+use super::event_order::{Event, EventOrder};
+
 use super::head_cache::{self, SharedHeadCache};
 use super::transaction::RegolithTxn;
 use crate::backends::shared::TransactionStatsHandle;
 use crate::corekv::{
     Dropable, Error, Result, RetryAttempt, RetryAttemptError, RetryAttemptIO, RetryAttemptValue,
-    RetryOptions, RetryTxn, Store, Txn,
+    RetryCallbacks, RetryOptions, RetryTxn, Store, Txn,
 };
 
 /// Key-value store backed by regolith.
@@ -317,7 +318,9 @@ impl Store for RegolithStore {
         let _active = ActiveTxnGuard(Arc::clone(&self.inner.active_txns));
         let queue_db = Arc::clone(&self.inner.db);
         let policy = regolith::RetryPolicy::new(options.max_attempts.max(1));
+        let event_token = self.inner.event_order.begin();
         let mut committed_changes = head_cache::HeadChanges::default();
+        let mut committed_callbacks = RetryCallbacks::default();
         let mut attempt_count = 0usize;
         let mut conflict_count = 0usize;
         let run = || {
@@ -329,6 +332,7 @@ impl Store for RegolithStore {
                     conflict_count += 1;
                 }
                 committed_changes = head_cache::HeadChanges::default();
+                committed_callbacks = RetryCallbacks::default();
                 let mut retry_txn = RegolithRetryTxn {
                     txn,
                     changes: head_cache::HeadChanges::default(),
@@ -337,6 +341,7 @@ impl Store for RegolithStore {
                     isolation: self.inner.options.isolation,
                     stats: self.inner.stats.clone(),
                     attempt_io_active: false,
+                    callbacks: RetryCallbacks::default(),
                 };
                 let mut value = attempt.run(&mut retry_txn).await;
                 if value.is_ok() && retry_txn.attempt_io_active {
@@ -346,6 +351,7 @@ impl Store for RegolithStore {
                 }
                 if value.is_ok() {
                     committed_changes = std::mem::take(&mut retry_txn.changes);
+                    committed_callbacks = std::mem::take(&mut retry_txn.callbacks);
                 }
                 value
             });
@@ -353,12 +359,57 @@ impl Store for RegolithStore {
         };
         let outcome = super::blocking(run);
         match outcome {
-            Ok((value, _receipt)) => {
-                let mut cache = head_cache::lock(&self.inner.head_cache)?;
-                cache.publish(&committed_changes);
-                self.inner.stats.record_commit();
-                for _ in 0..conflict_count {
-                    self.inner.stats.record_conflict();
+            Ok((value, receipt)) => {
+                {
+                    let mut cache = head_cache::lock(&self.inner.head_cache)?;
+                    cache.publish(&committed_changes);
+                    self.inner.stats.record_commit();
+                    for _ in 0..conflict_count {
+                        self.inner.stats.record_conflict();
+                    }
+                }
+                let (callbacks, async_callbacks, ordered_callbacks, ordered_async_callbacks) =
+                    committed_callbacks.into_parts();
+                for callback in async_callbacks {
+                    let callback = callback.lock().unwrap().take();
+                    if let Some(callback) = callback {
+                        callback().await;
+                    }
+                }
+                for callback in callbacks {
+                    let callback = callback.lock().unwrap().take();
+                    if let Some(callback) = callback {
+                        callback();
+                    }
+                }
+                let mut post_commit_error = None;
+                for callback in ordered_async_callbacks {
+                    let callback = callback.lock().unwrap().take();
+                    if let Some(callback) = callback {
+                        if let Err(error) = callback().await {
+                            post_commit_error.get_or_insert(error);
+                        }
+                    }
+                }
+                let events: Vec<Event> = ordered_callbacks
+                    .into_iter()
+                    .map(|callback| {
+                        Arc::new(move || {
+                            let callback = callback.lock().unwrap().take();
+                            if let Some(callback) = callback {
+                                callback();
+                            }
+                        }) as Event
+                    })
+                    .collect();
+                let events = if post_commit_error.is_some() {
+                    Vec::new()
+                } else {
+                    events
+                };
+                event_token.finish(receipt.seq(), events);
+                if let Some(error) = post_commit_error {
+                    return Err(RetryAttemptError::PostCommit(Error::Other(error)));
                 }
                 Ok(value)
             }
@@ -409,6 +460,7 @@ struct RegolithRetryTxn<'a> {
     isolation: regolith::IsolationLevel,
     stats: TransactionStatsHandle,
     attempt_io_active: bool,
+    callbacks: RetryCallbacks,
 }
 
 impl RegolithRetryTxn<'_> {
@@ -498,7 +550,11 @@ impl RetryTxn for RegolithRetryTxn<'_> {
         )))
     }
 
-    fn finish_attempt_io(&mut self, io: Box<dyn RetryAttemptIO>) -> Result<()> {
+    fn finish_attempt_io(
+        &mut self,
+        io: Box<dyn RetryAttemptIO>,
+        callbacks: RetryCallbacks,
+    ) -> Result<()> {
         let io = io
             .into_any()
             .downcast::<RegolithTxn>()
@@ -506,6 +562,7 @@ impl RetryTxn for RegolithRetryTxn<'_> {
         let (actual, changes) = io.into_scoped_engine_txn()?;
         *self.txn = *actual;
         self.changes.append(changes);
+        self.callbacks = callbacks;
         self.attempt_io_active = false;
         Ok(())
     }

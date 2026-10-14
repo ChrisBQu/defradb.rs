@@ -134,10 +134,107 @@ pub trait RetryTxn: MaybeSendSync + private::Sealed {
     /// Return the attempt capability after all namespace views and iterators
     /// have been dropped. Backends reject retained references before commit.
     #[doc(hidden)]
-    fn finish_attempt_io(&mut self, _io: Box<dyn RetryAttemptIO>) -> Result<()> {
+    fn finish_attempt_io(
+        &mut self,
+        _io: Box<dyn RetryAttemptIO>,
+        _callbacks: RetryCallbacks,
+    ) -> Result<()> {
         Err(super::errors::Error::Other(
             "backend does not accept scoped retry IO".into(),
         ))
+    }
+}
+
+/// Success callbacks collected by datastore's attempt facade. The store runs
+/// them only after the winning native commit has produced its receipt.
+#[derive(Default)]
+pub struct RetryCallbacks {
+    sync: Vec<Arc<Mutex<Option<TxnCallback>>>>,
+    asynchronous: Vec<Arc<Mutex<Option<AsyncTxnCallback>>>>,
+    ordered: Vec<Arc<Mutex<Option<OrderedRetryCallback>>>>,
+    ordered_async: Vec<Arc<Mutex<Option<AsyncOrderedRetryCallback>>>>,
+}
+
+/// Lengths of retry-success callback queues at a transaction savepoint.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RetryCallbackCounts {
+    sync: usize,
+    asynchronous: usize,
+    ordered: usize,
+    ordered_async: usize,
+}
+
+use std::sync::{Arc, Mutex};
+
+#[cfg(not(target_arch = "wasm32"))]
+pub type OrderedRetryCallback = Box<dyn FnOnce() + Send + 'static>;
+#[cfg(target_arch = "wasm32")]
+pub type OrderedRetryCallback = Box<dyn FnOnce() + 'static>;
+#[cfg(not(target_arch = "wasm32"))]
+pub type AsyncOrderedRetryCallback = Box<
+    dyn FnOnce() -> Pin<Box<dyn Future<Output = std::result::Result<(), String>> + Send>>
+        + Send
+        + 'static,
+>;
+#[cfg(target_arch = "wasm32")]
+pub type AsyncOrderedRetryCallback =
+    Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = std::result::Result<(), String>>>> + 'static>;
+
+impl RetryCallbacks {
+    pub fn counts(&self) -> RetryCallbackCounts {
+        RetryCallbackCounts {
+            sync: self.sync.len(),
+            asynchronous: self.asynchronous.len(),
+            ordered: self.ordered.len(),
+            ordered_async: self.ordered_async.len(),
+        }
+    }
+
+    pub fn truncate(&mut self, counts: RetryCallbackCounts) {
+        self.sync.truncate(counts.sync);
+        self.asynchronous.truncate(counts.asynchronous);
+        self.ordered.truncate(counts.ordered);
+        self.ordered_async.truncate(counts.ordered_async);
+    }
+
+    pub fn append(&mut self, mut other: Self) {
+        self.sync.append(&mut other.sync);
+        self.asynchronous.append(&mut other.asynchronous);
+        self.ordered.append(&mut other.ordered);
+        self.ordered_async.append(&mut other.ordered_async);
+    }
+
+    pub fn push_sync(&mut self, callback: TxnCallback) {
+        self.sync.push(Arc::new(Mutex::new(Some(callback))));
+    }
+
+    pub fn push_async(&mut self, callback: AsyncTxnCallback) {
+        self.asynchronous.push(Arc::new(Mutex::new(Some(callback))));
+    }
+
+    pub fn push_ordered(&mut self, callback: OrderedRetryCallback) {
+        self.ordered.push(Arc::new(Mutex::new(Some(callback))));
+    }
+
+    pub fn push_ordered_async(&mut self, callback: AsyncOrderedRetryCallback) {
+        self.ordered_async
+            .push(Arc::new(Mutex::new(Some(callback))));
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        Vec<Arc<Mutex<Option<TxnCallback>>>>,
+        Vec<Arc<Mutex<Option<AsyncTxnCallback>>>>,
+        Vec<Arc<Mutex<Option<OrderedRetryCallback>>>>,
+        Vec<Arc<Mutex<Option<AsyncOrderedRetryCallback>>>>,
+    ) {
+        (
+            self.sync,
+            self.asynchronous,
+            self.ordered,
+            self.ordered_async,
+        )
     }
 }
 
@@ -163,6 +260,7 @@ pub type RetryAttemptValue = Box<dyn Any>;
 pub enum RetryAttemptError {
     Storage(super::errors::Error),
     Exhausted(super::errors::TransactionConflict),
+    PostCommit(super::errors::Error),
     #[cfg(not(target_arch = "wasm32"))]
     Abort(Box<dyn Any + Send>),
     #[cfg(target_arch = "wasm32")]
@@ -176,6 +274,7 @@ impl std::fmt::Debug for RetryAttemptError {
             Self::Exhausted(conflict) => {
                 formatter.debug_tuple("Exhausted").field(conflict).finish()
             }
+            Self::PostCommit(error) => formatter.debug_tuple("PostCommit").field(error).finish(),
             Self::Abort(_) => formatter.write_str("Abort(<typed domain error>)"),
         }
     }
@@ -192,6 +291,7 @@ impl RetryAttemptError {
         match self {
             Self::Storage(error) => error,
             Self::Exhausted(conflict) => super::errors::Error::TxnRetryExhausted(conflict),
+            Self::PostCommit(error) => error,
             Self::Abort(_) => super::errors::Error::Other(
                 "transaction attempt aborted with a domain error".to_string(),
             ),
@@ -719,6 +819,8 @@ pub trait Txn: ReaderWriter + private::Sealed {
     /// Multiple callbacks can be registered and will be executed sequentially
     /// in registration order until one panics or the list completes.
     fn on_success_async(&mut self, callback: AsyncTxnCallback);
+
+
 
     /// Register a synchronous callback to be called on commit error.
     ///

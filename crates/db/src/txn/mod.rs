@@ -5,7 +5,7 @@
 /// - Transaction-scoped collection cache (lazy loading)
 /// - Reference to the database for collection operations
 use crate::collection::cache::CollectionCache;
-use crate::collection::{populate_collection_root_id, Collection};
+use crate::collection::{Collection, populate_collection_root_id};
 use crate::error::{Error, Result};
 use async_lock::{MutexGuardArc, RwLockReadGuardArc, RwLockWriteGuardArc};
 use datastore::{AsyncCallback, BasicTxn, NamespaceView, RootView, TxnCallback};
@@ -162,6 +162,37 @@ impl<S: Store> DbTxn<S> {
             statement_savepoint: None,
             _marker: std::marker::PhantomData,
         }
+    }
+
+    /// Consume this DB transaction into the engine's scoped retry attempt.
+    /// Namespace views must already be dropped; the returned callback bundle
+    /// is held by storage until the winning commit receipt is available.
+    pub fn into_retry_attempt(
+        mut self,
+    ) -> storage::corekv::Result<(
+        Box<dyn storage::corekv::RetryAttemptIO>,
+        storage::corekv::RetryCallbacks,
+    )> {
+        if !self.pending_collection_acp_registrations.is_empty() {
+            return Err(storage::corekv::Error::Other(
+                "retry attempts cannot carry pending collection ACP registrations".into(),
+            ));
+        }
+        let txn = self
+            .txn
+            .take()
+            .ok_or(storage::corekv::Error::DiscardedTxn)?;
+        let (io, mut callbacks) = txn.into_retry_attempt()?;
+
+        let doc_guards = std::mem::take(&mut self.doc_guards);
+        if !doc_guards.is_empty() {
+            callbacks.push_sync(Box::new(move || drop(doc_guards)));
+        }
+        let collection_guards = std::mem::take(&mut self.collection_guards);
+        if !collection_guards.is_empty() {
+            callbacks.push_sync(Box::new(move || drop(collection_guards)));
+        }
+        Ok((io, callbacks))
     }
 
     /// Mark this transaction as explicit.
@@ -407,6 +438,33 @@ impl<S: Store> DbTxn<S> {
     pub fn on_success_async(&mut self, callback: AsyncCallback) -> Result<()> {
         if let Some(txn) = &mut self.txn {
             txn.on_success_async(callback);
+            Ok(())
+        } else {
+            Err(Error::TxnNotActive)
+        }
+    }
+
+    /// Register a receipt-ordered publication callback for a retry attempt.
+    pub fn on_retry_success_ordered(
+        &mut self,
+        callback: storage::corekv::OrderedRetryCallback,
+    ) -> Result<()> {
+        if let Some(txn) = &mut self.txn {
+            txn.on_retry_success_ordered(callback);
+            Ok(())
+        } else {
+            Err(Error::TxnNotActive)
+        }
+    }
+
+    /// Register an async postcommit hook that must complete before ordered
+    /// event publication. Its error is returned after the durable commit.
+    pub fn on_retry_success_ordered_async(
+        &mut self,
+        callback: storage::corekv::AsyncOrderedRetryCallback,
+    ) -> Result<()> {
+        if let Some(txn) = &mut self.txn {
+            txn.on_retry_success_ordered_async(callback);
             Ok(())
         } else {
             Err(Error::TxnNotActive)

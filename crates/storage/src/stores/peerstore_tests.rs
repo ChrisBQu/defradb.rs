@@ -306,7 +306,7 @@ impl crate::corekv::RetryAttemptFn for ScopedRetryIoAttempt {
             } else {
                 None
             };
-            retry.finish_attempt_io(io)?;
+            retry.finish_attempt_io(io, crate::corekv::RetryCallbacks::default())?;
             Ok(Box::new(()) as crate::corekv::RetryAttemptValue)
         })
     }
