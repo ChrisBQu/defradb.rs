@@ -32,6 +32,7 @@ pub const MODELED_FAMILIES: &[&str] = &[
     "Index-maintenance consistency",
     "Order-preserving key encoding",
     "Concurrent collection-head transitions",
+    "Vector index link maintenance",
 ];
 
 pub fn properties_for(family: &'static str) -> impl Iterator<Item = &'static Property> {
