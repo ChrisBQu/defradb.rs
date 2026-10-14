@@ -122,6 +122,22 @@ impl IndexScanResult {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait DocFetcher: MaybeSendSync {
+    async fn check_node_permission(
+        &self,
+        _identity: &identity::Did,
+        _permission: acp::nac::NodePermission,
+    ) -> Result<Option<bool>> {
+        Ok(None)
+    }
+
+    /// Use the row snapshot for local authorization; remote providers remain external.
+    async fn scoped_acp(
+        &self,
+        provider: std::sync::Arc<dyn acp::DocumentACP>,
+    ) -> crate::error::Result<std::sync::Arc<dyn acp::DocumentACP>> {
+        Ok(provider)
+    }
+
     /// Get all documents from a collection (excludes deleted documents).
     async fn get_all(&self, collection_name: &str) -> Result<Vec<Document>>;
 

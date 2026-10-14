@@ -13,7 +13,7 @@ pub(crate) struct DocumentAcpSetup {
 
 pub(crate) async fn create_document_acp<S>(
     store: Arc<S>,
-    persistence: Persistence,
+    _persistence: Persistence,
     config: &crate::DocumentAcpConfig,
 ) -> Result<DocumentAcpSetup>
 where
@@ -64,18 +64,12 @@ where
                 vera_acp: Some(vera_acp),
             })
         }
-        crate::DocumentAcpConfig::Local => match persistence {
-            Persistence::Persistent => {
-                let zanzibar_store = Arc::new(acp::PersistentZanzibarStore::from_store(store));
-                let document_acp = Arc::new(acp::ZanzibarDocumentACP::new(zanzibar_store.clone()));
-                Ok(local_document_acp_setup(document_acp, zanzibar_store))
-            }
-            Persistence::Memory => {
-                let zanzibar_store = Arc::new(acp::MemoryZanzibarStore::new());
-                let document_acp = Arc::new(acp::ZanzibarDocumentACP::new(zanzibar_store.clone()));
-                Ok(local_document_acp_setup(document_acp, zanzibar_store))
-            }
-        },
+        crate::DocumentAcpConfig::Local => {
+            // Memory and disk profiles both share the engine with document rows.
+            let zanzibar_store = Arc::new(acp::PersistentZanzibarStore::from_store(store));
+            let document_acp = Arc::new(acp::ZanzibarDocumentACP::new(zanzibar_store.clone()));
+            Ok(local_document_acp_setup(document_acp, zanzibar_store))
+        }
     }
 }
 
@@ -93,27 +87,21 @@ fn local_document_acp_setup(
 
 pub(crate) async fn create_nac_manager<S>(
     store: Arc<S>,
-    persistence: Persistence,
+    _persistence: Persistence,
 ) -> Result<Arc<dyn db::NacManagerApi>>
 where
     S: storage::corekv::Store + 'static,
 {
-    match persistence {
-        Persistence::Persistent => {
-            let nac_store = Arc::new(acp::PersistentZanzibarStore::from_store(store));
-            let nac_config = db::NacConfig::new().with_dev_mode();
-            let manager = Arc::new(db::NacManager::new(nac_store, nac_config));
-            manager.initialize(None).await.map_err(|error| {
-                anyhow!("failed to initialize NAC from persistent store: {error}")
-            })?;
-            Ok(manager)
-        }
-        Persistence::Memory => {
-            let nac_store = Arc::new(acp::MemoryZanzibarStore::new());
-            let nac_config = db::NacConfig::new().with_dev_mode();
-            Ok(Arc::new(db::NacManager::new(nac_store, nac_config)))
-        }
-    }
+    let nac_store = Arc::new(acp::PersistentZanzibarStore::from_store(store));
+    let manager = Arc::new(db::NacManager::new(
+        nac_store,
+        db::NacConfig::new().with_dev_mode(),
+    ));
+    manager
+        .initialize(None)
+        .await
+        .map_err(|error| anyhow!("failed to initialize NAC: {error}"))?;
+    Ok(manager)
 }
 
 #[cfg(test)]

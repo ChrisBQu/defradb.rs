@@ -701,7 +701,10 @@ impl<S: Store> DbTxn<S> {
     }
 
     async fn run_pending_collection_acp_registrations(&mut self) -> Result<()> {
-        for registration in std::mem::take(&mut self.pending_collection_acp_registrations) {
+        for mut registration in std::mem::take(&mut self.pending_collection_acp_registrations) {
+            if let Some(scoped) = registration.acp.bind_transaction(self.acpstore()?) {
+                registration.acp = scoped;
+            }
             registration.run().await?;
         }
         Ok(())

@@ -250,10 +250,6 @@ impl Node {
         let mut servers = match config.datastore.store {
             DatastoreType::Memory => {
                 info!("Using in-memory datastore");
-                let acp_store: Arc<dyn acp::AcpStore> = Arc::new(acp::MemoryAcpStore::new());
-                let zanzibar_store: Arc<dyn acp::ZanzibarStore> =
-                    Arc::new(acp::MemoryZanzibarStore::new());
-                info!("Using in-memory ACP store");
                 let options = Self::encryption_options(
                     &config,
                     storage::RegolithStoreOptions::memory(),
@@ -261,8 +257,14 @@ impl Node {
                 )?;
                 let backend = storage::RegolithStore::open_with_options("memory", options)?;
                 let store = storage::DynStore::new(Arc::new(backend));
+                let store = Arc::new(store);
+                let acp_store: Arc<dyn acp::AcpStore> =
+                    Arc::new(acp::PersistentAcpStore::from_store(store.clone()));
+                let zanzibar_store: Arc<dyn acp::ZanzibarStore> =
+                    Arc::new(acp::PersistentZanzibarStore::from_store(store.clone()));
+
                 Self::init_store_and_server(
-                    Arc::new(store),
+                    store,
                     &config,
                     peer_keypair,
                     user_identity.clone(),

@@ -192,6 +192,41 @@ impl<S: Store> LensedDocFetcher<S> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
+    async fn check_node_permission(
+        &self,
+        identity: &identity::Did,
+        permission: acp::nac::NodePermission,
+    ) -> query::error::Result<Option<bool>> {
+        let Some(nac) = self.db.nac_manager() else {
+            return Ok(None);
+        };
+        let guard = self.txn.lock().await;
+        let txn = guard.as_ref().ok_or_else(|| {
+            query::error::QueryError::execution("authorization transaction is no longer active")
+        })?;
+        let view = txn
+            .acpstore()
+            .map_err(|error| query::error::QueryError::execution(error.to_string()))?;
+        nac.check_permission_in_txn(view, identity, permission)
+            .await
+            .map(Some)
+            .map_err(|error| query::error::QueryError::execution(error.to_string()))
+    }
+
+    async fn scoped_acp(
+        &self,
+        provider: Arc<dyn acp::DocumentACP>,
+    ) -> query::error::Result<Arc<dyn acp::DocumentACP>> {
+        let guard = self.txn.lock().await;
+        let txn = guard.as_ref().ok_or_else(|| {
+            query::error::QueryError::execution("authorization transaction is no longer active")
+        })?;
+        let view = txn
+            .acpstore()
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+        Ok(provider.bind_transaction(view).unwrap_or(provider))
+    }
+
     async fn get_all(&self, collection_name: &str) -> query::error::Result<Vec<Document>> {
         self.get_all_impl(collection_name).await
     }

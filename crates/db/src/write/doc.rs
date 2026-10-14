@@ -184,6 +184,10 @@ impl<S: Store + 'static> DbDocMutator<S> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
+    fn set_document_acp(&self, provider: Arc<dyn acp::DocumentACP>) {
+        self.db.set_document_acp(provider);
+    }
+
     async fn create(
         &self,
         collection_name: &str,
@@ -196,6 +200,13 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
 
         let (collection, datastore, systemstore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;
+        self.db
+            .check_node_access_in_txn(
+                systemstore.sibling(storage::namespace::Namespace::Acpstore),
+                acp::nac::NodePermission::DocumentUpdate,
+            )
+            .await
+            .map_err(crate::error::commit_query_error)?;
         self.ensure_collection_can_write(collection_name, &collection)
             .await?;
 
@@ -285,6 +296,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             }
 
             let doc_id = crate::write::autocommit::helpers::register_created_doc(
+                self.db.document_acp(),
                 &systemstore,
                 &datastore,
                 &collection,
@@ -381,6 +393,13 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
 
         let (collection, datastore, systemstore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;
+        self.db
+            .check_node_access_in_txn(
+                systemstore.sibling(storage::namespace::Namespace::Acpstore),
+                acp::nac::NodePermission::DocumentUpdate,
+            )
+            .await
+            .map_err(crate::error::commit_query_error)?;
         self.ensure_collection_can_write(collection_name, &collection)
             .await?;
 
@@ -577,6 +596,13 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
 
         let (collection, datastore, systemstore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;
+        self.db
+            .check_node_access_in_txn(
+                systemstore.sibling(storage::namespace::Namespace::Acpstore),
+                acp::nac::NodePermission::DocumentDelete,
+            )
+            .await
+            .map_err(crate::error::commit_query_error)?;
         self.ensure_collection_can_write(collection_name, &collection)
             .await?;
 
@@ -604,6 +630,13 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         if !existed {
             return Ok(DeleteResult::new(canonical_doc_id, existed));
         }
+        crate::write::autocommit::helpers::unregister_deleted_doc(
+            self.db.document_acp(),
+            &systemstore,
+            &collection,
+            &canonical_doc_id,
+        )
+        .await?;
 
         let (doc_cid, doc_block, col_block_data) = {
             let txn_guard = self.txn.lock().await;

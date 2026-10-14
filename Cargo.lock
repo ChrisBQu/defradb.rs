@@ -15,6 +15,7 @@ dependencies = [
  "async-lock",
  "async-trait",
  "bytes",
+ "datastore",
  "defra-core",
  "identity 0.5.0",
  "kovan",

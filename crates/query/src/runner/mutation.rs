@@ -195,9 +195,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // Batch implicit multi-mutation requests when the mutator supports it.
         //
         // Explicit `/tx` requests already provide their own shared transaction
-        // through `fetcher_override`. Requests touching policy-backed collections
-        // still use the legacy per-mutation path because ACP post-write side
-        // effects are applied outside the storage transaction.
+        // through `fetcher_override`. Local authorization always shares this
+        // transaction, including single-field mutations. Remote ACP retains
+        // its network-boundary handling.
         let has_policy_backed_mutation = if fetcher_override.is_none() {
             let mut has_policy = false;
             for mutation in &mutations {
@@ -217,14 +217,20 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             false
         };
 
-        if mutations.len() > 1 && fetcher_override.is_none() && !has_policy_backed_mutation {
+        if fetcher_override.is_none()
+            && (self.acp.supports_transactions()
+                || (mutations.len() > 1 && !has_policy_backed_mutation))
+        {
             if let Some(batch) = mutator.begin_batch().await? {
                 let batch_mutator = batch.mutator();
+                batch_mutator.set_document_acp(self.acp.clone());
                 let batch_fetcher = batch.fetcher();
+                let batch_runner =
+                    self.scoped_runner(batch_fetcher.scoped_acp(self.acp.clone()).await?);
                 let mut results = Map::new();
 
                 for mutation in mutations {
-                    let result = match self
+                    let result = match batch_runner
                         .execute_single_mutation(
                             &mutation,
                             batch_mutator.clone(),
@@ -238,6 +244,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     {
                         Ok(result) => result,
                         Err(err) => {
+                            drop(batch_runner);
                             if let Err(rollback_err) = batch.rollback().await {
                                 tracing::warn!(
                                     error = %rollback_err,
@@ -251,6 +258,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     results.insert(mutation.output_name(), result);
                 }
 
+                drop(batch_runner);
                 batch.commit().await?;
                 return Ok(JsonValue::Object(results));
             }
@@ -847,10 +855,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         }
 
         // For CREATE/UPSERT operations with caller_identity: register created docs with ACP
-        if matches!(
-            mutation.mutation_type,
-            MutationType::Create | MutationType::Upsert
-        ) {
+        if !self.acp.supports_transactions()
+            && matches!(
+                mutation.mutation_type,
+                MutationType::Create | MutationType::Upsert
+            )
+        {
             if let (Some(ref policy), Some(ref identity_did)) =
                 (&collection.policy, &caller_identity)
             {
@@ -932,9 +942,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     .and_then(|did| defra_core::signing::get_request_bearer_token(did.as_str()));
                 for result in &results {
                     if let Some(doc_id) = result.get("_docID").and_then(|v| v.as_str()) {
-                        // Best-effort unregistration - log failures but don't fail the delete
-                        // The document is already deleted from storage; ACP cleanup failure
-                        // leaves orphaned metadata but doesn't affect data integrity
+                        if self.acp.supports_transactions() {
+                            self.acp
+                                .unregister_doc_object(&policy.id, &policy.resource_name, doc_id)
+                                .await
+                                .map_err(|error| QueryError::execution(error.to_string()))?;
+                            continue;
+                        }
+                        // Remote cleanup runs after its independent document commit.
                         if let Some(deferred_acp_mutations) =
                             crate::txn::current_deferred_acp_mutations()
                         {

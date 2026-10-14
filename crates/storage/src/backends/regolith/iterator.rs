@@ -94,6 +94,8 @@ enum Source {
         resume: Option<Anchor>,
         page: VecDeque<KvPair>,
     },
+    /// An engine-owned cursor recording every consumed range, including gaps.
+    Validated(regolith::TxnCursor),
     /// The anchor fell outside the range, so there is nothing to walk.
     Empty,
 }
@@ -110,6 +112,7 @@ pub(crate) struct RegolithIterator {
     prefix: Option<Vec<u8>>,
     reverse: bool,
     keys_only: bool,
+    validated: bool,
     closed: bool,
     /// An entry `seek` pulled off to answer whether one exists, handed
     /// back by the next `next` rather than skipped.
@@ -130,6 +133,7 @@ impl RegolithIterator {
             prefix: opts.prefix().map(<[u8]>::to_vec),
             reverse: opts.reverse(),
             keys_only: opts.keys_only(),
+            validated: opts.validated(),
             closed: false,
             peeked: None,
         };
@@ -174,6 +178,28 @@ impl RegolithIterator {
                 } else {
                     Source::Cursor(cursor.entries())
                 }
+            }
+            Handle::Writable(txn) if self.validated => {
+                let (start, end, direction) = if self.reverse {
+                    let end = match self.ceiling(&anchor) {
+                        Ceiling::At(key) => Some(above(&key)),
+                        Ceiling::Below(end) => Some(end),
+                        Ceiling::Last => None,
+                    };
+                    (self.start.clone(), end, regolith::ScanDirection::Reverse)
+                } else {
+                    (
+                        self.floor(&anchor),
+                        self.end.clone(),
+                        regolith::ScanDirection::Forward,
+                    )
+                };
+                Source::Validated(txn.cursor(
+                    start.as_deref(),
+                    end.as_deref(),
+                    direction,
+                    regolith::ScanCheck::Range,
+                ))
             }
             Handle::Writable(_) => Source::Paged {
                 resume: Some(anchor),
@@ -297,6 +323,20 @@ impl RegolithIterator {
                 Some(entry) => entry.map_err(|error| Error::Backend(error.to_string()))?,
                 None => return Ok(None),
             },
+            Source::Validated(cursor) => {
+                let Handle::Writable(txn) = self.handle.as_ref() else {
+                    unreachable!()
+                };
+                // One entry per call keeps the validated range exactly aligned
+                // with what the caller consumed, including an exhausted empty range.
+                let page = cursor
+                    .next_page(txn, 1)
+                    .map_err(super::transaction::map_txn_error)?;
+                match page.entries.into_iter().next() {
+                    Some(entry) => entry,
+                    None => return Ok(None),
+                }
+            }
             Source::Paged { page, .. } => {
                 if page.is_empty() {
                     self.refill()?;

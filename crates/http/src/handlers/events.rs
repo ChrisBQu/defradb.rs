@@ -74,7 +74,8 @@ struct EventAccessContext {
     executor: Arc<dyn query::executor::QueryExecutor>,
     collection_mgmt: Option<Arc<dyn crate::router::CollectionManagementOperations>>,
     signing_config: Option<defra_core::signing::SigningConfig>,
-    dac_bypass: bool,
+    state: AppState,
+    identity: ExtractIdentity,
     did: Option<identity::Did>,
     acp_enabled: bool,
 }
@@ -85,6 +86,7 @@ impl EventAccessContext {
         collection_id: &str,
         doc_id: &str,
     ) -> Result<bool, HttpError> {
+        let dac_bypass = resolve_dac_bypass(&self.state, &self.identity).await;
         if !self.acp_enabled {
             return Ok(true);
         }
@@ -126,7 +128,7 @@ impl EventAccessContext {
                 self.executor.clone(),
                 QueryRequest::new(query).with_identity(self.did.clone()),
                 self.signing_config.clone(),
-                self.dac_bypass,
+                dac_bypass,
                 self.did.as_ref().map(|d| d.as_str().to_string()),
             )
             .await;
@@ -143,7 +145,7 @@ impl EventAccessContext {
             self.executor.clone(),
             QueryRequest::new(query).with_identity(self.did.clone()),
             self.signing_config.clone(),
-            self.dac_bypass,
+            dac_bypass,
             self.did.as_ref().map(|d| d.as_str().to_string()),
         )
         .await;
@@ -175,7 +177,8 @@ pub async fn events_sse(
         executor: state.executor.clone(),
         collection_mgmt: state.collection_mgmt.clone(),
         signing_config: resolve_signing_config(&state, &identity),
-        dac_bypass: resolve_dac_bypass(&state, &identity).await,
+        state: state.clone(),
+        identity: identity.clone(),
         did: identity.did().cloned(),
         acp_enabled: state.doc_acp.is_some() || state.acp.is_some(),
     };

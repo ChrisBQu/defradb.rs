@@ -22,6 +22,8 @@ impl Collection {
             .cloned()
             .ok_or_else(|| Error::InvalidDocument("Document must have an ID".into()))?;
 
+        self.claim_series(datastore, doc).await?;
+
         // Serialize document to CBOR
         let data = doc.to_cbor()?;
 
@@ -59,8 +61,12 @@ impl Collection {
 
         let key = self.doc_key(doc_short_id);
 
+        if self.is_deleted(datastore, doc_short_id).await? {
+            return Err(Error::DocumentNotFound(doc_id.to_string()));
+        }
+
         // Get old document for index update
-        let old_doc = match datastore.get(&key).await.map_err(Error::Storage)? {
+        let old_doc = match self.read_document_blob(datastore, doc_short_id).await? {
             Some(bytes) => {
                 let mut d = Document::from_cbor(&bytes)?;
                 d.set_id(doc_id.clone());
@@ -70,6 +76,9 @@ impl Collection {
         };
 
         self.validate_immutable_fields_unchanged(&old_doc, doc)?;
+
+        self.release_series(datastore, &old_doc).await?;
+        self.claim_series(datastore, doc).await?;
 
         // Serialize and store
         let data = doc.to_cbor()?;
@@ -99,6 +108,8 @@ impl Collection {
         doc_short_id: u64,
         index_manager: &IndexManager,
     ) -> Result<bool> {
+        self.validate_write_definition(datastore, true).await?;
+
         let key = self.doc_key(doc_short_id);
         let deleted_key = self.deleted_key(doc_short_id);
 
@@ -116,6 +127,8 @@ impl Collection {
             }
             None => return Ok(false),
         };
+
+        self.release_series(datastore, &doc).await?;
 
         // Set deletion marker (logical delete, keep document data)
         datastore

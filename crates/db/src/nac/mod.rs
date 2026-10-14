@@ -63,6 +63,14 @@ pub trait NacManagerApi: defra_core::thread_bounds::MaybeSendSync {
     async fn owner(&self) -> Option<Did>;
     async fn is_enabled(&self) -> bool;
     async fn check_permission(&self, identity: &Did, permission: NodePermission) -> Result<bool>;
+    async fn check_permission_in_txn(
+        &self,
+        _view: datastore::NamespaceView,
+        identity: &Did,
+        permission: NodePermission,
+    ) -> Result<bool> {
+        self.check_permission(identity, permission).await
+    }
     async fn is_admin(&self, identity: &Did) -> Result<bool>;
     async fn is_admin_persisted(&self, identity: &Did) -> Result<bool>;
     async fn is_owner(&self, identity: &Did) -> bool;
@@ -93,12 +101,12 @@ pub trait NacManagerApi: defra_core::thread_bounds::MaybeSendSync {
 /// - Initialization based on configuration
 /// - Permission checking with config-aware fallbacks
 /// - Admin management with authorization
-pub struct NacManager<S: ZanzibarStore + Send + Sync + 'static> {
+pub struct NacManager<S: ZanzibarStore + ?Sized + 'static> {
     nac: NodeACP<S>,
     config: NacConfig,
 }
 
-impl<S: ZanzibarStore + Send + Sync + 'static> NacManager<S> {
+impl<S: ZanzibarStore + ?Sized + 'static> NacManager<S> {
     /// Create a new NAC manager with the given store and config.
     pub fn new(store: Arc<S>, config: NacConfig) -> Self {
         Self {
@@ -112,6 +120,32 @@ impl<S: ZanzibarStore + Send + Sync + 'static> NacManager<S> {
     /// This should be called during node startup. If NAC is configured to be
     /// enabled and an owner identity is provided, NAC will be activated.
     pub async fn initialize(&self, owner_identity: Option<&Did>) -> Result<()> {
+        if let Some(scope) = self
+            .nac
+            .begin_scope(false)
+            .await
+            .map_err(|error| Error::Acp(error.to_string()))?
+        {
+            let scoped = NacManager::new(scope.store(), self.config.clone());
+            scoped
+                .nac
+                .load()
+                .await
+                .map_err(|error| Error::Acp(error.to_string()))?;
+            let scoped: Box<dyn NacManagerApi> = Box::new(scoped);
+            scoped.initialize(owner_identity).await?;
+            drop(scoped);
+            scope
+                .commit()
+                .await
+                .map_err(|error| Error::Acp(error.to_string()))?;
+            self.nac
+                .load()
+                .await
+                .map_err(|error| Error::Acp(error.to_string()))?;
+            return Ok(());
+        }
+
         self.nac
             .load()
             .await
@@ -184,6 +218,28 @@ impl<S: ZanzibarStore + Send + Sync + 'static> NacManager<S> {
         identity: &Did,
         permission: NodePermission,
     ) -> Result<bool> {
+        if let Some(scope) = self
+            .nac
+            .begin_scope(true)
+            .await
+            .map_err(|error| Error::Acp(error.to_string()))?
+        {
+            let scoped = NacManager::new(scope.store(), self.config.clone());
+            scoped
+                .nac
+                .load()
+                .await
+                .map_err(|error| Error::Acp(error.to_string()))?;
+            let scoped: Box<dyn NacManagerApi> = Box::new(scoped);
+            let result = scoped.check_permission(identity, permission).await?;
+            drop(scoped);
+            scope
+                .commit()
+                .await
+                .map_err(|error| Error::Acp(error.to_string()))?;
+            return Ok(result);
+        }
+
         self.nac
             .check_permission(identity, permission)
             .await
@@ -192,6 +248,28 @@ impl<S: ZanzibarStore + Send + Sync + 'static> NacManager<S> {
 
     /// Check if an identity is an admin.
     pub async fn is_admin(&self, identity: &Did) -> Result<bool> {
+        if let Some(scope) = self
+            .nac
+            .begin_scope(true)
+            .await
+            .map_err(|error| Error::Acp(error.to_string()))?
+        {
+            let scoped = NacManager::new(scope.store(), self.config.clone());
+            scoped
+                .nac
+                .load()
+                .await
+                .map_err(|error| Error::Acp(error.to_string()))?;
+            let scoped: Box<dyn NacManagerApi> = Box::new(scoped);
+            let result = scoped.is_admin(identity).await?;
+            drop(scoped);
+            scope
+                .commit()
+                .await
+                .map_err(|error| Error::Acp(error.to_string()))?;
+            return Ok(result);
+        }
+
         self.nac
             .is_admin(identity)
             .await
@@ -200,6 +278,28 @@ impl<S: ZanzibarStore + Send + Sync + 'static> NacManager<S> {
 
     /// Check if an identity is an admin based on stored relationships.
     pub async fn is_admin_persisted(&self, identity: &Did) -> Result<bool> {
+        if let Some(scope) = self
+            .nac
+            .begin_scope(true)
+            .await
+            .map_err(|error| Error::Acp(error.to_string()))?
+        {
+            let scoped = NacManager::new(scope.store(), self.config.clone());
+            scoped
+                .nac
+                .load()
+                .await
+                .map_err(|error| Error::Acp(error.to_string()))?;
+            let scoped: Box<dyn NacManagerApi> = Box::new(scoped);
+            let result = scoped.is_admin_persisted(identity).await?;
+            drop(scoped);
+            scope
+                .commit()
+                .await
+                .map_err(|error| Error::Acp(error.to_string()))?;
+            return Ok(result);
+        }
+
         self.nac
             .is_admin_persisted(identity)
             .await
@@ -213,6 +313,32 @@ impl<S: ZanzibarStore + Send + Sync + 'static> NacManager<S> {
 
     /// Enable NAC with the given owner.
     pub async fn enable(&self, owner: &Did) -> Result<()> {
+        if let Some(scope) = self
+            .nac
+            .begin_scope(false)
+            .await
+            .map_err(|error| Error::Acp(error.to_string()))?
+        {
+            let scoped = NacManager::new(scope.store(), self.config.clone());
+            scoped
+                .nac
+                .load()
+                .await
+                .map_err(|error| Error::Acp(error.to_string()))?;
+            let scoped: Box<dyn NacManagerApi> = Box::new(scoped);
+            scoped.enable(owner).await?;
+            drop(scoped);
+            scope
+                .commit()
+                .await
+                .map_err(|error| Error::Acp(error.to_string()))?;
+            self.nac
+                .load()
+                .await
+                .map_err(|error| Error::Acp(error.to_string()))?;
+            return Ok(());
+        }
+
         self.nac
             .enable(owner)
             .await
@@ -221,6 +347,32 @@ impl<S: ZanzibarStore + Send + Sync + 'static> NacManager<S> {
 
     /// Temporarily disable NAC.
     pub async fn disable(&self, requestor: &Did) -> Result<()> {
+        if let Some(scope) = self
+            .nac
+            .begin_scope(false)
+            .await
+            .map_err(|error| Error::Acp(error.to_string()))?
+        {
+            let scoped = NacManager::new(scope.store(), self.config.clone());
+            scoped
+                .nac
+                .load()
+                .await
+                .map_err(|error| Error::Acp(error.to_string()))?;
+            let scoped: Box<dyn NacManagerApi> = Box::new(scoped);
+            scoped.disable(requestor).await?;
+            drop(scoped);
+            scope
+                .commit()
+                .await
+                .map_err(|error| Error::Acp(error.to_string()))?;
+            self.nac
+                .load()
+                .await
+                .map_err(|error| Error::Acp(error.to_string()))?;
+            return Ok(());
+        }
+
         if !self.is_admin(requestor).await? {
             return Err(Error::Acp("only admins can disable NAC".into()));
         }
@@ -233,6 +385,32 @@ impl<S: ZanzibarStore + Send + Sync + 'static> NacManager<S> {
 
     /// Re-enable NAC after temporary disable.
     pub async fn re_enable(&self, requestor: &Did) -> Result<()> {
+        if let Some(scope) = self
+            .nac
+            .begin_scope(false)
+            .await
+            .map_err(|error| Error::Acp(error.to_string()))?
+        {
+            let scoped = NacManager::new(scope.store(), self.config.clone());
+            scoped
+                .nac
+                .load()
+                .await
+                .map_err(|error| Error::Acp(error.to_string()))?;
+            let scoped: Box<dyn NacManagerApi> = Box::new(scoped);
+            scoped.re_enable(requestor).await?;
+            drop(scoped);
+            scope
+                .commit()
+                .await
+                .map_err(|error| Error::Acp(error.to_string()))?;
+            self.nac
+                .load()
+                .await
+                .map_err(|error| Error::Acp(error.to_string()))?;
+            return Ok(());
+        }
+
         if !self.is_admin_persisted(requestor).await? {
             return Err(Error::Acp("only admins can re-enable NAC".into()));
         }
@@ -245,6 +423,32 @@ impl<S: ZanzibarStore + Send + Sync + 'static> NacManager<S> {
 
     /// Purge all NAC state (dev mode only).
     pub async fn purge(&self, requestor: &Did) -> Result<()> {
+        if let Some(scope) = self
+            .nac
+            .begin_scope(false)
+            .await
+            .map_err(|error| Error::Acp(error.to_string()))?
+        {
+            let scoped = NacManager::new(scope.store(), self.config.clone());
+            scoped
+                .nac
+                .load()
+                .await
+                .map_err(|error| Error::Acp(error.to_string()))?;
+            let scoped: Box<dyn NacManagerApi> = Box::new(scoped);
+            scoped.purge(requestor).await?;
+            drop(scoped);
+            scope
+                .commit()
+                .await
+                .map_err(|error| Error::Acp(error.to_string()))?;
+            self.nac
+                .load()
+                .await
+                .map_err(|error| Error::Acp(error.to_string()))?;
+            return Ok(());
+        }
+
         if !self.config.dev_mode {
             return Err(Error::Acp("NAC purge is only allowed in dev mode".into()));
         }
@@ -261,6 +465,32 @@ impl<S: ZanzibarStore + Send + Sync + 'static> NacManager<S> {
 
     /// Add an admin relationship.
     pub async fn add_admin(&self, requestor: &Did, target: &Did) -> Result<bool> {
+        if let Some(scope) = self
+            .nac
+            .begin_scope(false)
+            .await
+            .map_err(|error| Error::Acp(error.to_string()))?
+        {
+            let scoped = NacManager::new(scope.store(), self.config.clone());
+            scoped
+                .nac
+                .load()
+                .await
+                .map_err(|error| Error::Acp(error.to_string()))?;
+            let scoped: Box<dyn NacManagerApi> = Box::new(scoped);
+            let result = scoped.add_admin(requestor, target).await?;
+            drop(scoped);
+            scope
+                .commit()
+                .await
+                .map_err(|error| Error::Acp(error.to_string()))?;
+            self.nac
+                .load()
+                .await
+                .map_err(|error| Error::Acp(error.to_string()))?;
+            return Ok(result);
+        }
+
         self.nac
             .add_admin(requestor, target)
             .await
@@ -269,6 +499,32 @@ impl<S: ZanzibarStore + Send + Sync + 'static> NacManager<S> {
 
     /// Remove an admin relationship.
     pub async fn remove_admin(&self, requestor: &Did, target: &Did) -> Result<bool> {
+        if let Some(scope) = self
+            .nac
+            .begin_scope(false)
+            .await
+            .map_err(|error| Error::Acp(error.to_string()))?
+        {
+            let scoped = NacManager::new(scope.store(), self.config.clone());
+            scoped
+                .nac
+                .load()
+                .await
+                .map_err(|error| Error::Acp(error.to_string()))?;
+            let scoped: Box<dyn NacManagerApi> = Box::new(scoped);
+            let result = scoped.remove_admin(requestor, target).await?;
+            drop(scoped);
+            scope
+                .commit()
+                .await
+                .map_err(|error| Error::Acp(error.to_string()))?;
+            self.nac
+                .load()
+                .await
+                .map_err(|error| Error::Acp(error.to_string()))?;
+            return Ok(result);
+        }
+
         self.nac
             .remove_admin(requestor, target)
             .await
@@ -282,6 +538,34 @@ impl<S: ZanzibarStore + Send + Sync + 'static> NacManager<S> {
         target: &Did,
         permission: NodePermission,
     ) -> Result<bool> {
+        if let Some(scope) = self
+            .nac
+            .begin_scope(false)
+            .await
+            .map_err(|error| Error::Acp(error.to_string()))?
+        {
+            let scoped = NacManager::new(scope.store(), self.config.clone());
+            scoped
+                .nac
+                .load()
+                .await
+                .map_err(|error| Error::Acp(error.to_string()))?;
+            let scoped: Box<dyn NacManagerApi> = Box::new(scoped);
+            let result = scoped
+                .add_permission_grant(requestor, target, permission)
+                .await?;
+            drop(scoped);
+            scope
+                .commit()
+                .await
+                .map_err(|error| Error::Acp(error.to_string()))?;
+            self.nac
+                .load()
+                .await
+                .map_err(|error| Error::Acp(error.to_string()))?;
+            return Ok(result);
+        }
+
         self.nac
             .add_permission_grant(requestor, target, permission)
             .await
@@ -295,6 +579,34 @@ impl<S: ZanzibarStore + Send + Sync + 'static> NacManager<S> {
         target: &Did,
         permission: NodePermission,
     ) -> Result<bool> {
+        if let Some(scope) = self
+            .nac
+            .begin_scope(false)
+            .await
+            .map_err(|error| Error::Acp(error.to_string()))?
+        {
+            let scoped = NacManager::new(scope.store(), self.config.clone());
+            scoped
+                .nac
+                .load()
+                .await
+                .map_err(|error| Error::Acp(error.to_string()))?;
+            let scoped: Box<dyn NacManagerApi> = Box::new(scoped);
+            let result = scoped
+                .remove_permission_grant(requestor, target, permission)
+                .await?;
+            drop(scoped);
+            scope
+                .commit()
+                .await
+                .map_err(|error| Error::Acp(error.to_string()))?;
+            self.nac
+                .load()
+                .await
+                .map_err(|error| Error::Acp(error.to_string()))?;
+            return Ok(result);
+        }
+
         self.nac
             .remove_permission_grant(requestor, target, permission)
             .await

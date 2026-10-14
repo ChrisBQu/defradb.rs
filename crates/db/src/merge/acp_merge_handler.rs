@@ -104,6 +104,25 @@ const DELETED_STATUS: u8 = 2;
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl CompositeMergeHook for AcpCompositeMergeHook {
+    fn supports_transactions(&self) -> bool {
+        self.document_acp()
+            .is_some_and(|acp| acp.supports_transactions())
+    }
+
+    #[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
+    fn bind_transaction(
+        &self,
+        view: datastore::NamespaceView,
+    ) -> Option<Arc<dyn CompositeMergeHook>> {
+        let acp = self.document_acp()?.bind_transaction(view)?;
+        let hook = Self::new(self.local_identity.clone());
+        hook.set_document_acp(acp);
+        hook.set_strict_replicated_doc_access(
+            self.strict_replicated_doc_access.load(Ordering::Relaxed),
+        );
+        Some(Arc::new(hook))
+    }
+
     fn guards_protected_updates(&self) -> bool {
         self.document_acp().is_some()
     }
@@ -321,11 +340,13 @@ impl<S: Store, B: blockstore::Blockstore> AcpMergeHandler<S, B> {
     }
 
     pub fn with_document_acp(self, acp: Arc<dyn DocumentACP>) -> Self {
+        self.inner.db.set_document_acp(acp.clone());
         self.hook.set_document_acp(acp);
         self
     }
 
     pub fn set_document_acp(&self, acp: Arc<dyn DocumentACP>) {
+        self.inner.db.set_document_acp(acp.clone());
         self.hook.set_document_acp(acp);
     }
 

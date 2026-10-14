@@ -5,6 +5,36 @@ use identity::Did;
 use storage::corekv::Store;
 
 impl<S: Store> DB<S> {
+    pub(crate) async fn check_node_access_in_txn(
+        &self,
+        view: datastore::NamespaceView,
+        permission: NodePermission,
+    ) -> Result<()> {
+        let Some(nac) = self.nac_manager() else {
+            return Ok(());
+        };
+        let identity = defra_core::current_identity::get_effective_identity()
+            .and_then(|value| Did::new(value).ok());
+        if self
+            .node_did()
+            .is_some_and(|owner| identity.as_ref() == Some(&owner))
+        {
+            return Ok(());
+        }
+        let identity = identity.unwrap_or_else(Did::wildcard);
+        if nac
+            .check_permission_in_txn(view, &identity, permission)
+            .await
+            .map_err(|error| Error::Acp(error.to_string()))?
+        {
+            Ok(())
+        } else {
+            Err(Error::NotAuthorized {
+                permission: permission.as_str().to_string(),
+            })
+        }
+    }
+
     /// Check NAC permission before proceeding with a node-level operation.
     /// Matches Go's `db.checkNodeAccess()` pattern.
     ///

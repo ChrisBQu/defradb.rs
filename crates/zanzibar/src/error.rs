@@ -5,6 +5,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum Error {
+    #[error("a different policy already exists under ID {0}")]
+    PolicyAlreadyExists(String),
+
     #[error("cannot resolve an exclusion through a relationship cycle")]
     IndeterminateExclusion,
 

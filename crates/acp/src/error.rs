@@ -9,6 +9,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum Error {
+    #[error("a different policy already exists under ID {0}")]
+    PolicyAlreadyExists(String),
+
     /// JSON serialization/deserialization errors
     #[error("serialization error: {0}")]
     Json(#[from] serde_json::Error),
@@ -119,6 +122,7 @@ impl From<zanzibar::error::Error> for Error {
     fn from(e: zanzibar::error::Error) -> Self {
         match e {
             zanzibar::error::Error::PolicyNotFound(s) => Error::PolicyNotFound(s),
+            zanzibar::error::Error::PolicyAlreadyExists(s) => Error::PolicyAlreadyExists(s),
             zanzibar::error::Error::RelationNotFound { resource, relation } => {
                 Error::RelationNotFound { resource, relation }
             }

@@ -21,6 +21,20 @@ use crate::permission::DocumentPermission;
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait DocumentACP: MaybeSendSync {
+    /// Whether local reads and writes must share the authorized transaction.
+    fn supports_transactions(&self) -> bool {
+        false
+    }
+
+    /// Bind local authorization and registration to the same transaction as its rows.
+    /// Remote backends return None and remain at the network boundary.
+    fn bind_transaction(
+        &self,
+        _view: datastore::NamespaceView,
+    ) -> Option<std::sync::Arc<dyn DocumentACP>> {
+        None
+    }
+
     /// Whether missing registrations allow public access or require a collection grant.
     /// Remote backends may deny absence, including retired policies and archived objects.
     fn unregistered_documents_are_public(&self) -> bool {

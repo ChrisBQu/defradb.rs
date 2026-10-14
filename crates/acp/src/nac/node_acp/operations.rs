@@ -8,7 +8,7 @@ use crate::nac::permission::NodePermission;
 use crate::nac::policy::{ADMIN_RELATION, NODE_POLICY_ID, NODE_RESOURCE_NAME};
 use zanzibar::{Relationship, Subject, ZanzibarStore};
 
-impl<S: ZanzibarStore + Send + Sync + 'static> NodeACP<S> {
+impl<S: ZanzibarStore + ?Sized + 'static> NodeACP<S> {
     /// Check if an identity has a specific node permission.
     ///
     /// Returns `true` if:

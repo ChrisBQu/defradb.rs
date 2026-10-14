@@ -7,7 +7,7 @@ use crate::error::{Error, Result};
 use crate::nac::policy::{create_node_policy, NODE_POLICY_ID, NODE_RESOURCE_NAME, OWNER_RELATION};
 use zanzibar::{Relationship, ZanzibarStore};
 
-impl<S: ZanzibarStore + Send + Sync + 'static> NodeACP<S> {
+impl<S: ZanzibarStore + ?Sized + 'static> NodeACP<S> {
     /// Enable NAC with the given owner identity.
     ///
     /// The owner identity has full control over the node and can grant

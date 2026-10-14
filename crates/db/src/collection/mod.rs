@@ -34,6 +34,7 @@ pub(crate) mod locks;
 pub mod map;
 pub mod name;
 pub(crate) mod ops;
+mod series;
 pub use map::{Cached, CollectionMap};
 pub(crate) mod provider;
 pub mod retriever;
@@ -266,6 +267,38 @@ impl Collection {
     /// Get an index by name.
     pub fn get_index(&self, name: &str) -> Option<&IndexDescription> {
         self.def.indexes.iter().find(|idx| idx.name == name)
+    }
+
+    /// Record the definition and active-name mapping in the writer's read set.
+    /// Historical merge inputs may name an older version, but still validate
+    /// both that definition and the current mapping against concurrent DDL.
+    pub(crate) async fn validate_write_definition(
+        &self,
+        datastore: &NamespaceView,
+        require_current: bool,
+    ) -> Result<()> {
+        use storage::corekv::Key;
+        use storage::keys::systemstore::{CollectionKey, CollectionNameKey};
+        let system = datastore.sibling(storage::namespace::Namespace::Systemstore);
+        let active = system
+            .get(&CollectionNameKey::new(self.name()).bytes())
+            .await
+            .map_err(Error::Storage)?;
+        let Some(active) = active else {
+            return Err(Error::CollectionNotFound(self.name().to_string()));
+        };
+        if require_current && active.as_ref() != self.version_id().as_bytes() {
+            return Err(Error::Storage(storage::Error::TxnConflict));
+        }
+        if system
+            .get(&CollectionKey::new(self.version_id()).bytes())
+            .await
+            .map_err(Error::Storage)?
+            .is_none()
+        {
+            return Err(Error::CollectionNotFound(self.name().to_string()));
+        }
+        Ok(())
     }
 
     /// Generate the storage key for a document blob.

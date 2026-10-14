@@ -68,12 +68,14 @@ impl<S: Store + 'static> crate::database::DB<S> {
         target_name: &str,
         series_doc_id: &str,
     ) -> Result<Option<Document>> {
-        let fetcher = crate::LensedAutoCommitFetcher::new(self.clone());
-        let docs = fetcher
-            .get_by_field_value(target_name, "source_doc_id", series_doc_id)
-            .await
-            .map_err(Error::Query)?;
-        Ok(docs.into_iter().next())
+        let txn = self.new_txn(true).await?;
+        self.find_downsample_target_in_txn(
+            &txn.datastore()?,
+            &txn.systemstore()?,
+            target_name,
+            series_doc_id,
+        )
+        .await
     }
 
     /// Transaction-scoped variant of `find_downsample_target` for callers
@@ -88,12 +90,19 @@ impl<S: Store + 'static> crate::database::DB<S> {
         let Some(target_collection) = self.get_collection(target_name)? else {
             return Ok(None);
         };
-        let docs = target_collection
-            .get_all_with_datastore(datastore, systemstore)
-            .await?;
-        Ok(docs
-            .into_iter()
-            .find(|doc| doc.get("source_doc_id").and_then(|v| v.as_str()) == Some(series_doc_id)))
+        let Some(doc_id) = datastore
+            .get(&target_collection.series_key(series_doc_id))
+            .await
+            .map_err(Error::Storage)?
+        else {
+            return Ok(None);
+        };
+        let doc_id =
+            std::str::from_utf8(&doc_id).map_err(|error| Error::Other(error.to_string()))?;
+        let doc_id = DocID::from_string(doc_id)?;
+        target_collection
+            .get_by_doc_id(datastore, systemstore, &doc_id)
+            .await
     }
 
     pub(super) fn series_doc_id(&self, source_doc: &Document) -> Result<String> {

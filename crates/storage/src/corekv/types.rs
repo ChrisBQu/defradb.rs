@@ -86,6 +86,8 @@ pub struct IterOptions {
     /// When true, the iterator will not fetch values from storage,
     /// improving performance when only keys are needed.
     keys_only: bool,
+    /// Validate consumed ranges, including absent keys, in a writing transaction.
+    validated: bool,
 }
 
 impl IterOptions {
@@ -122,6 +124,17 @@ impl IterOptions {
     pub fn with_keys_only(mut self, keys_only: bool) -> Self {
         self.keys_only = keys_only;
         self
+    }
+
+    /// Validate the consumed range against concurrent inserts, updates and deletes.
+    /// Read-only snapshots remain write-free and never conflict.
+    pub fn with_validation(mut self, validated: bool) -> Self {
+        self.validated = validated;
+        self
+    }
+
+    pub fn validated(&self) -> bool {
+        self.validated
     }
 
     /// Get the prefix filter, if set.

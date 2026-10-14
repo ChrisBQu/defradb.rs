@@ -60,6 +60,13 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .acquire_arrival(collection.collection_id())
             .await;
         let txn = self.new_mutation_txn().await?;
+        self.db
+            .check_node_access_in_txn(
+                txn.acpstore().map_err(crate::error::commit_query_error)?,
+                acp::nac::NodePermission::DocumentUpdate,
+            )
+            .await
+            .map_err(crate::error::commit_query_error)?;
 
         // Acquire store views up front (dropped before commit); the mutation
         // itself runs in an async block so errors fall through to the discard.
@@ -137,6 +144,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             })?;
 
             let doc_id = register_created_doc(
+                self.db.document_acp(),
                 &systemstore,
                 &datastore,
                 &collection,
@@ -264,6 +272,13 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .acquire_arrival(collection.collection_id())
             .await;
         let txn = self.new_mutation_txn().await?;
+        self.db
+            .check_node_access_in_txn(
+                txn.acpstore().map_err(crate::error::commit_query_error)?,
+                acp::nac::NodePermission::DocumentUpdate,
+            )
+            .await
+            .map_err(crate::error::commit_query_error)?;
 
         let mut identities = Vec::with_capacity(prepared_docs.len());
         for doc in &mut prepared_docs {
@@ -399,6 +414,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 })?;
 
             let doc_id = register_created_doc(
+                self.db.document_acp(),
                 &systemstore,
                 &datastore,
                 &collection,

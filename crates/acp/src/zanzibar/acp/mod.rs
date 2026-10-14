@@ -95,7 +95,6 @@ impl<S: ZanzibarStore + ?Sized> ZanzibarDocumentACP<S> {
                 engine.add_policy(&policy);
             } else {
                 let policy = Self::create_default_policy(policy_id, resource_name);
-                self.store.store_policy(&policy).await?;
                 let mut engine = self.engine.write().await;
                 engine.add_policy(&policy);
             }

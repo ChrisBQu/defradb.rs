@@ -385,6 +385,26 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     ///
     /// When set, queries will filter results based on the identity's permissions.
     /// Collections with a policy will have ACP enforced; others are unaffected.
+    pub(crate) fn scoped_runner(&self, acp: Arc<dyn DocumentACP>) -> Self {
+        Self {
+            fetcher: self.fetcher.clone(),
+            collection_provider: self.collection_provider.clone(),
+            registry: self.registry.clone(),
+            mutator: self.mutator.clone(),
+            collection_truncator: self.collection_truncator.clone(),
+            acp,
+            default_identity: self.default_identity.clone(),
+            lens_store: self.lens_store.clone(),
+            nac: self.nac.clone(),
+            query_timeout: self.query_timeout,
+            query_limits: self.query_limits,
+            se_transport: self.se_transport.clone(),
+            read_validator: self.read_validator.clone(),
+            write_validator: self.write_validator.clone(),
+            introspection_cache: introspection::cache::IntrospectionSchemaCache::new(false),
+        }
+    }
+
     pub fn with_acp(mut self, acp: Arc<dyn DocumentACP>) -> Self {
         if let Some(mutator) = &self.mutator {
             mutator.set_document_acp(acp.clone());

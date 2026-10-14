@@ -167,7 +167,8 @@ impl Node {
             set_acp(acp_setup.document_acp.clone());
         }
 
-        let nac_adapter = Self::setup_nac_manager(config, user_did.as_ref()).await?;
+        let nac_adapter =
+            Self::setup_nac_manager(config, user_did.as_ref(), database.store().clone()).await?;
 
         // Wire the NAC manager into the DB so DB-layer `check_node_access` calls
         // go live (first-call-wins via the DB's OnceLock). Without this the CLI

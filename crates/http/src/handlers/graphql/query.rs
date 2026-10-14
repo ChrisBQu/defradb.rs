@@ -360,9 +360,8 @@ async fn graphql_sse(
     let did = identity.did().cloned();
     let acting_did = did.as_ref().map(|d| d.as_str().to_string());
 
-    // Resolve signing config and DAC bypass once at subscription setup time
+    // Signing configuration is fixed; authorization is resolved for each event.
     let signing_config = crate::query_context::resolve_signing_config(&state, &identity);
-    let dac_bypass = crate::query_context::resolve_dac_bypass(&state, &identity).await;
 
     let subscription_doc_ids_filter = subscription_doc_ids_with_limits(
         &query_str,
@@ -409,6 +408,7 @@ async fn graphql_sse(
                 if let Some(ref vars) = variables {
                     req = req.with_variables(vars.clone());
                 }
+                let dac_bypass = crate::query_context::resolve_dac_bypass(&state, &identity).await;
                 let response = execute_with_resolved_context(
                     executor.clone(),
                     req,

@@ -217,7 +217,8 @@ impl Reader for NamespacedTxn {
         }
         prefixed_opts = prefixed_opts
             .with_reverse(opts.reverse())
-            .with_keys_only(opts.keys_only());
+            .with_keys_only(opts.keys_only())
+            .with_validation(opts.validated());
 
         let iter = self.txn.iterator(prefixed_opts).await?;
         Ok(Box::new(NamespacedIterator {

@@ -70,6 +70,11 @@ pub(crate) async fn write_local_update(
     modified_fields: &mut rapidhash::RapidHashSet<String>,
     embedding_config: Option<&crate::search::EmbeddingClientConfig>,
 ) -> query::error::Result<()> {
+    collection
+        .validate_write_definition(datastore, true)
+        .await
+        .map_err(crate::error::commit_query_error)?;
+
     apply_local_counter_deltas(datastore, collection, doc, doc_short_id).await?;
     if let Some(config) = embedding_config {
         let generated = crate::search::set_embedding(
@@ -105,6 +110,11 @@ pub(crate) async fn write_local_create(
     index_manager: &IndexManager,
 ) -> query::error::Result<()> {
     collection
+        .validate_write_definition(datastore, true)
+        .await
+        .map_err(crate::error::commit_query_error)?;
+
+    collection
         .create_with_indexes(datastore, doc, doc_short_id, index_manager)
         .await
         .map_err(|e| crate::error::index_write_query_error("create", e))?;
@@ -123,6 +133,11 @@ pub(crate) async fn write_local_update_deferred(
     doc_short_id: u64,
     index_manager: &IndexManager,
 ) -> query::error::Result<()> {
+    collection
+        .validate_write_definition(datastore, true)
+        .await
+        .map_err(crate::error::commit_query_error)?;
+
     collection
         .update_with_indexes(datastore, doc, doc_short_id, index_manager)
         .await
@@ -145,6 +160,11 @@ pub(crate) async fn write_local_create_deferred(
     index_manager: &IndexManager,
 ) -> query::error::Result<()> {
     collection
+        .validate_write_definition(datastore, true)
+        .await
+        .map_err(crate::error::commit_query_error)?;
+
+    collection
         .create_with_indexes(datastore, doc, doc_short_id, index_manager)
         .await
         .map_err(|e| crate::error::index_write_query_error("create", e))?;
@@ -156,6 +176,7 @@ pub(crate) async fn write_local_create_deferred(
 /// short-ID <-> DocID mapping, and record block ownership for the genesis
 /// composite, field, and encryption blocks. Returns the parsed DocID.
 pub(crate) async fn register_created_doc(
+    acp: Option<&Arc<dyn acp::DocumentACP>>,
     systemstore: &NamespaceView,
     datastore: &NamespaceView,
     collection: &Collection,
@@ -200,6 +221,23 @@ pub(crate) async fn register_created_doc(
     )
     .await
     .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+
+    if let (Some(provider), Some(policy), Some(creator)) = (
+        acp,
+        collection.schema().policy.as_ref(),
+        defra_core::signing::get_broadcast_creator_did(),
+    ) {
+        if let Some(scoped) =
+            provider.bind_transaction(systemstore.sibling(storage::namespace::Namespace::Acpstore))
+        {
+            let creator = identity::Did::new(&creator)
+                .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+            scoped
+                .register_doc_object(&creator, &policy.id, &policy.resource_name, doc_id_str)
+                .await
+                .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+        }
+    }
 
     register_block_doc_id_mappings(systemstore, block_result, doc_id_str).await?;
     crate::event::arrivals::record(systemstore, collection.resolved_root_id(), doc_id_str)
@@ -814,4 +852,24 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             }
         }
     }
+}
+
+/// Local ownership disappears in the same commit as the deletion marker.
+pub(crate) async fn unregister_deleted_doc(
+    provider: Option<&Arc<dyn acp::DocumentACP>>,
+    systemstore: &NamespaceView,
+    collection: &Collection,
+    doc_id: &DocID,
+) -> query::error::Result<()> {
+    if let (Some(provider), Some(policy)) = (provider, collection.schema().policy.as_ref()) {
+        if let Some(scoped) =
+            provider.bind_transaction(systemstore.sibling(storage::namespace::Namespace::Acpstore))
+        {
+            scoped
+                .unregister_doc_object(&policy.id, &policy.resource_name, &doc_id.to_string())
+                .await
+                .map_err(|error| query::error::QueryError::execution(error.to_string()))?;
+        }
+    }
+    Ok(())
 }

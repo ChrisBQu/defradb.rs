@@ -73,6 +73,20 @@ impl<S: Store> PersistentZanzibarStore<S> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<S: Store> ZanzibarStore for PersistentZanzibarStore<S> {
+    fn supports_transactions(&self) -> bool {
+        true
+    }
+
+    async fn begin_scope(
+        &self,
+        readonly: bool,
+    ) -> Result<Option<Box<dyn zanzibar::store::ZanzibarScope>>> {
+        let txn = datastore::BasicTxn::new(self.store.inner().as_ref(), 0, readonly)
+            .await
+            .map_err(|error| Error::Serialization(error.to_string()))?;
+        Ok(Some(Box::new(super::transaction::OwnedZanzibarScope(txn))))
+    }
+
     async fn store_policy(&self, policy: &Policy) -> Result<()> {
         let mut txn = self.store.new_txn(false).await.map_err(|e| {
             Error::Serialization(format!("store_policy: create transaction: {}", e))
@@ -80,6 +94,16 @@ impl<S: Store> ZanzibarStore for PersistentZanzibarStore<S> {
 
         let key = Self::policy_key(&policy.id);
         let value = serde_json::to_vec(policy)?;
+        if let Some(existing) = txn
+            .get(key.as_bytes())
+            .await
+            .map_err(|error| Error::Serialization(error.to_string()))?
+        {
+            if existing.as_ref() != value.as_slice() {
+                return Err(Error::PolicyAlreadyExists(policy.id.clone()));
+            }
+            return Ok(());
+        }
 
         txn.set(key.as_bytes(), &value)
             .await

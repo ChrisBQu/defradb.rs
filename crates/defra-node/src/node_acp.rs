@@ -18,7 +18,7 @@ pub(crate) struct DocumentAcpSetup {
 
 pub(crate) async fn create_document_acp<S>(
     store: Arc<S>,
-    persistence: Persistence,
+    _persistence: Persistence,
     config: &crate::DocumentAcpConfig,
 ) -> Result<DocumentAcpSetup>
 where
@@ -69,18 +69,12 @@ where
                 vera_acp: Some(vera_acp),
             })
         }
-        crate::DocumentAcpConfig::Local => match persistence {
-            Persistence::Persistent => {
-                let zanzibar_store = Arc::new(acp::PersistentZanzibarStore::from_store(store));
-                let document_acp = Arc::new(acp::ZanzibarDocumentACP::new(zanzibar_store.clone()));
-                Ok(local_document_acp_setup(document_acp, zanzibar_store))
-            }
-            Persistence::Memory => {
-                let zanzibar_store = Arc::new(acp::MemoryZanzibarStore::new());
-                let document_acp = Arc::new(acp::ZanzibarDocumentACP::new(zanzibar_store.clone()));
-                Ok(local_document_acp_setup(document_acp, zanzibar_store))
-            }
-        },
+        crate::DocumentAcpConfig::Local => {
+            // Memory and disk profiles both share the engine with document rows.
+            let zanzibar_store = Arc::new(acp::PersistentZanzibarStore::from_store(store));
+            let document_acp = Arc::new(acp::ZanzibarDocumentACP::new(zanzibar_store.clone()));
+            Ok(local_document_acp_setup(document_acp, zanzibar_store))
+        }
     }
 }
 

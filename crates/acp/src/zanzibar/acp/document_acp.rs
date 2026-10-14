@@ -23,6 +23,23 @@ fn actor_subject(actor: &Did) -> Subject {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S> {
+    fn supports_transactions(&self) -> bool {
+        self.store.supports_transactions()
+    }
+
+    #[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
+    fn bind_transaction(
+        &self,
+        view: datastore::NamespaceView,
+    ) -> Option<std::sync::Arc<dyn DocumentACP>> {
+        if !self.supports_transactions() {
+            return None;
+        }
+        Some(std::sync::Arc::new(ZanzibarDocumentACP::new(
+            std::sync::Arc::new(crate::zanzibar::store::TransactionZanzibarStore::new(view)),
+        )))
+    }
+
     async fn register_doc_object(
         &self,
         identity: &Did,
@@ -30,6 +47,21 @@ impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S>
         resource_name: &str,
         doc_id: &str,
     ) -> Result<()> {
+        if let Some(scope) = self.store.begin_scope(false).await? {
+            let scoped = ZanzibarDocumentACP::new(scope.store());
+            let result = scoped
+                .register_doc_object(identity, policy_id, resource_name, doc_id)
+                .await?;
+            drop(scoped);
+            scope.commit().await?;
+            return Ok(result);
+        }
+
+        if self.store.get_policy(policy_id).await?.is_none() {
+            self.store
+                .store_policy(&Self::create_default_policy(policy_id, resource_name))
+                .await?;
+        }
         self.ensure_policy(policy_id, resource_name).await?;
 
         let subjects = self
@@ -37,6 +69,9 @@ impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S>
             .get_relation_subjects(policy_id, resource_name, doc_id, OWNER_RELATION)
             .await?;
 
+        if subjects.len() == 1 && subjects[0].as_entity() == Some(identity) {
+            return Ok(());
+        }
         if !subjects.is_empty() {
             tracing::warn!(
                 target: "acp::audit",
@@ -75,6 +110,16 @@ impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S>
         resource_name: &str,
         doc_id: &str,
     ) -> Result<bool> {
+        if let Some(scope) = self.store.begin_scope(true).await? {
+            let scoped = ZanzibarDocumentACP::new(scope.store());
+            let result = scoped
+                .is_doc_registered(policy_id, resource_name, doc_id)
+                .await?;
+            drop(scoped);
+            scope.commit().await?;
+            return Ok(result);
+        }
+
         let subjects = self
             .store
             .get_relation_subjects(policy_id, resource_name, doc_id, OWNER_RELATION)
@@ -89,6 +134,16 @@ impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S>
         resource_name: &str,
         doc_id: &str,
     ) -> Result<Option<Did>> {
+        if let Some(scope) = self.store.begin_scope(true).await? {
+            let scoped = ZanzibarDocumentACP::new(scope.store());
+            let result = scoped
+                .get_doc_owner(policy_id, resource_name, doc_id)
+                .await?;
+            drop(scoped);
+            scope.commit().await?;
+            return Ok(result);
+        }
+
         let owner = self
             .store
             .get_relation_subjects(policy_id, resource_name, doc_id, OWNER_RELATION)
@@ -107,6 +162,16 @@ impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S>
         resource_name: &str,
         doc_id: &str,
     ) -> Result<bool> {
+        if let Some(scope) = self.store.begin_scope(true).await? {
+            let scoped = ZanzibarDocumentACP::new(scope.store());
+            let result = scoped
+                .check_doc_access(identity, permission, policy_id, resource_name, doc_id)
+                .await?;
+            drop(scoped);
+            scope.commit().await?;
+            return Ok(result);
+        }
+
         if !self
             .is_doc_registered(policy_id, resource_name, doc_id)
             .await?
@@ -207,6 +272,24 @@ impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S>
         relation: &str,
         _managing_relations: &[String],
     ) -> Result<bool> {
+        if let Some(scope) = self.store.begin_scope(false).await? {
+            let scoped = ZanzibarDocumentACP::new(scope.store());
+            let result = scoped
+                .add_relationship(
+                    requestor,
+                    target,
+                    policy_id,
+                    collection_id,
+                    doc_id,
+                    relation,
+                    _managing_relations,
+                )
+                .await?;
+            drop(scoped);
+            scope.commit().await?;
+            return Ok(result);
+        }
+
         self.ensure_policy(policy_id, collection_id).await?;
 
         if relation == OWNER_RELATION {
@@ -298,6 +381,24 @@ impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S>
         relation: &str,
         _managing_relations: &[String],
     ) -> Result<bool> {
+        if let Some(scope) = self.store.begin_scope(false).await? {
+            let scoped = ZanzibarDocumentACP::new(scope.store());
+            let result = scoped
+                .delete_relationship(
+                    requestor,
+                    target,
+                    policy_id,
+                    collection_id,
+                    doc_id,
+                    relation,
+                    _managing_relations,
+                )
+                .await?;
+            drop(scoped);
+            scope.commit().await?;
+            return Ok(result);
+        }
+
         self.ensure_policy(policy_id, collection_id).await?;
 
         if relation == OWNER_RELATION {
@@ -354,6 +455,16 @@ impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S>
         resource_name: &str,
         doc_id: &str,
     ) -> Result<()> {
+        if let Some(scope) = self.store.begin_scope(false).await? {
+            let scoped = ZanzibarDocumentACP::new(scope.store());
+            let result = scoped
+                .unregister_doc_object(policy_id, resource_name, doc_id)
+                .await?;
+            drop(scoped);
+            scope.commit().await?;
+            return Ok(result);
+        }
+
         self.store
             .delete_object_relationships(policy_id, resource_name, doc_id)
             .await?;

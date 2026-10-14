@@ -71,14 +71,25 @@ impl std::fmt::Display for NacStatus {
 ///
 /// Uses a local Zanzibar store to manage node-level permissions.
 /// Unlike DAC, NAC is always local (no Vera option).
-pub struct NodeACP<S: ZanzibarStore + Send + Sync + 'static> {
+pub struct NodeACP<S: ZanzibarStore + ?Sized + 'static> {
     store: Arc<S>,
     engine: RwLock<PermissionEngine<S>>,
     status: Atom<NacStatus>,
     owner: AtomOption<Did>,
 }
 
-impl<S: ZanzibarStore + Send + Sync + 'static> NodeACP<S> {
+impl<S: ZanzibarStore + ?Sized + 'static> NodeACP<S> {
+    pub async fn begin_scope(
+        &self,
+        readonly: bool,
+    ) -> zanzibar::error::Result<Option<Box<dyn zanzibar::store::ZanzibarScope>>> {
+        self.store.begin_scope(readonly).await
+    }
+
+    pub fn supports_transactions(&self) -> bool {
+        self.store.supports_transactions()
+    }
+
     /// Create a new NodeACP with the given store.
     ///
     /// Starts in NotConfigured status. Call `enable()` to activate.
@@ -138,6 +149,9 @@ impl<S: ZanzibarStore + Send + Sync + 'static> NodeACP<S> {
                     "NAC state loaded from store"
                 );
             }
+        } else {
+            self.owner.store_none();
+            self.status.store(NacStatus::NotConfigured);
         }
 
         Ok(())
@@ -165,7 +179,7 @@ pub trait NodeAcpOperations: MaybeSendSync {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<S: ZanzibarStore + Send + Sync + 'static> NodeAcpOperations for NodeACP<S> {
+impl<S: ZanzibarStore + ?Sized + 'static> NodeAcpOperations for NodeACP<S> {
     async fn check_permission(&self, identity: &Did, permission: NodePermission) -> Result<bool> {
         NodeACP::check_permission(self, identity, permission).await
     }

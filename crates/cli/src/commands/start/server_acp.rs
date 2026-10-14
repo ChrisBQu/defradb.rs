@@ -182,17 +182,20 @@ impl Node {
         })
     }
 
-    pub(super) async fn setup_nac_manager(
+    pub(super) async fn setup_nac_manager<S: storage::corekv::Store + 'static>(
         config: &Config,
         user_did: Option<&Did>,
+        store: Arc<S>,
     ) -> Result<Option<Arc<crate::nac_adapter::NacAdapter>>> {
         if !config.acp.node_enable {
             return Ok(None);
         }
 
         let nac_config = db::NacConfig::new().with_enabled();
-        let nac_manager: Arc<dyn db::NacManagerApi> =
-            Arc::new(db::create_memory_nac_manager(nac_config));
+        let nac_manager: Arc<dyn db::NacManagerApi> = Arc::new(db::NacManager::new(
+            Arc::new(acp::PersistentZanzibarStore::from_store(store)),
+            nac_config,
+        ));
         nac_manager
             .initialize(user_did)
             .await

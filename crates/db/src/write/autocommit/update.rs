@@ -146,6 +146,13 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             query::error::QueryError::execution("update transaction already consumed")
         })?;
         drop(fresh_fetcher);
+        self.db
+            .check_node_access_in_txn(
+                txn.acpstore().map_err(crate::error::commit_query_error)?,
+                acp::nac::NodePermission::DocumentUpdate,
+            )
+            .await
+            .map_err(crate::error::commit_query_error)?;
 
         // Acquire store views up front (dropped before commit); the mutation
         // itself runs in an async block so errors fall through to the discard.

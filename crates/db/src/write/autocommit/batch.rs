@@ -175,6 +175,10 @@ impl<S: Store + 'static> MutationBatchController for BatchMutator<S> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store + 'static> DocMutator for BatchMutator<S> {
+    fn set_document_acp(&self, provider: Arc<dyn acp::DocumentACP>) {
+        self.db.set_document_acp(provider);
+    }
+
     async fn create(
         &self,
         collection_name: &str,
@@ -187,6 +191,13 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
 
         let (collection, datastore, systemstore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;
+        self.db
+            .check_node_access_in_txn(
+                systemstore.sibling(storage::namespace::Namespace::Acpstore),
+                acp::nac::NodePermission::DocumentUpdate,
+            )
+            .await
+            .map_err(crate::error::commit_query_error)?;
         self.acquire_collection_read_lock(&collection).await?;
         ensure_collection_is_active(&self.db, collection_name, &collection)?;
         let embedding_config = self.db.options().embedding_config();
@@ -262,6 +273,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             })?;
 
             let doc_id = register_created_doc(
+                self.db.document_acp(),
                 &systemstore,
                 &datastore,
                 &collection,
@@ -319,6 +331,13 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
 
         let (collection, datastore, systemstore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;
+        self.db
+            .check_node_access_in_txn(
+                systemstore.sibling(storage::namespace::Namespace::Acpstore),
+                acp::nac::NodePermission::DocumentUpdate,
+            )
+            .await
+            .map_err(crate::error::commit_query_error)?;
         self.acquire_collection_read_lock(&collection).await?;
         ensure_collection_is_active(&self.db, collection_name, &collection)?;
         let embedding_config = self.db.options().embedding_config();
@@ -474,6 +493,13 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
 
         let (collection, datastore, systemstore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;
+        self.db
+            .check_node_access_in_txn(
+                systemstore.sibling(storage::namespace::Namespace::Acpstore),
+                acp::nac::NodePermission::DocumentDelete,
+            )
+            .await
+            .map_err(crate::error::commit_query_error)?;
         self.acquire_collection_read_lock(&collection).await?;
         ensure_collection_is_active(&self.db, collection_name, &collection)?;
 
@@ -493,6 +519,13 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         if !existed {
             return Ok(DeleteResult::new(canonical_doc_id, existed));
         }
+        crate::write::autocommit::helpers::unregister_deleted_doc(
+            self.db.document_acp(),
+            &systemstore,
+            &collection,
+            &canonical_doc_id,
+        )
+        .await?;
 
         let schema_version_id = collection.version_id();
         let sign_config = get_signing_config();

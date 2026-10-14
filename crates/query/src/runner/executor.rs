@@ -404,15 +404,32 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
             }
         }
 
-        // NAC check uses the raw request identity (not default fallback).
-        if let Some(denial) = check_nac(self, &request.identity, &parsed).await {
-            return denial;
+        let nac_identity = request.identity.clone().unwrap_or_else(Did::wildcard);
+        match txn_ctx
+            .doc_fetcher()
+            .check_node_permission(&nac_identity, permission_for_operation(&parsed))
+            .await
+        {
+            Ok(Some(false)) => return QueryResponse::success(serde_json::json!({})),
+            Ok(Some(true)) => {}
+            Ok(None) => {
+                if let Some(denial) = check_nac(self, &request.identity, &parsed).await {
+                    return denial;
+                }
+            }
+            Err(error) => return QueryResponse::error(error.to_string()),
         }
 
         // Resolve effective identity: request identity takes precedence over default
         let identity = self.resolve_identity(request.identity);
 
         let mut warnings: Vec<GqlWarning> = Vec::new();
+
+        let scoped_acp = match txn_ctx.doc_fetcher().scoped_acp(self.acp.clone()).await {
+            Ok(provider) => provider,
+            Err(error) => return QueryResponse::error(error.to_string()),
+        };
+        let scoped_runner = self.scoped_runner(scoped_acp);
 
         // Route to appropriate handler based on operation type
         let execution = async {
@@ -437,13 +454,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                         )
                         .await
                     } else {
-                        self.execute_selects_internal(
-                            selects,
-                            fetcher.as_ref(),
-                            identity,
-                            &mut warnings,
-                        )
-                        .await
+                        scoped_runner
+                            .execute_selects_internal(
+                                selects,
+                                fetcher.as_ref(),
+                                identity,
+                                &mut warnings,
+                            )
+                            .await
                     }
                 }
                 ParsedOperation::Mutation { explain, .. } => {
@@ -469,15 +487,17 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                             }
                         };
 
+                        mutator.set_document_acp(self.acp.clone());
                         let txn_fetcher = txn_ctx.doc_fetcher();
-                        self.execute_mutation_internal_with_vars(
-                            &request.query,
-                            mutator,
-                            identity,
-                            variables.as_ref(),
-                            Some(txn_fetcher),
-                        )
-                        .await
+                        scoped_runner
+                            .execute_mutation_internal_with_vars(
+                                &request.query,
+                                mutator,
+                                identity,
+                                variables.as_ref(),
+                                Some(txn_fetcher),
+                            )
+                            .await
                     }
                 }
                 ParsedOperation::Subscription { .. } => {
@@ -494,7 +514,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
             }
         };
 
-        let deferred_acp_mutations = txn_ctx.deferred_acp_mutations();
+        let deferred_acp_mutations = if self.acp.supports_transactions() {
+            None
+        } else {
+            txn_ctx.deferred_acp_mutations()
+        };
 
         // Scope both transaction overlays around execution so schema resolution
         // and ACP checks see uncommitted state.

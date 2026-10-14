@@ -284,7 +284,14 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                     }
 
                     if let Some(outcome) = self
-                        .check_protected_update(cid, block, payload, doc_id, collection.schema())
+                        .check_protected_update(
+                            cid,
+                            block,
+                            payload,
+                            doc_id,
+                            collection.schema(),
+                            None,
+                        )
                         .await?
                     {
                         return Ok(CompositeMergePreparation::Complete(outcome));
@@ -540,7 +547,8 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                     .persist_merged_document(&mut datastore, &systemstore, &context, &mut state)
                     .await
                 {
-                    Ok(()) => self
+                    Ok(Some(outcome)) => Ok(Some(outcome)),
+                    Ok(None) => self
                         .update_heads(&headstore, &context, &state)
                         .await
                         .map(|()| None),
@@ -967,7 +975,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                     .persist_merged_document(&mut datastore, systemstore, &context, &mut state)
                     .await
                 {
-                    Ok(()) => Ok(None),
+                    Ok(outcome) => Ok(outcome),
                     Err(MergeError::UniqueConstraintViolation(reason)) => {
                         Ok(Some(MergeOutcome::rejected(reason)))
                     }

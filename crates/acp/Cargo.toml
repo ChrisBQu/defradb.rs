@@ -19,6 +19,7 @@ bench = false
 defra-core = { path = "../defra-core" }
 identity = { path = "../identity" }
 storage = { path = "../storage" }
+datastore = { path = "../datastore" }
 zanzibar = { path = "../zanzibar" }
 
 async-trait.workspace = true

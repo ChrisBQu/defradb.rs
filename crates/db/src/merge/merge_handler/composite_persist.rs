@@ -16,7 +16,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         systemstore: &NamespaceView,
         context: &CompositeMergeContext<'_, '_>,
         state: &mut CompositeMergeState,
-    ) -> std::result::Result<(), MergeError> {
+    ) -> std::result::Result<Option<MergeOutcome>, MergeError> {
         let collection = context.collection.as_ref().ok_or_else(|| {
             MergeError::MissingMetadata(format!(
                 "Collection not found for schema_version_id: {}",
@@ -24,15 +24,37 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             ))
         })?;
 
+        collection
+            .validate_write_definition(datastore, false)
+            .await
+            .map_err(MergeError::Database)?;
+        if self
+            .composite_merge_hook()
+            .is_some_and(|hook| hook.supports_transactions())
+        {
+            if let Some(outcome) = self
+                .check_protected_update(
+                    context.cid,
+                    context.block,
+                    context.payload,
+                    context.doc_id_str,
+                    collection.schema(),
+                    Some(systemstore.sibling(storage::namespace::Namespace::Acpstore)),
+                )
+                .await?
+            {
+                return Ok(Some(outcome));
+            }
+        }
         state.is_branchable = collection.schema().is_branchable;
 
         if context.payload.status == 2 {
             self.handle_deletion(datastore, context, collection).await?;
-            return Ok(());
+            return Ok(None);
         }
 
         if state.field_values.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
 
         let doc_id = DocID::from_string(context.doc_id_str)
@@ -94,6 +116,31 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             .map_err(|e| MergeError::Database(crate::error::Error::Storage(e)))?;
 
         if old_doc.is_none() && !doc_is_tombstoned {
+            if context.block.heads.as_deref().is_none_or(<[Cid]>::is_empty) {
+                if let (Some(provider), Some(policy), Some(signer)) = (
+                    self.db.document_acp(),
+                    collection.schema().policy.as_ref(),
+                    self.verify_block_signature(context.cid, context.block, &[])
+                        .await?,
+                ) {
+                    if let Some(scoped) = provider.bind_transaction(
+                        systemstore.sibling(storage::namespace::Namespace::Acpstore),
+                    ) {
+                        let signer = identity::Did::new(signer)
+                            .map_err(|error| MergeError::MergeFailed(error.to_string()))?;
+                        scoped
+                            .register_doc_object(
+                                &signer,
+                                &policy.id,
+                                &policy.resource_name,
+                                context.doc_id_str,
+                            )
+                            .await
+                            .map_err(|error| MergeError::MergeFailed(error.to_string()))?;
+                    }
+                }
+            }
+
             crate::event::arrivals::record(
                 systemstore,
                 collection.resolved_root_id(),
@@ -212,7 +259,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             );
         }
 
-        Ok(())
+        Ok(None)
     }
 
     pub(crate) async fn handle_deletion(
@@ -226,6 +273,10 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                 .get_with_datastore(datastore, context.doc_short_id, &doc_id)
                 .await
             {
+                collection
+                    .release_series(datastore, &old_doc)
+                    .await
+                    .map_err(MergeError::Database)?;
                 let short_id = collection.resolved_root_id();
                 if let Ok(index_manager) =
                     IndexManager::from_collection(short_id, collection.schema())
@@ -250,6 +301,18 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             }
         }
 
+        if let (Some(provider), Some(policy)) =
+            (self.db.document_acp(), collection.schema().policy.as_ref())
+        {
+            if let Some(scoped) = provider
+                .bind_transaction(datastore.sibling(storage::namespace::Namespace::Acpstore))
+            {
+                scoped
+                    .unregister_doc_object(&policy.id, &policy.resource_name, context.doc_id_str)
+                    .await
+                    .map_err(|error| MergeError::MergeFailed(error.to_string()))?;
+            }
+        }
         let deleted_key = build_deleted_key(collection.collection_id(), context.doc_short_id);
         datastore
             .set(&deleted_key, &[DELETED_MARKER])

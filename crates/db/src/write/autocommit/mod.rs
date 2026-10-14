@@ -18,7 +18,7 @@ use cid::Cid;
 use document::{DocID, Document};
 use events::{Message, Update};
 use query::mutator::{CreateResult, DeleteResult, DocMutator, MutationBatch, UpdateResult};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use storage::corekv::Store;
 use tracing::warn;
 
@@ -51,20 +51,16 @@ pub use batch::BatchMutator;
 /// `DbDocMutator` with explicit transaction management instead.
 pub struct AutoCommitMutator<S: Store> {
     pub(super) db: Arc<DB<S>>,
-    document_acp: OnceLock<Arc<dyn acp::DocumentACP>>,
 }
 
 impl<S: Store> AutoCommitMutator<S> {
     /// Create a new auto-committing mutator wrapping the given database.
     pub fn new(db: Arc<DB<S>>) -> Self {
-        Self {
-            db,
-            document_acp: OnceLock::new(),
-        }
+        Self { db }
     }
 
     pub fn set_document_acp(&self, acp: Arc<dyn acp::DocumentACP>) {
-        let _ = self.document_acp.set(acp);
+        self.db.set_document_acp(acp);
     }
 
     async fn new_mutation_txn(&self) -> query::error::Result<DbTxn<S>> {
@@ -118,9 +114,12 @@ impl<S: Store> AutoCommitMutator<S> {
         let Some(creator_did) = defra_core::signing::get_broadcast_creator_did() else {
             return Ok(());
         };
-        let Some(acp) = self.document_acp.get() else {
+        let Some(acp) = self.db.document_acp() else {
             return Ok(());
         };
+        if acp.supports_transactions() {
+            return Ok(());
+        }
         let creator = identity::Did::new(&creator_did).map_err(|error| {
             query::error::QueryError::execution(format!("invalid mutation creator DID: {error}"))
         })?;

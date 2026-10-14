@@ -359,7 +359,8 @@ fn prefix_iter_options(namespace: Namespace, opts: IterOptions) -> IterOptions {
     }
     prefixed_opts = prefixed_opts
         .with_reverse(opts.reverse())
-        .with_keys_only(opts.keys_only());
+        .with_keys_only(opts.keys_only())
+        .with_validation(opts.validated());
 
     prefixed_opts
 }

@@ -219,6 +219,7 @@ pub struct DB<S: Store> {
     /// encrypted-field DEKs through the KMS (which persists them in its
     /// KeyStore for cross-peer serving) instead of inline-and-blockstore.
     /// Set once at node startup via [`DB::set_kms`].
+    document_acp: std::sync::OnceLock<Arc<dyn acp::DocumentACP>>,
     kms: std::sync::OnceLock<std::sync::Arc<dyn kms::KmsService>>,
     /// Owning handle to the KMS durable blockstore. The KMS adapter
     /// (`DbEncBlockStore`) references this weakly to avoid the
@@ -293,6 +294,7 @@ impl<S: Store> DB<S> {
             pending_migrations: HopscotchMap::with_hasher(RandomState::default()),
             schema_heads: HopscotchMap::with_hasher(RandomState::default()),
             forbidden_collection_ids: HopscotchMap::with_hasher(RandomState::default()),
+            document_acp: std::sync::OnceLock::new(),
             kms: std::sync::OnceLock::new(),
             kms_blockstore: std::sync::OnceLock::new(),
             nac_manager: std::sync::OnceLock::new(),
@@ -361,6 +363,7 @@ impl<S: Store> DB<S> {
             pending_migrations: HopscotchMap::with_hasher(RandomState::default()),
             schema_heads: HopscotchMap::with_hasher(RandomState::default()),
             forbidden_collection_ids: HopscotchMap::with_hasher(RandomState::default()),
+            document_acp: std::sync::OnceLock::new(),
             kms: std::sync::OnceLock::new(),
             kms_blockstore: std::sync::OnceLock::new(),
             nac_manager: std::sync::OnceLock::new(),
@@ -474,6 +477,15 @@ impl<S: Store> DB<S> {
     /// Invalidate migration-history caches after a migration commit.
     pub(crate) fn bump_migration_generation(&self) {
         self.migration_generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Install the node's document authorization provider before serving mutations.
+    pub fn set_document_acp(&self, provider: Arc<dyn acp::DocumentACP>) {
+        let _ = self.document_acp.set(provider);
+    }
+
+    pub fn document_acp(&self) -> Option<&Arc<dyn acp::DocumentACP>> {
+        self.document_acp.get()
     }
 
     /// Install the KMS service. First call wins (OnceLock); subsequent calls

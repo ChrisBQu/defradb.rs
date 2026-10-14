@@ -3,6 +3,29 @@ use storage::keys::doc_id_index::decode_doc_short_id;
 use super::*;
 
 impl Collection {
+    /// Read all schema fields used to materialize a document. Until the value
+    /// merge operator is installed, whole-value writes still validate the blob.
+    pub(crate) async fn read_document_blob(
+        &self,
+        datastore: &NamespaceView,
+        doc_short_id: u64,
+    ) -> Result<Option<bytes::Bytes>> {
+        let key = self.doc_key(doc_short_id);
+        let parts = self
+            .def
+            .fields
+            .iter()
+            .map(|field| field.id.parse::<u32>())
+            .collect::<std::result::Result<Vec<_>, _>>();
+        match parts {
+            Ok(parts) if !parts.is_empty() => datastore.get_parts(&key, &parts).await,
+            // Empty projections do not validate presence. Unassigned field IDs
+            // must conservatively record a whole-value dependency.
+            _ => datastore.get(&key).await,
+        }
+        .map_err(Error::Storage)
+    }
+
     /// Get a document by its public DocID, resolving the short ID through
     /// the systemstore mapping. Returns None for unknown or deleted docs.
     pub async fn get_by_doc_id(
@@ -67,8 +90,7 @@ impl Collection {
         doc_id: &DocID,
         check_deleted: bool,
     ) -> Result<Option<(Document, bool)>> {
-        let key = self.doc_key(doc_short_id);
-        let data = datastore.get(&key).await.map_err(Error::Storage)?;
+        let data = self.read_document_blob(datastore, doc_short_id).await?;
 
         match data {
             Some(bytes) => {
@@ -268,6 +290,8 @@ impl Collection {
             .cloned()
             .ok_or_else(|| Error::InvalidDocument("Document must have an ID".into()))?;
 
+        self.claim_series(datastore, doc).await?;
+
         // Serialize document to CBOR
         let data = doc.to_cbor()?;
 
@@ -300,7 +324,10 @@ impl Collection {
 
         let key = self.doc_key(doc_short_id);
 
-        let old_doc = match datastore.get(&key).await.map_err(Error::Storage)? {
+        if self.is_deleted(datastore, doc_short_id).await? {
+            return Err(Error::DocumentNotFound(doc_id.to_string()));
+        }
+        let old_doc = match self.read_document_blob(datastore, doc_short_id).await? {
             Some(bytes) => {
                 let mut d = Document::from_cbor(&bytes)?;
                 d.set_id(doc_id.clone());
@@ -310,6 +337,9 @@ impl Collection {
         };
 
         self.validate_immutable_fields_unchanged(&old_doc, doc)?;
+
+        self.release_series(datastore, &old_doc).await?;
+        self.claim_series(datastore, doc).await?;
 
         // Serialize and store
         let data = doc.to_cbor()?;
@@ -337,6 +367,19 @@ impl Collection {
         // Check if document exists
         if !datastore.has(&key).await.map_err(Error::Storage)? {
             return Ok(false);
+        }
+
+        if self.def.downsample_source.is_some() {
+            let systemstore = datastore.sibling(storage::namespace::Namespace::Systemstore);
+            if let Some(doc_id) = crate::docid::map::get_doc_id(&systemstore, doc_short_id).await? {
+                let doc_id = DocID::from_string(&doc_id)?;
+                if let Some((doc, _)) = self
+                    .get_with_datastore_include_deleted(datastore, doc_short_id, &doc_id, false)
+                    .await?
+                {
+                    self.release_series(datastore, &doc).await?;
+                }
+            }
         }
 
         // Delete document
@@ -400,6 +443,10 @@ impl Collection {
             .ok_or_else(|| Error::InvalidDocument("Document must have an ID".into()))?;
 
         let key = self.doc_key(doc_short_id);
+
+        if !self.is_deleted(datastore, doc_short_id).await? {
+            self.claim_series(datastore, doc).await?;
+        }
 
         // Serialize and store (upsert)
         let data = doc.to_cbor()?;
