@@ -8,14 +8,13 @@ use document::Document;
 use lens::{build_targeted_history, CollectionHistoryLink, Lens, LensDoc, TargetedHistoryLink};
 use schema::CollectionVersion;
 use storage::corekv::Store;
-use tracing::{debug, trace};
+use tracing::debug;
 
 use crate::collection::Collection;
 use crate::definition::loader::get_collections_by_collection_id;
 use crate::definition::migration::helpers::{
     cache_migrated_document_with_indexes, lens_doc_to_document,
 };
-use crate::read::lensed::autocommit::migration::MigrationWriteBack;
 
 use super::LensedDocFetcher;
 
@@ -339,7 +338,7 @@ impl<S: Store> LensedDocFetcher<S> {
         &self,
         datastore: &NamespaceView,
         collection: &Collection,
-        source_doc: &Document,
+        _source_doc: &Document,
         migrated_doc: &Document,
     ) -> query::error::Result<()> {
         let txn_guard = self.txn.lock().await;
@@ -352,22 +351,6 @@ impl<S: Store> LensedDocFetcher<S> {
                 e
             ))
         })? {
-            if self.defer_readonly_write_back {
-                self.defer_document_write_back(
-                    collection.name(),
-                    MigrationWriteBack {
-                        source_document: source_doc.clone(),
-                        migrated_document: migrated_doc.clone(),
-                        migration_generation: self.db.migration_generation(),
-                    },
-                )
-                .await;
-            } else {
-                trace!(
-                    doc_id = ?migrated_doc.id(),
-                    "Skipping lens write-back in a read-only explicit transaction"
-                );
-            }
             return Ok(());
         }
         let systemstore = txn.systemstore().map_err(|e| {

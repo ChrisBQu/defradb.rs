@@ -42,7 +42,7 @@ impl<S: Store> crate::database::DB<S> {
             .register_action(&collection_id, crate::Action::TRUNCATE)
             .await?;
 
-        let fetcher = crate::LensedAutoCommitFetcher::new_without_write_back(self.clone());
+        let fetcher = crate::LensedAutoCommitFetcher::new(self.clone());
         let provider = crate::DbCollectionProvider::new_arc(self.clone());
         let runner = query::QueryRunner::with_provider(fetcher, provider)
             .with_lens_store(self.lens_store().clone());

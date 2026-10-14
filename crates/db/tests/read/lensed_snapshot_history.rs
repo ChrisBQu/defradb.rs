@@ -114,7 +114,7 @@ async fn deepen_history<S: Store + 'static>(db: &DB<S>) {
 }
 
 fn readonly_fetcher<S: Store + 'static>(db: &Arc<DB<S>>, txn: db::DbTxn<S>) -> LensedDocFetcher<S> {
-    LensedDocFetcher::new(db.clone(), txn, db.lens_store().clone(), true)
+    LensedDocFetcher::new(db.clone(), txn, db.lens_store().clone())
 }
 
 fn verified(docs: &[Document]) -> Option<&NormalValue> {
@@ -182,7 +182,6 @@ async fn writable_reads_reload_schema_history() {
         db.clone(),
         db.new_txn(false).await.unwrap(),
         db.lens_store().clone(),
-        false,
     );
     fetcher.get_all("Probe").await.unwrap();
     let before = db.store().keys_read();

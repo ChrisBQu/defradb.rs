@@ -89,10 +89,7 @@ pub use collection::snapshot::CollectionSnapshot;
 #[allow(deprecated)]
 pub use collection::{collection_short_id, Collection, DbCollectionTruncator};
 pub use collection::{Cached, CollectionMap};
-pub use database::{
-    DbOptions, EmbeddingClientConfig, DB, DEFAULT_MAX_TXN_RETRIES,
-    DEFAULT_MIGRATION_WRITE_BACK_BATCH_SIZE,
-};
+pub use database::{DbOptions, EmbeddingClientConfig, DB, DEFAULT_MAX_TXN_RETRIES};
 pub use definition::loader::{
     get_collection_by_version_id, get_collection_version_ids, get_collections_by_collection_id,
     load_active_collections,

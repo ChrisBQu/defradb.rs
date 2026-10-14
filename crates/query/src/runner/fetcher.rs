@@ -222,6 +222,12 @@ impl DocFetcher for FetcherWrapper {
             })
     }
 
+    async fn indexes_match_documents(&self, collection_name: &str) -> Result<bool> {
+        self.get_fetcher()
+            .indexes_match_documents(collection_name)
+            .await
+    }
+
     fn supports_index_queries(&self) -> bool {
         self.get_fetcher().supports_index_queries()
     }

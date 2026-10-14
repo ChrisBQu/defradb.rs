@@ -79,12 +79,6 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
 
         Ok(Box::new(LensedDocStream {
             inner: Box::new(inner),
-            // Streamed documents are processed one at a time, so per-document
-            // deferred write-back (`process_document` → `update_datastore` →
-            // `defer_document_write_back`) is the right model here - never
-            // `defer_full_scan_write_back`, which discards per-document
-            // candidates on the assumption the whole collection was already
-            // read (see fetcher.rs's eager paths, which call it up front).
             fetcher: self.stream_clone(),
             collection,
             datastore,

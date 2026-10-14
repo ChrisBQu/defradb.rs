@@ -25,8 +25,7 @@ async fn unknown_document_version_passes_through() {
     let db = Arc::new(db::DB::new(storage::RegolithStore::in_memory().unwrap()).unwrap());
     let txn = db.new_txn(false).await.unwrap();
     let datastore = txn.datastore().unwrap();
-    let fetcher =
-        LensedDocFetcher::new(db, txn, Arc::new(lens::MemoryTransformStore::new()), false);
+    let fetcher = LensedDocFetcher::new(db, txn, Arc::new(lens::MemoryTransformStore::new()));
 
     let collection = db::Collection::new(schema::CollectionVersion::new(
         "Users",
@@ -89,7 +88,7 @@ async fn readonly_alias_reads_reuse_schema_history_without_rescanning_storage() 
         db.patch_collection("HistoryProbe", &format!(r#"[{{"op":"add","path":"/HistoryProbe/Fields/-","value":{{"Name":"extra{index}","Kind":"String"}}}}]"#), None).await.unwrap();
     }
     let txn = db.new_txn(true).await.unwrap();
-    let fetcher = LensedDocFetcher::new(db.clone(), txn, db.lens_store().clone(), true);
+    let fetcher = LensedDocFetcher::new(db.clone(), txn, db.lens_store().clone());
     assert!(fetcher.get_all("HistoryProbe").await.unwrap().is_empty());
     let before = db.store().keys_read();
     assert!(fetcher.get_all("HistoryProbe").await.unwrap().is_empty());

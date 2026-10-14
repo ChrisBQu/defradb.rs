@@ -153,7 +153,6 @@ impl<S: Store> AutoCommitMutator<S> {
             self.db.clone(),
             txn,
             self.db.lens_store.clone(),
-            false,
         ));
         let batch = Arc::new(BatchMutator::new(self.db.clone(), fetcher.shared_txn()));
         Ok((batch, fetcher))

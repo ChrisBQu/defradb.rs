@@ -33,19 +33,8 @@ use lens::{TargetedHistoryLink, TransformStore};
 use query::runner::{DocFetcher, FetchByIdsResult};
 use storage::corekv::Store;
 
+use crate::database::DB;
 use crate::txn::DbTxn;
-use crate::{database::DB, read::lensed::autocommit::migration::MigrationWriteBack};
-
-pub struct PendingMigrationWriteBack {
-    pub(crate) collection_name: String,
-    pub(crate) write_back: MigrationWriteBack,
-}
-
-#[derive(Default)]
-pub struct PendingMigrationWriteBacks {
-    pub documents: Vec<PendingMigrationWriteBack>,
-    pub full_scans: RapidHashMap<String, bool>,
-}
 
 type VersionCache = RapidHashMap<String, (Arc<[schema::CollectionVersion]>, bool)>;
 
@@ -57,8 +46,6 @@ type VersionCache = RapidHashMap<String, (Arc<[schema::CollectionVersion]>, bool
 pub struct LensedDocFetcher<S: Store> {
     db: Arc<DB<S>>,
     txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
-    defer_readonly_write_back: bool,
-    pending_write_backs: Arc<TokioMutex<PendingMigrationWriteBacks>>,
     #[allow(dead_code)]
     lens_store: Arc<dyn TransformStore>,
     /// Read-only snapshot facts; writable transactions always reload their own schema writes.
@@ -85,33 +72,23 @@ impl<S: Store> LensedDocFetcher<S> {
     /// * `txn` - The database transaction
     /// * `lens_store` - The lens transform store for applying migrations
     #[allow(dead_code)]
-    pub fn new(
-        db: Arc<DB<S>>,
-        txn: DbTxn<S>,
-        lens_store: Arc<dyn TransformStore>,
-        defer_readonly_write_back: bool,
-    ) -> Self {
+    pub fn new(db: Arc<DB<S>>, txn: DbTxn<S>, lens_store: Arc<dyn TransformStore>) -> Self {
         Self {
             db,
             txn: Arc::new(TokioMutex::new(Some(txn))),
-            defer_readonly_write_back,
-            pending_write_backs: Arc::new(TokioMutex::new(PendingMigrationWriteBacks::default())),
             lens_store,
             version_cache: Arc::new(async_lock::RwLock::new(RapidHashMap::new())),
             history_cache: async_lock::RwLock::new(RapidHashMap::new()),
         }
     }
 
-    /// Build a lightweight fetcher sharing this one's transaction and pending
-    /// write-back queue, for use by a `DocStream` that outlives a single
+    /// Build a lightweight fetcher sharing this one's transaction, for use by a `DocStream` that outlives a single
     /// `&self` call. `history_cache` starts fresh rather than shared: it is
     /// pure memoization, so recomputing it costs nothing correctness-wise.
     pub(super) fn stream_clone(&self) -> Self {
         Self {
             db: self.db.clone(),
             txn: self.txn.clone(),
-            defer_readonly_write_back: self.defer_readonly_write_back,
-            pending_write_backs: self.pending_write_backs.clone(),
             lens_store: self.lens_store.clone(),
             version_cache: self.version_cache.clone(),
             history_cache: async_lock::RwLock::new(RapidHashMap::new()),
@@ -148,44 +125,6 @@ impl<S: Store> LensedDocFetcher<S> {
     pub(crate) async fn invalidate_migration_cache(&self) {
         self.history_cache.write().await.clear();
         self.version_cache.write().await.clear();
-    }
-
-    pub(super) async fn defer_document_write_back(
-        &self,
-        collection_name: &str,
-        write_back: MigrationWriteBack,
-    ) {
-        let mut pending = self.pending_write_backs.lock().await;
-        if !pending.full_scans.contains_key(collection_name) {
-            pending.documents.push(PendingMigrationWriteBack {
-                collection_name: collection_name.to_string(),
-                write_back,
-            });
-        }
-    }
-
-    pub(super) async fn defer_full_scan_write_back(
-        &self,
-        collection_name: &str,
-        include_deleted: bool,
-    ) {
-        if !self.defer_readonly_write_back {
-            return;
-        }
-
-        let mut pending = self.pending_write_backs.lock().await;
-        pending
-            .full_scans
-            .entry(collection_name.to_string())
-            .and_modify(|current| *current |= include_deleted)
-            .or_insert(include_deleted);
-        pending
-            .documents
-            .retain(|candidate| candidate.collection_name != collection_name);
-    }
-
-    pub async fn take_pending_write_backs(&self) -> PendingMigrationWriteBacks {
-        std::mem::take(&mut *self.pending_write_backs.lock().await)
     }
 }
 
@@ -365,6 +304,16 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
         params: &query::planner::index_selection::IndexScanParams,
     ) -> query::error::Result<query::fetcher::IndexScanResult> {
         self.get_by_index_scan_impl(collection_name, params).await
+    }
+
+    async fn indexes_match_documents(&self, collection_name: &str) -> query::error::Result<bool> {
+        let (collection, _, _) =
+            crate::collection::loader::get_collection_with_lazy_load(&self.txn, collection_name)
+                .await?;
+        Ok(!self
+            .load_versions_and_check_migrations(&collection)
+            .await?
+            .1)
     }
 
     fn supports_index_queries(&self) -> bool {

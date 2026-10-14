@@ -23,7 +23,6 @@ use rapidhash::{HashMapExt, RapidHashMap};
 use schema::CollectionVersion;
 use schema::FieldDescription;
 use schema::FieldKind;
-use std::num::NonZeroUsize;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -428,7 +427,7 @@ async fn namespace_counts(db: &Arc<DB<RegolithStore>>) -> (usize, usize, usize) 
 }
 
 #[tokio::test]
-async fn lazy_lensed_read_writes_back_without_new_commits() {
+async fn lazy_lensed_read_leaves_storage_unchanged() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let transform_store = Arc::new(SetVerifiedStore::default());
     let mut raw_db = DB::from_arc(store.clone()).unwrap();
@@ -470,31 +469,25 @@ async fn lazy_lensed_read_writes_back_without_new_commits() {
     assert_eq!(transform_store.transform_calls.load(Ordering::SeqCst), 1);
 
     let persisted = load_user(&db, &doc_id).await;
-    assert_eq!(
-        persisted.get("verified"),
-        Some(&document::NormalValue::Bool(true))
-    );
-    assert_eq!(persisted.schema_version_id(), Some(v2.as_str()));
+    assert_eq!(persisted.get("verified"), None);
+    assert_eq!(persisted.schema_version_id(), Some(v1.as_str()));
     assert_eq!(namespace_counts(&db).await, before_counts);
 
     fetcher.get_all("Users").await.unwrap();
     assert_eq!(
         transform_store.transform_calls.load(Ordering::SeqCst),
-        1,
-        "the cached version must bypass the lens on subsequent reads"
+        2,
+        "read-only transformations do not persist a cached version"
     );
 
     drop(fetcher);
     drop(db);
     let reopened = Arc::new(DB::open_from_arc(store).await.unwrap());
     let persisted_after_restart = load_user(&reopened, &doc_id).await;
-    assert_eq!(
-        persisted_after_restart.get("verified"),
-        Some(&document::NormalValue::Bool(true))
-    );
+    assert_eq!(persisted_after_restart.get("verified"), None);
     assert_eq!(
         persisted_after_restart.schema_version_id(),
-        Some(v2.as_str())
+        Some(v1.as_str())
     );
 }
 
@@ -588,7 +581,7 @@ async fn migration_context_cache_invalidates_when_graph_changes_without_version_
 }
 
 #[tokio::test]
-async fn lazy_write_back_updates_secondary_indexes_for_late_document() {
+async fn lazy_read_leaves_secondary_indexes_unchanged() {
     let transform_store = Arc::new(SetVerifiedStore::default());
     let mut raw_db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     raw_db.set_lens_store(transform_store);
@@ -628,18 +621,15 @@ async fn lazy_write_back_updates_secondary_indexes_for_late_document() {
     );
     assert_eq!(
         verified_index_count(&db).await,
-        1,
-        "lazy migration must atomically replace the document's index entries"
+        0,
+        "read-only transformation must not replace index entries"
     );
 }
 
 #[tokio::test]
-async fn lazy_full_scan_flushes_write_back_in_bounded_batches() {
+async fn lazy_full_scan_is_write_free_even_when_paused() {
     let transform_store = Arc::new(BlockingVerifiedStore::default());
-    let options = db::DbOptions::new().with_migration_write_back_batch_size(
-        NonZeroUsize::new(2).expect("batch size is non-zero"),
-    );
-    let mut raw_db = DB::with_options(RegolithStore::in_memory().unwrap(), options).unwrap();
+    let mut raw_db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     raw_db.set_lens_store(transform_store.clone());
     let db = Arc::new(raw_db);
 
@@ -684,8 +674,8 @@ async fn lazy_full_scan_flushes_write_back_in_bounded_batches() {
 
     assert_eq!(
         verified_index_count(&db).await,
-        2,
-        "the completed batch must commit before the next batch is transformed"
+        0,
+        "a partial read must not write index entries"
     );
 
     transform_store.release.notify_one();
@@ -694,22 +684,19 @@ async fn lazy_full_scan_flushes_write_back_in_bounded_batches() {
     assert!(docs
         .iter()
         .all(|doc| doc.schema_version_id() == Some(v2.as_str())));
-    assert_eq!(verified_index_count(&db).await, 3);
+    assert_eq!(verified_index_count(&db).await, 0);
     for doc_id in doc_ids {
         assert_eq!(
             load_user(&db, &doc_id).await.schema_version_id(),
-            Some(v2.as_str())
+            Some(v1.as_str())
         );
     }
 }
 
 #[tokio::test]
-async fn implicit_full_scan_defers_one_collection_instead_of_each_document() {
+async fn implicit_full_scan_transforms_without_writes() {
     let transform_store = Arc::new(SetVerifiedStore::default());
-    let options = db::DbOptions::new().with_migration_write_back_batch_size(
-        NonZeroUsize::new(2).expect("batch size is non-zero"),
-    );
-    let mut raw_db = DB::with_options(RegolithStore::in_memory().unwrap(), options).unwrap();
+    let mut raw_db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     raw_db.set_lens_store(transform_store.clone());
     let db = Arc::new(raw_db);
 
@@ -732,27 +719,27 @@ async fn implicit_full_scan_defers_one_collection_instead_of_each_document() {
     .await
     .unwrap();
 
+    let mut source_ids = Vec::new();
     for name in ["Deferred-1", "Deferred-2", "Deferred-3"] {
-        seed_old_user(&db, &v1, name).await;
+        source_ids.push(seed_old_user(&db, &v1, name).await);
     }
 
     let txn = db.new_txn(true).await.unwrap();
-    let fetcher = db::LensedDocFetcher::new(db, txn, transform_store, true);
+    let fetcher = db::LensedDocFetcher::new(db.clone(), txn, transform_store);
     let docs = fetcher.get_all("Users").await.unwrap();
     assert_eq!(docs.len(), 3);
 
-    let pending = fetcher.take_pending_write_backs().await;
-    assert!(
-        pending.documents.is_empty(),
-        "full scans must not retain one write-back candidate per stale document"
-    );
-    assert_eq!(pending.full_scans.get("Users"), Some(&false));
-
     fetcher.take_txn().await.unwrap().discard().unwrap();
+    for doc_id in source_ids {
+        let stored = load_user(&db, &doc_id).await;
+        assert_eq!(stored.schema_version_id(), Some(v1.as_str()));
+        assert_eq!(stored.get("verified"), None);
+    }
+    assert_eq!(verified_index_count(&db).await, 0);
 }
 
 #[tokio::test]
-async fn implicit_query_flushes_lazy_migration_after_read_snapshot_closes() {
+async fn implicit_query_leaves_storage_unchanged_after_snapshot_closes() {
     let transform_store = Arc::new(SetVerifiedStore::default());
     let mut raw_db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     raw_db.set_lens_store(transform_store);
@@ -809,7 +796,7 @@ async fn implicit_query_flushes_lazy_migration_after_read_snapshot_closes() {
         ))
         .await;
     assert!(response.errors.is_empty(), "{:?}", response.errors);
-    assert_eq!(verified_index_count(&db).await, 1);
+    assert_eq!(verified_index_count(&db).await, 0);
 
     let indexed_response = runner
         .execute(QueryRequest::new(
@@ -826,6 +813,17 @@ async fn implicit_query_flushes_lazy_migration_after_read_snapshot_closes() {
         Some(serde_json::json!({
             "Users": [{"name": "Implicit", "verified": true}]
         }))
+    );
+    let ordered = runner
+        .execute(QueryRequest::new(
+            "query { Users(order: {verified: DESC}, limit: 1) { name verified } }".to_string(),
+        ))
+        .await;
+    assert!(ordered.errors.is_empty(), "{:?}", ordered.errors);
+    assert_eq!(ordered.data, indexed_response.data);
+    assert_eq!(
+        load_user(&db, &doc_id).await.schema_version_id(),
+        Some(v1.as_str())
     );
 }
 
@@ -928,15 +926,12 @@ async fn concurrent_lazy_reads_of_same_document_are_idempotent() {
     }
 
     let persisted = load_user(&db, &doc_id).await;
-    assert_eq!(
-        persisted.get("verified"),
-        Some(&document::NormalValue::Bool(true))
-    );
-    assert_eq!(persisted.schema_version_id(), Some(v2.as_str()));
+    assert_eq!(persisted.get("verified"), None);
+    assert_eq!(persisted.schema_version_id(), Some(v1.as_str()));
     assert_eq!(
         verified_index_count(&db).await,
-        1,
-        "concurrent write-back must leave exactly one indexed document"
+        0,
+        "concurrent reads must leave the index unchanged"
     );
 }
 
@@ -1011,19 +1006,11 @@ async fn concurrent_update_wins_over_stale_lazy_write_back() {
     assert_eq!(persisted.schema_version_id(), Some(v2.as_str()));
 }
 
-/// The streaming counterpart of `implicit_full_scan_defers_one_collection_instead_of_each_document`:
-/// a streamed read must defer per document (matching Go's read-through
-/// `updateDataStore`, called per document from `FetchNext`), never as one
-/// full-scan marker - `defer_full_scan_write_back` discards per-document
-/// candidates on the assumption the whole collection was already read, which
-/// is false for a stream a caller may stop early.
+/// Streaming transformations leave stored documents and indexes unchanged.
 #[tokio::test]
-async fn streaming_lensed_read_defers_per_document_not_full_scan() {
+async fn streaming_lensed_read_keeps_source_documents_unchanged() {
     let transform_store = Arc::new(SetVerifiedStore::default());
-    let options = db::DbOptions::new().with_migration_write_back_batch_size(
-        NonZeroUsize::new(2).expect("batch size is non-zero"),
-    );
-    let mut raw_db = DB::with_options(RegolithStore::in_memory().unwrap(), options).unwrap();
+    let mut raw_db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     raw_db.set_lens_store(transform_store.clone());
     let db = Arc::new(raw_db);
 
@@ -1046,12 +1033,13 @@ async fn streaming_lensed_read_defers_per_document_not_full_scan() {
     .await
     .unwrap();
 
+    let mut source_ids = Vec::new();
     for name in ["Deferred-1", "Deferred-2", "Deferred-3"] {
-        seed_old_user(&db, &v1, name).await;
+        source_ids.push(seed_old_user(&db, &v1, name).await);
     }
 
     let txn = db.new_txn(true).await.unwrap();
-    let fetcher = db::LensedDocFetcher::new(db, txn, transform_store, true);
+    let fetcher = db::LensedDocFetcher::new(db.clone(), txn, transform_store);
 
     let mut stream = fetcher
         .stream_all_with_deleted("Users", false)
@@ -1067,26 +1055,18 @@ async fn streaming_lensed_read_defers_per_document_not_full_scan() {
         .all(|doc| doc.get("verified") == Some(&document::NormalValue::Bool(true))));
     drop(stream);
 
-    let pending = fetcher.take_pending_write_backs().await;
-    assert!(
-        pending.full_scans.is_empty(),
-        "a stream must never mark a whole-collection full scan"
-    );
-    assert_eq!(
-        pending.documents.len(),
-        3,
-        "a stream must defer one write-back candidate per migrated document"
-    );
-
     fetcher.take_txn().await.unwrap().discard().unwrap();
+    for doc_id in source_ids {
+        let stored = load_user(&db, &doc_id).await;
+        assert_eq!(stored.schema_version_id(), Some(v1.as_str()));
+        assert_eq!(stored.get("verified"), None);
+    }
+    assert_eq!(verified_index_count(&db).await, 0);
 }
 
-/// A lens-migrated collection must return correct, migrated documents through
-/// the streaming path, and persist them exactly as the eager auto-commit path
-/// does - proving `LensedAutoCommitFetcher::stream_all_with_deleted` isn't
-/// just correct in isolation but matches `get_all`'s observable contract.
+/// Streaming reads transform values without persisting them.
 #[tokio::test]
-async fn streaming_auto_commit_read_migrates_and_persists() {
+async fn streaming_auto_commit_read_transforms_without_persisting() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let transform_store = Arc::new(SetVerifiedStore::default());
     let mut raw_db = DB::from_arc(store.clone()).unwrap();
@@ -1134,21 +1114,13 @@ async fn streaming_auto_commit_read_migrates_and_persists() {
     assert_eq!(transform_store.transform_calls.load(Ordering::SeqCst), 1);
 
     let persisted = load_user(&db, &doc_id).await;
-    assert_eq!(
-        persisted.get("verified"),
-        Some(&document::NormalValue::Bool(true))
-    );
-    assert_eq!(persisted.schema_version_id(), Some(v2.as_str()));
+    assert_eq!(persisted.get("verified"), None);
+    assert_eq!(persisted.schema_version_id(), Some(v1.as_str()));
 }
 
-/// The early-termination counterpart of
-/// `streaming_auto_commit_read_migrates_and_persists`: a `LimitNode` stops
-/// pulling long before the write-back batch boundary, and `ScanNode::close`
-/// then tears the stream down. Documents already migrated through the lens
-/// must be persisted at that point - otherwise every limited query re-runs the
-/// transform forever, and the eager path's write-back is silently lost.
+/// Closing a partially consumed stream must also remain write-free.
 #[tokio::test]
-async fn streaming_auto_commit_read_persists_after_partial_consumption() {
+async fn streaming_auto_commit_read_is_write_free_after_partial_consumption() {
     let transform_store = Arc::new(SetVerifiedStore::default());
     let mut raw_db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     raw_db.set_lens_store(transform_store.clone());
@@ -1184,7 +1156,7 @@ async fn streaming_auto_commit_read_persists_after_partial_consumption() {
         .await
         .unwrap();
 
-    // One document out of three, well under the default write-back batch size.
+    // Stop after one document out of three.
     let (migrated, _is_deleted) = stream
         .next()
         .await
@@ -1202,10 +1174,10 @@ async fn streaming_auto_commit_read_persists_after_partial_consumption() {
     let persisted = load_user(&db, doc_id).await;
     assert_eq!(
         persisted.get("verified"),
-        Some(&document::NormalValue::Bool(true)),
-        "a partially consumed stream must persist the documents it did migrate"
+        None,
+        "a partially consumed read must not persist its transformations"
     );
-    assert_eq!(persisted.schema_version_id(), Some(v2.as_str()));
+    assert_eq!(persisted.schema_version_id(), Some(v1.as_str()));
 }
 
 #[tokio::test]
@@ -1236,7 +1208,6 @@ async fn readonly_snapshot_history_reuse_preserves_migrated_values() {
         db.clone(),
         db.new_txn(true).await.unwrap(),
         db.lens_store().clone(),
-        true,
     );
     for _ in 0..2 {
         let docs = fetcher

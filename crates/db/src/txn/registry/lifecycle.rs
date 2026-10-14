@@ -215,7 +215,6 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
     async fn begin_with_options(
         &self,
         readonly: bool,
-        defer_readonly_write_back: bool,
     ) -> std::result::Result<TransactionHandle, TransactionError> {
         let txn_id = self.id_counter.fetch_add(1, Ordering::SeqCst).to_string();
 
@@ -254,12 +253,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
                 ))
             },
         )?);
-        let fetcher = Arc::new(LensedDocFetcher::new(
-            self.db.clone(),
-            db_txn,
-            lens_store,
-            defer_readonly_write_back,
-        ));
+        let fetcher = Arc::new(LensedDocFetcher::new(self.db.clone(), db_txn, lens_store));
         let ctx = Arc::new(DbTransactionContext::new_with_broadcaster(
             self.db.clone(),
             txn_id.clone(),
@@ -289,13 +283,13 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
         &self,
         readonly: bool,
     ) -> std::result::Result<TransactionHandle, TransactionError> {
-        self.begin_with_options(readonly, false).await
+        self.begin_with_options(readonly).await
     }
 
     async fn begin_implicit_read(
         &self,
     ) -> std::result::Result<TransactionHandle, TransactionError> {
-        self.begin_with_options(true, true).await
+        self.begin_with_options(true).await
     }
 
     fn get(&self, handle: &TransactionHandle) -> GetTransactionResult {
@@ -359,7 +353,7 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
     async fn finish_implicit_read(
         &self,
         handle: &TransactionHandle,
-        apply_read_effects: bool,
+        _apply_read_effects: bool,
     ) -> std::result::Result<(), TransactionError> {
         let ctx = self.take_owned_ctx(handle)?;
         let action_lock = ctx.action_lock();
@@ -379,15 +373,6 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
                 handle, e
             ))
         })?;
-
-        if apply_read_effects {
-            ctx.persist_pending_migrations().await.map_err(|error| {
-                TransactionError::execution(format!(
-                    "deferred lens write-back failed for transaction '{}': {}",
-                    handle, error
-                ))
-            })?;
-        }
 
         Ok(())
     }

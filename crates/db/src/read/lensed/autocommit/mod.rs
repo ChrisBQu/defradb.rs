@@ -1,7 +1,7 @@
 //! Lensed auto-committing document fetcher.
 //!
 //! This fetcher combines auto-commit transaction management with lens migrations.
-//! Documents are automatically migrated during fetch when migrations are registered.
+//! Registered lenses transform returned values; reads never persist those transformations.
 
 mod fetch;
 pub mod migration;
@@ -38,7 +38,6 @@ struct MigrationCache {
 /// migration support from LensedDocFetcher.
 pub struct LensedAutoCommitFetcher<S: Store> {
     db: Arc<DB<S>>,
-    write_back_migrations: bool,
     /// Cache of migration contexts keyed by `"{collection_id}:{version_id}"`.
     /// The full cache is invalidated whenever the committed migration graph's
     /// generation changes.
@@ -50,21 +49,6 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
     pub fn new(db: Arc<DB<S>>) -> Self {
         Self {
             db,
-            write_back_migrations: true,
-            migration_cache: Mutex::new(MigrationCache::default()),
-        }
-    }
-
-    /// Create a lensed fetcher that returns transformed values without lazy
-    /// persistence.
-    ///
-    /// Used by mutation rebasing after the caller already holds the document's
-    /// write guard. The mutation itself persists the active-schema document,
-    /// and attempting lazy write-back here would recursively acquire that guard.
-    pub(crate) fn new_without_write_back(db: Arc<DB<S>>) -> Self {
-        Self {
-            db,
-            write_back_migrations: false,
             migration_cache: Mutex::new(MigrationCache::default()),
         }
     }
@@ -76,7 +60,6 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
     pub(super) fn clone_for_stream(&self) -> Self {
         Self {
             db: self.db.clone(),
-            write_back_migrations: self.write_back_migrations,
             migration_cache: Mutex::new(MigrationCache::default()),
         }
     }
@@ -164,6 +147,15 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
         params: &IndexScanParams,
     ) -> query::error::Result<query::fetcher::IndexScanResult> {
         self.get_by_index_scan_impl(collection_name, params).await
+    }
+
+    async fn indexes_match_documents(&self, collection_name: &str) -> query::error::Result<bool> {
+        let collection = self
+            .db
+            .get_collection(collection_name)
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))?
+            .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
+        Ok(!self.load_migration_context(&collection).await?.1)
     }
 
     fn supports_index_queries(&self) -> bool {

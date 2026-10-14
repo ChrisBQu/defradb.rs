@@ -17,7 +17,6 @@ use crate::database::DB;
 use crate::read::lensed::fetcher::LensedDocFetcher;
 use crate::txn::DbTxn;
 use crate::write::doc::DbDocMutator;
-use crate::LensedAutoCommitFetcher;
 
 /// Transaction context for query execution.
 ///
@@ -167,54 +166,6 @@ impl<S: Store + 'static> DbTransactionContext<S> {
     /// no longer available for queries.
     pub async fn is_consumed(&self) -> bool {
         self.fetcher.is_consumed().await
-    }
-
-    /// Persist lazy migrations collected by a successful implicit read.
-    ///
-    /// The caller must close the read snapshot first. Each collection is then
-    /// written through the same guarded, conflict-retrying path as direct
-    /// auto-commit reads.
-    pub(crate) async fn persist_pending_migrations(&self) -> query::error::Result<()> {
-        let pending = self.fetcher.take_pending_write_backs().await;
-        let mut by_collection = BTreeMap::new();
-        for candidate in pending.documents {
-            if pending.full_scans.contains_key(&candidate.collection_name) {
-                continue;
-            }
-            by_collection
-                .entry(candidate.collection_name)
-                .or_insert_with(Vec::new)
-                .push(candidate.write_back);
-        }
-
-        if by_collection.is_empty() && pending.full_scans.is_empty() {
-            return Ok(());
-        }
-
-        let fetcher = LensedAutoCommitFetcher::new(self.db.clone());
-        for (collection_name, write_backs) in by_collection {
-            let Some(collection) = self.db.get_collection(&collection_name).map_err(|error| {
-                query::error::QueryError::execution(format!(
-                    "failed to load collection for deferred lens write-back: {}",
-                    error
-                ))
-            })?
-            else {
-                continue;
-            };
-            fetcher
-                .persist_migrated_documents(&collection, write_backs)
-                .await?;
-        }
-        for (collection_name, include_deleted) in pending.full_scans {
-            if include_deleted {
-                fetcher.get_all_with_deleted(&collection_name, true).await?;
-            } else {
-                fetcher.get_all(&collection_name).await?;
-            }
-        }
-
-        Ok(())
     }
 }
 

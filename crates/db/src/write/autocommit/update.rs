@@ -81,7 +81,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             Arc::clone(&self.db),
             self.new_mutation_txn().await?,
             self.db.lens_store.clone(),
-            false,
         );
         let canonical_id = canonical_lock_id.to_string();
         let Some(mut current_doc) = fresh_fetcher
