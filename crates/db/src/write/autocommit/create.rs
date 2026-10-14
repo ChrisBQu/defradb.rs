@@ -1,10 +1,11 @@
 use super::helpers::{register_created_doc, write_branchable_collection_block, write_local_create};
 use super::*;
 use bytes::Bytes;
+use events::{Message, Update};
 
 use crate::block::builder::DocStorageIdentity;
 
-use crate::block::builder::{ComputedBlocks, compute_document_blocks, insert_computed_blocks};
+use crate::block::builder::{compute_document_blocks, insert_computed_blocks, ComputedBlocks};
 
 struct CreateRetryAttempt<S: Store> {
     db: Arc<DB<S>>,
@@ -168,13 +169,12 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             Err(error) => match error.downcast_abort::<query::error::QueryError>() {
                 Ok(error) => return Err(error),
                 Err(error) => {
-                    return Err(crate::error::commit_query_error(crate::error::Error::Storage(
-                        error.into_storage(),
-                    )))
+                    return Err(crate::error::commit_query_error(
+                        crate::error::Error::Storage(error.into_storage()),
+                    ))
                 }
             },
         };
-
 
         doc.clear_write_preparation();
         let mut result = CreateResult::with_commit(doc_id, doc, cid, block);

@@ -5,7 +5,7 @@
 /// - Transaction-scoped collection cache (lazy loading)
 /// - Reference to the database for collection operations
 use crate::collection::cache::CollectionCache;
-use crate::collection::{Collection, populate_collection_root_id};
+use crate::collection::{populate_collection_root_id, Collection};
 use crate::error::{Error, Result};
 use async_lock::{MutexGuardArc, RwLockReadGuardArc, RwLockWriteGuardArc};
 use datastore::{AsyncCallback, BasicTxn, NamespaceView, RootView, TxnCallback};

@@ -8,8 +8,8 @@
 #![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use regolith::{OptimisticTransactionDb, StreamOptions, TxnOptions};
@@ -318,7 +318,7 @@ impl Store for RegolithStore {
         let _active = ActiveTxnGuard(Arc::clone(&self.inner.active_txns));
         let queue_db = Arc::clone(&self.inner.db);
         let policy = regolith::RetryPolicy::new(options.max_attempts.max(1));
-        let event_token = self.inner.event_order.begin();
+        let mut event_token = None;
         let mut committed_changes = head_cache::HeadChanges::default();
         let mut committed_callbacks = RetryCallbacks::default();
         let mut attempt_count = 0usize;
@@ -341,6 +341,7 @@ impl Store for RegolithStore {
                     isolation: self.inner.options.isolation,
                     stats: self.inner.stats.clone(),
                     attempt_io_active: false,
+                    has_writes: false,
                     callbacks: RetryCallbacks::default(),
                 };
                 let mut value = attempt.run(&mut retry_txn).await;
@@ -349,7 +350,19 @@ impl Store for RegolithStore {
                         "retry attempt returned with scoped IO still active".into(),
                     )));
                 }
+                if value.is_ok()
+                    && retry_txn.callbacks.has_ordered_callbacks()
+                    && !retry_txn.has_writes
+                {
+                    value = Err(RetryAttemptError::Storage(Error::Other(
+                        "cannot publish ordered callbacks from a retry attempt without writes"
+                            .into(),
+                    )));
+                }
                 if value.is_ok() {
+                    if retry_txn.callbacks.has_ordered_callbacks() && event_token.is_none() {
+                        event_token = Some(self.inner.event_order.begin());
+                    }
                     committed_changes = std::mem::take(&mut retry_txn.changes);
                     committed_callbacks = std::mem::take(&mut retry_txn.callbacks);
                 }
@@ -407,7 +420,14 @@ impl Store for RegolithStore {
                 } else {
                     events
                 };
-                event_token.finish(receipt.seq(), events);
+                let has_events = !events.is_empty();
+                if event_token.is_some_and(|token| !token.finish(receipt.seq(), events))
+                    && has_events
+                {
+                    return Err(RetryAttemptError::PostCommit(Error::Other(
+                        "ordered retry receipt did not advance".into(),
+                    )));
+                }
                 if let Some(error) = post_commit_error {
                     return Err(RetryAttemptError::PostCommit(Error::Other(error)));
                 }
@@ -460,6 +480,7 @@ struct RegolithRetryTxn<'a> {
     isolation: regolith::IsolationLevel,
     stats: TransactionStatsHandle,
     attempt_io_active: bool,
+    has_writes: bool,
     callbacks: RetryCallbacks,
 }
 
@@ -520,6 +541,7 @@ impl RetryTxn for RegolithRetryTxn<'_> {
             .await
             .map_err(super::transaction::map_txn_error)?;
         self.changes.record(key, Some(value));
+        self.has_writes = true;
         Ok(())
     }
 
@@ -533,6 +555,7 @@ impl RetryTxn for RegolithRetryTxn<'_> {
             .await
             .map_err(super::transaction::map_txn_error)?;
         self.changes.record(key, None);
+        self.has_writes = true;
         Ok(())
     }
 
@@ -559,7 +582,8 @@ impl RetryTxn for RegolithRetryTxn<'_> {
             .into_any()
             .downcast::<RegolithTxn>()
             .map_err(|_| Error::Other("retry IO belongs to a different backend".into()))?;
-        let (actual, changes) = io.into_scoped_engine_txn()?;
+        let (actual, changes, has_writes) = io.into_scoped_engine_txn()?;
+        self.has_writes |= has_writes;
         *self.txn = *actual;
         self.changes.append(changes);
         self.callbacks = callbacks;
@@ -582,5 +606,73 @@ impl Dropable for RegolithStore {
                 .drop_all()
                 .map_err(|error| Error::Backend(format!("drop_all failed: {error}")))
         })
+    }
+}
+
+#[cfg(test)]
+mod retry_cold_io_tests {
+    use super::*;
+
+    struct ColdReadAttempt;
+    impl crate::corekv::RetryAttemptFn for ColdReadAttempt {
+        fn run<'a>(
+            &'a mut self,
+            retry: &'a mut dyn RetryTxn,
+        ) -> crate::corekv::RetryAttemptFuture<'a> {
+            Box::pin(async move {
+                let mut io = retry.begin_attempt_io()?;
+                assert_eq!(io.get(b"cold/00").await?.unwrap().len(), 16384);
+                assert!(io.has(b"cold/01").await?);
+                assert_eq!(io.get_size(b"cold/02").await?, Some(16384));
+                assert_eq!(io.get_parts(b"cold/03", &[]).await?.unwrap().len(), 16384);
+                for validated in [false, true] {
+                    let mut options =
+                        crate::corekv::IterOptions::new().with_prefix(b"cold/".to_vec());
+                    if validated {
+                        options = options.with_validation(true);
+                    }
+                    let mut iter = io.iterator(options).await?;
+                    let mut count = 0;
+                    while let Some(pair) = iter.next().await? {
+                        assert_eq!(pair.value.len(), 16384);
+                        count += 1;
+                    }
+                    assert_eq!(count, 24);
+                    iter.close().await?;
+                    drop(iter);
+                }
+                io.set(b"cold-result", b"complete").await?;
+                retry.finish_attempt_io(io, RetryCallbacks::default())?;
+                Ok(Box::new(()) as RetryAttemptValue)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn scoped_retry_io_reads_cold_sst_points_and_scans() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = RegolithStore::open(directory.path()).unwrap();
+        let mut txn = store.new_txn(false).await.unwrap();
+        for n in 0..24 {
+            txn.set(format!("cold/{n:02}").as_bytes(), &vec![n; 16384])
+                .await
+                .unwrap();
+        }
+        txn.commit().await.unwrap();
+        store.inner.db.db().flush().unwrap();
+        store.close().await.unwrap();
+        drop(store);
+        let store = RegolithStore::open(directory.path()).unwrap();
+        store
+            .transact_retry(RetryOptions::new(2), Box::new(ColdReadAttempt))
+            .await
+            .unwrap();
+        let txn = store.new_txn(true).await.unwrap();
+        assert_eq!(
+            txn.get(b"cold-result").await.unwrap().as_deref(),
+            Some(b"complete".as_slice())
+        );
+        txn.discard();
+        store.close().await.unwrap();
     }
 }

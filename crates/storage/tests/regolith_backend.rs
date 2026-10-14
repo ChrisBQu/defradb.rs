@@ -24,8 +24,8 @@ storage::generate_backend_dropable_tests!(store);
 #[tokio::test]
 async fn caller_listener_receives_transaction_conflicts() {
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use storage::RegolithStoreOptions;
     use storage::corekv::{Reader, Store, Writer};
+    use storage::RegolithStoreOptions;
 
     #[derive(Default)]
     struct Conflicts(AtomicUsize);

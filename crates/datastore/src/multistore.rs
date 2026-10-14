@@ -489,8 +489,8 @@ impl Iterator for NamespacedIterator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use storage::RegolithStore;
     use storage::corekv::Store;
+    use storage::RegolithStore;
 
     #[tokio::test]
     async fn test_shared_txn_namespace_isolation() {

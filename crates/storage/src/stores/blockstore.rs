@@ -1,5 +1,5 @@
 use crate::corekv::{IterOptions, Iterator, Key, Reader, Result, Store, Txn, Writer};
-use crate::keys::blockstore::{BlockstoreKey, OBJECT_MARKER, ToMergeIndexKey};
+use crate::keys::blockstore::{BlockstoreKey, ToMergeIndexKey, OBJECT_MARKER};
 use crate::namespace::{Namespace, NamespacedStore};
 use async_trait::async_trait;
 /// Blockstore - IPLD blocks and merkle tree nodes

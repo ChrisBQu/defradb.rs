@@ -102,7 +102,6 @@ impl EventToken {
             return true;
         }
         false
-
     }
 }
 
@@ -127,7 +126,6 @@ impl EventOrder {
             order: Arc::clone(self),
             token: Some(token),
             floor,
-
         }
     }
 
@@ -162,7 +160,6 @@ impl EventOrder {
             armed: true,
         };
         let mut first_panic = None;
-
 
         loop {
             let mut dispatch = None;
@@ -208,7 +205,6 @@ impl EventOrder {
                         first_panic = Some(payload);
                     }
                 }
-
             }
         }
     }
@@ -296,5 +292,4 @@ mod tests {
         order.begin().finish(2, vec![event(out.clone(), 3)]);
         assert_eq!(*out.load(), vec![2, 3]);
     }
-
 }

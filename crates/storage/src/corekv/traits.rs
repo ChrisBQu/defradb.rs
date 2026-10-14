@@ -197,6 +197,10 @@ impl RetryCallbacks {
         self.ordered_async.truncate(counts.ordered_async);
     }
 
+    pub fn has_ordered_callbacks(&self) -> bool {
+        !self.ordered.is_empty() || !self.ordered_async.is_empty()
+    }
+
     pub fn append(&mut self, mut other: Self) {
         self.sync.append(&mut other.sync);
         self.asynchronous.append(&mut other.asynchronous);
@@ -819,8 +823,6 @@ pub trait Txn: ReaderWriter + private::Sealed {
     /// Multiple callbacks can be registered and will be executed sequentially
     /// in registration order until one panics or the list completes.
     fn on_success_async(&mut self, callback: AsyncTxnCallback);
-
-
 
     /// Register a synchronous callback to be called on commit error.
     ///

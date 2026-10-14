@@ -10,7 +10,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::corekv::{
-    Result, RetryAttempt, RetryAttemptError, RetryAttemptValue, RetryOptions, Store, Txn, private,
+    private, Result, RetryAttempt, RetryAttemptError, RetryAttemptValue, RetryOptions, Store, Txn,
 };
 
 /// A [`Store`] that erases the concrete backend behind `Arc<dyn Store>`.

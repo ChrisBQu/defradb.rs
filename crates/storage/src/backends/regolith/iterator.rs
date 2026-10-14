@@ -233,9 +233,9 @@ impl RegolithIterator {
 
     /// Fill the page buffer from the transaction, resuming where the last
     /// page stopped.
-    fn refill(&mut self) -> Result<()> {
+    fn refill(&mut self) -> regolith::TxResult<()> {
         let (anchor, mut filled, mut last) = match &mut self.source {
-            Source::Paged { resume, .. } => match resume.take() {
+            Source::Paged { resume, .. } => match resume.clone() {
                 Some(anchor) => (anchor, VecDeque::new(), None),
                 None => return Ok(()),
             },
@@ -281,7 +281,7 @@ impl RegolithIterator {
             None => Box::new(txn.scan_stream(floor.as_deref(), self.end.as_deref())),
         };
         for entry in entries {
-            let (key, value) = entry.map_err(super::transaction::map_txn_error)?;
+            let (key, value) = entry?;
             // A resume key was returned by the previous page; a seek key was
             // not, and skipping it would make `seek` land past its target.
             // Only forward pages need this: a reverse page excludes the key
@@ -316,7 +316,7 @@ impl RegolithIterator {
         Ok(())
     }
 
-    fn step(&mut self) -> Result<Option<KvPair>> {
+    async fn step(&mut self) -> Result<Option<KvPair>> {
         let (key, value) = match &mut self.source {
             Source::Empty => return Ok(None),
             Source::Cursor(entries) => match entries.next() {
@@ -329,8 +329,8 @@ impl RegolithIterator {
                 };
                 // One entry per call keeps the validated range exactly aligned
                 // with what the caller consumed, including an exhausted empty range.
-                let page = cursor
-                    .next_page(txn, 1)
+                let page = regolith::ready(|| cursor.next_page(txn, 1))
+                    .await
                     .map_err(super::transaction::map_txn_error)?;
                 match page.entries.into_iter().next() {
                     Some(entry) => entry,
@@ -339,7 +339,9 @@ impl RegolithIterator {
             }
             Source::Paged { page, .. } => {
                 if page.is_empty() {
-                    self.refill()?;
+                    regolith::ready(|| self.refill())
+                        .await
+                        .map_err(super::transaction::map_txn_error)?;
                 }
                 return Ok(match &mut self.source {
                     Source::Paged { page, .. } => page.pop_front(),
@@ -356,8 +358,8 @@ impl RegolithIterator {
     }
 
     /// The next entry inside the range, or `None` at its end.
-    fn next_in_range(&mut self) -> Result<Option<KvPair>> {
-        while let Some(pair) = self.step()? {
+    async fn next_in_range(&mut self) -> Result<Option<KvPair>> {
+        while let Some(pair) = self.step().await? {
             // A reverse walk runs down to `start`, which is inclusive, so it
             // stops at the first key below it; a forward walk runs up to
             // `end`, which is not.
@@ -438,7 +440,7 @@ impl Iterator for RegolithIterator {
         if let Some(peeked) = self.peeked.take() {
             return Ok(Some(peeked));
         }
-        self.next_in_range()
+        self.next_in_range().await
     }
 
     async fn close(&mut self) -> Result<()> {
@@ -454,7 +456,7 @@ impl Iterator for RegolithIterator {
         self.position(Anchor::At(key.to_vec()));
         // Pull the entry the seek landed on so the caller learns whether
         // one exists; `next` hands back that same entry.
-        self.peeked = self.next_in_range()?;
+        self.peeked = self.next_in_range().await?;
         Ok(self.peeked.is_some())
     }
 

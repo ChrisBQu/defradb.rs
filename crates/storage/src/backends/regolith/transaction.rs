@@ -56,7 +56,6 @@ struct SavepointState {
     has_writes: bool,
     scoped_attempt: bool,
     owns_active_slot: bool,
-
 }
 
 impl RegolithTxn {
@@ -90,7 +89,6 @@ impl RegolithTxn {
             has_writes: false,
             scoped_attempt: false,
             owns_active_slot: true,
-
         })
     }
 
@@ -130,7 +128,6 @@ impl RegolithTxn {
                 has_writes: false,
                 scoped_attempt: false,
                 owns_active_slot: true,
-
             })
         })
     }
@@ -160,7 +157,7 @@ impl RegolithTxn {
 
     pub(super) fn into_scoped_engine_txn(
         mut self: Box<Self>,
-    ) -> Result<(Box<Transaction>, HeadChanges)> {
+    ) -> Result<(Box<Transaction>, HeadChanges, bool)> {
         if !self.scoped_attempt {
             return Err(Error::Other("not a scoped retry transaction".into()));
         }
@@ -171,7 +168,7 @@ impl RegolithTxn {
         let Handle::Writable(txn) = handle else {
             return Err(Error::ReadOnlyTxn);
         };
-        Ok((txn, std::mem::take(&mut self.head_changes)))
+        Ok((txn, std::mem::take(&mut self.head_changes), self.has_writes))
     }
 
     fn handle(&self) -> Result<&Arc<Handle>> {
@@ -260,7 +257,9 @@ impl Reader for RegolithTxn {
             Handle::ReadOnly(snapshot) => snapshot
                 .get_slice(key)
                 .map_err(|error| Error::Backend(error.to_string()))?,
-            Handle::Writable(txn) => txn.get_slice(key).map_err(map_txn_error)?,
+            Handle::Writable(txn) => regolith::ready(|| txn.get_slice(key))
+                .await
+                .map_err(map_txn_error)?,
         };
         Ok(slice.map(Bytes::from_owner))
     }
@@ -273,7 +272,9 @@ impl Reader for RegolithTxn {
             Handle::ReadOnly(snapshot) => snapshot
                 .get_slice(key)
                 .map_err(|error| Error::Backend(error.to_string()))?,
-            Handle::Writable(txn) => txn.get_parts(key, parts).map_err(map_txn_error)?,
+            Handle::Writable(txn) => regolith::ready(|| txn.get_parts(key, parts))
+                .await
+                .map_err(map_txn_error)?,
         };
         Ok(slice.map(Bytes::from_owner))
     }
@@ -288,7 +289,10 @@ impl Reader for RegolithTxn {
                 .map_err(|error| Error::Backend(error.to_string())),
             // A writing transaction has to consult its own buffer, which
             // `has` on the snapshot underneath would miss.
-            Handle::Writable(txn) => Ok(txn.get_slice(key).map_err(map_txn_error)?.is_some()),
+            Handle::Writable(txn) => Ok(regolith::ready(|| txn.get_slice(key))
+                .await
+                .map_err(map_txn_error)?
+                .is_some()),
         }
     }
 
@@ -305,7 +309,10 @@ impl Reader for RegolithTxn {
             // `get_for_update` records the read *before* consulting the write
             // buffer, which `get_slice` does not, so a key this transaction
             // already wrote still lands in the read set.
-            Handle::Writable(txn) => Ok(txn.get_for_update(key).map_err(map_txn_error)?.is_some()),
+            Handle::Writable(txn) => Ok(regolith::ready(|| txn.get_for_update(key))
+                .await
+                .map_err(map_txn_error)?
+                .is_some()),
         }
     }
 
@@ -317,9 +324,10 @@ impl Reader for RegolithTxn {
             Handle::ReadOnly(snapshot) => snapshot
                 .get_size(key)
                 .map_err(|error| Error::Backend(error.to_string())),
-            Handle::Writable(txn) => {
-                Ok(txn.get_slice(key).map_err(map_txn_error)?.map(|v| v.len()))
-            }
+            Handle::Writable(txn) => Ok(regolith::ready(|| txn.get_slice(key))
+                .await
+                .map_err(map_txn_error)?
+                .map(|v| v.len())),
         }
     }
 
@@ -357,8 +365,9 @@ impl Writer for RegolithTxn {
         if key.is_empty() {
             return Err(Error::EmptyKey);
         }
-        self.writable()?
-            .merge(key, operand)
+        let txn = self.writable()?;
+        regolith::ready(|| txn.merge(key, operand))
+            .await
             .map_err(map_txn_error)?;
         self.has_writes = true;
         Ok(())
@@ -371,8 +380,9 @@ impl Writer for RegolithTxn {
         once_key: Option<&[u8]>,
     ) -> Result<()> {
         let layout: Arc<dyn regolith::LogLayout> = Arc::new(log.clone());
-        self.writable()?
-            .append(&layout, entry, once_key)
+        let txn = self.writable()?;
+        regolith::ready(|| txn.append(&layout, entry, once_key))
+            .await
             .map_err(map_txn_error)?;
         // An append with an already-present once-key is elided by Regolith
         // during commit planning. Append-only commits therefore cannot
@@ -384,7 +394,10 @@ impl Writer for RegolithTxn {
         if key.is_empty() {
             return Err(Error::EmptyKey);
         }
-        self.writable()?.put(key, value).map_err(map_txn_error)?;
+        let txn = self.writable()?;
+        regolith::ready(|| txn.put(key, value))
+            .await
+            .map_err(map_txn_error)?;
         self.has_writes = true;
         self.head_changes.record(key, Some(value));
         Ok(())
@@ -394,7 +407,10 @@ impl Writer for RegolithTxn {
         if key.is_empty() {
             return Err(Error::EmptyKey);
         }
-        self.writable()?.delete(key).map_err(map_txn_error)?;
+        let txn = self.writable()?;
+        regolith::ready(|| txn.delete(key))
+            .await
+            .map_err(map_txn_error)?;
         self.has_writes = true;
         self.head_changes.record(key, None);
         Ok(())
@@ -406,14 +422,15 @@ impl Writer for RegolithTxn {
 impl Txn for RegolithTxn {
     async fn commit(mut self: Box<Self>) -> Result<()> {
         if self.scoped_attempt {
-            return Err(Error::Other("scoped retry transaction cannot commit independently".into()));
+            return Err(Error::Other(
+                "scoped retry transaction cannot commit independently".into(),
+            ));
         }
         if !self.ordered_events.is_empty() && !self.has_writes {
             self.release();
             self.callbacks.run_error().await;
             return Err(Error::Other(
                 "cannot publish ordered events from a transaction with no writes".to_string(),
-
             ));
         }
         let handle = self.handle.take().ok_or(Error::DiscardedTxn)?;

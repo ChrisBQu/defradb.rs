@@ -192,8 +192,12 @@ impl Txn for AttemptScopedTxn {
         Ok(())
     }
 
-    fn on_success_ordered_async(&mut self, callback: storage::corekv::AsyncOrderedTxnCallback) -> storage::corekv::Result<()> {
-        self.callbacks.push_ordered_async(Box::new(move || callback()));
+    fn on_success_ordered_async(
+        &mut self,
+        callback: storage::corekv::AsyncOrderedTxnCallback,
+    ) -> storage::corekv::Result<()> {
+        self.callbacks
+            .push_ordered_async(Box::new(move || callback()));
         Ok(())
     }
 
@@ -217,7 +221,6 @@ impl Txn for AttemptScopedTxn {
     fn callback_count(&self) -> usize {
         0
     }
-
 }
 
 #[derive(Clone, Copy)]
@@ -251,7 +254,6 @@ impl BasicTxn {
             ordered_callbacks: Vec::new(),
             ordered_async_callbacks: Vec::new(),
             retry_callbacks: RetryCallbacks::default(),
-
         }
     }
 
@@ -339,8 +341,12 @@ impl BasicTxn {
             })?;
         let (io, mut success_callbacks) = scoped.take()?;
         success_callbacks.append(std::mem::take(&mut retry_callbacks));
-        for callback in ordered_callbacks { success_callbacks.push_ordered(Box::new(move || callback())); }
-        for callback in ordered_async_callbacks { success_callbacks.push_ordered_async(Box::new(move || callback())); }
+        for callback in ordered_callbacks {
+            success_callbacks.push_ordered(Box::new(move || callback()));
+        }
+        for callback in ordered_async_callbacks {
+            success_callbacks.push_ordered_async(Box::new(move || callback()));
+        }
         drop(txn);
 
         for callback in callbacks {
