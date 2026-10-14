@@ -7,8 +7,8 @@ use defra_core::merge::{
 };
 use storage::corekv::Store;
 
-use super::{cid_set, DbMergeHandler, MergeError};
-use crate::merge::governance::{RedrivenMerge, REDRIVE_BUDGET};
+use super::{DbMergeHandler, MergeError, cid_set};
+use crate::merge::governance::{REDRIVE_BUDGET, RedrivenMerge};
 use kovan_queue::seg_queue::SegQueue;
 
 struct MergeRetryAttempt<S: Store, B: blockstore::Blockstore> {
@@ -258,8 +258,8 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
             handler: self.clone(),
             cid: *cid,
             block_data: block_data.to_vec(),
-            doc_id,
-            collection_id,
+            doc_id: doc_id.clone(),
+            collection_id: collection_id.clone(),
             creator,
             sender_peer: metadata.sender_peer.map(str::to_owned),
             is_explicit_replicator: metadata.is_explicit_replicator,
@@ -275,6 +275,36 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
                 Box::new(attempt),
             )
             .await;
+        // Head reclamation is a separate best-effort transaction. Run it
+        // only after the retry engine has committed and released its ordered
+        // commit token, so it cannot repeat inside a losing attempt.
+        if result.is_ok() {
+            if let (Some(collection_id), Some(doc_id)) =
+                (collection_id.as_deref(), doc_id.as_deref())
+            {
+                if let Ok(Some(collection)) = self.block_collection(collection_id, None).await {
+                    if let Ok(txn) = self.db.new_txn(true).await {
+                        if let Ok(systemstore) = txn.systemstore() {
+                            if let Ok(Some(doc_short_id)) = crate::docid::map::get_doc_short_id(
+                                &systemstore,
+                                collection.resolved_root_id(),
+                                doc_id,
+                            )
+                            .await
+                            {
+                                self.db.maybe_prune_document_heads(doc_short_id).await;
+                            }
+                        }
+                        let _ = txn.discard();
+                    }
+                    if collection.schema().is_branchable {
+                        self.db
+                            .maybe_prune_collection_heads(collection.resolved_root_id())
+                            .await;
+                    }
+                }
+            }
+        }
         let result = match result {
             Ok(value) => value
                 .downcast::<MergeOutcome>()

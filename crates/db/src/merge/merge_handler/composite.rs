@@ -126,7 +126,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             Err(error) => {
                 return self
                     .defer_unresolved_document(cid, block, payload, metadata, error)
-                    .await
+                    .await;
             }
         };
 
@@ -511,7 +511,6 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             collection_lookup.clone(),
             CompositeMergeMode::Standalone,
         );
-        self.db.maybe_prune_document_heads(doc_short_id).await;
         let mut state = CompositeMergeState::default();
 
         let process_result: std::result::Result<Option<MergeOutcome>, MergeError> = {
@@ -645,6 +644,8 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                 .map_err(MergeError::Database)?;
                 txn.force_commit().await?;
 
+                self.db.maybe_prune_document_heads(doc_short_id).await;
+
                 self.best_effort_finalize_linked_field_blocks(&state.linked_field_cids)
                     .await;
 
@@ -756,7 +757,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             Err(error) => {
                 return self
                     .defer_unresolved_document(cid, block, payload, metadata, error)
-                    .await
+                    .await;
             }
         };
         let root_cid = *cid;
@@ -951,7 +952,6 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             collection_lookup.clone(),
             CompositeMergeMode::Batch,
         );
-        self.db.maybe_prune_document_heads(doc_short_id).await;
         let mut state = CompositeMergeState::default();
 
         let process_result: std::result::Result<Option<MergeOutcome>, MergeError> = {

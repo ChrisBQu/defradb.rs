@@ -12,17 +12,16 @@ use schema::{FieldKind, ScalarKind};
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn write_branchable_collection_block<S: storage::corekv::Store + 'static>(
-    db: &crate::database::DB<S>,
+    _db: &crate::database::DB<S>,
     collection_name: &str,
     collection: &Collection,
     blockstore: &NamespaceView,
     headstore: &NamespaceView,
     doc_cid: Cid,
-    doc_short_id: u64,
+    _doc_short_id: u64,
     signing_config: Option<&defra_core::signing::SigningConfig>,
     prepared_inputs: Option<&query::prepared::PreparedInputMemo>,
 ) -> query::error::Result<Option<(Cid, Bytes)>> {
-    db.maybe_prune_document_heads(doc_short_id).await;
     if !collection.schema().is_branchable {
         return Ok(None);
     }
@@ -48,19 +47,25 @@ pub(crate) async fn write_branchable_collection_block<S: storage::corekv::Store 
         )),
     })?;
 
-    // The append just superseded the heads it was built on, and the keys it
-    // superseded are reclaimed by a transaction of their own. Every branchable
-    // mutation in the crate funnels through here, so this is the one place
-    // that has to remember.
-    //
-    // The reclaiming transaction is opened while the caller's is still open,
-    // which is sound: transactions are optimistic so neither blocks the other,
-    // and the keys it removes were superseded before the caller began, so it
-    // cannot touch anything the caller wrote.
-    db.maybe_prune_collection_heads(collection.resolved_root_id())
-        .await;
-
     Ok(written)
+}
+
+/// Run best-effort head reclamation only after the owning mutation has
+/// returned from its engine commit. Opening a nested prune transaction from a
+/// retry closure would repeat side effects on every attempt and can conflict
+/// with the mutation snapshot.
+pub(crate) async fn prune_heads_after_commit<S: storage::corekv::Store + 'static>(
+    db: &crate::database::DB<S>,
+    collection: &Collection,
+    doc_short_ids: impl IntoIterator<Item = u64>,
+) {
+    for doc_short_id in doc_short_ids {
+        db.maybe_prune_document_heads(doc_short_id).await;
+    }
+    if collection.schema().is_branchable {
+        db.maybe_prune_collection_heads(collection.resolved_root_id())
+            .await;
+    }
 }
 
 /// Persist a local UPDATE: apply CRDT field deltas to the authoritative store

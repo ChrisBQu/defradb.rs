@@ -107,7 +107,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         // Resolve the canonical ID before taking the per-document lock. The
         // retry closure repeats the document read and stale-input comparison
         // against each fresh engine snapshot.
-        let canonical_doc_id = {
+        let (doc_short_id, canonical_doc_id) = {
             let identity_txn = self.db.new_txn(true).await.map_err(|error| {
                 query::error::QueryError::execution(format!(
                     "failed to create identity transaction: {error}"
@@ -119,7 +119,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                         "failed to get systemstore: {error}"
                     ))
                 })?;
-                collection
+                let identity = collection
                     .require_doc_identity(&systemstore, &input_doc_id)
                     .await
                     .map_err(|error| match error {
@@ -127,15 +127,15 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                             query::error::QueryError::document_not_found(id)
                         }
                         other => query::error::QueryError::execution(other.to_string()),
-                    })?
-                    .1
+                    })?;
+                identity
             };
             identity_txn.discard().map_err(|error| {
                 query::error::QueryError::execution(format!(
                     "failed to discard identity transaction: {error}"
                 ))
             })?;
-            canonical.to_string()
+            (canonical.0, canonical.1.to_string())
         };
         doc.set_id(DocID::from_string(&canonical_doc_id).map_err(|error| {
             query::error::QueryError::execution(format!("invalid canonical document ID: {error}"))
@@ -173,6 +173,13 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 }
             },
         };
+
+        super::helpers::prune_heads_after_commit(
+            &self.db,
+            &collection,
+            std::iter::once(doc_short_id),
+        )
+        .await;
 
         let mut doc = doc;
         doc.clear_write_preparation();
