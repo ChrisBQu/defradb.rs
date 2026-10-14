@@ -256,6 +256,50 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
         .map_err(MergeError::Database)?;
         txn.force_commit().await?;
 
+        // Resolve the committed document identities from a fresh snapshot,
+        // then reclaim obsolete heads in independent best-effort writes.
+        // This must remain outside the shared batch transaction: pruning a
+        // head while processing the batch would add unrelated writes to the
+        // transaction and could rerun them when the batch is split/retried.
+        let mut prune_doc_ids = Vec::new();
+        let mut prune_collection_ids = Vec::new();
+        if let Ok(read_txn) = self.db.new_txn(true).await {
+            if let Ok(systemstore) = read_txn.systemstore() {
+                for block in blocks {
+                    let Ok(Some(collection)) =
+                        self.block_collection(&block.collection_id, None).await
+                    else {
+                        continue;
+                    };
+                    if collection.schema().is_branchable
+                        && !prune_collection_ids.contains(&collection.resolved_root_id())
+                    {
+                        prune_collection_ids.push(collection.resolved_root_id());
+                    }
+                    if let Ok(Some(doc_short_id)) = crate::docid::map::get_doc_short_id(
+                        &systemstore,
+                        collection.resolved_root_id(),
+                        &block.doc_id,
+                    )
+                    .await
+                    {
+                        if !prune_doc_ids.contains(&doc_short_id) {
+                            prune_doc_ids.push(doc_short_id);
+                        }
+                    }
+                }
+            }
+            let _ = read_txn.discard();
+        }
+        for doc_short_id in prune_doc_ids {
+            self.db.maybe_prune_document_heads(doc_short_id).await;
+        }
+        for collection_short_id in prune_collection_ids {
+            self.db
+                .maybe_prune_collection_heads(collection_short_id)
+                .await;
+        }
+
         // Move batch-merged CIDs into the permanent dedup set
         self.merged_composites
             .extend(batch_merged.keys().map(|cid| (cid, ())));
