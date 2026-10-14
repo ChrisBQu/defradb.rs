@@ -429,6 +429,46 @@ mod prepared_signature_tests {
         };
         assert_ne!(request, changed_request);
     }
+
+    #[test]
+    fn changed_kms_encryption_scope_requests_a_fresh_key() {
+        let identity = DocStorageIdentity::new(1, 2);
+        let mut doc = Document::new();
+        doc.set("secret", "value");
+        let mut prepared = document::WritePreparation::new(1, 2);
+        prepared.set_requires_kms_keys(true);
+        prepared.insert_scoped_key("secret".into(), Cid::default(), [7; 32], None);
+        doc.set_write_preparation(std::sync::Arc::new(prepared));
+
+        // Changing document-level encryption to field-level encryption
+        // changes the KMS scope, so the previously prepared key cannot match.
+        let config = EncryptionConfig {
+            encrypt_doc: false,
+            encrypt_fields: vec!["secret".into()],
+        };
+        let memo = query::prepared::PreparedInputMemo::default();
+        let error = compute_document_blocks_with_inputs(
+            &doc,
+            "schema-v1",
+            identity,
+            Some(&config),
+            None,
+            Some(&memo),
+        )
+        .unwrap_err();
+        let BuildError::NeedsInput(request) = error else {
+            panic!("expected fresh KMS input request, got {error:?}");
+        };
+        let operation: crate::write::prepare::PreparedKmsOperation =
+            serde_json::from_slice(request.exact_request()).unwrap();
+        assert!(matches!(
+            operation,
+            crate::write::prepare::PreparedKmsOperation::Generate {
+                doc_id,
+                field: Some(field),
+            } if doc_id == hex::encode(identity.doc_ref_bytes()) && field == "secret"
+        ));
+    }
 }
 
 pub(crate) fn priority_index_key(doc_short_id: u64, priority: u64, cid: Cid) -> Vec<u8> {
