@@ -4,6 +4,8 @@ This is the review entry point for Theo (vertexclique). [PR #1953](https://githu
 
 Target: new installations. Jack explicitly waived compatibility with existing encrypted/value layouts and migrations. Regolith is pinned to `d1e36aa747913f6b1ecc14c821f4e5e6314674cf`. Worker-pool/runtime redesign (§5.2 step 9) is outside these eight adoption steps. No PR has been merged.
 
+Latest published tip: [#1955 — receipt-ordered events](https://github.com/sourcenetwork/defradb.rs/pull/1955). Steps 5–8 remain in progress.
+
 ## Stack and merge order
 
 Merge from the bottom upward, retargeting the next PR after each merge. The branch name on #1920 predates its replacement implementation; its current content is engine encryption, not the old marker proposal.
@@ -16,8 +18,9 @@ Merge from the bottom upward, retargeting the next PR after each merge. The bran
 | 4 | 1c classifier / DefraLevel | [#1951](https://github.com/sourcenetwork/defradb.rs/pull/1951) | `defralevel/01c-key-classifier` | `defralevel/s0-change-markers` |
 | 5 | 2 transactional decisions | [#1952](https://github.com/sourcenetwork/defradb.rs/pull/1952) | `defralevel/02-transaction-decisions` | `defralevel/01c-key-classifier` |
 | 6 | 3 mechanisms, in progress | [#1953](https://github.com/sourcenetwork/defradb.rs/pull/1953) | `defralevel/03-engine-mechanisms` | `defralevel/02-transaction-decisions` |
+| 7 | 4 ordered events | [#1955](https://github.com/sourcenetwork/defradb.rs/pull/1955) | `defralevel/04-ordered-events` | `defralevel/03-engine-mechanisms` |
 
-The intended total is 11 PRs: these six plus one each for steps 4–8. Split into two stacks if further necessary splits exceed 11. Do not merge superseded generated implementations (#1897/#1899/#1911); their closure remains pending completion of this adoption.
+The intended total is 11 PRs: these seven plus one each for steps 5–8. Split into two stacks if further necessary splits exceed 11. Do not merge superseded generated implementations (#1897/#1899/#1911); their closure remains pending completion of this adoption.
 
 ## Implementation status
 
@@ -26,7 +29,7 @@ The intended total is 11 PRs: these six plus one each for steps 4–8. Split int
 | 1 | Implemented in three separate PRs. Engine key providers replace per-value encryption, including read-only opens. Only genuine block CID keys are ContentAddressed. Writers use DefraLevel; the old head cache is gated off for them, pending deletion in step 6. |
 | 2 | Implemented broadly: transactional document/version/definition/deletion reads, local ACP authorization and owner registration, validated relationship scans, embedded NAC persistence, downsample series uniqueness. Audit remaining writer copies during retry conversion. Remote Vera stays at the network boundary. |
 | 3 | Implemented: commit-ordered arrival append, engine ID allocation, numeric and full-text merges, local document part IDs and field operands, version-key handling, removal of interactive counter finalization, write-free readonly lenses and conservative lens-aware index planning, document head markers and CommutativePrefix classification. HNSW link/count operators are implemented with passing concurrency/operator/recall tests. Remote document composites now use LWW and exact integer operands; floating-point mirror repairs retain validated puts to preserve rounding. Known modified-field writes now project mutation and touched-index dependencies; general query/output reads and counter reads remain conservative. Writable lens retries belong to step 5. |
-| 4 | In progress on an isolated branch: propagate actual receipts and queue local events before commit; model delayed callbacks and failed commits. Not yet published. |
+| 4 | Published as draft #1955: order events by actual receipts, register before native commit, release failed commit floors, and run external ACP hooks before dispatch. Native/WASM Clippy and focused receipt tests pass on the isolated branch; integrated 59 write and 216 merge tests pass. GREEN TLA passes (776 states); RED fails Ordered as expected. Integrated workspace Clippy is running. Delivery is nondurable: cancellation during a postcommit async hook can lose its event. |
 | 5 | In progress: engine-owned retries and prepared remote inputs. The bundle is inconsistent: §5.2 asks for synchronous traits, but later accepted D39 adds `transact_async` and D56 explicitly says the async datapath stays. Follow D56 and the pinned engine API; worker-pool redesign remains step 9. |
 | 6 | Local branch removes the head-cache publication lock and obsolete head-cache/forced-read APIs; native storage and DB block/merge tests pass. Performance gates remain pending; this is not yet published. Remaining listed locks must be removed individually with before/after gates. Counter finalization is already gone; batch/document guards remain. The local candidate also removes has_for_update from the trait and wrappers. A separate arrival-guard removal candidate awaits validation. |
 | 7 | Implemented on an isolated branch: engine commit/policy tickers and per-store on_conflict reason counters, preserving caller instrumentation. Two native regressions and native/WASM Clippy pass. Not yet published above steps 4–6. |
