@@ -26,6 +26,19 @@ pub struct RegolithStoreOptions {
 }
 
 impl RegolithStoreOptions {
+    /// Seal engine files with a key resolved before opening the store.
+    ///
+    /// Values remain plaintext inside the engine, so equality checks,
+    /// allocations, appends and merge operands retain their meaning.
+    /// This does not decrypt values written by the legacy `EncryptedStore`
+    /// wrapper; those stores must be migrated before using this option.
+    pub fn with_encryption_key(mut self, key: [u8; 32]) -> Self {
+        self.engine = self.engine.key_provider(std::sync::Arc::new(
+            super::encryption::AtRestKeyProvider::new(key),
+        ));
+        self
+    }
+
     /// Server defaults: repeatable read, fsync on every commit.
     pub fn new() -> Self {
         Self {

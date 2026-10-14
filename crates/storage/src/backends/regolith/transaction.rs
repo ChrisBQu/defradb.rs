@@ -41,10 +41,18 @@ pub struct RegolithTxn {
 impl RegolithTxn {
     /// Open a snapshot of an existing on-disk database without modifying files.
     pub fn open_read_only(path: impl AsRef<std::path::Path>) -> Result<Self> {
-        let db = regolith::Db::open_read_only(path, super::RegolithStoreOptions::default().engine)
-            .map_err(|error| {
-                Error::Backend(format!("failed to open regolith read-only: {error}"))
-            })?;
+        Self::open_read_only_with_options(path, super::RegolithStoreOptions::default())
+    }
+
+    /// Open a snapshot with the same engine options, including at-rest keys,
+    /// used by a writable store. This never rewrites a legacy store.
+    pub fn open_read_only_with_options(
+        path: impl AsRef<std::path::Path>,
+        options: super::RegolithStoreOptions,
+    ) -> Result<Self> {
+        let db = regolith::Db::open_read_only(path, options.engine).map_err(|error| {
+            Error::Backend(format!("failed to open regolith read-only: {error}"))
+        })?;
         Ok(Self {
             handle: Some(Arc::new(Handle::ReadOnly(db.snapshot()))),
             active_txns: Arc::new(AtomicUsize::new(1)),
