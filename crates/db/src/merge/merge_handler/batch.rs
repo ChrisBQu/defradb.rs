@@ -294,7 +294,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
     ///
     /// Does NOT commit/discard — caller manages the transaction lifecycle.
     #[allow(clippy::too_many_arguments)]
-    async fn process_block_in_txn(
+    pub(crate) async fn process_block_in_txn(
         &self,
         datastore: &NamespaceView,
         headstore: &NamespaceView,

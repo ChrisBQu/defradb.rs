@@ -40,6 +40,12 @@ pub enum MergeError {
     #[error("unique constraint violation during merge: {0}")]
     UniqueConstraintViolation(String),
 
+    /// A single-block `_in_txn` merge rejected its content after staging
+    /// writes; the enclosing attempt is discarded and the original reason is
+    /// returned as the merge outcome.
+    #[error("{0}")]
+    RetryRejected(String),
+
     /// Database error.
     #[error("database error: {0}")]
     Database(#[from] crate::error::Error),
@@ -103,6 +109,7 @@ impl MergeError {
             | Self::InvalidReplayAuthorization(_)
             | Self::ImmutableFieldChanged(_)
             | Self::UniqueConstraintViolation(_)
+            | Self::RetryRejected(_)
             | Self::SignatureVerificationFailed { .. }
             | Self::DepthExceeded { .. } => MergeErrorDisposition::Terminal,
             Self::MissingMetadata(_)

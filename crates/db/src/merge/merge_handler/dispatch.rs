@@ -7,8 +7,153 @@ use defra_core::merge::{
 };
 use storage::corekv::Store;
 
-use super::{DbMergeHandler, MergeError};
+use super::{cid_set, DbMergeHandler, MergeError};
 use crate::merge::governance::{RedrivenMerge, REDRIVE_BUDGET};
+use kovan_queue::seg_queue::SegQueue;
+
+struct MergeRetryAttempt<S: Store, B: blockstore::Blockstore> {
+    handler: DbMergeHandler<S, B>,
+    cid: Cid,
+    block_data: Vec<u8>,
+    doc_id: Option<String>,
+    collection_id: Option<String>,
+    creator: Option<String>,
+    sender_peer: Option<String>,
+    is_explicit_replicator: bool,
+    authorization: Option<ExplicitReplayAuthorization>,
+    is_recovery: bool,
+    is_schema_block: bool,
+}
+
+impl<S: Store + 'static, B: blockstore::Blockstore + 'static> storage::corekv::RetryAttemptFn
+    for MergeRetryAttempt<S, B>
+{
+    fn run<'a>(
+        &'a mut self,
+        retry: &'a mut dyn storage::corekv::RetryTxn,
+    ) -> storage::corekv::RetryAttemptFuture<'a> {
+        Box::pin(async move {
+            match self.run_attempt(retry).await {
+                Ok(outcome) => Ok(Box::new(outcome) as storage::corekv::RetryAttemptValue),
+                Err(error) => Err(storage::corekv::RetryAttemptError::Abort(Box::new(error))),
+            }
+        })
+    }
+}
+
+impl<S: Store + 'static, B: blockstore::Blockstore + 'static> MergeRetryAttempt<S, B> {
+    async fn run_attempt(
+        &mut self,
+        retry: &mut dyn storage::corekv::RetryTxn,
+    ) -> Result<MergeOutcome, MergeError> {
+        let io = retry
+            .begin_attempt_io()
+            .map_err(|error| MergeError::Database(crate::error::Error::Storage(error.into())))?;
+        let basic_txn = datastore::BasicTxn::from_retry_attempt_io(io, 0);
+        let mut txn = crate::txn::DbTxn::<S>::new(basic_txn);
+        let datastore = txn.datastore()?;
+        let headstore = txn.headstore()?;
+        let systemstore = txn.systemstore()?;
+        let batch_merged = cid_set();
+        let batch_merged_collections = cid_set();
+        let pending_events = SegQueue::new();
+        let pending_post_commit_actions = SegQueue::new();
+        let pending_field_block_finalizations = SegQueue::new();
+        let metadata = BlockMetadata {
+            doc_id: self.doc_id.as_deref(),
+            collection_id: self.collection_id.as_deref(),
+            creator: self.creator.as_deref(),
+            sender_peer: self.sender_peer.as_deref(),
+            is_explicit_replicator: self.is_explicit_replicator,
+            explicit_replay_authorization: self.authorization.clone(),
+            verified_creator: None,
+            is_recovery: self.is_recovery,
+            is_schema_block: self.is_schema_block,
+        };
+        let result = self
+            .handler
+            .process_block_in_txn(
+                &datastore,
+                &headstore,
+                &systemstore,
+                &self.cid,
+                &self.block_data,
+                &metadata,
+                &batch_merged,
+                &batch_merged_collections,
+                &pending_events,
+                &pending_post_commit_actions,
+                &pending_field_block_finalizations,
+            )
+            .await;
+        drop(datastore);
+        drop(headstore);
+        drop(systemstore);
+        let outcome = match result {
+            Ok(MergeOutcome::Rejected { reason }) => {
+                let _ = txn.discard();
+                return Err(MergeError::RetryRejected(reason));
+            }
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let _ = txn.discard();
+                return Err(error);
+            }
+        };
+
+        let handler = self.handler.clone();
+        let merged_composites: Vec<_> = batch_merged.keys().collect();
+        let merged_collections: Vec<_> = batch_merged_collections.keys().collect();
+        let mut events = Vec::with_capacity(pending_events.len());
+        while let Some(event) = pending_events.pop() {
+            events.push(event.message);
+        }
+        let mut actions = Vec::new();
+        while let Some(action) = pending_post_commit_actions.pop() {
+            actions.push(action.action);
+        }
+        let mut field_cids = Vec::new();
+        while let Some(finalization) = pending_field_block_finalizations.pop() {
+            field_cids.extend(finalization.cids);
+        }
+        field_cids.sort_unstable();
+        field_cids.dedup();
+        txn.on_success_ordered_async(Box::new(move || {
+            Box::pin(async move {
+                handler
+                    .merged_composites
+                    .extend(merged_composites.iter().map(|cid| (*cid, ())));
+                handler
+                    .merged_collections
+                    .extend(merged_collections.iter().map(|cid| (*cid, ())));
+                for cid in &merged_composites {
+                    handler.release_merged_composite(cid, None).await;
+                }
+                for action in actions {
+                    if let Err(error) = action.run().await {
+                        tracing::warn!(error = %error, "Post-commit merge action failed");
+                    }
+                }
+                handler
+                    .best_effort_finalize_linked_field_blocks(&field_cids)
+                    .await;
+                Ok(())
+            })
+        }))?;
+        if !events.is_empty() {
+            if let Some(bus) = self.handler.db.event_bus().cloned() {
+                txn.on_success_ordered(Box::new(move || bus.publish_batch(events)))?;
+            }
+        }
+        let (io, callbacks) = txn
+            .into_retry_attempt()
+            .map_err(crate::error::Error::Storage)?;
+        retry
+            .finish_attempt_io(io, callbacks)
+            .map_err(|error| MergeError::Database(crate::error::Error::Storage(error.into())))?;
+        Ok(outcome)
+    }
+}
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -66,47 +211,84 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
         block_data: &[u8],
         metadata: BlockMetadata<'_>,
     ) -> Result<MergeOutcome, MergeError> {
-        // Go parity (internal/db/merge.go): merges race concurrent merges and
-        // local writes on shared systemstore keys — the /seq/doc short-ID
-        // sequence and co-owned block-ownership entries — so an optimistic
-        // TxnConflict is expected business. Go retries `executeMerge` up to
-        // MaxTxnRetries; the p2p layer treats a Failed merge as terminal (the
-        // pusher was already acked), so dropping a conflicted merge silently
-        // loses the document (observed as encrypted filtered-replication poll
-        // timeouts on the Linux CI runner).
         const MAX_TXN_RETRIES: usize = 5;
-
-        let mut result = self
-            .merge_block_attempt(cid, block_data, metadata.clone())
+        let recovered = if metadata.is_recovery {
+            self.recover_metadata_from_block(cid, block_data).await?
+        } else {
+            None
+        };
+        let doc_id = metadata
+            .doc_id
+            .map(str::to_owned)
+            .or_else(|| recovered.as_ref().map(|value| value.doc_id.clone()));
+        let collection_id = metadata
+            .collection_id
+            .map(str::to_owned)
+            .or_else(|| recovered.as_ref().map(|value| value.collection_id.clone()));
+        let creator = metadata
+            .creator
+            .map(str::to_owned)
+            .or_else(|| recovered.as_ref().map(|value| value.creator.clone()));
+        // Keep the established lock order: collection guard, then per-document
+        // merge queue, then a transaction snapshot. The guards span every
+        // engine retry so a local write cannot interleave between attempts.
+        let guard_collection_id = if let Some(schema_or_collection_id) = collection_id.as_deref() {
+            self.block_collection(schema_or_collection_id, None)
+                .await?
+                .map(|collection| collection.collection_id().to_string())
+        } else {
+            None
+        };
+        let _collection_guard = if let Some(collection_id) = guard_collection_id.as_deref() {
+            Some(
+                self.db
+                    .collection_read_guard(collection_id)
+                    .await
+                    .map_err(MergeError::Database)?,
+            )
+        } else {
+            None
+        };
+        let _doc_guard = if let Some(doc_id) = doc_id.as_deref() {
+            Some(self.merge_queue.acquire(doc_id).await)
+        } else {
+            None
+        };
+        let attempt = MergeRetryAttempt {
+            handler: self.clone(),
+            cid: *cid,
+            block_data: block_data.to_vec(),
+            doc_id,
+            collection_id,
+            creator,
+            sender_peer: metadata.sender_peer.map(str::to_owned),
+            is_explicit_replicator: metadata.is_explicit_replicator,
+            authorization: metadata.explicit_replay_authorization.clone(),
+            is_recovery: metadata.is_recovery,
+            is_schema_block: metadata.is_schema_block,
+        };
+        let result = self
+            .db
+            .store()
+            .transact_retry(
+                storage::corekv::RetryOptions::new(MAX_TXN_RETRIES as u32),
+                Box::new(attempt),
+            )
             .await;
-        let mut retry_count = 0;
-        for attempt in 1..MAX_TXN_RETRIES {
-            match &result {
-                Err(e) if e.is_txn_conflict() => {
-                    telemetry::record_retry_attempt(telemetry::RetryLayer::Merge);
-                    retry_count += 1;
-                    tracing::debug!(cid = %cid, attempt, "Merge txn conflict, retrying");
-                    result = self
-                        .merge_block_attempt(cid, block_data, metadata.clone())
-                        .await;
-                }
-                _ => break,
-            }
-        }
-        if retry_count > 0 && !result.as_ref().is_err_and(|error| error.is_txn_conflict()) {
-            telemetry::record_retry_success(telemetry::RetryLayer::Merge);
-        }
-        if let Err(e) = &result {
-            if e.is_txn_conflict() {
-                telemetry::record_retry_exhaustion(telemetry::RetryLayer::Merge);
-                tracing::warn!(
-                    cid = %cid,
-                    max_retries = MAX_TXN_RETRIES,
-                    "Merge txn conflict retries exhausted — document merge failed"
-                );
-            }
-        }
+        let result = match result {
+            Ok(value) => value
+                .downcast::<MergeOutcome>()
+                .map(|outcome| *outcome)
+                .map_err(|_| MergeError::MergeFailed("invalid merge retry result".into())),
+            Err(error) => match error.downcast_abort::<MergeError>() {
+                Ok(error) => Err(error),
+                Err(error) => Err(MergeError::Database(crate::error::Error::Storage(
+                    error.into_storage(),
+                ))),
+            },
+        };
         match result {
+            Err(MergeError::RetryRejected(reason)) => Ok(MergeOutcome::rejected(reason)),
             Err(error) if error.disposition() == MergeErrorDisposition::Terminal => {
                 Ok(MergeOutcome::rejected(error.to_string()))
             }
