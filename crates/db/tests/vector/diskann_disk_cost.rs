@@ -169,7 +169,7 @@ async fn query(dir: &Path, layout: &str, profile: &str, passes: usize) {
         "server" => RegolithStoreOptions::new(),
         _ => RegolithStoreOptions::embedded(),
     };
-    options.engine.statistics = Some(stats.clone());
+    options.engine = options.engine.statistics(Some(stats.clone()));
     let store = RegolithStore::open_with_options(dir.join("db"), options).unwrap();
     let mut txn = store.new_txn(true).await.unwrap();
     let resident = layout == "resident";
