@@ -755,9 +755,12 @@ async fn execute_autocommit_request(
     request: QueryRequest,
     policy: Option<ExecuteRetryPolicy>,
 ) -> QueryResponse {
-    let Some(policy) = policy else {
-        return executor.execute(request).await;
-    };
+    // Preparation is required even for one-shot execution: remote embedding
+    // and KMS work must happen outside the retriable mutation attempt. A
+    // missing conflict policy means zero storage-conflict retries, while
+    // typed NeedsInput outcomes still resolve and re-enter the request.
+    let policy =
+        policy.unwrap_or_else(|| ExecuteRetryPolicy::new(0, Duration::ZERO, Duration::ZERO));
     let prepared = match executor.prepare_request(&request).await {
         Ok(prepared) => prepared,
         Err(error) => {
@@ -768,16 +771,73 @@ async fn execute_autocommit_request(
             }
         }
     };
-    execute_request_with_retry_loop(request, policy, |request| {
-        executor.execute_prepared(request, prepared.clone())
-    })
-    .await
+    execute_prepared_request_with_retry_loop(executor, request, prepared, policy).await
+}
+
+async fn execute_prepared_request_with_retry_loop(
+    executor: &dyn QueryExecutor,
+    request: QueryRequest,
+    mut prepared: Option<std::sync::Arc<query::prepared::PreparedMutations>>,
+    policy: ExecuteRetryPolicy,
+) -> QueryResponse {
+    let mut retry_count = 0;
+    let mut backoff = policy.initial_backoff.min(policy.max_backoff);
+
+    loop {
+        let response = executor
+            .execute_prepared(request.clone(), prepared.clone())
+            .await;
+        if let Some(input) = response.retry_input() {
+            match executor
+                .resolve_retry_input(&request, prepared.clone(), input)
+                .await
+            {
+                Ok(Some(updated)) => {
+                    prepared = Some(updated);
+                    continue;
+                }
+                Ok(None) => {
+                    return QueryResponse::error(
+                        "retry input resolution returned no preparation capsule",
+                    )
+                }
+                Err(error) => {
+                    return QueryResponse::error(query::QueryResponseError::from_query_error(error))
+                }
+            }
+        }
+        if !is_transaction_conflict_response(&response) {
+            if retry_count > 0 {
+                telemetry::record_retry_success(telemetry::RetryLayer::EmbeddedExecute);
+            }
+            return response;
+        }
+        if retry_count >= policy.max_retries {
+            telemetry::record_retry_exhaustion(telemetry::RetryLayer::EmbeddedExecute);
+            return response;
+        }
+
+        telemetry::record_retry_attempt(telemetry::RetryLayer::EmbeddedExecute);
+        retry_count += 1;
+        let delay = jittered_backoff(backoff);
+        tracing::warn!(
+            retry = retry_count,
+            max_retries = policy.max_retries,
+            backoff_ms = delay.as_millis(),
+            "retrying embedded execute after transaction conflict"
+        );
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        backoff = next_retry_backoff(backoff, policy.max_backoff);
+    }
 }
 
 #[cfg(test)]
 #[path = "request_preparation_tests.rs"]
 mod request_preparation_tests;
 
+#[cfg(test)]
 async fn execute_request_with_retry_loop<F, Fut>(
     request: QueryRequest,
     policy: ExecuteRetryPolicy,

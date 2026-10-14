@@ -198,6 +198,8 @@ pub struct UpdateNode {
     /// Update input (fields to patch)
     input: UpdateInput,
     prepared_writes: Option<RapidHashMap<String, Arc<document::WritePreparation>>>,
+    prepared_embeddings: Option<RapidHashMap<String, Vec<crate::prepared::PreparedEmbedding>>>,
+    prepared_inputs: Option<crate::prepared::PreparedInputMemo>,
     /// Updated documents (populated after first next())
     updated_docs: Vec<Doc>,
     /// Document IDs that were requested but not found
@@ -238,6 +240,8 @@ impl UpdateNode {
             filter: None,
             input: UpdateInput::new(),
             prepared_writes: None,
+            prepared_embeddings: None,
+            prepared_inputs: None,
             updated_docs: Vec::new(),
             not_found_ids: Vec::new(),
             position: 0,
@@ -270,6 +274,16 @@ impl UpdateNode {
         writes: Option<RapidHashMap<String, Arc<document::WritePreparation>>>,
     ) -> Self {
         self.prepared_writes = writes;
+        self
+    }
+
+    pub fn with_prepared_embeddings(
+        mut self,
+        embeddings: Option<RapidHashMap<String, Vec<crate::prepared::PreparedEmbedding>>>,
+        inputs: Option<crate::prepared::PreparedInputMemo>,
+    ) -> Self {
+        self.prepared_embeddings = embeddings;
+        self.prepared_inputs = inputs;
         self
     }
 
@@ -423,8 +437,55 @@ impl PlanNode for UpdateNode {
                     )?;
 
                     // Collect the modified field names for block creation
-                    let modified_fields: RapidHashSet<String> =
+                    let mut modified_fields: RapidHashSet<String> =
                         self.input.fields.keys().cloned().collect();
+
+                    if let Some(embeddings) = &self.prepared_embeddings {
+                        let id = doc.id().map(ToString::to_string).unwrap_or_default();
+                        if let Some(prepared) = embeddings.get(&id) {
+                            for embedding in prepared {
+                                let dependencies_match = embedding
+                                    .dependencies
+                                    .iter()
+                                    .all(|(field, value)| doc.get(field) == Some(value));
+                                let Some(request) = self
+                                    .mutator
+                                    .prepared_embedding_request(
+                                        &self.collection_name,
+                                        &embedding.field,
+                                        &doc,
+                                    )
+                                    .await?
+                                else {
+                                    continue;
+                                };
+                                if dependencies_match && embedding.request == request {
+                                    doc.set(embedding.field.clone(), embedding.value.clone());
+                                    modified_fields.insert(embedding.field.clone());
+                                    continue;
+                                }
+
+                                let Some(response) = self
+                                    .prepared_inputs
+                                    .as_ref()
+                                    .and_then(|memo| memo.get(&request))
+                                else {
+                                    return Err(QueryError::NeedsInput(request));
+                                };
+                                let vector: Vec<f64> =
+                                    serde_json::from_slice(&response).map_err(|error| {
+                                        QueryError::execution(format!(
+                                            "invalid prepared embedding response: {error}"
+                                        ))
+                                    })?;
+                                doc.set(
+                                    embedding.field.clone(),
+                                    document::NormalValue::Float64Array(vector),
+                                );
+                                modified_fields.insert(embedding.field.clone());
+                            }
+                        }
+                    }
 
                     if let Some(writes) = &self.prepared_writes {
                         let id = doc.id().map(ToString::to_string).unwrap_or_default();

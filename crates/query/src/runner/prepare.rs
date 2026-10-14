@@ -18,11 +18,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         &self,
         request: &QueryRequest,
     ) -> Result<Option<Arc<PreparedMutations>>> {
-        let Some(mutator) = self
-            .mutator
-            .as_ref()
-            .filter(|m| m.requires_write_preparation())
-        else {
+        let Some(mutator) = self.mutator.as_ref() else {
             return Ok(None);
         };
         let variables = super::executor::convert_variables(&request.variables);
@@ -40,6 +36,25 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         else {
             return Ok(None);
         };
+        let schema_has_embeddings = if mutator.requires_write_preparation() {
+            false
+        } else {
+            let provider = self.effective_provider();
+            let mut has_embeddings = false;
+            for mutation in mutations {
+                if let Some(collection) = provider.get_collection(&mutation.collection_name).await?
+                {
+                    if !collection.vector_embeddings.is_empty() {
+                        has_embeddings = true;
+                        break;
+                    }
+                }
+            }
+            has_embeddings
+        };
+        if !mutator.requires_write_preparation() && !schema_has_embeddings {
+            return Ok(None);
+        }
         validate_parsed_operation(&parsed, self.effective_provider().as_ref()).await?;
         if super::executor::check_nac(self, &request.identity, &parsed)
             .await
@@ -52,6 +67,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let mut prepared = PreparedMutations {
             request_time,
             mutations: RapidHashMap::new(),
+            inputs: crate::prepared::PreparedInputMemo::default(),
         };
         let mut documents = Vec::new();
         let mut projected_ids = rapidhash::RapidHashSet::default();
@@ -70,7 +86,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 documents: &documents,
             };
             let authorized = self
-                .authorize_mutation(mutation, &identity, &fetcher, Some(&projected_ids))
+                .authorize_mutation(
+                    mutation,
+                    &identity,
+                    &fetcher,
+                    Some(&projected_ids),
+                    Some(&prepared.inputs),
+                )
                 .await?;
             let collection = &authorized.collection;
             let mut entry = PreparedMutation {
@@ -152,7 +174,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                 }
                             }
                         }
-                        let modified = if mutation.mutation_type == MutationType::Update {
+                        let modified: rapidhash::RapidHashSet<String> = if mutation.mutation_type
+                            == MutationType::Update
+                        {
                             let input = self.build_update_input(mutation, collection)?;
                             input.apply_to_with_time(doc, Some(collection), Some(request_time))?;
                             input.fields.keys().cloned().collect()
@@ -166,7 +190,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             .prepare_write(
                                 &mutation.collection_name,
                                 doc.clone(),
-                                Some(modified),
+                                Some(modified.clone()),
                                 config.clone(),
                             )
                             .await?;
@@ -174,6 +198,46 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             entry.updates.insert(id.to_string(), Arc::clone(write));
                         }
                         if let Some(id) = doc.id().map(ToString::to_string) {
+                            let mut embeddings = Vec::new();
+                            for embedding in &collection.vector_embeddings {
+                                if modified.contains(&embedding.field_name)
+                                    || !embedding
+                                        .fields
+                                        .iter()
+                                        .any(|source| modified.contains(source))
+                                {
+                                    continue;
+                                }
+                                let Some(value) = doc.get(&embedding.field_name).cloned() else {
+                                    continue;
+                                };
+                                let Some(request) = mutator
+                                    .prepared_embedding_request(
+                                        &mutation.collection_name,
+                                        &embedding.field_name,
+                                        &doc,
+                                    )
+                                    .await?
+                                else {
+                                    continue;
+                                };
+                                let dependencies = embedding
+                                    .fields
+                                    .iter()
+                                    .filter_map(|field| {
+                                        doc.get(field).cloned().map(|value| (field.clone(), value))
+                                    })
+                                    .collect();
+                                embeddings.push(crate::prepared::PreparedEmbedding {
+                                    field: embedding.field_name.clone(),
+                                    value,
+                                    dependencies,
+                                    request,
+                                });
+                            }
+                            if !embeddings.is_empty() {
+                                entry.embeddings.insert(id.clone(), embeddings);
+                            }
                             documents.push((mutation.collection_name.clone(), id, Some(doc)));
                         }
                     }

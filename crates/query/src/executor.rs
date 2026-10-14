@@ -110,6 +110,11 @@ impl QueryResponse {
         }
     }
 
+    /// Internal control request for an autocommit retry, omitted from JSON.
+    pub fn retry_input(&self) -> Option<&crate::prepared::PreparedInputRequest> {
+        self.errors.iter().find_map(QueryResponseError::retry_input)
+    }
+
     /// Create an error response.
     pub fn error(err: impl Into<QueryResponseError>) -> Self {
         Self {
@@ -206,6 +211,10 @@ pub struct QueryResponseError {
     /// Machine-readable GraphQL error metadata.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<QueryResponseErrorExtensions>,
+
+    /// Internal retry control. Never serialized to client responses.
+    #[serde(skip)]
+    pub(crate) retry_input: Option<crate::prepared::PreparedInputRequest>,
 }
 
 impl QueryResponseError {
@@ -216,6 +225,7 @@ impl QueryResponseError {
             path: None,
             locations: None,
             extensions: None,
+            retry_input: None,
         }
     }
 
@@ -248,12 +258,44 @@ impl QueryResponseError {
     pub fn from_query_error(error: crate::error::QueryError) -> Self {
         let is_transaction_conflict =
             matches!(&error, crate::error::QueryError::TransactionConflict(_));
+        let retry_input = match &error {
+            crate::error::QueryError::NeedsInput(request) => Some(request.clone()),
+            _ => None,
+        };
         let response_error = Self::new(error.to_string());
-        if is_transaction_conflict {
+        let mut response_error = if is_transaction_conflict {
             response_error.with_code(TXN_CONFLICT_ERROR_CODE)
         } else {
             response_error
-        }
+        };
+        response_error.retry_input = retry_input;
+        response_error
+    }
+
+    /// Internal retry control, omitted from serialized GraphQL errors.
+    pub fn retry_input(&self) -> Option<&crate::prepared::PreparedInputRequest> {
+        self.retry_input.as_ref()
+    }
+}
+
+#[cfg(test)]
+mod prepared_retry_tests {
+    use super::*;
+
+    #[test]
+    fn needs_input_is_internal_and_wire_bytes_are_not_serialized() {
+        let request = crate::prepared::PreparedInputRequest::new(
+            crate::prepared::PreparedInputKind::Embedding,
+            b"private source and provider context".as_slice(),
+        );
+        let error =
+            QueryResponseError::from_query_error(crate::error::QueryError::NeedsInput(request));
+
+        assert_eq!(error.message, "external input required");
+        assert!(error.retry_input().is_some());
+        let serialized = serde_json::to_string(&error).unwrap();
+        assert!(!serialized.contains("private source"));
+        assert!(!serialized.contains("retry_input"));
     }
 }
 
@@ -333,6 +375,20 @@ pub trait QueryExecutor: MaybeSendSync {
         _prepared: Option<std::sync::Arc<crate::prepared::PreparedMutations>>,
     ) -> QueryResponse {
         self.execute(request).await
+    }
+
+    /// Resolve a transaction-dependent input after its attempt has ended.
+    /// The returned capsule must memoize the exact response bytes so later
+    /// attempts with the same complete request do not call the provider again.
+    async fn resolve_retry_input(
+        &self,
+        _request: &QueryRequest,
+        _prepared: Option<std::sync::Arc<crate::prepared::PreparedMutations>>,
+        _input: &crate::prepared::PreparedInputRequest,
+    ) -> Result<Option<std::sync::Arc<crate::prepared::PreparedMutations>>> {
+        Err(crate::error::QueryError::execution(
+            "retry input resolution is not supported by this executor",
+        ))
     }
 
     /// Execute a GraphQL query and return the response.

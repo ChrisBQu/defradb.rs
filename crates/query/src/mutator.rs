@@ -371,6 +371,16 @@ impl MutationBatch {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait DocMutator: MaybeSendSync {
+    /// Return a request-bound mutator that can see prepared external inputs
+    /// while executing this request. Implementations must return an isolated
+    /// clone/context; this must not mutate shared mutator state.
+    fn with_prepared_inputs(
+        &self,
+        _inputs: crate::prepared::PreparedInputMemo,
+    ) -> Option<Arc<dyn DocMutator>> {
+        None
+    }
+
     /// Whether this mutator resolves persistent inputs before request retries.
     fn requires_write_preparation(&self) -> bool {
         false
@@ -385,6 +395,29 @@ pub trait DocMutator: MaybeSendSync {
         _encryption: Option<defra_core::encryption::EncryptionConfig>,
     ) -> Result<Document> {
         Ok(doc)
+    }
+
+    /// Resolve one exact external request after a transaction attempt has
+    /// ended. Implementations parse the request according to `kind` and return
+    /// the provider response bytes for per-request memoization.
+    async fn resolve_prepared_input(
+        &self,
+        _request: &crate::prepared::PreparedInputRequest,
+    ) -> Result<Arc<[u8]>> {
+        Err(crate::error::QueryError::execution(
+            "prepared input resolution is not supported by this mutator",
+        ))
+    }
+
+    /// Build the exact remote request for a regenerated embedding using the
+    /// current attempt's source values. This method is pure local work.
+    async fn prepared_embedding_request(
+        &self,
+        _collection_name: &str,
+        _field_name: &str,
+        _doc: &Document,
+    ) -> Result<Option<crate::prepared::PreparedInputRequest>> {
+        Ok(None)
     }
 
     /// Configure document ACP for mutation-side ordering guarantees.

@@ -17,7 +17,7 @@ use super::helpers::{
     write_branchable_collection_block, write_local_create, write_local_update,
 };
 use crate::block::builder::DocStorageIdentity;
-use crate::block::builder::{write_delete_block, write_document_blocks};
+use crate::block::builder::{write_delete_block_with_inputs, write_document_blocks_with_inputs};
 use crate::collection::loader::{get_collection_with_index_manager, get_collection_with_lazy_load};
 use crate::database::DB;
 use crate::event::emission::register_update_event_callback;
@@ -27,6 +27,7 @@ use defra_core::signing::get_signing_config;
 
 pub struct BatchMutator<S: Store> {
     db: Arc<DB<S>>,
+    prepared_inputs: Option<query::prepared::PreparedInputMemo>,
     txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
     /// Per-doc write guards held across the WHOLE batch txn so a local counter
     /// read-modify-write and a P2P merge on the same document never interleave
@@ -40,9 +41,18 @@ pub struct BatchMutator<S: Store> {
 
 impl<S: Store> BatchMutator<S> {
     pub fn new(db: Arc<DB<S>>, txn: Arc<TokioMutex<Option<DbTxn<S>>>>) -> Self {
+        Self::new_with_prepared_inputs(db, txn, None)
+    }
+
+    pub(crate) fn new_with_prepared_inputs(
+        db: Arc<DB<S>>,
+        txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
+        prepared_inputs: Option<query::prepared::PreparedInputMemo>,
+    ) -> Self {
         Self {
             db,
             txn,
+            prepared_inputs,
             doc_guards: PlMutex::new(BTreeMap::new()),
             batch_gate: PlMutex::new(None),
         }
@@ -266,7 +276,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         let (doc_id, doc_cid, doc_block, col_block_data) = {
             let (blockstore, headstore) = self.block_and_head_stores().await?;
 
-            let block_result = write_document_blocks(
+            let block_result = write_document_blocks_with_inputs(
                 &blockstore,
                 &headstore,
                 &doc,
@@ -276,13 +286,17 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 enc_config.as_ref(),
                 sign_config.as_ref(),
                 self.db.kms().as_ref(),
+                self.prepared_inputs.as_ref(),
             )
             .await
-            .map_err(|e| {
-                query::error::QueryError::execution(format!(
+            .map_err(|error| match error {
+                crate::block::builder::BuildError::NeedsInput(request) => {
+                    query::error::QueryError::NeedsInput(request)
+                }
+                error => query::error::QueryError::execution(format!(
                     "failed to write document blocks for create on collection {}: {}",
-                    collection_name, e
-                ))
+                    collection_name, error
+                )),
             })?;
 
             let doc_id = register_created_doc(
@@ -309,6 +323,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 block_result.cid,
                 doc_short_id,
                 sign_config.as_ref(),
+                self.prepared_inputs.as_ref(),
             )
             .await?;
 
@@ -435,7 +450,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         let (doc_cid, doc_block, col_block_data) = {
             let (blockstore, headstore) = self.block_and_head_stores().await?;
 
-            let block_result = write_document_blocks(
+            let block_result = write_document_blocks_with_inputs(
                 &blockstore,
                 &headstore,
                 &doc,
@@ -445,13 +460,17 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 enc_config.as_ref(),
                 sign_config.as_ref(),
                 self.db.kms().as_ref(),
+                self.prepared_inputs.as_ref(),
             )
             .await
-            .map_err(|e| {
-                query::error::QueryError::execution(format!(
+            .map_err(|error| match error {
+                crate::block::builder::BuildError::NeedsInput(request) => {
+                    query::error::QueryError::NeedsInput(request)
+                }
+                error => query::error::QueryError::execution(format!(
                     "failed to write document blocks for update on collection {}: {}",
-                    collection_name, e
-                ))
+                    collection_name, error
+                )),
             })?;
 
             register_block_doc_id_mappings(
@@ -470,6 +489,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 block_result.cid,
                 doc_short_id,
                 sign_config.as_ref(),
+                self.prepared_inputs.as_ref(),
             )
             .await?;
 
@@ -550,20 +570,24 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         let (doc_cid, doc_block, col_block_data) = {
             let (blockstore, headstore) = self.block_and_head_stores().await?;
 
-            let block_result = write_delete_block(
+            let block_result = write_delete_block_with_inputs(
                 &blockstore,
                 &headstore,
                 &canonical_doc_id.to_string(),
                 doc_short_id,
                 schema_version_id,
                 sign_config.as_ref(),
+                self.prepared_inputs.as_ref(),
             )
             .await
-            .map_err(|e| {
-                query::error::QueryError::execution(format!(
+            .map_err(|error| match error {
+                crate::block::builder::BuildError::NeedsInput(request) => {
+                    query::error::QueryError::NeedsInput(request)
+                }
+                error => query::error::QueryError::execution(format!(
                     "failed to write delete block for collection {}: {}",
-                    collection_name, e
-                ))
+                    collection_name, error
+                )),
             })?;
 
             let composite_cid = block_result.cid;
@@ -585,6 +609,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 composite_cid,
                 doc_short_id,
                 sign_config.as_ref(),
+                self.prepared_inputs.as_ref(),
             )
             .await?;
 

@@ -45,8 +45,38 @@ async fn inherited_encryption_cid(
 async fn kms_resolved_key(
     kms: Option<&std::sync::Arc<dyn kms::KmsService>>,
     enc_cid: Cid,
-) -> Result<Option<([u8; 32], Cid)>, String> {
+    prepared_inputs: Option<&query::prepared::PreparedInputMemo>,
+) -> Result<Option<([u8; 32], Cid)>, BuildError> {
     let kms_svc = kms.ok_or_else(|| format!("Encryption block {} not found", enc_cid))?;
+    if let Some(inputs) = prepared_inputs {
+        let request = crate::write::prepare::kms_input_request(
+            crate::write::prepare::PreparedKmsOperation::Get {
+                cid: enc_cid.to_string(),
+            },
+        );
+        let Some(response) = inputs.get(&request) else {
+            return Err(BuildError::NeedsInput(request));
+        };
+        let response: crate::write::prepare::PreparedKmsResponse =
+            serde_json::from_slice(&response).map_err(|error| {
+                BuildError::Message(format!("invalid cached KMS key response: {error}"))
+            })?;
+        let returned_cid = Cid::try_from(response.cid.as_str()).map_err(|error| {
+            BuildError::Message(format!("invalid CID in cached KMS key response: {error}"))
+        })?;
+        let key: [u8; 32] = response.key.try_into().map_err(|key: Vec<u8>| {
+            BuildError::Message(format!(
+                "KMS returned a {}-byte key for {returned_cid}, expected 32",
+                key.len()
+            ))
+        })?;
+        if returned_cid != enc_cid {
+            return Err(BuildError::Message(format!(
+                "KMS returned key for {returned_cid}, expected {enc_cid}"
+            )));
+        }
+        return Ok(Some((key, enc_cid)));
+    }
     let key = kms_svc
         .get_keys(&kms::RequestContext::anonymous(), &[enc_cid])
         .await
@@ -70,7 +100,8 @@ async fn inherited_encryption(
     blockstore: &NamespaceView,
     heads: &[Cid],
     kms: Option<&std::sync::Arc<dyn kms::KmsService>>,
-) -> Result<Option<([u8; 32], Cid)>, String> {
+    prepared_inputs: Option<&query::prepared::PreparedInputMemo>,
+) -> Result<Option<([u8; 32], Cid)>, BuildError> {
     let Some(enc_cid) = inherited_encryption_cid(blockstore, heads).await? else {
         return Ok(None);
     };
@@ -97,7 +128,7 @@ async fn inherited_encryption(
             // block in its own `KeyStore`; nothing requires that store to be
             // either of these namespaces. Ask it for the key rather than
             // assuming the aliasing today's wiring happens to give us.
-            None => return kms_resolved_key(kms, enc_cid).await,
+            None => return kms_resolved_key(kms, enc_cid, prepared_inputs).await,
         },
     };
     let enc_block = Encryption::from_dag_cbor(&enc_bytes)
@@ -150,29 +181,57 @@ async fn encrypt_with_new_key(
     key_field_name: Option<&str>,
     value_bytes: &[u8],
     prepared: Option<&document::WritePreparation>,
-) -> Result<(Vec<u8>, Cid), String> {
-    if let Some((cid, key)) = prepared.and_then(|p| p.key(field_name)) {
-        return Ok((encrypt_delta(value_bytes, key)?, cid));
-    }
-    if prepared.is_some() {
-        return Err(format!(
-            "encryption key for field {field_name} was not prepared"
-        ));
+    prepared_inputs: Option<&query::prepared::PreparedInputMemo>,
+) -> Result<(Vec<u8>, Cid), BuildError> {
+    if let Some(prepared) = prepared {
+        if let Some((cid, key)) = prepared.key(field_name) {
+            if prepared.key_scope_matches(field_name, key_field_name) {
+                return Ok((encrypt_delta(value_bytes, key)?, cid));
+            }
+        }
+        if (prepared.requires_kms_keys() || kms.is_some()) && prepared_inputs.is_none() {
+            return Err(format!(
+                "encryption key for field {field_name} was not prepared for the current encryption context"
+            )
+            .into());
+        }
     }
     if let Some(kms_svc) = kms {
         // KMS path: the KMS generates + persists the Encryption block (in its
         // KeyStore) and returns the CID + plain key for us to encrypt the field
         // delta with. The scope is keyed by the node-local DocRef: the public
         // DocID is not yet known on the create path.
-        let scope = kms::KeyScope::Document {
-            doc_id: hex::encode(doc_ref_bytes),
-            field: key_field_name.map(str::to_owned),
+        let doc_id = hex::encode(doc_ref_bytes);
+        let field = key_field_name.map(str::to_owned);
+        let (enc_cid, key) = if let Some(inputs) = prepared_inputs {
+            let request = crate::write::prepare::kms_input_request(
+                crate::write::prepare::PreparedKmsOperation::Generate { doc_id, field },
+            );
+            let Some(response) = inputs.get(&request) else {
+                return Err(BuildError::NeedsInput(request));
+            };
+            let response: crate::write::prepare::PreparedKmsResponse =
+                serde_json::from_slice(&response).map_err(|error| {
+                    BuildError::Message(format!("invalid cached KMS key response: {error}"))
+                })?;
+            let enc_cid = Cid::try_from(response.cid.as_str()).map_err(|error| {
+                BuildError::Message(format!("invalid CID in cached KMS key response: {error}"))
+            })?;
+            let key: [u8; 32] = response.key.try_into().map_err(|key: Vec<u8>| {
+                BuildError::Message(format!(
+                    "KMS returned a {}-byte key for {enc_cid}, expected 32",
+                    key.len()
+                ))
+            })?;
+            (enc_cid, key)
+        } else {
+            let scope = kms::KeyScope::Document { doc_id, field };
+            let ctx = kms::RequestContext::anonymous();
+            kms_svc
+                .generate_key(&ctx, scope)
+                .await
+                .map_err(|e| BuildError::Message(format!("kms generate_key: {e}")))?
         };
-        let ctx = kms::RequestContext::anonymous();
-        let (enc_cid, key) = kms_svc
-            .generate_key(&ctx, scope)
-            .await
-            .map_err(|e| format!("kms generate_key: {e}"))?;
         let encrypted = encrypt_delta(value_bytes, &key)?;
         tracing::debug!(
             field = %field_name,
@@ -240,6 +299,35 @@ pub async fn write_document_blocks(
     signing_config: Option<&SigningConfig>,
     kms: Option<&std::sync::Arc<dyn kms::KmsService>>,
 ) -> Result<BlockResult, String> {
+    write_document_blocks_with_inputs(
+        blockstore,
+        headstore,
+        doc,
+        schema_version_id,
+        identity,
+        modified_fields,
+        encryption_config,
+        signing_config,
+        kms,
+        None,
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn write_document_blocks_with_inputs(
+    blockstore: &NamespaceView,
+    headstore: &NamespaceView,
+    doc: &Document,
+    schema_version_id: &str,
+    identity: DocStorageIdentity,
+    modified_fields: Option<&rapidhash::RapidHashSet<String>>,
+    encryption_config: Option<&EncryptionConfig>,
+    signing_config: Option<&SigningConfig>,
+    kms: Option<&std::sync::Arc<dyn kms::KmsService>>,
+    prepared_inputs: Option<&query::prepared::PreparedInputMemo>,
+) -> Result<BlockResult, BuildError> {
     let doc_ref_bytes = identity.doc_ref_bytes();
 
     let mut field_links: Vec<DAGLink> = Vec::new();
@@ -341,12 +429,13 @@ pub async fn write_document_blocks(
                     key_field_name,
                     &value_bytes,
                     doc.write_preparation().map(AsRef::as_ref),
+                    prepared_inputs,
                 )
                 .await?;
                 encryption_cids.push(enc_cid);
                 (encrypted, Some(enc_cid))
             } else if let Some((key, enc_cid)) =
-                inherited_encryption(blockstore, &heads, kms).await?
+                inherited_encryption(blockstore, &heads, kms, prepared_inputs).await?
             {
                 let encrypted = encrypt_delta(&value_bytes, &key)?;
 
@@ -369,6 +458,7 @@ pub async fn write_document_blocks(
                     None,
                     &value_bytes,
                     doc.write_preparation().map(AsRef::as_ref),
+                    prepared_inputs,
                 )
                 .await?;
                 encryption_cids.push(enc_cid);
@@ -412,7 +502,7 @@ pub async fn write_document_blocks(
 
             if let Some(signer) = signing_config {
                 tracing::debug!(field = %field_name, priority = field_priority, "Signing field block");
-                match sign_block(&field_block, signer, blockstore).await {
+                match sign_block(&field_block, signer, blockstore, prepared_inputs).await {
                     Ok(Some(sig_cid)) => {
                         tracing::debug!(field = %field_name, sig_cid = %sig_cid, "Field block signed");
                         field_block.signature = Some(sig_cid);
@@ -532,7 +622,9 @@ pub async fn write_document_blocks(
     );
 
     if let Some(signer) = signing_config {
-        if let Some(sig_cid) = sign_block(&composite_block, signer, blockstore).await? {
+        if let Some(sig_cid) =
+            sign_block(&composite_block, signer, blockstore, prepared_inputs).await?
+        {
             composite_block.signature = Some(sig_cid);
         }
     }
@@ -615,6 +707,28 @@ pub async fn write_delete_block(
     schema_version_id: &str,
     signing_config: Option<&SigningConfig>,
 ) -> Result<BlockResult, String> {
+    write_delete_block_with_inputs(
+        blockstore,
+        headstore,
+        doc_id,
+        doc_short_id,
+        schema_version_id,
+        signing_config,
+        None,
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
+pub(crate) async fn write_delete_block_with_inputs(
+    blockstore: &NamespaceView,
+    headstore: &NamespaceView,
+    doc_id: &str,
+    doc_short_id: u64,
+    schema_version_id: &str,
+    signing_config: Option<&SigningConfig>,
+    prepared_inputs: Option<&query::prepared::PreparedInputMemo>,
+) -> Result<BlockResult, BuildError> {
     let snapshot = DocHeadsSnapshot::load(headstore, doc_short_id).await?;
     let priority: u64 = snapshot.max_priority() + 1;
 
@@ -638,7 +752,9 @@ pub async fn write_delete_block(
     );
 
     if let Some(signer) = signing_config {
-        if let Some(sig_cid) = sign_block(&composite_block, signer, blockstore).await? {
+        if let Some(sig_cid) =
+            sign_block(&composite_block, signer, blockstore, prepared_inputs).await?
+        {
             composite_block.signature = Some(sig_cid);
         }
     }

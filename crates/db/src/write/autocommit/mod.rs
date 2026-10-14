@@ -21,7 +21,10 @@ use std::sync::Arc;
 use storage::corekv::Store;
 use tracing::warn;
 
-use crate::block::builder::{write_collection_block, write_delete_block, write_document_blocks};
+use crate::block::builder::{
+    write_collection_block_with_inputs, write_delete_block_with_inputs,
+    write_document_blocks_with_inputs,
+};
 use crate::collection::Collection;
 use crate::database::DB;
 use crate::index::IndexManager;
@@ -50,12 +53,16 @@ pub use batch::BatchMutator;
 /// `DbDocMutator` with explicit transaction management instead.
 pub struct AutoCommitMutator<S: Store> {
     pub(super) db: Arc<DB<S>>,
+    pub(super) prepared_inputs: Option<query::prepared::PreparedInputMemo>,
 }
 
 impl<S: Store> AutoCommitMutator<S> {
     /// Create a new auto-committing mutator wrapping the given database.
     pub fn new(db: Arc<DB<S>>) -> Self {
-        Self { db }
+        Self {
+            db,
+            prepared_inputs: None,
+        }
     }
 
     pub fn set_document_acp(&self, acp: Arc<dyn acp::DocumentACP>) {
@@ -157,7 +164,11 @@ impl<S: Store> AutoCommitMutator<S> {
             txn,
             self.db.lens_store.clone(),
         ));
-        let batch = Arc::new(BatchMutator::new(self.db.clone(), fetcher.shared_txn()));
+        let batch = Arc::new(BatchMutator::new_with_prepared_inputs(
+            self.db.clone(),
+            fetcher.shared_txn(),
+            self.prepared_inputs.clone(),
+        ));
         Ok((batch, fetcher))
     }
 }
@@ -165,8 +176,143 @@ impl<S: Store> AutoCommitMutator<S> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
+    fn with_prepared_inputs(
+        &self,
+        inputs: query::prepared::PreparedInputMemo,
+    ) -> Option<Arc<dyn DocMutator>> {
+        Some(Arc::new(Self {
+            db: self.db.clone(),
+            prepared_inputs: Some(inputs),
+        }))
+    }
+
     fn requires_write_preparation(&self) -> bool {
+        let embedding = self.db.options().embedding_config();
         self.db.kms().is_some()
+            || !embedding.url.is_empty()
+            || !embedding.model.is_empty()
+            || get_signing_config().is_some()
+    }
+
+    async fn resolve_prepared_input(
+        &self,
+        request: &query::prepared::PreparedInputRequest,
+    ) -> query::error::Result<std::sync::Arc<[u8]>> {
+        match request.kind() {
+            query::prepared::PreparedInputKind::Embedding => {
+                let response = crate::search::embedding::resolve_prepared_embedding_request(
+                    request.exact_request(),
+                )
+                .await
+                .map_err(|error| {
+                    query::error::QueryError::execution(format!("embedding error: {error}"))
+                })?;
+                Ok(std::sync::Arc::from(response))
+            }
+            query::prepared::PreparedInputKind::Signature => {
+                let input =
+                    defra_core::signing::RemoteSignatureInput::decode(request.exact_request())
+                        .map_err(query::error::QueryError::execution)?;
+                let signer = get_signing_config().ok_or_else(|| {
+                    query::error::QueryError::execution(
+                        "remote signature input has no configured signer",
+                    )
+                })?;
+                let response = input
+                    .resolve(&signer)
+                    .map_err(query::error::QueryError::execution)?;
+                Ok(std::sync::Arc::from(response))
+            }
+            query::prepared::PreparedInputKind::KmsKey => {
+                let operation: crate::write::prepare::PreparedKmsOperation =
+                    serde_json::from_slice(request.exact_request()).map_err(|error| {
+                        query::error::QueryError::execution(format!(
+                            "invalid prepared KMS request: {error}"
+                        ))
+                    })?;
+                let kms = self.db.kms().ok_or_else(|| {
+                    query::error::QueryError::execution(
+                        "prepared KMS input has no configured KMS provider",
+                    )
+                })?;
+                let (cid, key) = match operation {
+                    crate::write::prepare::PreparedKmsOperation::Get { cid } => {
+                        let cid = cid::Cid::try_from(cid.as_str()).map_err(|error| {
+                            query::error::QueryError::execution(format!(
+                                "invalid encryption CID in prepared KMS request: {error}"
+                            ))
+                        })?;
+                        let key = kms
+                            .get_keys(&kms::RequestContext::anonymous(), &[cid])
+                            .await
+                            .map_err(|error| {
+                                query::error::QueryError::execution(format!(
+                                    "kms get_keys for {cid}: {error}"
+                                ))
+                            })?
+                            .wait_all()
+                            .await
+                            .map_err(|error| {
+                                query::error::QueryError::execution(format!(
+                                    "kms get_keys for {cid}: {error}"
+                                ))
+                            })?
+                            .remove(&cid)
+                            .ok_or_else(|| {
+                                query::error::QueryError::execution(format!(
+                                    "Encryption block {cid} not found"
+                                ))
+                            })?;
+                        (cid, key.to_vec())
+                    }
+                    crate::write::prepare::PreparedKmsOperation::Generate { doc_id, field } => {
+                        let scope = kms::KeyScope::Document { doc_id, field };
+                        let (cid, key) = kms
+                            .generate_key(&kms::RequestContext::anonymous(), scope)
+                            .await
+                            .map_err(|error| {
+                                query::error::QueryError::execution(format!(
+                                    "kms generate_key: {error}"
+                                ))
+                            })?;
+                        (cid, key.to_vec())
+                    }
+                };
+                let response = serde_json::to_vec(&crate::write::prepare::PreparedKmsResponse {
+                    cid: cid.to_string(),
+                    key,
+                })
+                .map_err(|error| query::error::QueryError::execution(error.to_string()))?;
+                Ok(std::sync::Arc::from(response))
+            }
+            kind => Err(query::error::QueryError::execution(format!(
+                "prepared {kind:?} input resolution is not available"
+            ))),
+        }
+    }
+
+    async fn prepared_embedding_request(
+        &self,
+        collection_name: &str,
+        field_name: &str,
+        doc: &document::Document,
+    ) -> query::error::Result<Option<query::prepared::PreparedInputRequest>> {
+        let collection = self.get_collection_or_err(collection_name)?;
+        let Some(embedding) = collection
+            .schema()
+            .vector_embeddings
+            .iter()
+            .find(|embedding| embedding.field_name == field_name)
+        else {
+            return Ok(None);
+        };
+        crate::search::embedding::prepared_embedding_request(
+            embedding,
+            doc,
+            &self.db.options().embedding_config(),
+        )
+        .map(Some)
+        .map_err(query::error::QueryError::execution)
     }
 
     async fn prepare_write(

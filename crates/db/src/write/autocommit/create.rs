@@ -5,7 +5,11 @@ use events::{Message, Update};
 
 use crate::block::builder::DocStorageIdentity;
 
-use crate::block::builder::{compute_document_blocks, insert_computed_blocks, ComputedBlocks};
+use crate::block::builder::{
+    ComputedBlocks, compute_document_blocks_with_inputs, insert_computed_blocks,
+};
+use crate::write::prepare::PreparedCreateBlocks;
+
 
 struct CreateRetryAttempt<S: Store> {
     db: Arc<DB<S>>,
@@ -16,6 +20,7 @@ struct CreateRetryAttempt<S: Store> {
     doc_short_id: u64,
     sign_config: Option<defra_core::signing::SigningConfig>,
     acp_registration: Option<(Arc<dyn acp::DocumentACP>, identity::Did, String, String)>,
+    prepared_inputs: Option<query::prepared::PreparedInputMemo>,
 }
 
 impl<S: Store + 'static> storage::corekv::RetryAttemptFn for CreateRetryAttempt<S> {
@@ -26,6 +31,7 @@ impl<S: Store + 'static> storage::corekv::RetryAttemptFn for CreateRetryAttempt<
         Box::pin(async move {
             let mutator = AutoCommitMutator {
                 db: Arc::clone(&self.db),
+                prepared_inputs: self.prepared_inputs.clone(),
             };
             match mutator.run_create_attempt(retry, self).await {
                 Ok(value) => Ok(Box::new(value) as storage::corekv::RetryAttemptValue),
@@ -72,14 +78,16 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             ),
         };
         let doc_short_id = identity.doc_short_id;
-        crate::write::prepare::prepare_keys(
-            &self.db,
-            &mut doc,
-            identity,
-            None,
-            get_encryption_config().as_ref(),
-        )
-        .await?;
+        if crate::write::prepare::prepared_identity(&doc).is_none() {
+            crate::write::prepare::prepare_keys(
+                &self.db,
+                &mut doc,
+                identity,
+                None,
+                get_encryption_config().as_ref(),
+            )
+            .await?;
+        }
 
         let schema_version_id = collection.version_id().to_string();
         let enc_config = get_encryption_config();
@@ -104,40 +112,30 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             }
             _ => None,
         };
-        #[cfg(feature = "native")]
-        let computed_blocks = {
-            let doc = doc.clone();
-            let schema = schema_version_id.clone();
-            let enc = enc_config.clone();
-            let sign = sign_config.clone();
-            tokio::task::spawn_blocking(move || {
-                compute_document_blocks(&doc, &schema, identity, enc.as_ref(), sign.as_ref())
+        let computed_blocks = doc
+            .write_preparation()
+            .and_then(|write| write.payload::<PreparedCreateBlocks>())
+            .filter(|prepared| prepared.schema_version_id == schema_version_id)
+            .map(|prepared| prepared.computed.clone())
+            .map(Ok)
+            .unwrap_or_else(|| {
+                compute_document_blocks_with_inputs(
+                    &doc,
+                    &schema_version_id,
+                    identity,
+                    enc_config.as_ref(),
+                    sign_config.as_ref(),
+                    self.prepared_inputs.as_ref(),
+                )
             })
-            .await
-            .map_err(|error| {
-                query::error::QueryError::execution(format!(
-                    "block computation task panicked: {error}"
-                ))
-            })?
-            .map_err(|error| {
-                query::error::QueryError::execution(format!(
+            .map_err(|error| match error {
+                crate::block::builder::BuildError::NeedsInput(request) => {
+                    query::error::QueryError::NeedsInput(request)
+                }
+                error => query::error::QueryError::execution(format!(
                     "failed to compute document blocks: {error}"
-                ))
-            })?
-        };
-        #[cfg(not(feature = "native"))]
-        let computed_blocks = compute_document_blocks(
-            &doc,
-            &schema_version_id,
-            identity,
-            enc_config.as_ref(),
-            sign_config.as_ref(),
-        )
-        .map_err(|error| {
-            query::error::QueryError::execution(format!(
-                "failed to compute document blocks: {error}"
-            ))
-        })?;
+                )),
+            })?;
 
         // No per-doc write guard for creates: the DocID is derived from the
         // genesis block inside the txn, so no identity exists to guard yet.
@@ -156,6 +154,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             doc_short_id,
             sign_config,
             acp_registration,
+            prepared_inputs: self.prepared_inputs.clone(),
         };
         let result = self
             .db
@@ -278,6 +277,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 block_result.cid,
                 attempt.doc_short_id,
                 attempt.sign_config.as_ref(),
+                attempt.prepared_inputs.as_ref(),
             )
             .await?;
             Ok((
@@ -601,6 +601,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 computed.block_result.cid,
                 identity.doc_short_id,
                 sign_config.as_ref(),
+                self.prepared_inputs.as_ref(),
             )
             .await?;
 

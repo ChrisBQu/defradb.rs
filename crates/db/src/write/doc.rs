@@ -291,6 +291,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 block_result.cid,
                 doc_short_id,
                 sign_config.as_ref(),
+                None,
             )
             .await?;
 
@@ -444,6 +445,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 block_result.cid,
                 doc_short_id,
                 sign_config.as_ref(),
+                None,
             )
             .await?;
 
@@ -570,6 +572,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 block_result.cid,
                 doc_short_id,
                 sign_config.as_ref(),
+                None,
             )
             .await?;
 

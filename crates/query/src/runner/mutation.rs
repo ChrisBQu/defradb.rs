@@ -238,6 +238,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             request_time,
                             Some(batch_fetcher.clone()),
                             prepared.and_then(|p| p.mutations.get(&mutation.output_name())),
+                            prepared.map(|p| p.inputs.clone()),
                             &mut created_ids,
                         )
                         .await
@@ -275,6 +276,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     request_time,
                     fetcher_override.clone(),
                     prepared.and_then(|p| p.mutations.get(&mutation.output_name())),
+                    prepared.map(|p| p.inputs.clone()),
                     &mut created_ids,
                 )
                 .await?;
@@ -286,12 +288,76 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         Ok(JsonValue::Object(results))
     }
 
+    async fn check_doc_access_prepared(
+        &self,
+        identity: &Identity,
+        permission: DocumentPermission,
+        policy_id: &str,
+        resource_name: &str,
+        doc_id: &str,
+        prepared_inputs: Option<&crate::prepared::PreparedInputMemo>,
+    ) -> Result<bool> {
+        // The overlay can change as preceding mutations register/unregister
+        // objects. Keep those checks live; memoize only the remote provider
+        // answer when no request-local projection can affect it.
+        if crate::txn::current_deferred_acp_mutations().is_some() || prepared_inputs.is_none() {
+            return crate::txn::check_doc_access_with_overlay(
+                self.acp.as_ref(),
+                identity,
+                permission,
+                policy_id,
+                resource_name,
+                doc_id,
+            )
+            .await
+            .map_err(|error| QueryError::execution(error.to_string()));
+        }
+
+        let bearer = identity
+            .did()
+            .and_then(|did| defra_core::signing::get_request_bearer_token(did.as_str()));
+        let exact_request = serde_json::to_vec(&(
+            identity
+                .did()
+                .map(identity::Did::as_str)
+                .unwrap_or("anonymous"),
+            permission.as_str(),
+            policy_id,
+            resource_name,
+            doc_id,
+            bearer,
+        ))
+        .map_err(|error| QueryError::execution(error.to_string()))?;
+        let request = crate::prepared::PreparedInputRequest::new(
+            crate::prepared::PreparedInputKind::AcpDecision,
+            exact_request,
+        );
+        let inputs = prepared_inputs.expect("checked above");
+        if let Some(response) = inputs.get(&request) {
+            return serde_json::from_slice::<bool>(&response).map_err(|error| {
+                QueryError::execution(format!("cached ACP response is invalid: {error}"))
+            });
+        }
+        let allowed = self
+            .acp
+            .check_doc_access(identity, permission, policy_id, resource_name, doc_id)
+            .await
+            .map_err(|error| QueryError::execution(error.to_string()))?;
+        let response = serde_json::to_vec(&allowed)
+            .map_err(|error| QueryError::execution(error.to_string()))?;
+        if !inputs.insert(request, std::sync::Arc::<[u8]>::from(response)) {
+            return Err(QueryError::execution("prepared input memo budget exceeded"));
+        }
+        Ok(allowed)
+    }
+
     pub(super) async fn authorize_mutation(
         &self,
         mutation: &Mutation,
         caller_identity: &Option<Did>,
         fetcher: &dyn crate::fetcher::DocFetcher,
         projected_ids: Option<&rapidhash::RapidHashSet<String>>,
+        prepared_inputs: Option<&crate::prepared::PreparedInputMemo>,
     ) -> Result<AuthorizedMutation> {
         // Validate collection exists - resolve on-demand from provider
         let collection = self.get_collection(&mutation.collection_name).await?;
@@ -373,16 +439,17 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                 continue;
                             }
                             // Phase 1: Check if the identity can read the document
-                            let can_read = crate::txn::check_doc_access_with_overlay(
-                                self.acp.as_ref(),
-                                &identity_for_acp,
-                                DocumentPermission::Read,
-                                &policy.id,
-                                &policy.resource_name,
-                                doc_id,
-                            )
-                            .await
-                            .unwrap_or(false);
+                            let can_read = self
+                                .check_doc_access_prepared(
+                                    &identity_for_acp,
+                                    DocumentPermission::Read,
+                                    &policy.id,
+                                    &policy.resource_name,
+                                    doc_id,
+                                    prepared_inputs,
+                                )
+                                .await
+                                .unwrap_or(false);
 
                             if !can_read {
                                 // Document is invisible to this identity -- skip silently
@@ -390,16 +457,17 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             }
 
                             // Phase 2: Check if the identity can update the document
-                            let can_update = crate::txn::check_doc_access_with_overlay(
-                                self.acp.as_ref(),
-                                &identity_for_acp,
-                                DocumentPermission::Update,
-                                &policy.id,
-                                &policy.resource_name,
-                                doc_id,
-                            )
-                            .await
-                            .map_err(|e| QueryError::acp_check_failed("update", doc_id, e))?;
+                            let can_update = self
+                                .check_doc_access_prepared(
+                                    &identity_for_acp,
+                                    DocumentPermission::Update,
+                                    &policy.id,
+                                    &policy.resource_name,
+                                    doc_id,
+                                    prepared_inputs,
+                                )
+                                .await
+                                .map_err(|e| QueryError::acp_check_failed("update", doc_id, e))?;
 
                             if !can_update {
                                 return Err(QueryError::document_not_found(
@@ -423,16 +491,17 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                 continue;
                             }
                             // Phase 1: Check if the identity can read the document
-                            let can_read = crate::txn::check_doc_access_with_overlay(
-                                self.acp.as_ref(),
-                                &identity_for_acp,
-                                DocumentPermission::Read,
-                                &policy.id,
-                                &policy.resource_name,
-                                doc_id,
-                            )
-                            .await
-                            .unwrap_or(false);
+                            let can_read = self
+                                .check_doc_access_prepared(
+                                    &identity_for_acp,
+                                    DocumentPermission::Read,
+                                    &policy.id,
+                                    &policy.resource_name,
+                                    doc_id,
+                                    prepared_inputs,
+                                )
+                                .await
+                                .unwrap_or(false);
 
                             if !can_read {
                                 // Document is invisible to this identity -- skip silently
@@ -440,16 +509,17 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             }
 
                             // Phase 2: Check if the identity can delete the document
-                            let can_delete = crate::txn::check_doc_access_with_overlay(
-                                self.acp.as_ref(),
-                                &identity_for_acp,
-                                DocumentPermission::Delete,
-                                &policy.id,
-                                &policy.resource_name,
-                                doc_id,
-                            )
-                            .await
-                            .map_err(|e| QueryError::acp_check_failed("delete", doc_id, e))?;
+                            let can_delete = self
+                                .check_doc_access_prepared(
+                                    &identity_for_acp,
+                                    DocumentPermission::Delete,
+                                    &policy.id,
+                                    &policy.resource_name,
+                                    doc_id,
+                                    prepared_inputs,
+                                )
+                                .await
+                                .map_err(|e| QueryError::acp_check_failed("delete", doc_id, e))?;
 
                             if !can_delete {
                                 return Err(QueryError::document_not_found(
@@ -487,6 +557,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         request_time: DateTime<FixedOffset>,
         fetcher_override: Option<Arc<dyn crate::fetcher::DocFetcher>>,
         prepared: Option<&crate::prepared::PreparedMutation>,
+        prepared_inputs: Option<crate::prepared::PreparedInputMemo>,
         created_ids: &mut RapidHashMap<String, String>,
     ) -> Result<JsonValue> {
         struct SigningConfigReset(Option<defra_core::signing::SigningConfig>);
@@ -514,7 +585,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 )
             {
                 let mut current = self
-                    .authorize_mutation(mutation, &caller_identity, fetcher.as_ref(), None)
+                    .authorize_mutation(
+                        mutation,
+                        &caller_identity,
+                        fetcher.as_ref(),
+                        None,
+                        prepared_inputs.as_ref(),
+                    )
                     .await?;
                 let matching = current
                     .acp_filtered_doc_ids
@@ -547,8 +624,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         } = match authorization {
             Some(authorization) => authorization,
             None => {
-                self.authorize_mutation(mutation, &caller_identity, fetcher.as_ref(), None)
-                    .await?
+                self.authorize_mutation(
+                    mutation,
+                    &caller_identity,
+                    fetcher.as_ref(),
+                    None,
+                    prepared_inputs.as_ref(),
+                )
+                .await?
             }
         };
 
@@ -590,22 +673,57 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             permission = "writer",
                             "create mutation requesting access decision"
                         );
-                        let decision_id = self
-                            .acp
-                            .create_access_decision(
-                                &Identity::from(identity_did.clone()),
+                        let request = crate::prepared::PreparedInputRequest::new(
+                            crate::prepared::PreparedInputKind::AcpDecision,
+                            serde_json::to_vec(&(
+                                identity_did.as_str(),
                                 &policy.id,
                                 &policy.resource_name,
                                 &policy.resource_name,
                                 "writer",
-                            )
-                            .await
-                            .map_err(|e| {
-                                QueryError::permission_denied(format!(
-                                    "create authorization failed: {}",
-                                    e
+                                defra_core::signing::get_request_bearer_token(
+                                    identity_did.as_str(),
+                                ),
+                            ))
+                            .map_err(|error| QueryError::execution(error.to_string()))?,
+                        );
+                        let decision_id = if let Some(bytes) = prepared_inputs
+                            .as_ref()
+                            .and_then(|inputs| inputs.get(&request))
+                        {
+                            serde_json::from_slice::<Option<String>>(&bytes).map_err(|error| {
+                                QueryError::execution(format!(
+                                    "cached create authorization response is invalid: {error}"
                                 ))
-                            })?;
+                            })?
+                        } else {
+                            let decision_id = self
+                                .acp
+                                .create_access_decision(
+                                    &Identity::from(identity_did.clone()),
+                                    &policy.id,
+                                    &policy.resource_name,
+                                    &policy.resource_name,
+                                    "writer",
+                                )
+                                .await
+                                .map_err(|e| {
+                                    QueryError::permission_denied(format!(
+                                        "create authorization failed: {}",
+                                        e
+                                    ))
+                                })?;
+                            if let Some(inputs) = prepared_inputs.as_ref() {
+                                let response = serde_json::to_vec(&decision_id)
+                                    .map_err(|error| QueryError::execution(error.to_string()))?;
+                                if !inputs.insert(request, std::sync::Arc::<[u8]>::from(response)) {
+                                    return Err(QueryError::execution(
+                                        "prepared input memo budget exceeded",
+                                    ));
+                                }
+                            }
+                            decision_id
+                        };
 
                         tracing::info!(
                             actor_did = %identity_did,
@@ -671,6 +789,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 if let Some(write) = prepared.updates.remove(projected) {
                     prepared.updates.insert(actual.clone(), write);
                 }
+                if let Some(embeddings) = prepared.embeddings.remove(projected) {
+                    prepared.embeddings.insert(actual.clone(), embeddings);
+                }
             }
             prepared
         });
@@ -699,7 +820,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 .with_collection(collection.clone())
                 .with_request_time(request_time)
                 .with_input(input)
-                .with_prepared_writes(prepared.map(|p| p.updates.clone()));
+                .with_prepared_writes(prepared.map(|p| p.updates.clone()))
+                .with_prepared_embeddings(prepared.map(|p| p.embeddings.clone()), prepared_inputs);
 
                 // Use ACP-filtered doc_ids (invisible docs removed), or resolved/original
                 if let Some(ref doc_ids) = acp_filtered_doc_ids {

@@ -31,7 +31,7 @@ pub trait RemoteSigner: Send + Sync {
 /// For Orbis-backed signing, this lets DefraDB attach ACP metadata to a sign
 /// request so Orbis can authorize the signature ceremony before producing a
 /// threshold signature.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum SigningAuthorization {
     Policy {
@@ -43,6 +43,79 @@ pub enum SigningAuthorization {
     Decision {
         decision_id: String,
     },
+}
+
+/// Exact delegated-signing input needed by a transaction attempt. `data` is
+/// the canonical unsigned block encoding; the remaining fields bind the
+/// response to the signer identity and authorization context.
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RemoteSignatureInput {
+    pub data: Vec<u8>,
+    pub key_type: SigningKeyType,
+    pub public_key_hex: String,
+    pub authorization: Option<SigningAuthorization>,
+}
+
+impl fmt::Debug for RemoteSignatureInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RemoteSignatureInput")
+            .field("data", &"[redacted]")
+            .field("key_type", &self.key_type)
+            .field("signer_context", &"[redacted]")
+            .finish()
+    }
+}
+
+impl RemoteSignatureInput {
+    pub fn encode(&self) -> Result<Vec<u8>, String> {
+        serde_json::to_vec(self).map_err(|error| format!("encode remote signature input: {error}"))
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
+        serde_json::from_slice(bytes)
+            .map_err(|error| format!("decode remote signature input: {error}"))
+    }
+
+    pub fn resolve(&self, signer: &SigningConfig) -> Result<Vec<u8>, String> {
+        if self.key_type != signer.key_type
+            || self.public_key_hex != signer.public_key_hex
+            || self.authorization != signer.signing_authorization
+        {
+            return Err(
+                "prepared signature context no longer matches the configured signer".into(),
+            );
+        }
+        signer
+            .remote_signer
+            .as_ref()
+            .ok_or_else(|| "prepared remote signature requires a remote signer".to_string())?
+            .sign_sync(&self.data, self.authorization.as_ref())
+    }
+}
+
+#[cfg(test)]
+mod remote_signature_input_tests {
+    use super::*;
+
+    #[test]
+    fn remote_signature_request_round_trips_exact_bytes_and_context() {
+        let input = RemoteSignatureInput {
+            data: vec![0x81, 0x01, 0x02],
+            key_type: SigningKeyType::BlsAugV1,
+            public_key_hex: "public-key-id".to_string(),
+            authorization: Some(SigningAuthorization::Decision {
+                decision_id: "decision-7".to_string(),
+            }),
+        };
+        let encoded = input.encode().unwrap();
+        assert_eq!(RemoteSignatureInput::decode(&encoded).unwrap(), input);
+
+        let changed_head_data = RemoteSignatureInput {
+            data: vec![0x81, 0x01, 0x03],
+            ..input.clone()
+        };
+        assert_ne!(input.encode().unwrap(), changed_head_data.encode().unwrap());
+    }
 }
 
 /// Key type for signing operations.

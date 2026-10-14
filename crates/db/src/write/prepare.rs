@@ -7,6 +7,42 @@ use storage::corekv::Store;
 use crate::{block::builder::DocStorageIdentity, database::DB};
 use defra_core::encryption::EncryptionConfig;
 
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+pub(crate) enum PreparedKmsOperation {
+    Get {
+        cid: String,
+    },
+    Generate {
+        doc_id: String,
+        field: Option<String>,
+    },
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct PreparedKmsResponse {
+    pub cid: String,
+    pub key: Vec<u8>,
+}
+
+pub(crate) fn kms_input_request(
+    operation: PreparedKmsOperation,
+) -> query::prepared::PreparedInputRequest {
+    query::prepared::PreparedInputRequest::new(
+        query::prepared::PreparedInputKind::KmsKey,
+        serde_json::to_vec(&operation).expect("prepared KMS operation is serializable"),
+    )
+}
+
+/// Create blocks computed outside an auto-commit attempt. The schema version
+/// is checked at insertion time because a structural schema write can
+/// invalidate the payload before the mutation retries.
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedCreateBlocks {
+    pub schema_version_id: String,
+    pub computed: crate::block::builder::ComputedBlocks,
+}
+
 pub(crate) async fn prepare_keys<S: Store + 'static>(
     db: &DB<S>,
     doc: &mut Document,
@@ -39,6 +75,7 @@ pub(crate) async fn prepare_keys_with_stores<S: Store + 'static>(
     }
     let Some(kms) = db.kms() else { return Ok(()) };
     let mut prepared = WritePreparation::new(identity.collection_short_id, identity.doc_short_id);
+    prepared.set_requires_kms_keys(true);
     let fields: Vec<_> = doc
         .values()
         .keys()
@@ -116,13 +153,13 @@ pub(crate) async fn prepare_keys_with_stores<S: Store + 'static>(
     for (field, key_field) in scopes {
         let scope = kms::KeyScope::Document {
             doc_id: hex::encode(identity.doc_ref_bytes()),
-            field: key_field,
+            field: key_field.clone(),
         };
         let (cid, key) = kms
             .generate_key(&kms::RequestContext::anonymous(), scope)
             .await
             .map_err(|e| query::error::QueryError::execution(format!("kms generate_key: {e}")))?;
-        prepared.insert_key(field, cid, key);
+        prepared.insert_scoped_key(field, cid, key, key_field);
     }
     doc.set_write_preparation(Arc::new(prepared));
     Ok(())
@@ -143,7 +180,21 @@ impl<S: Store + 'static> crate::AutoCommitMutator<S> {
         config: Option<EncryptionConfig>,
     ) -> query::error::Result<Document> {
         let collection = self.get_collection_or_err(collection_name)?;
-        if let Some(fields) = modified_fields.as_mut() {
+        let effective_encryption_config =
+            config.or_else(defra_core::encryption::get_encryption_config);
+        let generated_embeddings = if let Some(fields) = modified_fields.as_mut() {
+            let generated = crate::search::set_embedding(
+                &collection.schema().vector_embeddings,
+                &mut doc,
+                false,
+                Some(fields),
+                &self.db.options().embedding_config(),
+            )
+            .await
+            .map_err(|error| {
+                query::error::QueryError::execution(format!("embedding error: {error}"))
+            })?;
+            fields.extend(generated.iter().cloned());
             for embedding in &collection.schema().vector_embeddings {
                 if !fields.contains(&embedding.field_name)
                     && embedding
@@ -157,6 +208,25 @@ impl<S: Store + 'static> crate::AutoCommitMutator<S> {
                     }
                 }
             }
+            generated
+        } else {
+            crate::search::set_embedding(
+                &collection.schema().vector_embeddings,
+                &mut doc,
+                true,
+                None,
+                &self.db.options().embedding_config(),
+            )
+            .await
+            .map_err(|error| {
+                query::error::QueryError::execution(format!("embedding error: {error}"))
+            })?
+        };
+        let signing_config = defra_core::signing::get_signing_config();
+        let prepare_create = modified_fields.is_none()
+            && (!generated_embeddings.is_empty() || signing_config.is_some());
+        if self.db.kms().is_none() && !prepare_create {
+            return Ok(doc);
         }
         let prior = doc.write_preparation().cloned();
         let identity = if let Some(prior) = &prior {
@@ -186,15 +256,6 @@ impl<S: Store + 'static> crate::AutoCommitMutator<S> {
                 .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
             identity
         } else {
-            crate::search::set_embedding(
-                &collection.schema().vector_embeddings,
-                &mut doc,
-                true,
-                None,
-                &self.db.options().embedding_config(),
-            )
-            .await
-            .map_err(|e| query::error::QueryError::execution(format!("embedding error: {e}")))?;
             DocStorageIdentity::new(
                 collection.resolved_root_id(),
                 self.db
@@ -208,11 +269,40 @@ impl<S: Store + 'static> crate::AutoCommitMutator<S> {
             &mut doc,
             identity,
             modified_fields.as_ref(),
-            config.as_ref(),
+            effective_encryption_config.as_ref(),
             None,
             prior.as_deref(),
         )
         .await?;
+
+        if doc.write_preparation().is_none() {
+            doc.set_write_preparation(Arc::new(WritePreparation::new(
+                identity.collection_short_id,
+                identity.doc_short_id,
+            )));
+        }
+        if modified_fields.is_none() {
+            if let Some(signing_config) = signing_config.as_ref() {
+                let blocks = crate::block::builder::compute_document_blocks(
+                    &doc,
+                    &collection.version_id(),
+                    identity,
+                    effective_encryption_config.as_ref(),
+                    Some(signing_config),
+                )
+                .map_err(|error| {
+                    query::error::QueryError::execution(format!(
+                        "failed to prepare signed create blocks: {error}"
+                    ))
+                })?;
+                let mut write = (**doc.write_preparation().unwrap()).clone();
+                write.set_payload(Arc::new(PreparedCreateBlocks {
+                    schema_version_id: collection.version_id().to_string(),
+                    computed: blocks,
+                }));
+                doc.set_write_preparation(Arc::new(write));
+            }
+        }
         Ok(doc)
     }
 }

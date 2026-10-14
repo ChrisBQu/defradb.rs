@@ -20,27 +20,32 @@ pub(crate) async fn write_branchable_collection_block<S: storage::corekv::Store 
     doc_cid: Cid,
     doc_short_id: u64,
     signing_config: Option<&defra_core::signing::SigningConfig>,
+    prepared_inputs: Option<&query::prepared::PreparedInputMemo>,
 ) -> query::error::Result<Option<(Cid, Bytes)>> {
     db.maybe_prune_document_heads(doc_short_id).await;
     if !collection.schema().is_branchable {
         return Ok(None);
     }
 
-    let written = write_collection_block(
+    let written = write_collection_block_with_inputs(
         blockstore,
         headstore,
         collection.resolved_root_id(),
         collection.version_id(),
         doc_cid,
         signing_config,
+        prepared_inputs,
     )
     .await
     .map(Some)
-    .map_err(|error| {
-        query::error::QueryError::execution(format!(
+    .map_err(|error| match error {
+        crate::block::builder::BuildError::NeedsInput(request) => {
+            query::error::QueryError::NeedsInput(request)
+        }
+        error => query::error::QueryError::execution(format!(
             "failed to write collection block for branchable mutation on collection {}: {}",
             collection_name, error
-        ))
+        )),
     })?;
 
     // The append just superseded the heads it was built on, and the keys it

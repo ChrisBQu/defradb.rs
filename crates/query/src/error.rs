@@ -128,6 +128,12 @@ pub enum QueryError {
     #[error("{0}")]
     TransactionConflict(String),
 
+    /// A transaction attempt needs a remote input. The caller must end the
+    /// attempt, resolve this exact request outside the transaction, memoize
+    /// the response for the logical request, and execute again.
+    #[error("external input required")]
+    NeedsInput(crate::prepared::PreparedInputRequest),
+
     /// Schema validation error
     #[error("schema error: {0}")]
     Schema(#[from] schema::SchemaError),

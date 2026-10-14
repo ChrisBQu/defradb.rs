@@ -167,6 +167,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                         path: None,
                         locations: None,
                         extensions: None,
+                        retry_input: None,
                     }],
                     extensions: None,
                 };
@@ -217,6 +218,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                     path: None,
                     locations: None,
                     extensions: None,
+                    retry_input: None,
                 }],
                 extensions: None,
             };
@@ -280,9 +282,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                         // Use pre-parsed mutations to avoid redundant re-parsing
                         match self.mutator.as_ref() {
                             Some(mutator) => {
+                                let mutator = prepared
+                                    .as_ref()
+                                    .and_then(|prepared| {
+                                        mutator.with_prepared_inputs(prepared.inputs.clone())
+                                    })
+                                    .unwrap_or_else(|| mutator.clone());
                                 self.execute_parsed_mutations(
                                     mutations,
-                                    mutator.clone(),
+                                    mutator,
                                     identity,
                                     None,
                                     prepared.as_deref(),
@@ -346,9 +354,64 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         }
     }
 
+    async fn resolve_retry_input(
+        &self,
+        _request: &QueryRequest,
+        prepared: Option<std::sync::Arc<crate::prepared::PreparedMutations>>,
+        input: &crate::prepared::PreparedInputRequest,
+    ) -> Result<Option<std::sync::Arc<crate::prepared::PreparedMutations>>> {
+        let Some(prepared) = prepared else {
+            return Err(crate::error::QueryError::execution(
+                "retry input has no request preparation capsule",
+            ));
+        };
+        if prepared.inputs.get(input).is_none() {
+            if !prepared.inputs.register_dependency_miss() {
+                return Err(crate::error::QueryError::execution(
+                    "remote input dependency retry limit exceeded",
+                ));
+            }
+            let mutator = self.mutator.as_ref().ok_or_else(|| {
+                crate::error::QueryError::execution("retry input has no document mutator")
+            })?;
+            let response = mutator.resolve_prepared_input(input).await?;
+            if !prepared.inputs.insert(input.clone(), response) {
+                return Err(crate::error::QueryError::execution(
+                    "prepared input memo budget exceeded",
+                ));
+            }
+        }
+        Ok(Some(prepared))
+    }
+
     #[instrument(name = "query.execute_request", skip(self, request), fields(query_len = request.query.len() as i64))]
     async fn execute(&self, request: QueryRequest) -> QueryResponse {
-        self.execute_prepared(request, None).await
+        let mut prepared = match self.prepare_request(&request).await {
+            Ok(prepared) => prepared,
+            Err(error) => return QueryResponse::error(QueryResponseError::from_query_error(error)),
+        };
+        loop {
+            let response = self
+                .execute_prepared(request.clone(), prepared.clone())
+                .await;
+            let Some(input) = response.retry_input().cloned() else {
+                return response;
+            };
+            match self
+                .resolve_retry_input(&request, prepared.clone(), &input)
+                .await
+            {
+                Ok(Some(updated)) => prepared = Some(updated),
+                Ok(None) => {
+                    return QueryResponse::error(
+                        "retry input resolution returned no preparation capsule",
+                    )
+                }
+                Err(error) => {
+                    return QueryResponse::error(QueryResponseError::from_query_error(error))
+                }
+            }
+        }
     }
 
     #[instrument(
@@ -407,6 +470,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                         path: None,
                         locations: None,
                         extensions: None,
+                        retry_input: None,
                     }],
                     extensions: None,
                 };
@@ -433,6 +497,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                         path: None,
                         locations: None,
                         extensions: None,
+                        retry_input: None,
                     }],
                     extensions: None,
                 };

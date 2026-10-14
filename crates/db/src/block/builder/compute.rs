@@ -30,6 +30,25 @@ pub fn compute_document_blocks(
     encryption_config: Option<&EncryptionConfig>,
     signing_config: Option<&SigningConfig>,
 ) -> Result<ComputedBlocks, String> {
+    compute_document_blocks_with_inputs(
+        doc,
+        schema_version_id,
+        identity,
+        encryption_config,
+        signing_config,
+        None,
+    )
+    .map_err(|error| error.to_string())
+}
+
+pub(crate) fn compute_document_blocks_with_inputs(
+    doc: &Document,
+    schema_version_id: &str,
+    identity: DocStorageIdentity,
+    encryption_config: Option<&EncryptionConfig>,
+    signing_config: Option<&SigningConfig>,
+    prepared_inputs: Option<&query::prepared::PreparedInputMemo>,
+) -> Result<ComputedBlocks, BuildError> {
     let doc_ref_bytes = identity.doc_ref_bytes();
 
     let mut blockstore_entries: Vec<(Vec<u8>, Bytes)> = Vec::new();
@@ -62,32 +81,67 @@ pub fn compute_document_blocks(
                 } else {
                     None
                 };
-                let (encrypted, enc_cid) = if let Some((cid, key)) = doc
-                    .write_preparation()
-                    .and_then(|prepared| prepared.key(field_name))
-                {
+                let prepared_key = doc.write_preparation().and_then(|prepared| {
+                    (prepared.key_scope_matches(field_name, key_field_name))
+                        .then(|| prepared.key(field_name))
+                        .flatten()
+                });
+                let (encrypted, enc_cid) = if let Some((cid, key)) = prepared_key {
                     (encrypt_delta(&value_bytes, key)?, cid)
                 } else {
-                    if doc.write_preparation().is_some() {
-                        return Err(format!(
-                            "encryption key for field {field_name} was not prepared"
-                        ));
+                    let needs_kms = doc
+                        .write_preparation()
+                        .is_some_and(|prepared| prepared.requires_kms_keys());
+                    if needs_kms {
+                        let inputs = prepared_inputs.ok_or_else(|| {
+                            BuildError::Message(format!(
+                                "encryption key for field {field_name} was not prepared"
+                            ))
+                        })?;
+                        let request = crate::write::prepare::kms_input_request(
+                            crate::write::prepare::PreparedKmsOperation::Generate {
+                                doc_id: hex::encode(&doc_ref_bytes),
+                                field: key_field_name.map(str::to_owned),
+                            },
+                        );
+                        let Some(response) = inputs.get(&request) else {
+                            return Err(BuildError::NeedsInput(request));
+                        };
+                        let response: crate::write::prepare::PreparedKmsResponse =
+                            serde_json::from_slice(&response).map_err(|error| {
+                                BuildError::Message(format!(
+                                    "invalid cached KMS key response: {error}"
+                                ))
+                            })?;
+                        let enc_cid = Cid::try_from(response.cid.as_str()).map_err(|error| {
+                            BuildError::Message(format!(
+                                "invalid CID in cached KMS key response: {error}"
+                            ))
+                        })?;
+                        let key: [u8; 32] = response.key.try_into().map_err(|key: Vec<u8>| {
+                            BuildError::Message(format!(
+                                "KMS returned a {}-byte key for {enc_cid}, expected 32",
+                                key.len()
+                            ))
+                        })?;
+                        (encrypt_delta(&value_bytes, &key)?, enc_cid)
+                    } else {
+                        let key = defra_core::encryption::generate_encryption_key_for(
+                            &doc_ref_bytes,
+                            key_field_name,
+                        );
+                        let encrypted = encrypt_delta(&value_bytes, &key)?;
+
+                        let enc_block = Encryption { key: key.to_vec() };
+                        let enc_bytes = enc_block
+                            .to_dag_cbor()
+                            .map_err(|e| format!("Failed to encode encryption block: {}", e))?;
+                        let enc_cid = generate_cid_from_bytes(&enc_bytes)
+                            .map_err(|e| format!("Failed to generate encryption CID: {}", e))?;
+                        blockstore_entries.push((enc_cid.to_bytes(), enc_bytes.into()));
+
+                        (encrypted, enc_cid)
                     }
-                    let key = defra_core::encryption::generate_encryption_key_for(
-                        &doc_ref_bytes,
-                        key_field_name,
-                    );
-                    let encrypted = encrypt_delta(&value_bytes, &key)?;
-
-                    let enc_block = Encryption { key: key.to_vec() };
-                    let enc_bytes = enc_block
-                        .to_dag_cbor()
-                        .map_err(|e| format!("Failed to encode encryption block: {}", e))?;
-                    let enc_cid = generate_cid_from_bytes(&enc_bytes)
-                        .map_err(|e| format!("Failed to generate encryption CID: {}", e))?;
-                    blockstore_entries.push((enc_cid.to_bytes(), enc_bytes.into()));
-
-                    (encrypted, enc_cid)
                 };
 
                 (encrypted, Some(enc_cid))
@@ -133,7 +187,9 @@ pub fn compute_document_blocks(
         let mut field_block = Block::new_with_options(delta, vec![], vec![], encryption_cid, None);
 
         if let Some(signer) = signing_config {
-            if let Some((sig_cid, sig_cbor)) = compute_signature(&field_block, signer)? {
+            if let Some((sig_cid, sig_cbor)) =
+                compute_signature_prepared(&field_block, signer, prepared_inputs)?
+            {
                 blockstore_entries.push((sig_cid.to_bytes(), sig_cbor));
                 field_block.signature = Some(sig_cid);
             }
@@ -202,7 +258,9 @@ pub fn compute_document_blocks(
     );
 
     if let Some(signer) = signing_config {
-        if let Some((sig_cid, sig_cbor)) = compute_signature(&composite_block, signer)? {
+        if let Some((sig_cid, sig_cbor)) =
+            compute_signature_prepared(&composite_block, signer, prepared_inputs)?
+        {
             blockstore_entries.push((sig_cid.to_bytes(), sig_cbor));
             composite_block.signature = Some(sig_cid);
         }

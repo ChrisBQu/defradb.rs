@@ -16,9 +16,12 @@ mod write;
 pub(crate) use batch_signing::collect_on_commit;
 pub use build::build_blocks_from_document;
 pub use collection::write_collection_block;
+pub(crate) use collection::write_collection_block_with_inputs;
+pub(crate) use compute::compute_document_blocks_with_inputs;
 pub use compute::{compute_document_blocks, insert_computed_blocks, ComputedBlocks};
 pub(crate) use write::inherited_encryption_policy;
 pub use write::{write_delete_block, write_document_blocks};
+pub(crate) use write::{write_delete_block_with_inputs, write_document_blocks_with_inputs};
 
 use bytes::Bytes;
 use rapidhash::{HashMapExt, RapidHashMap};
@@ -39,6 +42,38 @@ use document::{DocID, Document, NormalValue};
 use storage::corekv::Key;
 use storage::keys::doc_id_index::DocRef;
 use storage::keys::headstore::{HeadstoreColKey, HeadstoreDocKey, HeadstorePriorityKey};
+
+#[derive(Debug, thiserror::Error)]
+pub enum BuildError {
+    #[error("{0}")]
+    Message(String),
+    #[error("external signature input required")]
+    NeedsInput(query::prepared::PreparedInputRequest),
+}
+
+impl From<String> for BuildError {
+    fn from(value: String) -> Self {
+        Self::Message(value)
+    }
+}
+
+impl From<query::error::QueryError> for BuildError {
+    fn from(value: query::error::QueryError) -> Self {
+        match value {
+            query::error::QueryError::NeedsInput(request) => Self::NeedsInput(request),
+            other => Self::Message(other.to_string()),
+        }
+    }
+}
+
+impl BuildError {
+    pub fn into_query_error(self) -> query::error::QueryError {
+        match self {
+            Self::NeedsInput(request) => query::error::QueryError::NeedsInput(request),
+            Self::Message(message) => query::error::QueryError::execution(message),
+        }
+    }
+}
 
 /// Node-local storage identity of a document.
 ///
@@ -174,6 +209,67 @@ pub fn compute_signature(
     Ok(Some((sig_cid, sig_cbor.into())))
 }
 
+/// Compute or request a signature using the exact-input memo for the active
+/// autocommit request. Local signing and non-requested paths retain the normal
+/// synchronous behavior.
+fn compute_signature_prepared(
+    block: &Block,
+    signer: &SigningConfig,
+    inputs: Option<&query::prepared::PreparedInputMemo>,
+) -> Result<Option<(Cid, Bytes)>, BuildError> {
+    if signer.remote_signer.is_none() || inputs.is_none() {
+        return compute_signature(block, signer).map_err(BuildError::Message);
+    }
+    let is_field = matches!(&block.delta, CrdtDelta::Lww(_) | CrdtDelta::Counter(_));
+    if is_field && block.delta.priority() > 1 {
+        return Ok(None);
+    }
+    let data = block
+        .to_dag_cbor()
+        .map_err(|e| BuildError::Message(format!("Failed to encode block for signing: {e}")))?;
+    let input = defra_core::signing::RemoteSignatureInput {
+        data,
+        key_type: signer.key_type,
+        public_key_hex: signer.public_key_hex.clone(),
+        authorization: signer.signing_authorization.clone(),
+    };
+    let request = query::prepared::PreparedInputRequest::new(
+        query::prepared::PreparedInputKind::Signature,
+        input.encode().map_err(BuildError::Message)?,
+    );
+    let sig_type: defra_core::block::SignatureType = signer.key_type.into();
+    if !sig_type.is_go_verifiable()
+        && !defra_core::block::go_verifiable_policy::non_go_verifiable_signing_allowed()
+    {
+        return Err(BuildError::Message(format!(
+            "refusing to sign a block with {sig_type:?} ({}): Go peers cannot verify it and will reject the block during replication. Set {}=1 to allow it on this node.",
+            signer.key_type,
+            defra_core::block::go_verifiable_policy::ALLOW_ENV,
+        )));
+    }
+    if !sig_type.is_go_verifiable() {
+        warn!(
+            signature_type = ?sig_type,
+            key_type = %signer.key_type,
+            "signing a block Go peers cannot verify; it will be rejected when replicating to a Go node"
+        );
+    }
+    let response = inputs
+        .expect("checked above")
+        .get(&request)
+        .ok_or_else(|| BuildError::NeedsInput(request))?;
+    let signature = Signature::new(
+        SignatureHeader::new(sig_type, signer.public_key_hex.as_bytes().to_vec()),
+        response.to_vec(),
+    );
+    let sig_cbor = signature
+        .to_dag_cbor()
+        .map_err(|e| BuildError::Message(format!("Failed to encode signature block: {e}")))?;
+    let sig_cid = generate_cid_from_bytes(&sig_cbor)
+        .map_err(|e| BuildError::Message(format!("Failed to generate signature CID: {e}")))?;
+    Ok(Some((sig_cid, sig_cbor.into())))
+}
+
 /// Sign a block and store the signature as a separate IPLD block.
 ///
 /// Delegates to `compute_signature()` for the pure computation, then writes
@@ -183,15 +279,16 @@ pub(crate) async fn sign_block(
     block: &Block,
     signer: &SigningConfig,
     blockstore: &NamespaceView,
-) -> Result<Option<Cid>, String> {
-    let Some((sig_cid, sig_cbor)) = compute_signature(block, signer)? else {
+    inputs: Option<&query::prepared::PreparedInputMemo>,
+) -> Result<Option<Cid>, BuildError> {
+    let Some((sig_cid, sig_cbor)) = compute_signature_prepared(block, signer, inputs)? else {
         return Ok(None);
     };
 
     blockstore
         .set(&sig_cid.to_bytes(), &sig_cbor)
         .await
-        .map_err(|e| format!("Failed to store signature block: {}", e))?;
+        .map_err(|e| BuildError::Message(format!("Failed to store signature block: {}", e)))?;
 
     Ok(Some(sig_cid))
 }
@@ -247,6 +344,91 @@ pub fn decode_priority_varint(buf: &[u8]) -> u64 {
         shift += 7;
     }
     n
+}
+
+#[cfg(test)]
+mod prepared_signature_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingSigner(AtomicUsize);
+
+    impl defra_core::signing::RemoteSigner for CountingSigner {
+        fn sign_sync(
+            &self,
+            data: &[u8],
+            _authorization: Option<&defra_core::signing::SigningAuthorization>,
+        ) -> Result<Vec<u8>, String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(data.iter().rev().copied().collect())
+        }
+    }
+
+    fn block(parent: Option<Cid>) -> Block {
+        let payload = CompositeDeltaPayload {
+            schema_version_id: "schema-v1".into(),
+            priority: 2,
+            status: 0,
+        };
+        Block::new(
+            CrdtDelta::Composite(payload),
+            parent.into_iter().collect(),
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn remote_signature_input_is_exact_and_reused_only_for_same_head_bytes() {
+        let remote = std::sync::Arc::new(CountingSigner(AtomicUsize::new(0)));
+        let signer = SigningConfig {
+            key_type: defra_core::signing::SigningKeyType::Ed25519,
+            private_key_bytes: Vec::new(),
+            public_key_bytes: vec![1, 2, 3],
+            public_key_hex: "010203".into(),
+            remote_signer: Some(remote.clone()),
+            signing_authorization: Some(defra_core::signing::SigningAuthorization::Decision {
+                decision_id: "decision-9".into(),
+            }),
+        };
+        let memo = query::prepared::PreparedInputMemo::default();
+        let parent_a = generate_cid_from_bytes(b"parent-a").unwrap();
+        let first = block(Some(parent_a));
+        let request = match compute_signature_prepared(&first, &signer, Some(&memo)) {
+            Err(BuildError::NeedsInput(request)) => request,
+            other => panic!("expected deferred signature, got {other:?}"),
+        };
+        // Reaching NeedsInput leaves the transaction attempt before invoking
+        // the remote signer.
+        assert_eq!(remote.0.load(Ordering::SeqCst), 0);
+        let input =
+            defra_core::signing::RemoteSignatureInput::decode(request.exact_request()).unwrap();
+        assert_eq!(input.data, first.to_dag_cbor().unwrap());
+        let changed_authorization = SigningConfig {
+            key_type: signer.key_type,
+            private_key_bytes: signer.private_key_bytes.clone(),
+            public_key_bytes: signer.public_key_bytes.clone(),
+            public_key_hex: signer.public_key_hex.clone(),
+            remote_signer: signer.remote_signer.clone(),
+            signing_authorization: Some(defra_core::signing::SigningAuthorization::Decision {
+                decision_id: "decision-10".into(),
+            }),
+        };
+        assert!(input.resolve(&changed_authorization).is_err());
+        assert_eq!(remote.0.load(Ordering::SeqCst), 0);
+        let signature = input.resolve(&signer).unwrap();
+        assert_eq!(remote.0.load(Ordering::SeqCst), 1);
+        assert!(memo.insert(request.clone(), std::sync::Arc::<[u8]>::from(signature)));
+        assert!(compute_signature_prepared(&first, &signer, Some(&memo)).is_ok());
+        assert_eq!(remote.0.load(Ordering::SeqCst), 1);
+
+        let parent_b = generate_cid_from_bytes(b"parent-b").unwrap();
+        let changed = block(Some(parent_b));
+        let changed_request = match compute_signature_prepared(&changed, &signer, Some(&memo)) {
+            Err(BuildError::NeedsInput(request)) => request,
+            other => panic!("changed head must request a new signature, got {other:?}"),
+        };
+        assert_ne!(request, changed_request);
+    }
 }
 
 pub(crate) fn priority_index_key(doc_short_id: u64, priority: u64, cid: Cid) -> Vec<u8> {

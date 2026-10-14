@@ -85,20 +85,24 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             // Get signing config from thread-local (set by FFI exec_request)
             let sign_config = get_signing_config();
 
-            let block_result = write_delete_block(
+            let block_result = write_delete_block_with_inputs(
                 &blockstore,
                 &headstore,
                 &doc_id_str,
                 doc_short_id,
                 schema_version_id,
                 sign_config.as_ref(),
+                self.prepared_inputs.as_ref(),
             )
             .await
-            .map_err(|e| {
-                query::error::QueryError::execution(format!(
+            .map_err(|e| match e {
+                crate::block::builder::BuildError::NeedsInput(request) => {
+                    query::error::QueryError::NeedsInput(request)
+                }
+                e => query::error::QueryError::execution(format!(
                     "failed to write delete block for collection {}: {}",
                     collection_name, e
-                ))
+                )),
             })?;
             let composite_cid = block_result.cid;
 
@@ -119,6 +123,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 composite_cid,
                 doc_short_id,
                 sign_config.as_ref(),
+                self.prepared_inputs.as_ref(),
             )
             .await?;
 
@@ -282,20 +287,24 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     query::error::QueryError::execution(format!("failed to get headstore: {}", e))
                 })?;
 
-                let block_result = write_delete_block(
+                let block_result = write_delete_block_with_inputs(
                     &blockstore,
                     &headstore,
                     &canonical_doc_id.to_string(),
                     doc_short_id,
                     &schema_version_id,
                     sign_config.as_ref(),
+                    self.prepared_inputs.as_ref(),
                 )
                 .await
-                .map_err(|e| {
-                    query::error::QueryError::execution(format!(
+                .map_err(|e| match e {
+                    crate::block::builder::BuildError::NeedsInput(request) => {
+                        query::error::QueryError::NeedsInput(request)
+                    }
+                    e => query::error::QueryError::execution(format!(
                         "failed to write delete block for collection {}: {}",
                         collection_name, e
-                    ))
+                    )),
                 })?;
                 let composite_cid = block_result.cid;
 
@@ -319,6 +328,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     composite_cid,
                     doc_short_id,
                     sign_config.as_ref(),
+                    self.prepared_inputs.as_ref(),
                 )
                 .await?;
 

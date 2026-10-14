@@ -16,6 +16,28 @@ pub async fn write_collection_block(
     doc_composite_cid: Cid,
     signing_config: Option<&SigningConfig>,
 ) -> Result<(Cid, Bytes), String> {
+    write_collection_block_with_inputs(
+        blockstore,
+        headstore,
+        collection_short_id,
+        schema_version_id,
+        doc_composite_cid,
+        signing_config,
+        None,
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
+pub(crate) async fn write_collection_block_with_inputs(
+    blockstore: &NamespaceView,
+    headstore: &NamespaceView,
+    collection_short_id: u32,
+    schema_version_id: &str,
+    doc_composite_cid: Cid,
+    signing_config: Option<&SigningConfig>,
+    prepared_inputs: Option<&query::prepared::PreparedInputMemo>,
+) -> Result<(Cid, Bytes), BuildError> {
     let found = crate::block::heads::live_collection_heads(headstore, collection_short_id)
         .await
         .map_err(|e| format!("Failed to read collection heads: {}", e))?;
@@ -47,7 +69,9 @@ pub async fn write_collection_block(
 
     // Sign the collection block if a signer is available
     if let Some(signer) = signing_config {
-        if let Some(sig_cid) = sign_block(&collection_block, signer, blockstore).await? {
+        if let Some(sig_cid) =
+            sign_block(&collection_block, signer, blockstore, prepared_inputs).await?
+        {
             collection_block.signature = Some(sig_cid);
         }
     }

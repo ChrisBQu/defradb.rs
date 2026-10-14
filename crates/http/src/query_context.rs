@@ -6,7 +6,6 @@
 //! points, we pin execution to a single thread using `spawn_blocking` +
 //! `Handle::block_on` — the same pattern the FFI uses with `rt.block_on()`.
 
-use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -75,32 +74,53 @@ async fn execute_prepared_with_executor(
             ))
         }
     };
-    execute_request_with_retry_loop(
+    execute_prepared_request_with_retry_loop(
+        executor,
         request,
+        prepared,
         max_retries,
         INITIAL_RETRY_BACKOFF,
         MAX_RETRY_BACKOFF,
-        |request| executor.execute_prepared(request, prepared.clone()),
     )
     .await
 }
 
-async fn execute_request_with_retry_loop<F, Fut>(
+async fn execute_prepared_request_with_retry_loop(
+    executor: &dyn QueryExecutor,
     request: QueryRequest,
+    mut prepared: Option<Arc<query::prepared::PreparedMutations>>,
     max_retries: u32,
     initial_backoff: Duration,
     max_backoff: Duration,
-    mut execute_once: F,
-) -> QueryResponse
-where
-    F: FnMut(QueryRequest) -> Fut,
-    Fut: Future<Output = QueryResponse>,
-{
+) -> QueryResponse {
     let mut retry_count = 0;
     let mut backoff = initial_backoff.min(max_backoff);
 
     loop {
-        let response = execute_once(request.clone()).await;
+        let response = executor
+            .execute_prepared(request.clone(), prepared.clone())
+            .await;
+        if let Some(input) = response.retry_input() {
+            match executor
+                .resolve_retry_input(&request, prepared.clone(), input)
+                .await
+            {
+                Ok(Some(updated)) => {
+                    prepared = Some(updated);
+                    continue;
+                }
+                Ok(None) => {
+                    return QueryResponse::error(
+                        "retry input resolution returned no preparation capsule",
+                    )
+                }
+                Err(error) => {
+                    return QueryResponse::error(
+                        query::executor::QueryResponseError::from_query_error(error),
+                    )
+                }
+            }
+        }
         if !response.is_transaction_conflict() {
             if retry_count > 0 {
                 telemetry::record_retry_success(telemetry::RetryLayer::HttpAutoCommit);
@@ -250,6 +270,8 @@ mod tests {
         preparations: AtomicUsize,
         auto_commit_attempts: AtomicUsize,
         explicit_txn_attempts: AtomicUsize,
+        input_on_second: bool,
+        input_resolutions: AtomicUsize,
     }
 
     #[async_trait]
@@ -259,18 +281,50 @@ mod tests {
             _request: &QueryRequest,
         ) -> Result<Option<Arc<query::prepared::PreparedMutations>>> {
             self.preparations.fetch_add(1, Ordering::SeqCst);
-            Ok(None)
+            Ok(Some(
+                Arc::new(query::prepared::PreparedMutations::default()),
+            ))
         }
 
         fn abandon_txn(&self, _handle: &TransactionHandle) {}
 
         async fn execute(&self, _request: QueryRequest) -> QueryResponse {
             assert_eq!(self.preparations.load(Ordering::SeqCst), 1);
-            if self.auto_commit_attempts.fetch_add(1, Ordering::SeqCst) < 2 {
+            let attempt = self.auto_commit_attempts.fetch_add(1, Ordering::SeqCst);
+            if self.input_on_second {
+                match attempt {
+                    0 | 2 => QueryResponse::transaction_conflict("transaction conflict"),
+                    1 => QueryResponse::error(query::QueryResponseError::from_query_error(
+                        query::error::QueryError::NeedsInput(
+                            query::prepared::PreparedInputRequest::new(
+                                query::prepared::PreparedInputKind::Embedding,
+                                br#"{"model":"m","input":"source"}"#.as_slice(),
+                            ),
+                        ),
+                    )),
+                    _ => QueryResponse::success(serde_json::json!({"_docID": "doc"})),
+                }
+            } else if attempt < 2 {
                 QueryResponse::transaction_conflict("transaction conflict")
             } else {
                 QueryResponse::success(serde_json::json!({"_docID": "doc"}))
             }
+        }
+
+        async fn resolve_retry_input(
+            &self,
+            _request: &QueryRequest,
+            prepared: Option<Arc<query::prepared::PreparedMutations>>,
+            input: &query::prepared::PreparedInputRequest,
+        ) -> Result<Option<Arc<query::prepared::PreparedMutations>>> {
+            self.input_resolutions.fetch_add(1, Ordering::SeqCst);
+            let Some(prepared) = prepared else {
+                return Ok(None);
+            };
+            if prepared.inputs.get(input).is_none() {
+                assert!(prepared.inputs.insert(input.clone(), b"[1.0]".as_slice()));
+            }
+            Ok(Some(prepared))
         }
 
         async fn execute_in_txn(
@@ -329,6 +383,29 @@ mod tests {
         let metrics_after = telemetry::conflict_metrics_snapshot().http_auto_commit;
         assert_eq!(metrics_after.attempts - metrics_before.attempts, 2);
         assert_eq!(metrics_after.successes - metrics_before.successes, 1);
+    }
+
+    #[tokio::test]
+    async fn auto_commit_resolves_input_outside_attempt_and_preserves_it_across_conflict() {
+        let executor = Arc::new(ConflictExecutor {
+            input_on_second: true,
+            ..Default::default()
+        });
+        let state = AppStateBuilder::new(executor.clone())
+            .with_max_txn_retries(3)
+            .build();
+
+        let response = execute_with_context(
+            &state,
+            &ExtractIdentity::anonymous(),
+            QueryRequest::new("mutation { update_User(input: {}) { _docID } }"),
+        )
+        .await;
+
+        assert_eq!(executor.preparations.load(Ordering::SeqCst), 1);
+        assert_eq!(executor.auto_commit_attempts.load(Ordering::SeqCst), 4);
+        assert_eq!(executor.input_resolutions.load(Ordering::SeqCst), 1);
+        assert!(!response.has_errors());
     }
 
     #[tokio::test]

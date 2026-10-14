@@ -276,7 +276,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
             // For update operations, pass the modified fields to only create blocks
             // for the fields that actually changed
-            let block_result = write_document_blocks(
+            let block_result = write_document_blocks_with_inputs(
                 &blockstore,
                 &headstore,
                 &doc,
@@ -286,13 +286,17 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 enc_config.as_ref(),
                 sign_config.as_ref(),
                 self.db.kms().as_ref(),
+                self.prepared_inputs.as_ref(),
             )
             .await
-            .map_err(|e| {
-                query::error::QueryError::execution(format!(
+            .map_err(|e| match e {
+                crate::block::builder::BuildError::NeedsInput(request) => {
+                    query::error::QueryError::NeedsInput(request)
+                }
+                e => query::error::QueryError::execution(format!(
                     "failed to write document blocks for update on collection {}: {}",
                     collection_name, e
-                ))
+                )),
             })?;
 
             if let Some(doc_id) = doc.id() {
@@ -309,6 +313,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 block_result.cid,
                 doc_short_id,
                 sign_config.as_ref(),
+                self.prepared_inputs.as_ref(),
             )
             .await?;
 
