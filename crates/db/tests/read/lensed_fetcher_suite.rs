@@ -115,10 +115,11 @@ async fn schema_history_alias_cost_measurement() {
     let mut metrics = std::fs::File::create(output).unwrap();
     for versions in [1, 32, 128] {
         for payload_bytes in [64, 1048576] {
-            let store = storage::encrypted_store::EncryptedStore::new(
-                storage::RegolithStore::in_memory().unwrap(),
-                [42; 32],
-            );
+            let store = storage::RegolithStore::open_with_options(
+                "memory",
+                storage::RegolithStoreOptions::memory().with_encryption_key([42; 32]),
+            )
+            .unwrap();
             let db = Arc::new(db::DB::new(store).unwrap());
             db.create_collections_atomic(
                 query::parse_sdl("type AliasCost { ordinal: Int payload: String }").unwrap(),

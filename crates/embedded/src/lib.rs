@@ -295,17 +295,6 @@ impl ManagedP2PSystem {
 pub enum EmbeddedStore {
     /// A regolith database, in memory or on a path.
     Regolith(storage::RegolithStore),
-    /// A store wrapped in transparent at-rest value encryption.
-    Encrypted(Box<storage::encrypted_store::EncryptedStore<EmbeddedStore>>),
-}
-
-impl EmbeddedStore {
-    /// Wrap this store in transparent at-rest value encryption keyed by `key`.
-    pub fn encrypted(self, key: [u8; 32]) -> Self {
-        Self::Encrypted(Box::new(storage::encrypted_store::EncryptedStore::new(
-            self, key,
-        )))
-    }
 }
 
 impl storage::corekv::private::Sealed for EmbeddedStore {}
@@ -315,14 +304,12 @@ impl storage::Store for EmbeddedStore {
     async fn new_txn(&self, readonly: bool) -> storage::Result<Box<dyn storage::Txn>> {
         match self {
             Self::Regolith(store) => store.new_txn(readonly).await,
-            Self::Encrypted(store) => store.new_txn(readonly).await,
         }
     }
 
     async fn close(&self) -> storage::Result<()> {
         match self {
             Self::Regolith(store) => store.close().await,
-            Self::Encrypted(store) => store.close().await,
         }
     }
 }

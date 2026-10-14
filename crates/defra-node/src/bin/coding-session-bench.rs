@@ -444,7 +444,7 @@ mod runner {
                --data-dir PATH            Persist the store at PATH\n\
                --reuse                    Reuse an existing fixture at --data-dir\n\
                --keep-data                Keep the auto-created temp data dir after the run\n\
-               --at-rest-encryption       Wrap the backend in value-only AES-256-GCM encryption\n\
+               --at-rest-encryption       Encrypt Regolith engine files at rest\n\
                --warmup N                 Warmup iterations per case (default: 2)\n\
                --iterations N             Timed iterations per case (default: 5)\n\
                --limit N                  GraphQL limit per query (default: 10)\n\

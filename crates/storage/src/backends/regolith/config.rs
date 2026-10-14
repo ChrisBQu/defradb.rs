@@ -31,7 +31,7 @@ impl RegolithStoreOptions {
     /// Values remain plaintext inside the engine, so equality checks,
     /// allocations, appends and merge operands retain their meaning.
     /// This does not decrypt values written by the legacy `EncryptedStore`
-    /// wrapper; those stores must be migrated before using this option.
+    /// wrapper. This format targets new installations.
     pub fn with_encryption_key(mut self, key: [u8; 32]) -> Self {
         self.engine = self.engine.key_provider(std::sync::Arc::new(
             super::encryption::AtRestKeyProvider::new(key),

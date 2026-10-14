@@ -1,6 +1,6 @@
-//! Integration test: full DB document CRUD over an `EncryptedStore`.
+//! Integration test: full DB document CRUD over an encrypted Regolith engine.
 //!
-//! Proves the at-rest value-encryption wrapper composes with the complete DB
+//! Proves the engine encryption composes with the complete DB
 //! stack (systemstore + datastore through transactions and iterators).
 
 use db::database::DB;
@@ -8,14 +8,19 @@ use db::AutoCommitMutator;
 use document::Document;
 use query::mutator::DocMutator;
 use std::sync::Arc;
-use storage::encrypted_store::EncryptedStore;
 use storage::RegolithStore;
 
 #[tokio::test]
 async fn document_crud_roundtrips_through_encrypted_store() {
     let key = [42u8; 32];
-    let backend = RegolithStore::in_memory().unwrap();
-    let store = Arc::new(EncryptedStore::new(backend, key));
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(
+        RegolithStore::open_with_options(
+            root.path(),
+            storage::RegolithStoreOptions::default().with_encryption_key(key),
+        )
+        .unwrap(),
+    );
     let db = Arc::new(DB::open_from_arc(store).await.unwrap());
 
     let collections = query::parse_sdl(

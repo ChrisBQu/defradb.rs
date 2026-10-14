@@ -89,7 +89,7 @@ pub struct StartArgs {
     #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = crate::cli::bool_value_parser())]
     pub no_searchable_encryption: Option<bool>,
 
-    /// Enable transparent at-rest value encryption for the storage backend,
+    /// Enable engine file encryption at rest for the storage backend,
     /// keyed by the keyring `encryption-key`. Default: false.
     #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
     pub at_rest_encryption: Option<bool>,

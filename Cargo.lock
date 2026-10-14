@@ -12813,7 +12813,6 @@ dependencies = [
  "bytes",
  "chrono",
  "cid",
- "crypto",
  "defra-core",
  "document",
  "futures",
@@ -12834,7 +12833,6 @@ dependencies = [
  "tracing",
  "uuid",
  "web-time",
- "zeroize",
 ]
 
 [[package]]

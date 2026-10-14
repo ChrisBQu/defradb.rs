@@ -56,33 +56,67 @@ async fn storage_stats_prints_aggregates_without_creating_config_or_keys() {
 }
 
 #[test]
-fn storage_stats_rejects_memory_and_encrypted_stores() {
-    for encrypted in [false, true] {
-        let root = tempfile::tempdir().unwrap();
-        let mut config = cli::config::Config {
-            rootdir: root.path().to_path_buf(),
-            ..Default::default()
-        };
-        config.datastore.at_rest_encryption = encrypted;
-        if !encrypted {
-            config.datastore.store = cli::config::DatastoreType::Memory;
-        }
-        std::fs::write(
-            root.path().join("config.yaml"),
-            serde_yaml::to_string(&config).unwrap(),
+fn storage_stats_rejects_memory() {
+    let root = tempfile::tempdir().unwrap();
+    let mut config = cli::config::Config {
+        rootdir: root.path().to_path_buf(),
+        ..Default::default()
+    };
+    config.datastore.store = cli::config::DatastoreType::Memory;
+    std::fs::write(
+        root.path().join("config.yaml"),
+        serde_yaml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+    let output = command(root.path()).output().unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("on-disk database"));
+    assert!(!config.data_path().exists());
+}
+
+#[tokio::test]
+async fn storage_stats_reads_engine_encryption_without_replacing_key() {
+    use keyring::{FileKeyring, Keyring, ENCRYPTION_KEY, KEYRING_SECRET_ENV};
+    let root = tempfile::tempdir().unwrap();
+    let mut config = cli::config::Config {
+        rootdir: root.path().to_path_buf(),
+        ..Default::default()
+    };
+    config.datastore.at_rest_encryption = true;
+    let secret = "storage-stats-secret";
+    let keyring = FileKeyring::open(config.keyring_path(), secret.as_bytes()).unwrap();
+    keyring.set(ENCRYPTION_KEY, &[42; 32]).unwrap();
+    std::fs::write(
+        root.path().join("config.yaml"),
+        serde_yaml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+    let database = db::DB::new(
+        storage::RegolithStore::open_with_options(
+            config.data_path(),
+            storage::RegolithStoreOptions::default().with_encryption_key([42; 32]),
         )
+        .unwrap(),
+    )
+    .unwrap();
+    database
+        .create_collections_atomic(query::parse_sdl("type Users { name: String }").unwrap())
+        .await
         .unwrap();
-        let output = command(root.path()).output().unwrap();
-        assert!(!output.status.success());
-        let error = String::from_utf8_lossy(&output.stderr);
-        let expected = if encrypted {
-            "encrypted store"
-        } else {
-            "on-disk database"
-        };
-        assert!(error.contains(expected), "{error}");
-        assert!(!config.data_path().exists());
-    }
+    database.close().await.unwrap();
+    drop(database);
+    let output = command(root.path())
+        .env(KEYRING_SECRET_ENV, secret)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(report["total"]["keys"].as_u64().unwrap() > 0);
+    assert_eq!(keyring.get(ENCRYPTION_KEY).unwrap().as_slice(), &[42; 32]);
 }
 
 #[test]
@@ -92,4 +126,32 @@ fn storage_stats_does_not_initialize_a_missing_database() {
     let output = command(&missing).output().unwrap();
     assert!(!output.status.success());
     assert!(!missing.exists());
+}
+
+#[test]
+fn encrypted_storage_stats_does_not_generate_a_missing_key() {
+    use keyring::{FileKeyring, Keyring, ENCRYPTION_KEY, KEYRING_SECRET_ENV};
+    let root = tempfile::tempdir().unwrap();
+    let mut config = cli::config::Config {
+        rootdir: root.path().to_path_buf(),
+        ..Default::default()
+    };
+    config.datastore.at_rest_encryption = true;
+    let secret = "storage-stats-missing-key";
+    let keyring = FileKeyring::open(config.keyring_path(), secret.as_bytes()).unwrap();
+    std::fs::write(
+        root.path().join("config.yaml"),
+        serde_yaml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+    let output = command(root.path())
+        .env(KEYRING_SECRET_ENV, secret)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(matches!(
+        keyring.get(ENCRYPTION_KEY),
+        Err(keyring::Error::NotFound(_))
+    ));
+    assert!(!config.data_path().exists());
 }

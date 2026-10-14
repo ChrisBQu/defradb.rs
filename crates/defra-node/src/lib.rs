@@ -1024,7 +1024,7 @@ impl NodeBuilder {
         self
     }
 
-    /// Enable transparent at-rest value encryption for the persistent storage backend.
+    /// Enable engine file encryption at rest for the persistent storage backend.
     pub fn with_at_rest_encryption_key(mut self, key: [u8; 32]) -> Self {
         self.at_rest_encryption_key = Some(key);
         self
@@ -1251,21 +1251,29 @@ impl NodeBuilder {
                 data_path = %path.display(),
                 "embedded node starting"
             );
-            let opts =
+            let mut opts =
                 resolve_regolith_options(self.regolith_options.clone(), self.storage_durability);
+            if let Some(key) = self.at_rest_encryption_key {
+                opts = opts.with_encryption_key(key);
+            }
             let store = storage::RegolithStore::open_with_options(&path, opts)
                 .map_err(|e| anyhow::anyhow!("failed to open regolith store: {}", e))?;
 
-            Self::build_with_persistent_store(store, self.at_rest_encryption_key, persistent_args)
-                .await?
+            Self::build_with_persistent_store_arc(Arc::new(store), persistent_args).await?
         } else {
             tracing::info!(
                 storage_backend = "memory",
                 "embedded node starting (ephemeral, no data_path)"
             );
             let store = Arc::new(
-                storage::RegolithStore::in_memory()
-                    .map_err(|e| anyhow::anyhow!("failed to open in-memory regolith: {}", e))?,
+                storage::RegolithStore::open_with_options("memory", {
+                    let opts = storage::RegolithStoreOptions::memory();
+                    match self.at_rest_encryption_key {
+                        Some(key) => opts.with_encryption_key(key),
+                        None => opts,
+                    }
+                })
+                .map_err(|e| anyhow::anyhow!("failed to open in-memory regolith: {}", e))?,
             );
 
             Self::build_with_store(
@@ -1374,20 +1382,6 @@ impl NodeBuilder {
         }
 
         Ok(node)
-    }
-
-    async fn build_with_persistent_store<S: storage::corekv::Store + 'static>(
-        store: S,
-        at_rest_encryption_key: Option<[u8; 32]>,
-        args: PersistentStoreBuildArgs,
-    ) -> anyhow::Result<EmbeddedNode> {
-        if let Some(key) = at_rest_encryption_key {
-            tracing::info!("at-rest encryption enabled (value-only, AES-256-GCM)");
-            let store = Arc::new(storage::encrypted_store::EncryptedStore::new(store, key));
-            Self::build_with_persistent_store_arc(store, args).await
-        } else {
-            Self::build_with_persistent_store_arc(Arc::new(store), args).await
-        }
     }
 
     async fn build_with_persistent_store_arc<S: storage::corekv::Store + 'static>(

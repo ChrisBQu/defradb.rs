@@ -70,11 +70,11 @@ pub struct Node {
 }
 
 impl Node {
-    /// Load the keyring `encryption-key`, generating and persisting a new
-    /// 32-byte AES-256 key on first use (Go's `getOrCreateEncryptionKey`).
+    /// Load the keyring `encryption-key`. Writable startup may generate and
+    /// persist a 32-byte key on first use; diagnostics require an existing key.
     ///
     /// Errors if the keyring is disabled or the stored key is not 32 bytes.
-    fn load_or_create_encryption_key(config: &Config) -> Result<[u8; 32]> {
+    fn load_encryption_key(config: &Config, create: bool) -> Result<[u8; 32]> {
         use crate::error::Error;
         use keyring::ENCRYPTION_KEY;
 
@@ -87,7 +87,7 @@ impl Node {
         let kr = crate::commands::open_keyring(config)?;
         let key_bytes: Vec<u8> = match kr.get(ENCRYPTION_KEY) {
             Ok(bytes) => bytes.to_vec(),
-            Err(keyring::Error::NotFound(_)) => {
+            Err(keyring::Error::NotFound(_)) if create => {
                 info!("Generating new at-rest encryption key");
                 let generated = crypto::generate_aes256().map_err(|e| {
                     Error::Keyring(format!("failed to generate encryption key: {}", e))
@@ -149,27 +149,20 @@ impl Node {
         Ok(Some(key))
     }
 
-    /// Wrap a concrete backend in a type-erased [`storage::DynStore`],
-    /// applying at-rest encryption when configured. The erasure keeps the
-    /// whole node stack at a single `S = DynStore` instantiation.
-    pub(crate) fn wrap_store<S>(config: &Config, backend: S) -> Result<storage::DynStore>
-    where
-        S: storage::corekv::Store + 'static,
-    {
+    /// Resolve encryption before opening the engine. Diagnostics never create keys.
+    pub(crate) fn encryption_options(
+        config: &Config,
+        options: storage::RegolithStoreOptions,
+        create: bool,
+    ) -> Result<storage::RegolithStoreOptions> {
         if config.datastore.at_rest_encryption {
-            info!("At-rest encryption enabled (value-only, AES-256-GCM)");
-            let key = Self::load_or_create_encryption_key(config)?;
-            Ok(storage::DynStore::new(Arc::new(
-                storage::encrypted_store::EncryptedStore::new(backend, key),
-            )))
+            Ok(options.with_encryption_key(Self::load_encryption_key(config, create)?))
         } else {
-            Ok(storage::DynStore::new(Arc::new(backend)))
+            Ok(options)
         }
     }
 
-    /// Build the persistent ACP/Zanzibar stores from a shared store and start
-    /// the server. The store may wrap a bare backend or an [`EncryptedStore`];
-    /// both DB and ACP share the same instance so they encrypt uniformly.
+    /// Build ACP and database services over the same engine-encrypted store.
     async fn init_persistent_store_and_server(
         store: Arc<storage::DynStore>,
         config: &Config,
@@ -261,8 +254,13 @@ impl Node {
                 let zanzibar_store: Arc<dyn acp::ZanzibarStore> =
                     Arc::new(acp::MemoryZanzibarStore::new());
                 info!("Using in-memory ACP store");
-                let backend = storage::RegolithStore::in_memory()?;
-                let store = Self::wrap_store(&config, backend)?;
+                let options = Self::encryption_options(
+                    &config,
+                    storage::RegolithStoreOptions::memory(),
+                    true,
+                )?;
+                let backend = storage::RegolithStore::open_with_options("memory", options)?;
+                let store = storage::DynStore::new(Arc::new(backend));
                 Self::init_store_and_server(
                     Arc::new(store),
                     &config,
@@ -282,9 +280,9 @@ impl Node {
                 );
                 let backend = storage::RegolithStore::open_with_options(
                     config.data_path(),
-                    regolith_options(&config),
+                    Self::encryption_options(&config, regolith_options(&config), true)?,
                 )?;
-                let store = Self::wrap_store(&config, backend)?;
+                let store = storage::DynStore::new(Arc::new(backend));
                 Self::init_persistent_store_and_server(
                     Arc::new(store),
                     &config,

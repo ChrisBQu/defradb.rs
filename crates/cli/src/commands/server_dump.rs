@@ -23,8 +23,11 @@ impl ServerDumpArgs {
             DatastoreType::Regolith => {
                 let opts = storage::RegolithStoreOptions::default()
                     .with_durability(config.datastore.durability);
-                let backend = storage::RegolithStore::open_with_options(config.data_path(), opts)?;
-                let store = Arc::new(Node::wrap_store(config, backend)?);
+                let backend = storage::RegolithStore::open_with_options(
+                    config.data_path(),
+                    Node::encryption_options(config, opts, false)?,
+                )?;
+                let store = Arc::new(storage::DynStore::new(Arc::new(backend)));
                 let database = db::DB::open_from_arc(store)
                     .await
                     .map_err(|e| Error::Server(e.to_string()))?;

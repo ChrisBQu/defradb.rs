@@ -99,7 +99,6 @@ pub mod backends;
 pub mod corekv;
 pub mod dyn_store;
 pub mod encoding;
-pub mod encrypted_store;
 pub mod field_value;
 pub mod keys;
 pub mod namespace;

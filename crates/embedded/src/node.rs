@@ -347,7 +347,7 @@ impl NodeBuilder {
         self
     }
 
-    /// Enable transparent at-rest value encryption for the storage backend,
+    /// Enable engine file encryption at rest for the storage backend,
     /// keyed by the given 32-byte AES-256 key. Opt-in; off by default.
     pub fn with_at_rest_encryption_key(mut self, key: [u8; 32]) -> Self {
         self.at_rest_encryption_key = Some(key);
@@ -378,7 +378,10 @@ impl NodeBuilder {
 
             // `Options::embedded` sizes the engine for a 1-4 MiB working
             // set, which is what an embedded node has to live inside.
-            let opts = storage::RegolithStoreOptions::embedded();
+            let mut opts = storage::RegolithStoreOptions::embedded();
+            if let Some(key) = self.at_rest_encryption_key {
+                opts = opts.with_encryption_key(key);
+            }
             let store =
                 storage::RegolithStore::open_with_options(&path, opts).with_context(|| {
                     format!("failed to open regolith store at '{}'", path.display())
@@ -392,20 +395,20 @@ impl NodeBuilder {
             );
             (
                 EmbeddedStore::Regolith(
-                    storage::RegolithStore::in_memory()
-                        .context("failed to open in-memory regolith store")?,
+                    storage::RegolithStore::open_with_options("memory", {
+                        let opts = storage::RegolithStoreOptions::memory();
+                        match self.at_rest_encryption_key {
+                            Some(key) => opts.with_encryption_key(key),
+                            None => opts,
+                        }
+                    })
+                    .context("failed to open in-memory regolith store")?,
                 ),
                 Persistence::Memory,
             )
         };
 
-        let store = match self.at_rest_encryption_key.take() {
-            Some(key) => {
-                tracing::info!("at-rest encryption enabled (value-only, AES-256-GCM)");
-                Arc::new(store.encrypted(key))
-            }
-            None => Arc::new(store),
-        };
+        let store = Arc::new(store);
 
         self.config.persistence = persistence;
         #[cfg(feature = "iroh")]
