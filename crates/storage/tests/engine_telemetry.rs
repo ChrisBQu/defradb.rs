@@ -1,8 +1,11 @@
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
     Arc,
+    atomic::{AtomicU64, AtomicUsize, Ordering},
 };
-use storage::corekv::{Error, Store, Writer};
+use storage::corekv::{
+    Error, RetryAttemptError, RetryAttemptFn, RetryAttemptFuture, RetryAttemptValue,
+    RetryCallbacks, RetryOptions, RetryTxn, Store, Writer,
+};
 use storage::{RegolithStore, RegolithStoreOptions};
 
 #[derive(Default)]
@@ -34,7 +37,7 @@ async fn engine_counters_and_conflict_reasons_preserve_caller_instrumentation() 
     let mut delete = store.new_txn(false).await.unwrap();
     delete.delete(b"ordinary").await.unwrap();
     delete.commit().await.unwrap();
-    assert!(matches!(reader.commit().await, Err(Error::TxnConflict)));
+    assert!(reader.commit().await.unwrap_err().is_txn_conflict());
 
     let snapshot = stats.snapshot();
     assert_eq!(
@@ -79,4 +82,75 @@ async fn accepted_blind_merges_are_visible_in_policy_tickers() {
     let stats = store.transaction_stats_handle().unwrap().snapshot();
     assert_eq!(stats.conflicts, 0);
     assert_eq!(stats.engine["regolith.policy.blind_merges_commuted"], 1);
+}
+
+struct ConflictOnceAttempt {
+    trigger_writer: Option<tokio::sync::oneshot::Sender<()>>,
+    writer_finished: Option<tokio::sync::oneshot::Receiver<()>>,
+    attempts: Arc<AtomicUsize>,
+}
+
+impl RetryAttemptFn for ConflictOnceAttempt {
+    fn run<'a>(&'a mut self, retry: &'a mut dyn RetryTxn) -> RetryAttemptFuture<'a> {
+        Box::pin(async move {
+            self.attempts.fetch_add(1, Ordering::Relaxed);
+            let mut io = retry.begin_attempt_io()?;
+            io.get(b"retry-counter").await?;
+            if let Some(trigger) = self.trigger_writer.take() {
+                let _ = trigger.send(());
+                self.writer_finished
+                    .take()
+                    .expect("first attempt owns writer notification")
+                    .await
+                    .map_err(|_| {
+                        RetryAttemptError::Storage(Error::Other(
+                            "conflict writer stopped before commit".into(),
+                        ))
+                    })?;
+            }
+            io.set(b"retry-counter", b"attempt").await?;
+            retry.finish_attempt_io(io, RetryCallbacks::default())?;
+            Ok(Box::new(()) as RetryAttemptValue)
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retry_adapter_counts_native_conflicts_and_commits_once() {
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
+    let mut seed = store.new_txn(false).await.unwrap();
+    seed.set(b"retry-counter", b"seed").await.unwrap();
+    seed.commit().await.unwrap();
+    let before = store.transaction_stats_handle().unwrap().snapshot();
+
+    let writer_store = Arc::clone(&store);
+    let (trigger_writer, start_writer) = tokio::sync::oneshot::channel();
+    let (writer_finished, finish_writer) = tokio::sync::oneshot::channel();
+    let writer = tokio::spawn(async move {
+        start_writer.await.unwrap();
+        let mut txn = writer_store.new_txn(false).await.unwrap();
+        txn.set(b"retry-counter", b"concurrent").await.unwrap();
+        txn.commit().await.unwrap();
+        let _ = writer_finished.send(());
+    });
+
+    let attempts = Arc::new(AtomicUsize::new(0));
+    store
+        .transact_retry(
+            RetryOptions::new(3),
+            Box::new(ConflictOnceAttempt {
+                trigger_writer: Some(trigger_writer),
+                writer_finished: Some(finish_writer),
+                attempts: Arc::clone(&attempts),
+            }),
+        )
+        .await
+        .unwrap();
+    writer.await.unwrap();
+
+    let after = store.transaction_stats_handle().unwrap().snapshot();
+    assert_eq!(attempts.load(Ordering::Relaxed), 2);
+    assert_eq!(after.commits - before.commits, 2); // writer and winning attempt
+    assert_eq!(after.conflicts - before.conflicts, 1);
+    assert_eq!(after.conflict_reasons.get("read/put"), Some(&1));
 }

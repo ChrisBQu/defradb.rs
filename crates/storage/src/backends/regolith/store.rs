@@ -544,9 +544,7 @@ impl RetryTxn for RegolithRetryTxn<'_> {
         let placeholder = self.db.begin(&TxnOptions::new().isolation(self.isolation));
         let actual = Box::new(std::mem::replace(self.txn, placeholder));
         self.attempt_io_active = true;
-        Ok(Box::new(RegolithTxn::scoped_attempt(
-            actual,
-        )))
+        Ok(Box::new(RegolithTxn::scoped_attempt(actual)))
     }
 
     fn finish_attempt_io(
