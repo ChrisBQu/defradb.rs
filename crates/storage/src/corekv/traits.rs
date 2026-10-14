@@ -184,6 +184,13 @@ pub trait Reader: MaybeSendSync + private::Sealed {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait Writer: MaybeSendSync + private::Sealed {
+    /// Apply an operator-defined operand without reading the value first.
+    async fn merge(&mut self, _key: &[u8], _operand: &[u8]) -> Result<()> {
+        Err(super::errors::Error::Other(
+            "value merges are unsupported by this store".into(),
+        ))
+    }
+
     /// Queue an entry whose position becomes visible only after commit.
     async fn append(
         &mut self,
@@ -527,6 +534,10 @@ impl Reader for Box<dyn Txn> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Writer for Box<dyn Txn> {
+    async fn merge(&mut self, key: &[u8], operand: &[u8]) -> Result<()> {
+        (**self).merge(key, operand).await
+    }
+
     async fn append(
         &mut self,
         log: &super::types::AppendLog,

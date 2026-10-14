@@ -166,17 +166,11 @@ impl FullTextIndex {
         field_len_delta: i128,
     ) -> Result<()> {
         let key = self.stats_shard_key(doc_short_id);
-        let (docs, field_len) = Self::decode_stats_delta(txn.get(&key).await?);
-        let docs = docs
-            .checked_add(docs_delta)
-            .ok_or_else(|| crate::corekv::Error::Other("full-text stats overflow".to_string()))?;
-        let field_len = field_len
-            .checked_add(field_len_delta)
-            .ok_or_else(|| crate::corekv::Error::Other("full-text stats overflow".to_string()))?;
-        let mut value = Vec::with_capacity(32);
-        value.extend_from_slice(&docs.to_be_bytes());
-        value.extend_from_slice(&field_len.to_be_bytes());
-        txn.set(&key, &value).await
+        txn.merge(
+            &key,
+            &crate::merge::stats_delta(docs_delta, field_len_delta),
+        )
+        .await
     }
 
     async fn read_stats<R: Reader + MaybeSend>(&self, txn: &R) -> Result<(u64, u64)> {

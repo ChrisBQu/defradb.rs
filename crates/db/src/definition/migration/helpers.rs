@@ -153,6 +153,18 @@ pub(crate) async fn cache_migrated_document(
         return Ok(false);
     };
 
+    collection
+        .validate_write_definition(datastore, true)
+        .await?;
+    if collection
+        .load_version(datastore, doc_short_id)
+        .await?
+        .as_deref()
+        == Some(collection.version_id())
+    {
+        return Ok(false);
+    }
+
     let data = doc.to_cbor()?;
     datastore
         .set(&collection.doc_key(doc_short_id), &data)
@@ -181,6 +193,18 @@ pub(crate) async fn cache_migrated_document_with_indexes(
     let Some(doc_short_id) = collection.resolve_doc_short_id(systemstore, doc_id).await? else {
         return Ok(false);
     };
+
+    collection
+        .validate_write_definition(datastore, true)
+        .await?;
+    if collection
+        .load_version(datastore, doc_short_id)
+        .await?
+        .as_deref()
+        == Some(collection.version_id())
+    {
+        return Ok(false);
+    }
 
     let key = collection.doc_key(doc_short_id);
     let Some(old_data) = datastore.get(&key).await.map_err(Error::Storage)? else {
@@ -224,6 +248,18 @@ pub(crate) async fn cache_document_version(
     let Some(doc_short_id) = collection.resolve_doc_short_id(systemstore, doc_id).await? else {
         return Ok(false);
     };
+
+    collection
+        .validate_write_definition(datastore, true)
+        .await?;
+    if collection
+        .load_version(datastore, doc_short_id)
+        .await?
+        .as_deref()
+        == Some(collection.version_id())
+    {
+        return Ok(false);
+    }
 
     collection.store_version(datastore, doc_short_id).await?;
     Ok(true)

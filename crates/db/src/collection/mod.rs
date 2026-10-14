@@ -396,9 +396,32 @@ impl Collection {
         datastore: &NamespaceView,
         doc_short_id: u64,
     ) -> Result<()> {
+        self.store_document_version(datastore, doc_short_id, &self.def.version_id)
+            .await
+    }
+
+    /// Validate the version even when its value does not need rewriting.
+    /// A concurrent schema transition must invalidate an old-schema writer.
+    pub(crate) async fn store_document_version(
+        &self,
+        datastore: &NamespaceView,
+        doc_short_id: u64,
+        version: &str,
+    ) -> Result<()> {
         let key = self.version_key(doc_short_id);
-        let version = self.def.version_id.as_bytes();
-        datastore.set(&key, version).await.map_err(Error::Storage)
+        if datastore
+            .get(&key)
+            .await
+            .map_err(Error::Storage)?
+            .as_deref()
+            == Some(version.as_bytes())
+        {
+            return Ok(());
+        }
+        datastore
+            .set(&key, version.as_bytes())
+            .await
+            .map_err(Error::Storage)
     }
 
     /// Load the schema version for a document.

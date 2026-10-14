@@ -122,6 +122,10 @@ impl Reader for CountingTxn {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Writer for CountingTxn {
+    async fn merge(&mut self, key: &[u8], operand: &[u8]) -> Result<()> {
+        self.inner.merge(key, operand).await
+    }
+
     async fn append(
         &mut self,
         log: &storage::corekv::AppendLog,

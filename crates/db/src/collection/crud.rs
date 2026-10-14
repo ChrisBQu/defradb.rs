@@ -454,12 +454,9 @@ impl Collection {
         datastore.set(&key, &data).await.map_err(Error::Storage)?;
 
         // Store schema version - preserve document's version if set, otherwise use collection's
-        let version_key = self.version_key(doc_short_id);
         let version = doc.schema_version_id().unwrap_or(&self.def.version_id);
-        datastore
-            .set(&version_key, version.as_bytes())
-            .await
-            .map_err(Error::Storage)?;
+        self.store_document_version(datastore, doc_short_id, version)
+            .await?;
 
         Ok(doc_id)
     }

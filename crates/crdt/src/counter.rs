@@ -39,13 +39,6 @@ pub enum NumericKind {
     Float64,
 }
 
-/// Internal helper for computed new values (used in apply_delta)
-enum NewValue {
-    Int64(i64),
-    Float32(f32),
-    Float64(f64),
-}
-
 /// Counter Delta - represents an increment/decrement operation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CounterDelta {
@@ -322,89 +315,11 @@ impl Counter {
         })
     }
 
-    /// Get current value as i64
-    async fn get_int64(&self, reader: &dyn Reader) -> Result<i64> {
-        match reader
-            .get(&self.value_key)
-            .await
-            .map_err(|e| Error::Storage(e.to_string()))?
-        {
-            Some(bytes) => {
-                if bytes.len() != 8 {
-                    return Err(Error::MergeError(format!(
-                        "invalid counter value length for field '{}' in schema '{}': \
-                         expected 8 bytes, got {} bytes",
-                        self.field_name,
-                        self.schema_version_id,
-                        bytes.len()
-                    )));
-                }
-                let arr: [u8; 8] = bytes[..8]
-                    .try_into()
-                    .expect("length already validated as 8 bytes");
-                Ok(i64::from_be_bytes(arr))
-            }
-            None => Ok(0),
-        }
-    }
-
     /// Set value as i64
     async fn set_int64(&self, rw: &mut dyn ReaderWriter, value: i64) -> Result<()> {
         rw.set(&self.value_key, &value.to_be_bytes())
             .await
             .map_err(|e| Error::Storage(e.to_string()))
-    }
-
-    /// Get current value as f64
-    async fn get_float64(&self, reader: &dyn Reader) -> Result<f64> {
-        match reader
-            .get(&self.value_key)
-            .await
-            .map_err(|e| Error::Storage(e.to_string()))?
-        {
-            Some(bytes) => {
-                if bytes.len() != 8 {
-                    return Err(Error::MergeError(format!(
-                        "invalid counter value length for field '{}' in schema '{}': \
-                         expected 8 bytes, got {} bytes",
-                        self.field_name,
-                        self.schema_version_id,
-                        bytes.len()
-                    )));
-                }
-                let arr: [u8; 8] = bytes[..8]
-                    .try_into()
-                    .expect("length already validated as 8 bytes");
-                Ok(f64::from_be_bytes(arr))
-            }
-            None => Ok(0.0),
-        }
-    }
-
-    /// Get current value as f32
-    async fn get_float32(&self, reader: &dyn Reader) -> Result<f32> {
-        match reader
-            .get(&self.value_key)
-            .await
-            .map_err(|e| Error::Storage(e.to_string()))?
-        {
-            Some(bytes) => {
-                if bytes.len() != 4 {
-                    return Err(Error::MergeError(format!(
-                        "invalid counter value length for field '{}' in schema '{}': \
-                         expected 4 bytes (Float32), got {} bytes",
-                        self.field_name,
-                        self.schema_version_id,
-                        bytes.len()
-                    )));
-                }
-                let arr: [u8; 4] = bytes[..4]
-                    .try_into()
-                    .expect("length already validated as 4 bytes");
-                Ok(f32::from_be_bytes(arr))
-            }
-            None => Ok(0.0),
-        }
     }
 
     /// Set value as f32
@@ -446,137 +361,90 @@ impl Counter {
             )));
         }
 
-        // Decode and validate based on kind BEFORE any state changes
-        let new_value = match self.kind {
+        // Validate before staging the operand. No read of the counter is needed.
+        let (value, operand) = match self.kind {
             NumericKind::Int64 => {
-                let increment = delta.decode_int64()?;
-                if !self.allow_decrement && increment < 0 {
+                let value = delta.decode_int64()?;
+                if !self.allow_decrement && value < 0 {
                     return Err(Error::MergeError("decrement not allowed".into()));
                 }
-                let current = if is_create {
-                    0
-                } else {
-                    self.get_int64(rw).await?
-                };
-                // Int64: Wrap on overflow to match Go DefraDB behavior
-                NewValue::Int64(current.wrapping_add(increment))
+                (
+                    value.to_be_bytes().to_vec(),
+                    storage::merge::counter_i64(value),
+                )
             }
             NumericKind::Float32 => {
-                let increment = delta.decode_float32()?;
-                if !self.allow_decrement && increment < 0.0 {
+                let value = delta.decode_float32()?;
+                if !self.allow_decrement && value < 0.0 {
                     return Err(Error::MergeError("decrement not allowed".into()));
                 }
-                let current = if is_create {
-                    0.0f32
-                } else {
-                    self.get_float32(rw).await?
-                };
-                NewValue::Float32(current + increment)
+                (
+                    value.to_be_bytes().to_vec(),
+                    storage::merge::counter_f32(value),
+                )
             }
             NumericKind::Float64 => {
-                let increment = delta.decode_float64()?;
-                if !self.allow_decrement && increment < 0.0 {
+                let value = delta.decode_float64()?;
+                if !self.allow_decrement && value < 0.0 {
                     return Err(Error::MergeError("decrement not allowed".into()));
                 }
-
-                let current = if is_create {
-                    0.0
-                } else {
-                    self.get_float64(rw).await?
-                };
-                NewValue::Float64(current + increment)
+                (
+                    value.to_be_bytes().to_vec(),
+                    storage::merge::counter_f64(value),
+                )
             }
         };
-
-        match new_value {
-            NewValue::Int64(v) => self.set_int64(rw, v).await?,
-            NewValue::Float32(v) => self.set_float32(rw, v).await?,
-            NewValue::Float64(v) => self.set_float64(rw, v).await?,
+        if is_create {
+            rw.set(&self.value_key, &value).await
+        } else {
+            rw.merge(&self.value_key, &operand).await
         }
+        .map_err(|error| Error::Storage(error.to_string()))?;
 
         Ok(MergeResult::Applied)
     }
 
-    /// Initialize the CRDT accumulation store (`value_key`) from the document's
-    /// current materialized value, but only if the store has no value yet.
-    ///
-    /// The accumulation store (`value_key`) is the single source of truth for a
-    /// counter. Both local writes and merges apply their *delta* to it via a
-    /// read-modify-write; the document blob merely mirrors the resulting store
-    /// value. Because local writes now also advance the accumulation store, a
-    /// local increment is never "stranded in the blob" relative to the store, so
-    /// reconcile only needs to seed the store the *first* time the counter is
-    /// touched on this node — e.g. migrating an old document whose store predates
-    /// this single-store invariant, or a node that materialized the blob via a
-    /// non-counter path. Once the store has a value it is authoritative and must
-    /// never be overwritten from a possibly-stale/lagging blob.
-    ///
-    /// This is deliberately *init-if-absent*, not a value comparison: a PNCounter
-    /// allows decrements, so `blob < store` is ambiguous and `max` would be wrong.
-    ///
-    /// NOTE: per #847, counter merge is unconditional and there is no nonce
-    /// tracking. A reconcile must never call a `mark_nonce(..)` helper — that
-    /// would leak dead markers into the datastore and reintroduce the dedup
-    /// contract #847 removed.
+    /// Seed an absent counter during creation. Existing stores are authoritative;
+    /// no value is adopted from a materialized document during an update.
     pub async fn reconcile_int64(&self, rw: &mut dyn ReaderWriter, value: i64) -> Result<()> {
         if !self.has_value(rw).await? {
-            return self.set_int64(rw, value).await;
-        }
-        // The store is present (authoritative). For an increment-only PCounter the
-        // value can only GROW, so a present store that is BEHIND the materialized
-        // `value` can only be a PRE-FIX document whose local increments were written
-        // to the blob but never to the store — adopt the larger to migrate it. Never
-        // LOWER a present store (no clobber: under the intra-batch lag the store is
-        // ahead of the lagging blob, so value <= current is a no-op). Skipped for a
-        // decrement-capable PNCounter: a decrement legitimately lowers the value, so
-        // `value < current` is ambiguous and `max` would be wrong — there it stays
-        // strict init-if-absent.
-        if !self.allow_decrement {
-            let current = self.get_int64(rw).await?;
-            if value > current {
-                self.set_int64(rw, value).await?;
-            }
+            self.set_int64(rw, value).await?;
         }
         Ok(())
     }
 
-    /// Float64 variant of `reconcile_int64` — same init-if-absent + PCounter
-    /// migrate-via-max semantics. See that method.
     pub async fn reconcile_float64(&self, rw: &mut dyn ReaderWriter, value: f64) -> Result<()> {
         if !self.has_value(rw).await? {
-            return self.set_float64(rw, value).await;
-        }
-        if !self.allow_decrement {
-            let current = self.get_float64(rw).await?;
-            if value > current {
-                self.set_float64(rw, value).await?;
-            }
+            self.set_float64(rw, value).await?;
         }
         Ok(())
     }
 
-    /// Float32 variant of `reconcile_int64` — same init-if-absent + PCounter
-    /// migrate-via-max semantics. See that method.
     pub async fn reconcile_float32(&self, rw: &mut dyn ReaderWriter, value: f32) -> Result<()> {
         if !self.has_value(rw).await? {
-            return self.set_float32(rw, value).await;
-        }
-        if !self.allow_decrement {
-            let current = self.get_float32(rw).await?;
-            if value > current {
-                self.set_float32(rw, value).await?;
-            }
+            self.set_float32(rw, value).await?;
         }
         Ok(())
     }
 
     /// Whether the accumulation store (`value_key`) currently holds a value.
     async fn has_value(&self, reader: &dyn Reader) -> Result<bool> {
-        Ok(reader
-            .get(&self.value_key)
+        // Present accumulators are updated only through blind operands. The
+        // document's deletion/version dependencies protect their lifecycle.
+        if reader
+            .get_parts(&self.value_key, &[])
             .await
-            .map_err(|e| Error::Storage(e.to_string()))?
-            .is_some())
+            .map_err(|error| Error::Storage(error.to_string()))?
+            .is_some()
+        {
+            return Ok(true);
+        }
+        // First initialization (including a new schema version) is a one-winner
+        // race. An absent point read must be validated before putting the seed.
+        reader
+            .has(&self.value_key)
+            .await
+            .map_err(|error| Error::Storage(error.to_string()))
     }
 
     /// Get current value bytes (for internal use)

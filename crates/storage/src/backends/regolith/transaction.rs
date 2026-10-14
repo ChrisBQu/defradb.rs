@@ -274,6 +274,13 @@ impl Reader for RegolithTxn {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Writer for RegolithTxn {
+    async fn merge(&mut self, key: &[u8], operand: &[u8]) -> Result<()> {
+        if key.is_empty() {
+            return Err(Error::EmptyKey);
+        }
+        self.writable()?.merge(key, operand).map_err(map_txn_error)
+    }
+
     async fn append(
         &mut self,
         log: &crate::corekv::AppendLog,

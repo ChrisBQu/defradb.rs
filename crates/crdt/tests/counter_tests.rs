@@ -773,14 +773,9 @@ async fn test_counter_float32_accumulation_uses_f32_precision() {
     );
 }
 
-/// PCounter (increment-only) reconcile MIGRATES a present-but-stale store via max,
-/// and NEVER lowers a present store (#1021). A pre-fix document has its value in
-/// the blob but a store left behind (old local increments hit only the blob); the
-/// first post-fix touch must adopt the larger so those increments are not dropped.
-/// The intra-batch lag — where the store leads the lagging blob — must be a no-op
-/// (never lower), so reconcile can never clobber.
+/// Creation may seed an absent accumulator, but never migrate it via max.
 #[tokio::test]
-async fn test_pcounter_reconcile_migrates_via_max_never_lowers() {
+async fn test_pcounter_seed_never_overwrites_an_accumulator() {
     let store = RegolithStore::in_memory().unwrap();
     // allow_decrement = false => PCounter.
     let counter = Counter::new(
@@ -799,13 +794,13 @@ async fn test_pcounter_reconcile_migrates_via_max_never_lowers() {
     counter.reconcile_int64(&mut *txn, 5).await.unwrap();
     assert_eq!(read(counter.value(&*txn).await.unwrap()), 5);
 
-    // Present but BEHIND (pre-fix doc: blob=8 ahead of store=5) -> migrate to 8.
+    // A materialized mirror never replaces the authoritative accumulator.
     counter.reconcile_int64(&mut *txn, 8).await.unwrap();
-    assert_eq!(read(counter.value(&*txn).await.unwrap()), 8);
+    assert_eq!(read(counter.value(&*txn).await.unwrap()), 5);
 
     // Present and AHEAD of the passed value (intra-batch lag) -> no-op, never lower.
     counter.reconcile_int64(&mut *txn, 3).await.unwrap();
-    assert_eq!(read(counter.value(&*txn).await.unwrap()), 8);
+    assert_eq!(read(counter.value(&*txn).await.unwrap()), 5);
 
     txn.commit().await.unwrap();
 }

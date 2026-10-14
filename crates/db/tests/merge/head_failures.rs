@@ -107,6 +107,10 @@ impl Reader for FailingHeadTxn {
 
 #[async_trait]
 impl Writer for FailingHeadTxn {
+    async fn merge(&mut self, key: &[u8], operand: &[u8]) -> Result<()> {
+        self.inner.merge(key, operand).await
+    }
+
     async fn append(
         &mut self,
         log: &storage::corekv::AppendLog,

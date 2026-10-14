@@ -620,3 +620,25 @@ async fn fulltext_scoring_tracks_updates_and_deletes_with_sharded_stats() {
     assert!(index.search_scored(&read, "rust").await.unwrap().is_empty());
     assert_eq!(index.stats(&read).await.unwrap(), (1, 2.0));
 }
+
+#[tokio::test]
+async fn fulltext_stats_merges_allow_more_overlapping_writers_than_shards() {
+    let store = RegolithStore::in_memory().unwrap();
+    let index = test_fulltext_index();
+    let mut writers = Vec::new();
+    // With 256 shards, this guarantees a shared stats key without depending on
+    // the hash implementation. Every writer starts before any commit.
+    for id in 1..=257 {
+        let mut txn = store.new_txn(false).await.unwrap();
+        index
+            .save(&mut txn, id, &[NormalValue::String("shared".into())])
+            .await
+            .unwrap();
+        writers.push(txn);
+    }
+    for txn in writers {
+        txn.commit().await.unwrap();
+    }
+    let reader = store.new_txn(true).await.unwrap();
+    assert_eq!(index.stats(&reader).await.unwrap(), (257, 1.0));
+}

@@ -116,3 +116,5 @@ pub use corekv::{
 pub use dyn_store::DynStore;
 
 pub use backends::{TransactionStatsHandle, TransactionStatsSnapshot};
+
+pub mod merge;

@@ -71,7 +71,8 @@ impl RegolithStore {
         let engine = options
             .engine
             .clone()
-            .add_listener(Arc::new(BackgroundErrorListener));
+            .add_listener(Arc::new(BackgroundErrorListener))
+            .merge_operator(Some(Arc::new(crate::merge::DefraMergeOperator)));
         let db = OptimisticTransactionDb::open(&path, engine)
             .map_err(|error| Error::Backend(format!("failed to open regolith: {error}")))?
             .with_isolation(options.isolation)

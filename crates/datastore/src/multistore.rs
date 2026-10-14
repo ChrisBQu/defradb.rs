@@ -39,6 +39,14 @@ impl SharedTxn {
             .release_savepoint()
     }
 
+    pub async fn merge(&self, namespace: Namespace, key: &[u8], operand: &[u8]) -> Result<()> {
+        self.txn
+            .write()
+            .await
+            .merge(&prefix_key(namespace, key), operand)
+            .await
+    }
+
     pub async fn append(
         &self,
         namespace: Namespace,
@@ -200,6 +208,10 @@ pub struct NamespaceView {
 }
 
 impl NamespaceView {
+    pub async fn merge(&self, key: &[u8], operand: &[u8]) -> Result<()> {
+        self.txn.merge(self.namespace, key, operand).await
+    }
+
     pub async fn append(
         &self,
         log: &storage::corekv::AppendLog,
@@ -329,6 +341,10 @@ impl Reader for NamespaceView {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Writer for NamespaceView {
+    async fn merge(&mut self, key: &[u8], operand: &[u8]) -> Result<()> {
+        self.txn.merge(self.namespace, key, operand).await
+    }
+
     async fn append(
         &mut self,
         log: &storage::corekv::AppendLog,

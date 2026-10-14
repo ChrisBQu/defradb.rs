@@ -70,6 +70,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time"] }
 futures.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+regolith = { workspace = true, features = ["testing"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
 
 [dev-dependencies]

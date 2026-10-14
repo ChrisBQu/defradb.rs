@@ -11041,6 +11041,7 @@ dependencies = [
  "loom",
  "lz4_flex",
  "portable-atomic",
+ "proptest",
  "rustix 1.1.4",
  "snap",
  "thiserror 1.0.69",
