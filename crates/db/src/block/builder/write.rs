@@ -187,7 +187,7 @@ async fn encrypt_with_new_key(
     if let Some(prepared) = prepared {
         if let Some((cid, key)) = prepared.key(field_name) {
             if prepared.key_scope_matches(field_name, key_field_name) {
-                return Ok((encrypt_delta(value_bytes, key)?, cid));
+                return Ok((encrypt_retry_delta(value_bytes, key, prepared_inputs)?, cid));
             }
         }
         if (prepared.requires_kms_keys() || kms.is_some()) && prepared_inputs.is_none() {
@@ -233,7 +233,7 @@ async fn encrypt_with_new_key(
                 .await
                 .map_err(|e| BuildError::Message(format!("kms generate_key: {e}")))?
         };
-        let encrypted = encrypt_delta(value_bytes, &key)?;
+        let encrypted = encrypt_retry_delta(value_bytes, &key, prepared_inputs)?;
         tracing::debug!(
             field = %field_name,
             ciphertext_len = encrypted.len(),
@@ -243,8 +243,8 @@ async fn encrypt_with_new_key(
     }
 
     // Legacy path: inline key generation + direct block store.
-    let key = defra_core::encryption::generate_encryption_key_for(doc_ref_bytes, key_field_name);
-    let encrypted = encrypt_delta(value_bytes, &key)?;
+    let key = encryption_key_prepared(doc_ref_bytes, key_field_name, prepared_inputs)?;
+    let encrypted = encrypt_retry_delta(value_bytes, &key, prepared_inputs)?;
 
     tracing::debug!(
         field = %field_name,
@@ -438,7 +438,7 @@ pub(crate) async fn write_document_blocks_with_inputs(
             } else if let Some((key, enc_cid)) =
                 inherited_encryption(blockstore, &heads, kms, prepared_inputs).await?
             {
-                let encrypted = encrypt_delta(&value_bytes, &key)?;
+                let encrypted = encrypt_retry_delta(&value_bytes, &key, prepared_inputs)?;
 
                 tracing::debug!(
                     field = %field_name,
@@ -476,7 +476,38 @@ pub(crate) async fn write_document_blocks_with_inputs(
                 || doc.get_counter_delta(field_name).is_some();
 
             let nonce: i64 = if is_counter && !is_create {
-                rand::random()
+                if let Some(inputs) = prepared_inputs {
+                    let exact = serde_json::to_vec(&(
+                        "counter-nonce-v1",
+                        &doc_ref_bytes,
+                        field_name,
+                        field_priority,
+                        &heads,
+                        &value_bytes,
+                    ))
+                    .map_err(|error| BuildError::Message(error.to_string()))?;
+                    let request = query::prepared::PreparedInputRequest::new(
+                        query::prepared::PreparedInputKind::Encryption,
+                        exact,
+                    );
+                    if let Some(value) = inputs.get(&request) {
+                        i64::from_be_bytes(value.as_ref().try_into().map_err(|_| {
+                            BuildError::Message("invalid prepared counter nonce".into())
+                        })?)
+                    } else {
+                        let nonce: i64 = rand::random();
+                        if !inputs
+                            .insert(request, std::sync::Arc::<[u8]>::from(nonce.to_be_bytes()))
+                        {
+                            return Err(BuildError::Message(
+                                "prepared nonce memo budget exhausted".into(),
+                            ));
+                        }
+                        nonce
+                    }
+                } else {
+                    rand::random()
+                }
             } else {
                 0
             };
@@ -595,7 +626,7 @@ pub(crate) async fn write_document_blocks_with_inputs(
     };
 
     let composite_encryption_cid = if explicit_doc_encryption {
-        let key = defra_core::encryption::generate_encryption_key_for(&doc_ref_bytes, None);
+        let key = encryption_key_prepared(&doc_ref_bytes, None, prepared_inputs)?;
         let enc_block = Encryption { key: key.to_vec() };
         let enc_bytes = enc_block
             .to_dag_cbor()
@@ -814,4 +845,15 @@ pub(crate) async fn write_delete_block_with_inputs(
         field_cids: vec![],
         encryption_cids: vec![],
     })
+}
+
+fn encrypt_retry_delta(
+    plaintext: &[u8],
+    key: &[u8; 32],
+    inputs: Option<&query::prepared::PreparedInputMemo>,
+) -> Result<Vec<u8>, String> {
+    match inputs {
+        Some(inputs) => encrypt_delta_prepared(plaintext, key, inputs),
+        None => encrypt_delta(plaintext, key),
+    }
 }

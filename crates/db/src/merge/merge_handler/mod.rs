@@ -223,12 +223,12 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     }
 
     /// Create a new database merge handler.
-    #[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
     pub fn new(db: Arc<DB<S>>, blockstore: Arc<B>) -> Self {
         Self::new_with_max_merge_depth(db, blockstore, DEFAULT_MAX_MERGE_DEPTH)
     }
 
     /// Create a merge handler with an explicit parent-chain depth limit.
+    #[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
     pub fn new_with_max_merge_depth(
         db: Arc<DB<S>>,
         blockstore: Arc<B>,

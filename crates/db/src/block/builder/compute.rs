@@ -134,10 +134,11 @@ pub(crate) fn compute_document_blocks_with_inputs(
                         };
                         (encrypted, enc_cid)
                     } else {
-                        let key = defra_core::encryption::generate_encryption_key_for(
+                        let key = encryption_key_prepared(
                             &doc_ref_bytes,
                             key_field_name,
-                        );
+                            prepared_inputs,
+                        )?;
                         let encrypted = match prepared_inputs {
                             Some(inputs) => encrypt_delta_prepared(&value_bytes, &key, inputs)?,
                             None => encrypt_delta(&value_bytes, &key)?,
@@ -234,7 +235,7 @@ pub(crate) fn compute_document_blocks_with_inputs(
     // Composite encryption CID for doc-level encryption
     let composite_encryption_cid = if let Some(enc) = encryption_config {
         if enc.encrypt_doc {
-            let key = defra_core::encryption::generate_encryption_key_for(&doc_ref_bytes, None);
+            let key = encryption_key_prepared(&doc_ref_bytes, None, prepared_inputs)?;
             let enc_block = Encryption { key: key.to_vec() };
             let enc_bytes = enc_block
                 .to_dag_cbor()

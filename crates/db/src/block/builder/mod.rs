@@ -111,6 +111,36 @@ pub(crate) fn encrypt_delta(plaintext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>,
     Ok(ciphertext)
 }
 
+/// Keep locally generated keys stable for one request's preparation passes.
+pub(crate) fn encryption_key_prepared(
+    doc_ref: &[u8],
+    field: Option<&str>,
+    inputs: Option<&query::prepared::PreparedInputMemo>,
+) -> Result<[u8; 32], String> {
+    let Some(inputs) = inputs else {
+        return Ok(defra_core::encryption::generate_encryption_key_for(
+            doc_ref, field,
+        ));
+    };
+    let exact = serde_json::to_vec(&("local-encryption-key-v1", doc_ref, field))
+        .map_err(|error| error.to_string())?;
+    let request = query::prepared::PreparedInputRequest::new(
+        query::prepared::PreparedInputKind::Encryption,
+        exact,
+    );
+    if let Some(key) = inputs.get(&request) {
+        return key
+            .as_ref()
+            .try_into()
+            .map_err(|_| "invalid prepared local encryption key".into());
+    }
+    let key = defra_core::encryption::generate_encryption_key_for(doc_ref, field);
+    if !inputs.insert(request, std::sync::Arc::<[u8]>::from(key)) {
+        return Err("prepared encryption memo budget exhausted".into());
+    }
+    Ok(key)
+}
+
 /// Preserve a randomized ciphertext across transaction re-entry when a later
 /// prepared input (such as a remote signature) suspends the attempt.
 pub(crate) fn encrypt_delta_prepared(
