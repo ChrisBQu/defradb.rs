@@ -44,6 +44,7 @@ pub enum PreparedInputKind {
     Embedding,
     KmsKey,
     Signature,
+    Encryption,
     AcpDecision,
 }
 

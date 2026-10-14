@@ -111,6 +111,32 @@ pub(crate) fn encrypt_delta(plaintext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>,
     Ok(ciphertext)
 }
 
+/// Preserve a randomized ciphertext across transaction re-entry when a later
+/// prepared input (such as a remote signature) suspends the attempt.
+pub(crate) fn encrypt_delta_prepared(
+    plaintext: &[u8],
+    key: &[u8; 32],
+    inputs: &query::prepared::PreparedInputMemo,
+) -> Result<Vec<u8>, String> {
+    let mut exact = Vec::with_capacity(40 + plaintext.len());
+    exact.extend_from_slice(b"AES-GCM-delta-v1");
+    exact.extend_from_slice(key);
+    exact.extend_from_slice(&(plaintext.len() as u64).to_be_bytes());
+    exact.extend_from_slice(plaintext);
+    let request = query::prepared::PreparedInputRequest::new(
+        query::prepared::PreparedInputKind::Encryption,
+        exact,
+    );
+    if let Some(ciphertext) = inputs.get(&request) {
+        return Ok(ciphertext.to_vec());
+    }
+    let ciphertext = encrypt_delta(plaintext, key)?;
+    if !inputs.insert(request, std::sync::Arc::<[u8]>::from(ciphertext.clone())) {
+        return Err("prepared encryption memo budget exhausted".into());
+    }
+    Ok(ciphertext)
+}
+
 /// Compute a signature block without writing to storage.
 ///
 /// Pure function: returns `(sig_cid, sig_cbor_bytes)` for the caller to store.

@@ -110,17 +110,26 @@ pub async fn set_embedding(
 pub(crate) fn set_embedding_from_inputs(
     embeddings: &[VectorEmbeddingDescription],
     doc: &mut Document,
+    is_create: bool,
     modified_fields: &RapidHashSet<String>,
     config: &EmbeddingClientConfig,
     inputs: &query::prepared::PreparedInputMemo,
 ) -> query::error::Result<Vec<String>> {
     let mut generated = Vec::new();
     for embedding in embeddings {
-        if modified_fields.contains(&embedding.field_name)
-            || !embedding
-                .fields
-                .iter()
-                .any(|field| modified_fields.contains(field))
+        if is_create
+            && doc
+                .get_field_value(&embedding.field_name)
+                .is_some_and(|field| field.is_dirty())
+        {
+            continue;
+        }
+        if !is_create && modified_fields.contains(&embedding.field_name)
+            || !is_create
+                && !embedding
+                    .fields
+                    .iter()
+                    .any(|field| modified_fields.contains(field))
             || resolve_embedding_config(embedding, config).is_err()
         {
             continue;

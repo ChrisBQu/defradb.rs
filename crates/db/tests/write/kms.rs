@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use crypto::PrivateKey;
 use db::{AutoCommitMutator, DB};
 use defra_core::encryption::{set_encryption_config, EncryptionConfig};
 use document::Document;
@@ -108,6 +109,87 @@ fn document(value: &str) -> Document {
     doc.set("right", value);
     doc.set("public", value);
     doc
+}
+
+struct CountingRemoteSigner {
+    key: crypto::Ed25519PrivateKey,
+    calls: AtomicUsize,
+}
+
+impl defra_core::signing::RemoteSigner for CountingRemoteSigner {
+    fn sign_sync(
+        &self,
+        data: &[u8],
+        _authorization: Option<&defra_core::signing::SigningAuthorization>,
+    ) -> Result<Vec<u8>, String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.key
+            .sign(data)
+            .map_err(|error| format!("remote signing failed: {error}"))
+    }
+}
+
+#[tokio::test]
+async fn direct_create_resolves_kms_and_signature_inputs_once() {
+    let fixture = fixture().await;
+    encrypt();
+    let key = crypto::generate_ed25519().unwrap();
+    let public = key.public_key();
+    let public_key_bytes = public.raw_owned();
+    let public_key_hex = hex::encode(public.raw());
+    let signer = Arc::new(CountingRemoteSigner {
+        key,
+        calls: AtomicUsize::new(0),
+    });
+    defra_core::signing::set_signing_config(Some(defra_core::signing::SigningConfig {
+        key_type: defra_core::signing::SigningKeyType::Ed25519,
+        private_key_bytes: Vec::new(),
+        public_key_bytes,
+        public_key_hex,
+        remote_signer: Some(signer.clone()),
+        signing_authorization: None,
+    }));
+
+    let result = AutoCommitMutator::new(Arc::clone(&fixture.db))
+        .create("Secrets", document("direct"))
+        .await;
+    defra_core::signing::set_signing_config(None);
+    result.unwrap();
+
+    assert_eq!(fixture.kms.0.load(Ordering::SeqCst), 2);
+    assert_eq!(signer.calls.load(Ordering::SeqCst), 4);
+}
+
+#[tokio::test]
+async fn direct_delete_many_resolves_each_signature_once() {
+    let fixture = fixture().await;
+    let mutator = AutoCommitMutator::new(Arc::clone(&fixture.db));
+    let first = mutator.create("Secrets", document("first")).await.unwrap();
+    let second = mutator.create("Secrets", document("second")).await.unwrap();
+    let key = crypto::generate_ed25519().unwrap();
+    let public = key.public_key();
+    let public_key_bytes = public.raw_owned();
+    let public_key_hex = hex::encode(public.raw());
+    let signer = Arc::new(CountingRemoteSigner {
+        key,
+        calls: AtomicUsize::new(0),
+    });
+    defra_core::signing::set_signing_config(Some(defra_core::signing::SigningConfig {
+        key_type: defra_core::signing::SigningKeyType::Ed25519,
+        private_key_bytes: Vec::new(),
+        public_key_bytes,
+        public_key_hex,
+        remote_signer: Some(signer.clone()),
+        signing_authorization: None,
+    }));
+
+    let result = mutator
+        .delete_many_impl("Secrets", &[first.doc_id, second.doc_id])
+        .await;
+    defra_core::signing::set_signing_config(None);
+    let results = result.unwrap();
+    assert!(results.iter().all(|result| result.existed));
+    assert_eq!(signer.calls.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]

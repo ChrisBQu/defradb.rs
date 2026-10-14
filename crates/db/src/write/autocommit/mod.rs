@@ -308,7 +308,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
         collection_name: &str,
         doc: Document,
     ) -> query::error::Result<CreateResult> {
-        self.create_impl(collection_name, doc).await
+        self.create_with_resolved_inputs(collection_name, doc).await
     }
 
     async fn create_many(
@@ -316,7 +316,8 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
         collection_name: &str,
         docs: Vec<Document>,
     ) -> query::error::Result<Vec<CreateResult>> {
-        self.create_many_impl(collection_name, docs).await
+        self.create_many_with_resolved_inputs(collection_name, docs)
+            .await
     }
 
     async fn update(
@@ -345,7 +346,8 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
         collection_name: &str,
         doc_id: &DocID,
     ) -> query::error::Result<DeleteResult> {
-        self.delete_impl(collection_name, doc_id).await
+        self.delete_with_resolved_inputs(collection_name, doc_id)
+            .await
     }
 
     async fn exists(&self, collection_name: &str, doc_id: &DocID) -> query::error::Result<bool> {

@@ -96,6 +96,7 @@ pub(crate) async fn write_local_update(
             crate::search::embedding::set_embedding_from_inputs(
                 &collection.schema().vector_embeddings,
                 doc,
+                false,
                 modified_fields,
                 config,
                 inputs,

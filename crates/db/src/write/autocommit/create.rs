@@ -72,6 +72,115 @@ impl<S: Store + 'static> storage::corekv::RetryAttemptFn for CreateManyRetryAtte
 
 #[allow(clippy::type_complexity)]
 impl<S: Store + 'static> AutoCommitMutator<S> {
+    pub(super) async fn create_with_resolved_inputs(
+        &self,
+        collection_name: &str,
+        doc: Document,
+    ) -> query::error::Result<CreateResult> {
+        if self.prepared_inputs.is_some() {
+            return self.create_impl(collection_name, doc).await;
+        }
+        let inputs = query::prepared::PreparedInputMemo::default();
+        let mutator = Self {
+            db: self.db.clone(),
+            prepared_inputs: Some(inputs.clone()),
+        };
+        let mut doc = doc;
+        mutator
+            .seed_create_identity(collection_name, &mut doc)
+            .await?;
+        loop {
+            match mutator.create_impl(collection_name, doc.clone()).await {
+                Err(query::error::QueryError::NeedsInput(request)) => {
+                    if inputs.get(&request).is_some() {
+                        return Err(query::error::QueryError::execution(format!(
+                            "prepared input {:?} remained missing after memoization",
+                            request.kind()
+                        )));
+                    }
+                    if !inputs.register_dependency_miss() {
+                        return Err(query::error::QueryError::execution(
+                            "prepared input dependency budget exhausted",
+                        ));
+                    }
+                    let response = self.resolve_prepared_input(&request).await?;
+                    if !inputs.insert(request, response) {
+                        return Err(query::error::QueryError::execution(
+                            "prepared input memory budget exhausted",
+                        ));
+                    }
+                }
+                result => return result,
+            }
+        }
+    }
+
+    pub(super) async fn create_many_with_resolved_inputs(
+        &self,
+        collection_name: &str,
+        docs: Vec<Document>,
+    ) -> query::error::Result<Vec<CreateResult>> {
+        if self.prepared_inputs.is_some() {
+            return self.create_many_impl(collection_name, docs).await;
+        }
+        let inputs = query::prepared::PreparedInputMemo::default();
+        let mutator = Self {
+            db: self.db.clone(),
+            prepared_inputs: Some(inputs.clone()),
+        };
+        let mut docs = docs;
+        for doc in &mut docs {
+            mutator.seed_create_identity(collection_name, doc).await?;
+        }
+        loop {
+            match mutator
+                .create_many_impl(collection_name, docs.clone())
+                .await
+            {
+                Err(query::error::QueryError::NeedsInput(request)) => {
+                    if !inputs.register_dependency_miss() {
+                        return Err(query::error::QueryError::execution(
+                            "prepared input dependency budget exhausted",
+                        ));
+                    }
+                    let response = self.resolve_prepared_input(&request).await?;
+                    if !inputs.insert(request, response) {
+                        return Err(query::error::QueryError::execution(
+                            "prepared input memory budget exhausted",
+                        ));
+                    }
+                }
+                result => return result,
+            }
+        }
+    }
+
+    async fn seed_create_identity(
+        &self,
+        collection_name: &str,
+        doc: &mut Document,
+    ) -> query::error::Result<()> {
+        if crate::write::prepare::prepared_identity(doc).is_some() {
+            return Ok(());
+        }
+        let (_collection_guard, collection) = self.guarded_collection(collection_name).await?;
+        let identity = DocStorageIdentity::new(
+            collection.resolved_root_id(),
+            self.db
+                .next_doc_short_id()
+                .await
+                .map_err(|error| query::error::QueryError::execution(error.to_string()))?,
+        );
+        let mut preparation =
+            document::WritePreparation::new(identity.collection_short_id, identity.doc_short_id);
+        // The block builder uses this flag to distinguish a KMS-backed
+        // missing key (which must become a prepared-input request) from the
+        // legacy local-key path.
+        preparation.set_requires_kms_keys(self.db.kms().is_some());
+        doc.set_write_preparation(Arc::new(preparation));
+        Ok(())
+    }
+
     pub(super) async fn create_impl(
         &self,
         collection_name: &str,
@@ -86,15 +195,26 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
         // Generate embeddings before blocks (embedding values affect the genesis CID)
         let embedding_config = self.db.options().embedding_config();
-        crate::search::set_embedding(
-            &collection.schema().vector_embeddings,
-            &mut doc,
-            true,
-            None,
-            &embedding_config,
-        )
-        .await
-        .map_err(|e| query::error::QueryError::execution(format!("embedding error: {}", e)))?;
+        if let Some(inputs) = &self.prepared_inputs {
+            crate::search::embedding::set_embedding_from_inputs(
+                &collection.schema().vector_embeddings,
+                &mut doc,
+                true,
+                &rapidhash::RapidHashSet::default(),
+                &embedding_config,
+                inputs,
+            )?;
+        } else {
+            crate::search::set_embedding(
+                &collection.schema().vector_embeddings,
+                &mut doc,
+                true,
+                None,
+                &embedding_config,
+            )
+            .await
+            .map_err(|e| query::error::QueryError::execution(format!("embedding error: {}", e)))?;
+        }
 
         let identity = match crate::write::prepare::prepared_identity(&doc) {
             Some(identity) => identity,
@@ -433,15 +553,28 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         let mut prepared_docs: Vec<Document> = Vec::with_capacity(docs.len());
         let embedding_config = self.db.options().embedding_config();
         for mut doc in docs {
-            crate::search::set_embedding(
-                &collection.schema().vector_embeddings,
-                &mut doc,
-                true,
-                None,
-                &embedding_config,
-            )
-            .await
-            .map_err(|e| query::error::QueryError::execution(format!("embedding error: {}", e)))?;
+            if let Some(inputs) = &self.prepared_inputs {
+                crate::search::embedding::set_embedding_from_inputs(
+                    &collection.schema().vector_embeddings,
+                    &mut doc,
+                    true,
+                    &rapidhash::RapidHashSet::default(),
+                    &embedding_config,
+                    inputs,
+                )?;
+            } else {
+                crate::search::set_embedding(
+                    &collection.schema().vector_embeddings,
+                    &mut doc,
+                    true,
+                    None,
+                    &embedding_config,
+                )
+                .await
+                .map_err(|e| {
+                    query::error::QueryError::execution(format!("embedding error: {}", e))
+                })?;
+            }
 
             prepared_docs.push(doc);
         }

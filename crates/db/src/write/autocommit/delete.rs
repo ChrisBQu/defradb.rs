@@ -59,6 +59,75 @@ impl<S: Store + 'static> storage::corekv::RetryAttemptFn for DeleteRetryAttempt<
 }
 
 impl<S: Store + 'static> AutoCommitMutator<S> {
+    pub(super) async fn delete_with_resolved_inputs(
+        &self,
+        collection_name: &str,
+        doc_id: &DocID,
+    ) -> query::error::Result<DeleteResult> {
+        if self.prepared_inputs.is_some() {
+            return self.delete_impl(collection_name, doc_id).await;
+        }
+        let inputs = query::prepared::PreparedInputMemo::default();
+        let mutator = Self {
+            db: self.db.clone(),
+            prepared_inputs: Some(inputs.clone()),
+        };
+        loop {
+            match mutator.delete_impl(collection_name, doc_id).await {
+                Err(query::error::QueryError::NeedsInput(request)) => {
+                    if !inputs.register_dependency_miss() {
+                        return Err(query::error::QueryError::execution(
+                            "prepared input dependency budget exhausted",
+                        ));
+                    }
+                    let response = self.resolve_prepared_input(&request).await?;
+                    if !inputs.insert(request, response) {
+                        return Err(query::error::QueryError::execution(
+                            "prepared input memory budget exhausted",
+                        ));
+                    }
+                }
+                result => return result,
+            }
+        }
+    }
+
+    pub async fn delete_many_impl(
+        &self,
+        collection_name: &str,
+        doc_ids: &[DocID],
+    ) -> query::error::Result<Vec<DeleteResult>> {
+        if self.prepared_inputs.is_some() {
+            return self.delete_many_once_impl(collection_name, doc_ids).await;
+        }
+        let inputs = query::prepared::PreparedInputMemo::default();
+        let mutator = Self {
+            db: self.db.clone(),
+            prepared_inputs: Some(inputs.clone()),
+        };
+        loop {
+            match mutator
+                .delete_many_once_impl(collection_name, doc_ids)
+                .await
+            {
+                Err(query::error::QueryError::NeedsInput(request)) => {
+                    if !inputs.register_dependency_miss() {
+                        return Err(query::error::QueryError::execution(
+                            "prepared input dependency budget exhausted",
+                        ));
+                    }
+                    let response = self.resolve_prepared_input(&request).await?;
+                    if !inputs.insert(request, response) {
+                        return Err(query::error::QueryError::execution(
+                            "prepared input memory budget exhausted",
+                        ));
+                    }
+                }
+                result => return result,
+            }
+        }
+    }
+
     pub(super) async fn delete_impl(
         &self,
         collection_name: &str,
@@ -286,7 +355,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
     /// This avoids creating N separate MVCC snapshots and N COW epochs when
     /// purging large batches (e.g. 686 documents caused a 20GB memory spike
     /// with per-document transactions).
-    pub async fn delete_many_impl(
+    async fn delete_many_once_impl(
         &self,
         collection_name: &str,
         doc_ids: &[DocID],
