@@ -8,8 +8,8 @@
 #![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use regolith::{OptimisticTransactionDb, StreamOptions};
@@ -319,11 +319,15 @@ impl Store for RegolithStore {
         let policy = regolith::RetryPolicy::new(options.max_attempts.max(1));
         let mut committed_changes = head_cache::HeadChanges::default();
         let mut attempt_count = 0usize;
+        let mut conflict_count = 0usize;
         let run = || {
             let mut queue = queue_db.db().io_queue();
             let queue_id = queue.id();
-            let future = queue_db.transact_async(queue_id, &policy, async |txn, _lost| {
+            let future = queue_db.transact_async(queue_id, &policy, async |txn, lost| {
                 attempt_count += 1;
+                if lost.is_some() {
+                    conflict_count += 1;
+                }
                 committed_changes = head_cache::HeadChanges::default();
                 let mut retry_txn = RegolithRetryTxn {
                     txn,
@@ -344,22 +348,29 @@ impl Store for RegolithStore {
                 let mut cache = head_cache::lock(&self.inner.head_cache)?;
                 cache.publish(&committed_changes);
                 self.inner.stats.record_commit();
-                for _ in 1..attempt_count {
+                for _ in 0..conflict_count {
                     self.inner.stats.record_conflict();
                 }
                 Ok(value)
             }
             Err(regolith::TransactError::Closure(error)) => Err(error),
-            Err(regolith::TransactError::Exhausted(_)) => {
+            Err(regolith::TransactError::Exhausted(conflict)) => {
                 self.inner.stats.record_conflict();
-                Err(RetryAttemptError::Storage(Error::TxnConflict))
+                Err(RetryAttemptError::Exhausted(
+                    crate::corekv::TransactionConflict {
+                        access: conflict.mine(),
+                        winning_write: conflict.theirs(),
+                        observed_seq: conflict.observed_seq(),
+                        latest_seq: conflict.latest_seq(),
+                    },
+                ))
             }
             Err(regolith::TransactError::Engine(error)) => Err(RetryAttemptError::Storage(
                 super::transaction::map_txn_error(error),
             )),
-            Err(other) => Err(RetryAttemptError::Storage(Error::Backend(format!(
-                "{other:?}"
-            )))),
+            Err(_other) => Err(RetryAttemptError::Storage(Error::Backend(
+                "unknown regolith transaction retry failure".into(),
+            ))),
         }
     }
 

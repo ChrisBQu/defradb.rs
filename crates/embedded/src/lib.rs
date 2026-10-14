@@ -320,6 +320,17 @@ impl storage::Store for EmbeddedStore {
         }
     }
 
+    async fn transact_retry(
+        &self,
+        options: storage::corekv::RetryOptions,
+        attempt: storage::corekv::RetryAttempt,
+    ) -> std::result::Result<storage::corekv::RetryAttemptValue, storage::corekv::RetryAttemptError>
+    {
+        match self {
+            Self::Regolith(store) => store.transact_retry(options, attempt).await,
+        }
+    }
+
     async fn close(&self) -> storage::Result<()> {
         match self {
             Self::Regolith(store) => store.close().await,

@@ -60,6 +60,17 @@ impl storage::Store for FfiStore {
         }
     }
 
+    async fn transact_retry(
+        &self,
+        options: storage::corekv::RetryOptions,
+        attempt: storage::corekv::RetryAttempt,
+    ) -> std::result::Result<storage::corekv::RetryAttemptValue, storage::corekv::RetryAttemptError>
+    {
+        match self {
+            FfiStore::Regolith(store) => store.transact_retry(options, attempt).await,
+        }
+    }
+
     async fn close(&self) -> storage::Result<()> {
         match self {
             FfiStore::Regolith(s) => s.close().await,

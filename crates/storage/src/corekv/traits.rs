@@ -121,6 +121,29 @@ pub trait RetryTxn: MaybeSendSync + private::Sealed {
     async fn has(&self, key: &[u8]) -> Result<bool>;
     async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()>;
     async fn delete(&mut self, key: &[u8]) -> Result<()>;
+
+    /// Open the backend's sealed, attempt-scoped transaction adapter for
+    /// datastore facades that need the full Reader/Writer surface. The
+    /// returned transaction must refuse commit/discard; ownership remains
+    /// with this retry attempt and the adapter must be returned before the
+    /// closure completes. Backends without an owned attempt adapter reject
+    /// this bridge and continue to use the restricted methods above.
+    #[doc(hidden)]
+    fn take_attempt_txn(&mut self) -> Result<Box<dyn Txn>> {
+        Err(super::errors::Error::Other(
+            "backend does not expose a scoped transaction facade".into(),
+        ))
+    }
+
+    /// Return the adapter from [`RetryTxn::take_attempt_txn`]. This fails if
+    /// namespace views or iterators still retain it, so the engine never
+    /// commits while attempt-local access is live.
+    #[doc(hidden)]
+    fn restore_attempt_txn(&mut self, _txn: Box<dyn Txn>) -> Result<()> {
+        Err(super::errors::Error::Other(
+            "backend does not accept a scoped transaction facade".into(),
+        ))
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -132,6 +155,7 @@ pub type RetryAttemptValue = Box<dyn Any>;
 /// domain aborts cross the engine boundary untouched and are never retried.
 pub enum RetryAttemptError {
     Storage(super::errors::Error),
+    Exhausted(super::errors::TransactionConflict),
     #[cfg(not(target_arch = "wasm32"))]
     Abort(Box<dyn Any + Send>),
     #[cfg(target_arch = "wasm32")]
@@ -142,6 +166,9 @@ impl std::fmt::Debug for RetryAttemptError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Storage(error) => formatter.debug_tuple("Storage").field(error).finish(),
+            Self::Exhausted(conflict) => {
+                formatter.debug_tuple("Exhausted").field(conflict).finish()
+            }
             Self::Abort(_) => formatter.write_str("Abort(<typed domain error>)"),
         }
     }
@@ -157,6 +184,7 @@ impl RetryAttemptError {
     pub fn into_storage(self) -> super::errors::Error {
         match self {
             Self::Storage(error) => error,
+            Self::Exhausted(conflict) => super::errors::Error::TxnRetryExhausted(conflict),
             Self::Abort(_) => super::errors::Error::Other(
                 "transaction attempt aborted with a domain error".to_string(),
             ),

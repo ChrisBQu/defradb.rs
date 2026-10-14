@@ -71,6 +71,11 @@ pub enum Error {
     #[error("transaction conflict. Please retry")]
     TxnConflictDetails(TransactionConflict),
 
+    /// The engine exhausted its own retry policy. Outer request retry loops
+    /// must not repeat the exact same stale attempt body.
+    #[error("transaction retry attempts exhausted")]
+    TxnRetryExhausted(TransactionConflict),
+
     /// Unique index constraint violation.
     #[error("can not index a doc's field(s) that violates unique index.")]
     UniqueConstraintViolation,
