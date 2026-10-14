@@ -8,8 +8,9 @@ use defra_core::block::{
 use defra_core::merge::{BlockMetadata, MergeBlock, MergeHandler};
 use std::sync::{Arc, Mutex};
 use storage::corekv::{
-    private::Sealed, AsyncTxnCallback, IterOptions, Iterator, Reader, Result, Store, Txn,
-    TxnCallback, Writer,
+    intercept_retry_writes, private::Sealed, AsyncTxnCallback, IterOptions, Iterator, Reader,
+    Result, RetryAttempt, RetryAttemptError, RetryAttemptValue, RetryOptions,
+    RetryWriteInterceptor, Store, Txn, TxnCallback, Writer,
 };
 use storage::RegolithStore;
 
@@ -65,6 +66,30 @@ impl Store for FailingHeadStore {
             inner: self.inner.new_txn(readonly).await?,
             fail: self.fail.clone(),
         }))
+    }
+    async fn transact_retry(
+        &self,
+        options: RetryOptions,
+        attempt: RetryAttempt,
+    ) -> std::result::Result<RetryAttemptValue, RetryAttemptError> {
+        let fail = self.fail.clone();
+        let interceptor: RetryWriteInterceptor = Arc::new(move |key, value| {
+            let delete = value.is_none();
+            match fail
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|point| point.refuses(delete, key))
+            {
+                Some(point) => Err(storage::Error::Other(format!(
+                    "injected head write failure at {point:?}"
+                ))),
+                None => Ok(()),
+            }
+        });
+        self.inner
+            .transact_retry(options, intercept_retry_writes(attempt, interceptor))
+            .await
     }
     async fn close(&self) -> Result<()> {
         self.inner.close().await

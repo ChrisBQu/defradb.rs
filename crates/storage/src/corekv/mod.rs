@@ -79,5 +79,6 @@ pub use traits::{
     OrderedTxnCallback, OrderedTxnCallbacks, Reader, ReaderWriter, RetryAttempt, RetryAttemptError,
     RetryAttemptFn, RetryAttemptFuture, RetryAttemptIO, RetryAttemptValue, RetryCallbackCounts,
     RetryCallbacks, RetryOptions, RetryTxn, Store, Txn, TxnCallback, TxnStore, Writer,
+    intercept_retry_writes, RetryWriteInterceptor,
 };
 pub use types::{AppendLog, IterOptions, Key};

@@ -255,6 +255,189 @@ pub trait RetryAttemptIO: ReaderWriter + private::Sealed {
     fn into_any(self: Box<Self>) -> Box<dyn Any>;
 }
 
+/// Intercepts a write staged by an engine-owned attempt. `value` is `None` for
+/// deletes. The interceptor runs before the underlying write is staged.
+#[cfg(not(target_arch = "wasm32"))]
+pub type RetryWriteInterceptor = Arc<dyn Fn(&[u8], Option<&[u8]>) -> Result<()> + Send + Sync>;
+#[cfg(target_arch = "wasm32")]
+pub type RetryWriteInterceptor = Arc<dyn Fn(&[u8], Option<&[u8]>) -> Result<()>>;
+
+/// Wrap a retry attempt with a safe write interceptor while preserving the
+/// backend-owned attempt IO and commit lifecycle. Useful for decorators that
+/// inject failures or observe writes without implementing the sealed IO type.
+pub fn intercept_retry_writes(
+    attempt: RetryAttempt,
+    interceptor: RetryWriteInterceptor,
+) -> RetryAttempt {
+    Box::new(InterceptingRetryAttempt {
+        inner: attempt,
+        interceptor,
+    })
+}
+
+struct InterceptingRetryAttempt {
+    inner: RetryAttempt,
+    interceptor: RetryWriteInterceptor,
+}
+
+impl private::Sealed for InterceptingRetryAttempt {}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl RetryAttemptFn for InterceptingRetryAttempt {
+    fn run<'a>(&'a mut self, txn: &'a mut dyn RetryTxn) -> RetryAttemptFuture<'a> {
+        Box::pin(async move {
+            let mut wrapped = InterceptingRetryTxn {
+                inner: txn,
+                interceptor: Arc::clone(&self.interceptor),
+            };
+            self.inner.run(&mut wrapped).await
+        })
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl RetryAttemptFn for InterceptingRetryAttempt {
+    fn run<'a>(&'a mut self, txn: &'a mut dyn RetryTxn) -> RetryAttemptFuture<'a> {
+        Box::pin(async move {
+            let mut wrapped = InterceptingRetryTxn {
+                inner: txn,
+                interceptor: Arc::clone(&self.interceptor),
+            };
+            self.inner.run(&mut wrapped).await
+        })
+    }
+}
+
+struct InterceptingRetryTxn<'a> {
+    inner: &'a mut dyn RetryTxn,
+    interceptor: RetryWriteInterceptor,
+}
+
+impl private::Sealed for InterceptingRetryTxn<'_> {}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl RetryTxn for InterceptingRetryTxn<'_> {
+    async fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
+        self.inner.get(key).await
+    }
+    async fn has(&self, key: &[u8]) -> Result<bool> {
+        self.inner.has(key).await
+    }
+    async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+        (self.interceptor)(key, Some(value))?;
+        self.inner.set(key, value).await
+    }
+    async fn delete(&mut self, key: &[u8]) -> Result<()> {
+        (self.interceptor)(key, None)?;
+        self.inner.delete(key).await
+    }
+    fn begin_attempt_io(&mut self) -> Result<Box<dyn RetryAttemptIO>> {
+        Ok(Box::new(InterceptingRetryAttemptIO {
+            inner: Some(self.inner.begin_attempt_io()?),
+            interceptor: Arc::clone(&self.interceptor),
+        }))
+    }
+    fn finish_attempt_io(
+        &mut self,
+        io: Box<dyn RetryAttemptIO>,
+        callbacks: RetryCallbacks,
+    ) -> Result<()> {
+        self.inner.finish_attempt_io(io, callbacks)
+    }
+}
+
+struct InterceptingRetryAttemptIO {
+    inner: Option<Box<dyn RetryAttemptIO>>,
+    interceptor: RetryWriteInterceptor,
+}
+
+impl private::Sealed for InterceptingRetryAttemptIO {}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Reader for InterceptingRetryAttemptIO {
+    async fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
+        self.inner.as_ref().unwrap().get(key).await
+    }
+    async fn get_parts(&self, key: &[u8], parts: &[u32]) -> Result<Option<Bytes>> {
+        self.inner.as_ref().unwrap().get_parts(key, parts).await
+    }
+    async fn has(&self, key: &[u8]) -> Result<bool> {
+        self.inner.as_ref().unwrap().has(key).await
+    }
+    async fn has_for_update(&self, key: &[u8]) -> Result<bool> {
+        self.inner.as_ref().unwrap().has_for_update(key).await
+    }
+    async fn get_size(&self, key: &[u8]) -> Result<Option<usize>> {
+        self.inner.as_ref().unwrap().get_size(key).await
+    }
+    async fn iterator(&self, options: IterOptions) -> Result<Box<dyn Iterator>> {
+        self.inner.as_ref().unwrap().iterator(options).await
+    }
+    async fn collection_head_entries(
+        &self,
+        head_prefix: &[u8],
+        marker_prefix: &[u8],
+    ) -> Result<Option<crate::stores::headstore::CollectionHeadEntries>> {
+        self.inner
+            .as_ref()
+            .unwrap()
+            .collection_head_entries(head_prefix, marker_prefix)
+            .await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Writer for InterceptingRetryAttemptIO {
+    async fn merge(&mut self, key: &[u8], operand: &[u8]) -> Result<()> {
+        (self.interceptor)(key, Some(operand))?;
+        self.inner.as_mut().unwrap().merge(key, operand).await
+    }
+    async fn append(
+        &mut self,
+        log: &super::types::AppendLog,
+        entry: &[u8],
+        once_key: Option<&[u8]>,
+    ) -> Result<()> {
+        (self.interceptor)(&log.head_key, Some(entry))?;
+        self.inner
+            .as_mut()
+            .unwrap()
+            .append(log, entry, once_key)
+            .await
+    }
+    async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+        (self.interceptor)(key, Some(value))?;
+        self.inner.as_mut().unwrap().set(key, value).await
+    }
+    async fn delete(&mut self, key: &[u8]) -> Result<()> {
+        (self.interceptor)(key, None)?;
+        self.inner.as_mut().unwrap().delete(key).await
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl RetryAttemptIO for InterceptingRetryAttemptIO {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn into_any(mut self: Box<Self>) -> Box<dyn Any> {
+        self.inner.take().unwrap().into_any()
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl RetryAttemptIO for InterceptingRetryAttemptIO {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn into_any(mut self: Box<Self>) -> Box<dyn Any> {
+        self.inner.take().unwrap().into_any()
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub type RetryAttemptValue = Box<dyn Any + Send>;
 #[cfg(target_arch = "wasm32")]

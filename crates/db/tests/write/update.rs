@@ -401,6 +401,21 @@ impl storage::corekv::Store for ChangeBeforeBegin {
         self.inner.new_txn(readonly).await
     }
 
+    async fn transact_retry(
+        &self,
+        options: storage::corekv::RetryOptions,
+        attempt: storage::corekv::RetryAttempt,
+    ) -> std::result::Result<storage::corekv::RetryAttemptValue, storage::corekv::RetryAttemptError>
+    {
+        let pending = self.pending.lock().unwrap().take();
+        if let Some((key, value)) = pending {
+            let mut change = self.inner.new_txn(false).await?;
+            change.set(&key, &value).await?;
+            change.commit().await?;
+        }
+        self.inner.transact_retry(options, attempt).await
+    }
+
     async fn close(&self) -> storage::Result<()> {
         self.inner.close().await
     }
