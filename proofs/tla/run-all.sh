@@ -76,12 +76,6 @@ RUNS=(
   "MC_Nac_Red_WriteWhileDisabled.cfg MC_Nac_Red_WriteWhileDisabled.tla RED" # NAC: admin write accepted while disabled
   "MC_TxnRegistry_Green.cfg        MC_TxnRegistry_Green.tla        GREEN" # txn cleanup never evicts a live transaction
   "MC_TxnRegistry_Red_NaiveSweep.cfg MC_TxnRegistry_Red_NaiveSweep.tla RED" # naive sweep evicts a still-live txn
-  "MC_MergeQueue_Green.cfg         MC_MergeQueue_Green.tla         GREEN" # per-doc merge serialized; no loss/dup; fails closed
-  "MC_MergeQueue_CrossDocParallel.cfg MC_MergeQueue_CrossDocParallel.tla RED" # anti-vacuity: per-doc locks permit cross-doc overlap
-  "MC_MergeQueue_Red_PerDocWriters.cfg MC_MergeQueue_CrossDocParallel.tla RED" # per-doc-only P2P writers violate the global receiver-owner boundary
-  "MC_MergeQueue_Red_FailOpen.cfg  MC_MergeQueue_Red_FailOpen.tla  RED"   # retry exhaustion silently drops a block
-  "MC_MergeQueue_Red_NoMutex.cfg   MC_MergeQueue_Red_NoMutex.tla   RED"   # no per-doc mutex -> same-doc double-apply
-  "MC_MergeQueue_Red_LocalMergeInterleave.cfg MC_MergeQueue_Red_LocalMergeInterleave.tla RED" # shared guard removed -> local write + same-doc merge interleave (INV_NoLocalMergeInterleave)
   "MC_TwoStoreCounter_Red_Split.cfg TwoStoreCounter.tla           RED"   # counter reconcile-from-blob clobbers a concurrent local increment (INV_NoLoss)
   "MC_TwoStoreCounter_Red_DoubleApply.cfg TwoStoreCounter.tla     RED"   # #4935: re-delivered delta merged twice w/o dedup -> double-apply (INV_NoDoubleApply)
   "MC_TwoStoreCounter_Green.cfg     TwoStoreCounter.tla           GREEN" # unified RMW + merged-set dedup -> exact (no loss, no double)
@@ -91,9 +85,6 @@ RUNS=(
   "MC_IndexReconciliation_Green.cfg IndexReconciliation.tla GREEN" # index keys equal the winning CRDT materialized value
   "MC_DocumentMaterialization_Red_Overwrite.cfg DocumentMaterialization.tla RED" # active rematerialization must not clear delete marker
   "MC_DocumentMaterialization_Green.cfg DocumentMaterialization.tla GREEN" # deletion marker is componentwise/absorbing
-  "MC_InteractiveTxnCounter_Green.cfg MC_InteractiveTxnCounter_Common.tla GREEN" # #1044: gate On + commit-only finalize -> deadlock-free + gate never held across idle
-  "MC_InteractiveTxnCounter_Red_NoGate.cfg MC_InteractiveTxnCounter_Common.tla RED" # gate Off -> arbitrary-order batch vs finalize circular-wait DEADLOCK (gate is load-bearing)
-  "MC_InteractiveTxnCounter_Red_AcrossLifetime.cfg MC_InteractiveTxnCounter_Common.tla RED" # #1041 old path: gate held across user-controlled idle lifetime (INV_GateBoundedHold)
   "MC_PushLogAdmission_Green.cfg MC_PushLogAdmission_Common.tla GREEN" # #1088 W1: capacity overflow nacks -> success implies registered-or-merged + all docs merge
   "MC_PushLogAdmission_Red_SuccessOnFull.cfg MC_PushLogAdmission_Common.tla RED" # fa4a84f7 regression: overflow drops registration but acks success (INV_SuccessImpliesRegisteredOrMerged)
   "MC_PushBacklog_Green.cfg MC_PushBacklog_Common.tla GREEN" # #1099: bounded queue + fixed workers + per-peer cap -> all bounds hold, healthy peers progress

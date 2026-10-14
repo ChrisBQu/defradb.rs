@@ -288,20 +288,17 @@ pub const PROPERTIES: &[Property] = &[
         // assert the product state (LWW name + counter views) after live, restart,
         // and 3-node full-mesh replay; `MC_MixedFieldMaterialization` proves the
         // stale whole-document commit hazard RED/GREEN.
-        // This found and fixed #1021's residual two-store counter race — local writes and merges both
-        // RMW the authoritative accumulation store, serialized per-doc by
-        // `crates/db/src/write/queue.rs` (shared by the local-write and merge
-        // paths). The internal `INV_SameDocSerialized` "≤1 worker in the critical
-        // section" + the txn-registry sweep remain a structural Boundary.
-        // `MC_TwoStoreCounter` proves BOTH counter hazards RED-then-GREEN: the
-        // two-store split lost-update (`MC_TwoStoreCounter_Red_Split`, INV_NoLoss) and
-        // the merged-set/is_merged double-apply (`MC_TwoStoreCounter_Red_DoubleApply`,
-        // INV_NoDoubleApply — the model twin of upstream Go #4935 / our #1043).
+        // The process-local document queue and counter-finalize gate are gone.
+        // Ordinary application markers validate exactly-once decisions; counter
+        // operands fold in the engine. Materialized mirrors retain validated
+        // reads. The adapter test `interactive_counter_increment_conflicts_with_concurrent_same_doc_merge`
+        // checks conflict/rollback/retry convergence. Engine OCC is a boundary;
+        // the historical serialized MergeQueue model is deliberately retired.
         family: "Transaction & merge-queue concurrency",
         name: "INV_NoLoss / INV_NoDoubleApply under concurrent same-doc mutation",
         axis: Tla,
-        anchor: "crates/db/src/write/queue.rs (per-doc write lock, shared with crates/db (merge) merge handler); crates/db txn registry",
-        model_ref: "MC_MergeQueue_Green.cfg / MC_TxnRegistry_Green.cfg / MC_TwoStoreCounter_Green.cfg / MC_MixedFieldMaterialization_Green.cfg",
+        anchor: "crates/db/src/merge/merge_handler/counter.rs; crates/db/src/write/doc.rs; crates/db/tests/merge/merge_handler_tests.rs; crates/db txn registry",
+        model_ref: "MC_TxnRegistry_Green.cfg / MC_TwoStoreCounter_Green.cfg / MC_MixedFieldMaterialization_Green.cfg",
         tiers: &[Behavioral, Boundary],
     },
     Property {

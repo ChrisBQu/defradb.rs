@@ -1005,7 +1005,7 @@ async fn explicit_txn_indexed_counter_index_reflects_post_rmw_value() {
 // merge. The error path is covered by the whole-txn discard semantics
 // (`explicit_txn_discard_drops_pending_counter_ops` proves a non-committed txn
 // applies no RMW), and the concurrent-finalize-vs-merge guard lifecycle is
-// covered by `proofs/tla/InteractiveTxnCounter.tla`.
+// retired with the batch gate; ordinary transaction validation now protects the mirror.
 
 #[tokio::test]
 async fn create_in_tx_publishes_event_on_commit() {
