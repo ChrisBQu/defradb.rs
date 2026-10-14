@@ -1,4 +1,4 @@
-import HeadSet.Cache
+import HeadSet.Core
 import Lean
 
 open Lean

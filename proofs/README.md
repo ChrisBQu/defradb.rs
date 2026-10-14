@@ -189,3 +189,24 @@ Read this before trusting a verdict; it states the model's honest reach.
   the TLA axis drives the selected DefraDB binary. What conformance does **not** reach is marked
   `Boundary` in the registry (crypto, eventual connectivity, bounded-N, the gents
   claim substrate): assumed, never asserted against the artifact.
+
+## Regolith adoption bindings
+
+Document arrivals use the pinned engine's `Transaction::append`, with the document
+arrival marker as `once_key`. `crates/db/src/event/arrivals.rs` never allocates a
+position itself; rows and their cursor positions appear only after commit. The
+binding in `src/registry.rs` is to
+[CommitOrderedAppend.tla](https://github.com/sourcenetwork/regolith/blob/d1e36aa747913f6b1ecc14c821f4e5e6314674cf/proofs/tla/CommitOrderedAppend.tla).
+Its GREEN Groups/Pipeline/Faults configurations cover dense numbering, commit
+order, at-most-once keys and snapshot prefixes. Counter, OnceFromView and
+AssignBeforeValidation are negative controls. The engine's model is kept at the
+same revision as Cargo.lock rather than copied into this repository. DefraDB's
+`arrival_transactions` tests exercise reverse commit order, rollback, duplicate
+once keys and reopen through the adapter.
+
+`HeadSetCache.tla`, its configurations and `HeadSet/Cache.lean` are retired with
+the adapter cache and publication lock. `HeadSet.tla` and `HeadSet/Core.lean`
+remain the head-route soundness basis. The Rust/Lean conformance test now imports
+Core directly and retains the sibling, pruning, abort and old-snapshot cases.
+The interactive-counter model remains until the remaining batch gate is removed;
+this checkpoint does not claim that all step-8 retirement is complete.

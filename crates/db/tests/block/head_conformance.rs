@@ -49,7 +49,7 @@ fn cid(block: u32) -> Cid {
 fn cases() -> Vec<Vec<Action>> {
     let seed = vec![action("begin", 0), append(0, 1, &[]), action("commit", 0)];
     let mut cases = vec![
-        // Warm the cache, commit siblings from the same snapshot in both orders.
+        // Read the snapshot, then commit siblings from it in both orders.
         vec![
             action("begin", 1),
             action("read", 1),

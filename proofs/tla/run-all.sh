@@ -145,11 +145,6 @@ RUNS=(
   "MC_PendingDagQuarantine_Green.cfg PendingDagQuarantine.tla GREEN" # #1128: deterministic rejection quarantines durably; sound docs merge, poison docs quarantine
   "MC_PendingDagQuarantine_Red_RetryForever.cfg PendingDagQuarantine.tla RED" # pre-#1128 wedge, still live for any unclassified Rejected producer: Rejected treated as retryable skip -> poison root swept forever (LIVE_PoisonQuiesces)
   "MC_PendingDagQuarantine_Red_OvereagerQuarantine.cfg PendingDagQuarantine.tla RED" # forbidden overcorrection: sound doc's transient failure also quarantines it (LIVE_SoundEventuallyMerged)
-  "MC_HeadSetCache_Green.cfg HeadSetCache.tla GREEN"
-  "MC_HeadSetCache_Red_StaleFill.cfg HeadSetCache.tla RED"
-  "MC_HeadSetCache_Red_WriterSnapshot.cfg HeadSetCache.tla RED"
-  "MC_HeadSetCache_Red_AbortPublish.cfg HeadSetCache.tla RED"
-  "MC_HeadSetCache_Red_HistoryScan.cfg HeadSetCache.tla RED"
   "MC_VectorLinks_Green.cfg VectorLinks.tla GREEN"
   "MC_VectorLinks_Red_Puts.cfg VectorLinks.tla RED"
   "MC_VectorLinks_Red_Prune.cfg VectorLinks.tla RED"

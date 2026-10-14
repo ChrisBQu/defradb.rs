@@ -11,7 +11,7 @@ mod builder_write_priority_tests;
 mod builder_write_update_tests;
 mod cleanup;
 mod document_heads;
-mod head_cache_conformance;
+mod head_conformance;
 mod heads;
 mod priority;
 mod verify;
