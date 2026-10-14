@@ -41,6 +41,19 @@ impl storage::corekv::private::Sealed for FfiStore {}
 
 #[async_trait]
 impl storage::Store for FfiStore {
+    async fn allocate(&self, key: &[u8], count: u64) -> storage::Result<std::ops::Range<u64>> {
+        match self {
+            FfiStore::Regolith(store) => store.allocate(key, count).await,
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn transaction_stats_handle(&self) -> Option<storage::backends::TransactionStatsHandle> {
+        match self {
+            FfiStore::Regolith(store) => store.transaction_stats_handle(),
+        }
+    }
+
     async fn new_txn(&self, readonly: bool) -> storage::Result<Box<dyn storage::Txn>> {
         match self {
             FfiStore::Regolith(s) => s.new_txn(readonly).await,

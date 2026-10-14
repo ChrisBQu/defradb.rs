@@ -254,11 +254,9 @@ impl<T> ReaderWriter for T where T: Reader + Writer {}
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait Store: MaybeSendSync + private::Sealed {
     /// Reserve IDs outside a transaction. Reservations survive aborted mutations.
-    async fn allocate(&self, _key: &[u8], _count: u64) -> Result<std::ops::Range<u64>> {
-        Err(super::errors::Error::Other(
-            "ID allocation is unsupported by this store".into(),
-        ))
-    }
+    /// Store wrappers must forward this capability; database schema and document
+    /// creation depend on it, so omission must fail at compile time.
+    async fn allocate(&self, key: &[u8], count: u64) -> Result<std::ops::Range<u64>>;
 
     /// Transaction diagnostics for stores that keep them.
     fn transaction_stats_handle(&self) -> Option<crate::backends::TransactionStatsHandle> {

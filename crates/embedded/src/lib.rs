@@ -301,6 +301,19 @@ impl storage::corekv::private::Sealed for EmbeddedStore {}
 
 #[async_trait]
 impl storage::Store for EmbeddedStore {
+    async fn allocate(&self, key: &[u8], count: u64) -> storage::Result<std::ops::Range<u64>> {
+        match self {
+            Self::Regolith(store) => store.allocate(key, count).await,
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn transaction_stats_handle(&self) -> Option<storage::backends::TransactionStatsHandle> {
+        match self {
+            Self::Regolith(store) => store.transaction_stats_handle(),
+        }
+    }
+
     async fn new_txn(&self, readonly: bool) -> storage::Result<Box<dyn storage::Txn>> {
         match self {
             Self::Regolith(store) => store.new_txn(readonly).await,
