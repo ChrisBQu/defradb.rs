@@ -297,7 +297,6 @@ impl Reader for RegolithTxn {
         }
     }
 
-
     async fn get_size(&self, key: &[u8]) -> Result<Option<usize>> {
         if key.is_empty() {
             return Err(Error::EmptyKey);

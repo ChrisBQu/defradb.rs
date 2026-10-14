@@ -186,6 +186,18 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         self.db.set_document_acp(provider);
     }
 
+    async fn register_ordered_async_hook(
+        &self,
+        callback: storage::corekv::AsyncOrderedTxnCallback,
+    ) -> query::error::Result<()> {
+        let mut guard = self.txn.lock().await;
+        let txn = guard.as_mut().ok_or_else(|| {
+            query::error::QueryError::execution("transaction is no longer active")
+        })?;
+        txn.on_success_ordered_async(callback)
+            .map_err(|error| query::error::QueryError::execution(error.to_string()))
+    }
+
     async fn create(
         &self,
         collection_name: &str,

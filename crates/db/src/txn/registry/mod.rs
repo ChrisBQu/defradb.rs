@@ -20,7 +20,7 @@ use kovan_queue::seg_queue::SegQueue;
 use lens::{LensConfig, LensModule, TransformId};
 use query::error::TransactionError;
 use query::txn::{
-    DeferredAcpMutations, GetTransactionResult, TransactionContext, TransactionHandle,
+    AcpRegistrationProjection, GetTransactionResult, TransactionContext, TransactionHandle,
     TransactionRegistry,
 };
 use rapidhash::fast::RandomState;

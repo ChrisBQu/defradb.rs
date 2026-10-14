@@ -130,6 +130,38 @@ impl<S: Store> AutoCommitMutator<S> {
         registration.map_err(|error| query::error::QueryError::execution(error.to_string()))
     }
 
+    pub(super) fn register_deleted_doc_with_acp(
+        &self,
+        txn: &mut crate::txn::DbTxn<S>,
+        collection: &Collection,
+        doc_id: String,
+    ) -> query::error::Result<()> {
+        let Some(policy) = collection.schema().policy.as_ref() else {
+            return Ok(());
+        };
+        let Some(acp) = self.db.document_acp().cloned() else {
+            return Ok(());
+        };
+        if acp.supports_transactions() {
+            return Ok(());
+        }
+
+        let policy_id = policy.id.clone();
+        let resource_name = policy.resource_name.clone();
+        txn.on_success_ordered_async(Arc::new(move || {
+            let acp = Arc::clone(&acp);
+            let policy_id = policy_id.clone();
+            let resource_name = resource_name.clone();
+            let doc_id = doc_id.clone();
+            Box::pin(async move {
+                if let Err(error) = acp.unregister_doc_object(&policy_id, &resource_name, &doc_id).await {
+                    tracing::warn!(%doc_id, %policy_id, %error, "Deferred ACP unregister failed after commit");
+                }
+                Ok(())
+            })
+        })).map_err(|error| query::error::QueryError::execution(error.to_string()))
+    }
+
     pub async fn new_batch_components(
         &self,
     ) -> query::error::Result<(Arc<BatchMutator<S>>, Arc<LensedDocFetcher<S>>)> {
@@ -355,6 +387,10 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
 
     fn set_document_acp(&self, acp: Arc<dyn acp::DocumentACP>) {
         AutoCommitMutator::set_document_acp(self, acp);
+    }
+
+    fn manages_external_acp_hooks(&self) -> bool {
+        true
     }
 
     async fn begin_batch(&self) -> query::error::Result<Option<MutationBatch>> {

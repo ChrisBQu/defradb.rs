@@ -356,6 +356,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 .with_query_limits(self.query_limits)
                 .with_fetcher(Arc::new(fetcher_arc))
                 .with_acp(self.acp.clone(), identity)
+                .with_acp_registration_projection(self.acp_registration_projection.clone())
                 .with_read_validator(self.read_validator.clone())
                 .with_retry_inputs(self.retry_inputs.clone())
                 .with_index_estimates(index_estimates);

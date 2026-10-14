@@ -80,6 +80,7 @@ pub struct Planner {
     pub(crate) lens_store: Option<Arc<dyn lens::TransformStore>>,
     /// Optional ACP for permission filtering in plans
     acp: Option<Arc<dyn DocumentACP>>,
+    acp_registration_projection: Option<Arc<crate::txn::AcpRegistrationProjection>>,
     /// Identity for ACP permission checks
     identity_did: Option<Did>,
     /// App read validator, applied after ACP
@@ -127,6 +128,7 @@ impl Planner {
             fetcher: None,
             lens_store: None,
             acp: None,
+            acp_registration_projection: None,
             identity_did: None,
             read_validator: None,
             retry_inputs: None,
@@ -179,6 +181,14 @@ impl Planner {
         self
     }
 
+    pub fn with_acp_registration_projection(
+        mut self,
+        projection: Option<Arc<crate::txn::AcpRegistrationProjection>>,
+    ) -> Self {
+        self.acp_registration_projection = projection;
+        self
+    }
+
     pub fn with_read_validator(
         mut self,
         validator: Option<Arc<dyn crate::access_hooks::ReadValidator>>,
@@ -224,7 +234,12 @@ impl Planner {
             collection,
         )
         .map(|check| check.with_retry_inputs(self.retry_inputs.clone()));
-        PermissionFilterNode::wrap(plan, acp, app, self.retry_inputs.clone())
+        PermissionFilterNode::wrap_with_projection(
+            plan,
+            acp,
+            app,
+            self.acp_registration_projection.clone(),
+        )
     }
 
     /// Get a collection by name or CollectionID.

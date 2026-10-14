@@ -446,6 +446,11 @@ pub trait DocMutator: MaybeSendSync {
         false
     }
 
+    /// Return the active attempt's external ACP registration projection, if any.
+    fn acp_registration_projection(&self) -> Option<Arc<crate::txn::AcpRegistrationProjection>> {
+        None
+    }
+
     /// Return a request-bound mutator that can see prepared external inputs
     /// while executing this request. Implementations must return an isolated
     /// clone/context; this must not mutate shared mutator state.
@@ -497,6 +502,26 @@ pub trait DocMutator: MaybeSendSync {
 
     /// Configure document ACP for mutation-side ordering guarantees.
     fn set_document_acp(&self, _acp: Arc<dyn acp::DocumentACP>) {}
+
+    /// Whether the concrete mutator stages external ACP create/delete hooks
+    /// inside the storage attempt that owns each document write.
+    fn manages_external_acp_hooks(&self) -> bool {
+        false
+    }
+
+    /// Attach a fallible external side effect to this mutation's durable commit.
+    ///
+    /// Implementations must retain the hook only for the winning transaction
+    /// attempt and run it before ordered events become visible. Providers that
+    /// cannot make this guarantee must return an error.
+    async fn register_ordered_async_hook(
+        &self,
+        _callback: storage::corekv::AsyncOrderedTxnCallback,
+    ) -> Result<()> {
+        Err(crate::error::QueryError::execution(
+            "ordered post-commit hooks are unsupported by this mutator",
+        ))
+    }
 
     /// Begin a request-scoped mutation batch.
     ///

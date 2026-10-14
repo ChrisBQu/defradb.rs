@@ -17,6 +17,7 @@ use crate::access_hooks::AppReadCheck;
 use crate::document::DocumentMapping;
 use crate::error::Result;
 use crate::planner::{index_selection::CursorSeek, Doc, PlanNode};
+use crate::txn::AcpRegistrationProjection;
 
 // Keep enough remote checks moving to hide latency without letting one query
 // exhaust the ACP provider's connection pool.
@@ -31,6 +32,7 @@ struct AcpReadCheck {
     policy_id: Arc<str>,
     resource_name: Arc<str>,
     retry_inputs: Option<crate::prepared::PreparedInputMemo>,
+    projection: Option<Arc<AcpRegistrationProjection>>,
 }
 
 /// PermissionFilterNode filters documents based on ACP permissions.
@@ -88,6 +90,7 @@ impl PermissionFilterNode {
                 policy_id: Arc::from(policy_id.into()),
                 resource_name: Arc::from(resource_name.into()),
                 retry_inputs: None,
+                projection: None,
             }),
             app: None,
             current_doc: Doc::default(),
@@ -128,6 +131,16 @@ impl PermissionFilterNode {
         self
     }
 
+    pub(crate) fn with_projection(
+        mut self,
+        projection: Option<Arc<AcpRegistrationProjection>>,
+    ) -> Self {
+        if let Some(acp) = &mut self.acp {
+            acp.projection = projection;
+        }
+        self
+    }
+
     pub(crate) fn with_retry_inputs(
         mut self,
         inputs: Option<crate::prepared::PreparedInputMemo>,
@@ -146,10 +159,30 @@ impl PermissionFilterNode {
         app: Option<AppReadCheck>,
         retry_inputs: Option<crate::prepared::PreparedInputMemo>,
     ) -> Box<dyn PlanNode> {
+        Self::wrap_with_projection_and_inputs(source, acp, app, None, retry_inputs)
+    }
+
+    pub fn wrap_with_projection(
+        source: Box<dyn PlanNode>,
+        acp: Option<(Arc<dyn DocumentACP>, Identity, String, String)>,
+        app: Option<AppReadCheck>,
+        projection: Option<Arc<AcpRegistrationProjection>>,
+    ) -> Box<dyn PlanNode> {
+        Self::wrap_with_projection_and_inputs(source, acp, app, projection, None)
+    }
+
+    pub fn wrap_with_projection_and_inputs(
+        source: Box<dyn PlanNode>,
+        acp: Option<(Arc<dyn DocumentACP>, Identity, String, String)>,
+        app: Option<AppReadCheck>,
+        projection: Option<Arc<AcpRegistrationProjection>>,
+        retry_inputs: Option<crate::prepared::PreparedInputMemo>,
+    ) -> Box<dyn PlanNode> {
         match (acp, app) {
             (Some((acp, identity, policy_id, resource_name)), app) => Box::new(
                 Self::new(source, acp, identity, policy_id, resource_name)
                     .with_app_check(app)
+                    .with_projection(projection)
                     .with_retry_inputs(retry_inputs),
             ),
             (None, Some(app)) => Box::new(Self::app_only(source, app)),
@@ -168,6 +201,7 @@ impl PermissionFilterNode {
                 policy_id,
                 resource_name,
                 retry_inputs,
+                projection,
             }) = acp
             else {
                 let allowed = app_allows(app.as_ref(), &doc_id).await?;
@@ -179,6 +213,7 @@ impl PermissionFilterNode {
             } else {
                 match crate::txn::check_doc_access_with_prepared_inputs(
                     acp.as_ref(),
+                    projection.as_deref(),
                     identity.as_ref(),
                     DocumentPermission::Read,
                     policy_id.as_ref(),

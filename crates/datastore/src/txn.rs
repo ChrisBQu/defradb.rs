@@ -120,23 +120,12 @@ impl Reader for AttemptScopedTxn {
         self.io()?.has(key).await
     }
 
-
     async fn get_size(&self, key: &[u8]) -> storage::corekv::Result<Option<usize>> {
         self.io()?.get_size(key).await
     }
 
     async fn iterator(&self, options: IterOptions) -> storage::corekv::Result<Box<dyn Iterator>> {
         self.io()?.iterator(options).await
-    }
-
-    async fn collection_head_entries(
-        &self,
-        head_prefix: &[u8],
-        marker_prefix: &[u8],
-    ) -> storage::corekv::Result<Option<storage::stores::headstore::CollectionHeadEntries>> {
-        self.io()?
-            .collection_head_entries(head_prefix, marker_prefix)
-            .await
     }
 }
 

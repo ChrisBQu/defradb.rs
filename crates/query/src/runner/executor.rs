@@ -238,6 +238,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
             .or_else(defra_core::current_identity::get_effective_identity);
 
         let mut warnings: Vec<GqlWarning> = Vec::new();
+        let scoped_runner = self.scoped_runner(self.acp.clone());
 
         // Route to appropriate handler based on operation type
         // Pass identity and variables through for ACP permission checks and variable substitution
@@ -288,14 +289,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                                         mutator.with_prepared_inputs(prepared.inputs.clone())
                                     })
                                     .unwrap_or_else(|| mutator.clone());
-                                self.execute_parsed_mutations(
-                                    mutations,
-                                    mutator,
-                                    identity,
-                                    None,
-                                    prepared.as_deref(),
-                                )
-                                .await
+                                scoped_runner
+                                    .execute_parsed_mutations(
+                                        mutations,
+                                        mutator,
+                                        identity,
+                                        None,
+                                        prepared.as_deref(),
+                                    )
+                                    .await
                             }
                             None => Err(crate::error::QueryError::execution(
                                 "mutations require a mutator; call with_mutator() first",
@@ -539,7 +541,18 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
             Ok(provider) => provider,
             Err(error) => return QueryResponse::error(error.to_string()),
         };
-        let scoped_runner = self.scoped_runner(scoped_acp);
+        let mut scoped_runner = self.scoped_runner(scoped_acp);
+        if !scoped_runner.acp.supports_transactions() {
+            // Even transaction-context implementations without an ACP
+            // projection must never fall back to mutating an external provider
+            // before the storage transaction commits. The mutator's ordered
+            // hook registration will fail closed if it cannot retain hooks.
+            scoped_runner.acp_registration_projection = Some(
+                txn_ctx
+                    .acp_registration_projection()
+                    .unwrap_or_else(|| Arc::new(crate::txn::AcpRegistrationProjection::new())),
+            );
+        }
 
         let statement_guard = if !txn_ctx.is_readonly()
             && matches!(&parsed, ParsedOperation::Mutation { explain: None, .. })
@@ -637,34 +650,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
             }
         };
 
-        let deferred_acp_mutations = if self.acp.supports_transactions() {
-            None
-        } else {
-            txn_ctx.deferred_acp_mutations()
-        };
-
-        // Scope both transaction overlays around execution so schema resolution
-        // and ACP checks see uncommitted state.
+        // Collection schema reads retain their transaction-scoped provider;
+        // ACP projection is passed explicitly through the scoped runner.
         let result = if let Some(provider) = txn_provider {
-            if let Some(deferred_acp_mutations) = deferred_acp_mutations {
-                super::scope_txn_collection_provider(
-                    provider,
-                    crate::txn::scope_deferred_acp_mutations(
-                        deferred_acp_mutations,
-                        await_with_timeout(execution, self.query_timeout),
-                    ),
-                )
-                .await
-            } else {
-                super::scope_txn_collection_provider(
-                    provider,
-                    await_with_timeout(execution, self.query_timeout),
-                )
-                .await
-            }
-        } else if let Some(deferred_acp_mutations) = deferred_acp_mutations {
-            crate::txn::scope_deferred_acp_mutations(
-                deferred_acp_mutations,
+            super::scope_txn_collection_provider(
+                provider,
                 await_with_timeout(execution, self.query_timeout),
             )
             .await

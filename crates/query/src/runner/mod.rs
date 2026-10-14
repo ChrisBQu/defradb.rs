@@ -59,7 +59,7 @@ use crate::limits::QueryLimits;
 use crate::mutator::CollectionTruncator;
 use crate::mutator::DocMutator;
 use crate::planner::Doc;
-use crate::txn::{NoOpTransactionRegistry, TransactionRegistry};
+use crate::txn::{AcpRegistrationProjection, NoOpTransactionRegistry, TransactionRegistry};
 
 #[cfg(not(target_arch = "wasm32"))]
 tokio::task_local! {
@@ -206,6 +206,8 @@ pub struct QueryRunner<F: DocFetcher, R: TransactionRegistry = NoOpTransactionRe
     /// Defaults to a no-op ACP implementation that allows access and treats
     /// documents as unregistered, matching the "ACP not configured" behavior.
     pub(crate) acp: Arc<dyn DocumentACP>,
+    /// Explicit transaction/request projection for external ACP registrations.
+    pub(crate) acp_registration_projection: Option<Arc<AcpRegistrationProjection>>,
     /// Default identity for ACP permission checks.
     ///
     /// Used when a request doesn't include an explicit identity (e.g., no bearer token).
@@ -250,6 +252,7 @@ impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
             mutator: None,
             collection_truncator: None,
             acp: Arc::new(NoOpDocumentAcp),
+            acp_registration_projection: None,
             default_identity: None,
             lens_store: None,
             nac: Arc::new(NoOpNacChecker),
@@ -275,6 +278,7 @@ impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
             mutator: None,
             collection_truncator: None,
             acp: Arc::new(NoOpDocumentAcp),
+            acp_registration_projection: None,
             default_identity: None,
             lens_store: None,
             nac: Arc::new(NoOpNacChecker),
@@ -302,6 +306,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             mutator: None,
             collection_truncator: None,
             acp: Arc::new(NoOpDocumentAcp),
+            acp_registration_projection: None,
             default_identity: None,
             lens_store: None,
             nac: Arc::new(NoOpNacChecker),
@@ -332,6 +337,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             mutator: None,
             collection_truncator: None,
             acp: Arc::new(NoOpDocumentAcp),
+            acp_registration_projection: None,
             default_identity: None,
             lens_store: None,
             nac: Arc::new(NoOpNacChecker),
@@ -361,6 +367,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             mutator: None,
             collection_truncator: None,
             acp: Arc::new(NoOpDocumentAcp),
+            acp_registration_projection: None,
             default_identity: None,
             lens_store: None,
             nac: Arc::new(NoOpNacChecker),
@@ -400,6 +407,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             mutator: self.mutator.clone(),
             collection_truncator: self.collection_truncator.clone(),
             acp,
+            acp_registration_projection: self.acp_registration_projection.clone(),
             default_identity: self.default_identity.clone(),
             lens_store: self.lens_store.clone(),
             nac: self.nac.clone(),

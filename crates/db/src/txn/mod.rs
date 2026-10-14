@@ -739,7 +739,10 @@ impl<S: Store> DbTxn<S> {
         let mut persisted_schema: CollectionVersion = serde_json::from_slice(&schema_bytes)
             .map_err(|error| {
                 Error::collection_schema_json(
-                    format!("failed to deserialize schema for collection '{}'", collection.name()),
+                    format!(
+                        "failed to deserialize schema for collection '{}'",
+                        collection.name()
+                    ),
                     error,
                 )
             })?;

@@ -3,7 +3,7 @@
 use query::fetcher::CollectionProvider;
 use query::mutator::DocMutator;
 use query::runner::DocFetcher;
-use query::txn::{DeferredAcpMutations, TransactionContext};
+use query::txn::{AcpRegistrationProjection, TransactionContext};
 use std::result::Result;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -28,7 +28,7 @@ pub struct DbTransactionContext<S: Store> {
     readonly: bool,
     owner: Option<String>,
     fetcher: Arc<LensedDocFetcher<S>>,
-    deferred_acp_mutations: Arc<DeferredAcpMutations>,
+    acp_registration_projection: Arc<AcpRegistrationProjection>,
     broadcaster: Option<Arc<dyn crate::event::emission::TxnBroadcaster>>,
     action_lock: Arc<async_lock::Mutex<()>>,
     statement_rollback_pending: AtomicBool,
@@ -50,7 +50,7 @@ impl<S: Store> DbTransactionContext<S> {
         id: String,
         readonly: bool,
         fetcher: Arc<LensedDocFetcher<S>>,
-        deferred_acp_mutations: Arc<DeferredAcpMutations>,
+        acp_registration_projection: Arc<AcpRegistrationProjection>,
         broadcaster: Option<Arc<dyn crate::event::emission::TxnBroadcaster>>,
     ) -> Self {
         let now = Instant::now();
@@ -60,7 +60,7 @@ impl<S: Store> DbTransactionContext<S> {
             readonly,
             owner: defra_core::current_identity::get_effective_identity(),
             fetcher,
-            deferred_acp_mutations,
+            acp_registration_projection,
             broadcaster,
             action_lock: Arc::new(async_lock::Mutex::new(())),
             statement_rollback_pending: AtomicBool::new(false),
@@ -139,7 +139,7 @@ impl<S: Store + 'static> DbTransactionContext<S> {
             .ok_or_else(|| "transaction was consumed with statement cleanup pending".to_string())?;
         txn.rollback_statement_savepoint()
             .map_err(|error| error.to_string())?;
-        self.deferred_acp_mutations.rollback_statement_savepoint()?;
+        self.acp_registration_projection.rollback_statement_savepoint()?;
         self.statement_rollback_pending
             .store(false, Ordering::Release);
         Ok(())
@@ -235,8 +235,8 @@ impl<S: Store + 'static> TransactionContext for DbTransactionContext<S> {
         )))
     }
 
-    fn deferred_acp_mutations(&self) -> Option<Arc<DeferredAcpMutations>> {
-        Some(self.deferred_acp_mutations.clone())
+    fn acp_registration_projection(&self) -> Option<Arc<AcpRegistrationProjection>> {
+        Some(self.acp_registration_projection.clone())
     }
 
     fn action_lock(&self) -> Option<Arc<async_lock::Mutex<()>>> {
@@ -255,9 +255,9 @@ impl<S: Store + 'static> TransactionContext for DbTransactionContext<S> {
         let txn = guard
             .as_mut()
             .ok_or_else(|| "transaction is no longer active".to_string())?;
-        self.deferred_acp_mutations.set_statement_savepoint()?;
+        self.acp_registration_projection.set_statement_savepoint()?;
         if let Err(error) = txn.set_statement_savepoint() {
-            self.deferred_acp_mutations.rollback_statement_savepoint()?;
+            self.acp_registration_projection.rollback_statement_savepoint()?;
             return Err(error.to_string());
         }
         Ok(())
@@ -274,11 +274,11 @@ impl<S: Store + 'static> TransactionContext for DbTransactionContext<S> {
         if success {
             txn.release_statement_savepoint()
                 .map_err(|error| error.to_string())?;
-            self.deferred_acp_mutations.release_statement_savepoint()?;
+            self.acp_registration_projection.release_statement_savepoint()?;
         } else {
             txn.rollback_statement_savepoint()
                 .map_err(|error| error.to_string())?;
-            self.deferred_acp_mutations.rollback_statement_savepoint()?;
+            self.acp_registration_projection.rollback_statement_savepoint()?;
         }
         self.statement_rollback_pending
             .store(false, Ordering::Release);

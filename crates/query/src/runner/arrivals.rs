@@ -51,6 +51,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let identity = acp::Identity::from(caller);
         let checker = crate::txn::OverlayChecker {
             acp: self.acp.as_ref(),
+            projection: self.acp_registration_projection.as_deref(),
             identity: &identity,
         };
         let mut entries = Vec::new();

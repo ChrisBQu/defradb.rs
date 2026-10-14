@@ -297,6 +297,22 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         self.db.set_document_acp(provider);
     }
 
+    fn manages_external_acp_hooks(&self) -> bool {
+        true
+    }
+
+    async fn register_ordered_async_hook(
+        &self,
+        callback: storage::corekv::AsyncOrderedTxnCallback,
+    ) -> query::error::Result<()> {
+        let mut guard = self.txn.lock().await;
+        let txn = guard.as_mut().ok_or_else(|| {
+            query::error::QueryError::execution("mutation batch transaction is no longer active")
+        })?;
+        txn.on_success_ordered_async(callback)
+            .map_err(|error| query::error::QueryError::execution(error.to_string()))
+    }
+
     async fn create(
         &self,
         collection_name: &str,
@@ -701,6 +717,20 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
 
             (composite_cid, block_result.block, col_block_data)
         };
+
+        {
+            let mut txn_guard = self.txn.lock().await;
+            let txn = txn_guard.as_mut().ok_or_else(|| {
+                query::error::QueryError::execution(
+                    "mutation batch transaction is no longer active",
+                )
+            })?;
+            super::AutoCommitMutator::new(Arc::clone(&self.db)).register_deleted_doc_with_acp(
+                txn,
+                &collection,
+                canonical_doc_id.to_string(),
+            )?;
+        }
 
         self.register_update_callback(
             collection_name.to_string(),

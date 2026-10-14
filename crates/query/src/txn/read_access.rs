@@ -4,10 +4,13 @@ use acp::read_access::{DocAccess, ObjectAccessChecker};
 use acp::{DocumentACP, DocumentPermission, Identity};
 use async_trait::async_trait;
 
-use super::context::{check_doc_access_with_overlay, is_doc_registered_with_overlay};
+use super::context::{
+    check_doc_access_with_projection, is_doc_registered_with_projection, AcpRegistrationProjection,
+};
 
 pub struct OverlayChecker<'a> {
     pub acp: &'a dyn DocumentACP,
+    pub projection: Option<&'a AcpRegistrationProjection>,
     pub identity: &'a Identity,
 }
 
@@ -29,15 +32,24 @@ impl ObjectAccessChecker for OverlayChecker<'_> {
             });
         }
 
-        if !is_doc_registered_with_overlay(self.acp, policy_id, resource_name, object_id).await? {
+        if !is_doc_registered_with_projection(
+            self.acp,
+            self.projection,
+            policy_id,
+            resource_name,
+            object_id,
+        )
+        .await?
+        {
             return Ok(DocAccess {
                 has_access: self.acp.unregistered_documents_are_public(),
                 explicit: false,
             });
         }
 
-        let has_access = check_doc_access_with_overlay(
+        let has_access = check_doc_access_with_projection(
             self.acp,
+            self.projection,
             self.identity,
             DocumentPermission::Read,
             policy_id,

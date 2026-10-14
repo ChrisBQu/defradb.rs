@@ -31,21 +31,10 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         db_txn.make_explicit();
         // Non-Send on wasm32, where the callbacks it holds drop their `Send`
         // bounds for the single-threaded browser runtime.
+        // Projection state is transaction-owned. Remote ACP effects are
+        // registered as ordered callbacks with the mutation attempt itself.
         #[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
-        let deferred_acp_mutations = Arc::new(DeferredAcpMutations::new());
-        let deferred_acp_mutations_for_commit = deferred_acp_mutations.clone();
-        db_txn
-            .on_success_async(Box::new(move || {
-                Box::pin(async move {
-                    deferred_acp_mutations_for_commit.run_all_logged().await;
-                })
-            }))
-            .map_err(|e| {
-                TransactionError::execution(format!(
-                    "failed to register deferred ACP commit hook: {}",
-                    e
-                ))
-            })?;
+        let acp_registration_projection = Arc::new(AcpRegistrationProjection::new());
 
         // Transaction-scoped collection caching: collections are loaded lazily
         // from the SystemStore on first access within the transaction. Once loaded,
@@ -64,7 +53,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
             txn_id.clone(),
             readonly,
             fetcher,
-            deferred_acp_mutations,
+            acp_registration_projection,
             self.broadcaster.clone(),
         ));
 
