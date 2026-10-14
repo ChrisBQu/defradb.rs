@@ -37,6 +37,17 @@ impl Store for PauseAfterSetStore {
         }))
     }
 
+    async fn transact_retry(
+        &self,
+        options: storage::corekv::RetryOptions,
+        attempt: storage::corekv::RetryAttempt,
+    ) -> std::result::Result<
+        storage::corekv::RetryAttemptValue,
+        storage::corekv::RetryAttemptError,
+    > {
+        self.inner.transact_retry(options, attempt).await
+    }
+
     async fn close(&self) -> StorageResult<()> {
         self.inner.close().await
     }

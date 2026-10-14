@@ -16,8 +16,8 @@ use embedded::Libp2pConfig;
 use embedded::{EmbeddedNodeConfig, NodeBuilder};
 #[cfg(any(feature = "libp2p", feature = "iroh"))]
 use embedded::{Persistence, TransportConfig};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::Notify;
 
@@ -207,6 +207,15 @@ impl storage::Store for SlowCloseStore {
 
     async fn new_txn(&self, readonly: bool) -> storage::Result<Box<dyn storage::Txn>> {
         self.inner.new_txn(readonly).await
+    }
+
+    async fn transact_retry(
+        &self,
+        options: storage::corekv::RetryOptions,
+        attempt: storage::corekv::RetryAttempt,
+    ) -> std::result::Result<storage::corekv::RetryAttemptValue, storage::corekv::RetryAttemptError>
+    {
+        self.inner.transact_retry(options, attempt).await
     }
 
     async fn close(&self) -> storage::Result<()> {

@@ -11,10 +11,9 @@
 //! below this decorator, and is not counted here.
 
 use async_trait::async_trait;
+use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
-use storage::corekv::private::Sealed;
 use storage::corekv::AsyncTxnCallback;
 use storage::corekv::IterOptions;
 use storage::corekv::Iterator;
@@ -25,6 +24,7 @@ use storage::corekv::Store;
 use storage::corekv::Txn;
 use storage::corekv::TxnCallback;
 use storage::corekv::Writer;
+use storage::corekv::private::Sealed;
 
 #[derive(Default)]
 struct Counts {
@@ -78,6 +78,15 @@ impl<S: Store> Store for CountingStore<S> {
             inner,
             counts: Arc::clone(&self.counts),
         }))
+    }
+
+    async fn transact_retry(
+        &self,
+        options: storage::corekv::RetryOptions,
+        attempt: storage::corekv::RetryAttempt,
+    ) -> std::result::Result<storage::corekv::RetryAttemptValue, storage::corekv::RetryAttemptError>
+    {
+        self.inner.transact_retry(options, attempt).await
     }
 
     async fn close(&self) -> Result<()> {

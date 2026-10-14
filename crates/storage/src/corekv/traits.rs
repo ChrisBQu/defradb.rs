@@ -788,29 +788,8 @@ pub trait Store: MaybeSendSync + private::Sealed {
     async fn transact_retry(
         &self,
         options: RetryOptions,
-        mut attempt: RetryAttempt,
-    ) -> std::result::Result<RetryAttemptValue, RetryAttemptError> {
-        let max_attempts = options.max_attempts.max(1);
-        for attempt_number in 1..=max_attempts {
-            let mut txn = self.new_txn(false).await?;
-            let result = {
-                let mut retry_txn = RetryTxnAdapter(txn.as_mut());
-                attempt.run(&mut retry_txn).await
-            };
-            match result {
-                Err(error) => {
-                    txn.discard();
-                    return Err(error);
-                }
-                Ok(value) => match txn.commit().await {
-                    Ok(()) => return Ok(value),
-                    Err(error) if error.is_txn_conflict() && attempt_number < max_attempts => {}
-                    Err(error) => return Err(RetryAttemptError::Storage(error)),
-                },
-            }
-        }
-        unreachable!("retry loop always returns")
-    }
+        attempt: RetryAttempt,
+    ) -> std::result::Result<RetryAttemptValue, RetryAttemptError>;
 
     /// Close the store and release resources.
     ///
@@ -822,27 +801,6 @@ pub trait Store: MaybeSendSync + private::Sealed {
     /// * `Ok(())` on success
     /// * `Err(Error)` if an error occurred during close
     async fn close(&self) -> Result<()>;
-}
-
-struct RetryTxnAdapter<'a>(&'a mut dyn Txn);
-
-impl private::Sealed for RetryTxnAdapter<'_> {}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl RetryTxn for RetryTxnAdapter<'_> {
-    async fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
-        self.0.get(key).await
-    }
-    async fn has(&self, key: &[u8]) -> Result<bool> {
-        self.0.has(key).await
-    }
-    async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
-        self.0.set(key, value).await
-    }
-    async fn delete(&mut self, key: &[u8]) -> Result<()> {
-        self.0.delete(key).await
-    }
 }
 
 /// Dropable trait for stores that support bulk deletion.
