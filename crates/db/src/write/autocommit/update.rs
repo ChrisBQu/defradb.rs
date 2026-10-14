@@ -153,7 +153,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             canonical_doc_id,
             signing_config: get_signing_config(),
             encryption_config: get_encryption_config(),
-            prepared_inputs: self.prepared_inputs.clone(),
+            prepared_inputs: Some(self.prepared_inputs.clone().unwrap_or_default()),
         };
         let result = self
             .db

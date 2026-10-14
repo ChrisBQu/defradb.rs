@@ -183,7 +183,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             doc_short_id,
             sign_config,
             acp_registration,
-            prepared_inputs: self.prepared_inputs.clone(),
+            prepared_inputs: Some(self.prepared_inputs.clone().unwrap_or_default()),
         };
         let result = self
             .db
@@ -582,7 +582,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             computed: computed_blocks,
             signing_config: sign_config,
             acp_registration,
-            prepared_inputs: self.prepared_inputs.clone(),
+            prepared_inputs: Some(self.prepared_inputs.clone().unwrap_or_default()),
         };
         let result = self
             .db

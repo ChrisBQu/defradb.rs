@@ -75,7 +75,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             collection: collection.clone(),
             doc_id: doc_id.clone(),
             signing_config: get_signing_config(),
-            prepared_inputs: self.prepared_inputs.clone(),
+            prepared_inputs: Some(self.prepared_inputs.clone().unwrap_or_default()),
         };
         let result = self
             .db
@@ -298,7 +298,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             collection,
             doc_ids: doc_ids.to_vec(),
             signing_config: get_signing_config(),
-            prepared_inputs: self.prepared_inputs.clone(),
+            prepared_inputs: Some(self.prepared_inputs.clone().unwrap_or_default()),
         };
         let result = self
             .db
