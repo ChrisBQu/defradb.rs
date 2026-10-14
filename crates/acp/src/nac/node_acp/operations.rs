@@ -27,7 +27,7 @@ impl<S: ZanzibarStore + ?Sized + 'static> NodeACP<S> {
         }
 
         // Use the engine to check permission
-        let engine = self.engine.read().await;
+        let engine = self.engine.snapshot();
         let has_permission = engine
             .check(
                 NODE_POLICY_ID,
@@ -90,7 +90,7 @@ impl<S: ZanzibarStore + ?Sized + 'static> NodeACP<S> {
         }
 
         // Check admin relation from stored relationships
-        let engine = self.engine.read().await;
+        let engine = self.engine.snapshot();
         Ok(engine
             .check(
                 NODE_POLICY_ID,

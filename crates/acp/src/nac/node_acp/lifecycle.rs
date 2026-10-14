@@ -26,8 +26,7 @@ impl<S: ZanzibarStore + ?Sized + 'static> NodeACP<S> {
 
         // Load policy into engine
         {
-            let mut engine = self.engine.write().await;
-            engine.add_policy(&policy);
+            self.engine.edit(|engine| engine.add_policy(&policy));
         }
 
         // Create owner relationship
@@ -179,8 +178,8 @@ impl<S: ZanzibarStore + ?Sized + 'static> NodeACP<S> {
 
         // Clear engine cache
         {
-            let mut engine = self.engine.write().await;
-            engine.remove_policy(NODE_POLICY_ID);
+            self.engine
+                .edit(|engine| engine.remove_policy(NODE_POLICY_ID));
         }
 
         // Reset state

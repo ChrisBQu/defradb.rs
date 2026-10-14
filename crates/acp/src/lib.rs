@@ -32,6 +32,7 @@ mod identity;
 mod local;
 pub mod nac;
 mod permission;
+mod policy_cache;
 // Both persistent stores require `S: Store + Send + Sync`, which the wasm
 // LevelDB store cannot satisfy, so they are native-only.
 #[cfg(not(target_arch = "wasm32"))]

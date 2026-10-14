@@ -99,43 +99,57 @@ impl std::fmt::Display for StepResult {
 
 pub struct PermissionEngine<S: ZanzibarStore + ?Sized> {
     store: Arc<S>,
-    pub lookup: PolicyLookupTable,
+    pub lookup: Arc<PolicyLookupTable>,
+}
+
+impl<S: ZanzibarStore + ?Sized> Clone for PermissionEngine<S> {
+    fn clone(&self) -> Self {
+        Self {
+            store: self.store.clone(),
+            lookup: self.lookup.clone(),
+        }
+    }
 }
 
 impl<S: ZanzibarStore + ?Sized> PermissionEngine<S> {
     pub fn new(store: Arc<S>) -> Self {
         Self {
             store,
-            lookup: PolicyLookupTable::new(),
+            lookup: Arc::new(PolicyLookupTable::new()),
         }
     }
 
+    /// Build an evaluator over one immutable policy snapshot.
+    pub fn with_lookup(store: Arc<S>, lookup: Arc<PolicyLookupTable>) -> Self {
+        Self { store, lookup }
+    }
+
     pub fn add_policy(&mut self, policy: &Policy) {
-        self.lookup.add_policy(policy);
+        Arc::make_mut(&mut self.lookup).add_policy(policy);
     }
 
     pub fn remove_policy(&mut self, policy_id: &str) {
-        self.lookup.remove_policy(policy_id);
+        Arc::make_mut(&mut self.lookup).remove_policy(policy_id);
     }
 
     pub fn update_policy(&mut self, policy: &Policy) {
-        self.lookup.update_policy(policy);
+        Arc::make_mut(&mut self.lookup).update_policy(policy);
     }
 
     pub async fn load_policy(&mut self, policy_id: &str) -> Result<()> {
         if let Some(policy) = self.store.get_policy(policy_id).await? {
-            self.lookup.add_policy(&policy);
+            Arc::make_mut(&mut self.lookup).add_policy(&policy);
         }
         Ok(())
     }
 
     pub async fn reload_policy(&mut self, policy_id: &str) -> Result<()> {
-        self.lookup.remove_policy(policy_id);
+        Arc::make_mut(&mut self.lookup).remove_policy(policy_id);
         self.load_policy(policy_id).await
     }
 
     pub fn clear_cache(&mut self) {
-        self.lookup.clear();
+        Arc::make_mut(&mut self.lookup).clear();
     }
 
     /// Evaluate with deterministic depth and work limits; exhaustion returns an error.

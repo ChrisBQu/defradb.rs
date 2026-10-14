@@ -8,7 +8,7 @@ use crate::types::Policy;
 ///
 /// Built from policies, provides O(1) lookup of relation expressions
 /// by (policy_id, resource, relation) tuple.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct PolicyLookupTable {
     policies: RapidHashMap<String, RapidHashMap<String, RapidHashMap<String, RelationExpression>>>,
     actors: RapidHashMap<String, String>,

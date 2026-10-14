@@ -13,7 +13,7 @@ mod operations;
 use std::sync::Arc;
 use storage::corekv::MaybeSendSync;
 
-use async_lock::RwLock;
+use crate::policy_cache::PolicyCache;
 use async_trait::async_trait;
 use identity::Did;
 use kovan::{Atom, AtomOption};
@@ -23,7 +23,7 @@ use crate::nac::permission::NodePermission;
 use crate::nac::policy::{
     validate_node_policy, NODE_POLICY_ID, NODE_RESOURCE_NAME, OWNER_RELATION,
 };
-use zanzibar::{PermissionEngine, Subject, ZanzibarStore};
+use zanzibar::{Subject, ZanzibarStore};
 
 /// The fixed object ID for the node resource.
 /// There's only one "node" instance, so we use a constant ID.
@@ -73,7 +73,7 @@ impl std::fmt::Display for NacStatus {
 /// Unlike DAC, NAC is always local (no Vera option).
 pub struct NodeACP<S: ZanzibarStore + ?Sized + 'static> {
     store: Arc<S>,
-    engine: RwLock<PermissionEngine<S>>,
+    engine: PolicyCache<S>,
     status: Atom<NacStatus>,
     owner: AtomOption<Did>,
 }
@@ -96,7 +96,7 @@ impl<S: ZanzibarStore + ?Sized + 'static> NodeACP<S> {
     pub fn new(store: Arc<S>) -> Self {
         Self {
             store: store.clone(),
-            engine: RwLock::new(PermissionEngine::new(store)),
+            engine: PolicyCache::new(store),
             status: Atom::new(NacStatus::NotConfigured),
             owner: AtomOption::none(),
         }
@@ -109,8 +109,7 @@ impl<S: ZanzibarStore + ?Sized + 'static> NodeACP<S> {
         if let Some(policy) = self.store.get_policy(NODE_POLICY_ID).await? {
             validate_node_policy(&policy).map_err(Error::InvalidPolicy)?;
 
-            let mut engine = self.engine.write().await;
-            engine.add_policy(&policy);
+            self.engine.edit(|engine| engine.add_policy(&policy));
 
             let subjects = self
                 .store

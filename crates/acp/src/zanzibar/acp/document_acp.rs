@@ -189,7 +189,7 @@ impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S>
         let granted = if permission == DocumentPermission::Read {
             // Read access is granted if the caller has any of the
             // implies-read permissions — matches Go's ImplyDocumentReadPerm.
-            let engine = self.engine.read().await;
+            let engine = self.engine.snapshot();
             let mut result = false;
             for perm in DocumentPermission::implies_read_permissions() {
                 match engine
@@ -207,7 +207,7 @@ impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S>
             result
         } else {
             let relation = Self::permission_to_relation(permission);
-            let engine = self.engine.read().await;
+            let engine = self.engine.snapshot();
             engine
                 .check(policy_id, resource_name, doc_id, relation, &subject)
                 .await?
