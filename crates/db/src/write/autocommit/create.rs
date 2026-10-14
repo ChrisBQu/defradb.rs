@@ -6,10 +6,9 @@ use events::{Message, Update};
 use crate::block::builder::DocStorageIdentity;
 
 use crate::block::builder::{
-    ComputedBlocks, compute_document_blocks_with_inputs, insert_computed_blocks,
+    compute_document_blocks_with_inputs, insert_computed_blocks, ComputedBlocks,
 };
 use crate::write::prepare::PreparedCreateBlocks;
-
 
 struct CreateRetryAttempt<S: Store> {
     db: Arc<DB<S>>,
@@ -201,7 +200,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     return Err(crate::error::commit_query_error(
                         crate::error::Error::Storage(error.into_storage()),
                     ));
-
                 }
             },
         };

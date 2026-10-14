@@ -676,3 +676,75 @@ mod retry_cold_io_tests {
         store.close().await.unwrap();
     }
 }
+
+#[cfg(test)]
+mod retry_order_tests {
+    use super::*;
+    use std::sync::Mutex;
+    use tokio::sync::Notify;
+
+    struct OrderedAttempt {
+        events: Arc<Mutex<Vec<u8>>>,
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+    impl crate::corekv::RetryAttemptFn for OrderedAttempt {
+        fn run<'a>(
+            &'a mut self,
+            retry: &'a mut dyn RetryTxn,
+        ) -> crate::corekv::RetryAttemptFuture<'a> {
+            Box::pin(async move {
+                let mut io = retry.begin_attempt_io()?;
+                io.set(b"ordered-retry", b"durable").await?;
+                let mut callbacks = RetryCallbacks::default();
+                let entered = self.entered.clone();
+                let release = self.release.clone();
+                callbacks.push_ordered_async(Box::new(move || {
+                    Box::pin(async move {
+                        entered.notify_one();
+                        release.notified().await;
+                        Ok(())
+                    })
+                }));
+                let events = self.events.clone();
+                callbacks.push_ordered(Box::new(move || events.lock().unwrap().push(1)));
+                retry.finish_attempt_io(io, callbacks)?;
+                Ok(Box::new(()) as RetryAttemptValue)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn regular_commit_waits_for_earlier_retry_postcommit_hook() {
+        let store = RegolithStore::in_memory().unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let attempt = OrderedAttempt {
+            events: events.clone(),
+            entered: entered.clone(),
+            release: release.clone(),
+        };
+        let retry_store = store.clone();
+        let retry_task = tokio::spawn(async move {
+            retry_store
+                .transact_retry(RetryOptions::new(2), Box::new(attempt))
+                .await
+                .unwrap();
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+            .await
+            .unwrap();
+        let mut regular = store.new_txn(false).await.unwrap();
+        regular.set(b"ordered-regular", b"durable").await.unwrap();
+        let out = events.clone();
+        regular
+            .on_success_ordered(Arc::new(move || out.lock().unwrap().push(2)))
+            .unwrap();
+        regular.commit().await.unwrap();
+        assert!(events.lock().unwrap().is_empty());
+        release.notify_one();
+        retry_task.await.unwrap();
+        assert_eq!(*events.lock().unwrap(), vec![1, 2]);
+    }
+}

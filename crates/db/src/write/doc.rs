@@ -389,6 +389,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             &index_manager,
             &mut modified_fields,
             None,
+            None,
         )
         .await?;
 

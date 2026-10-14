@@ -106,6 +106,39 @@ pub async fn set_embedding(
     Ok(generated)
 }
 
+/// Apply only exact memoized embedding responses inside a transaction attempt.
+pub(crate) fn set_embedding_from_inputs(
+    embeddings: &[VectorEmbeddingDescription],
+    doc: &mut Document,
+    modified_fields: &RapidHashSet<String>,
+    config: &EmbeddingClientConfig,
+    inputs: &query::prepared::PreparedInputMemo,
+) -> query::error::Result<Vec<String>> {
+    let mut generated = Vec::new();
+    for embedding in embeddings {
+        if modified_fields.contains(&embedding.field_name)
+            || !embedding
+                .fields
+                .iter()
+                .any(|field| modified_fields.contains(field))
+            || resolve_embedding_config(embedding, config).is_err()
+        {
+            continue;
+        }
+        let request = prepared_embedding_request(embedding, doc, config)
+            .map_err(query::error::QueryError::execution)?;
+        let response = inputs
+            .get(&request)
+            .ok_or_else(|| query::error::QueryError::NeedsInput(request.clone()))?;
+        let vector: Vec<f64> = serde_json::from_slice(&response).map_err(|error| {
+            query::error::QueryError::execution(format!("invalid prepared embedding: {error}"))
+        })?;
+        doc.set(&embedding.field_name, NormalValue::Float64Array(vector));
+        generated.push(embedding.field_name.clone());
+    }
+    Ok(generated)
+}
+
 /// Exact provider request needed to resolve an embedding after an attempt
 /// discovered newer source fields. The API key stays in this internal byte
 /// request and is redacted by `PreparedInputRequest::Debug`.

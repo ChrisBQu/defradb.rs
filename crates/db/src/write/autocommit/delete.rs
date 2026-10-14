@@ -1,6 +1,6 @@
-use events::{Message, Update};
 use super::helpers::write_branchable_collection_block;
 use super::*;
+use events::{Message, Update};
 
 struct DeleteRetryAttempt<S: Store> {
     db: Arc<DB<S>>,
@@ -259,7 +259,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 }))
                 .map_err(|error| crate::error::commit_query_error(error.into()))?;
             }
-
         }
         let (io, callbacks) = txn
             .into_retry_attempt()
@@ -443,7 +442,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 ));
             }
             Ok(results)
-
         }
         .await;
         drop(datastore);

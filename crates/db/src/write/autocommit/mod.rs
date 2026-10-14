@@ -76,7 +76,6 @@ impl<S: Store> AutoCommitMutator<S> {
     }
 
     pub(super) fn register_created_doc_with_acp(
-
         &self,
         txn: &mut crate::txn::DbTxn<S>,
         collection: &Collection,
@@ -121,7 +120,6 @@ impl<S: Store> AutoCommitMutator<S> {
         }));
         registration.map_err(|error| query::error::QueryError::execution(error.to_string()))
     }
-
 
     pub async fn new_batch_components(
         &self,
@@ -327,7 +325,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
         doc: Document,
         modified_fields: rapidhash::RapidHashSet<String>,
     ) -> query::error::Result<UpdateResult> {
-        self.update_impl(collection_name, None, doc, modified_fields)
+        self.update_with_resolved_inputs(collection_name, None, doc, modified_fields)
             .await
     }
 
@@ -338,7 +336,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
         doc: Document,
         modified_fields: rapidhash::RapidHashSet<String>,
     ) -> query::error::Result<UpdateResult> {
-        self.update_impl(collection_name, Some(expected), doc, modified_fields)
+        self.update_with_resolved_inputs(collection_name, Some(expected), doc, modified_fields)
             .await
     }
 

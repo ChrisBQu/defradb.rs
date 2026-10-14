@@ -1,8 +1,8 @@
-use events::{Message, Update};
 use super::helpers::{
     register_block_doc_id_mappings, write_branchable_collection_block, write_local_update,
 };
 use super::*;
+use events::{Message, Update};
 
 use crate::block::builder::DocStorageIdentity;
 use query::runner::DocFetcher;
@@ -41,6 +41,51 @@ impl<S: Store + 'static> storage::corekv::RetryAttemptFn for UpdateRetryAttempt<
 
 #[allow(clippy::type_complexity)]
 impl<S: Store + 'static> AutoCommitMutator<S> {
+    pub(super) async fn update_with_resolved_inputs(
+        &self,
+        collection_name: &str,
+        expected: Option<Document>,
+        doc: Document,
+        fields: rapidhash::RapidHashSet<String>,
+    ) -> query::error::Result<UpdateResult> {
+        if self.prepared_inputs.is_some() {
+            return self
+                .update_impl(collection_name, expected, doc, fields)
+                .await;
+        }
+        let inputs = query::prepared::PreparedInputMemo::default();
+        let mutator = Self {
+            db: self.db.clone(),
+            prepared_inputs: Some(inputs.clone()),
+        };
+        loop {
+            match mutator
+                .update_impl(
+                    collection_name,
+                    expected.clone(),
+                    doc.clone(),
+                    fields.clone(),
+                )
+                .await
+            {
+                Err(query::error::QueryError::NeedsInput(request)) => {
+                    if !inputs.register_dependency_miss() {
+                        return Err(query::error::QueryError::execution(
+                            "prepared input dependency budget exhausted",
+                        ));
+                    }
+                    let response = self.resolve_prepared_input(&request).await?;
+                    if !inputs.insert(request, response) {
+                        return Err(query::error::QueryError::execution(
+                            "prepared input memory budget exhausted",
+                        ));
+                    }
+                }
+                result => return result,
+            }
+        }
+    }
+
     pub(super) async fn update_impl(
         &self,
         collection_name: &str,
@@ -160,7 +205,35 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         // The fresh read, stale-plan comparison, rebase, and writes all belong
         // to this attempt. A storage conflict therefore repeats the complete
         // decision against the next engine snapshot.
-        let fetcher = LensedDocFetcher::new(Arc::clone(&self.db), txn, self.db.lens_store.clone());
+        let fetcher = if attempt.expected.is_none() {
+            let mut dependencies = attempt.modified_fields.clone();
+            for index in attempt.collection.write_indexes() {
+                if index
+                    .fields
+                    .iter()
+                    .any(|field| attempt.modified_fields.contains(&field.name))
+                {
+                    dependencies.extend(index.fields.iter().map(|field| field.name.clone()));
+                }
+            }
+            for embedding in &attempt.collection.schema().vector_embeddings {
+                if embedding
+                    .fields
+                    .iter()
+                    .any(|field| attempt.modified_fields.contains(field))
+                {
+                    dependencies.extend(embedding.fields.iter().cloned());
+                }
+            }
+            LensedDocFetcher::new_projected(
+                Arc::clone(&self.db),
+                txn,
+                self.db.lens_store.clone(),
+                dependencies,
+            )
+        } else {
+            LensedDocFetcher::new(Arc::clone(&self.db), txn, self.db.lens_store.clone())
+        };
         let docs = fetcher
             .get_by_ids(
                 &attempt.collection_name,
@@ -228,14 +301,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 other => query::error::QueryError::execution(other.to_string()),
             })?;
         current_doc.set_id(canonical_doc_id.clone());
-        crate::write::prepare::prepare_keys(
-            &self.db,
-            &mut current_doc,
-            DocStorageIdentity::new(attempt.collection.resolved_root_id(), doc_short_id),
-            Some(&attempt.modified_fields),
-            attempt.encryption_config.as_ref(),
-        )
-        .await?;
         let mut modified_fields = attempt.modified_fields.clone();
         let embedding_config = self.db.options().embedding_config();
         let index_manager = IndexManager::from_indexes(
@@ -266,6 +331,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     &index_manager,
                     &mut modified_fields,
                     Some(&embedding_config),
+                    attempt.prepared_inputs.as_ref(),
                 )
                 .await?;
                 let block_result = write_document_blocks_with_inputs(

@@ -425,6 +425,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             &index_manager,
             &mut modified_fields,
             None,
+            self.prepared_inputs.as_ref(),
         )
         .await?;
 

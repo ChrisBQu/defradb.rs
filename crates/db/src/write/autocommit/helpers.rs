@@ -69,6 +69,7 @@ pub(crate) async fn write_branchable_collection_block<S: storage::corekv::Store 
 /// CRDT accumulation store — the single-store invariant is enforced by
 /// construction, not by each mutator remembering to call the counter helper.
 /// When requested, embeddings use the final field values before persistence.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn write_local_update(
     datastore: &NamespaceView,
     collection: &Collection,
@@ -77,6 +78,7 @@ pub(crate) async fn write_local_update(
     index_manager: &IndexManager,
     modified_fields: &mut rapidhash::RapidHashSet<String>,
     embedding_config: Option<&crate::search::EmbeddingClientConfig>,
+    prepared_inputs: Option<&query::prepared::PreparedInputMemo>,
 ) -> query::error::Result<()> {
     collection
         .validate_write_definition(datastore, true)
@@ -85,15 +87,25 @@ pub(crate) async fn write_local_update(
 
     apply_local_counter_deltas(datastore, collection, doc, doc_short_id).await?;
     if let Some(config) = embedding_config {
-        let generated = crate::search::set_embedding(
-            &collection.schema().vector_embeddings,
-            doc,
-            false,
-            Some(modified_fields),
-            config,
-        )
-        .await
-        .map_err(|e| query::error::QueryError::execution(format!("embedding error: {e}")))?;
+        let generated = if let Some(inputs) = prepared_inputs {
+            crate::search::embedding::set_embedding_from_inputs(
+                &collection.schema().vector_embeddings,
+                doc,
+                modified_fields,
+                config,
+                inputs,
+            )?
+        } else {
+            crate::search::set_embedding(
+                &collection.schema().vector_embeddings,
+                doc,
+                false,
+                Some(modified_fields),
+                config,
+            )
+            .await
+            .map_err(|e| query::error::QueryError::execution(format!("embedding error: {e}")))?
+        };
         modified_fields.extend(generated);
     }
     collection
@@ -622,35 +634,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .map_err(|e| query::error::QueryError::execution(format!("db error: {}", e)))?
             .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))
     }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn register_ordered_update_event(
-        &self,
-        txn: &mut crate::txn::DbTxn<S>,
-        collection_name: &str,
-        collection: &Collection,
-        doc_id: String,
-        doc_cid: Cid,
-        doc_block: Bytes,
-        collection_block: Option<(Cid, Bytes)>,
-    ) -> query::error::Result<()> {
-        crate::event::emission::register_update_event_callback(
-            txn,
-            self.db.event_bus(),
-            None,
-            None,
-            collection_name.to_owned(),
-            collection.collection_id().to_string(),
-            doc_id,
-            doc_cid,
-            doc_block,
-            None,
-            collection_block,
-            None,
-        )
-        .map_err(|error| query::error::QueryError::execution(error.to_string()))
-    }
-
 }
 
 /// Local ownership disappears in the same commit as the deletion marker.
