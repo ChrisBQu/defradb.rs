@@ -206,6 +206,80 @@ async fn cancelling_a_statement_rolls_back_only_that_statement_before_commit() {
 }
 
 #[tokio::test]
+async fn timing_out_a_statement_rolls_back_only_that_statement_before_commit() {
+    let bus: Arc<dyn Bus> = Arc::new(ChannelBus::new());
+    let inner = RegolithStore::in_memory().unwrap();
+    let gate = Arc::new(WriteGate::default());
+    let mut db = DB::new(PauseAfterSetStore {
+        inner,
+        gate: Arc::clone(&gate),
+    })
+    .unwrap();
+    db.set_event_bus(bus.clone());
+    let db = Arc::new(db);
+    for schema in query::parse_sdl("type Users { name: String }").unwrap() {
+        db.create_collection(schema).await.unwrap();
+    }
+    let registry = Arc::new(DbTransactionRegistry::new(Arc::clone(&db)));
+    let runner = Arc::new(
+        query::QueryRunner::with_arc_registry_and_provider(
+            LensedAutoCommitFetcher::new(Arc::clone(&db)),
+            DbCollectionProvider::new_arc(Arc::clone(&db)),
+            Arc::clone(&registry),
+        )
+        .with_query_timeout(1),
+    );
+
+    let handle = runner.begin_txn(false).await.unwrap();
+    let mut events = bus.subscribe(&[EventName::Update]);
+    let prior = runner
+        .execute_in_txn(
+            QueryRequest::new(r#"mutation { add_Users(input: {name: "kept"}) { _docID } }"#),
+            &handle,
+        )
+        .await;
+    assert!(!prior.has_errors(), "{:?}", prior.errors);
+
+    gate.armed.store(true, Ordering::SeqCst);
+    let runner_for_task = Arc::clone(&runner);
+    let handle_for_task = handle.clone();
+    let mutation = tokio::spawn(async move {
+        runner_for_task
+            .execute_in_txn(
+                QueryRequest::new(
+                    r#"mutation { add_Users(input: {name: "timed out"}) { _docID } }"#,
+                ),
+                &handle_for_task,
+            )
+            .await
+    });
+    gate.entered.notified().await;
+    let timed_out = mutation.await.unwrap();
+    assert!(timed_out.has_errors(), "expected query timeout");
+    assert!(timed_out.errors[0].message.contains("timed out"));
+
+    runner.commit_txn(&handle).await.unwrap();
+    let response = runner
+        .execute(QueryRequest::new("{ Users { name } }"))
+        .await;
+    assert!(!response.has_errors(), "{:?}", response.errors);
+    assert_eq!(
+        response.data.unwrap()["Users"],
+        serde_json::json!([{ "name": "kept" }])
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+        .await
+        .expect("prior statement event remains queued")
+        .expect("event bus stays open");
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), events.recv())
+            .await
+            .is_err(),
+        "timed-out statement must not publish a buffered document event"
+    );
+}
+
+#[tokio::test]
 async fn failed_partial_batch_keeps_prior_statements_and_discards_its_own_writes() {
     let bus: Arc<dyn Bus> = Arc::new(ChannelBus::new());
     let mut db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
