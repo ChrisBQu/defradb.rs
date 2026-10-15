@@ -21,7 +21,10 @@ use cid::Cid;
 use defra_core::thread_bounds::MaybeSendSync;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use storage::corekv::{IterOptions, Key, Store};
+use storage::corekv::{
+    IterOptions, Key, Reader, RetryAttemptFn, RetryAttemptFuture, RetryAttemptValue, RetryOptions,
+    RetryTxn, Store,
+};
 use storage::keys::systemstore::{P2PPendingDagKey, P2PQuarantinedDagKey};
 use storage::stores::Systemstore;
 use web_time::{SystemTime, UNIX_EPOCH};
@@ -29,48 +32,35 @@ use web_time::{SystemTime, UNIX_EPOCH};
 use crate::error::{Error, Result};
 use crate::ExplicitReplayAuthorization;
 
-const PENDING_STORE_TXN_MAX_ATTEMPTS: usize = 3;
+const PENDING_STORE_TXN_MAX_ATTEMPTS: u32 = 3;
 
 /// Maximum number of same-root announcers retained in addition to the
 /// immutable origin provider. Each unavailable provider consumes a bounded
 /// selective-CAR attempt, so this durable list must remain bounded too.
 pub(crate) const MAX_PENDING_DAG_ALTERNATE_PROVIDERS: usize = 3;
 
-async fn retry_pending_store_conflicts<T, F, Fut>(
-    operation: &'static str,
-    mut attempt: F,
-) -> storage::corekv::Result<T>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = storage::corekv::Result<T>>,
-{
-    for attempt_number in 1..=PENDING_STORE_TXN_MAX_ATTEMPTS {
-        match attempt().await {
-            Ok(value) => return Ok(value),
-            Err(error)
-                if error.is_txn_conflict() && attempt_number < PENDING_STORE_TXN_MAX_ATTEMPTS =>
-            {
-                tracing::debug!(
-                    operation,
-                    attempt = attempt_number,
-                    max_attempts = PENDING_STORE_TXN_MAX_ATTEMPTS,
-                    "Retrying idempotent pending-DAG transaction conflict"
-                );
-            }
-            Err(error) => {
-                if error.is_txn_conflict() {
-                    tracing::warn!(
-                        operation,
-                        attempt = attempt_number,
-                        max_attempts = PENDING_STORE_TXN_MAX_ATTEMPTS,
-                        "Pending-DAG transaction conflict exhausted"
-                    );
+struct PendingStoreWriteAttempt {
+    writes: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+}
+
+impl RetryAttemptFn for PendingStoreWriteAttempt {
+    fn run<'a>(&'a mut self, retry: &'a mut dyn RetryTxn) -> RetryAttemptFuture<'a> {
+        Box::pin(async move {
+            let io = retry.begin_attempt_io()?;
+            let txn = datastore::BasicTxn::from_retry_attempt_io(io, 0);
+            let systemstore = txn.systemstore();
+            for (key, value) in &self.writes {
+                match value {
+                    Some(value) => systemstore.set(key, value).await?,
+                    None => systemstore.delete(key).await?,
                 }
-                return Err(error);
             }
-        }
+            drop(systemstore);
+            let (io, callbacks) = txn.into_retry_attempt()?;
+            retry.finish_attempt_io(io, callbacks)?;
+            Ok(Box::new(()) as RetryAttemptValue)
+        })
     }
-    unreachable!("bounded pending-store retry loop always returns")
 }
 
 /// Verified explicit-replay authorization carried by a persisted registration.
@@ -198,13 +188,15 @@ pub trait PendingDagStorage: MaybeSendSync {
 
 /// `PendingDagStorage` over the systemstore keyspace (`/p2p/pending_dag/`).
 pub struct PendingDagStore<S: Store> {
+    store: Arc<S>,
     systemstore: Systemstore<S>,
 }
 
 impl<S: Store> PendingDagStore<S> {
     pub fn new(store: Arc<S>) -> Self {
         Self {
-            systemstore: Systemstore::new(store),
+            systemstore: Systemstore::new(Arc::clone(&store)),
+            store,
         }
     }
 
@@ -214,16 +206,36 @@ impl<S: Store> PendingDagStore<S> {
         key: &[u8],
         value: Option<&[u8]>,
     ) -> Result<()> {
-        retry_pending_store_conflicts(operation, || async {
-            let mut txn = self.systemstore.new_txn(false).await?;
-            match value {
-                Some(value) => txn.set(key, value).await?,
-                None => txn.delete(key).await?,
+        let writes = vec![(key.to_vec(), value.map(<[u8]>::to_vec))];
+        self.transact_write(operation, writes).await
+    }
+
+    async fn transact_write(
+        &self,
+        operation: &'static str,
+        writes: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+    ) -> Result<()> {
+        let attempt = PendingStoreWriteAttempt { writes };
+        match self
+            .store
+            .transact_retry(
+                RetryOptions::new(PENDING_STORE_TXN_MAX_ATTEMPTS),
+                Box::new(attempt),
+            )
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                if matches!(error, storage::corekv::RetryAttemptError::Exhausted(_)) {
+                    tracing::warn!(
+                        operation,
+                        max_attempts = PENDING_STORE_TXN_MAX_ATTEMPTS,
+                        "Pending-DAG transaction conflicts exhausted"
+                    );
+                }
+                Err(Error::Storage(error.into_storage().to_string()))
             }
-            txn.commit().await
-        })
-        .await
-        .map_err(|error| Error::Storage(error.to_string()))
+        }
     }
 }
 
@@ -248,16 +260,12 @@ impl<S: Store + 'static> PendingDagStorage for PendingDagStore<S> {
             .filter(|old| *old != root_cid)
             .map(|old| P2PPendingDagKey::new(old.to_string()).bytes());
         let value = record.to_bytes()?;
-        retry_pending_store_conflicts("pending_store.replace_scope_head", || async {
-            let mut txn = self.systemstore.new_txn(false).await?;
-            txn.set(&new_key, &value).await?;
-            if let Some(old_key) = old_key.as_ref() {
-                txn.delete(old_key).await?;
-            }
-            txn.commit().await
-        })
-        .await
-        .map_err(|error| Error::Storage(error.to_string()))
+        let mut writes = vec![(new_key, Some(value))];
+        if let Some(old_key) = old_key {
+            writes.push((old_key, None));
+        }
+        self.transact_write("pending_store.replace_scope_head", writes)
+            .await
     }
 
     async fn remove(&self, root_cid: &Cid) -> Result<()> {
@@ -389,6 +397,116 @@ mod tests {
     use multihash_codetable::{Code, MultihashDigest};
     use storage::RegolithStore;
 
+    struct ConflictInjectingStore {
+        inner: Arc<RegolithStore>,
+        conflict_key: Vec<u8>,
+        conflicts_remaining: Arc<AtomicUsize>,
+        attempt_calls: Arc<AtomicUsize>,
+    }
+
+    impl storage::corekv::private::Sealed for ConflictInjectingStore {}
+
+    #[async_trait]
+    impl Store for ConflictInjectingStore {
+        async fn allocate(
+            &self,
+            key: &[u8],
+            count: u64,
+        ) -> storage::corekv::Result<std::ops::Range<u64>> {
+            self.inner.allocate(key, count).await
+        }
+
+        fn transaction_stats_handle(&self) -> Option<storage::backends::TransactionStatsHandle> {
+            self.inner.transaction_stats_handle()
+        }
+
+        async fn new_txn(
+            &self,
+            readonly: bool,
+        ) -> storage::corekv::Result<Box<dyn storage::corekv::Txn>> {
+            self.inner.new_txn(readonly).await
+        }
+
+        async fn transact_retry(
+            &self,
+            options: RetryOptions,
+            attempt: storage::corekv::RetryAttempt,
+        ) -> std::result::Result<RetryAttemptValue, storage::corekv::RetryAttemptError> {
+            let wrapped = Box::new(InjectCommitConflict {
+                inner: Some(attempt),
+                store: Arc::clone(&self.inner),
+                conflict_key: self.conflict_key.clone(),
+                conflicts_remaining: Arc::clone(&self.conflicts_remaining),
+                attempt_calls: Arc::clone(&self.attempt_calls),
+            });
+            self.inner.transact_retry(options, wrapped).await
+        }
+
+        async fn close(&self) -> storage::corekv::Result<()> {
+            self.inner.close().await
+        }
+    }
+
+    struct InjectCommitConflict {
+        inner: Option<storage::corekv::RetryAttempt>,
+        store: Arc<RegolithStore>,
+        conflict_key: Vec<u8>,
+        conflicts_remaining: Arc<AtomicUsize>,
+        attempt_calls: Arc<AtomicUsize>,
+    }
+
+    impl RetryAttemptFn for InjectCommitConflict {
+        fn run<'a>(&'a mut self, retry: &'a mut dyn RetryTxn) -> RetryAttemptFuture<'a> {
+            Box::pin(async move {
+                self.attempt_calls.fetch_add(1, Ordering::SeqCst);
+                let output = self.inner.as_mut().unwrap().run(retry).await?;
+                let mut remaining = self.conflicts_remaining.load(Ordering::SeqCst);
+                let mut inject_conflict = false;
+                while remaining > 0 {
+                    match self.conflicts_remaining.compare_exchange_weak(
+                        remaining,
+                        remaining - 1,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    ) {
+                        Ok(_) => {
+                            inject_conflict = true;
+                            break;
+                        }
+                        Err(current) => remaining = current,
+                    }
+                }
+                if inject_conflict {
+                    let mut competitor = self.store.new_txn(false).await?;
+                    competitor
+                        .set(&self.conflict_key, b"competing write")
+                        .await?;
+                    competitor.commit().await?;
+                }
+                Ok(output)
+            })
+        }
+    }
+
+    fn conflict_injecting_store(
+        conflicts: usize,
+    ) -> (Arc<ConflictInjectingStore>, Arc<AtomicUsize>) {
+        let inner = Arc::new(RegolithStore::in_memory().unwrap());
+        let root = cid(b"bounded retry test");
+        let key = P2PPendingDagKey::new(root.to_string()).bytes();
+        let mut conflict_key = Vec::with_capacity(1 + key.len());
+        conflict_key.push(storage::namespace::Namespace::Systemstore.prefix());
+        conflict_key.extend_from_slice(&key);
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let store = Arc::new(ConflictInjectingStore {
+            inner,
+            conflict_key,
+            conflicts_remaining: Arc::new(AtomicUsize::new(conflicts)),
+            attempt_calls: Arc::clone(&attempts),
+        });
+        (store, attempts)
+    }
+
     fn record(doc: &str) -> PersistedPendingDag {
         PersistedPendingDag {
             doc_id: doc.to_string(),
@@ -443,34 +561,57 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_store_conflicts_retry_to_success() {
-        let attempts = AtomicUsize::new(0);
-        retry_pending_store_conflicts("pending_store.put", || async {
-            if attempts.fetch_add(1, Ordering::Relaxed) < 2 {
-                Err(storage::corekv::Error::TxnConflict)
-            } else {
-                Ok(())
-            }
-        })
-        .await
-        .unwrap();
-        assert_eq!(attempts.load(Ordering::Relaxed), 3);
+    async fn pending_store_retries_a_commit_conflict_once_then_persists_value() {
+        let (root, attempts) = conflict_injecting_store(1);
+        let store = PendingDagStore::new(root);
+        let root_cid = cid(b"bounded retry test");
+
+        store.put(&root_cid, &record("doc-a")).await.unwrap();
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        let loaded = store.load_all().await.unwrap();
+        assert_eq!(loaded, vec![(root_cid, record("doc-a"))]);
     }
 
     #[tokio::test]
-    async fn pending_store_conflicts_have_a_bounded_terminal_result() {
-        let attempts = AtomicUsize::new(0);
-        let error = retry_pending_store_conflicts("pending_store.quarantine", || async {
-            attempts.fetch_add(1, Ordering::Relaxed);
-            Err::<(), _>(storage::corekv::Error::TxnConflict)
-        })
-        .await
-        .unwrap_err();
-        assert!(error.is_txn_conflict());
+    async fn pending_store_preserves_three_attempt_conflict_bound() {
+        let (root, attempts) = conflict_injecting_store(PENDING_STORE_TXN_MAX_ATTEMPTS as usize);
+        let store = PendingDagStore::new(root);
+        let root_cid = cid(b"bounded retry test");
+
+        let error = store.put(&root_cid, &record("doc-a")).await.unwrap_err();
+
         assert_eq!(
-            attempts.load(Ordering::Relaxed),
-            PENDING_STORE_TXN_MAX_ATTEMPTS
+            attempts.load(Ordering::SeqCst),
+            PENDING_STORE_TXN_MAX_ATTEMPTS as usize
         );
+        assert!(
+            matches!(error, Error::Storage(ref message) if message.contains("retry")),
+            "unexpected terminal error: {error:?}"
+        );
+        let key = P2PPendingDagKey::new(root_cid.to_string());
+        let txn = store.systemstore.new_txn(true).await.unwrap();
+        assert_eq!(
+            txn.get(&key.bytes()).await.unwrap(),
+            Some(bytes::Bytes::from_static(b"competing write"))
+        );
+        txn.discard();
+    }
+
+    #[tokio::test]
+    async fn replace_scope_head_is_atomic_through_engine_retry_api() {
+        let store = PendingDagStore::new(Arc::new(RegolithStore::in_memory().unwrap()));
+        let old_root = cid(b"old");
+        let new_root = cid(b"new");
+        store.put(&old_root, &record("doc-a")).await.unwrap();
+
+        store
+            .replace_scope_head(Some(&old_root), &new_root, &record("doc-a"))
+            .await
+            .unwrap();
+
+        let entries = store.load_all().await.unwrap();
+        assert_eq!(entries, vec![(new_root, record("doc-a"))]);
     }
 
     #[tokio::test]

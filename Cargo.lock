@@ -9433,6 +9433,7 @@ dependencies = [
  "ciborium",
  "cid",
  "crypto",
+ "datastore",
  "defra-core",
  "document",
  "futures",
