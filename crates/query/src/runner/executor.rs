@@ -490,31 +490,24 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
             }
         };
 
-        let txn_provider = txn_ctx.collection_provider();
+        // The transaction's own provider, so its uncommitted schemas are visible.
+        let txn_provider = txn_ctx
+            .collection_provider()
+            .unwrap_or_else(|| self.collection_provider.clone());
 
         // Validate that all referenced collections exist before execution.
-        // Use the transaction-scoped provider if available so uncommitted schemas are visible.
-        {
-            let validation_provider: &dyn crate::fetcher::CollectionProvider =
-                if let Some(ref p) = txn_provider {
-                    p.as_ref()
-                } else {
-                    self.collection_provider.as_ref()
-                };
-
-            if let Err(e) = validate_parsed_operation(&parsed, validation_provider).await {
-                return QueryResponse {
-                    data: None,
-                    errors: vec![QueryResponseError {
-                        message: e.to_string(),
-                        path: None,
-                        locations: None,
-                        extensions: None,
-                        retry_input: None,
-                    }],
+        if let Err(e) = validate_parsed_operation(&parsed, txn_provider.as_ref()).await {
+            return QueryResponse {
+                data: None,
+                errors: vec![QueryResponseError {
+                    message: e.to_string(),
+                    path: None,
+                    locations: None,
                     extensions: None,
-                };
-            }
+                    retry_input: None,
+                }],
+                extensions: None,
+            };
         }
 
         let nac_identity = request.identity.clone().unwrap_or_else(Did::wildcard);
@@ -543,6 +536,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
             Err(error) => return QueryResponse::error(error.to_string()),
         };
         let mut scoped_runner = self.scoped_runner(scoped_acp);
+        scoped_runner.collection_provider = Arc::clone(&txn_provider);
         if !scoped_runner.acp.supports_transactions() {
             // Even transaction-context implementations without an ACP
             // projection must never fall back to mutating an external provider
@@ -582,13 +576,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                     }
                     let fetcher = txn_ctx.doc_fetcher();
                     if let Some(explain_type) = explain {
-                        self.explain_query_with_identity_and_vars(
-                            &request.query,
-                            identity,
-                            explain_type,
-                            variables.as_ref(),
-                        )
-                        .await
+                        self.with_collection_provider(txn_provider)
+                            .explain_query_with_identity_and_vars(
+                                &request.query,
+                                identity,
+                                explain_type,
+                                variables.as_ref(),
+                            )
+                            .await
                     } else {
                         scoped_runner
                             .execute_selects_internal(
@@ -603,7 +598,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                 ParsedOperation::Mutation { explain, .. } => {
                     if let Some(explain_type) = explain {
                         // Return mutation plan instead of executing
-                        self.explain_mutation_with_identity(&request.query, identity, explain_type)
+                        self.with_collection_provider(txn_provider)
+                            .explain_mutation_with_identity(&request.query, identity, explain_type)
                             .await
                     } else {
                         // Check if this is a read-only transaction
@@ -672,22 +668,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                 }
                 ParsedOperation::Introspection { query } => {
                     // Introspection queries are executed against the GraphQL schema
-                    self.execute_introspection(&query).await
+                    scoped_runner.execute_introspection(&query).await
                 }
             }
         };
 
-        // Collection schema reads retain their transaction-scoped provider;
-        // ACP projection is passed explicitly through the scoped runner.
-        let result = if let Some(provider) = txn_provider {
-            super::scope_txn_collection_provider(
-                provider,
-                await_with_timeout(execution, self.query_timeout),
-            )
-            .await
-        } else {
-            await_with_timeout(execution, self.query_timeout).await
-        };
+        let result = await_with_timeout(execution, self.query_timeout).await;
 
         let response = match result {
             Ok(data) => QueryResponse {

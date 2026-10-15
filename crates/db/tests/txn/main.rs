@@ -8,4 +8,5 @@ mod registry_suite;
 mod statement_savepoint;
 
 mod ownership;
+mod schema_visibility;
 mod store_release;

@@ -61,43 +61,6 @@ use crate::mutator::DocMutator;
 use crate::planner::Doc;
 use crate::txn::{AcpRegistrationProjection, NoOpTransactionRegistry, TransactionRegistry};
 
-#[cfg(not(target_arch = "wasm32"))]
-tokio::task_local! {
-    /// Per-request collection provider override for transaction-scoped schema resolution.
-    ///
-    /// When a query executes within a transaction that has uncommitted schema changes,
-    /// this is set to a transaction-aware provider so `get_collection()` sees the new schemas.
-    static TXN_COLLECTION_PROVIDER: Arc<dyn CollectionProvider>;
-}
-
-#[cfg(target_arch = "wasm32")]
-thread_local! {
-    static TXN_COLLECTION_PROVIDER: std::cell::RefCell<Option<Arc<dyn CollectionProvider>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-async fn scope_txn_collection_provider<F>(
-    provider: Arc<dyn CollectionProvider>,
-    future: F,
-) -> F::Output
-where
-    F: std::future::Future,
-{
-    #[cfg(not(target_arch = "wasm32"))]
-    return TXN_COLLECTION_PROVIDER.scope(provider, future).await;
-
-    #[cfg(target_arch = "wasm32")]
-    defra_core::wasm_task_local::scope(&TXN_COLLECTION_PROVIDER, provider, future).await
-}
-
-fn current_txn_collection_provider() -> Option<Arc<dyn CollectionProvider>> {
-    #[cfg(not(target_arch = "wasm32"))]
-    return TXN_COLLECTION_PROVIDER.try_with(Clone::clone).ok();
-
-    #[cfg(target_arch = "wasm32")]
-    defra_core::wasm_task_local::try_with(&TXN_COLLECTION_PROVIDER, Clone::clone)
-}
-
 // Re-export for backwards compatibility
 pub use crate::fetcher::{DocFetcher, FetchByIdsResult, IndexScanResult};
 
@@ -421,6 +384,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         }
     }
 
+    /// This runner resolving collections through `provider`.
+    pub(crate) fn with_collection_provider(&self, provider: Arc<dyn CollectionProvider>) -> Self {
+        let mut runner = self.scoped_runner(self.acp.clone());
+        runner.collection_provider = provider;
+        runner
+    }
+
     pub fn with_acp(mut self, acp: Arc<dyn DocumentACP>) -> Self {
         if let Some(mutator) = &self.mutator {
             mutator.set_document_acp(acp.clone());
@@ -583,12 +553,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         request_identity.or_else(|| self.default_identity.clone())
     }
 
-    /// Get the effective collection provider.
-    ///
-    /// Returns the transaction-scoped provider if set (via task-local storage),
-    /// otherwise returns the default process-wide provider.
+    /// The provider this runner resolves collections through: a transaction's
+    /// own provider for a runner scoped to that transaction, so its uncommitted
+    /// schemas are visible, and the process-wide one otherwise.
     fn effective_provider(&self) -> Arc<dyn CollectionProvider> {
-        current_txn_collection_provider().unwrap_or_else(|| self.collection_provider.clone())
+        self.collection_provider.clone()
     }
 
     pub(crate) fn transaction_collection_provider(
