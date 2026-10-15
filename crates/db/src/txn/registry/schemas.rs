@@ -77,17 +77,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
             let updated_destination = updated_destination.clone();
             Box::pin(async move {
                 db.bump_migration_generation();
-                if let Err(error) = db
-                    .lens_store()
-                    .add_with_id(transform_id.clone(), config)
-                    .await
-                {
-                    tracing::warn!(
-                        transform_id = %transform_id,
-                        error = %error,
-                        "failed to promote committed transaction migration lens"
-                    );
-                }
+                db.register_committed_lens(transform_id, config).await;
 
                 if !updated_destination.name.is_empty() {
                     if let Err(error) = db

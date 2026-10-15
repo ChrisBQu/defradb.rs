@@ -528,17 +528,7 @@ impl<S: Store> crate::database::DB<S> {
 
         if let Some((transform_id, config)) = committed_migration {
             self.bump_migration_generation();
-            if let Err(error) = self
-                .lens_store()
-                .add_with_id(transform_id.clone(), config)
-                .await
-            {
-                tracing::warn!(
-                    transform_id = %transform_id,
-                    error = %error,
-                    "failed to promote collection patch migration lens"
-                );
-            }
+            self.register_committed_lens(transform_id, config).await;
         }
 
         // Clean up any pending migration that was linked to this version

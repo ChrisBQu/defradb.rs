@@ -469,7 +469,8 @@ impl<S: Store> DB<S> {
 
     /// Replace the transform store backing lens migrations.
     pub fn set_lens_store(&mut self, store: Arc<dyn TransformStore>) {
-        self.lens_store = store;
+        self.lens_store =
+            crate::definition::migration::committed_lenses::CommittedLensStore::wrap(store);
     }
 
     pub fn set_kms(&self, kms: std::sync::Arc<dyn kms::KmsService>) {
@@ -685,6 +686,7 @@ impl<S: Store> DB<S> {
     /// The lens transform store this database runs its migrations on.
     fn create_lens_store() -> Result<Arc<dyn TransformStore>> {
         lens::default_store()
+            .map(crate::definition::migration::committed_lenses::CommittedLensStore::wrap)
             .map_err(|e| Error::Lens(format!("failed to create lens transform store: {}", e)))
     }
 

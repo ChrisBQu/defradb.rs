@@ -4,8 +4,9 @@
 //! older data is readable by the current storage layer. Lens migrations then
 //! provide document transforms between schema versions.
 
-pub mod document_parts;
+pub(crate) mod committed_lenses;
 mod counters;
+pub mod document_parts;
 pub mod format;
 pub mod helpers;
 mod reindex;
@@ -115,11 +116,8 @@ impl<S: Store> DB<S> {
         txn.commit().await?;
 
         let transform_id = TransformId::new(config_cid.to_string());
-
-        self.lens_store
-            .add_with_id(transform_id.clone(), config)
-            .await
-            .map_err(|e| Error::Lens(e.to_string()))?;
+        self.register_committed_lens(transform_id.clone(), config)
+            .await;
 
         tracing::info!(
             transform_id = %transform_id,
@@ -162,19 +160,17 @@ impl<S: Store> DB<S> {
                 let key_str = String::from_utf8_lossy(&pair.key);
                 let transform_id = key_str.strip_prefix(prefix_str).map(TransformId::new);
 
-                let result = if let Some(id) = transform_id {
-                    self.lens_store.add_with_id(id, config).await
-                } else {
-                    self.lens_store.add(config).await.map(|_| ())
+                let Some(id) = transform_id else {
+                    if let Err(e) = self.lens_store.add(config).await {
+                        tracing::warn!(
+                            error = %e,
+                            key = ?String::from_utf8_lossy(&pair.key),
+                            "Failed to reload lens config"
+                        );
+                    }
+                    continue;
                 };
-
-                if let Err(e) = result {
-                    tracing::warn!(
-                        error = %e,
-                        key = ?String::from_utf8_lossy(&pair.key),
-                        "Failed to reload lens config"
-                    );
-                }
+                self.register_committed_lens(id, config).await;
             }
 
             iter.close().await.map_err(Error::Storage)?;

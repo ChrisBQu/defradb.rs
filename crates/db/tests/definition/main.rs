@@ -2,8 +2,9 @@
 #[path = "../common/mod.rs"]
 mod common;
 
-mod document_parts;
+mod committed_lenses;
 mod counter_migration;
+mod document_parts;
 mod format;
 mod helpers;
 mod json;
