@@ -759,8 +759,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             create_input: Vec<rapidhash::RapidHashMap<String, serde_json::Value>>,
             update_input: rapidhash::RapidHashMap<String, serde_json::Value>,
         }
-        let request: Request = serde_json::from_slice(input.exact_request())
-            .map_err(|_| crate::error::QueryError::execution("invalid prepared write validation request"))?;
+        let request: Request = serde_json::from_slice(input.exact_request()).map_err(|_| {
+            crate::error::QueryError::execution("invalid prepared write validation request")
+        })?;
         let validator = self.write_validator.as_ref().ok_or_else(|| {
             crate::error::QueryError::execution("write validator changed during retry preparation")
         })?;
@@ -782,7 +783,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             .as_deref()
             .map(Did::new)
             .transpose()
-            .map_err(|_| crate::error::QueryError::execution("invalid identity in write validation request"))?;
+            .map_err(|_| {
+                crate::error::QueryError::execution("invalid identity in write validation request")
+            })?;
         validator
             .validate_write(&crate::access_hooks::WriteRequest {
                 identity: identity.as_ref(),
@@ -863,7 +866,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             };
             let allowed = self
                 .acp
-                .check_doc_access(&Identity::from(did), permission, field(2)?, field(3)?, field(4)?)
+                .check_doc_access(
+                    &Identity::from(did),
+                    permission,
+                    field(2)?,
+                    field(3)?,
+                    field(4)?,
+                )
                 .await
                 .map_err(|error| crate::error::QueryError::execution(error.to_string()))?;
             serde_json::to_vec(&allowed)

@@ -231,6 +231,8 @@ pub struct QueryRunner<F: DocFetcher, R: TransactionRegistry = NoOpTransactionRe
     pub(crate) read_validator: Option<Arc<dyn crate::access_hooks::ReadValidator>>,
     /// App write validator, checked before ACP on every mutation.
     pub(crate) write_validator: Option<Arc<dyn crate::access_hooks::WriteValidator>>,
+    /// Request-bound external answers for an engine-owned retry attempt.
+    pub(crate) retry_inputs: Option<crate::prepared::PreparedInputMemo>,
     /// Cache of built introspection schemas.
     pub(crate) introspection_cache: introspection::cache::IntrospectionSchemaCache,
 }
@@ -255,6 +257,7 @@ impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
             query_limits: QueryLimits::default(),
             read_validator: None,
             write_validator: None,
+            retry_inputs: None,
             se_transport: None,
             introspection_cache: Default::default(),
         }
@@ -279,6 +282,7 @@ impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
             query_limits: QueryLimits::default(),
             read_validator: None,
             write_validator: None,
+            retry_inputs: None,
             se_transport: None,
             introspection_cache: Default::default(),
         }
@@ -305,6 +309,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             query_limits: QueryLimits::default(),
             read_validator: None,
             write_validator: None,
+            retry_inputs: None,
             se_transport: None,
             introspection_cache: Default::default(),
         }
@@ -334,6 +339,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             query_limits: QueryLimits::default(),
             read_validator: None,
             write_validator: None,
+            retry_inputs: None,
             se_transport: None,
             introspection_cache: Default::default(),
         }
@@ -362,6 +368,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             query_limits: QueryLimits::default(),
             read_validator: None,
             write_validator: None,
+            retry_inputs: None,
             se_transport: None,
             introspection_cache: Default::default(),
         }
@@ -401,10 +408,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             se_transport: self.se_transport.clone(),
             read_validator: self.read_validator.clone(),
             write_validator: self.write_validator.clone(),
+            retry_inputs: self.retry_inputs.clone(),
             introspection_cache: introspection::cache::IntrospectionSchemaCache::new(false),
         }
     }
-
 
     pub fn with_acp(mut self, acp: Arc<dyn DocumentACP>) -> Self {
         if let Some(mutator) = &self.mutator {

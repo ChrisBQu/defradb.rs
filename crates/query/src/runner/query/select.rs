@@ -1,6 +1,6 @@
 //! Core query routing and encrypted search.
 
-use acp::{DocumentACP, DocumentPermission, Identity};
+use acp::{DocumentPermission, Identity};
 use identity::Did;
 use serde_json::{Map, Value as JsonValue};
 
@@ -388,13 +388,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 .await
                 .map_err(QueryError::execution)?;
 
-            let filtered_ids = Self::filter_ids_by_acp(
-                &ids,
-                self.acp.as_ref(),
-                &collection,
-                caller_identity.clone(),
-            )
-            .await;
+            let filtered_ids = self
+                .filter_ids_by_acp(&ids, &collection, caller_identity.clone())
+                .await?;
             let filtered_ids = self
                 .app_readable_ids(caller_identity.as_ref(), &collection, filtered_ids)
                 .await;
@@ -426,13 +422,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         };
 
         // Apply ACP filtering: remove document IDs the caller cannot read.
-        let filtered_ids = Self::filter_ids_by_acp(
-            &matching_ids,
-            self.acp.as_ref(),
-            &collection,
-            caller_identity.clone(),
-        )
-        .await;
+        let filtered_ids = self
+            .filter_ids_by_acp(&matching_ids, &collection, caller_identity.clone())
+            .await?;
         let filtered_ids = self
             .app_readable_ids(caller_identity.as_ref(), &collection, filtered_ids)
             .await;
@@ -461,43 +453,43 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// If no ACP is configured or the collection has no policy, all IDs pass through.
     /// Fail-closed: any ACP check error results in the document being excluded.
     async fn filter_ids_by_acp(
+        &self,
         doc_ids: &[String],
-        acp: &dyn DocumentACP,
         collection: &schema::CollectionVersion,
         caller_identity: Option<Did>,
-    ) -> Vec<String> {
+    ) -> Result<Vec<String>> {
         let policy = match &collection.policy {
             Some(policy) => policy,
-            None => return doc_ids.to_vec(),
+            None => return Ok(doc_ids.to_vec()),
         };
 
         let identity = Identity::from(caller_identity);
         let mut allowed = Vec::with_capacity(doc_ids.len());
 
         for doc_id in doc_ids {
-            let has_access = crate::txn::check_doc_access_with_overlay(
-                acp,
-                &identity,
-                DocumentPermission::Read,
-                &policy.id,
-                &policy.resource_name,
-                doc_id,
-            )
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!(
-                    doc_id = %doc_id,
-                    error = %e,
-                    "ACP check failed for encrypted search result, denying access"
-                );
-                false
-            });
+            let has_access = self
+                .check_doc_access_for_read(
+                    &identity,
+                    DocumentPermission::Read,
+                    &policy.id,
+                    &policy.resource_name,
+                    doc_id,
+                )
+                .await
+                .map_err(|e| {
+                    tracing::warn!(
+                        doc_id = %doc_id,
+                        error = %e,
+                        "ACP check failed for encrypted search result, denying access"
+                    );
+                    e
+                })?;
 
             if has_access {
                 allowed.push(doc_id.clone());
             }
         }
 
-        allowed
+        Ok(allowed)
     }
 }

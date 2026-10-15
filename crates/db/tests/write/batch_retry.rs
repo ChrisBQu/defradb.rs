@@ -1,7 +1,7 @@
 use crate::common::schema::test_collection;
-use db::{DB, DbCollectionProvider, LensedAutoCommitFetcher};
-use events::{Bus, ChannelBus, EventName};
 use async_trait::async_trait;
+use db::{DbCollectionProvider, LensedAutoCommitFetcher, DB};
+use events::{Bus, ChannelBus, EventName};
 use query::{DocFetcher, QueryExecutor, QueryRequest};
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -120,7 +120,9 @@ async fn implicit_batch_replays_atomically_inside_engine_attempt() {
         LensedAutoCommitFetcher::new(db.clone()),
         DbCollectionProvider::new_arc(db.clone()),
     )
-    .with_mutator(Arc::new(db::write::autocommit::AutoCommitMutator::new(db.clone())));
+    .with_mutator(Arc::new(db::write::autocommit::AutoCommitMutator::new(
+        db.clone(),
+    )));
     let request = QueryRequest::new(
         r#"mutation {
             first: add_TestDoc(input: {x: 1}) { _docID }
@@ -128,7 +130,10 @@ async fn implicit_batch_replays_atomically_inside_engine_attempt() {
         }"#,
     );
     let prepared = runner.prepare_request(&request).await.unwrap();
-    assert!(prepared.is_some(), "a top-level batch must be request-prepared");
+    assert!(
+        prepared.is_some(),
+        "a top-level batch must be request-prepared"
+    );
     let mut events = bus.subscribe(&[EventName::Update]);
     let response = runner.execute_prepared(request, prepared).await;
     assert!(!response.has_errors(), "{:?}", response.errors);
@@ -150,7 +155,10 @@ async fn implicit_batch_replays_atomically_inside_engine_attempt() {
     doc_events.sort();
     returned.sort();
     assert_eq!(doc_events, returned);
-    assert!(events.try_recv().is_err(), "losing attempt must publish no events");
+    assert!(
+        events.try_recv().is_err(),
+        "losing attempt must publish no events"
+    );
 
     let docs = LensedAutoCommitFetcher::new(db)
         .get_all("TestDoc")

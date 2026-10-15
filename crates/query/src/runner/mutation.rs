@@ -48,6 +48,50 @@ impl Drop for EncryptionConfigGuard {
 }
 
 impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R> {
+    pub(crate) async fn check_doc_access_for_read(
+        &self,
+        identity: &Identity,
+        permission: DocumentPermission,
+        policy_id: &str,
+        resource_name: &str,
+        doc_id: &str,
+    ) -> Result<bool> {
+        let Some(inputs) = &self.retry_inputs else {
+            return crate::txn::check_doc_access_with_overlay(
+                self.acp.as_ref(),
+                identity,
+                permission,
+                policy_id,
+                resource_name,
+                doc_id,
+            )
+            .await
+            .map_err(|error| QueryError::execution(error.to_string()));
+        };
+        let bearer = identity
+            .did()
+            .and_then(|did| defra_core::signing::get_request_bearer_token(did.as_str()));
+        let exact_request = serde_json::to_vec(&(
+            identity.did().map(Did::as_str).unwrap_or("anonymous"),
+            permission.as_str(),
+            policy_id,
+            resource_name,
+            doc_id,
+            bearer,
+        ))
+        .map_err(|error| QueryError::execution(error.to_string()))?;
+        let request = crate::prepared::PreparedInputRequest::new(
+            crate::prepared::PreparedInputKind::AcpDecision,
+            exact_request,
+        );
+        let Some(response) = inputs.get(&request) else {
+            return Err(QueryError::NeedsInput(request));
+        };
+        serde_json::from_slice(&response).map_err(|error| {
+            QueryError::execution(format!("cached ACP response is invalid: {error}"))
+        })
+    }
+
     /// Execute a GraphQL mutation and return JSON results.
     ///
     /// Requires a mutator to be configured via `with_mutator()`.
@@ -227,8 +271,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                 let caller_identity = caller_identity.clone();
                 let prepared = prepared.cloned();
                 let acp = self.acp.clone();
-                let operation: crate::mutator::MutationBatchOperation = Arc::new(
-                    move |batch_mutator, batch_fetcher| {
+                let operation: crate::mutator::MutationBatchOperation =
+                    Arc::new(move |batch_mutator, batch_fetcher| {
                         let runner = runner.clone();
                         let mutations = mutations.clone();
                         let caller_identity = caller_identity.clone();
@@ -237,7 +281,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                         Box::pin(async move {
                             batch_mutator.set_document_acp(acp.clone());
                             let attempt_acp = batch_fetcher.scoped_acp(acp.clone()).await?;
-                            let batch_runner = runner.scoped_runner(attempt_acp);
+                            let mut batch_runner = runner.scoped_runner(attempt_acp);
+                            batch_runner.retry_inputs = prepared.as_ref().map(|p| p.inputs.clone());
                             let mut created_ids = RapidHashMap::default();
                             let mut results = Map::new();
 
@@ -249,9 +294,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                                         caller_identity.clone(),
                                         request_time,
                                         Some(batch_fetcher.clone()),
-                                        prepared.as_ref().and_then(|p| {
-                                            p.mutations.get(&mutation.output_name())
-                                        }),
+                                        prepared
+                                            .as_ref()
+                                            .and_then(|p| p.mutations.get(&mutation.output_name())),
                                         prepared.as_ref().map(|p| p.inputs.clone()),
                                         &mut created_ids,
                                         true,
@@ -261,8 +306,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                             }
                             Ok(JsonValue::Object(results))
                         })
-                    },
-                );
+                    });
                 return batch.run(operation).await;
             }
         }
@@ -305,8 +349,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
         // objects. Keep those checks live; memoize only the remote provider
         // answer when no request-local projection can affect it.
         if !strict_attempt
-            && (crate::txn::current_deferred_acp_mutations().is_some()
-                || prepared_inputs.is_none())
+            && (crate::txn::current_deferred_acp_mutations().is_some() || prepared_inputs.is_none())
         {
             return crate::txn::check_doc_access_with_overlay(
                 self.acp.as_ref(),

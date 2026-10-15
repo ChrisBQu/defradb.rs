@@ -79,16 +79,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             for doc in plan_docs {
                 if let Some(doc_id_val) = doc.get(0) {
                     if let Some(doc_id) = doc_id_val.as_str() {
-                        let has_access = crate::txn::check_doc_access_with_overlay(
-                            self.acp.as_ref(),
-                            &acp_identity,
-                            DocumentPermission::Read,
-                            &policy.id,
-                            &policy.resource_name,
-                            doc_id,
-                        )
-                        .await
-                        .unwrap_or(false);
+                        let has_access = self
+                            .check_doc_access_for_read(
+                                &acp_identity,
+                                DocumentPermission::Read,
+                                &policy.id,
+                                &policy.resource_name,
+                                doc_id,
+                            )
+                            .await?;
                         if has_access {
                             filtered.push(doc);
                         }

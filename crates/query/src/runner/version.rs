@@ -98,15 +98,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     Some(id) => id.to_string(),
                     None => continue,
                 };
-                match crate::txn::check_doc_access_with_overlay(
-                    self.acp.as_ref(),
-                    &identity,
-                    DocumentPermission::Read,
-                    &policy.id,
-                    &policy.resource_name,
-                    &doc_id,
-                )
-                .await
+                match self
+                    .check_doc_access_for_read(
+                        &identity,
+                        DocumentPermission::Read,
+                        &policy.id,
+                        &policy.resource_name,
+                        &doc_id,
+                    )
+                    .await
                 {
                     Ok(true) => permitted.push((doc, cid)),
                     Ok(false) => {
@@ -118,6 +118,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             "CID time-travel query: document excluded by ACP"
                         );
                     }
+                    Err(e @ QueryError::NeedsInput(_)) => return Err(e),
                     Err(e) => {
                         return Err(QueryError::acp_check_failed("read", doc_id, e.to_string()));
                     }

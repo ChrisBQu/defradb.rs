@@ -6,12 +6,12 @@ use document::{DocID, Document};
 use kovan_queue::seg_queue::SegQueue;
 use p2p::sync::SyncCoordinator;
 use p2p::transport::P2PTransport;
+use parking_lot::Mutex as StdMutex;
 use query::mutator::{
     BroadcastStatus, CreateResult, DeleteResult, DocMutator, MutationBatchController, UpdateResult,
 };
 use rapidhash::RapidHashSet;
 use std::sync::Arc;
-use parking_lot::Mutex as StdMutex;
 use storage::corekv::Store;
 use tracing::{error, warn};
 
@@ -405,8 +405,8 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> MutationBatch
         let sync = self.sync.clone();
         let db = self.db.clone();
         let se_options = self.se_options.clone();
-        let wrapped_operation: query::mutator::MutationBatchOperation = Arc::new(
-            move |attempt_mutator, attempt_fetcher| {
+        let wrapped_operation: query::mutator::MutationBatchOperation =
+            Arc::new(move |attempt_mutator, attempt_fetcher| {
                 let wrapper = Arc::new(BroadcastBatchMutator::new(
                     attempt_mutator,
                     inner_controller.clone(),
@@ -424,8 +424,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> MutationBatch
                     }
                     result
                 })
-            },
-        );
+            });
 
         let result = self
             .inner_controller

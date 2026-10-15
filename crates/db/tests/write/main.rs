@@ -3,8 +3,8 @@
 mod common;
 
 mod batch;
-mod batch_signing;
 mod batch_retry;
+mod batch_signing;
 mod doc_suite;
 mod embedding;
 mod embedding_reload;

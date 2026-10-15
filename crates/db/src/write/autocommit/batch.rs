@@ -244,9 +244,12 @@ impl<S: Store + 'static> MutationBatchController for BatchMutator<S> {
             .transact_retry(storage::corekv::RetryOptions::new(4), Box::new(attempt))
             .await
         {
-            Ok(value) => value.downcast::<serde_json::Value>().map(|value| *value).map_err(|_| {
-                query::error::QueryError::execution("invalid mutation batch retry result")
-            }),
+            Ok(value) => value
+                .downcast::<serde_json::Value>()
+                .map(|value| *value)
+                .map_err(|_| {
+                    query::error::QueryError::execution("invalid mutation batch retry result")
+                }),
             Err(error) => match error.downcast_abort::<query::error::QueryError>() {
                 Ok(error) => Err(error),
                 Err(error) => Err(crate::error::commit_query_error(
@@ -291,11 +294,10 @@ impl<S: Store + 'static> storage::corekv::RetryAttemptFn for BatchRetryAttempt<S
                 .map_err(storage::corekv::RetryAttemptError::Storage)?;
             let basic_txn = BasicTxn::from_retry_attempt_io(io, 0);
             let txn = DbTxn::<S>::new(basic_txn);
-            let fetcher = Arc::new(crate::LensedDocFetcher::new(
-                self.db.clone(),
-                txn,
-                self.db.lens_store.clone(),
-            ));
+            let fetcher = Arc::new(
+                crate::LensedDocFetcher::new(self.db.clone(), txn, self.db.lens_store.clone())
+                    .with_prepared_inputs(self.prepared_inputs.clone()),
+            );
             let batch = Arc::new(BatchMutator::new_with_prepared_inputs(
                 self.db.clone(),
                 fetcher.shared_txn(),

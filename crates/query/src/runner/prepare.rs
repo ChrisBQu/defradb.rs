@@ -110,22 +110,20 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 }
             }
             for permission in permissions {
-                let allowed = self.nac.check_permission(&effective_identity, permission).await;
-                let exact_request = serde_json::to_vec(&(
-                    effective_identity.to_string(),
-                    permission.as_str(),
-                ))
-                .map_err(|error| QueryError::execution(error.to_string()))?;
+                let allowed = self
+                    .nac
+                    .check_permission(&effective_identity, permission)
+                    .await;
+                let exact_request =
+                    serde_json::to_vec(&(effective_identity.to_string(), permission.as_str()))
+                        .map_err(|error| QueryError::execution(error.to_string()))?;
                 let request = crate::prepared::PreparedInputRequest::new(
                     crate::prepared::PreparedInputKind::NodePermission,
                     exact_request,
                 );
                 let response = serde_json::to_vec(&allowed)
                     .map_err(|error| QueryError::execution(error.to_string()))?;
-                if !prepared
-                    .inputs
-                    .insert(request, Arc::<[u8]>::from(response))
-                {
+                if !prepared.inputs.insert(request, Arc::<[u8]>::from(response)) {
                     return Err(QueryError::execution("prepared input memo budget exceeded"));
                 }
             }

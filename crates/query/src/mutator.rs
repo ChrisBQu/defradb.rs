@@ -11,8 +11,8 @@ use identity::Did;
 use rapidhash::RapidHashSet;
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
-use storage::corekv::MaybeSendSync;
 use std::{future::Future, pin::Pin};
+use storage::corekv::MaybeSendSync;
 
 use crate::error::Result;
 use crate::Filter;
@@ -307,12 +307,10 @@ pub trait MutationBatchController: MaybeSendSync {
         mutator: Option<Arc<dyn DocMutator>>,
         fetcher: Option<Arc<dyn crate::fetcher::DocFetcher>>,
     ) -> Result<JsonValue> {
-        let mutator = mutator.ok_or_else(|| {
-            crate::error::QueryError::execution("mutation batch has no mutator")
-        })?;
-        let fetcher = fetcher.ok_or_else(|| {
-            crate::error::QueryError::execution("mutation batch has no fetcher")
-        })?;
+        let mutator = mutator
+            .ok_or_else(|| crate::error::QueryError::execution("mutation batch has no mutator"))?;
+        let fetcher = fetcher
+            .ok_or_else(|| crate::error::QueryError::execution("mutation batch has no fetcher"))?;
         match operation(mutator, fetcher).await {
             Ok(value) => {
                 self.commit().await?;
@@ -344,13 +342,11 @@ pub type MutationBatchOperation = Arc<
         + Sync,
 >;
 #[cfg(target_arch = "wasm32")]
-pub type MutationBatchOperation = Arc<
-    dyn Fn(Arc<dyn DocMutator>, Arc<dyn crate::fetcher::DocFetcher>) -> MutationBatchFuture,
->;
+pub type MutationBatchOperation =
+    Arc<dyn Fn(Arc<dyn DocMutator>, Arc<dyn crate::fetcher::DocFetcher>) -> MutationBatchFuture>;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub type MutationBatchFuture =
-    Pin<Box<dyn Future<Output = Result<JsonValue>> + Send + 'static>>;
+pub type MutationBatchFuture = Pin<Box<dyn Future<Output = Result<JsonValue>> + Send + 'static>>;
 #[cfg(target_arch = "wasm32")]
 pub type MutationBatchFuture = Pin<Box<dyn Future<Output = Result<JsonValue>> + 'static>>;
 
@@ -387,12 +383,16 @@ impl MutationBatch {
 
     /// Get the shared mutator for this batch.
     pub fn mutator(&self) -> Arc<dyn DocMutator> {
-        self.mutator.clone().expect("retryable batches run an operation")
+        self.mutator
+            .clone()
+            .expect("retryable batches run an operation")
     }
 
     /// Get the shared fetcher for this batch.
     pub fn fetcher(&self) -> Arc<dyn crate::fetcher::DocFetcher> {
-        self.fetcher.clone().expect("retryable batches run an operation")
+        self.fetcher
+            .clone()
+            .expect("retryable batches run an operation")
     }
 
     /// Run a complete top-level mutation request through the batch controller.
