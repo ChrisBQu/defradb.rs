@@ -567,7 +567,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                                     strict_attempt,
                                 )
                                 .await
-                                .map_err(|e| QueryError::acp_check_failed("update", doc_id, e))?;
+                                .map_err(|error| match error {
+                                    error @ QueryError::NeedsInput(_) => error,
+                                    error => QueryError::acp_check_failed("update", doc_id, error),
+                                })?;
 
                             if !can_update {
                                 return Err(QueryError::document_not_found(
@@ -625,7 +628,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                                     strict_attempt,
                                 )
                                 .await
-                                .map_err(|e| QueryError::acp_check_failed("delete", doc_id, e))?;
+                                .map_err(|error| match error {
+                                    error @ QueryError::NeedsInput(_) => error,
+                                    error => QueryError::acp_check_failed("delete", doc_id, error),
+                                })?;
 
                             if !can_delete {
                                 return Err(QueryError::document_not_found(
