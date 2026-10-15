@@ -1,14 +1,160 @@
 use crate::common::schema::test_collection;
+use acp::{DocumentACP, Identity};
 use async_trait::async_trait;
 use db::{DbCollectionProvider, LensedAutoCommitFetcher, DB};
 use events::{Bus, ChannelBus, EventName};
-use query::{DocFetcher, QueryExecutor, QueryRequest};
+use query::{DocFetcher, DocMutator, QueryExecutor, QueryRequest};
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc, Mutex,
 };
 use storage::corekv::{RetryAttempt, RetryAttemptError, RetryAttemptFn, RetryAttemptFuture};
 use storage::{RegolithStore, Result, Store, Txn};
+
+const ACP_PERMISSION_KEY: &[u8] = b"batch-retry-acp-permission";
+
+struct RevokeAfterAttemptRead {
+    store: Arc<RegolithStore>,
+    view: Option<datastore::NamespaceView>,
+    revoked: Arc<AtomicBool>,
+    permission_checks: Arc<AtomicUsize>,
+    attempt_reads: Arc<AtomicUsize>,
+}
+
+impl RevokeAfterAttemptRead {
+    async fn read_permission(&self) -> acp::Result<Option<bytes::Bytes>> {
+        if let Some(view) = &self.view {
+            self.attempt_reads.fetch_add(1, Ordering::SeqCst);
+            return view
+                .get(ACP_PERMISSION_KEY)
+                .await
+                .map_err(|error| acp::Error::Storage(error.to_string()));
+        }
+        let txn = datastore::BasicTxn::new(self.store.as_ref(), 990_002, true)
+            .await
+            .map_err(|error| acp::Error::Storage(error.to_string()))?;
+        txn.acpstore()
+            .get(ACP_PERMISSION_KEY)
+            .await
+            .map_err(|error| acp::Error::Storage(error.to_string()))
+    }
+
+    async fn revoke_outside_attempt(&self) -> acp::Result<()> {
+        let txn = datastore::BasicTxn::new(self.store.as_ref(), 990_001, false)
+            .await
+            .map_err(|error| acp::Error::Storage(error.to_string()))?;
+        txn.acpstore()
+            .set(ACP_PERMISSION_KEY, b"deny")
+            .await
+            .map_err(|error| acp::Error::Storage(error.to_string()))?;
+        txn.commit()
+            .await
+            .map_err(|error| acp::Error::Storage(error.to_string()))
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl DocumentACP for RevokeAfterAttemptRead {
+    fn supports_transactions(&self) -> bool {
+        true
+    }
+
+    fn bind_transaction(&self, view: datastore::NamespaceView) -> Option<Arc<dyn DocumentACP>> {
+        Some(Arc::new(Self {
+            store: self.store.clone(),
+            view: Some(view),
+            revoked: self.revoked.clone(),
+            permission_checks: self.permission_checks.clone(),
+            attempt_reads: self.attempt_reads.clone(),
+        }))
+    }
+
+    fn unregistered_documents_are_public(&self) -> bool {
+        false
+    }
+
+    async fn register_doc_object(
+        &self,
+        _identity: &identity::Did,
+        _policy_id: &str,
+        _resource_name: &str,
+        _doc_id: &str,
+    ) -> acp::Result<()> {
+        Ok(())
+    }
+
+    async fn is_doc_registered(
+        &self,
+        _policy_id: &str,
+        _resource_name: &str,
+        _doc_id: &str,
+    ) -> acp::Result<bool> {
+        let value = self.read_permission().await?;
+        Ok(value.is_some())
+    }
+
+    async fn get_doc_owner(
+        &self,
+        _policy_id: &str,
+        _resource_name: &str,
+        _doc_id: &str,
+    ) -> acp::Result<Option<identity::Did>> {
+        Ok(None)
+    }
+
+    async fn check_doc_access(
+        &self,
+        _identity: &Identity,
+        _permission: acp::DocumentPermission,
+        _policy_id: &str,
+        _resource_name: &str,
+        _doc_id: &str,
+    ) -> acp::Result<bool> {
+        self.permission_checks.fetch_add(1, Ordering::SeqCst);
+        let value = self.read_permission().await?;
+        let allowed = value.is_some_and(|value| value.as_ref() == b"allow");
+        if allowed && self.view.is_some() && !self.revoked.swap(true, Ordering::SeqCst) {
+            self.revoke_outside_attempt().await?;
+        }
+        Ok(allowed)
+    }
+
+    async fn add_actor_relationship(
+        &self,
+        _requestor: &identity::Did,
+        _target: &identity::Did,
+        _policy_id: &str,
+        _collection_id: &str,
+        _doc_id: &str,
+        _relation: &str,
+        _managing_relations: &[String],
+    ) -> acp::Result<bool> {
+        Ok(false)
+    }
+
+    async fn delete_actor_relationship(
+        &self,
+        _requestor: &identity::Did,
+        _target: &identity::Did,
+        _policy_id: &str,
+        _collection_id: &str,
+        _doc_id: &str,
+        _relation: &str,
+        _managing_relations: &[String],
+    ) -> acp::Result<bool> {
+        Ok(false)
+    }
+
+    async fn unregister_doc_object(
+        &self,
+        _policy_id: &str,
+        _resource_name: &str,
+        _doc_id: &str,
+    ) -> acp::Result<()> {
+        Ok(())
+    }
+}
 
 #[derive(Clone)]
 struct ConflictStore {
@@ -232,4 +378,79 @@ async fn direct_mutation_api_replays_atomically_inside_engine_attempt() {
         .await
         .unwrap();
     assert_eq!(docs.len(), 2, "the direct API batch commits atomically");
+}
+
+#[tokio::test]
+async fn transactional_acp_revoke_conflicts_and_denies_batch_update() {
+    let inner = RegolithStore::in_memory().unwrap();
+    let store = ConflictStore {
+        inner: inner.clone(),
+        attempts: Arc::new(AtomicUsize::new(0)),
+        raced: Arc::new(AtomicBool::new(true)),
+        attempt_ids: Arc::new(Mutex::new(Vec::new())),
+    };
+    let db = Arc::new(DB::new(store.clone()).unwrap());
+    db.create_collection(
+        test_collection().with_policy(schema::PolicyDescription::new("policy", "test-docs")),
+    )
+    .await
+    .unwrap();
+
+    let original = db::write::autocommit::AutoCommitMutator::new(db.clone())
+        .create(
+            "TestDoc",
+            document::Document::from_json_str(r#"{"x":1}"#).unwrap(),
+        )
+        .await
+        .unwrap();
+    let seed = datastore::BasicTxn::new(&inner, 990_000, false)
+        .await
+        .unwrap();
+    seed.acpstore()
+        .set(ACP_PERMISSION_KEY, b"allow")
+        .await
+        .unwrap();
+    seed.commit().await.unwrap();
+
+    let permission_checks = Arc::new(AtomicUsize::new(0));
+    let attempt_reads = Arc::new(AtomicUsize::new(0));
+    let acp: Arc<dyn DocumentACP> = Arc::new(RevokeAfterAttemptRead {
+        store: Arc::new(inner.clone()),
+        view: None,
+        revoked: Arc::new(AtomicBool::new(false)),
+        permission_checks: permission_checks.clone(),
+        attempt_reads: attempt_reads.clone(),
+    });
+    let runner = query::QueryRunner::with_provider(
+        LensedAutoCommitFetcher::new(db.clone()),
+        DbCollectionProvider::new_arc(db.clone()),
+    )
+    .with_mutator(Arc::new(db::write::autocommit::AutoCommitMutator::new(
+        db.clone(),
+    )))
+    .with_acp(acp);
+    let mut request = QueryRequest::new(format!(
+        r#"mutation {{ update_TestDoc(docID: "{}", input: {{x: 2}}) {{ _docID x }} }}"#,
+        original.doc_id
+    ));
+    request.identity = Some(identity::Did::new("did:key:batch-reader").unwrap());
+    let prepared = runner.prepare_request(&request).await.unwrap();
+    let response = runner.execute_prepared(request, prepared).await;
+
+    assert!(
+        response.has_errors(),
+        "revoked authorization must deny the retry: {:?}, checks={}, attempts={}",
+        response.errors,
+        permission_checks.load(Ordering::SeqCst),
+        store.attempts.load(Ordering::SeqCst)
+    );
+    assert_eq!(store.attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(permission_checks.load(Ordering::SeqCst), 4);
+    assert!(attempt_reads.load(Ordering::SeqCst) >= 2);
+    let docs = LensedAutoCommitFetcher::new(db)
+        .get_all("TestDoc")
+        .await
+        .unwrap();
+    assert_eq!(docs.len(), 1);
+    assert_eq!(docs[0].get("x"), Some(&document::NormalValue::Int(1)));
 }
