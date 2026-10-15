@@ -23,7 +23,7 @@ use crate::txn::check_doc_access_with_overlay;
 // exhaust the ACP provider's connection pool.
 const MAX_IN_FLIGHT_PERMISSION_CHECKS: usize = 16;
 
-type PermissionCheck = MaybeBoxFuture<'static, (Doc, bool)>;
+type PermissionCheck = MaybeBoxFuture<'static, Result<(Doc, bool)>>;
 
 #[derive(Clone)]
 struct AcpReadCheck {
@@ -155,8 +155,8 @@ impl PermissionFilterNode {
                 resource_name,
             }) = acp
             else {
-                let allowed = app_allows(app.as_ref(), &doc_id).await;
-                return (doc, allowed);
+                let allowed = app_allows(app.as_ref(), &doc_id).await?;
+                return Ok((doc, allowed));
             };
             let allowed = if identity.is_authenticated() && defra_core::dac_bypass::get_dac_bypass()
             {
@@ -183,9 +183,9 @@ impl PermissionFilterNode {
                     false
                 })
             };
-            let allowed = allowed && app_allows(app.as_ref(), &doc_id).await;
+            let allowed = allowed && app_allows(app.as_ref(), &doc_id).await?;
 
-            (doc, allowed)
+            Ok((doc, allowed))
         })
     }
 }
@@ -234,7 +234,8 @@ impl PlanNode for PermissionFilterNode {
                 // non-blocking poll avoids racing (and potentially cancelling)
                 // `source.next()` while still letting immediately available
                 // decisions preserve single-row streaming latency.
-                if let Some(Some((doc, allowed))) = self.pending.get_mut().next().now_or_never() {
+                if let Some(Some(result)) = self.pending.get_mut().next().now_or_never() {
+                    let (doc, allowed) = result?;
                     if allowed {
                         self.current_doc = doc;
                         return Ok(true);
@@ -243,11 +244,12 @@ impl PlanNode for PermissionFilterNode {
             }
 
             match self.pending.get_mut().next().await {
-                Some((doc, true)) => {
+                Some(Ok((doc, true))) => {
                     self.current_doc = doc;
                     return Ok(true);
                 }
-                Some((_, false)) => continue,
+                Some(Ok((_, false))) => continue,
+                Some(Err(error)) => return Err(error),
                 None => return Ok(false),
             }
         }

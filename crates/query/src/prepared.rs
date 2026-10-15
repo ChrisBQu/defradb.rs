@@ -48,6 +48,7 @@ pub enum PreparedInputKind {
     AcpDecision,
     WriteValidation,
     NodePermission,
+    ReadValidation,
 }
 
 const MAX_PREPARED_INPUTS: usize = 64;

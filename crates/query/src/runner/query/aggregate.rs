@@ -101,7 +101,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             let doc_id = doc.get(0).and_then(|value| value.as_str()).unwrap_or("");
             if self
                 .app_may_read(app_identity.as_ref(), collection, doc_id)
-                .await
+                .await?
             {
                 readable.push(doc);
             }
@@ -357,6 +357,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 .with_fetcher(Arc::new(fetcher_arc))
                 .with_acp(self.acp.clone(), identity)
                 .with_read_validator(self.read_validator.clone())
+                .with_retry_inputs(self.retry_inputs.clone())
                 .with_index_estimates(index_estimates);
         if let Some(ref lens_store) = self.lens_store {
             planner = planner.with_lens_store(lens_store.clone());

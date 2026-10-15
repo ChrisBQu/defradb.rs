@@ -393,7 +393,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 .await?;
             let filtered_ids = self
                 .app_readable_ids(caller_identity.as_ref(), &collection, filtered_ids)
-                .await;
+                .await?;
 
             return Ok(serde_json::json!([{"docIDs": filtered_ids}]));
         }
@@ -427,7 +427,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             .await?;
         let filtered_ids = self
             .app_readable_ids(caller_identity.as_ref(), &collection, filtered_ids)
-            .await;
+            .await?;
 
         Ok(serde_json::json!([{"docIDs": filtered_ids}]))
     }

@@ -133,7 +133,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             let doc_id = doc.id().map(|id| id.to_string()).unwrap_or_default();
             if self
                 .app_may_read(app_identity.as_ref(), &collection, &doc_id)
-                .await
+                .await?
             {
                 readable.push((doc, cid));
             }

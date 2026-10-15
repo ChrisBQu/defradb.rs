@@ -228,11 +228,11 @@ pub struct QueryRunner<F: DocFetcher, R: TransactionRegistry = NoOpTransactionRe
     /// `None` keeps the back-compat local-plaintext path (unit/FFI/non-P2P).
     pub(crate) se_transport: Option<Arc<dyn SeQueryTransport>>,
     /// App read validator, checked after ACP on every read path.
+    pub(crate) retry_inputs: Option<crate::prepared::PreparedInputMemo>,
     pub(crate) read_validator: Option<Arc<dyn crate::access_hooks::ReadValidator>>,
     /// App write validator, checked before ACP on every mutation.
     pub(crate) write_validator: Option<Arc<dyn crate::access_hooks::WriteValidator>>,
     /// Request-bound external answers for an engine-owned retry attempt.
-    pub(crate) retry_inputs: Option<crate::prepared::PreparedInputMemo>,
     /// Cache of built introspection schemas.
     pub(crate) introspection_cache: introspection::cache::IntrospectionSchemaCache,
 }
@@ -338,8 +338,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             query_timeout: 30,
             query_limits: QueryLimits::default(),
             read_validator: None,
-            write_validator: None,
             retry_inputs: None,
+            write_validator: None,
             se_transport: None,
             introspection_cache: Default::default(),
         }
@@ -367,8 +367,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             query_timeout: 30,
             query_limits: QueryLimits::default(),
             read_validator: None,
-            write_validator: None,
             retry_inputs: None,
+            write_validator: None,
             se_transport: None,
             introspection_cache: Default::default(),
         }
@@ -447,23 +447,36 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         identity: Option<&Did>,
         collection: &CollectionVersion,
         doc_id: &str,
-    ) -> bool {
-        let Some(validator) = self
-            .read_validator
-            .as_ref()
-            .filter(|validator| validator.governs(collection))
-        else {
-            return true;
-        };
-        let request = crate::access_hooks::ReadRequest {
-            identity,
-            collection,
+    ) -> Result<bool> {
+        crate::access_hooks::read::app_allows(
+            self.app_read_check(identity.cloned(), collection).as_ref(),
             doc_id,
-        };
-        validator.may_read(&request).await.unwrap_or_else(|error| {
-            tracing::warn!(%doc_id, collection = %collection.name, %error, "Read validator failed, hiding document");
-            false
-        })
+        )
+        .await
+    }
+
+    pub(crate) async fn resolve_read_validation_input(
+        &self,
+        input: &crate::prepared::PreparedInputRequest,
+    ) -> Result<Arc<[u8]>> {
+        let input: crate::access_hooks::read::ReadValidationInput =
+            serde_json::from_slice(input.exact_request())
+                .map_err(|error| QueryError::execution(error.to_string()))?;
+        let identity = input
+            .identity
+            .as_deref()
+            .map(Did::new)
+            .transpose()
+            .map_err(|error| QueryError::execution(error.to_string()))?;
+        let check = crate::access_hooks::AppReadCheck::bind(
+            self.read_validator.as_ref(),
+            identity,
+            &input.collection,
+        );
+        let allowed = crate::access_hooks::read::app_allows(check.as_ref(), &input.doc_id).await?;
+        Ok(serde_json::to_vec(&allowed)
+            .map_err(|error| QueryError::execution(error.to_string()))?
+            .into())
     }
 
     /// Doc IDs the app read validator lets this identity read.
@@ -472,14 +485,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         identity: Option<&Did>,
         collection: &CollectionVersion,
         doc_ids: Vec<String>,
-    ) -> Vec<String> {
+    ) -> Result<Vec<String>> {
         let mut readable = Vec::with_capacity(doc_ids.len());
         for doc_id in doc_ids {
-            if self.app_may_read(identity, collection, &doc_id).await {
+            if self.app_may_read(identity, collection, &doc_id).await? {
                 readable.push(doc_id);
             }
         }
-        readable
+        Ok(readable)
     }
 
     pub(crate) fn app_read_check(
@@ -488,6 +501,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         collection: &CollectionVersion,
     ) -> Option<crate::access_hooks::AppReadCheck> {
         crate::access_hooks::AppReadCheck::bind(self.read_validator.as_ref(), identity, collection)
+            .map(|check| check.with_retry_inputs(self.retry_inputs.clone()))
     }
 
     /// Set the searchable-encryption remote query transport.

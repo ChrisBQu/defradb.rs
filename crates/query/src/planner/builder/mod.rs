@@ -83,6 +83,7 @@ pub struct Planner {
     /// Identity for ACP permission checks
     identity_did: Option<Did>,
     /// App read validator, applied after ACP
+    retry_inputs: Option<crate::prepared::PreparedInputMemo>,
     read_validator: Option<Arc<dyn crate::access_hooks::ReadValidator>>,
     /// Pre-computed FTS scores: output_name → (doc_id → score)
     pub(crate) fts_scores: RapidHashMap<String, RapidHashMap<String, f64>>,
@@ -128,6 +129,7 @@ impl Planner {
             acp: None,
             identity_did: None,
             read_validator: None,
+            retry_inputs: None,
             fts_scores: RapidHashMap::new(),
             query_limits: QueryLimits::default(),
             index_estimates: None,
@@ -185,6 +187,14 @@ impl Planner {
         self
     }
 
+    pub(crate) fn with_retry_inputs(
+        mut self,
+        inputs: Option<crate::prepared::PreparedInputMemo>,
+    ) -> Self {
+        self.retry_inputs = inputs;
+        self
+    }
+
     /// Whether an app read validator hides rows of `collection`.
     pub(super) fn app_gates_reads(&self, collection: &CollectionVersion) -> bool {
         self.read_validator
@@ -212,7 +222,8 @@ impl Planner {
             self.read_validator.as_ref(),
             self.identity_did.clone(),
             collection,
-        );
+        )
+        .map(|check| check.with_retry_inputs(self.retry_inputs.clone()));
         PermissionFilterNode::wrap(plan, acp, app)
     }
 

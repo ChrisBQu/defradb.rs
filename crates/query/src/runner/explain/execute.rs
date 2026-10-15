@@ -281,6 +281,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             .with_fetcher(Arc::new(fetcher_arc))
             .with_acp(self.acp.clone(), caller_identity.clone())
             .with_read_validator(self.read_validator.clone())
+            .with_retry_inputs(self.retry_inputs.clone())
             .with_index_estimates(index_estimates);
             if let Some(ref lens_store) = self.lens_store {
                 planner = planner.with_lens_store(lens_store.clone());

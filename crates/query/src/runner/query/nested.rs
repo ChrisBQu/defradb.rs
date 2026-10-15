@@ -74,6 +74,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 .with_fetcher(Arc::new(fetcher_arc))
                 .with_acp(self.acp.clone(), identity)
                 .with_read_validator(self.read_validator.clone())
+                .with_retry_inputs(self.retry_inputs.clone())
                 .with_index_estimates(index_estimates);
         if !fts_scores.is_empty() {
             planner = planner.with_fts_scores(fts_scores);
