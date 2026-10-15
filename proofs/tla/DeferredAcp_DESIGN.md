@@ -137,10 +137,10 @@ the named invariant "is violated" with a concrete two-txn counterexample trace.
   the bearer-token guard (`RequestBearerTokenGuard`), and hook fail-soft/`catch_unwind` logging
   are out of scope — modeled as an atomic, total commit application. The relation engine itself
   is the Acp slice's job and is exercised by `--test acp`.
-- **Modeled as atomic:** commit applies the whole projection in a single TLA+ action, matching
-  `run_all_logged` draining all hooks under one `on_success_async`. Partial-commit (some hooks
-  applied, some not) is not modeled as a separate adversary; the storage txn's commit atomicity
-  is assumed (it is the storage SSI slice's concern).
+- **Modeled as atomic:** commit applies the transaction-local projection in one TLA+ action.
+  Storage transaction atomicity and isolation are assumed engine boundaries, not discharged
+  by this model. Remote ACP hooks can partially succeed after durability; their delivery and
+  partial failure are outside this model. No atomic remote-hook application is claimed.
 - **Out of scope here:** the per-request identity/JWT authentication that produces
   `Identity::Authenticated(did)` (the Auth/Jwt slices); the dual-path User-vs-Commits gating
   (the Commits slice). This slice assumes those gates and models only the deferred overlay on

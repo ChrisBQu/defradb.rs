@@ -1,21 +1,16 @@
-//! Storage SSI serializability — write-skew rejection (point-read antidependency).
+//! Storage transaction validation — point-read write-skew rejection.
 //!
-//! Model: storage layer `ConflictTracker` (crates/storage/src/backends/shared.rs).
-//! At commit, a transaction is rejected if a transaction that committed after its
-//! snapshot either wrote a key it read, or read a key/range it wrote. Two txns
-//! whose read/write sets cross (tx1: read B, write A; tx2: read A, write B) form a
-//! read-write dependency cycle — committing both would be non-serializable, so the
-//! second committer MUST abort.
+//! The backend is regolith at DefraLevel. The historical adapter-owned
+//! ConflictTracker and its document-scan carve-out no longer exist. The pinned
+//! DefraLevel model is an engine boundary, not a proof of this Rust adapter.
 //!
-//! The carve-out: full document-collection prefix SCANS (`d/d/...`) are deliberately
-//! NOT treated as conflicting reads (matching Go). Point reads (`get` -> record_key)
-//! ARE. So the witnessing scenario reads the *other* document by its exact `_docID`
-//! (a point read) rather than a bare collection scan, otherwise the antidependency
-//! would be (correctly) ignored and no conflict would fire.
+//! This scenario reads the other document by exact `_docID` before updating its
+//! own document. The crossed validated read/write dependencies prevent both
+//! transactions from committing. It does not assert general serializability
+//! for commutative scans or other intentionally weaker read classes.
 //!
-//! Anti-tautology: a clean read-write-commit transaction is run FIRST and asserted to
-//! SUCCEED, proving the tx path works end to end — so the later commit *failure* is a
-//! genuine SSI rejection, not setup breakage or a node that simply can't commit.
+//! A clean read-write transaction succeeds first, distinguishing the expected
+//! conflict from a broken setup or transaction endpoint.
 
 use crate::support;
 use defra_harness::TestCluster;

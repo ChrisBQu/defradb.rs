@@ -1,5 +1,10 @@
 # Cross-Cutting Consistency & Completeness Report
 
+> Historical survey of the pre-Regolith-adoption model set. The adapter-owned
+> SSI/range models and ConflictTracker anchors below have been retired. Consult
+> `proofs/README.md` and `proofs/src/registry.rs` for current bindings; this report
+> is retained as historical analysis, not current verification evidence.
+
 Sweep of all 18 formal-model families across 5 clusters (replication-convergence,
 integrity-cid, acp-security, keys-identity, storage-txn). Synthesizes the 5 cluster
 audits plus independent re-verification of the load-bearing anchors and the regression

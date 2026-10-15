@@ -72,19 +72,11 @@ RUNS=(
   "MC_Integrity_HonestConvergence.cfg MC_Integrity_Attacks.tla     GREEN" # gate doesn't block honest convergence
   "MC_Acp_Green.cfg            MC_Acp_Green.tla            GREEN" # ACP revocation propagates
   "MC_Acp_StaleCache_Red.cfg   MC_Acp_StaleCache_Red.tla   RED"   # stale cache grants revoked permission
-  "MC_Ssi_Green.cfg             MC_Ssi_Green.tla             GREEN" # SSI: full ww+rw test -> serializable
-  "MC_Ssi_Red_WriteSkew.cfg     MC_Ssi_Red_WriteSkew.tla     RED"   # SSI: ww-only -> write-skew admitted (INV_Serializable)
-  "MC_Ssi_Probe_NoSnapFilter.cfg MC_Ssi_Probe_NoSnapFilter.tla GREEN" # SSI probe: snapshot guard is liveness, not safety
   "MC_Capability_Green.cfg         MC_Capability_Common.tla   GREEN" # capability: only legit tokens authorized
   "MC_Capability_Red_Forge.cfg     MC_Capability_Common.tla   RED"   # capability: forged token accepted (INV_OnlyLegitAccepted)
   "MC_Capability_Red_Ttl.cfg       MC_Capability_Common.tla   RED"   # capability: over-cap TTL accepted (INV_TtlCapped)
   "MC_Capability_Red_WrongTarget.cfg MC_Capability_Common.tla RED"   # capability: wrong peer/collection accepted (INV_TargetBound)
   "MC_Capability_Red_Revoked.cfg   MC_Capability_Common.tla   RED"   # capability: revoked token accepted (INV_RevokedNeverAccepted)
-  "MC_SsiRange_Green_Correct.cfg          MC_SsiRange_Green_Correct.tla          GREEN" # SSI carve-out: doc-scan carve tracks index-range skew
-  "MC_SsiRange_Red_TooAggressive.cfg      MC_SsiRange_Red_TooAggressive.tla      RED"   # SSI carve-out: over-broad carve drops a real skew
-  "MC_SsiRange_Green_DocScanFalsePositive.cfg MC_SsiRange_Green_DocScanFalsePositive.tla GREEN" # carve drops only a false positive
-  "MC_SsiRange_Green_NoCarveBaseline.cfg  MC_SsiRange_Green_NoCarveBaseline.tla  GREEN" # anti-vacuity baseline (cycle is caused by the carve)
-  "MC_SsiRange_Probe_DocScanSkew.cfg      MC_SsiRange_Probe_DocScanSkew.tla      RED"   # boundary probe: unsound IF keyspaces overlap (they don't)
   "MC_Nac_Green.cfg                MC_Nac_Green.tla                GREEN" # NAC lifecycle: no priv-esc across enable/disable
   "MC_Nac_Red_NoPersist.cfg        MC_Nac_Red_NoPersist.tla        RED"   # NAC: disabled-flag not persisted across restart
   "MC_Nac_Red_ReEnableLive.cfg     MC_Nac_Red_ReEnableLive.tla     RED"   # NAC: re-enable from stale live admin (escalation)

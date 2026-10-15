@@ -34,7 +34,7 @@ section is the **diff**: what is proven vs. the accepted gap.
 | Encrypted LWW restart/replay | TLA+ + existing LWW Lean law | kms, p2p, db-merge, crdt |
 | Management-channel auth (NAC gate) | TLA+ | http, db-nac, pg-compat |
 | ACP soundness + revocation + dual-path commits | TLA+ & Lean | acp, zanzibar, vera, query, db |
-| Storage SSI serializability (point + range/scan carve-out) | TLA+ | storage |
+| Storage transaction validation | TLA+ | storage |
 | P2P explicit-replay capability gate | TLA+ | p2p |
 | NAC lifecycle privilege-escalation | TLA+ | acp, db-nac |
 | Transaction & merge-queue concurrency | TLA+ | db, db-merge |
@@ -124,7 +124,7 @@ headstore); go↔go vs rust↔rust parity (`parity.rs`) localized it to Rust.
 | Replicator lifecycle | Behavioral | `replicator_lifecycle.rs` (backfill no-loss + resume across node restart) |
 | Sync ownership transfer | Boundary + external integration | deterministic full-DAG/head-hint A/B fence; `p2p_admission_restart`; marker migration/storage tests; mixed Go/Rust PushLog fixture. These run in repository CI, not this conformance binary's `tests/behavioral/` harness. |
 | ACP soundness + revocation + commits | Behavioral + Contract | `acp.rs`; `RelationExpression` vocab |
-| Storage SSI serializability | Behavioral | `ssi.rs` (real `409 Conflict` on write-skew) |
+| Storage transaction validation | Behavioral | `ssi.rs` (real `409 Conflict` on write-skew) |
 | Management-channel auth (NAC gate) | Behavioral | `nac.rs` |
 | NAC lifecycle priv-escalation | Behavioral | `nac_lifecycle.rs` |
 | Transaction & merge-queue concurrency | Behavioral + Boundary | `partition::{convergence_concurrent_pncounter_signed_deltas_sum,convergence_restart_pncounter_signed_deltas_sum,convergence_concurrent_pncounter_same_doc_merge_storm}` (PNCounter exact signed sum across live, restart, and storm); `partition::convergence_concurrent_same_doc_merge_storm` (no-loss/no-double-apply exact-sum oracle); `partition::{convergence_concurrent_mixed_lww_and_counter_fields_merge,convergence_restart_mixed_lww_and_counter_fields_merge,convergence_mixed_lww_and_counter_3node_full_mesh}` (mixed Counter×LWW exact-state); `MC_MixedFieldMaterialization_{Red_WholeDoc,Green}`; engine OCC and the txn-registry sweep stay Boundary |
@@ -233,3 +233,10 @@ Core directly and retains the sibling, pruning, abort and old-snapshot cases.
 It checks that a delayed registration cannot cross forget/re-add or replace a
 newer pending marker. Its negative variants remove the incarnation or ordering
 check. This finite model does not verify the Rust implementation.
+
+The adapter-owned `Ssi.tla` and `SsiRange.tla` families and their eight TLC
+configurations are retired. They modeled the removed `ConflictTracker`, including
+its old document-scan carve-out. The real point-read write-skew regression remains
+bound to regolith's pinned `DefraLevel.tla` as an engine boundary; it does not
+claim that every DefraLevel read class provides serializable scans. Historical
+survey material describes the retired implementation and is retained as such.

@@ -125,7 +125,7 @@ no shared files).
   same `index.description()`, same `schema` — mod.rs:427-428).
 * **Storage is faithful.** We assume `save`/`delete` actually set/clear the
   characteristic bit (the `txn.Datastore().Set/Delete` boundary). Storage
-  durability/serializability is the `storage` SSI slice, not this one.
+  durability and transaction isolation are assumed engine boundaries, not proved by this slice.
 * **Set semantics, not multiset.** An index key either exists or not; re-saving an
   existing tuple is idempotent (sets the same empty-valued key). Modeling the store
   as `Tuple → Bool` is therefore faithful to the keyspace, not an oversimplification.
