@@ -6,7 +6,8 @@ the adoption plan. Run all timings serially on one quiet host. Do not run
 builds or other test suites during a timing window.
 
 Create a dedicated detached worktree and use one build target directory for
-that worktree throughout the comparisons. Sharing a Cargo target directory
+that worktree throughout the comparisons. The build and run scripts refuse a
+branch-attached worktree before checking out revisions. Sharing a Cargo target directory
 between different worktree paths can reuse stale workspace artifacts.
 
 ```sh
@@ -36,3 +37,8 @@ use strict observed medians, with no invented noise tolerance. Historical
 are not established as comparable. A passing workload report does not prove
 the disjoint-field correctness target; the storage, DB and GraphQL regression
 tests provide that evidence. Keep all raw outputs alongside the report.
+Latency p50/p99 remain in comparison details but are reported only, not used
+as non-regression gates. If a throughput or conflict-rate metric is absent on
+one side because retry accounting changed schema, that comparison is incomplete
+instead of silently passing; structural failures and observed regressions still
+take precedence.

@@ -29,7 +29,7 @@ The stack has the intended 11 PRs. Prep #1922 is already marked ready; the ten a
 | Step | Published implementation | Remaining work |
 |---|---|---|
 | 1 | Pinned API, engine encryption, classifier/DefraLevel in three PRs | Final stack validation and performance gates |
-| 2 | Transactional decision reads, local ACP, relationship/NAC/downsample decisions | Final lower-checkpoint interoperability and stack gates |
+| 2 | Transactional decision reads, local ACP, relationship/NAC/downsample decisions | Lower-checkpoint interoperability passes; final stack performance gates remain |
 | 3 | Arrival append, ID allocation, field/counter/vector/full-text operators, head markers, read-only lenses and known-field write projections | General query/output and conditional reads remain conservative; no blanket zero-conflict claim |
 | 4 | Receipt-ordered events and fallible ordered ACP hooks | Final CI/performance gates; winner-only hooks and suppression on hook failure are covered |
 | 5 | Engine retries for individual/many writes, merges, lenses, backfill and pending DAG writes; bounded prepared inputs | Generic HTTP/embedded business-conflict replay removed; eligible single mutations now rerun selection inside engine batches. Final CI and performance gates remain |
@@ -39,12 +39,12 @@ The stack has the intended 11 PRs. Prep #1922 is already marked ready; the ten a
 
 ### Immediate blockers
 
-1. Finish validation of the final query-projection integration and inspect current-head CI after the upper-stack restack. All four lower-checkpoint basic/ACP/encryption/full-counter gates now pass independently.
-2. Complete §5.3 timing and allocation gates on a quiet host. All nine removal checkpoints build; frozen final endpoints are being refreshed. No performance gate is waived. Creates remain about 4.6% above main in the latest allocation pair.
+1. Inspect current-head CI after the upper-stack restack. The final query-projection native/external validation passes. All four lower-checkpoint basic/ACP/encryption/full-counter gates now pass independently.
+2. Complete §5.3 timing and allocation gates on a quiet host. All nine removal checkpoints build; frozen final endpoints are built. No performance gate is waived. Creates remain about 4.6% above main in the latest allocation pair.
 
 The browser identity regression is fixed at step 5: identity is scoped per future poll and restored before suspension. CI at `1fb3ebed0` passes 73 browser library tests, two browser integration tests and four relay tests; six native identity tests also pass.
 
-Step 6 now supports projected GraphQL updates for unconditional explicit document IDs, scalar patches and `_docID`-only output. Full documents are materialized, with only relevant field dependencies validated. Filters, other returned fields, migrations, downsample and unsupported shapes retain conservative reads. Preparation uses the same dependency set, preserves found-target membership and invokes preparation hooks; custom mutators default to full validation. Eight real GraphQL regressions pass, including disjoint commits with required untouched fields, same-field/predicate/output/index conflicts and later full reads. A custom-mutator regression confirms hooks run and missing IDs stay excluded. Query 599, DB library 29, write 64 and index 61 tests pass. The final broad native/external run is in progress at code checkpoint `b4a2552f7`.
+Step 6 now supports projected GraphQL updates for unconditional explicit document IDs, scalar patches and `_docID`-only output. Full documents are materialized, with only relevant field dependencies validated. Filters, other returned fields, migrations, downsample and unsupported shapes retain conservative reads. Preparation uses the same dependency set, preserves found-target membership and invokes preparation hooks; custom mutators default to full validation. Eight real GraphQL regressions pass, including disjoint commits with required untouched fields, same-field/predicate/output/index conflicts and later full reads. A custom-mutator regression confirms hooks run and missing IDs stay excluded. Query 599, DB library 29, write 64 and index 61 tests pass. At `b4a2552f7`, the full core run passes 2,365 tests (33 ignored), HTTP/embedded passes 358 (5 ignored), and benchmark accounting passes five. After an unused-import cleanup, `888e2da4c` passes broad native all-target Clippy, WASM Clippy, formatting, and a fresh CLI run: ACP 204 (16 ignored), basic 56, encryption 25, counter 9 (8 ignored), and write-skew one. The cleanup changes no runtime behavior. Current-head remote CI remains pending.
 
 ## Validation evidence
 

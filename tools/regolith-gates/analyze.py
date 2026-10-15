@@ -741,38 +741,59 @@ def comparable_gate_values(summary: dict) -> dict[tuple[str, str], dict[str, flo
             base['legacy_http_exhausted_per_commit'] = medians['legacy_http_exhausted_per_commit']
         if medians.get('engine_exhaustions_per_commit') is not None:
             base['engine_exhaustions_per_commit'] = medians['engine_exhaustions_per_commit']
+        if medians.get('engine_exhaustions') is not None:
+            base['engine_exhaustions'] = medians['engine_exhaustions']
         values[(workload, writer_str)] = base
     return values
+
+
+GATE_METRICS = {
+    'commits_per_second',
+    'storage_conflicts_per_commit',
+    'client_conflicts_per_commit',
+    'legacy_http_conflicts_per_commit',
+    'legacy_http_exhausted_per_commit',
+    'engine_exhaustions_per_commit',
+}
 
 
 def nonregression(reference: dict, candidate: dict) -> dict[str, Any]:
     ref_values = comparable_gate_values(reference['summary'])
     cand_values = comparable_gate_values(candidate['summary'])
     details, regressions, missing, not_comparable = [], [], [], []
+    incomparable_gate_metric = False
     for cell, candidate_metrics in cand_values.items():
         reference_metrics = ref_values.get(cell)
         if reference_metrics is None:
             missing.append(f'{cell}: reference sample group missing')
             continue
-        for metric, value in candidate_metrics.items():
+        for metric in sorted(set(candidate_metrics) | set(reference_metrics)):
+            value = candidate_metrics.get(metric)
             reference_value = reference_metrics.get(metric)
             if value is None or reference_value is None:
-                not_comparable.append({
+                record = {
                     'workload': cell[0], 'writers': int(cell[1]), 'metric': metric,
                     'candidate_schema': candidate['summary']['schema'],
                     'reference_schema': reference['summary']['schema'],
                     'reason': 'metric absent in one source schema; kept distinct, not conflated',
-                })
+                    'gate_metric': metric in GATE_METRICS,
+                }
+                not_comparable.append(record)
+                incomparable_gate_metric |= metric in GATE_METRICS
                 continue
-            # Only throughput and conflict rates are non-regression gates here.
-            passed = value >= reference_value if metric == 'commits_per_second' else value <= reference_value
+            is_gate = metric in GATE_METRICS
+            passed = (value >= reference_value if metric == 'commits_per_second'
+                      else value <= reference_value) if is_gate else None
             record = {'workload': cell[0], 'writers': int(cell[1]), 'metric': metric,
                       'reference_median': reference_value, 'candidate_median': value,
-                      'delta': value - reference_value, 'observed_pass': passed}
+                      'delta': value - reference_value, 'gate_metric': is_gate,
+                      'observed_pass': passed}
             details.append(record)
-            if not passed:
+            if is_gate and not passed:
                 regressions.append(record)
-    status = 'observed_fail' if regressions else 'incomplete' if missing or not details else 'observed_pass'
+    status = ('observed_fail' if regressions else
+              'incomplete' if missing or incomparable_gate_metric
+              or not any(item['gate_metric'] for item in details) else 'observed_pass')
     return {'status': status, 'strict_no_tolerance': True, 'compared_cells': len(details),
             'regressions': regressions, 'missing_comparisons': missing,
             'not_comparable_schema_metrics': not_comparable, 'details': details}

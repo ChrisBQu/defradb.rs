@@ -71,6 +71,16 @@ def ensure_clean_tree(worktree: Path) -> None:
         raise RuntimeError(f'Runner worktree is dirty: {status}')
 
 
+def ensure_detached_worktree(worktree: Path) -> None:
+    attached = subprocess.run(
+        ['git', 'symbolic-ref', '-q', 'HEAD'], cwd=worktree,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if attached.returncode == 0:
+        raise RuntimeError(f'Runner worktree must be detached before checkout: {worktree}')
+    if attached.returncode != 1:
+        raise RuntimeError(f'Cannot verify detached worktree state: {worktree}')
+
+
 def load_build_metadata(binary_dir: Path) -> tuple[dict, str, str]:
     json_path = binary_dir / 'BUILD.json'
     txt_path = binary_dir / 'BUILD.txt'
@@ -189,6 +199,7 @@ def main() -> None:
         guard_script = (args.guard_script or (worktree / 'tools/perf-site/loadguard.py')).resolve()
         if not guard_script.is_file():
             raise FileNotFoundError(f'load guard script not found: {guard_script}')
+        ensure_detached_worktree(worktree)
         binary_dir = args.binary_root.resolve() / label
         build_metadata, revision, profile = load_build_metadata(binary_dir)
         executable_names = sorted({binary for _, binary, _, _, _ in COMMANDS})
