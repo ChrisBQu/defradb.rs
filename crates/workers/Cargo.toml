@@ -1,0 +1,29 @@
+[package]
+name = "workers"
+description = "Thread-per-core worker pool: topology, placement, local executors, routing and containment"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+# `Env` (the wrapper that places compaction threads), `IoQueue` (the hook a
+# worker polls between tasks) and `regolith::sync` (completions, admission,
+# the shutdown latch, the lock-free queues).
+regolith.workspace = true
+# The per-key queues a worker keeps for document affinity.
+rapidhash.workspace = true
+tracing.workspace = true
+
+# Pinning, memory policy, memory locking and priorities. Already in the
+# lockfile through regolith and the CLI.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[lints]
+workspace = true

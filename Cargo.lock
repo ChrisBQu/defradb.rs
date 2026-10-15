@@ -15844,6 +15844,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "workers"
+version = "0.5.0"
+dependencies = [
+ "libc",
+ "rapidhash",
+ "regolith",
+ "tracing",
+]
+
+[[package]]
 name = "writeable"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
