@@ -30,6 +30,7 @@ use defra_core::block::Signature;
 use defra_core::block::SignatureHeader;
 use defra_core::block::SignatureType;
 use defra_core::merge::BlockMetadata;
+use defra_core::merge::ExplicitReplayAuthorization;
 use defra_core::merge::MergeBlock;
 use defra_core::merge::MergeErrorDisposition;
 use defra_core::merge::MergeHandler;
@@ -2663,6 +2664,7 @@ enum StubKmsResponse {
 struct StubKms {
     response: StubKmsResponse,
     calls: std::sync::atomic::AtomicUsize,
+    contexts: std::sync::Mutex<Vec<(Option<String>, Option<String>)>>,
 }
 
 impl StubKms {
@@ -2670,6 +2672,7 @@ impl StubKms {
         Self {
             response: StubKmsResponse::Key(key),
             calls: std::sync::atomic::AtomicUsize::new(0),
+            contexts: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -2677,6 +2680,7 @@ impl StubKms {
         Self {
             response: StubKmsResponse::AccessDenied,
             calls: std::sync::atomic::AtomicUsize::new(0),
+            contexts: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -2684,6 +2688,7 @@ impl StubKms {
         Self {
             response: StubKmsResponse::UnavailableThenKey(key),
             calls: std::sync::atomic::AtomicUsize::new(0),
+            contexts: std::sync::Mutex::new(Vec::new()),
         }
     }
 }
@@ -2692,9 +2697,13 @@ impl StubKms {
 impl kms::KmsService for StubKms {
     async fn get_keys(
         &self,
-        _: &kms::RequestContext,
+        context: &kms::RequestContext,
         cids: &[kms::EncryptionCid],
     ) -> kms::Result<kms::KeyResults> {
+        self.contexts.lock().unwrap().push((
+            context.user_identity().map(ToString::to_string),
+            context.explicit_replay_capability().map(str::to_owned),
+        ));
         let (results, tx) = kms::KeyResults::new(cids.len().max(1));
         let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         match &self.response {
@@ -2980,6 +2989,99 @@ async fn merge_attempt_resolves_dek_outside_attempt_and_reuses_it() {
 
     assert_eq!(outcome, MergeOutcome::Merged);
     assert_eq!(kms.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn batch_merge_prepares_deks_outside_attempts_per_authorization_context() {
+    let (handler, blockstore, _) = make_handler_with_schema_and_bus().await;
+    let key = [29u8; 32];
+    let encryption_cid = Encryption::new(key.to_vec()).generate_cid().unwrap();
+    let mut blocks = Vec::new();
+    let contexts = [
+        (
+            "did:key:z6MksQ6mYqY1YxR4KQ2NW6y6x8vJrNs2LEd8w5pYxHw3rroA",
+            "capability-a",
+            "Alice",
+        ),
+        (
+            "did:key:z6MkwQm1zZ1p9raM2AfU4vX9y1Aq5PEYB9H9n1tFoZT3zh7T",
+            "capability-b",
+            "Bob",
+        ),
+    ];
+    for (creator, capability, value) in contexts {
+        let mut plaintext = Vec::new();
+        ciborium::into_writer(&NormalValue::String(value.into()), &mut plaintext).unwrap();
+        let (ciphertext, _) =
+            crypto::encryption::aes::encrypt_aes(&plaintext, &key, &[], true).unwrap();
+        let field = Block::new_with_options(
+            CrdtDelta::Lww(LwwDeltaPayload {
+                field_name: "name".into(),
+                schema_version_id: "v1".into(),
+                priority: 1,
+                data: ciphertext,
+            }),
+            vec![],
+            vec![],
+            Some(encryption_cid),
+            None,
+        );
+        let field_cid = field.generate_cid().unwrap();
+        blockstore
+            .put(&field_cid, &field.to_dag_cbor().unwrap())
+            .await
+            .unwrap();
+        let composite = Block::new(
+            CrdtDelta::Composite(CompositeDeltaPayload {
+                schema_version_id: "v1".into(),
+                priority: 1,
+                status: 1,
+            }),
+            vec![],
+            vec![DAGLink::new("name", field_cid)],
+        );
+        let cid = composite.generate_cid().unwrap();
+        let doc_id = db::block::builder::derive_doc_id(&cid);
+        blockstore
+            .put(&cid, &composite.to_dag_cbor().unwrap())
+            .await
+            .unwrap();
+        blocks.push(MergeBlock {
+            cid,
+            block_data: composite.to_dag_cbor().unwrap().into(),
+            doc_id,
+            collection_id: "col-users".into(),
+            creator: creator.into(),
+            sender_peer: None,
+            is_explicit_replicator: true,
+            explicit_replay_authorization: Some(ExplicitReplayAuthorization {
+                source_peer_id: "source-peer".into(),
+                target_peer_id: "target-peer".into(),
+                collection_id: "col-users".into(),
+                authorizer_did: creator.into(),
+                expires_at: u64::MAX,
+                capability: Some(capability.into()),
+            }),
+            verified_creator: None,
+        });
+    }
+
+    let kms = Arc::new(StubKms::fixed_key(key));
+    handler.set_kms(kms.clone());
+    let outcomes = handler.handle_block_batch(&blocks).await;
+
+    assert!(matches!(
+        outcomes.as_slice(),
+        [Ok(MergeOutcome::Merged), Ok(MergeOutcome::Merged)]
+    ));
+    assert_eq!(
+        kms.calls.load(Ordering::SeqCst),
+        2,
+        "the same encryption CID must be fetched separately for each block authorization context"
+    );
+    let recorded = kms.contexts.lock().unwrap();
+    assert!(recorded.contains(&(Some(contexts[0].0.into()), Some(contexts[0].1.into()))));
+    assert!(recorded.contains(&(Some(contexts[1].0.into()), Some(contexts[1].1.into()))));
 }
 
 #[tokio::test]

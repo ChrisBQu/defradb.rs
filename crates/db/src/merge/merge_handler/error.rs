@@ -63,6 +63,16 @@ pub enum MergeError {
     #[error("merge requires prepared encryption key for {0}")]
     NeedsDecryptionKey(Cid),
 
+    /// The batch retry driver needs this block's DEK resolved outside the
+    /// engine-owned attempt. The index selects its exact authorization context.
+    #[error(
+        "batch merge requires prepared encryption key for block {block_index}: {encryption_cid}"
+    )]
+    NeedsBatchDecryptionKey {
+        block_index: usize,
+        encryption_cid: Cid,
+    },
+
     /// Block signature verification failed — block MUST be rejected.
     #[error("block signature verification failed for cid={cid}: {reason}")]
     SignatureVerificationFailed { cid: Cid, reason: String },
@@ -109,6 +119,7 @@ impl MergeError {
             | Self::Storage(_)
             | Self::Kms(_)
             | Self::NeedsDecryptionKey(_)
+            | Self::NeedsBatchDecryptionKey { .. }
             | Self::GateContended => MergeErrorDisposition::Retryable,
         }
     }
