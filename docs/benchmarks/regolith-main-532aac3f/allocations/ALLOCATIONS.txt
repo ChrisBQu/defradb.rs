@@ -1,0 +1,10 @@
+revision=532aac3fd06a61c319c2d5fbde84da42aab67f0d
+binary_sha256=a1b68c22e10f4cb75f8e0f091bc35636b2d02fc2bd0ba0a7a05bd0ed807f99ed
+source_worktree=/Users/johnzampolin/go/src/github.com/sourcenetwork/defradb-alloc-main
+counts_only=true; throughput_timings_ignored=true
+
+raw_output:
+  document create              2994.4 allocations/op
+  document get by id            165.0 allocations/op
+  document to map                36.0 allocations/op
+  document from json             76.0 allocations/op

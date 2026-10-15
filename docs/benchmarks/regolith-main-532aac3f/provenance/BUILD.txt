@@ -1,0 +1,7 @@
+Revision: 532aac3fd06a61c319c2d5fbde84da42aab67f0d
+Tree: clean at build
+Toolchain: rustc 1.99.0 (b940084d7 2026-09-28)
+Profile: release-fast
+Build command: CARGO_TARGET_DIR=/tmp/defra-perf-artifacts/main-532aac3f CARGO_BUILD_JOBS=8 cargo bench -p benches --bench allocs --bench write_baseline --bench document_write --bench startup --profile release-fast --no-run
+These executables were built, not run; no timings or allocation counts were collected.
+Run from: /Users/johnzampolin/go/src/github.com/sourcenetwork/defradb-alloc-main

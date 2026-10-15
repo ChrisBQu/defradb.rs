@@ -1,0 +1,31 @@
+Gnuplot not found, using plotters backend
+Benchmarking document_create/4
+Benchmarking document_create/4: Warming up for 3.0000 s
+Benchmarking document_create/4: Collecting 100 samples in estimated 5.2098 s (106k iterations)
+Benchmarking document_create/4: Analyzing
+document_create/4       time:   [22.279 µs 22.331 µs 22.380 µs]
+                        thrpt:  [44.683 Kelem/s 44.782 Kelem/s 44.885 Kelem/s]
+Found 8 outliers among 100 measurements (8.00%)
+  6 (6.00%) low mild
+  2 (2.00%) high mild
+Benchmarking document_create/16
+Benchmarking document_create/16: Warming up for 3.0000 s
+Benchmarking document_create/16: Collecting 100 samples in estimated 5.5058 s (40k iterations)
+Benchmarking document_create/16: Analyzing
+document_create/16      time:   [77.302 µs 77.772 µs 78.314 µs]
+                        thrpt:  [12.769 Kelem/s 12.858 Kelem/s 12.936 Kelem/s]
+Found 5 outliers among 100 measurements (5.00%)
+  1 (1.00%) high mild
+  4 (4.00%) high severe
+
+Benchmarking document_create_branchable/14
+Benchmarking document_create_branchable/14: Warming up for 3.0000 s
+Benchmarking document_create_branchable/14: Collecting 100 samples in estimated 6.7575 s (15k iterations)
+Benchmarking document_create_branchable/14: Analyzing
+document_create_branchable/14
+                        time:   [29.462 µs 29.527 µs 29.596 µs]
+                        thrpt:  [33.788 Kelem/s 33.868 Kelem/s 33.942 Kelem/s]
+Found 3 outliers among 100 measurements (3.00%)
+  1 (1.00%) low mild
+  2 (2.00%) high mild
+

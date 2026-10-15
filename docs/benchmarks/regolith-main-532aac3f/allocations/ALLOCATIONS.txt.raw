@@ -1,0 +1,4 @@
+  document create              2994.4 allocations/op
+  document get by id            165.0 allocations/op
+  document to map                36.0 allocations/op
+  document from json             76.0 allocations/op

@@ -1,0 +1,20 @@
+  document create              2991.5 allocations/op
+  document get by id            165.0 allocations/op
+  document to map                36.0 allocations/op
+  document from json             76.0 allocations/op
+  document create              2990.7 allocations/op
+  document get by id            165.0 allocations/op
+  document to map                36.0 allocations/op
+  document from json             76.0 allocations/op
+  document create              2984.6 allocations/op
+  document get by id            165.0 allocations/op
+  document to map                36.0 allocations/op
+  document from json             76.0 allocations/op
+  document create              2996.9 allocations/op
+  document get by id            165.0 allocations/op
+  document to map                36.0 allocations/op
+  document from json             76.0 allocations/op
+  document create              3005.3 allocations/op
+  document get by id            165.0 allocations/op
+  document to map                36.0 allocations/op
+  document from json             76.0 allocations/op

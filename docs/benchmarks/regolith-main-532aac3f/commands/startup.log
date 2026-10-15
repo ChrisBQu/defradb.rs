@@ -1,0 +1,11 @@
+Gnuplot not found, using plotters backend
+Benchmarking startup/cold_open/embedded/10_collections
+Benchmarking startup/cold_open/embedded/10_collections: Warming up for 3.0000 s
+Benchmarking startup/cold_open/embedded/10_collections: Collecting 100 samples in estimated 5.3327 s (400 iterations)
+Benchmarking startup/cold_open/embedded/10_collections: Analyzing
+startup/cold_open/embedded/10_collections
+                        time:   [9.0257 ms 9.2868 ms 9.5778 ms]
+Found 4 outliers among 100 measurements (4.00%)
+  2 (2.00%) high mild
+  2 (2.00%) high severe
+
