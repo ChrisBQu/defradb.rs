@@ -123,7 +123,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             match mutator.create_impl(collection_name, doc.clone()).await {
                 Err(query::error::QueryError::NeedsInput(request)) => {
                     inputs
-                        .answer_miss(&request, || self.resolve_prepared_input(&request))
+                        .answer_wave(&request, |wave| self.resolve_prepared_inputs(wave))
                         .await?;
                 }
                 result => return result,
@@ -155,7 +155,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             {
                 Err(query::error::QueryError::NeedsInput(request)) => {
                     inputs
-                        .answer_miss(&request, || self.resolve_prepared_input(&request))
+                        .answer_wave(&request, |wave| self.resolve_prepared_inputs(wave))
                         .await?;
                 }
                 result => return result,
@@ -539,16 +539,24 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         // === Phase 1: Prepare documents (sequential — embeddings are async/external) ===
         let mut prepared_docs: Vec<Document> = Vec::with_capacity(docs.len());
         let embedding_config = self.db.options().embedding_config();
+        // Every document's missing embeddings join one wave.
+        let mut first_miss = None;
         for mut doc in docs {
             if let Some(inputs) = &self.prepared_inputs {
-                crate::search::embedding::set_embedding_from_inputs(
+                match crate::search::embedding::set_embedding_from_inputs(
                     &collection.schema().vector_embeddings,
                     &mut doc,
                     true,
                     &rapidhash::RapidHashSet::default(),
                     &embedding_config,
                     inputs,
-                )?;
+                ) {
+                    Ok(_) => {}
+                    Err(query::error::QueryError::NeedsInput(request)) => {
+                        first_miss.get_or_insert(request);
+                    }
+                    Err(error) => return Err(error),
+                }
             } else {
                 crate::search::set_embedding(
                     &collection.schema().vector_embeddings,
@@ -564,6 +572,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             }
 
             prepared_docs.push(doc);
+        }
+        if let Some(request) = first_miss {
+            return Err(query::error::QueryError::NeedsInput(request));
         }
 
         // No per-doc write guards for creates: identities are derived inside
@@ -652,17 +663,29 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         #[cfg(not(feature = "native"))]
         let computed_blocks: Vec<ComputedBlocks> = {
             let mut computed = Vec::with_capacity(prepared_docs.len());
+            // Every document's missing inputs join one wave: a miss is kept
+            // and the next document computed.
+            let mut first_miss = None;
             for (doc, identity) in prepared_docs.iter().zip(identities.iter()) {
-                let blocks = compute_document_blocks_with_inputs(
+                match compute_document_blocks_with_inputs(
                     doc,
                     &schema_version_id,
                     *identity,
                     enc_config.as_ref(),
                     sign_config.as_ref(),
                     self.prepared_inputs.as_ref(),
-                )
-                .map_err(|error| error.into_query_error_in("failed to compute document blocks"))?;
-                computed.push(blocks);
+                ) {
+                    Ok(blocks) => computed.push(blocks),
+                    Err(crate::block::builder::BuildError::NeedsInput(request)) => {
+                        first_miss.get_or_insert(request);
+                    }
+                    Err(error) => {
+                        return Err(error.into_query_error_in("failed to compute document blocks"))
+                    }
+                }
+            }
+            if let Some(request) = first_miss {
+                return Err(query::error::QueryError::NeedsInput(request));
             }
             computed
         };

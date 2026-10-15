@@ -1,5 +1,6 @@
 mod access_cache;
 mod circuit_breaker;
+mod decisions;
 pub mod cosmos;
 mod policy_cache;
 mod provider;

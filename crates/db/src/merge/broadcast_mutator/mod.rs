@@ -468,6 +468,13 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         self.inner.resolve_prepared_input(request).await
     }
 
+    async fn resolve_prepared_inputs(
+        &self,
+        requests: Vec<query::prepared::PreparedInputRequest>,
+    ) -> query::error::Result<Vec<Arc<[u8]>>> {
+        self.inner.resolve_prepared_inputs(requests).await
+    }
+
     async fn prepared_embedding_request(
         &self,
         collection_name: &str,

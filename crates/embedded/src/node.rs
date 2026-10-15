@@ -572,6 +572,9 @@ where
         .await
         .map_err(|error| anyhow!("failed to open database: {error}"))?;
     database.set_event_bus(event_bus.clone());
+    if let Some(edge) = config.edge.as_ref() {
+        database.set_network(edge.clone());
+    }
     #[cfg(feature = "iroh")]
     if let Some(hooks) = &access_hooks {
         hooks.install(&database);
@@ -720,12 +723,17 @@ where
             None => vec![],
         };
 
-        Arc::new(kms::DefraKms::new(
+        Arc::new(kms::DefraKms::with_inputs(
             store,
             transports,
             policy as Arc<dyn kms::AccessPolicy>,
             Arc::new(db::DbBlockDocIDResolver::new(database.clone())),
             node_did,
+            config
+                .edge
+                .as_ref()
+                .map(kms::KmsInputs::on)
+                .unwrap_or_default(),
         ))
     };
 

@@ -35,6 +35,7 @@ members = [
     "crates/telemetry",
     "crates/edge",
     "crates/workers",
+    "crates/inputs",
     "tools/lens-host",
     "tools/ffi-test",
     "tools/integration-test",

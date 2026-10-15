@@ -4,6 +4,7 @@ use std::sync::Arc;
 use chrono::{DateTime, FixedOffset};
 use document::{Document, WritePreparation};
 use kovan_map::HopscotchMap;
+use kovan_queue::seg_queue::SegQueue;
 use rapidhash::fast::{RandomState, RapidHashMap};
 
 use crate::error::{QueryError, Result};
@@ -73,12 +74,24 @@ pub enum PreparedInputKind {
 /// a cap would refuse a request that is valid only for being large. What
 /// bounds a dependency miss is progress: a miss must name a request the memo
 /// does not hold yet ([`answer_miss`](Self::answer_miss)).
+///
+/// A pass that meets several misses goes on past them and records each
+/// ([`want`](Self::want)), so the wave that answers the miss ending the
+/// attempt answers them all at once ([`answer_wave`](Self::answer_wave)):
+/// the attempts of a request make one round trip per wave of inputs, not one
+/// per input.
 #[derive(Clone)]
-pub struct PreparedInputMemo(Arc<HopscotchMap<PreparedInputRequest, Arc<[u8]>, RandomState>>);
+pub struct PreparedInputMemo {
+    answers: Arc<HopscotchMap<PreparedInputRequest, Arc<[u8]>, RandomState>>,
+    wanted: Arc<SegQueue<PreparedInputRequest>>,
+}
 
 impl Default for PreparedInputMemo {
     fn default() -> Self {
-        Self(Arc::new(HopscotchMap::with_hasher(RandomState::default())))
+        Self {
+            answers: Arc::new(HopscotchMap::with_hasher(RandomState::default())),
+            wanted: Arc::new(SegQueue::new()),
+        }
     }
 }
 
@@ -94,7 +107,22 @@ impl std::fmt::Debug for PreparedInputMemo {
 
 impl PreparedInputMemo {
     pub fn get(&self, request: &PreparedInputRequest) -> Option<Arc<[u8]>> {
-        self.0.get(request)
+        self.answers.get(request)
+    }
+
+    /// The answer to `request`, or, when the memo holds none, a note that the
+    /// request is wanted: the pass goes on and the next wave answers it.
+    pub fn get_or_want(&self, request: &PreparedInputRequest) -> Option<Arc<[u8]>> {
+        let answer = self.get(request);
+        if answer.is_none() {
+            self.want(request.clone());
+        }
+        answer
+    }
+
+    /// Records a request a pass found unanswered and went on past.
+    pub fn want(&self, request: PreparedInputRequest) {
+        self.wanted.push(request);
     }
 
     /// Memoize `response` unless the request is already answered, and return
@@ -104,7 +132,7 @@ impl PreparedInputMemo {
         request: PreparedInputRequest,
         response: impl Into<Arc<[u8]>>,
     ) -> Arc<[u8]> {
-        self.0.get_or_insert(request, response.into())
+        self.answers.get_or_insert(request, response.into())
     }
 
     /// Answer the dependency miss that ended an attempt, so the next attempt
@@ -121,7 +149,7 @@ impl PreparedInputMemo {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<Arc<[u8]>>>,
     {
-        if self.0.contains_key(request) {
+        if self.answers.contains_key(request) {
             return Err(QueryError::execution(format!(
                 "external input {:?} was requested again after it was provided",
                 request.kind()
@@ -132,8 +160,50 @@ impl PreparedInputMemo {
         Ok(())
     }
 
+    /// Answers the miss that ended an attempt together with every request
+    /// the attempt went on past, as one wave: `resolve` gets them all, each
+    /// once, and returns their answers in order, fetched outside any
+    /// transaction. As with [`answer_miss`](Self::answer_miss), a miss for a
+    /// request already answered is an error.
+    pub async fn answer_wave<F, Fut>(
+        &self,
+        request: &PreparedInputRequest,
+        resolve: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(Vec<PreparedInputRequest>) -> Fut,
+        Fut: Future<Output = Result<Vec<Arc<[u8]>>>>,
+    {
+        if self.answers.contains_key(request) {
+            return Err(QueryError::execution(format!(
+                "external input {:?} was requested again after it was provided",
+                request.kind()
+            )));
+        }
+        let mut wave = vec![request.clone()];
+        let mut seen = rapidhash::fast::RapidHashSet::default();
+        seen.insert(request.clone());
+        while let Some(wanted) = self.wanted.pop() {
+            if !self.answers.contains_key(&wanted) && seen.insert(wanted.clone()) {
+                wave.push(wanted);
+            }
+        }
+        let answers = resolve(wave.clone()).await?;
+        if answers.len() != wave.len() {
+            return Err(QueryError::execution(format!(
+                "asked for {} external inputs, got {} answers",
+                wave.len(),
+                answers.len()
+            )));
+        }
+        for (request, answer) in wave.into_iter().zip(answers) {
+            self.insert(request, answer);
+        }
+        Ok(())
+    }
+
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.answers.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -351,5 +421,45 @@ mod tests {
         let error = memo.answer_miss(&request, resolve).await.unwrap_err();
         assert!(error.to_string().contains("requested again"), "{error}");
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_wave_answers_the_miss_and_every_request_the_pass_went_past() {
+        let memo = PreparedInputMemo::default();
+        let ended =
+            PreparedInputRequest::new(PreparedInputKind::Signature, b"composite".as_slice());
+        let passed = PreparedInputRequest::new(PreparedInputKind::Signature, b"field".as_slice());
+        assert!(memo.get_or_want(&passed).is_none());
+        assert!(
+            memo.get_or_want(&passed).is_none(),
+            "asked twice, wanted once"
+        );
+        let waves = std::sync::atomic::AtomicUsize::new(0);
+        memo.answer_wave(&ended, |wave| {
+            waves.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                assert_eq!(wave.len(), 2);
+                Ok(wave
+                    .iter()
+                    .map(|request| Arc::<[u8]>::from(request.exact_request()))
+                    .collect())
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(waves.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(memo.get(&ended).as_deref(), Some(b"composite".as_slice()));
+        assert_eq!(memo.get(&passed).as_deref(), Some(b"field".as_slice()));
+
+        let error = memo
+            .answer_wave(&ended, |wave| async move {
+                Ok(wave
+                    .iter()
+                    .map(|_| Arc::<[u8]>::from(b"".as_slice()))
+                    .collect())
+            })
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("requested again"), "{error}");
     }
 }

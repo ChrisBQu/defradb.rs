@@ -5,7 +5,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use crypto::{Key, PublicKey};
-use defra_core::signing::{RemoteSigner, SigningAuthorization};
+use defra_core::signing::{RemoteSigner, SignFailure, SigningAuthorization};
+use defra_core::thread_bounds::MaybeBoxFuture;
 use edge::Edge;
 use identity::{FullIdentity, Identity};
 use sha2::{Digest, Sha256};
@@ -14,8 +15,12 @@ use tonic::transport::Channel;
 use crate::proto::{sign_service_client::SignServiceClient, StartSignRequest};
 
 #[derive(Debug, thiserror::Error)]
-#[error("Orbis signing: {0}")]
-pub struct OrbisClientError(String);
+#[error("Orbis signing: {message}")]
+pub struct OrbisClientError {
+    message: String,
+    /// The call did not reach Orbis or its answer did not come back.
+    transient: bool,
+}
 
 /// Signs with a registered derivation and verifies against a provisioned BLS key.
 ///
@@ -45,12 +50,12 @@ impl OrbisClient {
                 .bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         {
-            return Err(OrbisClientError(
-                "derivation ID must be 64 lowercase hexadecimal characters".into(),
+            return Err(error(
+                "derivation ID must be 64 lowercase hexadecimal characters",
             ));
         }
         if service_identity.pub_key().key_type() != crypto::KeyType::Ed25519 {
-            return Err(OrbisClientError("service identity must use Ed25519".into()));
+            return Err(error("service identity must use Ed25519"));
         }
         if public_key_bytes.len() != 48 {
             return Err(error("BLS public key must contain 48 bytes"));
@@ -88,6 +93,26 @@ impl OrbisClient {
         &self.public_key_hex
     }
 
+    /// What one signing call needs, owned, so a wave's calls run as
+    /// network tasks of their own.
+    fn derivation(&self) -> Derivation {
+        Derivation {
+            channel: self.channel.clone(),
+            derivation_id: self.derivation_id.clone(),
+            public_key: self.public_key.clone(),
+            service_identity: Arc::clone(&self.service_identity),
+        }
+    }
+}
+
+struct Derivation {
+    channel: Channel,
+    derivation_id: String,
+    public_key: crypto::BlsPublicKey,
+    service_identity: Arc<identity::RawIdentity>,
+}
+
+impl Derivation {
     fn bearer_token(&self, data: &[u8]) -> Result<String, OrbisClientError> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -128,7 +153,16 @@ impl OrbisClient {
         let response = SignServiceClient::new(self.channel.clone())
             .start_sign(request)
             .await
-            .map_err(error)?
+            .map_err(|status| OrbisClientError {
+                transient: matches!(
+                    status.code(),
+                    tonic::Code::Unavailable
+                        | tonic::Code::DeadlineExceeded
+                        | tonic::Code::ResourceExhausted
+                        | tonic::Code::Aborted
+                ),
+                message: status.to_string(),
+            })?
             .into_inner();
         if response.signature.len() != 192 {
             return Err(error("BLS signature must contain 96 hex-encoded bytes"));
@@ -141,6 +175,10 @@ impl OrbisClient {
     }
 }
 
+/// Orbis binds authorization to the registered derivation.
+const PER_REQUEST_AUTHORIZATION: &str =
+    "Orbis authorization is bound to the registered derivation; per-request overrides are unsupported";
+
 impl RemoteSigner for OrbisClient {
     fn sign_sync(
         &self,
@@ -148,17 +186,59 @@ impl RemoteSigner for OrbisClient {
         authorization: Option<&SigningAuthorization>,
     ) -> Result<Vec<u8>, String> {
         if authorization.is_some() {
-            return Err("Orbis authorization is bound to the registered derivation; per-request overrides are unsupported".into());
+            return Err(PER_REQUEST_AUTHORIZATION.into());
         }
         self.edge
-            .block_on(self.sign_async(data))
+            .block_on(self.derivation().sign_async(data))
             .map_err(|e| e.to_string())?
             .map_err(|e| e.to_string())
+    }
+
+    /// Every payload of the wave signs at once, each a call on the network
+    /// runtime over the one gRPC channel; the wave completes when all have.
+    fn sign_batch(
+        &self,
+        payloads: Vec<Arc<[u8]>>,
+        authorization: Option<SigningAuthorization>,
+    ) -> MaybeBoxFuture<'static, Vec<Result<Vec<u8>, SignFailure>>> {
+        if authorization.is_some() {
+            let refused = payloads
+                .iter()
+                .map(|_| Err(SignFailure::refused(PER_REQUEST_AUTHORIZATION)))
+                .collect();
+            return Box::pin(std::future::ready(refused));
+        }
+        let derivation = Arc::new(self.derivation());
+        let calls: Vec<_> = payloads
+            .into_iter()
+            .map(|payload| {
+                let derivation = Arc::clone(&derivation);
+                self.edge
+                    .spawn(async move { derivation.sign_async(&payload).await })
+            })
+            .collect();
+        Box::pin(async move {
+            let mut signatures = Vec::with_capacity(calls.len());
+            for call in calls {
+                signatures.push(match call.await {
+                    Ok(Ok(signature)) => Ok(signature),
+                    Ok(Err(error)) => Err(SignFailure {
+                        transient: error.transient,
+                        message: error.to_string(),
+                    }),
+                    Err(error) => Err(SignFailure::transient(error.to_string())),
+                });
+            }
+            signatures
+        })
     }
 }
 
 fn error(error: impl std::fmt::Display) -> OrbisClientError {
-    OrbisClientError(error.to_string())
+    OrbisClientError {
+        message: error.to_string(),
+        transient: false,
+    }
 }
 
 #[cfg(test)]
