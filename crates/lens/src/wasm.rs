@@ -616,6 +616,14 @@ mod tests {
             .unwrap_or(default)
     }
 
+    fn env_u64(name: &str, default: u64) -> u64 {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(default)
+    }
+
     fn percentile(sorted: &[f64], quantile: f64) -> f64 {
         let index = ((sorted.len() - 1) as f64 * quantile).round() as usize;
         sorted[index]
@@ -692,6 +700,7 @@ mod tests {
     fn measure_epoch_ticker_periods() {
         let samples = env_usize("DEFRA_LENS_TICKER_SAMPLES", 20);
         let light_sample_ms = env_usize("DEFRA_LENS_TICKER_LIGHT_MS", 2_000);
+        let light_fuel_budget = env_u64("DEFRA_LENS_TICKER_FUEL", u64::MAX);
         let docs_per_batch = 16;
         let periods_ms = [10, 25, 50, 100, 250];
         let input_docs = vec![
@@ -700,7 +709,7 @@ mod tests {
         ];
         let module_bytes = IDENTITY_PASSTHROUGH_WASM;
 
-        println!("epoch ticker probe: profile={}, samples={samples}, light_ms/sample={light_sample_ms}, docs/batch={docs_per_batch}, fuel=u64::MAX, epoch_deadline_ticks=2", if cfg!(debug_assertions) { "debug" } else { "release" });
+        println!("epoch ticker probe: profile={}, samples={samples}, light_ms/sample={light_sample_ms}, docs/batch={docs_per_batch}, light_fuel={light_fuel_budget}, trap_fuel=u64::MAX, epoch_deadline_ticks=2", if cfg!(debug_assertions) { "debug" } else { "release" });
         println!("period_ms,light_median_ns_per_doc,light_p95_ns_per_doc,light_epoch_traps,trap_median_ms,trap_p95_ms,trap_min_ms,trap_max_ms");
         println!("CPU time/context switches: not measured by this portable harness; optionally wrap the test process in platform-specific perf tooling.");
 
@@ -711,7 +720,7 @@ mod tests {
             // light probe runs long enough to span many timer periods and
             // reports any accidental interruption. Fuel is only a distant
             // safety bound so it does not mask epoch timing.
-            sandbox.fuel_budget = Some(u64::MAX);
+            sandbox.fuel_budget = Some(light_fuel_budget);
             sandbox.epoch_deadline_ticks = Some(2);
             sandbox.epoch_tick_period = Some(period);
             let wasm_store = WasmTransformStore::with_sandbox(Some(sandbox.clone())).unwrap();
