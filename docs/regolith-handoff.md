@@ -4,7 +4,7 @@ This is the review entry point for Theo (vertexclique). [PR #1953](https://githu
 
 Target: new installations. Jack explicitly waived compatibility with existing encrypted/value layouts and migrations. Regolith is pinned to `d1e36aa747913f6b1ecc14c821f4e5e6314674cf`. Worker-pool/runtime redesign (§5.2 step 9) is outside these eight adoption steps. No PR has been merged.
 
-Latest published tip: [#1961 — proof alignment](https://github.com/sourcenetwork/defradb.rs/pull/1961). **All eight steps are represented by 11 draft PRs; implementation and gates are not complete.** Blocking work: whole implicit GraphQL batch engine retries (step 5), concurrent index-metadata refresh (step 6), and performance/allocation gates. No PR has been merged.
+Latest published tip: [#1961 — proof alignment](https://github.com/sourcenetwork/defradb.rs/pull/1961). **All eight steps are represented by 11 draft PRs; implementation and gates are not complete.** Blocking work: whole implicit GraphQL batch engine retries (step 5), final combined validation, and performance/allocation gates. The step-6 index-metadata race is fixed at `36ac4cc8`. No PR has been merged.
 
 ## Stack and merge order
 
@@ -35,7 +35,7 @@ The stack now has the intended 11 draft PRs. Split into two stacks if further ne
 | 3 | Published: arrival append, ID allocation, field/counter/vector/full-text operators, head markers, read-only lenses and known-field write projections. General query/output and conditional reads remain conservative. |
 | 4 | Published #1955: receipt-ordered events and fallible ordered ACP hooks. Delivery remains nondurable if cancellation occurs after commit. |
 | 5 | Published #1956, incomplete: engine retries cover individual/many document writes, remote merges, eager lenses, backfill/publication and pending DAG writes. Exact prepared inputs and typed exhaustion are implemented. Whole implicit GraphQL batches (including transactional ACP) still need their complete engine-owned callback path and provider-boundary validation. Async traits follow accepted D39/D56; runtime redesign is step 9. |
-| 6 | Published #1959, incomplete: requested locks/cache/forced-read APIs removed; collection OCC, immutable ACP/cache snapshots and peer generation fences replace them. Peer conflict transitions use engine retries; legacy migration is removed. The full index suite exposed stale cached metadata during concurrent index creation; a snapshot-correct refresh fix is underway. Performance gates remain open. |
+| 6 | Published #1959, incomplete: requested locks/cache/forced-read APIs removed; collection OCC, immutable ACP/cache snapshots and peer generation fences replace them. Peer conflict transitions use engine retries; legacy migration is removed. Snapshot-correct index metadata refresh is integrated at `36ac4cc8`; all 59 index tests and four schema-conflict tests pass, with native/WASM lint. Performance gates remain open. |
 | 7 | Published #1960: native commit/policy tickers and bounded conflict-reason listener preserve caller instrumentation, with duplicate adapter increments removed. Three regressions and native/WASM Clippy pass. |
 | 8 | Published #1961: obsolete cache/counter/queue models retired, HeadSet retained, pinned engine arrival proof bound. New boundary models cover prepared inputs, marker generations and collection-version OCC. All 163 TLC verdicts, Lean build and registry checks pass; lower-stack fixes and gates still block readiness. |
 
@@ -178,3 +178,11 @@ The combined step-6 database run caught a real failure: `create_index_keeps_pace
 Comparable allocation runs confirm a regression: current main `532aac3f` measures 2985.7 allocations/create and 165/get-by-ID; step4 `3c8bed28` measures 3622.0/269; step5 measures 4062.7/269; step6+peer candidate `97e2a3a3` measures 4242.0/269. All use the same release-fast allocation harness; codecs remain 36 map/76 JSON. Investigation is active. The earlier failed head-cache throughput/conflict gate remains open, and no fresh per-removal throughput gate is claimed.
 
 Independent step-6 validation completed after the index failure: DB merge/read/search/transaction/vector/view/write suites pass **679 tests** (14 ignored); query/storage/zanzibar suites pass **1275 tests**. The earlier combined run passed **694 tests** before the one index race failure. These do not waive that failure. External step-6 basic/ACP/encryption is running on a freshly built CLI. Proof registry rerun on the published tip passes 3/3, and Lean build passes.
+
+## Latest validation after index-race repair
+
+Step 6 now includes `36ac4cc8`: each engine attempt reloads collection/index actions from its own snapshot, allows only index-list drift, and rejects changed versions or other schema content. Backfill also verifies its target index descriptor. All 59 index tests and four schema OCC tests pass; native DB and WASM Clippy pass. The deterministic regression exercises two DB handles with a stale writer cache across index creation, then verifies create/update/delete index maintenance. The fix is carried through steps 7 and 8.
+
+External step-6 validation before this repair passes 204 ACP tests (16 ignored), 55 basic tests, and all 25 encryption tests using exact Go pin `53f0e76a3`. The remaining basic version-JSON smoke test initially read this workstation's old `rocksdb` config; it passes with a clean `DEFRA_ROOTDIR`. Earlier independent DB suites passed 679 tests (14 ignored), and core query/storage/authorization suites passed 1275. These checkpoint results do not replace final combined validation after whole-batch retry integration.
+
+Whole-batch retry implementation and allocation investigation remain active. A proposed full-document allocation optimization was held back during review because writable callers need their field-level validation dependencies preserved. No performance gate is waived.
