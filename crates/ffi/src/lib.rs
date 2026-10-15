@@ -53,6 +53,7 @@ mod policy_yaml;
 #[cfg(feature = "profiling")]
 pub mod profiling;
 pub mod query;
+pub mod remote_signer;
 pub mod runtime;
 pub mod schema;
 pub mod se_key;
@@ -238,7 +239,7 @@ pub use acp::{
     bind_identity_bearer_token, create_identity, delete_dac_actor_relationship,
     delete_nac_actor_relationship, disable_nac, enable_nac, get_dac_policy, get_nac_status,
     get_node_identity, list_dac_policies, node_set_default_identity, re_enable_nac,
-    register_remote_identity, register_remote_identity_bytes, RegisterIdentity,
+    RegisterIdentity,
 };
 pub use action::list_actions;
 pub use backup::{basic_export, basic_import};
@@ -273,6 +274,10 @@ pub use p2p::{
     p2p_sync_documents, p2p_sync_status,
 };
 pub use query::exec_request;
+pub use remote_signer::{
+    defra_remote_sign_complete, register_remote_identity, register_remote_identity_async,
+    register_remote_identity_bytes, register_remote_identity_bytes_async,
+};
 pub use schema::{add_schema, add_schema_in_txn, get_collections, get_collections_in_txn};
 pub use se_key::set_se_encryption_key;
 pub use subscription::{

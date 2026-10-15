@@ -4,13 +4,10 @@ use identity::Identity;
 
 use crate::helpers::{get_node_database, get_rt};
 use crate::state::NODES;
-use crate::types::{c_str_to_string, DefraRemoteSignCallback, FfiResult};
+use crate::types::{c_str_to_string, FfiResult};
 use crate::{ffi_async, ffi_entry, try_ffi};
 
-use super::identity_ops::{
-    decode_and_validate_public_key, parse_signing_key_type, store_remote_identity,
-    validate_public_key_bytes,
-};
+use super::identity_ops::parse_signing_key_type;
 
 /// Get the node's identity (DID).
 ///
@@ -103,111 +100,6 @@ pub extern "C" fn RegisterIdentity(
         match result {
             Ok(json) => FfiResult::success(json),
             Err(e) => FfiResult::error(e),
-        }
-    }
-}
-
-/// Register an identity whose private key stays outside DefraDB.
-///
-/// The host provides the DID, public key, key type, and a signing callback.
-/// This supports device-bound keys (for example Secure Enclave P-256 keys) and
-/// remote identity providers such as Orbis without exporting private key bytes.
-///
-/// Swift can import this symbol directly from the generated Apple package.
-/// The callback is required and uses a plain C function-pointer ABI.
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-#[no_mangle]
-pub extern "C" fn register_remote_identity(
-    did: *const c_char,
-    public_key_hex: *const c_char,
-    key_type: *const c_char,
-    signer_handle: usize,
-    callback: DefraRemoteSignCallback,
-) -> FfiResult {
-    ffi_entry! {
-        let result = (|| {
-            let did_str = unsafe { c_str_to_string(did) }.ok_or("invalid did parameter")?;
-            let pub_hex =
-                unsafe { c_str_to_string(public_key_hex) }.ok_or("invalid public_key_hex parameter")?;
-            let key_type_str =
-                unsafe { c_str_to_string(key_type) }.unwrap_or_else(|| "secp256r1".to_string());
-            let signing_key_type = parse_signing_key_type(&key_type_str)?;
-
-            let public_key_bytes =
-                decode_and_validate_public_key(&did_str, &pub_hex, signing_key_type)?;
-
-            store_remote_identity(
-                did_str,
-                public_key_bytes,
-                pub_hex,
-                signing_key_type,
-                signer_handle,
-                callback,
-            )
-        })();
-
-        match result {
-            Ok(json) => FfiResult::success(json),
-            Err(error) => FfiResult::error(error),
-        }
-    }
-}
-
-/// Register an identity whose public key is already available as raw bytes.
-///
-/// This is intended for Swift and Objective-C callers that already have the
-/// device public key as `Data` or `UnsafePointer<UInt8>`. The callback contract
-/// matches [`register_remote_identity`].
-///
-/// Public key format:
-/// - `secp256r1` / `secp256k1`: uncompressed SEC1 / X9.63 bytes
-/// - `ed25519`: raw 32-byte public key
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-#[no_mangle]
-pub extern "C" fn register_remote_identity_bytes(
-    did: *const c_char,
-    public_key_ptr: *const u8,
-    public_key_len: usize,
-    key_type: *const c_char,
-    signer_handle: usize,
-    callback: DefraRemoteSignCallback,
-) -> FfiResult {
-    ffi_entry! {
-        let result = (|| {
-            let did_str = unsafe { c_str_to_string(did) }.ok_or("invalid did parameter")?;
-            if public_key_ptr.is_null() || public_key_len == 0 {
-                return Err("invalid public_key_bytes parameter".to_string());
-            }
-            if public_key_len > 256 {
-                return Err(format!(
-                    "public_key_len {} exceeds maximum 256",
-                    public_key_len
-                ));
-            }
-            let key_type_str =
-                unsafe { c_str_to_string(key_type) }.unwrap_or_else(|| "secp256r1".to_string());
-            let signing_key_type = parse_signing_key_type(&key_type_str)?;
-            // SAFETY: `public_key_ptr` is non-null and `public_key_len` is
-            // bounded (checked above). The caller guarantees the pointer is
-            // valid for `public_key_len` bytes.
-            let public_key_bytes =
-                unsafe { std::slice::from_raw_parts(public_key_ptr, public_key_len) }.to_vec();
-
-            validate_public_key_bytes(&did_str, &public_key_bytes, signing_key_type)?;
-
-            store_remote_identity(
-                did_str,
-                public_key_bytes.clone(),
-                hex::encode(&public_key_bytes),
-                signing_key_type,
-                signer_handle,
-                callback,
-            )
-        })();
-
-        match result {
-            Ok(json) => FfiResult::success(json),
-            Err(error) => FfiResult::error(error),
         }
     }
 }
@@ -345,6 +237,7 @@ pub extern "C" fn create_identity() -> FfiResult {
 mod tests {
     use super::*;
     use crate::node::{new_node, node_close};
+    use crate::remote_signer::{register_remote_identity, register_remote_identity_bytes};
     use crate::types::NodeInitOptions;
     use crypto::{keys::Key, keys::PublicKey, PrivateKey};
     use std::ffi::{CStr, CString};

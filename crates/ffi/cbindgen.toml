@@ -21,6 +21,7 @@ documentation_style = "c"
 
 [export]
 include = [
+    "DefraRemoteSignAsyncCallback",
     "DefraRemoteSignCallback",
     "FfiResult",
     "NewNodeResult",

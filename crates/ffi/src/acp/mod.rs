@@ -6,7 +6,7 @@
 
 mod dac;
 mod identity;
-mod identity_ops;
+pub(crate) mod identity_ops;
 mod nac;
 
 pub use dac::{
@@ -15,7 +15,7 @@ pub use dac::{
 };
 pub use identity::{
     bind_identity_bearer_token, create_identity, get_node_identity, node_set_default_identity,
-    register_remote_identity, register_remote_identity_bytes, RegisterIdentity,
+    RegisterIdentity,
 };
 pub use nac::{
     add_nac_actor_relationship, delete_nac_actor_relationship, disable_nac, enable_nac,
