@@ -467,11 +467,11 @@ pub trait DocMutator: MaybeSendSync {
     }
 
     /// Whether update reads may be projected to the mutation's known field
-    /// dependencies. Implementations opting in must accept partially
-    /// materialized documents in `prepare_write` and `update`, preserve their
-    /// existing result/event semantics, and maintain every dependency they
-    /// inspect. Custom mutators retain full reads unless they explicitly opt
-    /// in.
+    /// dependencies. Documents remain fully materialized, but fields outside
+    /// that dependency set are not validated. Implementations opting in must
+    /// preserve result/event semantics and register every additional dependency
+    /// their preparation and update logic inspects. Custom mutators retain full
+    /// reads unless they explicitly opt in.
     fn supports_projected_updates(&self) -> bool {
         false
     }

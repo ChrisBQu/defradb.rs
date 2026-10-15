@@ -237,11 +237,11 @@ async fn issue1194_same_doc_disjoint_field_txn_pair_commits() {
     let cluster = build_cluster().await;
     let node = cluster.client(0);
 
-    node.schema_add("type Snap { status: String  content: String }")
+    node.schema_add("type Snap { status: String! content: String! untouched: String! }")
         .expect("schema add");
 
     let data = node
-        .query(r#"mutation { add_Snap(input: {status: "streaming", content: "init"}) { _docID } }"#)
+        .query(r#"mutation { add_Snap(input: {status: "streaming", content: "init", untouched: "preserved"}) { _docID } }"#)
         .expect("create doc");
     let id = data["add_Snap"][0]["_docID"].as_str().unwrap().to_string();
 
@@ -269,11 +269,12 @@ async fn issue1194_same_doc_disjoint_field_txn_pair_commits() {
 
     let final_doc = node
         .query(&format!(
-            r#"query {{ Snap(docID: "{id}") {{ status content }} }}"#
+            r#"query {{ Snap(docID: "{id}") {{ status content untouched }} }}"#
         ))
         .expect("read merged document");
     assert_eq!(final_doc["Snap"][0]["content"], json!("first"));
     assert_eq!(final_doc["Snap"][0]["status"], json!("claimed"));
+    assert_eq!(final_doc["Snap"][0]["untouched"], json!("preserved"));
 }
 
 /// A predicate read remains part of the transaction's dependency set, even if

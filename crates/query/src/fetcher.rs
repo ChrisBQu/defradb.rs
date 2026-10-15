@@ -205,11 +205,12 @@ pub trait DocFetcher: MaybeSendSync {
         doc_ids: &[String],
     ) -> Result<FetchByIdsResult>;
 
-    /// Get documents by ID while validating only the named document fields.
+    /// Get complete documents by ID while validating only the named fields.
     ///
     /// Implementations that cannot provide an exact projected read return
     /// `None`; callers must then use [`Self::get_by_ids`] and retain full-read
-    /// validation. The returned documents may still contain the full value.
+    /// validation. Projection narrows validation, not materialization: callers
+    /// still need the complete snapshot value for schema checks and events.
     async fn get_by_ids_projected(
         &self,
         _collection_name: &str,
