@@ -4,6 +4,7 @@
 //! older data is readable by the current storage layer. Lens migrations then
 //! provide document transforms between schema versions.
 
+mod counters;
 pub mod format;
 pub mod helpers;
 mod reindex;
@@ -26,6 +27,7 @@ impl<S: Store> DB<S> {
     /// documents or persisted lens configurations.
     pub(crate) async fn initialize_migrations(&self) -> Result<()> {
         self.maybe_migrate_v015_document_storage().await?;
+        self.maybe_migrate_counter_accumulators().await?;
         self.maybe_backfill_commit_priority_index().await?;
         self.reload_lens_configs().await
     }

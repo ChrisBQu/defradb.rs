@@ -2,6 +2,7 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+mod counter_migration;
 mod format;
 mod helpers;
 mod json;
