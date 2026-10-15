@@ -3,16 +3,20 @@
 use crate::error::Result;
 use async_trait::async_trait;
 use document::Document;
-use storage::corekv::MaybeSendSync;
+use storage::corekv::MaybeSend;
 
 /// A pull-based source of documents paired with their deletion status.
 ///
 /// Returned by [`crate::fetcher::DocFetcher::stream_all_with_deleted`]. Each
 /// call yields at most one document, so a consumer that stops pulling stops
 /// the underlying storage work.
+///
+/// A stream is owned by the one task that pulls it, through `&mut self`, so
+/// it may move between threads but is never shared: no `Sync` bound, and an
+/// implementation holds its iterator and read transaction as plain fields.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-pub trait DocStream: MaybeSendSync {
+pub trait DocStream: MaybeSend {
     /// Advance the stream. `Ok(None)` means exhausted; further calls keep
     /// returning `Ok(None)`.
     async fn next(&mut self) -> Result<Option<(Document, bool)>>;
@@ -78,6 +82,38 @@ mod tests {
     #[tokio::test]
     async fn vec_stream_empty_yields_none_immediately() {
         let mut stream = VecStream::new(Vec::new());
+        assert!(stream.next().await.unwrap().is_none());
+    }
+
+    /// A stream that is not `Sync` (it counts its pulls in a `Cell`) is still
+    /// a `DocStream`, and its box can move to another thread: one task owns
+    /// a stream, so nothing needs a lock to make it `Sync`.
+    #[tokio::test]
+    async fn a_stream_owned_by_one_task_need_not_be_sync() {
+        struct Counting {
+            pulls: std::cell::Cell<usize>,
+        }
+
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        impl DocStream for Counting {
+            async fn next(&mut self) -> Result<Option<(Document, bool)>> {
+                self.pulls.set(self.pulls.get() + 1);
+                Ok(None)
+            }
+        }
+
+        fn moves_between_threads<T>(_: &T)
+        where
+            T: Send,
+        {
+        }
+
+        let mut stream: Box<dyn DocStream> = Box::new(Counting {
+            pulls: std::cell::Cell::new(0),
+        });
+        moves_between_threads(&stream);
+        assert!(stream.next().await.unwrap().is_none());
         assert!(stream.next().await.unwrap().is_none());
     }
 }
