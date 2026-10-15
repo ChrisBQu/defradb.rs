@@ -70,8 +70,13 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         version_id: &str,
         is_active: bool,
     ) -> Result<schema::CollectionVersion> {
-        self.set_collection_active_in_txn_as(&RequestContext::ambient(), txn_id, version_id, is_active)
-            .await
+        self.set_collection_active_in_txn_as(
+            &RequestContext::ambient(),
+            txn_id,
+            version_id,
+            is_active,
+        )
+        .await
     }
 
     pub async fn set_collection_active_in_txn_as(

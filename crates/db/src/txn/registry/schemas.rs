@@ -130,8 +130,14 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         document_acp: Option<Arc<dyn acp::DocumentACP>>,
         creator: Option<identity::Did>,
     ) -> Result<Vec<schema::CollectionVersion>> {
-        self.add_schema_in_txn_with_acp_as(&RequestContext::ambient(), txn_id, sdl, document_acp, creator)
-            .await
+        self.add_schema_in_txn_with_acp_as(
+            &RequestContext::ambient(),
+            txn_id,
+            sdl,
+            document_acp,
+            creator,
+        )
+        .await
     }
 
     /// Add a schema within an existing transaction, optionally registering

@@ -120,16 +120,17 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
         self.owners()
             .map_err(|error| TransactionError::execution(error.to_string()))?
             .run_anywhere("txn.read", move || async move {
-                scope.mirror(async move {
-                    let txn = db.new_txn(true).await.map_err(|error| {
-                        TransactionError::execution(format!("storage error: {}", error))
-                    })?;
-                    // A snapshot of its own, never registered: no ID names it.
-                    let mut owned = OwnedTxn::new(TxnId::unnamed(), txn, db, None)
-                        .map_err(|error| TransactionError::execution(error.to_string()))?;
-                    within(timeout, job(&mut owned)).await
-                })
-                .await
+                scope
+                    .mirror(async move {
+                        let txn = db.new_txn(true).await.map_err(|error| {
+                            TransactionError::execution(format!("storage error: {}", error))
+                        })?;
+                        // A snapshot of its own, never registered: no ID names it.
+                        let mut owned = OwnedTxn::new(TxnId::unnamed(), txn, db, None)
+                            .map_err(|error| TransactionError::execution(error.to_string()))?;
+                        within(timeout, job(&mut owned)).await
+                    })
+                    .await
             })
             .await
             .map_err(|error| TransactionError::execution(error.to_string()))?

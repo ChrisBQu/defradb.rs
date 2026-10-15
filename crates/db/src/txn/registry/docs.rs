@@ -6,11 +6,7 @@ use query::txn::TxnTurn;
 
 impl<S: Store + 'static> DbTransactionRegistry<S> {
     /// [`Self::get_all_docs_as`] in [`RequestContext::ambient`].
-    pub async fn get_all_docs(
-        &self,
-        txn_id: &str,
-        collection_name: &str,
-    ) -> Result<Vec<Document>> {
+    pub async fn get_all_docs(&self, txn_id: &str, collection_name: &str) -> Result<Vec<Document>> {
         self.get_all_docs_as(&RequestContext::ambient(), txn_id, collection_name)
             .await
     }
@@ -19,7 +15,9 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
     pub async fn get_all_docs_as(
         &self,
         context: &RequestContext,
- txn_id: &str, collection_name: &str) -> Result<Vec<Document>> {
+        txn_id: &str,
+        collection_name: &str,
+    ) -> Result<Vec<Document>> {
         let collection_name = collection_name.to_owned();
         self.in_txn(context, txn_id, move |owned| {
             Box::pin(async move {

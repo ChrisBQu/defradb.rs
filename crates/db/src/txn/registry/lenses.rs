@@ -7,11 +7,7 @@ use storage::corekv::OnCommit;
 
 impl<S: Store + 'static> DbTransactionRegistry<S> {
     /// [`Self::add_lens_in_txn_as`] in [`RequestContext::ambient`].
-    pub async fn add_lens_in_txn(
-        &self,
-        txn_id: &str,
-        config: LensConfig,
-    ) -> Result<TransformId> {
+    pub async fn add_lens_in_txn(&self, txn_id: &str, config: LensConfig) -> Result<TransformId> {
         self.add_lens_in_txn_as(&RequestContext::ambient(), txn_id, config)
             .await
     }
@@ -24,7 +20,9 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
     pub async fn add_lens_in_txn_as(
         &self,
         context: &RequestContext,
- txn_id: &str, config: LensConfig) -> Result<TransformId> {
+        txn_id: &str,
+        config: LensConfig,
+    ) -> Result<TransformId> {
         self.db
             .check_node_access_as(context, acp::nac::NodePermission::LensCreate)
             .await?;

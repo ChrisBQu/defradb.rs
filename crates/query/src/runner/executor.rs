@@ -305,7 +305,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             // which nothing registers.
             let (context, deadline) = (self.context(), self.deadline());
             match self
-                .drive(&request, |job| self.registry.read_as(&context, deadline, job))
+                .drive(&request, |job| {
+                    self.registry.read_as(&context, deadline, job)
+                })
                 .await
             {
                 Err(TransactionError::NotSupported(_)) => {}
