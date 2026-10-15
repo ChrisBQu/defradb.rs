@@ -51,10 +51,17 @@ pub(crate) fn compute_document_blocks_with_inputs(
 ) -> Result<ComputedBlocks, BuildError> {
     let doc_ref_bytes = identity.doc_ref_bytes();
 
-    let mut blockstore_entries: Vec<(Vec<u8>, Bytes)> = Vec::new();
-    let mut headstore_entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-    let mut field_links: Vec<DAGLink> = Vec::new();
-    let mut field_cids: Vec<Cid> = Vec::new();
+    let field_count = doc
+        .values()
+        .len()
+        .saturating_sub(usize::from(doc.values().contains_key("_docID")));
+    let document_and_field_count = field_count.saturating_add(1);
+    let mut blockstore_entries: Vec<(Vec<u8>, Bytes)> =
+        Vec::with_capacity(document_and_field_count);
+    let mut headstore_entries: Vec<(Vec<u8>, Vec<u8>)> =
+        Vec::with_capacity(document_and_field_count.saturating_mul(3));
+    let mut field_links: Vec<DAGLink> = Vec::with_capacity(field_count);
+    let mut field_cids: Vec<Cid> = Vec::with_capacity(field_count);
     let mut encryption_cids: Vec<Cid> = Vec::new();
 
     let priority: u64 = 1; // Always 1 for creates
