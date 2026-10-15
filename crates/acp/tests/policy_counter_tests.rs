@@ -97,10 +97,11 @@ async fn persistent_store_counter_survives_reopen() {
     );
 }
 
-/// New installations allocate independently of policy enumeration. Explicit
-/// policy IDs do not consume counter reservations.
+/// Stores written before the counter key existed have policies but no counter.
+/// Starting from 1 there would re-mint an id that is already in use, so the
+/// absent key is seeded from the number of policies already stored.
 #[tokio::test]
-async fn persistent_store_counter_is_independent_of_explicit_policy_ids() {
+async fn persistent_store_counter_seeds_from_existing_policies() {
     let store = PersistentZanzibarStore::from_store(Arc::new(RegolithStore::in_memory().unwrap()));
 
     for id in ["policy-a", "policy-b", "policy-c"] {
@@ -112,8 +113,43 @@ async fn persistent_store_counter_is_independent_of_explicit_policy_ids() {
 
     assert_eq!(
         store.next_policy_counter().await.unwrap(),
-        1,
-        "explicit policy IDs do not consume the engine counter"
+        4,
+        "three pre-existing policies means counters 1..3 are spent"
+    );
+}
+
+/// Seeding races between store instances over one backing store must leave
+/// gaps at worst: every instance hands out distinct values above the seed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn persistent_store_counter_seeding_never_repeats_across_instances() {
+    let backing = Arc::new(RegolithStore::in_memory().unwrap());
+    let legacy = PersistentZanzibarStore::from_store(backing.clone());
+    for id in ["policy-a", "policy-b", "policy-c"] {
+        legacy
+            .store_policy(&Policy::new(id, "legacy"))
+            .await
+            .unwrap();
+    }
+    drop(legacy);
+
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let store = PersistentZanzibarStore::from_store(backing.clone());
+        handles.push(tokio::spawn(async move {
+            store.next_policy_counter().await.unwrap()
+        }));
+    }
+    let mut issued = Vec::new();
+    for handle in handles {
+        issued.push(handle.await.unwrap());
+    }
+    issued.sort_unstable();
+    issued.dedup();
+
+    assert_eq!(issued.len(), 8, "every instance gets a distinct counter");
+    assert!(
+        issued.iter().all(|counter| *counter > 3),
+        "no instance re-mints a counter a stored policy spent: {issued:?}"
     );
 }
 

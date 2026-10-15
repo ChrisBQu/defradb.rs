@@ -1058,6 +1058,7 @@ async fn auto_commit_create_registers_acp_before_publishing_update() {
     let acp: Arc<dyn DocumentACP> =
         Arc::new(LocalDocumentACP::new(Arc::new(MemoryAcpStore::new())));
     let mutator = db::AutoCommitMutator::new(db);
+    // The database gates a non-transactional provider itself.
     mutator.set_document_acp(acp.clone());
     let mut sub = bus.subscribe(&[EventName::Update]);
     let owner = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";

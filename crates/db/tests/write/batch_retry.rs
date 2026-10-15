@@ -746,7 +746,12 @@ async fn remote_acp_batch_replays_with_attempt_local_registration_projection() {
         ))),
         registrations: AtomicUsize::new(0),
     });
-    db.set_document_acp(acp.clone());
+    // A non-transactional provider is external: reads and writes go through
+    // the gate of owed registrations, as every node wires it.
+    db.set_document_acp(Arc::new(acp::ExternalDocumentAcp::new(
+        acp.clone(),
+        db.store().clone(),
+    )));
     let db = Arc::new(db);
 
     let runner = query::QueryRunner::with_provider(

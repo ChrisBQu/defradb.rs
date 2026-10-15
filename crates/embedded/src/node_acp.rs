@@ -35,7 +35,7 @@ where
             );
             let sh_acp = Arc::new(vera::VeraDocumentACP::new(provider, tuning.cache_ttl));
             Ok(DocumentAcpSetup {
-                document_acp: sh_acp.clone(),
+                document_acp: gate_external_acp(sh_acp.clone(), store),
                 local_zanzibar_store: None,
                 vera_acp: Some(sh_acp),
             })
@@ -59,7 +59,7 @@ where
             );
             let vera_acp = Arc::new(vera::VeraDocumentACP::new(provider, tuning.cache_ttl));
             Ok(DocumentAcpSetup {
-                document_acp: vera_acp.clone(),
+                document_acp: gate_external_acp(vera_acp.clone(), store),
                 local_zanzibar_store: None,
                 vera_acp: Some(vera_acp),
             })
@@ -71,6 +71,37 @@ where
             Ok(local_document_acp_setup(document_acp, zanzibar_store))
         }
     }
+}
+
+/// Gate a Vera provider with the registrations creates still owe it, and
+/// settle in the background any a previous run left owed (a crash, or a
+/// provider call that failed). Until settled, such a document is readable only
+/// by its creator.
+#[cfg(feature = "vera")]
+fn gate_external_acp<S>(
+    provider: Arc<dyn acp::DocumentACP>,
+    store: Arc<S>,
+) -> Arc<dyn acp::DocumentACP>
+where
+    S: storage::corekv::Store + 'static,
+{
+    let gate = Arc::new(acp::ExternalDocumentAcp::new(provider, store));
+    let redrive = Arc::clone(&gate);
+    tokio::spawn(async move {
+        match redrive.redrive_owed().await {
+            Ok(report) if report.settled > 0 => tracing::info!(
+                settled = report.settled,
+                failed = report.failed,
+                "Settled ACP registrations owed from a previous run"
+            ),
+            Ok(_) => {}
+            Err(error) => tracing::warn!(
+                %error,
+                "Could not read owed ACP registrations; their documents stay readable only by their creators"
+            ),
+        }
+    });
+    gate
 }
 
 fn local_document_acp_setup(

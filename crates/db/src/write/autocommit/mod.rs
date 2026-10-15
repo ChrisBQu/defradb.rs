@@ -78,7 +78,10 @@ impl<S: Store> AutoCommitMutator<S> {
         }
     }
 
-    pub fn set_document_acp(&self, acp: Arc<dyn acp::DocumentACP>) {
+    pub fn set_document_acp(&self, acp: Arc<dyn acp::DocumentACP>)
+    where
+        S: 'static,
+    {
         self.db.set_document_acp(acp);
     }
 
@@ -124,16 +127,11 @@ impl<S: Store> AutoCommitMutator<S> {
                 Some(creator.to_string()),
                 request_bearer_token,
                 async move {
-                    if !acp
-                        .is_doc_registered(&policy_id, &resource_name, &doc_id)
+                    acp.redrive_registration(&policy_id, &resource_name, &doc_id)
                         .await
-                        .map_err(|error| format!("failed to check ACP registration before publishing update: {error}"))?
-                    {
-                        acp.register_doc_object(&creator, &policy_id, &resource_name, &doc_id)
-                            .await
-                            .map_err(|error| format!("failed to register document with ACP before publishing update: {error}"))?;
-                    }
-                    Ok(())
+                        .map_err(|error| {
+                            format!("failed to register document with ACP before publishing update: {error}")
+                        })
                 },
             ))
         }));
@@ -188,6 +186,7 @@ impl<S: Store> AutoCommitMutator<S> {
         &self,
     ) -> query::error::Result<(Arc<BatchMutator<S>>, Arc<LensedDocFetcher<S>>)> {
         let txn = self.new_mutation_txn().await?;
+        let acp_registration_projection = txn.acp_registration_projection();
         let fetcher = Arc::new(LensedDocFetcher::new(
             self.db.clone(),
             txn,
@@ -197,6 +196,7 @@ impl<S: Store> AutoCommitMutator<S> {
             self.db.clone(),
             fetcher.shared_txn(),
             self.prepared_inputs.clone(),
+            acp_registration_projection,
         ));
         Ok((batch, fetcher))
     }

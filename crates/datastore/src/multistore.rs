@@ -176,6 +176,24 @@ impl SharedTxn {
     }
 }
 
+/// A [`NamespaceView`] that does not keep its transaction in use.
+#[derive(Clone)]
+pub struct WeakNamespaceView {
+    txn: std::sync::Weak<SharedTxn>,
+    namespace: Namespace,
+}
+
+impl WeakNamespaceView {
+    /// The view, while its transaction has not been committed, rolled back or
+    /// dropped.
+    pub fn upgrade(&self) -> Option<NamespaceView> {
+        self.txn.upgrade().map(|txn| NamespaceView {
+            txn,
+            namespace: self.namespace,
+        })
+    }
+}
+
 /// A view into a specific namespace of a shared transaction.
 pub struct NamespaceView {
     txn: Arc<SharedTxn>,
@@ -209,6 +227,15 @@ impl NamespaceView {
         Self {
             txn: self.txn.clone(),
             namespace,
+        }
+    }
+
+    /// A handle to this view that does not keep the transaction in use, so
+    /// the transaction can still commit or roll back while it is held.
+    pub fn downgrade(&self) -> WeakNamespaceView {
+        WeakNamespaceView {
+            txn: Arc::downgrade(&self.txn),
+            namespace: self.namespace,
         }
     }
 

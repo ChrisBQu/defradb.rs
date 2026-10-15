@@ -5,8 +5,6 @@ use acp::DocumentACP;
 use acp::DocumentPermission;
 use acp::Identity;
 use identity::Did;
-use kovan::Atom;
-use rapidhash::RapidHashMap;
 use std::sync::Arc;
 use storage::corekv::MaybeSendSync;
 
@@ -14,142 +12,70 @@ use crate::fetcher::CollectionProvider;
 use crate::fetcher::DocFetcher;
 use crate::mutator::DocMutator;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum ProjectedDocRegistration {
-    Registered { owner: Did },
-    Unregistered,
-}
-
-#[derive(Clone, Debug, Hash, PartialEq, Eq)]
-struct DocRegistrationKey {
-    policy_id: String,
-    resource_name: String,
-    doc_id: String,
-}
-
+/// A transaction's view of the registrations its creates owe an external ACP
+/// provider (see [`acp::pending`]). The owed records are the transaction's own
+/// writes, so its statement savepoints and its rollback cover them and nothing
+/// is copied here: a lookup is one point read through the transaction, and the
+/// post-commit hooks that settle the records stay attached to the transaction
+/// that owns the document writes. Remote ACP updates are not atomic with
+/// storage; the records only keep each owed document readable by its creator
+/// alone until the provider confirms.
 #[derive(Clone, Default)]
-struct AcpRegistrationState {
-    projected_registrations: RapidHashMap<DocRegistrationKey, ProjectedDocRegistration>,
-}
-
-/// Transaction or request scoped projection of external ACP registration writes.
-///
-/// External ACP providers cannot participate in the storage transaction. This
-/// projection preserves read-your-own-registration behavior while the ordered
-/// post-commit hooks remain attached to the transaction that owns the document
-/// writes. It does not make remote ACP updates atomic with storage.
-#[derive(Default)]
 pub struct AcpRegistrationProjection {
-    state: Atom<AcpRegistrationState>,
-    savepoints: Atom<Vec<RapidHashMap<DocRegistrationKey, ProjectedDocRegistration>>>,
+    pending: Option<acp::PendingRegistrations>,
 }
 
 impl AcpRegistrationProjection {
-    pub fn new() -> Self {
+    /// Read owed registrations through the transaction behind `pending`.
+    pub fn new(pending: acp::PendingRegistrations) -> Self {
+        Self {
+            pending: Some(pending),
+        }
+    }
+
+    /// A projection with no transaction behind it: nothing is owed through it.
+    pub fn detached() -> Self {
         Self::default()
     }
 
-    pub fn set_savepoint(&self) {
-        let projected = self
-            .state
-            .peek(|state| state.projected_registrations.clone());
-        self.savepoints.rcu(|savepoints| {
-            let mut savepoints = savepoints.clone();
-            savepoints.push(projected.clone());
-            savepoints
-        });
-    }
-
-    pub fn rollback_to_savepoint(&self) -> Result<(), String> {
-        let mut restored = None;
-        self.savepoints.rcu(|savepoints| {
-            let mut savepoints = savepoints.clone();
-            restored = savepoints.pop();
-            savepoints
-        });
-        let Some(saved) = restored else {
-            return Err("ACP projection has no active statement savepoint".into());
+    /// The creator a registration is owed to, as this transaction sees it.
+    pub async fn owed_creator(
+        &self,
+        policy_id: &str,
+        resource_name: &str,
+        doc_id: &str,
+    ) -> AcpResult<Option<Did>> {
+        let Some(pending) = &self.pending else {
+            return Ok(None);
         };
-        self.state.rcu(|state| {
-            let mut state = state.clone();
-            state.projected_registrations = saved.clone();
-            state
-        });
-        Ok(())
+        Ok(pending
+            .get(policy_id, resource_name, doc_id)
+            .await?
+            .map(|owed| owed.creator))
     }
+}
 
-    pub fn release_savepoint(&self) -> Result<(), String> {
-        let mut had_savepoint = false;
-        self.savepoints.rcu(|savepoints| {
-            let mut savepoints = savepoints.clone();
-            had_savepoint = savepoints.pop().is_some();
-            savepoints
-        });
-        if had_savepoint {
-            Ok(())
-        } else {
-            Err("ACP projection has no active statement savepoint".into())
+/// Only an external provider is owed registrations; a transactional one
+/// registers inside the create's transaction, so nothing is read for it.
+async fn owed_creator(
+    acp: &dyn DocumentACP,
+    projection: Option<&AcpRegistrationProjection>,
+    policy_id: &str,
+    resource_name: &str,
+    doc_id: &str,
+) -> AcpResult<Option<Did>> {
+    match projection {
+        Some(projection) if !acp.supports_transactions() => {
+            projection
+                .owed_creator(policy_id, resource_name, doc_id)
+                .await
         }
+        _ => Ok(None),
     }
+}
 
-    fn doc_key(policy_id: &str, resource_name: &str, doc_id: &str) -> DocRegistrationKey {
-        DocRegistrationKey {
-            policy_id: policy_id.to_string(),
-            resource_name: resource_name.to_string(),
-            doc_id: doc_id.to_string(),
-        }
-    }
-
-    fn projected_registration(
-        &self,
-        policy_id: &str,
-        resource_name: &str,
-        doc_id: &str,
-    ) -> AcpResult<Option<ProjectedDocRegistration>> {
-        Ok(self.state.peek(|state| {
-            state
-                .projected_registrations
-                .get(&Self::doc_key(policy_id, resource_name, doc_id))
-                .cloned()
-        }))
-    }
-
-    pub fn project_registration(
-        &self,
-        policy_id: &str,
-        resource_name: &str,
-        doc_id: &str,
-        owner: Did,
-    ) -> Result<(), String> {
-        self.state.rcu(|old| {
-            let mut next = old.clone();
-            next.projected_registrations.insert(
-                Self::doc_key(policy_id, resource_name, doc_id),
-                ProjectedDocRegistration::Registered {
-                    owner: owner.clone(),
-                },
-            );
-            next
-        });
-        Ok(())
-    }
-
-    pub fn project_unregistration(
-        &self,
-        policy_id: &str,
-        resource_name: &str,
-        doc_id: &str,
-    ) -> Result<(), String> {
-        self.state.rcu(|old| {
-            let mut next = old.clone();
-            next.projected_registrations.insert(
-                Self::doc_key(policy_id, resource_name, doc_id),
-                ProjectedDocRegistration::Unregistered,
-            );
-            next
-        });
-        Ok(())
-    }
+fn is_creator(identity: &Identity, creator: &Did) -> bool {
+    matches!(identity, Identity::Authenticated(did) if did == creator)
 }
 
 /// Check document registration using an explicit request/transaction projection.
@@ -160,15 +86,11 @@ pub async fn is_doc_registered_with_projection(
     resource_name: &str,
     doc_id: &str,
 ) -> AcpResult<bool> {
-    if let Some(projection) = projection {
-        if let Some(projected) =
-            projection.projected_registration(policy_id, resource_name, doc_id)?
-        {
-            return Ok(matches!(
-                projected,
-                ProjectedDocRegistration::Registered { .. }
-            ));
-        }
+    if owed_creator(acp, projection, policy_id, resource_name, doc_id)
+        .await?
+        .is_some()
+    {
+        return Ok(true);
     }
     acp.is_doc_registered(policy_id, resource_name, doc_id)
         .await
@@ -185,18 +107,14 @@ pub async fn is_doc_registered_with_prepared_inputs(
     doc_id: &str,
     inputs: Option<&crate::prepared::PreparedInputMemo>,
 ) -> crate::error::Result<bool> {
-    if let Some(projection) = projection {
-        if let Some(projected) = projection
-            .projected_registration(policy_id, resource_name, doc_id)
-            .map_err(|error| crate::error::QueryError::execution(error.to_string()))?
-        {
-            return Ok(matches!(
-                projected,
-                ProjectedDocRegistration::Registered { .. }
-            ));
-        }
+    if owed_creator(acp, projection, policy_id, resource_name, doc_id)
+        .await
+        .map_err(|error| crate::error::QueryError::execution(error.to_string()))?
+        .is_some()
+    {
+        return Ok(true);
     }
-    if acp.supports_transactions() || inputs.is_none() {
+    let Some(inputs) = inputs.filter(|_| !acp.supports_transactions()) else {
         return is_doc_registered_with_projection(
             acp,
             projection,
@@ -206,7 +124,7 @@ pub async fn is_doc_registered_with_prepared_inputs(
         )
         .await
         .map_err(|error| crate::error::QueryError::execution(error.to_string()));
-    }
+    };
     let bearer = identity
         .did()
         .and_then(|did| defra_core::signing::get_request_bearer_token(did.as_str()));
@@ -223,7 +141,7 @@ pub async fn is_doc_registered_with_prepared_inputs(
         crate::prepared::PreparedInputKind::AcpDecision,
         exact_request,
     );
-    let Some(response) = inputs.expect("checked above").get(&request) else {
+    let Some(response) = inputs.get(&request) else {
         return Err(crate::error::QueryError::NeedsInput(request));
     };
     serde_json::from_slice(&response).map_err(|error| {
@@ -241,17 +159,8 @@ pub async fn check_doc_access_with_projection(
     resource_name: &str,
     doc_id: &str,
 ) -> AcpResult<bool> {
-    if let Some(projection) = projection {
-        if let Some(projected) =
-            projection.projected_registration(policy_id, resource_name, doc_id)?
-        {
-            return Ok(match projected {
-                ProjectedDocRegistration::Unregistered => acp.unregistered_documents_are_public(),
-                ProjectedDocRegistration::Registered { owner } => {
-                    matches!(identity, Identity::Authenticated(did) if did == &owner)
-                }
-            });
-        }
+    if let Some(creator) = owed_creator(acp, projection, policy_id, resource_name, doc_id).await? {
+        return Ok(is_creator(identity, &creator));
     }
     acp.check_doc_access(identity, permission, policy_id, resource_name, doc_id)
         .await
@@ -271,22 +180,15 @@ pub async fn check_doc_access_with_prepared_inputs(
     doc_id: &str,
     inputs: Option<&crate::prepared::PreparedInputMemo>,
 ) -> crate::error::Result<bool> {
-    // Projected registrations override remote state, while transaction-capable
-    // providers stay live so their reads participate in OCC.
-    if let Some(projected) = projection
-        .map(|projection| projection.projected_registration(policy_id, resource_name, doc_id))
-        .transpose()
+    // A registration this transaction owes overrides remote state, while
+    // transaction-capable providers stay live so their reads participate in OCC.
+    if let Some(creator) = owed_creator(acp, projection, policy_id, resource_name, doc_id)
+        .await
         .map_err(|error| crate::error::QueryError::execution(error.to_string()))?
-        .flatten()
     {
-        return Ok(match projected {
-            ProjectedDocRegistration::Unregistered => acp.unregistered_documents_are_public(),
-            ProjectedDocRegistration::Registered { owner } => {
-                matches!(identity, Identity::Authenticated(did) if did == &owner)
-            }
-        });
+        return Ok(is_creator(identity, &creator));
     }
-    if acp.supports_transactions() || inputs.is_none() {
+    let Some(inputs) = inputs.filter(|_| !acp.supports_transactions()) else {
         return check_doc_access_with_projection(
             acp,
             projection,
@@ -298,8 +200,7 @@ pub async fn check_doc_access_with_prepared_inputs(
         )
         .await
         .map_err(|error| crate::error::QueryError::execution(error.to_string()));
-    }
-    let inputs = inputs.expect("checked above");
+    };
     let bearer = identity
         .did()
         .and_then(|did| defra_core::signing::get_request_bearer_token(did.as_str()));
@@ -367,26 +268,13 @@ pub async fn check_doc_read_access_with_prepared_inputs(
         object_id: &str,
         inputs: &crate::prepared::PreparedInputMemo,
     ) -> crate::error::Result<DocAccess> {
-        if let Some(projected) = projection
-            .map(|projection| {
-                projection.projected_registration(policy_id, resource_name, object_id)
-            })
-            .transpose()
+        if let Some(creator) = owed_creator(acp, projection, policy_id, resource_name, object_id)
+            .await
             .map_err(|error| crate::error::QueryError::execution(error.to_string()))?
-            .flatten()
         {
-            let (has_access, explicit) = match projected {
-                ProjectedDocRegistration::Unregistered => {
-                    (acp.unregistered_documents_are_public(), false)
-                }
-                ProjectedDocRegistration::Registered { owner } => (
-                    matches!(identity, Identity::Authenticated(did) if did == &owner),
-                    true,
-                ),
-            };
             return Ok(DocAccess {
-                has_access,
-                explicit,
+                has_access: is_creator(identity, &creator),
+                explicit: true,
             });
         }
 
@@ -554,109 +442,11 @@ pub trait TransactionContext: MaybeSendSync {
 mod tests {
     use super::*;
 
-    #[test]
-    fn concurrent_projection_writes_compose_without_lost_updates() {
-        let projection = AcpRegistrationProjection::new();
-        let owner: Did = "did:key:z6MksQ6mYqY1YxR4KQ2NW6y6x8vJrNs2LEd8w5pYxHw3rroA"
-            .parse()
-            .unwrap();
-
-        std::thread::scope(|scope| {
-            for index in 0..32 {
-                let projection = &projection;
-                let owner = owner.clone();
-                scope.spawn(move || {
-                    projection
-                        .project_registration("policy", "User", &format!("doc-{index}"), owner)
-                        .unwrap();
-                });
-            }
-        });
-
-        for index in 0..32 {
-            assert!(matches!(
-                projection
-                    .projected_registration("policy", "User", &format!("doc-{index}"))
-                    .unwrap(),
-                Some(ProjectedDocRegistration::Registered { .. })
-            ));
-        }
-    }
-
     #[tokio::test]
-    async fn projected_registration_reports_registered_and_owner_only_access() {
-        let projection = AcpRegistrationProjection::new();
-        let owner: Did = "did:key:z6MksQ6mYqY1YxR4KQ2NW6y6x8vJrNs2LEd8w5pYxHw3rroA"
-            .parse()
-            .unwrap();
-        let stranger: Did = "did:key:z6MkwQm1zZ1p9raM2AfU4vX9y1Aq5PEYB9H9n1tFoZT3zh7T"
-            .parse()
-            .unwrap();
-        projection
-            .project_registration("policy", "User", "doc-1", owner.clone())
-            .unwrap();
-
-        assert!(check_doc_access_with_projection(
-            &NoopDocumentAcp(true),
-            Some(&projection),
-            &Identity::Authenticated(owner),
-            DocumentPermission::Read,
-            "policy",
-            "User",
-            "doc-1",
-        )
-        .await
-        .unwrap());
-        assert!(!check_doc_access_with_projection(
-            &NoopDocumentAcp(true),
-            Some(&projection),
-            &Identity::Authenticated(stranger),
-            DocumentPermission::Read,
-            "policy",
-            "User",
-            "doc-1",
-        )
-        .await
-        .unwrap());
-    }
-
-    #[tokio::test]
-    async fn projected_unregistration_reports_public_access() {
-        let projection = AcpRegistrationProjection::new();
-        projection
-            .project_unregistration("policy", "User", "doc-1")
-            .unwrap();
-
-        assert!(check_doc_access_with_projection(
-            &NoopDocumentAcp(true),
-            Some(&projection),
-            &Identity::Anonymous,
-            DocumentPermission::Read,
-            "policy",
-            "User",
-            "doc-1",
-        )
-        .await
-        .unwrap());
-        assert!(!is_doc_registered_with_projection(
-            &NoopDocumentAcp(true),
-            Some(&projection),
-            "policy",
-            "User",
-            "doc-1",
-        )
-        .await
-        .unwrap());
-    }
-
-    #[tokio::test]
-    async fn private_unregistration_denies_overlay_and_shared_reads() {
+    async fn private_unregistered_doc_denies_overlay_and_shared_reads() {
         use acp::read_access::{check_doc_read_access, ObjectAccessChecker};
         let acp = NoopDocumentAcp(false);
-        let projection = AcpRegistrationProjection::new();
-        projection
-            .project_unregistration("policy", "User", "doc-1")
-            .unwrap();
+        let projection = AcpRegistrationProjection::detached();
         let checker = crate::txn::OverlayChecker {
             acp: &acp,
             projection: Some(&projection),
@@ -676,12 +466,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn projected_unregistered_branchable_doc_falls_back_to_collection_policy() {
-        let projection = AcpRegistrationProjection::new();
-        projection
-            .project_unregistration("policy", "User", "doc-1")
-            .unwrap();
+    async fn unregistered_branchable_doc_falls_back_to_collection_policy() {
+        let projection = AcpRegistrationProjection::detached();
         let memo = crate::prepared::PreparedInputMemo::default();
+        let doc_request = crate::prepared::PreparedInputRequest::new(
+            crate::prepared::PreparedInputKind::AcpDecision,
+            serde_json::to_vec(&(
+                "anonymous",
+                "registered",
+                "policy",
+                "User",
+                "doc-1",
+                None::<String>,
+            ))
+            .unwrap(),
+        );
+        assert!(memo.insert(
+            doc_request,
+            std::sync::Arc::<[u8]>::from(b"false".as_slice())
+        ));
         let request_bytes = serde_json::to_vec(&(
             "anonymous",
             "registered",

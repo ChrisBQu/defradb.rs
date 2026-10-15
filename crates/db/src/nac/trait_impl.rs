@@ -37,7 +37,7 @@ impl<S: ZanzibarStore + ?Sized + 'static> NacManagerApi for NacManager<S> {
         if !self.nac.supports_transactions() {
             return self.check_permission(identity, permission).await;
         }
-        let scoped = acp::nac::NodeACP::new(std::sync::Arc::new(
+        let scoped = self.nac.scoped(std::sync::Arc::new(
             acp::zanzibar::store::TransactionZanzibarStore::new(view),
         ));
         scoped

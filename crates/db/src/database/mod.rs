@@ -455,8 +455,22 @@ impl<S: Store> DB<S> {
         self.migration_generation.fetch_add(1, Ordering::AcqRel);
     }
 
-    /// Install the node's document authorization provider before serving mutations.
-    pub fn set_document_acp(&self, provider: Arc<dyn acp::DocumentACP>) {
+    /// Install the node's document authorization provider before serving
+    /// mutations. A non-transactional provider is gated by the registrations
+    /// creates owe it (see [`acp::ExternalDocumentAcp`]) unless it already is.
+    pub fn set_document_acp(&self, provider: Arc<dyn acp::DocumentACP>)
+    where
+        S: 'static,
+    {
+        let provider: Arc<dyn acp::DocumentACP> =
+            if provider.supports_transactions() || provider.settles_owed_registrations() {
+                provider
+            } else {
+                Arc::new(acp::ExternalDocumentAcp::new(
+                    provider,
+                    Arc::clone(&self.store),
+                ))
+            };
         let _ = self.document_acp.set(provider);
     }
 

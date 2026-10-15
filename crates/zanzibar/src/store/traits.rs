@@ -45,6 +45,11 @@ pub trait ZanzibarStore: MaybeSendSync {
 
     async fn get_policy(&self, policy_id: &str) -> Result<Option<Policy>>;
 
+    /// Whether a policy is stored under `policy_id`, without parsing it.
+    async fn has_policy(&self, policy_id: &str) -> Result<bool> {
+        Ok(self.get_policy(policy_id).await?.is_some())
+    }
+
     async fn list_policies(&self) -> Result<Vec<Policy>>;
 
     /// Return the next policy-ID counter value, advancing the stored counter.

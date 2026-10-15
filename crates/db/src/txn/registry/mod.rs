@@ -20,8 +20,7 @@ use kovan_queue::seg_queue::SegQueue;
 use lens::{LensConfig, LensModule, TransformId};
 use query::error::TransactionError;
 use query::txn::{
-    AcpRegistrationProjection, GetTransactionResult, TransactionContext, TransactionHandle,
-    TransactionRegistry,
+    GetTransactionResult, TransactionContext, TransactionHandle, TransactionRegistry,
 };
 use rapidhash::fast::RandomState;
 use std::sync::atomic::{AtomicU64, Ordering};

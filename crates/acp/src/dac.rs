@@ -59,6 +59,28 @@ pub trait DocumentACP: MaybeSendSync {
         doc_id: &str,
     ) -> Result<()>;
 
+    /// Whether this provider reads and settles the registrations creates owe
+    /// it (see [`crate::pending`]), as [`crate::ExternalDocumentAcp`] does. A
+    /// non-transactional provider that does not is wrapped in one by the
+    /// database it is installed in.
+    fn settles_owed_registrations(&self) -> bool {
+        false
+    }
+
+    /// Complete the registration a create owes this provider for `doc_id`
+    /// (see [`crate::pending`]): register the recorded creator and clear the
+    /// record. Nothing is owed when no record exists, which is always the case
+    /// for a provider that registers inside the create's transaction.
+    async fn redrive_registration(
+        &self,
+        policy_id: &str,
+        resource_name: &str,
+        doc_id: &str,
+    ) -> Result<()> {
+        let _ = (policy_id, resource_name, doc_id);
+        Ok(())
+    }
+
     /// Register an ACP object with creator as owner.
     ///
     /// Documents use `id = docID`; branchable collections use

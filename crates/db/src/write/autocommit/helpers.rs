@@ -204,20 +204,31 @@ pub(crate) async fn register_created_doc(
     .await
     .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
+    // Registration happens only here, on the create branch. A local provider
+    // registers in this transaction; an external one cannot join it, so the
+    // registration it is owed is recorded here and settled after the commit.
     if let (Some(provider), Some(policy), Some(creator)) = (
         acp,
         collection.schema().policy.as_ref(),
         defra_core::signing::get_broadcast_creator_did(),
     ) {
-        if let Some(scoped) =
-            provider.bind_transaction(systemstore.sibling(storage::namespace::Namespace::Acpstore))
-        {
-            let creator = identity::Did::new(&creator)
-                .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
-            scoped
+        let creator = identity::Did::new(&creator)
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+        let acpstore = systemstore.sibling(storage::namespace::Namespace::Acpstore);
+        match provider.bind_transaction(acpstore.clone()) {
+            Some(scoped) => scoped
                 .register_doc_object(&creator, &policy.id, &policy.resource_name, doc_id_str)
                 .await
-                .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+                .map_err(|e| query::error::QueryError::execution(e.to_string()))?,
+            None => acp::PendingRegistrations::new(&acpstore)
+                .record(&acp::PendingRegistration::new(
+                    creator,
+                    &policy.id,
+                    &policy.resource_name,
+                    doc_id_str,
+                ))
+                .await
+                .map_err(|e| query::error::QueryError::execution(e.to_string()))?,
         }
     }
 
@@ -644,13 +655,17 @@ pub(crate) async fn unregister_deleted_doc(
     doc_id: &DocID,
 ) -> query::error::Result<()> {
     if let (Some(provider), Some(policy)) = (provider, collection.schema().policy.as_ref()) {
-        if let Some(scoped) =
-            provider.bind_transaction(systemstore.sibling(storage::namespace::Namespace::Acpstore))
-        {
-            scoped
+        let acpstore = systemstore.sibling(storage::namespace::Namespace::Acpstore);
+        match provider.bind_transaction(acpstore.clone()) {
+            Some(scoped) => scoped
                 .unregister_doc_object(&policy.id, &policy.resource_name, &doc_id.to_string())
                 .await
-                .map_err(|error| query::error::QueryError::execution(error.to_string()))?;
+                .map_err(|error| query::error::QueryError::execution(error.to_string()))?,
+            // A registration still owed for a deleted document is owed no more.
+            None => acp::PendingRegistrations::new(&acpstore)
+                .clear(&policy.id, &policy.resource_name, &doc_id.to_string())
+                .await
+                .map_err(|error| query::error::QueryError::execution(error.to_string()))?,
         }
     }
     Ok(())

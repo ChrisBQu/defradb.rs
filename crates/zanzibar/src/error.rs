@@ -14,6 +14,11 @@ pub enum Error {
     #[error("permission evaluation {0} limit exceeded")]
     EvaluationLimitExceeded(&'static str),
 
+    #[error(
+        "the permission check needs a store read that is not ready; use the asynchronous check"
+    )]
+    EvaluationPending,
+
     #[error("serialization error: {0}")]
     Json(#[from] serde_json::Error),
 

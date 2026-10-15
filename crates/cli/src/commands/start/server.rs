@@ -142,6 +142,7 @@ impl Node {
             config,
             identity_key_bytes.as_deref(),
             acp_store,
+            store.clone(),
             zanzibar_store.clone(),
             event_bus.clone(),
             db::node_access_checker(database.clone()),

@@ -102,15 +102,40 @@ impl<S: ZanzibarStore + ?Sized + 'static> NodeACP<S> {
         }
     }
 
+    /// A NodeACP over `store` (a transaction or a scope) that shares this
+    /// one's policy snapshot. Its state is unknown until [`load`](Self::load).
+    pub fn scoped<T>(&self, store: Arc<T>) -> NodeACP<T>
+    where
+        T: ZanzibarStore + ?Sized + 'static,
+    {
+        NodeACP {
+            engine: self.engine.sharing(store.clone()),
+            store,
+            status: Atom::new(NacStatus::NotConfigured),
+            owner: AtomOption::none(),
+        }
+    }
+
     /// Load existing NAC state from the store.
     ///
-    /// Should be called during startup to restore NAC state.
+    /// Should be called during startup to restore NAC state. Whether NAC is
+    /// configured, its owner and its disabled flag are read from the store;
+    /// the policy body is parsed only when the shared snapshot lacks it. Only
+    /// `enable` writes that body, always [`create_node_policy`], so publishing
+    /// what a scope read cannot put a different body in the snapshot.
+    ///
+    /// [`create_node_policy`]: crate::nac::create_node_policy
     pub async fn load(&self) -> Result<()> {
-        if let Some(policy) = self.store.get_policy(NODE_POLICY_ID).await? {
+        let configured = if self.engine.snapshot().lookup.has_policy(NODE_POLICY_ID) {
+            self.store.has_policy(NODE_POLICY_ID).await?
+        } else if let Some(policy) = self.store.get_policy(NODE_POLICY_ID).await? {
             validate_node_policy(&policy).map_err(Error::InvalidPolicy)?;
-
             self.engine.edit(|engine| engine.add_policy(&policy));
-
+            true
+        } else {
+            false
+        };
+        if configured {
             let subjects = self
                 .store
                 .get_relation_subjects(
@@ -140,7 +165,7 @@ impl<S: ZanzibarStore + ?Sized + 'static> NodeACP<S> {
                     self.status.store(NacStatus::DisabledTemporarily);
                 }
 
-                tracing::info!(
+                tracing::debug!(
                     target: "nac::audit",
                     event = "nac_loaded",
                     owner = %owner_did,
