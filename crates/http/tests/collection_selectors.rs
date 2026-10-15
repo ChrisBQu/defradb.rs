@@ -83,7 +83,7 @@ fn router() -> Router {
 }
 
 fn router_with(versions: Arc<Versions>) -> Router {
-    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()), edge::testing::edge())
         .with_rest(Arc::new(MockRestOperations::new()) as Arc<dyn RestOperations>)
         .with_collection_versions(versions)
         .with_txn_ops(Arc::new(MockTransactionOperations::new()))
@@ -93,7 +93,7 @@ fn router_with(versions: Arc<Versions>) -> Router {
 
 /// A router with no version store, so no listing can be answered.
 fn router_without_versions() -> Router {
-    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()), edge::testing::edge())
         .with_rest(Arc::new(MockRestOperations::new()) as Arc<dyn RestOperations>)
         .build();
     defra_http::create_router_with_state(state)

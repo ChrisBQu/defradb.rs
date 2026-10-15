@@ -1,13 +1,16 @@
 //! Query execution with thread-local signing and DAC bypass context.
 //!
 //! HTTP handlers must set `signing_config` and `dac_bypass` thread-locals
-//! before executing queries to match FFI behavior. Because tokio's
-//! work-stealing scheduler can move tasks between OS threads at `.await`
-//! points, we pin execution to a single thread using `spawn_blocking` +
-//! `Handle::block_on` — the same pattern the FFI uses with `rt.block_on()`.
+//! before executing queries to match FFI behavior. A task on a
+//! multi-threaded runtime can move between OS threads at `.await` points,
+//! so a query that needs them runs pinned to one thread of the network
+//! runtime ([`Edge::spawn_pinned`]), the thread-locals set on it first.
 
+use std::future::Future;
 use std::sync::Arc;
 
+use defra_core::signing::SigningConfig;
+use edge::Edge;
 use query::executor::{QueryExecutor, QueryRequest, QueryResponse};
 use query::txn::TransactionHandle;
 
@@ -30,31 +33,15 @@ pub async fn execute_with_context(
         return execute_prepared_request(state, request).await;
     }
     let executor = state.executor.clone();
-    let handle = tokio::runtime::Handle::current();
-
-    let batch_session_key = signing_config.as_ref().map(|s| s.public_key_hex.clone());
     let acting_did = identity.did().map(|d| d.as_str().to_string());
-
-    let bearer = acting_did
-        .as_deref()
-        .and_then(defra_core::signing::get_request_bearer_token);
-    match tokio::task::spawn_blocking(move || {
-        let _identity_guard =
-            defra_core::current_identity::scoped_current_identity(acting_did.clone());
-        defra_core::signing::set_signing_config(signing_config);
-        defra_core::batch_signing::set_batch_session_key(batch_session_key);
-        defra_core::dac_bypass::set_dac_bypass(dac_bypass);
-        handle.block_on(defra_core::signing::scope_request_bearer_token(
-            acting_did,
-            bearer,
-            execute_prepared_with_executor(executor.as_ref(), request),
-        ))
-    })
+    run_pinned_with_context(
+        &state.edge,
+        signing_config,
+        dac_bypass,
+        acting_did,
+        move || async move { execute_prepared_with_executor(executor.as_ref(), request).await },
+    )
     .await
-    {
-        Ok(response) => response,
-        Err(join_err) => QueryResponse::error(format!("query execution task failed: {join_err}")),
-    }
 }
 
 async fn execute_prepared_request(state: &AppState, request: QueryRequest) -> QueryResponse {
@@ -127,68 +114,70 @@ pub async fn execute_in_txn_with_context(
     }
 
     let executor = state.executor.clone();
-    let handle = tokio::runtime::Handle::current();
-
-    let batch_session_key = signing_config.as_ref().map(|s| s.public_key_hex.clone());
     let acting_did = identity.did().map(|d| d.as_str().to_string());
-
-    let bearer = acting_did
-        .as_deref()
-        .and_then(defra_core::signing::get_request_bearer_token);
-    match tokio::task::spawn_blocking(move || {
-        let _identity_guard =
-            defra_core::current_identity::scoped_current_identity(acting_did.clone());
-        defra_core::signing::set_signing_config(signing_config);
-        defra_core::batch_signing::set_batch_session_key(batch_session_key);
-        defra_core::dac_bypass::set_dac_bypass(dac_bypass);
-        handle.block_on(defra_core::signing::scope_request_bearer_token(
-            acting_did,
-            bearer,
-            executor.execute_in_txn(request, &txn_handle),
-        ))
-    })
+    run_pinned_with_context(
+        &state.edge,
+        signing_config,
+        dac_bypass,
+        acting_did,
+        move || async move { executor.execute_in_txn(request, &txn_handle).await },
+    )
     .await
-    {
-        Ok(response) => response,
-        Err(join_err) => QueryResponse::error(format!("query execution task failed: {join_err}")),
-    }
 }
 
-/// Execute a query inside `spawn_blocking` with pre-resolved context values.
+/// Execute a query pinned to one thread with pre-resolved context values.
 ///
 /// Used by SSE streams where signing config and DAC bypass are resolved once
 /// at subscription setup time, then reused for each per-event query.
 pub async fn execute_with_resolved_context(
+    edge: &Edge,
     executor: Arc<dyn QueryExecutor>,
     request: QueryRequest,
-    signing_config: Option<defra_core::signing::SigningConfig>,
+    signing_config: Option<SigningConfig>,
     dac_bypass: bool,
     acting_did: Option<String>,
 ) -> QueryResponse {
-    let handle = tokio::runtime::Handle::current();
+    run_pinned_with_context(
+        edge,
+        signing_config,
+        dac_bypass,
+        acting_did,
+        move || async move { executor.execute(request).await },
+    )
+    .await
+}
 
+/// Runs the query `run` builds on one thread of the network runtime, with
+/// the request's signing config, batch session key, DAC bypass, acting
+/// identity and bearer token set on that thread first.
+async fn run_pinned_with_context<R, Fut>(
+    edge: &Edge,
+    signing_config: Option<SigningConfig>,
+    dac_bypass: bool,
+    acting_did: Option<String>,
+    run: R,
+) -> QueryResponse
+where
+    R: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = QueryResponse> + 'static,
+{
     let batch_session_key = signing_config.as_ref().map(|s| s.public_key_hex.clone());
-
     let bearer = acting_did
         .as_deref()
         .and_then(defra_core::signing::get_request_bearer_token);
-    match tokio::task::spawn_blocking(move || {
-        let _identity_guard =
+    edge.spawn_pinned(move || {
+        let identity_guard =
             defra_core::current_identity::scoped_current_identity(acting_did.clone());
         defra_core::signing::set_signing_config(signing_config);
         defra_core::batch_signing::set_batch_session_key(batch_session_key);
         defra_core::dac_bypass::set_dac_bypass(dac_bypass);
-        handle.block_on(defra_core::signing::scope_request_bearer_token(
-            acting_did,
-            bearer,
-            executor.execute(request),
-        ))
+        async move {
+            let _identity_guard = identity_guard;
+            defra_core::signing::scope_request_bearer_token(acting_did, bearer, run()).await
+        }
     })
     .await
-    {
-        Ok(response) => response,
-        Err(join_err) => QueryResponse::error(format!("query execution task failed: {join_err}")),
-    }
+    .unwrap_or_else(|error| QueryResponse::error(format!("query execution task failed: {error}")))
 }
 
 /// Resolve the signing config for a request identity.
@@ -198,7 +187,7 @@ pub async fn execute_with_resolved_context(
 pub(crate) fn resolve_signing_config(
     state: &AppState,
     identity: &ExtractIdentity,
-) -> Option<defra_core::signing::SigningConfig> {
+) -> Option<SigningConfig> {
     defra_core::signing::resolve_signing_config_with_flag(
         identity.did().map(|d| d.as_str()),
         state.node_identity_did.as_deref(),
@@ -334,7 +323,7 @@ mod tests {
     #[tokio::test]
     async fn auto_commit_returns_business_conflict_without_replaying_request() {
         let executor = Arc::new(ConflictExecutor::default());
-        let state = AppStateBuilder::new(executor.clone()).build();
+        let state = AppStateBuilder::new(executor.clone(), edge::testing::edge()).build();
 
         let response = execute_with_context(
             &state,
@@ -354,7 +343,7 @@ mod tests {
             engine_managed_retry: true,
             ..Default::default()
         });
-        let state = AppStateBuilder::new(executor.clone()).build();
+        let state = AppStateBuilder::new(executor.clone(), edge::testing::edge()).build();
 
         let response = execute_with_context(
             &state,
@@ -374,7 +363,7 @@ mod tests {
             input_on_second: true,
             ..Default::default()
         });
-        let state = AppStateBuilder::new(executor.clone()).build();
+        let state = AppStateBuilder::new(executor.clone(), edge::testing::edge()).build();
 
         let response = execute_with_context(
             &state,
@@ -392,7 +381,7 @@ mod tests {
     #[tokio::test]
     async fn explicit_transaction_execution_is_not_retried() {
         let executor = Arc::new(ConflictExecutor::default());
-        let state = AppStateBuilder::new(executor.clone()).build();
+        let state = AppStateBuilder::new(executor.clone(), edge::testing::edge()).build();
 
         let response = execute_in_txn_with_context(
             &state,
@@ -471,7 +460,7 @@ mod tests {
     #[tokio::test]
     async fn node_owner_is_not_promoted_to_nac_dac_bypass() {
         let executor = Arc::new(DacBypassRecorder::default());
-        let state = AppStateBuilder::new(executor.clone())
+        let state = AppStateBuilder::new(executor.clone(), edge::testing::edge())
             .with_node_identity_did(OWNER_DID.to_string())
             .with_signing_enabled(false)
             .build();
@@ -489,7 +478,7 @@ mod tests {
     #[tokio::test]
     async fn a_stranger_gets_no_dac_bypass() {
         let executor = Arc::new(DacBypassRecorder::default());
-        let state = AppStateBuilder::new(executor.clone())
+        let state = AppStateBuilder::new(executor.clone(), edge::testing::edge())
             .with_node_identity_did(OWNER_DID.to_string())
             .with_signing_enabled(false)
             .build();
@@ -508,7 +497,7 @@ mod tests {
     #[tokio::test]
     async fn bearer_scope_crosses_each_blocking_execution_boundary() {
         let executor = Arc::new(DacBypassRecorder::default());
-        let state = AppStateBuilder::new(executor.clone())
+        let state = AppStateBuilder::new(executor.clone(), edge::testing::edge())
             .with_signing_enabled(false)
             .with_nac(Arc::new(crate::MockNodeAcpOperations::new()))
             .build();
@@ -532,6 +521,7 @@ mod tests {
                         }
                         _ => {
                             execute_with_resolved_context(
+                                &state.edge,
                                 executor.clone(),
                                 request,
                                 None,

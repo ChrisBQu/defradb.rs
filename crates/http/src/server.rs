@@ -8,6 +8,7 @@ use axum::error_handling::HandleErrorLayer;
 use axum::extract::DefaultBodyLimit;
 use axum::http::{header, HeaderValue, Method, StatusCode};
 use axum::Router;
+use edge::Edge;
 use tokio::net::TcpListener;
 use tower::limit::ConcurrencyLimitLayer;
 use tower::timeout::TimeoutLayer;
@@ -89,6 +90,8 @@ pub struct Server {
     config: ServerConfig,
     tls: Option<crate::TlsConfig>,
     executor: Arc<dyn QueryExecutor>,
+    /// The network runtime the server's requests run on.
+    edge: Edge,
     rest: Option<Arc<dyn RestOperations>>,
     p2p: Option<Arc<dyn P2POperations>>,
     manage: Option<Arc<dyn ManageRequester>>,
@@ -113,102 +116,38 @@ pub struct Server {
 }
 
 impl Server {
-    /// Create a new server with the given executor.
-    pub fn new<E: QueryExecutor + 'static>(executor: E) -> Self {
-        Self {
-            config: ServerConfig::default(),
-            tls: None,
-            executor: Arc::new(executor),
-            rest: None,
-            p2p: None,
-            manage: None,
-            acp: None,
-            index: None,
-            encrypted_index: None,
-            backup: None,
-            block: None,
-            schema: None,
-            lens: None,
-            nac: None,
-            collection_versions: None,
-            collection_mgmt: None,
-            doc_acp: None,
-            view: None,
-            dump: None,
-            txn_ops: None,
-            event_bus: None,
-            node_options: None,
-            node_identity_did: None,
-            dev_mode: false,
-        }
+    /// Create a new server with the given executor, running on `edge`.
+    pub fn new<E>(executor: E, edge: Edge) -> Self
+    where
+        E: QueryExecutor + 'static,
+    {
+        Self::from_arc_with_config(Arc::new(executor), ServerConfig::default(), edge)
     }
 
     /// Create a server with custom configuration.
-    pub fn with_config<E: QueryExecutor + 'static>(executor: E, config: ServerConfig) -> Self {
-        Self {
-            config,
-            tls: None,
-            executor: Arc::new(executor),
-            rest: None,
-            p2p: None,
-            manage: None,
-            acp: None,
-            index: None,
-            encrypted_index: None,
-            backup: None,
-            block: None,
-            schema: None,
-            lens: None,
-            nac: None,
-            collection_versions: None,
-            collection_mgmt: None,
-            doc_acp: None,
-            view: None,
-            dump: None,
-            txn_ops: None,
-            event_bus: None,
-            node_options: None,
-            node_identity_did: None,
-            dev_mode: false,
-        }
+    pub fn with_config<E>(executor: E, config: ServerConfig, edge: Edge) -> Self
+    where
+        E: QueryExecutor + 'static,
+    {
+        Self::from_arc_with_config(Arc::new(executor), config, edge)
     }
 
     /// Create a server from an Arc'd executor.
-    pub fn from_arc(executor: Arc<dyn QueryExecutor>) -> Self {
-        Self {
-            config: ServerConfig::default(),
-            tls: None,
-            executor,
-            rest: None,
-            p2p: None,
-            manage: None,
-            acp: None,
-            index: None,
-            encrypted_index: None,
-            backup: None,
-            block: None,
-            schema: None,
-            lens: None,
-            nac: None,
-            collection_versions: None,
-            collection_mgmt: None,
-            doc_acp: None,
-            view: None,
-            dump: None,
-            txn_ops: None,
-            event_bus: None,
-            node_options: None,
-            node_identity_did: None,
-            dev_mode: false,
-        }
+    pub fn from_arc(executor: Arc<dyn QueryExecutor>, edge: Edge) -> Self {
+        Self::from_arc_with_config(executor, ServerConfig::default(), edge)
     }
 
     /// Create a server from an Arc'd executor with custom configuration.
-    pub fn from_arc_with_config(executor: Arc<dyn QueryExecutor>, config: ServerConfig) -> Self {
+    pub fn from_arc_with_config(
+        executor: Arc<dyn QueryExecutor>,
+        config: ServerConfig,
+        edge: Edge,
+    ) -> Self {
         Self {
             config,
             tls: None,
             executor,
+            edge,
             rest: None,
             p2p: None,
             manage: None,
@@ -442,7 +381,7 @@ impl Server {
     /// defect class is a value computed correctly and never consumed.
     pub(crate) fn app_state(&self) -> AppState {
         // Build state with all configured components
-        let mut builder = AppStateBuilder::new(Arc::clone(&self.executor));
+        let mut builder = AppStateBuilder::new(Arc::clone(&self.executor), self.edge.clone());
         if let Some(ref rest) = self.rest {
             builder = builder.with_rest(Arc::clone(rest));
         }

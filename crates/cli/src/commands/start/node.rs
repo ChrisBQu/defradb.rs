@@ -195,6 +195,7 @@ impl Node {
         user_identity: Option<std::sync::Arc<identity::RawIdentity>>,
         node_identity: Option<Arc<identity::RawIdentity>>,
         se_key: Option<[u8; 32]>,
+        edge: &edge::Edge,
     ) -> Result<ServerSetup> {
         info!("Using unified ACP store (namespace isolated in main database)");
         let acp_store: Arc<dyn acp::AcpStore> =
@@ -210,15 +211,17 @@ impl Node {
             zanzibar_store,
             node_identity,
             se_key,
+            edge,
         )
         .await
     }
 
-    /// Create a new node
+    /// Create a new node, serving on the network runtime `edge`.
     #[doc(hidden)]
     pub async fn new(
         mut config: Config,
         user_identity: Option<std::sync::Arc<identity::RawIdentity>>,
+        edge: edge::Edge,
     ) -> Result<Self> {
         if config.api.pubkey_path.is_empty() && config.api.privkey_path.is_empty() {
             let cert = config.rootdir.join("certs/server.crt");
@@ -297,6 +300,7 @@ impl Node {
                     zanzibar_store,
                     node_identity.clone(),
                     se_key,
+                    &edge,
                 )
                 .await?
             }
@@ -317,6 +321,7 @@ impl Node {
                     user_identity.clone(),
                     node_identity.clone(),
                     se_key,
+                    &edge,
                 )
                 .await?
             }

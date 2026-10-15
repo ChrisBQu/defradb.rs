@@ -18,6 +18,7 @@ default = ["server"]
 server = [
     "dep:async-stream",
     "dep:axum",
+    "dep:edge",
     "dep:axum-server",
     "dep:hyper",
     "dep:rustls",
@@ -50,7 +51,8 @@ hex = "0.4"
 base64.workspace = true
 cid.workspace = true
 
-# Async runtime
+# Async runtime: requests run on the network runtime the server is given.
+edge = { path = "../edge", optional = true }
 tokio = { workspace = true, features = ["rt", "net", "time"], optional = true }
 tokio-stream = { workspace = true, optional = true }
 async-trait.workspace = true
@@ -91,6 +93,7 @@ telemetry = { path = "../telemetry", optional = true }
 db = { path = "../db", default-features = false, features = ["native"] }
 
 [dev-dependencies]
+edge = { path = "../edge", features = ["testing"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "test-util"] }
 tower = { workspace = true, features = ["util"] }
 urlencoding = "2.1"

@@ -316,8 +316,8 @@ pub struct StartArgs {
 }
 
 impl StartArgs {
-    /// Execute the start command
-    pub async fn execute(self, mut config: Config) -> Result<()> {
+    /// Execute the start command, serving on the network runtime `edge`.
+    pub async fn execute(self, mut config: Config, edge: edge::Edge) -> Result<()> {
         // Apply start-specific flags to config
         self.apply_to_config(&mut config)?;
 
@@ -343,7 +343,7 @@ impl StartArgs {
         fd_limit::raise_nofile_limit();
 
         // Start the node
-        let node = Node::new(config, user_identity).await?;
+        let node = Node::new(config, user_identity, edge).await?;
         node.run().await
     }
 

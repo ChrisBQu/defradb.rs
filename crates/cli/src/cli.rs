@@ -216,10 +216,10 @@ pub enum Command {
 }
 
 impl Cli {
-    /// Execute the CLI command
-    pub async fn execute(self, config: Config) -> Result<()> {
+    /// Execute the CLI command. Network work runs on `edge`.
+    pub async fn execute(self, config: Config, edge: edge::Edge) -> Result<()> {
         match self.command {
-            Command::Start(args) => args.execute(config).await,
+            Command::Start(args) => args.execute(config, edge).await,
             Command::Version(args) => args.execute(),
             Command::Keyring(args) => args.execute(config),
             Command::Client(args) => args.execute(config, self.url).await,
