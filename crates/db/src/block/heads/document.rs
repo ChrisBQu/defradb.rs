@@ -8,6 +8,7 @@ use cid::Cid;
 use storage::corekv::{Error, IterOptions, Iterator, Key, KvPair, Reader, Result};
 use storage::keys::headstore::HeadstoreDocKey;
 
+use super::reclamation::{marker_parent, Reclamation};
 use super::walk::HeadWalk;
 use super::{PruneOutcome, RECLAIM_MAX_KEYS};
 
@@ -60,17 +61,116 @@ pub async fn publish(
 }
 
 /// Each writer names its own child, so sibling writers never overwrite a parent.
-/// `parent_key` is the stored head key, byte for byte.
+/// `parent_key` is the stored head key, byte for byte. Returns the marker written.
 pub async fn supersede(
     writer: &datastore::NamespaceView,
     parent_key: &[u8],
     child: Cid,
-) -> Result<()> {
+) -> Result<Vec<u8>> {
     let mut marker = renamed(parent_key, MARKERS)
         .ok_or_else(|| Error::Other("a document head marker needs a /d/ head key".into()))?;
     marker.push(b'/');
     marker.extend_from_slice(child.to_string().as_bytes());
-    writer.set(&marker, &[]).await
+    writer.set(&marker, &[]).await?;
+    Ok(marker)
+}
+
+/// The heads one local write superseded, each with the marker it wrote, so
+/// its reclamation needs no second walk of the document's heads.
+#[derive(Debug, Default)]
+pub struct HeadWrites {
+    superseded: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+impl HeadWrites {
+    /// [`supersede`], remembering the parent and its marker.
+    pub async fn supersede(
+        &mut self,
+        writer: &datastore::NamespaceView,
+        parent_key: &[u8],
+        child: Cid,
+    ) -> Result<()> {
+        let marker = supersede(writer, parent_key, child).await?;
+        self.superseded.push((parent_key.to_vec(), marker));
+        Ok(())
+    }
+}
+
+/// What a load of one document's heads found to reclaim, gathered by the same
+/// walk, so the write that loaded them reclaims without walking them again.
+#[derive(Debug, Default)]
+pub struct Reclaimable {
+    gathered: Reclamation,
+    orphans: Vec<Vec<u8>>,
+}
+
+/// Walk one document's heads and markers once: hand each live head to `live`
+/// and gather what is superseded, under the same budget as [`reclaim`].
+pub async fn load<R>(reader: &R, doc_short_id: u64, live: impl FnMut(KvPair)) -> Result<Reclaimable>
+where
+    R: Reader + ?Sized,
+{
+    let heads = reader
+        .iterator(IterOptions::new().with_prefix(HeadstoreDocKey::document_prefix(doc_short_id)))
+        .await?;
+    let markers = reader
+        .iterator(
+            IterOptions::new()
+                .with_prefix(document_markers(doc_short_id))
+                .with_keys_only(true),
+        )
+        .await?;
+    let mut walk = HeadWalk::new(heads, markers, HEADS.len(), MARKERS.len(), false)
+        .collect_orphans(RECLAIM_MAX_KEYS);
+    let gathered = Reclamation::gather(&mut walk, RECLAIM_MAX_KEYS, false, live).await?;
+    let orphans = walk.take_orphans();
+    walk.close().await?;
+    Ok(Reclaimable { gathered, orphans })
+}
+
+impl Reclaimable {
+    /// Reclaim, in the writer's transaction, what the load found and what
+    /// `writes` superseded since, by the same rules as [`reclaim`].
+    ///
+    /// The load may predate the transaction's view, so a marker gathered as an
+    /// orphan whose parent's head key is stored now leaves together with that
+    /// head, as a fresh walk would group them: a marker never leaves while
+    /// its head stays.
+    pub async fn reclaim(
+        self,
+        writer: &datastore::NamespaceView,
+        writes: HeadWrites,
+    ) -> Result<PruneOutcome> {
+        let Self {
+            mut gathered,
+            orphans,
+        } = self;
+        for (parent, marker) in writes.superseded {
+            gathered.offer(vec![marker, parent], RECLAIM_MAX_KEYS);
+        }
+        let mut headless = Vec::with_capacity(orphans.len());
+        for marker in orphans {
+            let Some(head) =
+                marker_parent(&marker, MARKERS.len()).map(|parent| [HEADS, parent].concat())
+            else {
+                continue;
+            };
+            if writer.get_parts(&head, &[]).await?.is_some() {
+                gathered.offer(vec![marker, head], RECLAIM_MAX_KEYS);
+            } else {
+                headless.push(marker);
+            }
+        }
+        gathered
+            .finish(
+                writer,
+                headless,
+                Some(PUBLISHED),
+                MARKERS.len(),
+                RECLAIM_MAX_KEYS,
+            )
+            .await
+    }
 }
 
 /// Reclaim the document's superseded heads in the caller's transaction.

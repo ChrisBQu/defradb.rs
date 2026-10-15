@@ -319,7 +319,8 @@ pub async fn write_document_blocks(
 
 /// [`write_document_blocks`] with prepared remote inputs. An update that has
 /// already read the document's heads passes them in `heads`, so they are not
-/// scanned a second time; without them an update reads them here.
+/// scanned a second time, not even to reclaim what they supersede; without
+/// them an update reads them here.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn write_document_blocks_with_inputs(
     blockstore: &NamespaceView,
@@ -332,7 +333,7 @@ pub(crate) async fn write_document_blocks_with_inputs(
     signing_config: Option<&SigningConfig>,
     kms: Option<&std::sync::Arc<dyn kms::KmsService>>,
     prepared_inputs: Option<&query::prepared::PreparedInputMemo>,
-    heads: Option<&DocHeadsSnapshot>,
+    heads: Option<DocHeadsSnapshot>,
 ) -> Result<BlockResult, BuildError> {
     let doc_ref_bytes = identity.doc_ref_bytes();
 
@@ -342,15 +343,12 @@ pub(crate) async fn write_document_blocks_with_inputs(
     let mut encryption_cids: Vec<Cid> = Vec::new();
 
     let is_create = modified_fields.is_none();
-    let loaded;
     let snapshot = match heads {
         _ if is_create => None,
         Some(heads) => Some(heads),
-        None => {
-            loaded = DocHeadsSnapshot::load(headstore, identity.doc_short_id).await?;
-            Some(&loaded)
-        }
+        None => Some(DocHeadsSnapshot::load(headstore, identity.doc_short_id).await?),
     };
+    let mut head_writes = crate::block::heads::document::HeadWrites::default();
     let composite_priority: u64 = if is_create {
         1
     } else {
@@ -582,7 +580,8 @@ pub(crate) async fn write_document_blocks_with_inputs(
                 .map_err(|e| format!("Failed to store field block: {}", e))?;
 
             for old_head in &field_head_entries {
-                crate::block::heads::document::supersede(headstore, &old_head.key, field_cid)
+                head_writes
+                    .supersede(headstore, &old_head.key, field_cid)
                     .await
                     .map_err(|e| format!("Failed to delete old field head: {}", e))?;
             }
@@ -678,7 +677,8 @@ pub(crate) async fn write_document_blocks_with_inputs(
         .map_err(|e| format!("Failed to store composite block: {}", e))?;
 
     for old_head in &composite_head_entries {
-        crate::block::heads::document::supersede(headstore, &old_head.key, composite_cid)
+        head_writes
+            .supersede(headstore, &old_head.key, composite_cid)
             .await
             .map_err(|e| format!("Failed to delete old composite head: {}", e))?;
     }
@@ -703,10 +703,8 @@ pub(crate) async fn write_document_blocks_with_inputs(
         )
         .await
         .map_err(|e| format!("Failed to write composite priority index: {}", e))?;
-    if !is_create {
-        crate::block::heads::document::reclaim(headstore, identity.doc_short_id)
-            .await
-            .map_err(|e| format!("Failed to reclaim superseded document heads: {e}"))?;
+    if let Some(snapshot) = snapshot {
+        snapshot.reclaim(headstore, head_writes).await?;
     }
 
     let doc_id_str = if is_create {
@@ -772,6 +770,7 @@ pub(crate) async fn write_delete_block_with_inputs(
     prepared_inputs: Option<&query::prepared::PreparedInputMemo>,
 ) -> Result<BlockResult, BuildError> {
     let snapshot = DocHeadsSnapshot::load(headstore, doc_short_id).await?;
+    let mut head_writes = crate::block::heads::document::HeadWrites::default();
     let priority: u64 = snapshot.max_priority() + 1;
 
     let composite_head_entries = snapshot.field_heads("C");
@@ -813,7 +812,8 @@ pub(crate) async fn write_delete_block_with_inputs(
         .map_err(|e| format!("Failed to store delete composite block: {}", e))?;
 
     for old_head in &composite_head_entries {
-        crate::block::heads::document::supersede(headstore, &old_head.key, composite_cid)
+        head_writes
+            .supersede(headstore, &old_head.key, composite_cid)
             .await
             .map_err(|e| format!("Failed to delete old composite head: {}", e))?;
     }
@@ -838,9 +838,7 @@ pub(crate) async fn write_delete_block_with_inputs(
         )
         .await
         .map_err(|e| format!("Failed to write delete priority index: {}", e))?;
-    crate::block::heads::document::reclaim(headstore, doc_short_id)
-        .await
-        .map_err(|e| format!("Failed to reclaim superseded document heads: {e}"))?;
+    snapshot.reclaim(headstore, head_writes).await?;
 
     tracing::debug!(
         doc_id = %doc_id,

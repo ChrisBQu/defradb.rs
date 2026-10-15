@@ -189,7 +189,7 @@ pub fn compute_signature(
     signer: &SigningConfig,
 ) -> Result<Option<(Cid, Bytes)>, String> {
     // Only sign first field blocks (priority <= 1) and composite blocks.
-    // Higher-priority field blocks are not signed — their integrity is
+    // Higher-priority field blocks are not signed: their integrity is
     // guaranteed by the signature on the parent composite block.
     let is_field = matches!(&block.delta, CrdtDelta::Lww(_) | CrdtDelta::Counter(_));
     if is_field && block.delta.priority() > 1 {
@@ -579,7 +579,7 @@ pub async fn get_all_field_heads(
         .await
         .map_err(|e| format!("Failed to iterate headstore: {}", e))?
     {
-        // Key: /d/{doc_short_id}/{field_id}/{cid} — the CID is the suffix
+        // Key: /d/{doc_short_id}/{field_id}/{cid}: the CID is the suffix
         // after the scanned prefix (the short ID segment is binary, so the
         // key cannot be split on '/').
         let cid_str = String::from_utf8_lossy(&kv_pair.key[prefix_len..]);
@@ -604,36 +604,23 @@ pub struct DocHeadsSnapshot {
     max_priority: u64,
     max_priority_by_field: RapidHashMap<String, u64>,
     entries_by_field: RapidHashMap<String, Vec<FieldHeadEntry>>,
+    reclaimable: crate::block::heads::document::Reclaimable,
 }
 
 impl DocHeadsSnapshot {
-    /// Load all heads for a document in a single headstore scan.
+    /// Load all heads for a document in a single headstore scan, gathering
+    /// on the way what the write that loads them will reclaim.
     pub async fn load(headstore: &NamespaceView, doc_short_id: u64) -> Result<Self, String> {
-        use storage::corekv::IterOptions;
-
-        let prefix = HeadstoreDocKey::document_prefix(doc_short_id);
-        let prefix_len = prefix.len();
-        let opts = IterOptions::new().with_prefix(prefix);
-
-        let mut iter = crate::block::heads::document::iterator(headstore, opts)
-            .await
-            .map_err(|e| format!("Failed to create headstore iterator: {}", e))?;
-
+        let prefix_len = HeadstoreDocKey::document_prefix(doc_short_id).len();
         let mut max_priority: u64 = 0;
         let mut max_priority_by_field: RapidHashMap<String, u64> = RapidHashMap::new();
         let mut entries_by_field: RapidHashMap<String, Vec<FieldHeadEntry>> = RapidHashMap::new();
 
-        while let Some(kv_pair) = iter
-            .next()
-            .await
-            .map_err(|e| format!("Failed to iterate headstore: {}", e))?
-        {
+        let reclaimable = crate::block::heads::document::load(headstore, doc_short_id, |kv_pair| {
             let priority = decode_priority_varint(&kv_pair.value);
-            if priority > max_priority {
-                max_priority = priority;
-            }
+            max_priority = max_priority.max(priority);
 
-            // Key: /d/{doc_short_id}/{field_id}/{cid} — parse the suffix
+            // Key: /d/{doc_short_id}/{field_id}/{cid}: parse the suffix
             // after the scanned prefix (the short ID segment is binary).
             let suffix = String::from_utf8_lossy(&kv_pair.key[prefix_len..]);
             if let Some((field_id, cid_str)) = suffix.split_once('/') {
@@ -651,7 +638,9 @@ impl DocHeadsSnapshot {
                         });
                 }
             }
-        }
+        })
+        .await
+        .map_err(|e| format!("Failed to iterate headstore: {}", e))?;
 
         // Sort each field's entries by CID string to match Go's deterministic ordering.
         for entries in entries_by_field.values_mut() {
@@ -662,7 +651,21 @@ impl DocHeadsSnapshot {
             max_priority,
             max_priority_by_field,
             entries_by_field,
+            reclaimable,
         })
+    }
+
+    /// Reclaim, in the writer's transaction, the superseded heads this load
+    /// found and the ones `writes` superseded since, without a second scan.
+    pub async fn reclaim(
+        self,
+        headstore: &NamespaceView,
+        writes: crate::block::heads::document::HeadWrites,
+    ) -> Result<crate::block::heads::PruneOutcome, String> {
+        self.reclaimable
+            .reclaim(headstore, writes)
+            .await
+            .map_err(|e| format!("Failed to reclaim superseded document heads: {e}"))
     }
 
     pub fn max_priority(&self) -> u64 {

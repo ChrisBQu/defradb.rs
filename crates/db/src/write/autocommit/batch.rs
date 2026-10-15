@@ -569,7 +569,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 sign_config.as_ref(),
                 self.db.kms().as_ref(),
                 self.prepared_inputs.as_ref(),
-                Some(&heads),
+                Some(heads),
             )
             .await
             .map_err(|error| {
