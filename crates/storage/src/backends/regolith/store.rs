@@ -2,8 +2,8 @@
 //!
 //! regolith validates its own transactions, so there is no conflict
 //! tracker or read-set bookkeeping here: the engine decides whether a
-//! transaction may land. Snapshot capture and native commit share a short
-//! publication boundary with the collection-head cache (HeadSet.Cache).
+//! transaction may land. Snapshot capture and native commit use the engine
+//! directly, so independent commits can join its commit groups.
 
 #![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
 
@@ -17,8 +17,6 @@ use regolith::{OptimisticTransactionDb, StreamOptions, TxnOptions};
 use super::background_errors::BackgroundErrorListener;
 use super::config::RegolithStoreOptions;
 use super::event_order::{Event, EventOrder};
-
-use super::head_cache::{self, SharedHeadCache};
 use super::transaction::RegolithTxn;
 use crate::backends::shared::TransactionStatsHandle;
 use crate::corekv::{
@@ -42,7 +40,6 @@ struct StoreInner {
     closed: AtomicBool,
     active_txns: Arc<AtomicUsize>,
     stats: TransactionStatsHandle,
-    head_cache: SharedHeadCache,
     event_order: Arc<EventOrder>,
     path: PathBuf,
     /// The mounted OPFS environment, kept so `persist` can reach it.
@@ -92,7 +89,6 @@ impl RegolithStore {
                 closed: AtomicBool::new(false),
                 active_txns: Arc::new(AtomicUsize::new(0)),
                 stats: TransactionStatsHandle::for_backend("regolith"),
-                head_cache: Arc::default(),
                 event_order: Arc::default(),
                 path,
                 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -198,16 +194,7 @@ impl RegolithStore {
     /// Each flush is atomic; the stream as a whole is not. Work that must
     /// land all-or-nothing belongs in a transaction.
     pub fn streaming_writer(&self, opts: StreamOptions) -> regolith::StreamingWriter<'_> {
-        super::blocking(|| {
-            // A borrowed native writer can flush after this call returns, outside
-            // transaction publication. Disable caching for this store's lifetime.
-            self.inner
-                .head_cache
-                .lock()
-                .expect("head cache publication poisoned")
-                .disable();
-            self.inner.db.db().streaming_writer(opts)
-        })
+        super::blocking(|| self.inner.db.db().streaming_writer(opts))
     }
 
     /// Wait for in-flight transactions to finish, up to the configured
@@ -285,7 +272,6 @@ impl Store for RegolithStore {
             self.inner.options.isolation,
             Arc::clone(&self.inner.active_txns),
             self.inner.stats.clone(),
-            Arc::clone(&self.inner.head_cache),
             Arc::clone(&self.inner.event_order),
         );
         match txn {
@@ -319,7 +305,6 @@ impl Store for RegolithStore {
         let queue_db = Arc::clone(&self.inner.db);
         let policy = regolith::RetryPolicy::new(options.max_attempts.max(1));
         let mut event_token = None;
-        let mut committed_changes = head_cache::HeadChanges::default();
         let mut committed_callbacks = RetryCallbacks::default();
         let mut attempt_count = 0usize;
         let mut conflict_count = 0usize;
@@ -332,7 +317,6 @@ impl Store for RegolithStore {
                     conflict_count += 1;
                     telemetry::record_retry_attempt(telemetry::RetryLayer::Engine);
                 }
-                committed_changes = head_cache::HeadChanges::default();
                 committed_callbacks = RetryCallbacks::default();
                 let mut retry_txn = RegolithRetryTxn {
                     previous_conflict: lost.map(|reason| crate::corekv::TransactionConflict {
@@ -342,8 +326,6 @@ impl Store for RegolithStore {
                         latest_seq: reason.latest_seq(),
                     }),
                     txn,
-                    changes: head_cache::HeadChanges::default(),
-                    head_cache: Arc::clone(&self.inner.head_cache),
                     db: Arc::clone(&self.inner.db),
                     isolation: self.inner.options.isolation,
                     stats: self.inner.stats.clone(),
@@ -370,7 +352,6 @@ impl Store for RegolithStore {
                     if retry_txn.callbacks.has_ordered_callbacks() && event_token.is_none() {
                         event_token = Some(self.inner.event_order.begin());
                     }
-                    committed_changes = std::mem::take(&mut retry_txn.changes);
                     committed_callbacks = std::mem::take(&mut retry_txn.callbacks);
                 }
                 value
@@ -391,8 +372,6 @@ impl Store for RegolithStore {
         match outcome {
             Ok((value, receipt)) => {
                 {
-                    let mut cache = head_cache::lock(&self.inner.head_cache)?;
-                    cache.publish(&committed_changes);
                     self.inner.stats.record_commit();
                     for _ in 0..conflict_count {
                         self.inner.stats.record_conflict();
@@ -492,8 +471,6 @@ impl Store for RegolithStore {
 struct RegolithRetryTxn<'a> {
     previous_conflict: Option<crate::corekv::TransactionConflict>,
     txn: &'a mut regolith::Transaction,
-    changes: head_cache::HeadChanges,
-    head_cache: SharedHeadCache,
     db: Arc<OptimisticTransactionDb>,
     isolation: regolith::IsolationLevel,
     stats: TransactionStatsHandle,
@@ -508,12 +485,6 @@ impl RegolithRetryTxn<'_> {
             return Err(Error::Other(
                 "raw retry operations are unavailable while scoped IO is active".into(),
             ));
-        }
-        Ok(())
-    }
-    fn disable_projection_for_key(&self, key: &[u8]) -> Result<()> {
-        if head_cache::is_projection_key(key) {
-            head_cache::lock(&self.head_cache)?.disable();
         }
         Ok(())
     }
@@ -557,11 +528,9 @@ impl RetryTxn for RegolithRetryTxn<'_> {
         if key.is_empty() {
             return Err(Error::EmptyKey);
         }
-        self.disable_projection_for_key(key)?;
         regolith::ready(|| self.txn.put(key, value))
             .await
             .map_err(super::transaction::map_txn_error)?;
-        self.changes.record(key, Some(value));
         self.has_writes = true;
         Ok(())
     }
@@ -571,11 +540,9 @@ impl RetryTxn for RegolithRetryTxn<'_> {
         if key.is_empty() {
             return Err(Error::EmptyKey);
         }
-        self.disable_projection_for_key(key)?;
         regolith::ready(|| self.txn.delete(key))
             .await
             .map_err(super::transaction::map_txn_error)?;
-        self.changes.record(key, None);
         self.has_writes = true;
         Ok(())
     }
@@ -590,7 +557,6 @@ impl RetryTxn for RegolithRetryTxn<'_> {
         Ok(Box::new(RegolithTxn::scoped_attempt(
             actual,
             self.stats.clone(),
-            Arc::clone(&self.head_cache),
         )))
     }
 
@@ -603,10 +569,9 @@ impl RetryTxn for RegolithRetryTxn<'_> {
             .into_any()
             .downcast::<RegolithTxn>()
             .map_err(|_| Error::Other("retry IO belongs to a different backend".into()))?;
-        let (actual, changes, has_writes) = io.into_scoped_engine_txn()?;
+        let (actual, has_writes) = io.into_scoped_engine_txn()?;
         self.has_writes |= has_writes;
         *self.txn = *actual;
-        self.changes.append(changes);
         self.callbacks = callbacks;
         self.attempt_io_active = false;
         Ok(())
@@ -619,8 +584,6 @@ impl Dropable for RegolithStore {
     async fn drop_all(&self) -> Result<()> {
         super::blocking(|| {
             self.ensure_open()?;
-            let mut cache = head_cache::lock(&self.inner.head_cache)?;
-            cache.reset();
             self.inner
                 .db
                 .db()

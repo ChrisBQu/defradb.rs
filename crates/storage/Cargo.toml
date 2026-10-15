@@ -20,7 +20,6 @@ bytes.workspace = true
 chrono = { version = "0.4", features = ["serde"] }
 
 # Async runtime
-async-lock.workspace = true
 async-trait.workspace = true
 
 # Serialization
@@ -39,7 +38,6 @@ rapidhash.workspace = true
 
 # Lock-free shared state
 kovan.workspace = true
-kovan-map.workspace = true
 kovan-queue.workspace = true
 
 # Logging

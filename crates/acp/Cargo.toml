@@ -23,7 +23,6 @@ datastore = { path = "../datastore" }
 zanzibar = { path = "../zanzibar" }
 
 async-trait.workspace = true
-async-lock.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true

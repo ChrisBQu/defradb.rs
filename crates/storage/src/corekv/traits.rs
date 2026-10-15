@@ -380,17 +380,6 @@ impl Reader for InterceptingRetryAttemptIO {
     async fn iterator(&self, options: IterOptions) -> Result<Box<dyn Iterator>> {
         self.inner.as_ref().unwrap().iterator(options).await
     }
-    async fn collection_head_entries(
-        &self,
-        head_prefix: &[u8],
-        marker_prefix: &[u8],
-    ) -> Result<Option<crate::stores::headstore::CollectionHeadEntries>> {
-        self.inner
-            .as_ref()
-            .unwrap()
-            .collection_head_entries(head_prefix, marker_prefix)
-            .await
-    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -656,24 +645,7 @@ pub trait Reader: MaybeSendSync + private::Sealed {
     /// The caller is responsible for closing the iterator when done.
     async fn iterator(&self, opts: IterOptions) -> Result<Box<dyn Iterator>>;
 
-    /// Optional materialization of the exact head and marker prefixes supplied
-    /// by the collection-head owner, in this reader's key coordinates.
-    /// This reads the captured snapshot plus own writes;
-    /// it is not a general KV scan and does not add point reads to validation.
-    ///
-    /// Collection writers use immutable CID-owned keys and tolerate concurrent
-    /// supersession/reclamation (HeadSet.Core). Prune must anchor its shared
-    /// deletions with `has_for_update`. General KV scans use `iterator` and
-    /// retain the engine's observation semantics. Return
-    /// `None` when the backend, namespace, isolation level, or budget cannot serve
-    /// this projection; the head query then uses its ordinary scan.
-    async fn collection_head_entries(
-        &self,
-        _head_prefix: &[u8],
-        _marker_prefix: &[u8],
-    ) -> Result<Option<crate::stores::headstore::CollectionHeadEntries>> {
-        Ok(None)
-    }
+
 }
 
 /// Writer trait for write operations.
@@ -1050,15 +1022,6 @@ impl Reader for Box<dyn Txn> {
         (**self).iterator(opts).await
     }
 
-    async fn collection_head_entries(
-        &self,
-        head_prefix: &[u8],
-        marker_prefix: &[u8],
-    ) -> Result<Option<crate::stores::headstore::CollectionHeadEntries>> {
-        (**self)
-            .collection_head_entries(head_prefix, marker_prefix)
-            .await
-    }
 }
 
 /// Blanket implementation of Writer for Box<dyn Txn>.

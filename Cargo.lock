@@ -12,7 +12,6 @@ checksum = "fe438c63458706e03479442743baae6c88256498e6431708f6dfc520a26515d3"
 name = "acp"
 version = "0.5.0"
 dependencies = [
- "async-lock",
  "async-trait",
  "bytes",
  "datastore",
@@ -12807,7 +12806,6 @@ dependencies = [
 name = "storage"
 version = "0.5.0"
 dependencies = [
- "async-lock",
  "async-trait",
  "bm25",
  "bytes",
@@ -12819,7 +12817,6 @@ dependencies = [
  "getrandom 0.2.17",
  "hex",
  "kovan",
- "kovan-map",
  "kovan-queue",
  "n0-future",
  "proptest",

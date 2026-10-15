@@ -6,7 +6,6 @@ mod config;
 mod encryption;
 mod event_order;
 mod handle;
-mod head_cache;
 pub(crate) mod iterator;
 mod store;
 mod transaction;
@@ -15,10 +14,10 @@ pub use config::RegolithStoreOptions;
 pub use store::RegolithStore;
 pub use transaction::RegolithTxn;
 
-/// Native storage and publication locks may wait synchronously. Let Tokio
+/// Native storage calls may wait synchronously. Let Tokio
 /// replace the worker while keeping the operation on this stack: detaching a
 /// commit would allow cancellation to release its caller's serialization guard
-/// before native commit and cache publication finish. Other executors retain
+/// before native commit finishes. Other executors retain
 /// the synchronous backend contract.
 fn blocking<T>(operation: impl FnOnce() -> T) -> T {
     #[cfg(not(target_arch = "wasm32"))]

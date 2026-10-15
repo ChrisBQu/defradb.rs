@@ -1,9 +1,8 @@
 //! A regolith-backed transaction.
 //!
 //! regolith owns the write buffer, read set, and commit validation. A bounded
-//! head-key journal updates the optional collection-head projection only after
-//! native commit succeeds. Snapshot capture and publication share a short lock;
-//! the application transaction never holds that lock across its lifetime.
+//! native commit publishes writes without an adapter publication lock. Head
+//! rows and supersession markers are read through engine snapshots.
 //!
 //! A read-only transaction does not begin one at all: it pins a snapshot,
 //! which is the same view without the commit-time validation nothing will
@@ -22,7 +21,6 @@ use regolith::{
 
 use super::event_order::{Event, EventOrder};
 use super::handle::Handle;
-use super::head_cache::{self, HeadChanges, HeadSnapshot, SharedHeadCache};
 use super::iterator::RegolithIterator;
 use crate::backends::shared::{CallbackCounts, CallbackManager, TransactionStatsHandle};
 use crate::corekv::{
@@ -37,9 +35,6 @@ pub struct RegolithTxn {
     stats: TransactionStatsHandle,
     callbacks: CallbackManager,
     readonly: bool,
-    pub(super) head_cache: SharedHeadCache,
-    head_snapshot: Option<HeadSnapshot>,
-    head_changes: HeadChanges,
     event_order: Arc<EventOrder>,
     ordered_events: Vec<Event>,
     ordered_async_callbacks: Vec<AsyncOrderedTxnCallback>,
@@ -52,7 +47,6 @@ pub struct RegolithTxn {
 #[derive(Clone)]
 struct SavepointState {
     callbacks: CallbackCounts,
-    head_changes: HeadChanges,
     ordered_events: usize,
     ordered_async_callbacks: usize,
     has_writes: bool,
@@ -79,9 +73,6 @@ impl RegolithTxn {
             stats: TransactionStatsHandle::for_backend("regolith"),
             callbacks: CallbackManager::default(),
             readonly: true,
-            head_cache: SharedHeadCache::default(),
-            head_snapshot: None,
-            head_changes: HeadChanges::default(),
             savepoints: Vec::new(),
             event_order: Arc::new(EventOrder::default()),
             ordered_events: Vec::new(),
@@ -98,29 +89,20 @@ impl RegolithTxn {
         isolation: IsolationLevel,
         active_txns: Arc<AtomicUsize>,
         stats: TransactionStatsHandle,
-        head_cache: SharedHeadCache,
         event_order: Arc<EventOrder>,
     ) -> Result<Self> {
         super::blocking(|| {
-            let cache = head_cache::lock(&head_cache)?;
             let handle = if readonly {
                 Handle::ReadOnly(db.db().snapshot())
             } else {
                 Handle::Writable(Box::new(db.begin(&TxnOptions::new().isolation(isolation))))
             };
-            let head_snapshot = (!cache.disabled
-                && (readonly || isolation == IsolationLevel::RepeatableRead))
-                .then(|| cache.capture(db.db().snapshot()));
-            drop(cache);
             Ok(Self {
                 handle: Some(Arc::new(handle)),
                 active_txns,
                 stats,
                 callbacks: CallbackManager::default(),
                 readonly,
-                head_cache,
-                head_snapshot,
-                head_changes: HeadChanges::default(),
                 savepoints: Vec::new(),
                 event_order,
                 ordered_events: Vec::new(),
@@ -135,7 +117,6 @@ impl RegolithTxn {
     pub(super) fn scoped_attempt(
         txn: Box<Transaction>,
         stats: TransactionStatsHandle,
-        head_cache: SharedHeadCache,
     ) -> Self {
         Self {
             handle: Some(Arc::new(Handle::Writable(txn))),
@@ -143,9 +124,6 @@ impl RegolithTxn {
             stats,
             callbacks: CallbackManager::default(),
             readonly: false,
-            head_cache,
-            head_snapshot: None,
-            head_changes: HeadChanges::default(),
             event_order: Arc::new(EventOrder::default()),
             ordered_events: Vec::new(),
             ordered_async_callbacks: Vec::new(),
@@ -160,7 +138,7 @@ impl RegolithTxn {
     #[allow(clippy::boxed_local)]
     pub(super) fn into_scoped_engine_txn(
         mut self: Box<Self>,
-    ) -> Result<(Box<Transaction>, HeadChanges, bool)> {
+    ) -> Result<(Box<Transaction>, bool)> {
         if !self.scoped_attempt {
             return Err(Error::Other("not a scoped retry transaction".into()));
         }
@@ -171,7 +149,7 @@ impl RegolithTxn {
         let Handle::Writable(txn) = handle else {
             return Err(Error::ReadOnlyTxn);
         };
-        Ok((txn, std::mem::take(&mut self.head_changes), self.has_writes))
+        Ok((txn, self.has_writes))
     }
 
     fn handle(&self) -> Result<&Arc<Handle>> {
@@ -312,21 +290,6 @@ impl Reader for RegolithTxn {
         }
     }
 
-    async fn collection_head_entries(
-        &self,
-        head_prefix: &[u8],
-        marker_prefix: &[u8],
-    ) -> Result<Option<crate::stores::headstore::CollectionHeadEntries>> {
-        self.handle()?;
-        let Some(collection_id) = head_cache::matching_collection(head_prefix, marker_prefix)
-        else {
-            return Ok(None);
-        };
-        self.head_snapshot.as_ref().map_or(Ok(None), |snapshot| {
-            snapshot.read(&self.head_cache, &self.head_changes, collection_id)
-        })
-    }
-
     async fn iterator(&self, opts: IterOptions) -> Result<Box<dyn Iterator>> {
         // The iterator holds the same handle, so it keeps the snapshot or
         // the transaction alive without borrowing this one. Scanning a
@@ -380,7 +343,6 @@ impl Writer for RegolithTxn {
             .await
             .map_err(map_txn_error)?;
         self.has_writes = true;
-        self.head_changes.record(key, Some(value));
         Ok(())
     }
 
@@ -393,7 +355,6 @@ impl Writer for RegolithTxn {
             .await
             .map_err(map_txn_error)?;
         self.has_writes = true;
-        self.head_changes.record(key, None);
         Ok(())
     }
 }
@@ -426,11 +387,8 @@ impl Txn for RegolithTxn {
                     .to_string(),
             )
         })?;
-        // Native commit and cache publication are one boundary. Never run
-        // user callbacks under it, and never publish a failed transaction.
-        // Register before entering native commit. Keep the token outside the
-        // cache-lock closure so a failed commit cannot drain while that lock
-        // is held when the token is dropped.
+        // Register before entering native commit so failed commits cannot
+        // publish events and receipt-ordering starts before commit completion.
         let ordered_token = (!self.ordered_events.is_empty()).then(|| self.event_order.begin());
         let mut ordered_seq = None;
         let outcome = match handle {
@@ -439,16 +397,11 @@ impl Txn for RegolithTxn {
                 Ok(())
             }
             Handle::Writable(txn) => super::blocking(|| {
-                let mut cache = head_cache::lock(&self.head_cache)?;
                 let outcome = txn.commit().map_err(map_txn_error);
                 if let (Some(_token), Ok(receipt)) = (&ordered_token, &outcome) {
                     ordered_seq = Some(receipt.seq());
                 }
-                let outcome = outcome.map(|_| ());
-                if outcome.is_ok() {
-                    cache.publish(&self.head_changes);
-                }
-                outcome
+                outcome.map(|_| ())
             }),
         };
         match outcome {
@@ -489,7 +442,6 @@ impl Txn for RegolithTxn {
     fn set_savepoint(&mut self) -> Result<()> {
         let state = SavepointState {
             callbacks: self.callbacks.counts(),
-            head_changes: self.head_changes.clone(),
             ordered_events: self.ordered_events.len(),
             ordered_async_callbacks: self.ordered_async_callbacks.len(),
             has_writes: self.has_writes,
@@ -510,7 +462,6 @@ impl Txn for RegolithTxn {
             .map_err(map_txn_error)?;
         self.savepoints.pop();
         self.callbacks.truncate(state.callbacks);
-        self.head_changes = state.head_changes;
         self.ordered_events.truncate(state.ordered_events);
         self.ordered_async_callbacks
             .truncate(state.ordered_async_callbacks);
