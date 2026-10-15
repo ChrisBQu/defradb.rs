@@ -1,8 +1,10 @@
 //! Adapter to bridge document-level ACP operations to HTTP's DocumentAcpOperations trait.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use defra_core::RequestContext;
 
 use defra_http::router::DocumentAcpOperations;
 use storage::corekv::Store;
@@ -12,6 +14,8 @@ pub struct DocumentAcpAdapter<S: Store> {
     database: Arc<db::DB<S>>,
     acp: Arc<dyn acp::DocumentACP>,
     store: Arc<dyn acp::ZanzibarStore>,
+    /// The request this adapter serves, for one bound to it.
+    context: Option<RequestContext>,
 }
 
 impl<S: Store + 'static> DocumentAcpAdapter<S> {
@@ -25,7 +29,12 @@ impl<S: Store + 'static> DocumentAcpAdapter<S> {
             database,
             acp,
             store,
+            context: None,
         }
+    }
+
+    fn context(&self) -> Cow<'_, RequestContext> {
+        RequestContext::bound_or_ambient(self.context.as_ref())
     }
 
     /// Create an Arc-wrapped adapter.
@@ -89,6 +98,15 @@ impl<S: Store + 'static> DocumentAcpAdapter<S> {
 
 #[async_trait]
 impl<S: Store + 'static> DocumentAcpOperations for DocumentAcpAdapter<S> {
+    fn bind_request(&self, context: &RequestContext) -> Option<Arc<dyn DocumentAcpOperations>> {
+        Some(Arc::new(Self {
+            database: Arc::clone(&self.database),
+            acp: Arc::clone(&self.acp),
+            store: Arc::clone(&self.store),
+            context: Some(context.clone()),
+        }))
+    }
+
     async fn check_doc_access(
         &self,
         actor: &identity::Did,
@@ -118,7 +136,7 @@ impl<S: Store + 'static> DocumentAcpOperations for DocumentAcpAdapter<S> {
         relation: &str,
     ) -> Result<bool, String> {
         self.database
-            .check_node_access(None, acp::nac::NodePermission::DacRelationAdd)
+            .check_node_access_as(&self.context(), acp::nac::NodePermission::DacRelationAdd)
             .await
             .map_err(|e| format!("{}", e))?;
 
@@ -166,7 +184,7 @@ impl<S: Store + 'static> DocumentAcpOperations for DocumentAcpAdapter<S> {
         relation: &str,
     ) -> Result<bool, String> {
         self.database
-            .check_node_access(None, acp::nac::NodePermission::DacRelationDelete)
+            .check_node_access_as(&self.context(), acp::nac::NodePermission::DacRelationDelete)
             .await
             .map_err(|e| format!("{}", e))?;
 
