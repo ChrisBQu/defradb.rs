@@ -37,7 +37,8 @@ pub struct WasmSandboxConfig {
     /// Epoch deadline ticks before interruption.
     pub epoch_deadline_ticks: Option<u64>,
 
-    /// Period at which the shared engine advances its epoch clock.
+    /// Period at which the shared engine advances its epoch clock. The
+    /// restrictive default is provisional until lens-call measurements tune it.
     pub epoch_tick_period: Option<Duration>,
 }
 
@@ -53,23 +54,12 @@ impl WasmSandboxConfig {
     }
 }
 
-/// One epoch clock per shared Wasmtime engine. Runtime tasks are preferred;
-/// the owned thread fallback is used when a store is constructed outside a
-/// multi-thread Tokio runtime, where a synchronous WASM call could otherwise
-/// prevent the runtime from advancing the epoch.
+/// One independent epoch clock per shared Wasmtime engine. This must not run
+/// on the Tokio runtime: transform execution is synchronous, so every runtime
+/// worker could be occupied by WASM while the clock needs to advance.
 struct EpochTicker {
-    worker: Option<EpochTickerWorker>,
-}
-
-enum EpochTickerWorker {
-    Runtime {
-        cancel: tokio::sync::oneshot::Sender<()>,
-        task: tokio::task::JoinHandle<()>,
-    },
-    Thread {
-        stop: Arc<AtomicBool>,
-        worker: JoinHandle<()>,
-    },
+    stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
 }
 
 impl EpochTicker {
@@ -78,28 +68,6 @@ impl EpochTicker {
             return Err(Error::InvalidConfig(
                 "WASM epoch tick period must be greater than zero".into(),
             ));
-        }
-
-        if let Some(runtime) = tokio::runtime::Handle::try_current()
-            .ok()
-            .filter(|runtime| {
-                runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
-            })
-        {
-            let (cancel, mut cancelled) = tokio::sync::oneshot::channel();
-            let task = runtime.spawn(async move {
-                let mut interval = tokio::time::interval(period);
-                interval.tick().await;
-                loop {
-                    tokio::select! {
-                        _ = &mut cancelled => break,
-                        _ = interval.tick() => engine.increment_epoch(),
-                    }
-                }
-            });
-            return Ok(Self {
-                worker: Some(EpochTickerWorker::Runtime { cancel, task }),
-            });
         }
 
         let stop = Arc::new(AtomicBool::new(false));
@@ -115,24 +83,18 @@ impl EpochTicker {
             })?;
 
         Ok(Self {
-            worker: Some(EpochTickerWorker::Thread { stop, worker }),
+            stop,
+            worker: Some(worker),
         })
     }
 }
 
 impl Drop for EpochTicker {
     fn drop(&mut self) {
-        match self.worker.take() {
-            Some(EpochTickerWorker::Runtime { cancel, task }) => {
-                let _ = cancel.send(());
-                task.abort();
-            }
-            Some(EpochTickerWorker::Thread { stop, worker }) => {
-                stop.store(true, Ordering::Release);
-                worker.thread().unpark();
-                let _ = worker.join();
-            }
-            None => {}
+        self.stop.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            worker.thread().unpark();
+            let _ = worker.join();
         }
     }
 }
@@ -426,6 +388,7 @@ impl TransformStore for WasmTransformStore {
             docs,
             self.sandbox.clone(),
             false,
+            self.epoch_ticker.clone(),
         ))
     }
 
@@ -441,6 +404,7 @@ impl TransformStore for WasmTransformStore {
             docs,
             self.sandbox.clone(),
             true,
+            self.epoch_ticker.clone(),
         ))
     }
 
@@ -463,6 +427,7 @@ fn execute_pipeline_stream(
     docs: LensDocStream,
     sandbox: Option<WasmSandboxConfig>,
     inverse: bool,
+    epoch_ticker: Option<Arc<EpochTicker>>,
 ) -> LensDocResultStream {
     enum Phase {
         Collecting {
@@ -470,6 +435,7 @@ fn execute_pipeline_stream(
             modules: Vec<CompiledModule>,
             docs: LensDocStream,
             sandbox: Option<WasmSandboxConfig>,
+            epoch_ticker: Option<Arc<EpochTicker>>,
         },
         Yielding {
             results: Vec<LensDoc>,
@@ -489,6 +455,7 @@ fn execute_pipeline_stream(
         modules,
         docs,
         sandbox,
+        epoch_ticker,
     };
 
     Box::pin(futures::stream::unfold(initial, |phase| async {
@@ -498,7 +465,9 @@ fn execute_pipeline_stream(
                 modules,
                 docs,
                 sandbox,
+                epoch_ticker,
             } => {
+                let _ticker_keepalive = epoch_ticker;
                 let current_docs: Vec<serde_json::Value> = docs
                     .collect::<Vec<_>>()
                     .await
@@ -639,22 +608,68 @@ mod tests {
         ];
 
         let mut sandbox = WasmSandboxConfig::restrictive();
-        sandbox.fuel_budget = None;
+        // Fuel is a final bound if epoch ticking regresses; the expected trap
+        // is specifically the epoch interrupt.
+        sandbox.fuel_budget = Some(50_000_000);
         sandbox.epoch_deadline_ticks = Some(1);
         sandbox.epoch_tick_period = Some(Duration::from_millis(2));
         let base = WasmTransformStore::with_sandbox(Some(sandbox)).unwrap();
         // Transaction-local stores share the base engine and its ticker.
         let local = base.empty_with_shared_engine();
+        assert!(Engine::same(&base.engine, &local.engine));
         let module = Module::new(&local.engine, INFINITE_LOOP_WASM).unwrap();
-        let mut store = wasmtime::Store::new(&local.engine, ());
-        store.set_epoch_deadline(1);
-        let run = module.get_typed_func::<(), ()>(&store, "run").unwrap();
+        let ticker = Arc::downgrade(local.epoch_ticker.as_ref().unwrap());
+        drop(base);
 
-        let result = run.call(&mut store, ());
-        assert!(
-            result.is_err(),
-            "the ticked epoch deadline must interrupt the loop"
+        let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let mut store = wasmtime::Store::new(&local.engine, ());
+            store.set_epoch_deadline(1);
+            let result = wasmtime::Instance::new(&mut store, &module, &[]).and_then(|instance| {
+                let func = instance
+                    .get_func(&mut store, "run")
+                    .expect("test module exports run");
+                func.call(&mut store, &[], &mut [])
+            });
+            drop(store);
+            drop(local);
+            let _ = result_tx.send(result);
+        });
+
+        let result = result_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("epoch interruption must finish within the bounded test window");
+        assert_eq!(
+            result
+                .unwrap_err()
+                .downcast_ref::<wasmtime::Trap>()
+                .copied(),
+            Some(wasmtime::Trap::Interrupt)
         );
+        assert!(
+            ticker.upgrade().is_none(),
+            "last local store stops the ticker"
+        );
+    }
+
+    #[test]
+    fn returned_stream_keeps_epoch_ticker_alive_until_dropped() {
+        let store =
+            WasmTransformStore::with_sandbox(Some(WasmSandboxConfig::restrictive())).unwrap();
+        let ticker = Arc::downgrade(store.epoch_ticker.as_ref().unwrap());
+        let stream = execute_pipeline_stream(
+            store.engine.clone(),
+            Vec::new(),
+            Box::pin(futures::stream::empty()),
+            None,
+            false,
+            store.epoch_ticker.clone(),
+        );
+
+        drop(store);
+        assert!(ticker.upgrade().is_some());
+        drop(stream);
+        assert!(ticker.upgrade().is_none());
     }
 
     #[test]
