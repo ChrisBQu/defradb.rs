@@ -350,6 +350,7 @@ where
             se_correlator_for_transport,
             coordinator.replicators().clone(),
             se_key_handle,
+            coordinator.network(),
         )) as Arc<dyn query::SeQueryTransport>);
     let manage_controller: Arc<dyn defra_http::P2POperations> = Arc::new(adapter);
     let system = Arc::new(ManagedP2PSystem::with_replicator_push_options_callback(

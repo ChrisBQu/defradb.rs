@@ -373,6 +373,7 @@ impl<S: Store + 'static> IrohPeer<S> {
             self.se_correlator.clone(),
             Arc::clone(self.coordinator.replicators()),
             key,
+            self.coordinator.network(),
         ))
     }
 }

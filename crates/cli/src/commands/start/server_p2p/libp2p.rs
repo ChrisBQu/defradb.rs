@@ -471,6 +471,7 @@ impl Node {
                 se_correlator,
                 se_replicator_registry,
                 db::merge::filled_se_key_handle(key, None),
+                coordinator.network(),
             )) as Arc<dyn query::SeQueryTransport>
         });
 

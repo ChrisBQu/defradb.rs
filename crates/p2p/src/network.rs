@@ -57,6 +57,21 @@ impl Network {
         }
     }
 
+    /// Starts `future` as network work now and hands its output back when
+    /// awaited; dropped unawaited, the work runs on. `None` when the network
+    /// refused it (it is shutting down) or it panicked.
+    pub fn run<F>(&self, future: F) -> MaybeBoxFuture<'static, Option<F::Output>>
+    where
+        F: Future + MaybeSend + 'static,
+        F::Output: MaybeSend + 'static,
+    {
+        let (done, output) = regolith::sync::unbounded();
+        self.spawn(async move {
+            let _ = done.try_send(future.await);
+        });
+        Box::pin(async move { output.recv_async().await })
+    }
+
     /// Completes after `duration`, on the edge's clock when there is one.
     pub fn sleep(&self, duration: Duration) -> MaybeBoxFuture<'static, ()> {
         match &self.edge {
@@ -89,7 +104,7 @@ impl Network {
         Fut::Output: MaybeSend + 'static,
     {
         match self.crossing() {
-            Some(edge) => edge.spawn(async move { make().await }).await.ok(),
+            Some(_) => self.run(async move { make().await }).await,
             None => Some(make().await),
         }
     }
@@ -137,6 +152,19 @@ mod tests {
             edge.block_on(network.hand_off(|| async { 7 })).unwrap(),
             Some(7)
         );
+        pool.shutdown_blocking().unwrap();
+    }
+
+    #[test]
+    fn work_run_from_a_worker_hands_its_output_back() {
+        let network = Network::on(edge::testing::edge());
+        let pool = workers::Pool::start(workers::Config::unplaced(1)).unwrap();
+        let ran = pool
+            .submit_and_wait(workers::Target::Worker(0), move || async move {
+                network.run(async { workers::on_worker() }).await
+            })
+            .unwrap();
+        assert_eq!(ran, Some(false), "the work ran on the edge");
         pool.shutdown_blocking().unwrap();
     }
 
