@@ -49,6 +49,7 @@ pub enum PreparedInputKind {
     WriteValidation,
     NodePermission,
     ReadValidation,
+    EncryptedSearch,
 }
 
 const MAX_PREPARED_INPUTS: usize = 64;

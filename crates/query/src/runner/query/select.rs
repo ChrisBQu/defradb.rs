@@ -383,10 +383,16 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 .map(Self::extract_eq_conditions)
                 .unwrap_or_default();
 
-            let ids = transport
-                .query_doc_ids(&collection.collection_id, eq_conditions)
-                .await
-                .map_err(QueryError::execution)?;
+            let ids = super::super::se_transport::query_with_prepared_inputs(
+                transport.as_ref(),
+                self.retry_inputs.as_ref(),
+                super::super::se_transport::PreparedEncryptedSearch {
+                    collection_id: collection.collection_id.clone(),
+                    eq_conditions,
+                    caller_identity: caller_identity.as_ref().map(ToString::to_string),
+                },
+            )
+            .await?;
 
             let filtered_ids = self
                 .filter_ids_by_acp(&ids, &collection, caller_identity.clone())

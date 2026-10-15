@@ -32,3 +32,107 @@ pub trait SeQueryTransport: Send + Sync {
         eq_conditions: Vec<(String, JsonValue)>,
     ) -> std::result::Result<Vec<String>, String>;
 }
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(super) struct PreparedEncryptedSearch {
+    pub collection_id: String,
+    pub eq_conditions: Vec<(String, JsonValue)>,
+    pub caller_identity: Option<String>,
+}
+
+pub(super) async fn query_with_prepared_inputs(
+    transport: &dyn SeQueryTransport,
+    inputs: Option<&crate::prepared::PreparedInputMemo>,
+    input: PreparedEncryptedSearch,
+) -> crate::error::Result<Vec<String>> {
+    if let Some(inputs) = inputs {
+        let request = crate::prepared::PreparedInputRequest::new(
+            crate::prepared::PreparedInputKind::EncryptedSearch,
+            serde_json::to_vec(
+                &serde_json::to_value(&input)
+                    .map_err(|error| crate::error::QueryError::execution(error.to_string()))?,
+            )
+            .map_err(|error| crate::error::QueryError::execution(error.to_string()))?,
+        );
+        let Some(response) = inputs.get(&request) else {
+            return Err(crate::error::QueryError::NeedsInput(request));
+        };
+        return serde_json::from_slice(&response)
+            .map_err(|error| crate::error::QueryError::execution(error.to_string()));
+    }
+    transport
+        .query_doc_ids(&input.collection_id, input.eq_conditions)
+        .await
+        .map_err(crate::error::QueryError::execution)
+}
+
+impl<F: super::DocFetcher + 'static, R: crate::txn::TransactionRegistry> super::QueryRunner<F, R> {
+    pub(crate) async fn resolve_encrypted_search_input(
+        &self,
+        input: &crate::prepared::PreparedInputRequest,
+    ) -> crate::error::Result<std::sync::Arc<[u8]>> {
+        let transport = self.se_transport.as_ref().ok_or_else(|| {
+            crate::error::QueryError::execution("prepared encrypted search has no transport")
+        })?;
+        let input: PreparedEncryptedSearch = serde_json::from_slice(input.exact_request())
+            .map_err(|error| crate::error::QueryError::execution(error.to_string()))?;
+        let ids = query_with_prepared_inputs(transport.as_ref(), None, input).await?;
+        Ok(serde_json::to_vec(&ids)
+            .map_err(|error| crate::error::QueryError::execution(error.to_string()))?
+            .into())
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Transport(AtomicUsize);
+    #[async_trait]
+    impl SeQueryTransport for Transport {
+        async fn query_doc_ids(
+            &self,
+            _: &str,
+            _: Vec<(String, JsonValue)>,
+        ) -> Result<Vec<String>, String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(vec!["doc1".into()])
+        }
+    }
+
+    #[tokio::test]
+    async fn prepared_encrypted_search_defers_transport_and_keys_query_inputs() {
+        let transport = Transport(AtomicUsize::new(0));
+        let memo = crate::prepared::PreparedInputMemo::default();
+        let input = |value: &str| PreparedEncryptedSearch {
+            collection_id: "users".into(),
+            eq_conditions: vec![("name".into(), JsonValue::String(value.into()))],
+            caller_identity: Some("did:key:reader".into()),
+        };
+        let crate::error::QueryError::NeedsInput(request) =
+            query_with_prepared_inputs(&transport, Some(&memo), input("alice"))
+                .await
+                .unwrap_err()
+        else {
+            panic!("expected a typed input miss");
+        };
+        assert_eq!(transport.0.load(Ordering::SeqCst), 0);
+        let decoded = serde_json::from_slice(request.exact_request()).unwrap();
+        let response = query_with_prepared_inputs(&transport, None, decoded)
+            .await
+            .unwrap();
+        assert!(memo.insert(request, serde_json::to_vec(&response).unwrap()));
+        assert_eq!(
+            query_with_prepared_inputs(&transport, Some(&memo), input("alice"))
+                .await
+                .unwrap(),
+            vec!["doc1"]
+        );
+        assert!(matches!(
+            query_with_prepared_inputs(&transport, Some(&memo), input("bob")).await,
+            Err(crate::error::QueryError::NeedsInput(_))
+        ));
+        assert_eq!(transport.0.load(Ordering::SeqCst), 1);
+    }
+}

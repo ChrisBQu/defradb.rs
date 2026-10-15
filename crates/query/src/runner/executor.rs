@@ -377,6 +377,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                 self.resolve_write_validation_input(input).await?
             } else if input.kind() == crate::prepared::PreparedInputKind::ReadValidation {
                 self.resolve_read_validation_input(input).await?
+            } else if input.kind() == crate::prepared::PreparedInputKind::EncryptedSearch {
+                self.resolve_encrypted_search_input(input).await?
             } else {
                 let mutator = self.mutator.as_ref().ok_or_else(|| {
                     crate::error::QueryError::execution("retry input has no document mutator")
