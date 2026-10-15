@@ -18,8 +18,7 @@
 use std::any::Any;
 
 use storage::corekv::{
-    MaybeSend, RetryAttemptError, RetryAttemptFn, RetryAttemptFuture, RetryOptions, RetryTxn,
-    Store,
+    MaybeSend, RetryAttemptError, RetryAttemptFn, RetryAttemptFuture, RetryOptions, RetryTxn, Store,
 };
 
 use crate::BasicTxn;

@@ -21,9 +21,9 @@ use blockstore::{verify_block_cid, Blockstore};
 
 use crate::error::{Error, Result};
 use crate::message::PushLogBroadcast;
+use crate::sync::head_scope::ScopeDecision;
 use crate::sync::manager::events::SyncEvent;
 use crate::sync::manager::links::find_all_missing_links;
-use crate::sync::head_scope::ScopeDecision;
 use crate::sync::manager::pending::PendingDag;
 use crate::sync::pending_store::{Admission, PersistedPendingDag, Registration};
 use crate::ExplicitReplayAuthorization;

@@ -75,7 +75,6 @@ pub mod types;
 pub use errors::{Error, Result, TransactionConflict, UNIQUE_CONSTRAINT_VIOLATION_MESSAGE};
 pub use iterator::{Iterator, KvPair};
 pub use retry_policy::{engine_retry_options, DEFAULT_MAX_TXN_RETRIES};
-pub use transact::transact;
 pub use traits::private;
 pub(crate) use traits::truncate_queue;
 pub use traits::{
@@ -86,4 +85,5 @@ pub use traits::{
     RetryAttemptValue, RetryCallbackCounts, RetryCallbackParts, RetryCallbacks, RetryOptions,
     RetryTxn, RetryWriteInterceptor, Store, Txn, TxnCallback, TxnStore, Writer,
 };
+pub use transact::transact;
 pub use types::{AppendLog, IterOptions, Key};

@@ -8,11 +8,11 @@
 
 use crate::error::{Error, Result};
 use async_trait::async_trait;
+use datastore::BasicTxn;
 use defra_core::thread_bounds::MaybeSendSync;
 use kovan_map::HopscotchMap;
 use rapidhash::fast::RandomState;
 use std::sync::Arc;
-use datastore::BasicTxn;
 use storage::corekv::{
     IterOptions, Key, Reader, RetryAttemptError, RetryAttemptValue, RetryOptions, Store,
 };

@@ -294,11 +294,7 @@ impl P2PTransport for RecordingTransport {
         Ok(())
     }
 
-    async fn send_car_response(
-        &self,
-        _peer_id: &PeerId,
-        _car_data: Vec<u8>,
-    ) -> crate::Result<()> {
+    async fn send_car_response(&self, _peer_id: &PeerId, _car_data: Vec<u8>) -> crate::Result<()> {
         Ok(())
     }
 
@@ -525,12 +521,9 @@ async fn subscribe_collections_is_bounded_batched_and_idempotent() {
     let transport =
         RecordingTransport::new("batch-peer").with_subscribe_delay(Duration::from_millis(5));
     let collection_store = Arc::new(RecordingCollectionStore::default());
-    let coordinator = new_test_coordinator_with_store(
-        blockstore,
-        transport.clone(),
-        collection_store.clone(),
-    )
-    .await;
+    let coordinator =
+        new_test_coordinator_with_store(blockstore, transport.clone(), collection_store.clone())
+            .await;
     let collections = (0..70)
         .map(|index| format!("collection-{index}"))
         .collect::<Vec<_>>();
@@ -572,15 +565,11 @@ async fn subscribe_collections_is_bounded_batched_and_idempotent() {
 async fn subscribe_collections_persists_desired_set_and_restart_heals_partial_failure() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
-    let transport =
-        RecordingTransport::new("partial-failure-peer").fail_subscribe("collection-1");
+    let transport = RecordingTransport::new("partial-failure-peer").fail_subscribe("collection-1");
     let collection_store = Arc::new(RecordingCollectionStore::default());
-    let coordinator = new_test_coordinator_with_store(
-        blockstore,
-        transport.clone(),
-        collection_store.clone(),
-    )
-    .await;
+    let coordinator =
+        new_test_coordinator_with_store(blockstore, transport.clone(), collection_store.clone())
+            .await;
     let collections = (0..3)
         .map(|index| format!("collection-{index}"))
         .collect::<Vec<_>>();
@@ -628,15 +617,11 @@ async fn subscribe_collections_persists_desired_set_and_restart_heals_partial_fa
 async fn failed_subscribe_retries_durable_intent_without_restart() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
-    let transport =
-        RecordingTransport::new("subscribe-retry-peer").fail_subscribe_once("users");
+    let transport = RecordingTransport::new("subscribe-retry-peer").fail_subscribe_once("users");
     let collection_store = Arc::new(RecordingCollectionStore::default());
-    let coordinator = new_test_coordinator_with_store(
-        blockstore,
-        transport.clone(),
-        collection_store.clone(),
-    )
-    .await;
+    let coordinator =
+        new_test_coordinator_with_store(blockstore, transport.clone(), collection_store.clone())
+            .await;
 
     coordinator
         .subscribe_collection("users")
@@ -700,12 +685,9 @@ async fn load_p2p_collections_retries_failed_restoration_in_process() {
         .add_collections(&["users".to_string()])
         .await
         .unwrap();
-    let coordinator = new_test_coordinator_with_store(
-        blockstore,
-        transport.clone(),
-        collection_store.clone(),
-    )
-    .await;
+    let coordinator =
+        new_test_coordinator_with_store(blockstore, transport.clone(), collection_store.clone())
+            .await;
 
     assert_eq!(
         coordinator.load_p2p_collections().await.unwrap(),
@@ -764,12 +746,9 @@ async fn unsubscribe_failure_keeps_live_topic_retryable() {
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let transport = RecordingTransport::new("unsubscribe-peer").fail_unsubscribe_once("users");
     let collection_store = Arc::new(RecordingCollectionStore::default());
-    let coordinator = new_test_coordinator_with_store(
-        blockstore,
-        transport.clone(),
-        collection_store.clone(),
-    )
-    .await;
+    let coordinator =
+        new_test_coordinator_with_store(blockstore, transport.clone(), collection_store.clone())
+            .await;
 
     assert!(coordinator.subscribe_collection("users").await.unwrap());
     let error = coordinator
@@ -812,12 +791,9 @@ async fn resubscribe_after_failed_unsubscribe_restores_durable_intent() {
     let blockstore = Arc::new(DefraBlockstore::new(store, true));
     let transport = RecordingTransport::new("resubscribe-peer").fail_unsubscribe_once("users");
     let collection_store = Arc::new(RecordingCollectionStore::default());
-    let coordinator = new_test_coordinator_with_store(
-        blockstore,
-        transport.clone(),
-        collection_store.clone(),
-    )
-    .await;
+    let coordinator =
+        new_test_coordinator_with_store(blockstore, transport.clone(), collection_store.clone())
+            .await;
 
     assert!(coordinator.subscribe_collection("users").await.unwrap());
     coordinator
@@ -835,7 +811,11 @@ async fn resubscribe_after_failed_unsubscribe_restores_durable_intent() {
         coordinator.get_subscribed_collections().await.unwrap(),
         vec!["users".to_string()]
     );
-    wait_for(|| reconcilers_done(&coordinator), "the reconciler should end").await;
+    wait_for(
+        || reconcilers_done(&coordinator),
+        "the reconciler should end",
+    )
+    .await;
     assert_eq!(
         transport.subscribed_topics(),
         vec!["users"],
@@ -871,12 +851,8 @@ async fn resubscribe_during_an_in_flight_removal_returns_at_once_and_converges()
         .with_unsubscribe_gate(Arc::clone(&retry_started), Arc::clone(&retry_release));
     let collection_store = Arc::new(RecordingCollectionStore::default());
     let coordinator = Arc::new(
-        new_test_coordinator_with_store(
-            blockstore,
-            transport.clone(),
-            collection_store.clone(),
-        )
-        .await,
+        new_test_coordinator_with_store(blockstore, transport.clone(), collection_store.clone())
+            .await,
     );
 
     assert!(coordinator.subscribe_collection("users").await.unwrap());
@@ -917,12 +893,9 @@ async fn terminated_retry_releases_ownership_for_a_later_unsubscribe() {
     let transport =
         RecordingTransport::new("retry-handoff-peer").fail_unsubscribe_times("users", 2);
     let collection_store = Arc::new(RecordingCollectionStore::default());
-    let coordinator = new_test_coordinator_with_store(
-        blockstore,
-        transport.clone(),
-        collection_store.clone(),
-    )
-    .await;
+    let coordinator =
+        new_test_coordinator_with_store(blockstore, transport.clone(), collection_store.clone())
+            .await;
 
     assert!(coordinator.subscribe_collection("users").await.unwrap());
     coordinator
@@ -963,12 +936,9 @@ async fn unsubscribe_collections_commits_one_durable_batch_before_live_cleanup()
     let transport =
         RecordingTransport::new("remove-batch-peer").fail_unsubscribe_once("collection-1");
     let collection_store = Arc::new(RecordingCollectionStore::default());
-    let coordinator = new_test_coordinator_with_store(
-        blockstore,
-        transport.clone(),
-        collection_store.clone(),
-    )
-    .await;
+    let coordinator =
+        new_test_coordinator_with_store(blockstore, transport.clone(), collection_store.clone())
+            .await;
     let collections = (0..3)
         .map(|index| format!("collection-{index}"))
         .collect::<Vec<_>>();

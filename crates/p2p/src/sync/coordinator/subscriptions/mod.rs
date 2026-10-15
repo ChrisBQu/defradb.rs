@@ -339,7 +339,10 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     /// or at restart. The live set holds only topics whose transport
     /// installation succeeded.
     pub async fn subscribe_collections(&self, collection_ids: &[String]) -> Result<usize> {
-        self.subscriptions.collections.subscribe(collection_ids).await
+        self.subscriptions
+            .collections
+            .subscribe(collection_ids)
+            .await
     }
 
     /// Subscribe to a specific document for sync.

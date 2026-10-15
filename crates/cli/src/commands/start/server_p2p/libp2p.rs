@@ -61,8 +61,7 @@ impl Node {
         );
         let merge_blockstore = sync_blockstore.clone();
         let collection_store: Arc<dyn p2p::sync::P2PCollectionStorage> = Arc::new(
-            p2p::sync::P2PCollectionStore::new(store.clone())
-                .with_max_txn_retries(max_txn_retries),
+            p2p::sync::P2PCollectionStore::new(store.clone()).with_max_txn_retries(max_txn_retries),
         );
         let head_provider: Arc<dyn p2p::sync::DocumentHeadProvider> =
             Arc::new(db::merge::create_head_provider(database.clone()));

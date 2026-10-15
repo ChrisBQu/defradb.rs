@@ -457,7 +457,10 @@ async fn a_sweep_makes_the_view_the_records() {
         Admission::Registered
     );
     store.put(&orphan, &record("doc-orphan")).await.unwrap();
-    assert!(store.remove(&kept, &Arc::new(PersistedView::default())).await.unwrap());
+    assert!(store
+        .remove(&kept, &Arc::new(PersistedView::default()))
+        .await
+        .unwrap());
     assert!(view.contains(&kept) && !view.contains(&orphan));
 
     let records = store.sweep(&view).await.unwrap();

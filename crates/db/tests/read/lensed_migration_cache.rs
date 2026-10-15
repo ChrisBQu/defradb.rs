@@ -22,7 +22,10 @@ fn users(version_id: &str) -> Collection {
     ))
 }
 
-fn fetcher() -> (Arc<DB<RegolithStore>>, LensedAutoCommitFetcher<RegolithStore>) {
+fn fetcher() -> (
+    Arc<DB<RegolithStore>>,
+    LensedAutoCommitFetcher<RegolithStore>,
+) {
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     let fetcher = LensedAutoCommitFetcher::new(Arc::clone(&db));
     (db, fetcher)

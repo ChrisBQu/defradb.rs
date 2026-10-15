@@ -2652,7 +2652,10 @@ async fn gossip_subscribed_collection_accepts_without_peer_connection_cache() {
         "test setup requires the coordinator peer_state cache to start cold"
     );
 
-    coordinator.subscriptions.collections.insert_live("collection1");
+    coordinator
+        .subscriptions
+        .collections
+        .insert_live("collection1");
 
     let result = coordinator
         .handle_transport_event(gossip_event(peer.clone(), "collection1"))
@@ -2747,7 +2750,10 @@ async fn pushlog_controlled_mode_allows_locally_subscribed_collection() {
     let (coordinator, mut events) =
         create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
 
-    coordinator.subscriptions.collections.insert_live("collection1");
+    coordinator
+        .subscriptions
+        .collections
+        .insert_live("collection1");
 
     coordinator
         .handle_transport_event(pushlog_event(peer.clone(), "collection1"))
@@ -2873,7 +2879,10 @@ async fn two_stream_controlled_mode_allows_locally_subscribed_collection() {
     let (coordinator, mut events) =
         create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
 
-    coordinator.subscriptions.collections.insert_live("collection1");
+    coordinator
+        .subscriptions
+        .collections
+        .insert_live("collection1");
 
     coordinator
         .handle_transport_event(two_stream_event(peer.clone(), "collection1", false))
@@ -2926,7 +2935,10 @@ async fn gossip_controlled_mode_allows_subscribed_collection() {
     let (coordinator, _events) =
         create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
 
-    coordinator.subscriptions.collections.insert_live("collection1");
+    coordinator
+        .subscriptions
+        .collections
+        .insert_live("collection1");
 
     let result = coordinator
         .handle_transport_event(gossip_event(peer, "collection1"))
@@ -2950,7 +2962,10 @@ async fn gossip_relay_cannot_confer_explicit_replicator_trust_on_origin() {
     peer_state.peer_connected(origin.as_str());
     let (coordinator, mut events) =
         create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
-    coordinator.subscriptions.collections.insert_live("collection1");
+    coordinator
+        .subscriptions
+        .collections
+        .insert_live("collection1");
 
     let mut event = gossip_event(relay.clone(), "collection1");
     let TransportEvent::GossipMessage { message, .. } = &mut event else {
@@ -3003,7 +3018,10 @@ async fn gossip_controlled_mode_rejects_mismatched_topic_and_payload_collection(
     let (coordinator, _events) =
         create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
 
-    coordinator.subscriptions.collections.insert_live("collection1");
+    coordinator
+        .subscriptions
+        .collections
+        .insert_live("collection1");
 
     let result = coordinator
         .handle_transport_event(gossip_event_on_topic(peer, "collection2", "collection1"))
@@ -3049,7 +3067,10 @@ async fn gossip_controlled_mode_allows_subscribed_outbound_replicator_target() {
         .await
         .unwrap();
 
-    coordinator.subscriptions.collections.insert_live("collection1");
+    coordinator
+        .subscriptions
+        .collections
+        .insert_live("collection1");
 
     let result = coordinator
         .handle_transport_event(gossip_event(peer, "collection1"))
@@ -3088,7 +3109,10 @@ async fn gossip_allows_doc_less_collection_commit_from_outbound_replicator_targe
         .await
         .unwrap();
 
-    coordinator.subscriptions.collections.insert_live("collection1");
+    coordinator
+        .subscriptions
+        .collections
+        .insert_live("collection1");
 
     let result = coordinator
         .handle_transport_event(collection_commit_gossip_event(peer, "collection1"))

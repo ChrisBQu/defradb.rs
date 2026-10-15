@@ -206,10 +206,7 @@ impl PersistedView {
 }
 
 /// The scope and version of a record's head, if it belongs to a scope.
-pub(super) fn scope_head(
-    root: Cid,
-    record: &PersistedPendingDag,
-) -> Option<(Scope, HeadVersion)> {
+pub(super) fn scope_head(root: Cid, record: &PersistedPendingDag) -> Option<(Scope, HeadVersion)> {
     Scope::of(
         root,
         record.source_peer.as_deref(),

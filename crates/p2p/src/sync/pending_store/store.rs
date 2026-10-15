@@ -22,8 +22,7 @@ use storage::stores::Systemstore;
 
 use super::view::{scope_head, PersistedView};
 use super::{
-    slots, Admission, PendingDagStorage, PersistedPendingDag, PersistedQuarantinedDag,
-    Registration,
+    slots, Admission, PendingDagStorage, PersistedPendingDag, PersistedQuarantinedDag, Registration,
 };
 use crate::error::{Error, Result};
 use crate::sync::head_scope::{HeadVersion, ScopeDecision};
@@ -345,7 +344,11 @@ async fn quarantine(
     drop(systemstore);
     on_commit(
         txn,
-        view.removed(root, discharged.as_ref().map(|stored| &stored.record), !already),
+        view.removed(
+            root,
+            discharged.as_ref().map(|stored| &stored.record),
+            !already,
+        ),
     )?;
     Ok(Box::new(already))
 }
@@ -412,11 +415,13 @@ async fn read_record(
     let Some(bytes) = systemstore.get(&record_key(root)).await? else {
         return Ok(None);
     };
-    defra_core::cbor::from_slice(&bytes).map(Some).map_err(|error| {
-        storage::corekv::Error::Other(format!(
-            "the pending DAG record of {root} cannot be decoded: {error}"
-        ))
-    })
+    defra_core::cbor::from_slice(&bytes)
+        .map(Some)
+        .map_err(|error| {
+            storage::corekv::Error::Other(format!(
+                "the pending DAG record of {root} cannot be decoded: {error}"
+            ))
+        })
 }
 
 async fn read_head(
