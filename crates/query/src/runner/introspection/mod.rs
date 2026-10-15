@@ -180,6 +180,7 @@ pub fn build_introspection_schema(
             TypeRef::named_nn("DocumentArrivalPage"),
             |_| FieldFuture::new(async { Ok(Some(GqlValue::Null)) }),
         )
+        .description("Reads committed document arrivals in local commit order. Creates made by the current transaction appear only after that transaction commits.")
         .argument(InputValue::new("collection", TypeRef::named_nn("String")))
         .argument(InputValue::new("after", TypeRef::named("String")))
         .argument(InputValue::new("limit", TypeRef::named("Int")))
