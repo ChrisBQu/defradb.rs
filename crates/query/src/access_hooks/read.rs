@@ -70,8 +70,11 @@ impl AppReadCheck {
             };
             let request = crate::prepared::PreparedInputRequest::new(
                 crate::prepared::PreparedInputKind::ReadValidation,
-                serde_json::to_vec(&request)
-                    .map_err(|error| crate::error::QueryError::execution(error.to_string()))?,
+                serde_json::to_vec(
+                    &serde_json::to_value(&request)
+                        .map_err(|error| crate::error::QueryError::execution(error.to_string()))?,
+                )
+                .map_err(|error| crate::error::QueryError::execution(error.to_string()))?,
             );
             let Some(response) = inputs.get(&request) else {
                 return Err(crate::error::QueryError::NeedsInput(request));
