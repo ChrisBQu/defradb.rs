@@ -110,10 +110,14 @@ impl<S: Store + 'static> IrohPeer<S> {
         // Its network work runs on the edge, also when a write on a pool
         // worker hands it a broadcast.
         coordinator.use_network(p2p::network::Network::on(edge.clone()));
+        // Its durable registrations change on the database's worker pool.
         coordinator
-            .install_pending_dag_store(Arc::new(
-                p2p::sync::PendingDagStore::new(Arc::clone(&store))
-                    .with_max_txn_retries(database.options().max_txn_retries()),
+            .install_pending_dag_store(p2p::sync::pooled_pending_store(
+                Arc::new(
+                    p2p::sync::PendingDagStore::new(Arc::clone(&store))
+                        .with_max_txn_retries(database.options().max_txn_retries()),
+                ),
+                database.pool(),
             ))
             .await;
 
@@ -170,7 +174,9 @@ impl<S: Store + 'static> IrohPeer<S> {
             .set_document_acp(Arc::clone(&document_acp));
         doc_pusher_acp.set_document_acp(Arc::clone(&document_acp));
         replication.broadcast_mutator.set_document_acp(document_acp);
-        let doc_pusher: Arc<dyn TransportDocPusher> = doc_pusher_acp;
+        // Its storage calls run on the database's worker pool.
+        let doc_pusher: Arc<dyn TransportDocPusher> =
+            crate::pooled(doc_pusher_acp, database.pool());
 
         if load_persisted_collections {
             match db::merge::load_persisted_collections(&coordinator).await {

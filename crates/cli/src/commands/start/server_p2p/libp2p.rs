@@ -89,10 +89,14 @@ impl Node {
         // Its network work runs on the edge, also when a write on a pool
         // worker hands it a broadcast.
         coordinator.use_network(p2p::network::Network::on(edge.clone()));
+        // Its durable registrations change on the database's worker pool.
         coordinator
-            .install_pending_dag_store(Arc::new(
-                p2p::sync::PendingDagStore::new(store.clone())
-                    .with_max_txn_retries(max_txn_retries),
+            .install_pending_dag_store(p2p::sync::pooled_pending_store(
+                Arc::new(
+                    p2p::sync::PendingDagStore::new(store.clone())
+                        .with_max_txn_retries(max_txn_retries),
+                ),
+                database.pool(),
             ))
             .await;
         let coordinator_for_acp = coordinator.clone();
@@ -401,7 +405,9 @@ impl Node {
             .with_retry_schedule(retry_schedule.clone()),
         );
         let doc_pusher_for_acp = doc_pusher_impl.clone();
-        let doc_pusher: Arc<dyn crate::transport_doc_pusher::TransportDocPusher> = doc_pusher_impl;
+        // Its storage calls run on the database's worker pool.
+        let doc_pusher: Arc<dyn crate::transport_doc_pusher::TransportDocPusher> =
+            defra_p2p_adapter::pooled(doc_pusher_impl, database.pool());
 
         let failure_recorder_task = defra_p2p_adapter::spawn_failure_recorder(
             database
