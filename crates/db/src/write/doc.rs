@@ -72,28 +72,39 @@ impl<S: Store + 'static> DbDocMutator<S> {
     ///
     /// Collections will be loaded lazily from the transaction's cache.
     pub fn new(db: Arc<DB<S>>, txn: DbTxn<S>) -> Self {
-        Self {
-            db,
-            txn: Held::new(Arc::new(txn)),
-            broadcaster: None,
-            prepared_inputs: query::prepared::PreparedInputMemo::default(),
-            creates: AtomicU64::new(0),
-        }
+        Self::holding(db, Held::new(Arc::new(txn)), None)
     }
 
-    /// Create a mutator over a transaction lent to it, which its lender keeps
-    /// and takes back, and that (optionally) forwards committed writes to a
-    /// `TxnBroadcaster`. When `broadcaster` is `Some`,
+    /// Create a mutator that shares a transaction and (optionally) forwards
+    /// committed writes to a `TxnBroadcaster`. When `broadcaster` is `Some`,
     /// each per-mutation `on_commit(OnCommit::Async(..))` callback both publishes to the
     /// local event bus and asks the broadcaster to push to P2P peers.
     pub fn from_shared_txn_with_broadcaster(
         db: Arc<DB<S>>,
+        txn: LentTxn<S>,
+        broadcaster: Option<Arc<dyn crate::event::emission::TxnBroadcaster>>,
+    ) -> Self {
+        Self::holding(db, Held::new(txn), broadcaster)
+    }
+
+    /// A mutator over a transaction lent to it, which its lender keeps and
+    /// takes back: [`take_txn`](Self::take_txn) finds nothing.
+    pub(crate) fn lent_with_broadcaster(
+        db: Arc<DB<S>>,
         txn: &LentTxn<S>,
+        broadcaster: Option<Arc<dyn crate::event::emission::TxnBroadcaster>>,
+    ) -> Self {
+        Self::holding(db, Held::borrowed(txn), broadcaster)
+    }
+
+    fn holding(
+        db: Arc<DB<S>>,
+        txn: Held<S>,
         broadcaster: Option<Arc<dyn crate::event::emission::TxnBroadcaster>>,
     ) -> Self {
         Self {
             db,
-            txn: Held::borrowed(txn),
+            txn,
             broadcaster,
             prepared_inputs: query::prepared::PreparedInputMemo::default(),
             creates: AtomicU64::new(0),

@@ -79,7 +79,7 @@ impl<S: Store + 'static> TransactionContext for DbTransactionContext<S> {
             return None;
         }
         let txn = self.txn.upgrade()?;
-        Some(Arc::new(DbDocMutator::from_shared_txn_with_broadcaster(
+        Some(Arc::new(DbDocMutator::lent_with_broadcaster(
             self.db.clone(),
             &txn,
             self.broadcaster.clone(),
