@@ -50,38 +50,17 @@ impl IndexManager {
             // transaction, so the values go in one at a time: the winner then
             // depends on the public DocID ordering, never on scheduling.
             for values in &value_sets {
-                let holder = if original_keys.is_empty() {
-                    None
-                } else {
-                    unique
-                        .conflicting_doc_id(&mutable_datastore, values)
-                        .await
-                        .map_err(Error::Storage)?
-                };
-                if let Some(holder) = holder {
-                    let key = self.encode_index_key(index.description(), values)?;
-                    if holder != doc_short_id
-                        && [holder, doc_short_id].iter().any(|id| {
-                            original_keys
-                                .get(id)
-                                .is_some_and(|keys| !keys.contains(&key))
-                        })
-                    {
-                        return Err(Error::Storage(
-                            storage::corekv::Error::UniqueConstraintViolation,
-                        ));
-                    }
-                }
-                self.save_resolving_unique_conflict(
+                self.save_rebuilt_unique(
                     &mut mutable_datastore,
                     systemstore,
                     index,
+                    unique,
                     doc_short_id,
                     &doc_id,
                     values,
+                    original_keys,
                 )
-                .await
-                .map_err(Error::Storage)?;
+                .await?;
             }
         }
         Ok(())

@@ -23,3 +23,11 @@ pub enum Error {
     #[error("{0}")]
     Other(String),
 }
+
+impl Error {
+    /// Whether this is a unique-index rejection, as opposed to a transient
+    /// storage failure that should retry.
+    pub fn is_unique_constraint_violation(&self) -> bool {
+        matches!(self, Error::Storage(source) if source.is_unique_constraint_violation())
+    }
+}

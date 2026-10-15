@@ -200,7 +200,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                     // None) — internal index-state inconsistency, not a
                     // transient storage failure. Classify and reject rather
                     // than retrying forever.
-                    if is_unique_constraint_violation(&e) {
+                    if e.is_unique_constraint_violation() {
                         return Err(MergeError::UniqueConstraintViolation(e.to_string()));
                     }
                     let message = if context.mode.is_standalone() {
@@ -335,12 +335,4 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
 
         Ok(())
     }
-}
-
-/// True if `e` represents a deterministic unique-index rejection rather than a
-/// transient storage failure during merge-time index maintenance. Only this
-/// case should be converted into `MergeOutcome::Rejected`; every other
-/// `crate::index::Error` must keep surfacing as `Err` so transient failures retry.
-pub fn is_unique_constraint_violation(e: &crate::index::Error) -> bool {
-    matches!(e, crate::index::Error::Storage(se) if se.is_unique_constraint_violation())
 }
