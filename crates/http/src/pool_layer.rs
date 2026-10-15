@@ -58,7 +58,9 @@ pub fn runs_on_pool(path: &str) -> bool {
 /// (`/collections/{name}/document/{docID}`, keyed as a GraphQL write to it
 /// is).
 pub fn route_target(path: &str) -> workers::Target {
-    let mut segments = path.split('/').skip_while(|segment| *segment != "collections");
+    let mut segments = path
+        .split('/')
+        .skip_while(|segment| *segment != "collections");
     match (segments.nth(1), segments.next(), segments.next()) {
         (Some(collection), Some("document"), Some(doc_id))
             if !collection.is_empty() && !doc_id.is_empty() =>
@@ -170,6 +172,102 @@ mod tests {
         ] {
             assert!(!runs_on_pool(path), "{path}");
         }
+    }
+
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use axum::body::Body;
+    use axum::routing::get;
+    use axum::Router;
+    use tokio::sync::Notify;
+
+    const LIMIT: Duration = Duration::from_secs(10);
+
+    /// A collections route on `pool` whose handler says when it starts and
+    /// when it ends, and waits for `gate` in between.
+    fn app(
+        pool: &workers::Pool,
+        started: &Arc<Notify>,
+        gate: &Arc<Notify>,
+        done: &Arc<Notify>,
+    ) -> Router {
+        let (started, gate, done) = (Arc::clone(started), Arc::clone(gate), Arc::clone(done));
+        let handler = move || {
+            let (started, gate, done) =
+                (Arc::clone(&started), Arc::clone(&gate), Arc::clone(&done));
+            async move {
+                started.notify_one();
+                gate.notified().await;
+                done.notify_one();
+                "ok"
+            }
+        };
+        Router::new()
+            .route("/api/v0/collections", get(handler))
+            .route_layer(OnPool::new(pool.clone()))
+    }
+
+    fn request() -> Request {
+        Request::get("/api/v0/collections")
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_request_that_times_out_before_its_worker_starts_it_never_runs() {
+        let pool = workers::Pool::start(workers::Config::unplaced(1)).unwrap();
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        // The one worker's thread is held until `release` sends.
+        let hold = pool
+            .submit(workers::Target::Worker(0), move || async move {
+                let _ = held.recv();
+            })
+            .await
+            .unwrap();
+        let notify = || Arc::new(Notify::new());
+        let (started, gate, done) = (notify(), notify(), notify());
+        let timed_out = tokio::time::timeout(
+            Duration::from_millis(50),
+            app(&pool, &started, &gate, &done).oneshot(request()),
+        )
+        .await;
+        assert!(timed_out.is_err(), "the held worker cannot answer");
+        release.send(()).unwrap();
+        hold.await.unwrap();
+        // A job queued after the request's, in the same inbox, runs after
+        // the request's turn.
+        pool.submit(workers::Target::LeastLoaded, || async {})
+            .await
+            .unwrap()
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), started.notified())
+                .await
+                .is_err(),
+            "the timed-out request never ran"
+        );
+        pool.shutdown_blocking().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_request_that_times_out_while_it_runs_runs_to_its_end() {
+        let pool = workers::Pool::start(workers::Config::unplaced(1)).unwrap();
+        let notify = || Arc::new(Notify::new());
+        let (started, gate, done) = (notify(), notify(), notify());
+        let response = app(&pool, &started, &gate, &done).oneshot(request());
+        tokio::pin!(response);
+        tokio::select! {
+            _ = &mut response => panic!("the request ended before its gate opened"),
+            _ = started.notified() => {}
+        }
+        drop(response);
+        gate.notify_one();
+        tokio::time::timeout(LIMIT, done.notified())
+            .await
+            .expect("the running request finished");
+        pool.shutdown_blocking().unwrap();
     }
 
     #[test]

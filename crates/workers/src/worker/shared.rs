@@ -58,7 +58,13 @@ impl Job {
     {
         let (sender, completion) = completion::channel();
         let fail: Arc<dyn Fail + Send + Sync> = sender.shared();
-        let start: Start = Box::new(move || Box::pin(async move { sender.send(make().await) }));
+        let start: Start = Box::new(move || {
+            // Its waiter gave up before it started: it never runs.
+            if sender.is_cancelled() {
+                return Box::pin(std::future::ready(()));
+            }
+            Box::pin(async move { sender.send(make().await) })
+        });
         (
             Job {
                 start,

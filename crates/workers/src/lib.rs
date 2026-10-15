@@ -22,7 +22,7 @@ mod worker;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub use clock::StdClock;
 pub use clock::{Clock, EnvClock};
-pub use completion::Completion;
+pub use completion::{CancelOnDrop, Completion};
 #[cfg(not(target_family = "wasm"))]
 pub use completion::{block_on, block_on_timeout};
 pub use config::{

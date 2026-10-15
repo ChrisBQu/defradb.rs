@@ -55,7 +55,9 @@ where
 /// place when the caller is already a worker (no hop from worker to worker),
 /// on the worker `target` names otherwise (one crossing there, one back), and
 /// in place when there is no pool (a test, a one-shot tool). What a boundary
-/// wraps a data-path call in.
+/// wraps a data-path call in. Dropped before the worker starts it, the call
+/// never runs; once started, it runs to its end
+/// ([`Completion::cancel_on_drop`](crate::Completion::cancel_on_drop)).
 ///
 /// ```no_run
 /// # async fn demo(pool: Option<&workers::Pool>) -> Result<(), workers::Error> {
@@ -75,7 +77,9 @@ where
     Fut::Output: Send + 'static,
 {
     match pool {
-        Some(pool) if !crate::worker::on_worker() => pool.submit(target, make).await?.await,
+        Some(pool) if !crate::worker::on_worker() => {
+            pool.submit(target, make).await?.cancel_on_drop().await
+        }
         _ => Ok(make().await),
     }
 }
@@ -179,4 +183,79 @@ pub fn fallback() -> Result<&'static Pool, Error> {
 #[cfg(target_family = "wasm")]
 pub fn fallback() -> Result<&'static Pool, Error> {
     Err(Error::NotOnWorker)
+}
+
+#[cfg(all(test, not(target_family = "wasm")))]
+mod tests {
+    use std::future::Future;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{mpsc, Arc};
+    use std::task::{Context, Waker};
+    use std::time::Duration;
+
+    use regolith::sync::Event;
+
+    use super::run_on;
+    use crate::{block_on, Config, Pool, Target};
+
+    const LIMIT: Duration = Duration::from_secs(10);
+
+    /// Polls `call` once, which submits it, and hands it back to be dropped.
+    fn submitted<F: Future>(call: F) -> std::pin::Pin<Box<F>> {
+        let mut call = Box::pin(call);
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(call.as_mut().poll(&mut cx).is_pending());
+        call
+    }
+
+    #[test]
+    fn a_call_dropped_before_its_worker_starts_it_never_runs() {
+        let pool = Pool::start(Config::unplaced(1)).unwrap();
+        let (started_tx, started) = mpsc::channel();
+        let (release, held) = mpsc::channel::<()>();
+        // The one worker's thread is held until `release` sends.
+        let hold = block_on(pool.submit(Target::Worker(0), move || async move {
+            started_tx.send(()).unwrap();
+            let _ = held.recv();
+        }))
+        .unwrap()
+        .unwrap();
+        started.recv_timeout(LIMIT).unwrap();
+
+        let ran = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&ran);
+        drop(submitted(run_on(
+            Some(&pool),
+            Target::Worker(0),
+            move || async move {
+                flag.store(true, Ordering::SeqCst);
+            },
+        )));
+        release.send(()).unwrap();
+        block_on(hold).unwrap().unwrap();
+        // A call queued after the dropped one runs after its turn.
+        pool.submit_and_wait(Target::Worker(0), || async {})
+            .unwrap();
+        assert!(!ran.load(Ordering::SeqCst), "the dropped call never ran");
+        pool.shutdown_blocking().unwrap();
+    }
+
+    #[test]
+    fn a_call_dropped_while_it_runs_runs_to_its_end() {
+        let pool = Pool::start(Config::unplaced(1)).unwrap();
+        let (started_tx, started) = mpsc::channel();
+        let (done_tx, done) = mpsc::channel();
+        let gate = Arc::new(Event::new());
+        let waits = Arc::clone(&gate);
+        let call = submitted(run_on(Some(&pool), Target::Worker(0), move || async move {
+            started_tx.send(()).unwrap();
+            waits.wait().await;
+            done_tx.send(()).unwrap();
+        }));
+        started.recv_timeout(LIMIT).unwrap();
+        drop(call);
+        gate.set();
+        done.recv_timeout(LIMIT).expect("the running call finished");
+        pool.shutdown_blocking().unwrap();
+    }
 }

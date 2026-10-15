@@ -18,6 +18,9 @@ const EMPTY: u8 = 0;
 const WRITING: u8 = 1;
 const FULL: u8 = 2;
 const TAKEN: u8 = 3;
+/// The waiter gave up before a result came: a task that has not started
+/// yet never runs, and a result that comes is dropped.
+const CANCELLED: u8 = 4;
 
 /// The slot a result is written into once and taken out of once.
 pub(crate) struct Shared<T> {
@@ -49,6 +52,13 @@ impl<T> Shared<T> {
         self.state.store(FULL, Ordering::Release);
         self.event.set();
         true
+    }
+
+    /// Gives up on the result unless it is in already.
+    fn cancel(&self) {
+        let _ = self
+            .state
+            .compare_exchange(EMPTY, CANCELLED, Ordering::AcqRel, Ordering::Relaxed);
     }
 
     fn take(&self) -> Option<Result<T, Error>> {
@@ -94,6 +104,11 @@ impl<T> Sender<T> {
 
     pub(crate) fn shared(&self) -> Arc<Shared<T>> {
         self.shared.clone()
+    }
+
+    /// Whether the waiter gave up before the task started.
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.shared.state.load(Ordering::Acquire) == CANCELLED
     }
 }
 
@@ -149,6 +164,32 @@ impl<T> Completion<T> {
     pub fn wait_timeout(self, timeout: std::time::Duration) -> Result<T, Error> {
         block_on_timeout(self, timeout)?
     }
+
+    /// This completion awaited by a waiter that may give up: dropped before
+    /// the result is in, a task that has not started never runs, and one
+    /// already running runs to its end, its result discarded.
+    pub fn cancel_on_drop(self) -> CancelOnDrop<T> {
+        CancelOnDrop(self)
+    }
+}
+
+/// A [`Completion`] whose task does not start once its waiter is gone
+/// ([`Completion::cancel_on_drop`]).
+#[must_use = "dropping it cancels a task that has not started"]
+pub struct CancelOnDrop<T>(Completion<T>);
+
+impl<T> Future for CancelOnDrop<T> {
+    type Output = Result<T, Error>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.get_mut().0).poll(cx)
+    }
+}
+
+impl<T> Drop for CancelOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.shared.cancel();
+    }
 }
 
 impl<T> Future for Completion<T> {
@@ -160,7 +201,7 @@ impl<T> Future for Completion<T> {
             this.wait = None;
             return Poll::Ready(value);
         }
-        if this.shared.state.load(Ordering::Acquire) == TAKEN {
+        if matches!(this.shared.state.load(Ordering::Acquire), TAKEN | CANCELLED) {
             return Poll::Ready(Err(Error::Consumed));
         }
         let wait = this.wait.get_or_insert_with(|| {
@@ -294,6 +335,22 @@ mod tests {
         assert!(completion.is_finished());
         assert_eq!(block_on(&mut completion), Ok(Ok(1)));
         assert_eq!(block_on(&mut completion), Ok(Err(Error::Consumed)));
+    }
+
+    #[test]
+    fn a_cancelled_completion_takes_no_result_and_a_taken_one_stays_taken() {
+        let (sender, completion) = channel::<u8>();
+        drop(completion.cancel_on_drop());
+        assert!(sender.is_cancelled());
+        sender.send(1);
+
+        let (sender, completion) = channel::<u8>();
+        sender.send(2);
+        let shared = Arc::clone(&completion.shared);
+        let mut waiting = completion.cancel_on_drop();
+        assert_eq!(block_on(&mut waiting), Ok(Ok(2)));
+        drop(waiting);
+        assert_eq!(shared.state.load(Ordering::Acquire), TAKEN);
     }
 
     #[test]
