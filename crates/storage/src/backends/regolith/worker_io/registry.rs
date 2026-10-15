@@ -11,6 +11,10 @@
 //! delivers runs regolith callbacks, and one of them may open another
 //! transaction here, which looks the registry up. Each entry is its own
 //! `Rc`, cloned out for the poll.
+//!
+//! The registry keeps the waker its worker rested with until the worker runs
+//! again, so a queue opened while it rests (a browser page's call on its
+//! driven worker's thread) wakes the worker like the others do.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -28,9 +32,16 @@ struct Entry {
     queue: Rc<RefCell<IoQueue>>,
 }
 
+#[derive(Default)]
+struct Registry {
+    entries: Vec<Entry>,
+    /// The waker the worker rested with; `None` while it runs.
+    resting: Option<Waker>,
+}
+
 thread_local! {
     /// `None` on a thread that is not a worker with regolith queues.
-    static QUEUES: RefCell<Option<Vec<Entry>>> = const { RefCell::new(None) };
+    static QUEUES: RefCell<Option<Registry>> = const { RefCell::new(None) };
 }
 
 /// The calling thread's registry, for as long as it lives.
@@ -40,7 +51,7 @@ impl Bound {
     /// Opens the calling thread's registry.
     pub(super) fn here() -> Bound {
         QUEUES.with(|queues| {
-            queues.borrow_mut().get_or_insert_with(Vec::new);
+            queues.borrow_mut().get_or_insert_with(Registry::default);
         });
         Bound(())
     }
@@ -57,9 +68,10 @@ impl Drop for Bound {
 pub(super) fn queue_for(db: &Arc<OptimisticTransactionDb>) -> Option<QueueId> {
     QUEUES.with(|queues| {
         let mut queues = queues.borrow_mut();
-        let entries = queues.as_mut()?;
+        let registry = queues.as_mut()?;
         let target = Arc::as_ptr(db);
-        if let Some(entry) = entries
+        if let Some(entry) = registry
+            .entries
             .iter()
             .find(|entry| std::ptr::eq(entry.db.as_ptr(), target))
         {
@@ -67,7 +79,10 @@ pub(super) fn queue_for(db: &Arc<OptimisticTransactionDb>) -> Option<QueueId> {
         }
         let queue = db.db().io_queue();
         let id = queue.id();
-        entries.push(Entry {
+        if let Some(waker) = &registry.resting {
+            queue.idle_waker(waker);
+        }
+        registry.entries.push(Entry {
             db: Arc::downgrade(db),
             id,
             queue: Rc::new(RefCell::new(queue)),
@@ -88,9 +103,10 @@ enum Slot {
 fn slot(index: usize) -> Slot {
     QUEUES.with(|queues| {
         let mut queues = queues.borrow_mut();
-        let Some(entries) = queues.as_mut() else {
+        let Some(registry) = queues.as_mut() else {
             return Slot::End;
         };
+        let entries = &mut registry.entries;
         match entries.get(index) {
             None => Slot::End,
             Some(entry) if entry.db.strong_count() == 0 => Slot::Gone(entries.swap_remove(index)),
@@ -100,7 +116,17 @@ fn slot(index: usize) -> Slot {
 }
 
 /// Polls every queue of the calling worker within `budget` units each.
+/// Records whether the worker rests, and with which waker.
+fn set_resting(waker: Option<&Waker>) {
+    QUEUES.with(|queues| {
+        if let Some(registry) = queues.borrow_mut().as_mut() {
+            registry.resting = waker.cloned();
+        }
+    });
+}
+
 pub(super) fn poll(budget: usize) -> workers::HookProgress {
+    set_resting(None);
     let mut progress = workers::HookProgress::default();
     let mut index = 0;
     loop {
@@ -126,6 +152,7 @@ pub(super) fn poll(budget: usize) -> workers::HookProgress {
 
 /// Hands `waker` to every queue of the calling worker before it parks.
 pub(super) fn idle(waker: &Waker) {
+    set_resting(Some(waker));
     let mut index = 0;
     loop {
         match slot(index) {
@@ -142,5 +169,10 @@ pub(super) fn idle(waker: &Waker) {
 /// How many queues the calling thread holds.
 #[cfg(test)]
 pub(super) fn len() -> usize {
-    QUEUES.with(|queues| queues.borrow().as_ref().map_or(0, Vec::len))
+    QUEUES.with(|queues| {
+        queues
+            .borrow()
+            .as_ref()
+            .map_or(0, |registry| registry.entries.len())
+    })
 }

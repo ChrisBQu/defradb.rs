@@ -1,6 +1,6 @@
 //! The boundary between the network edge and the worker pool for GraphQL:
 //! a [`QueryExecutor`] that runs each request on the worker its routing
-//! names ([`route`]) and hands the response back. Every boundary that
+//! names and hands the response back. Every boundary that
 //! executes GraphQL (HTTP, Postgres wire, the embedded API, the C FFI)
 //! holds the database's executor through one of these, so each request
 //! crosses into the pool once and its result crosses back once.
