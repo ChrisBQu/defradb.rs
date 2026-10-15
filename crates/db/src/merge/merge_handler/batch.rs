@@ -285,9 +285,6 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
         &self,
         blocks: &[MergeBlock],
     ) -> Result<Vec<Result<MergeOutcome, MergeError>>, MergeError> {
-        const MAX_TXN_RETRIES: u32 = 5;
-        const MAX_KMS_INPUT_MISSES_PER_BLOCK: usize = 64;
-
         if blocks.is_empty() {
             return Ok(Vec::new());
         }
@@ -305,10 +302,8 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
         // Never share a CID-only memo across block authorization contexts.
         // Each block owns a small key map, even when two blocks reference the
         // same encryption block under different explicit replay principals.
-        let retry_deks: Vec<RetryDecryptionKeys> = blocks
-            .iter()
-            .map(|_| Arc::new(Mutex::new(HashMap::new())))
-            .collect();
+        let retry_deks: Vec<RetryDecryptionKeys> =
+            blocks.iter().map(|_| retry_decryption_keys()).collect();
         let prefetch_requested: Vec<_> = blocks
             .iter()
             .map(|_| Arc::new(AtomicBool::new(false)))
@@ -317,8 +312,6 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
             .iter()
             .map(|block| Self::kms_request_context(Some(&batch_block_metadata(block))))
             .collect();
-        let mut kms_input_misses = 0usize;
-        let max_kms_input_misses = MAX_KMS_INPUT_MISSES_PER_BLOCK.saturating_mul(blocks.len());
 
         let result = loop {
             let attempt = BatchMergeRetryAttempt {
@@ -330,10 +323,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
             match self
                 .db
                 .store()
-                .transact_retry(
-                    storage::corekv::RetryOptions::new(MAX_TXN_RETRIES),
-                    Box::new(attempt),
-                )
+                .transact_retry(self.db.options().retry_options(), Box::new(attempt))
                 .await
             {
                 Ok(value) => {
@@ -349,20 +339,19 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
                         block_index,
                         encryption_cid,
                     }) => {
-                        kms_input_misses += 1;
-                        if kms_input_misses > max_kms_input_misses {
-                            break Err(MergeError::MergeFailed(
-                                "batch merge exceeded its prepared KMS dependency budget".into(),
-                            ));
-                        }
                         let Some(kms) = self.kms() else {
                             break Err(MergeError::Kms(kms::Error::KeyUnavailable));
                         };
-                        let Some(context) = kms_contexts.get(block_index) else {
+                        let (Some(context), Some(block_keys)) =
+                            (kms_contexts.get(block_index), retry_deks.get(block_index))
+                        else {
                             break Err(MergeError::MergeFailed(
                                 "batch merge requested a DEK for an invalid block index".into(),
                             ));
                         };
+                        if block_keys.contains_key(&encryption_cid) {
+                            break Err(repeated_key_request(&encryption_cid));
+                        }
                         match kms
                             .get_keys(context, std::slice::from_ref(&encryption_cid))
                             .await
@@ -370,10 +359,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
                             Ok(results) => match results.wait_all().await {
                                 Ok(mut keys) => match keys.remove(&encryption_cid) {
                                     Some(key) => {
-                                        retry_deks[block_index]
-                                            .lock()
-                                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                            .insert(encryption_cid, key);
+                                        block_keys.insert(encryption_cid, Zeroizing::new(key));
                                     }
                                     None => break Err(MergeError::Kms(kms::Error::KeyUnavailable)),
                                 },

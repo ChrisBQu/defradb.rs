@@ -160,7 +160,7 @@ mod retry_tests {
             .allows(&input.doc_id)
             .await
             .unwrap();
-        assert!(memo.insert(request, serde_json::to_vec(&resolved).unwrap()));
+        memo.insert(request, serde_json::to_vec(&resolved).unwrap());
         assert!(check.allows("doc1").await.unwrap());
         assert_eq!(provider.0.load(Ordering::SeqCst), 1);
         assert!(matches!(

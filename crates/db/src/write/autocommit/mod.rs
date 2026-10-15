@@ -347,11 +347,16 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                             "invalid prepared node permission request",
                         )
                     })?;
-                let identity = identity::Did::new(identity).map_err(|_| {
-                    query::error::QueryError::execution(
-                        "invalid identity in node permission request",
-                    )
-                })?;
+                // An attempt with no acting identity asks for the wildcard actor.
+                let identity = if identity == identity::Did::wildcard().as_str() {
+                    identity::Did::wildcard()
+                } else {
+                    identity::Did::new(identity).map_err(|_| {
+                        query::error::QueryError::execution(
+                            "invalid identity in node permission request",
+                        )
+                    })?
+                };
                 let permission = match permission.as_str() {
                     "update-document" => acp::nac::NodePermission::DocumentUpdate,
                     "delete-document" => acp::nac::NodePermission::DocumentDelete,

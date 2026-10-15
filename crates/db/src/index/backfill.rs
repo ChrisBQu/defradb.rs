@@ -237,12 +237,7 @@ impl<S: Store> DB<S> {
         };
         match self
             .store()
-            .transact_retry(
-                storage::corekv::RetryOptions::new(
-                    self.options().max_txn_retries().saturating_add(1),
-                ),
-                Box::new(attempt),
-            )
+            .transact_retry(self.options().retry_options(), Box::new(attempt))
             .await
         {
             Ok(_) => {}
@@ -263,11 +258,13 @@ impl<S: Store> DB<S> {
         max_docs: &mut usize,
     ) -> Result<BatchIndexResult> {
         let collection = self.require_collection(&plan.collection_name)?;
+        // Each conflict halves the batch, so the policy's budget is extended
+        // by the halvings that can bring it down to one document.
         let attempts = self
             .options()
-            .max_txn_retries()
-            .saturating_add(max_docs.ilog2())
-            .saturating_add(1);
+            .retry_options()
+            .max_attempts
+            .saturating_add(max_docs.ilog2());
         let attempt = BackfillRetryAttempt {
             collection,
             plan: plan.clone(),

@@ -367,32 +367,33 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                 "retry input has no request preparation capsule",
             ));
         };
-        if prepared.inputs.get(input).is_none() {
-            if !prepared.inputs.register_dependency_miss() {
-                return Err(crate::error::QueryError::execution(
-                    "remote input dependency retry limit exceeded",
-                ));
-            }
-            let response = if input.kind() == crate::prepared::PreparedInputKind::AcpDecision {
-                self.resolve_acp_decision_input(input).await?
-            } else if input.kind() == crate::prepared::PreparedInputKind::WriteValidation {
-                self.resolve_write_validation_input(input).await?
-            } else if input.kind() == crate::prepared::PreparedInputKind::ReadValidation {
-                self.resolve_read_validation_input(input).await?
-            } else if input.kind() == crate::prepared::PreparedInputKind::EncryptedSearch {
-                self.resolve_encrypted_search_input(input).await?
-            } else {
-                let mutator = self.mutator.as_ref().ok_or_else(|| {
-                    crate::error::QueryError::execution("retry input has no document mutator")
-                })?;
-                mutator.resolve_prepared_input(input).await?
-            };
-            if !prepared.inputs.insert(input.clone(), response) {
-                return Err(crate::error::QueryError::execution(
-                    "prepared input memo budget exceeded",
-                ));
-            }
-        }
+        prepared
+            .inputs
+            .answer_miss(input, || async {
+                match input.kind() {
+                    crate::prepared::PreparedInputKind::AcpDecision => {
+                        self.resolve_acp_decision_input(input).await
+                    }
+                    crate::prepared::PreparedInputKind::WriteValidation => {
+                        self.resolve_write_validation_input(input).await
+                    }
+                    crate::prepared::PreparedInputKind::ReadValidation => {
+                        self.resolve_read_validation_input(input).await
+                    }
+                    crate::prepared::PreparedInputKind::EncryptedSearch => {
+                        self.resolve_encrypted_search_input(input).await
+                    }
+                    _ => {
+                        let mutator = self.mutator.as_ref().ok_or_else(|| {
+                            crate::error::QueryError::execution(
+                                "retry input has no document mutator",
+                            )
+                        })?;
+                        mutator.resolve_prepared_input(input).await
+                    }
+                }
+            })
+            .await?;
         Ok(Some(prepared))
     }
 

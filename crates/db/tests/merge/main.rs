@@ -13,6 +13,7 @@ mod collection_predecessor;
 mod governance;
 mod head_failures;
 mod head_provider;
+mod merge_dek_misses;
 mod merge_handler_composite_persist;
 mod merge_handler_se_merge;
 mod merge_handler_se_repush;

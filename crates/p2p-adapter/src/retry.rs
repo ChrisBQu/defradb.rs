@@ -185,8 +185,12 @@ pub fn spawn_failure_recorder<S: storage::corekv::Store + 'static>(
 }
 
 /// Activate a dormant durable peer schedule after either transport reconnects.
-pub async fn activate_retry_peer<S: storage::corekv::Store>(store: Arc<S>, peer_id: &PeerId) {
-    let peerstore = storage::stores::Peerstore::new(store);
+/// Its transaction re-runs a conflict up to `max_txn_retries` times.
+pub async fn activate_retry_peer<S>(store: Arc<S>, max_txn_retries: u32, peer_id: &PeerId)
+where
+    S: storage::corekv::Store,
+{
+    let peerstore = storage::stores::Peerstore::new(store).with_max_txn_retries(max_txn_retries);
     match peerstore.activate_retry_peer(peer_id.as_str()).await {
         Ok(true) => {
             tracing::debug!(%peer_id, "Activated durable push markers after peer reconnect")

@@ -56,9 +56,10 @@ use std::fmt;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use storage::corekv::{IterOptions, Key, Store};
+use storage::corekv::{IterOptions, Key, RetryOptions, Store};
 use storage::keys::blockstore::{BlockstoreKey, ToMergeIndexKey};
 use storage::stores::blockstore::BlockstoreTxn;
+use storage::stores::BlockWrite;
 use storage::stores::Blockstore as InternalBlockstore;
 use tracing::instrument;
 
@@ -89,6 +90,8 @@ pub struct DefraBlockstore<S: Store> {
     /// LRU cache for merged CIDs — fast path for `is_merged()` checks
     /// during P2P DAG sync. Only positive results are cached (merged = true).
     merged_cache: Mutex<LruCache<Cid, ()>>,
+    /// The engine retry policy every block write runs under.
+    retry: RetryOptions,
 }
 
 impl<S: Store> fmt::Debug for DefraBlockstore<S> {
@@ -118,7 +121,15 @@ impl<S: Store + 'static> DefraBlockstore<S> {
             merged_cache: Mutex::new(LruCache::new(
                 NonZeroUsize::new(DEFAULT_MERGED_CACHE_SIZE).unwrap(),
             )),
+            retry: storage::corekv::engine_retry_options(storage::corekv::DEFAULT_MAX_TXN_RETRIES),
         }
+    }
+
+    /// Re-run a conflicting block write up to `max_txn_retries` times, the
+    /// node's `datastore.max_txn_retries`.
+    pub fn with_max_txn_retries(mut self, max_txn_retries: u32) -> Self {
+        self.retry = storage::corekv::engine_retry_options(max_txn_retries);
+        self
     }
 
     /// Check if hash verification on read is currently enabled
@@ -228,68 +239,49 @@ impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
             return Ok(());
         }
 
-        let mut txn = self.store.new_txn(false).await?;
-        let already_exists = {
-            let bs_txn = txn
-                .as_any_mut()
-                .downcast_mut::<BlockstoreTxn>()
-                .ok_or_else(|| Error::Internal("Failed to downcast transaction".to_string()))?;
-            if bs_txn.has_block(cid).await? {
-                true
-            } else {
-                bs_txn.put_block(cid, data).await?;
-                false
-            }
-        };
-        if already_exists {
-            txn.discard();
-            return Ok(());
+        let data = Bytes::copy_from_slice(data);
+        let written = self
+            .store
+            .write_blocks(
+                self.retry,
+                vec![BlockWrite::Put {
+                    cid: *cid,
+                    data: data.clone(),
+                }],
+            )
+            .await?;
+        if written.first() == Some(&true) {
+            self.cache.lock().put(*cid, data);
         }
-        txn.commit().await?;
-
-        // Write-through: populate cache
-        self.cache.lock().put(*cid, Bytes::copy_from_slice(data));
         Ok(())
     }
 
     async fn put_many(&self, blocks: &[(&Cid, &[u8])]) -> Result<()> {
-        if blocks.is_empty() {
-            return Ok(());
-        }
-
-        let blocks_to_write: Vec<_> = {
+        let to_write: Vec<(Cid, Bytes)> = {
             let cache = self.cache.lock();
             blocks
                 .iter()
-                .copied()
                 .filter(|(cid, _)| !cache.contains(cid))
+                .map(|(cid, data)| (**cid, Bytes::copy_from_slice(data)))
                 .collect()
         };
-        if blocks_to_write.is_empty() {
+        if to_write.is_empty() {
             return Ok(());
         }
 
-        let mut txn = self.store.new_txn(false).await?;
-        let mut written: Vec<(Cid, Bytes)> = Vec::new();
-        {
-            let bs_txn = txn
-                .as_any_mut()
-                .downcast_mut::<BlockstoreTxn>()
-                .ok_or_else(|| Error::Internal("Failed to downcast transaction".to_string()))?;
-            for (cid, data) in blocks_to_write {
-                if bs_txn.has_block(cid).await? {
-                    continue;
-                }
-                bs_txn.put_block(cid, data).await?;
-                written.push((*cid, Bytes::copy_from_slice(data)));
-            }
-        }
-        txn.commit().await?;
-
-        // Write-through: populate cache for all written blocks
+        let writes = to_write
+            .iter()
+            .map(|(cid, data)| BlockWrite::Put {
+                cid: *cid,
+                data: data.clone(),
+            })
+            .collect();
+        let written = self.store.write_blocks(self.retry, writes).await?;
         let mut cache = self.cache.lock();
-        for (cid, data) in written {
-            cache.put(cid, data);
+        for ((cid, data), written) in to_write.into_iter().zip(written) {
+            if written {
+                cache.put(cid, data);
+            }
         }
         Ok(())
     }
@@ -314,15 +306,9 @@ impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
         self.cache.lock().pop(cid);
         self.merged_cache.lock().pop(cid);
 
-        let mut txn = self.store.new_txn(false).await?;
-        {
-            let bs_txn = txn
-                .as_any_mut()
-                .downcast_mut::<BlockstoreTxn>()
-                .ok_or_else(|| Error::Internal("Failed to downcast transaction".to_string()))?;
-            bs_txn.delete_block(cid).await?;
-        }
-        txn.commit().await?;
+        self.store
+            .write_blocks(self.retry, vec![BlockWrite::Delete(*cid)])
+            .await?;
         Ok(())
     }
 
@@ -397,18 +383,11 @@ impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
     }
 
     async fn mark_as_merged(&self, cid: &Cid) -> Result<()> {
-        let mut txn = self.store.new_txn(false).await?;
-        let block_exists;
-        {
-            let bs_txn = txn
-                .as_any_mut()
-                .downcast_mut::<BlockstoreTxn>()
-                .ok_or_else(|| Error::Internal("Failed to downcast transaction".to_string()))?;
-            block_exists = bs_txn.has_block(cid).await?;
-            bs_txn.mark_as_merged(cid).await?;
-        }
-        txn.commit().await?;
-        if block_exists {
+        let stored = self
+            .store
+            .write_blocks(self.retry, vec![BlockWrite::MarkMerged(*cid)])
+            .await?;
+        if stored.first() == Some(&true) {
             self.merged_cache.lock().put(*cid, ());
         }
         Ok(())
@@ -418,17 +397,8 @@ impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
         if cids.is_empty() {
             return Ok(());
         }
-        let mut txn = self.store.new_txn(false).await?;
-        {
-            let bs_txn = txn
-                .as_any_mut()
-                .downcast_mut::<BlockstoreTxn>()
-                .ok_or_else(|| Error::Internal("Failed to downcast transaction".to_string()))?;
-            for cid in cids {
-                bs_txn.mark_as_merged(cid).await?;
-            }
-        }
-        txn.commit().await?;
+        let writes = cids.iter().copied().map(BlockWrite::MarkMerged).collect();
+        self.store.write_blocks(self.retry, writes).await?;
         let mut cache = self.merged_cache.lock();
         for cid in cids {
             cache.put(*cid, ());

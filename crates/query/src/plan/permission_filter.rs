@@ -555,7 +555,7 @@ mod tests {
         };
         assert_eq!(acp.calls.load(Ordering::SeqCst), 0);
 
-        assert!(memo.insert(request, b"true".as_slice()));
+        memo.insert(request, b"true".as_slice());
         let (_, allowed) = node
             .permission_check("doc-1".to_string(), doc)
             .await

@@ -208,7 +208,7 @@ impl<S: Store + 'static> MutationBatchController for BatchMutator<S> {
         match self
             .db
             .store()
-            .transact_retry(storage::corekv::RetryOptions::new(4), Box::new(attempt))
+            .transact_retry(self.db.options().retry_options(), Box::new(attempt))
             .await
         {
             Ok(value) => value

@@ -228,7 +228,8 @@ async fn push_existing_docs_with_config_and_allowlist<S: Store + 'static, T: P2P
     }
 
     let local_peer_id = transport.local_peer_id().to_string();
-    let peerstore = storage::stores::Peerstore::new(db.store().clone())
+    let peerstore = db
+        .peerstore()
         .with_retry_schedule(replay_config.retry_schedule.clone());
     let txn = db
         .new_txn(true)
@@ -390,7 +391,7 @@ async fn push_existing_docs_with_config_and_allowlist<S: Store + 'static, T: P2P
                 let pid = peer_id.clone();
                 let gate = replay_gate.clone();
                 let peer_key = pid.clone();
-                let retry_store = storage::stores::Peerstore::new(db.store().clone());
+                let retry_store = db.peerstore();
                 let replay_doc_id = doc_id.clone();
                 let replay_collection_id = collection.collection_id().to_string();
                 let total_blocks = requests.len();
@@ -723,7 +724,7 @@ pub async fn retry_doc<S: Store + 'static, T: P2PTransport>(
         }
     };
     if let Some(filter) = filters.get(collection_id) {
-        let peerstore = storage::stores::Peerstore::new(db.store().clone());
+        let peerstore = db.peerstore();
         let txn = db
             .new_txn(true)
             .await
@@ -789,23 +790,16 @@ pub async fn retry_doc<S: Store + 'static, T: P2PTransport>(
                 ));
             }
 
-            if super::push_docs_replay::remaining_retry_after(
-                &storage::stores::Peerstore::new(db.store().clone()),
-                peer_id,
-            )
-            .await?
-            .is_some()
+            if super::push_docs_replay::remaining_retry_after(&db.peerstore(), peer_id)
+                .await?
+                .is_some()
             {
                 return Err(p2p::error::RATE_LIMITED_MESSAGE.to_string());
             }
             match transport.send_two_stream_request(peer_id, request).await {
                 Ok(reply) if reply.err_message.is_some() => {
-                    super::push_docs_replay::persist_retry_after(
-                        &storage::stores::Peerstore::new(db.store().clone()),
-                        peer_id,
-                        &reply,
-                    )
-                    .await?;
+                    super::push_docs_replay::persist_retry_after(&db.peerstore(), peer_id, &reply)
+                        .await?;
                     return Err(format!(
                         "peer rejected replay after {successful_blocks} successful block(s): {}",
                         reply
@@ -888,23 +882,16 @@ pub async fn retry_collection_commit<S: Store + 'static, T: P2PTransport>(
         if p2p::signing::sign_with_transport(transport, &mut request).is_err() {
             return Err(format!("failed to sign current collection head {cid}"));
         }
-        if super::push_docs_replay::remaining_retry_after(
-            &storage::stores::Peerstore::new(db.store().clone()),
-            peer_id,
-        )
-        .await?
-        .is_some()
+        if super::push_docs_replay::remaining_retry_after(&db.peerstore(), peer_id)
+            .await?
+            .is_some()
         {
             return Err(p2p::error::RATE_LIMITED_MESSAGE.to_string());
         }
         match transport.send_two_stream_request(peer_id, request).await {
             Ok(reply) if reply.err_message.is_some() => {
-                super::push_docs_replay::persist_retry_after(
-                    &storage::stores::Peerstore::new(db.store().clone()),
-                    peer_id,
-                    &reply,
-                )
-                .await?;
+                super::push_docs_replay::persist_retry_after(&db.peerstore(), peer_id, &reply)
+                    .await?;
                 return Err(format!(
                     "peer rejected current collection head {cid}: {}",
                     reply

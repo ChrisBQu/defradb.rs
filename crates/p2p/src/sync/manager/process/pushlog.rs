@@ -13,7 +13,6 @@
 //! `pending_capacity_sheds_unrelated_blocks_but_accepts_missing_dependency`.
 
 use rapidhash::{HashSetExt, RapidHashSet};
-use std::time::Duration;
 use web_time::Instant;
 
 use cid::Cid;
@@ -28,8 +27,6 @@ use crate::sync::manager::pending::PendingDag;
 use crate::ExplicitReplayAuthorization;
 
 use super::SyncManager;
-
-const MAX_RETRIABLE_PUSHLOG_ATTEMPTS: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AnnouncedBlockKind {
@@ -58,46 +55,7 @@ fn announced_block_kind(bytes: &[u8]) -> AnnouncedBlockKind {
     }
 }
 
-fn retriable_pushlog_delay(attempt: usize) -> Duration {
-    match attempt {
-        1 => Duration::from_millis(10),
-        2 => Duration::from_millis(25),
-        _ => Duration::from_millis(50),
-    }
-}
-
 impl<B: Blockstore + 'static> SyncManager<B> {
-    async fn retry_retriable_pushlog_op<T, F, Fut>(
-        &self,
-        cid: &Cid,
-        op_name: &'static str,
-        mut op: F,
-    ) -> Result<T>
-    where
-        F: FnMut() -> Fut,
-        Fut: std::future::Future<Output = Result<T>>,
-    {
-        let mut attempt = 1;
-        loop {
-            match op().await {
-                Ok(value) => return Ok(value),
-                Err(error) if error.is_retriable() && attempt < MAX_RETRIABLE_PUSHLOG_ATTEMPTS => {
-                    tracing::debug!(
-                        cid = %cid,
-                        op_name,
-                        attempt,
-                        max_attempts = MAX_RETRIABLE_PUSHLOG_ATTEMPTS,
-                        error = %error,
-                        "Retryable PushLog storage operation failed; backing off and retrying"
-                    );
-                    n0_future::time::sleep(retriable_pushlog_delay(attempt)).await;
-                    attempt += 1;
-                }
-                Err(error) => return Err(error),
-            }
-        }
-    }
-
     async fn emit_sync_error(&self, cid: &Cid, error: &Error) -> Result<()> {
         if self
             .event_tx
@@ -207,13 +165,10 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 }
 
                 match self
-                    .retry_retriable_pushlog_op(&cid, "suppressed_is_merged", || async {
-                        self.blockstore
-                            .is_merged(&cid)
-                            .await
-                            .map_err(Error::from_blockstore)
-                    })
+                    .blockstore
+                    .is_merged(&cid)
                     .await
+                    .map_err(Error::from_blockstore)
                 {
                     Ok(true) => {
                         self.diagnostics.record_already_merged_fast_path();
@@ -313,13 +268,10 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     ) -> Result<()> {
         // Check if already merged
         match self
-            .retry_retriable_pushlog_op(cid, "is_merged", || async {
-                self.blockstore
-                    .is_merged(cid)
-                    .await
-                    .map_err(Error::from_blockstore)
-            })
+            .blockstore
+            .is_merged(cid)
             .await
+            .map_err(Error::from_blockstore)
         {
             Ok(true) => {
                 self.diagnostics.record_already_merged_fast_path();
@@ -388,13 +340,10 @@ impl<B: Blockstore + 'static> SyncManager<B> {
 
         // Store the block (marked as unmerged in P2P mode)
         if let Err(e) = self
-            .retry_retriable_pushlog_op(cid, "put_block", || async {
-                self.blockstore
-                    .put(cid, &msg.block)
-                    .await
-                    .map_err(Error::from_blockstore)
-            })
+            .blockstore
+            .put(cid, &msg.block)
             .await
+            .map_err(Error::from_blockstore)
         {
             self.emit_sync_error(cid, &e).await?;
             return Err(e);
@@ -856,6 +805,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use std::time::Duration;
 
     use async_trait::async_trait;
     use blockstore::DefraBlockstore;

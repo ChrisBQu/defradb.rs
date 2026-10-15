@@ -87,14 +87,12 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         if let Some(kms) = self.kms() {
             if let Some(keys) = self.retry_decryption_keys() {
                 let key = keys
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .get(enc_cid)
-                    .copied()
                     .ok_or(MergeError::NeedsDecryptionKey(*enc_cid))?;
-                return crypto::encryption::aes::decrypt_aes(None, data, &key, &[]).map_err(|e| {
-                    kms::Error::Crypto(format!("KMS-keyed decryption failed: {e}")).into()
-                });
+                return crypto::encryption::aes::decrypt_aes(None, data, key.as_slice(), &[])
+                    .map_err(|e| {
+                        kms::Error::Crypto(format!("KMS-keyed decryption failed: {e}")).into()
+                    });
             }
             let ctx = Self::kms_request_context(metadata);
             let results = kms.get_keys(&ctx, std::slice::from_ref(enc_cid)).await?;

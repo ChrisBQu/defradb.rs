@@ -13,13 +13,9 @@ use async_trait::async_trait;
 /// The Peerstore handles storage of replicator configuration, replication
 /// retry tracking, and search engine retry tracking for P2P operations.
 use bytes::Bytes;
-use std::future::Future;
 use std::sync::Arc;
 use tracing;
 
-const PUSH_RETRY_TXN_MAX_ATTEMPTS: usize = 4;
-#[cfg(not(target_arch = "wasm32"))]
-const PUSH_MARKER_IO_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(10);
 const RETRY_MARKER_GENERATION_MAGIC: &[u8] = b"DFRGMARKER1";
 
 fn encode_retry_marker_generation(generation: u64) -> Vec<u8> {
@@ -34,70 +30,11 @@ fn decode_retry_marker_generation(bytes: &[u8]) -> Option<u64> {
     Some(u64::from_be_bytes(generation_bytes))
 }
 
-async fn retry_push_txn<T, F, Fut, P>(mut operation: F, is_retryable: P) -> Result<T>
-where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = Result<T>>,
-    P: Fn(&crate::corekv::Error) -> bool,
-{
-    let mut retried = false;
-    for attempt in 1..=PUSH_RETRY_TXN_MAX_ATTEMPTS {
-        match operation().await {
-            Err(error) if is_retryable(&error) && attempt < PUSH_RETRY_TXN_MAX_ATTEMPTS => {
-                telemetry::record_retry_attempt(telemetry::RetryLayer::PushMarker);
-                retried = true;
-                if error.is_retriable() {
-                    tracing::debug!(attempt, "retrying push retry-state transaction conflict");
-                } else {
-                    tracing::warn!(attempt, %error, "retrying durable push retry-state write");
-                    wait_before_marker_retry(attempt).await;
-                }
-            }
-            Err(error) if is_retryable(&error) => {
-                telemetry::record_retry_exhaustion(telemetry::RetryLayer::PushMarker);
-                tracing::error!(
-                    attempts = PUSH_RETRY_TXN_MAX_ATTEMPTS,
-                    %error,
-                    "durable push retry-state write retries exhausted"
-                );
-                return Err(error);
-            }
-            Ok(value) => {
-                if retried {
-                    telemetry::record_retry_success(telemetry::RetryLayer::PushMarker);
-                }
-                return Ok(value);
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    unreachable!("bounded transaction retry loop always returns")
-}
-
-async fn retry_scope_marker_write<T, F, Fut>(operation: F) -> Result<T>
-where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = Result<T>>,
-{
-    retry_push_txn(operation, is_retryable_marker_write).await
-}
-
-fn is_retryable_marker_write(error: &crate::corekv::Error) -> bool {
-    matches!(
-        error,
-        crate::corekv::Error::Io(_) | crate::corekv::Error::Backend(_)
-    )
-}
-
-async fn wait_before_marker_retry(_attempt: usize) {
-    #[cfg(not(target_arch = "wasm32"))]
-    tokio::time::sleep(PUSH_MARKER_IO_RETRY_DELAY * _attempt as u32).await;
-}
-
 /// Peerstore provides storage for peer and replication metadata
 pub struct Peerstore<S: Store> {
     store: NamespacedStore<S>,
     retry_schedule: super::RetrySchedule,
+    retry: RetryOptions,
 }
 
 struct RegisterScopeMarkerAttempt {
@@ -680,10 +617,7 @@ impl<S: Store> Peerstore<S> {
         attempt: crate::corekv::RetryAttempt,
     ) -> Result<T> {
         self.store
-            .transact_retry(
-                RetryOptions::new(PUSH_RETRY_TXN_MAX_ATTEMPTS as u32),
-                attempt,
-            )
+            .transact_retry(self.retry, attempt)
             .await
             .map_err(crate::corekv::RetryAttemptError::into_storage)?
             .downcast::<T>()
@@ -696,7 +630,15 @@ impl<S: Store> Peerstore<S> {
         Self {
             store: NamespacedStore::new(store, Namespace::Peerstore),
             retry_schedule: super::RetrySchedule::default(),
+            retry: crate::corekv::engine_retry_options(crate::corekv::DEFAULT_MAX_TXN_RETRIES),
         }
+    }
+
+    /// Re-run a conflicting transaction up to `max_txn_retries` times, the
+    /// node's `datastore.max_txn_retries`.
+    pub fn with_max_txn_retries(mut self, max_txn_retries: u32) -> Self {
+        self.retry = crate::corekv::engine_retry_options(max_txn_retries);
+        self
     }
 
     /// Set the runtime retry policy without rewriting persisted deadlines.
@@ -898,15 +840,13 @@ impl<S: Store> Peerstore<S> {
         };
         drop(txn);
 
-        retry_scope_marker_write(|| {
-            self.register_scope_marker_once(
-                peer_id,
-                doc_id,
-                collection_id,
-                retry_info_bytes,
-                expected_incarnation,
-            )
-        })
+        self.register_scope_marker_once(
+            peer_id,
+            doc_id,
+            collection_id,
+            retry_info_bytes,
+            expected_incarnation,
+        )
         .await
     }
 
@@ -934,7 +874,7 @@ impl<S: Store> Peerstore<S> {
         let value = self
             .store
             .transact_retry(
-                RetryOptions::new(PUSH_RETRY_TXN_MAX_ATTEMPTS as u32),
+                self.retry,
                 Box::new(RegisterScopeMarkerAttempt {
                     peer_id,
                     expected_incarnation,

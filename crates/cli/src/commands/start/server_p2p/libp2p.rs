@@ -19,9 +19,13 @@ impl Node {
         se_key: Option<[u8; 32]>,
     ) -> Result<P2PSetup> {
         let retry_schedule = config.retry_schedule()?;
+        let max_txn_retries = database.options().max_txn_retries();
         info!("Initializing P2P network (libp2p)");
 
-        let blockstore = Arc::new(blockstore::DefraBlockstore::new(store.clone(), true));
+        let blockstore = Arc::new(
+            blockstore::DefraBlockstore::new(store.clone(), true)
+                .with_max_txn_retries(max_txn_retries),
+        );
         let bitswap_store = p2p::BitswapStoreAdapter::new(blockstore);
         let classifier = defra_p2p_adapter::DbBlockClassifier::new_arc(database.clone());
         let serve_acp = Arc::new(p2p::bitswap::LateBoundServeAcp::new());
@@ -51,7 +55,10 @@ impl Node {
         let manage_hooks = defra_p2p_adapter::manage::hooks::new_manage_hooks_cell();
         let manage_hooks_for_events = manage_hooks.clone();
 
-        let sync_blockstore = Arc::new(blockstore::DefraBlockstore::new(store.clone(), true));
+        let sync_blockstore = Arc::new(
+            blockstore::DefraBlockstore::new(store.clone(), true)
+                .with_max_txn_retries(max_txn_retries),
+        );
         let merge_blockstore = sync_blockstore.clone();
         let collection_store: Arc<dyn p2p::sync::P2PCollectionStorage> =
             Arc::new(p2p::sync::P2PCollectionStore::new(store.clone()));
@@ -77,7 +84,10 @@ impl Node {
         let failure_rx = db::merge::attach_failure_channel(&mut coordinator, 1024);
         let coordinator = Arc::new(coordinator);
         coordinator
-            .install_pending_dag_store(Arc::new(p2p::sync::PendingDagStore::new(store.clone())))
+            .install_pending_dag_store(Arc::new(
+                p2p::sync::PendingDagStore::new(store.clone())
+                    .with_max_txn_retries(max_txn_retries),
+            ))
             .await;
         let coordinator_for_acp = coordinator.clone();
         let serve_acp_for_acp = serve_acp.clone();
@@ -228,6 +238,7 @@ impl Node {
                         info!("Peer connected: {}", peer);
                         defra_p2p_adapter::activate_retry_peer(
                             se_store.clone(),
+                            max_txn_retries,
                             &p2p::transport::PeerId::from(*peer),
                         )
                         .await;
@@ -387,7 +398,8 @@ impl Node {
         let doc_pusher: Arc<dyn crate::transport_doc_pusher::TransportDocPusher> = doc_pusher_impl;
 
         let failure_recorder_task = defra_p2p_adapter::spawn_failure_recorder(
-            storage::stores::Peerstore::new(store.clone())
+            database
+                .peerstore()
                 .with_retry_schedule(retry_schedule.clone()),
             failure_rx,
         );
@@ -397,13 +409,13 @@ impl Node {
             .merge_handler_inner
             .set_se_repusher(se_repusher.clone());
         let retry_loop_task = defra_p2p_adapter::spawn_retry_loop(
-            storage::stores::Peerstore::new(store.clone()).with_retry_schedule(retry_schedule),
+            database.peerstore().with_retry_schedule(retry_schedule),
             p2p::Libp2pTransport::new(handle.clone()),
             doc_pusher.clone(),
             Some(se_repusher),
         );
 
-        let restore_peerstore = storage::stores::Peerstore::new(store);
+        let restore_peerstore = database.peerstore();
         match restore_peerstore.list_replicators().await {
             Ok(entries) => {
                 for (_peer_id_str, data) in entries {

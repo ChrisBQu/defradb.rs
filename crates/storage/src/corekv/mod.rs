@@ -66,12 +66,14 @@
 /// ```
 pub mod errors;
 pub mod iterator;
+pub mod retry_policy;
 pub mod traits;
 pub mod types;
 
 // Re-export commonly used types and traits for convenience
 pub use errors::{Error, Result, TransactionConflict, UNIQUE_CONSTRAINT_VIOLATION_MESSAGE};
 pub use iterator::{Iterator, KvPair};
+pub use retry_policy::{engine_retry_options, DEFAULT_MAX_TXN_RETRIES};
 pub use traits::private;
 pub use traits::{
     intercept_retry_writes, make_async_callback, make_callback, AsyncOrderedRetryCallback,

@@ -18,46 +18,7 @@ use crate::signing::sign_with_transport;
 use crate::sync::rate_limiter::RateLimitDecision;
 use crate::transport::{P2PTransport, PeerId, TransportEvent};
 
-const MAX_RETRIABLE_EVENT_ATTEMPTS: usize = 4;
-
-fn retriable_event_delay(attempt: usize) -> Duration {
-    match attempt {
-        1 => Duration::from_millis(10),
-        2 => Duration::from_millis(25),
-        _ => Duration::from_millis(50),
-    }
-}
-
 impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
-    async fn retry_retriable_event<F, Fut, Output>(
-        &self,
-        event_kind: &'static str,
-        mut op: F,
-    ) -> Result<Output>
-    where
-        F: FnMut() -> Fut,
-        Fut: std::future::Future<Output = Result<Output>>,
-    {
-        let mut attempt = 1;
-        loop {
-            match op().await {
-                Ok(output) => return Ok(output),
-                Err(error) if error.is_retriable() && attempt < MAX_RETRIABLE_EVENT_ATTEMPTS => {
-                    tracing::debug!(
-                        event_kind,
-                        attempt,
-                        max_attempts = MAX_RETRIABLE_EVENT_ATTEMPTS,
-                        error = %error,
-                        "Retryable transport event failed; backing off and retrying"
-                    );
-                    n0_future::time::sleep(retriable_event_delay(attempt)).await;
-                    attempt += 1;
-                }
-                Err(error) => return Err(error),
-            }
-        }
-    }
-
     async fn handle_peer_connected(&self, peer_id: PeerId) {
         tracing::debug!(peer_id = %peer_id, "Peer connected");
         self.access.peer_state.peer_connected(peer_id.as_str());
@@ -530,10 +491,8 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 cid,
                 data,
             } => {
-                self.retry_retriable_event("bitswap_block_received", || {
-                    self.handle_bitswap_block_received(query_id, cid, data.clone())
-                })
-                .await?;
+                self.handle_bitswap_block_received(query_id, cid, data)
+                    .await?;
             }
             TransportEvent::BitswapComplete {
                 query_id,
@@ -622,9 +581,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 let has_notices = crate::sync::car::decode_car_oversized(&car_data)
                     .is_ok_and(|notices| !notices.is_empty());
                 let result = self
-                    .retry_retriable_event("car_fetch_response", || {
-                        self.handle_car_fetch_response(peer_id.clone(), root_cid, car_data.clone())
-                    })
+                    .handle_car_fetch_response(peer_id.clone(), root_cid, car_data)
                     .await;
                 let disposition = result.as_ref().ok().copied();
                 match disposition {

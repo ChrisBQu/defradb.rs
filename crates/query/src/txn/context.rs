@@ -498,7 +498,7 @@ mod tests {
             crate::prepared::PreparedInputKind::AcpDecision,
             request_bytes,
         );
-        assert!(memo.insert(request, std::sync::Arc::<[u8]>::from(b"true".as_slice())));
+        memo.insert(request, std::sync::Arc::<[u8]>::from(b"true".as_slice()));
         let permission_request = crate::prepared::PreparedInputRequest::new(
             crate::prepared::PreparedInputKind::AcpDecision,
             serde_json::to_vec(&(
@@ -511,10 +511,10 @@ mod tests {
             ))
             .unwrap(),
         );
-        assert!(memo.insert(
+        memo.insert(
             permission_request,
             std::sync::Arc::<[u8]>::from(b"false".as_slice()),
-        ));
+        );
 
         let allowed = check_doc_read_access_with_prepared_inputs(
             &NoopDocumentAcp(true),

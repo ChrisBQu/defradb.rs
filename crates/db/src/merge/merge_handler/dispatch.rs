@@ -222,7 +222,6 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
         block_data: &[u8],
         metadata: BlockMetadata<'_>,
     ) -> Result<MergeOutcome, MergeError> {
-        const MAX_TXN_RETRIES: usize = 5;
         let recovered = if metadata.is_recovery {
             self.recover_metadata_from_block(cid, block_data).await?
         } else {
@@ -240,7 +239,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
             .creator
             .map(str::to_owned)
             .or_else(|| recovered.as_ref().map(|value| value.creator.clone()));
-        let retry_deks = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let retry_deks = super::retry_decryption_keys();
         let prefetch_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let retry_metadata = BlockMetadata {
             doc_id: doc_id.as_deref(),
@@ -254,8 +253,6 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
             is_schema_block: metadata.is_schema_block,
         };
         let kms_context = Self::kms_request_context(Some(&retry_metadata));
-        const MAX_KMS_INPUT_MISSES: usize = 64;
-        let mut kms_input_misses = 0;
         let result = loop {
             let attempt = MergeRetryAttempt {
                 handler: self.with_retry_decryption_context(
@@ -276,10 +273,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
             let result = self
                 .db
                 .store()
-                .transact_retry(
-                    storage::corekv::RetryOptions::new(MAX_TXN_RETRIES as u32),
-                    Box::new(attempt),
-                )
+                .transact_retry(self.db.options().retry_options(), Box::new(attempt))
                 .await;
             match result {
                 Ok(value) => {
@@ -290,11 +284,8 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
                 }
                 Err(error) => match error.downcast_abort::<MergeError>() {
                     Ok(MergeError::NeedsDecryptionKey(enc_cid)) => {
-                        kms_input_misses += 1;
-                        if kms_input_misses > MAX_KMS_INPUT_MISSES {
-                            break Err(MergeError::MergeFailed(
-                                "merge exceeded its prepared KMS dependency budget".into(),
-                            ));
+                        if retry_deks.contains_key(&enc_cid) {
+                            break Err(super::repeated_key_request(&enc_cid));
                         }
                         let Some(kms) = self.kms() else {
                             break Err(MergeError::Kms(kms::Error::KeyUnavailable));
@@ -313,10 +304,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
                         .await;
                         match resolved {
                             Ok((cid, key)) => {
-                                retry_deks
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                    .insert(cid, key);
+                                retry_deks.insert(cid, zeroize::Zeroizing::new(key));
                             }
                             Err(error) => break Err(MergeError::Kms(error)),
                         }

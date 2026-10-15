@@ -6,7 +6,6 @@ use p2p::bitswap::{LateBoundServeAcp, ServeAcp};
 use p2p::iroh::IrohTransport;
 use p2p::P2PTransport;
 use storage::corekv::Store;
-use storage::stores::Peerstore;
 
 use super::config::IrohPeerConfig;
 use super::events::spawn_event_handler;
@@ -75,7 +74,10 @@ impl<S: Store + 'static> IrohPeer<S> {
         let transport = IrohTransport::new(command_tx, secret_key);
         let local_peer_id = transport.local_peer_id().to_string();
 
-        let blockstore = Arc::new(IrohBlockstore::new(Arc::clone(&store), true));
+        let blockstore = Arc::new(
+            IrohBlockstore::new(Arc::clone(&store), true)
+                .with_max_txn_retries(database.options().max_txn_retries()),
+        );
         let serve_acp = Arc::new(LateBoundServeAcp::new());
         let (mut coordinator, sync_events) =
             match p2p::sync::SyncCoordinator::with_head_provider_and_serve_gate(
@@ -102,9 +104,10 @@ impl<S: Store + 'static> IrohPeer<S> {
         let failure_rx = db::merge::attach_failure_channel(&mut coordinator, 1024);
         let coordinator = Arc::new(coordinator);
         coordinator
-            .install_pending_dag_store(Arc::new(p2p::sync::PendingDagStore::new(Arc::clone(
-                &store,
-            ))))
+            .install_pending_dag_store(Arc::new(
+                p2p::sync::PendingDagStore::new(Arc::clone(&store))
+                    .with_max_txn_retries(database.options().max_txn_retries()),
+            ))
             .await;
 
         // The requester's DID has to come from the iroh handshake: the KMS
@@ -245,6 +248,7 @@ impl<S: Store + 'static> IrohPeer<S> {
             events,
             Arc::clone(&coordinator),
             Arc::clone(&store),
+            database.options().max_txn_retries(),
             Arc::clone(&event_bus),
             transport.clone(),
             manage_hooks.clone(),
@@ -253,7 +257,9 @@ impl<S: Store + 'static> IrohPeer<S> {
         );
 
         let failure_recorder_task = crate::spawn_failure_recorder(
-            Peerstore::new(Arc::clone(&store)).with_retry_schedule(retry_schedule.clone()),
+            database
+                .peerstore()
+                .with_retry_schedule(retry_schedule.clone()),
             failure_rx,
         );
         let se_repusher: Arc<dyn db::merge::SeArtifactRepusher> =
@@ -263,7 +269,7 @@ impl<S: Store + 'static> IrohPeer<S> {
             .merge_handler_inner
             .set_se_repusher(se_repusher.clone());
         let retry_loop_task = crate::spawn_retry_loop(
-            Peerstore::new(Arc::clone(&store)).with_retry_schedule(retry_schedule),
+            database.peerstore().with_retry_schedule(retry_schedule),
             transport.clone(),
             Arc::clone(&doc_pusher),
             Some(se_repusher),

@@ -204,7 +204,7 @@ pub async fn complete_document_retry_if_current<S: storage::corekv::Store>(
     attempted_heads: &[Cid],
     marker_generation: u64,
 ) -> Result<(), String> {
-    let peerstore = storage::stores::Peerstore::new(db.store().clone());
+    let peerstore = db.peerstore();
     let txn = db
         .new_txn(true)
         .await
@@ -231,7 +231,7 @@ pub(crate) async fn complete_document_retry_if_absent<S: storage::corekv::Store>
     collection_id: &str,
     marker_generation: u64,
 ) -> Result<(), String> {
-    let peerstore = storage::stores::Peerstore::new(db.store().clone());
+    let peerstore = db.peerstore();
     let txn = db
         .new_txn(true)
         .await
@@ -259,7 +259,7 @@ pub(crate) async fn complete_collection_retry_if_current<S: storage::corekv::Sto
     attempted_heads: &[Cid],
     marker_generation: u64,
 ) -> Result<(), String> {
-    let peerstore = storage::stores::Peerstore::new(db.store().clone());
+    let peerstore = db.peerstore();
     let txn = db
         .new_txn(true)
         .await

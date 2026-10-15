@@ -212,7 +212,8 @@ impl Node {
             // the blockstore Arc (set_kms_blockstore) so the adapter can hold a
             // Weak and avoid the lock-pinning cycle (#976) while sharing the cache.
             let kms_blockstore = database.set_kms_blockstore(Arc::new(
-                blockstore::DefraBlockstore::new(store.clone(), true),
+                blockstore::DefraBlockstore::new(store.clone(), true)
+                    .with_max_txn_retries(database.options().max_txn_retries()),
             ));
             let enc_block_store: Arc<dyn kms::EncBlockStore> =
                 Arc::new(db::DbEncBlockStore::new(database.clone(), kms_blockstore));

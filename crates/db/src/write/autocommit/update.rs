@@ -83,17 +83,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 .await
             {
                 Err(query::error::QueryError::NeedsInput(request)) => {
-                    if !inputs.register_dependency_miss() {
-                        return Err(query::error::QueryError::execution(
-                            "prepared input dependency budget exhausted",
-                        ));
-                    }
-                    let response = self.resolve_prepared_input(&request).await?;
-                    if !inputs.insert(request, response) {
-                        return Err(query::error::QueryError::execution(
-                            "prepared input memory budget exhausted",
-                        ));
-                    }
+                    inputs
+                        .answer_miss(&request, || self.resolve_prepared_input(&request))
+                        .await?;
                 }
                 result => return result,
             }
@@ -173,7 +165,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         let result = self
             .db
             .store()
-            .transact_retry(storage::corekv::RetryOptions::new(4), Box::new(attempt))
+            .transact_retry(self.db.options().retry_options(), Box::new(attempt))
             .await;
         let (doc, fields_modified, cid, block, col_data) = match result {
             Ok(value) => *value
@@ -211,6 +203,18 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         retry: &mut dyn storage::corekv::RetryTxn,
         attempt: &UpdateRetryAttempt<S>,
     ) -> query::error::Result<(Document, usize, Cid, Bytes, Option<(Cid, Bytes)>)> {
+        // A compare-and-set that finds the document changed lost a race the
+        // caller asked for: report it with the reason the engine gave.
+        let lost = retry.previous_conflict();
+        let lost_race = || {
+            query::error::QueryError::transaction_conflict(
+                lost.map_or(
+                    storage::Error::TxnConflict,
+                    storage::Error::TxnConflictDetails,
+                )
+                .to_string(),
+            )
+        };
         let io = retry
             .begin_attempt_io()
             .map_err(|error| crate::error::commit_query_error(error.into()))?;
@@ -272,7 +276,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .await?;
         let Some(mut current_doc) = docs.into_docs().into_iter().next() else {
             return Err(if attempt.expected.is_some() {
-                query::error::QueryError::transaction_conflict("transaction conflict. Please retry")
+                lost_race()
             } else {
                 query::error::QueryError::document_not_found(attempt.canonical_doc_id.clone())
             });
@@ -293,9 +297,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 || expected.is_deleted() != current_doc.is_deleted()
                 || !unchanged
             {
-                return Err(query::error::QueryError::transaction_conflict(
-                    "transaction conflict. Please retry",
-                ));
+                return Err(lost_race());
             }
         }
         for field in &attempt.modified_fields {

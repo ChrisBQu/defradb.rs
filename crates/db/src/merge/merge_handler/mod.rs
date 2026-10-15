@@ -31,11 +31,8 @@ use kovan_map::HopscotchMap;
 use kovan_queue::seg_queue::SegQueue;
 use rapidhash::fast::RandomState;
 use rapidhash::{RapidHashMap, RapidHashSet};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use std::{
-    collections::HashMap,
-    sync::{atomic::AtomicBool, Mutex},
-};
 
 use cid::Cid;
 use crdt::traits::{Context, ReplicatedData, ValueReader};
@@ -71,7 +68,22 @@ pub const DEFAULT_MAX_MERGE_DEPTH: usize = 8192;
 /// A lock-free set of block CIDs.
 pub type CidSet = HopscotchMap<Cid, (), RandomState>;
 
-pub(crate) type RetryDecryptionKeys = Arc<Mutex<HashMap<Cid, [u8; 32]>>>;
+/// Decryption keys fetched outside the engine-owned attempts of one merge,
+/// shared by those attempts without a lock.
+pub(crate) type RetryDecryptionKeys = Arc<HopscotchMap<Cid, Zeroizing<[u8; 32]>, RandomState>>;
+
+/// An empty [`RetryDecryptionKeys`].
+pub(crate) fn retry_decryption_keys() -> RetryDecryptionKeys {
+    Arc::new(HopscotchMap::with_hasher(RandomState::default()))
+}
+
+/// The error for a merge attempt that asked again for a key it was given:
+/// running it again would only ask again.
+pub(crate) fn repeated_key_request(encryption_cid: &Cid) -> MergeError {
+    MergeError::MergeFailed(format!(
+        "merge requested decryption key {encryption_cid} again after it was provided"
+    ))
+}
 
 /// An empty [`CidSet`].
 pub fn cid_set() -> CidSet {

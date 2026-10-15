@@ -75,17 +75,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         loop {
             match mutator.delete_impl(collection_name, doc_id).await {
                 Err(query::error::QueryError::NeedsInput(request)) => {
-                    if !inputs.register_dependency_miss() {
-                        return Err(query::error::QueryError::execution(
-                            "prepared input dependency budget exhausted",
-                        ));
-                    }
-                    let response = self.resolve_prepared_input(&request).await?;
-                    if !inputs.insert(request, response) {
-                        return Err(query::error::QueryError::execution(
-                            "prepared input memory budget exhausted",
-                        ));
-                    }
+                    inputs
+                        .answer_miss(&request, || self.resolve_prepared_input(&request))
+                        .await?;
                 }
                 result => return result,
             }
@@ -111,17 +103,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 .await
             {
                 Err(query::error::QueryError::NeedsInput(request)) => {
-                    if !inputs.register_dependency_miss() {
-                        return Err(query::error::QueryError::execution(
-                            "prepared input dependency budget exhausted",
-                        ));
-                    }
-                    let response = self.resolve_prepared_input(&request).await?;
-                    if !inputs.insert(request, response) {
-                        return Err(query::error::QueryError::execution(
-                            "prepared input memory budget exhausted",
-                        ));
-                    }
+                    inputs
+                        .answer_miss(&request, || self.resolve_prepared_input(&request))
+                        .await?;
                 }
                 result => return result,
             }
@@ -151,7 +135,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         let result = self
             .db
             .store()
-            .transact_retry(storage::corekv::RetryOptions::new(4), Box::new(attempt))
+            .transact_retry(self.db.options().retry_options(), Box::new(attempt))
             .await;
         let (canonical_doc_id, commit_result, doc_short_id) = match result {
             Ok(value) => *value
@@ -390,7 +374,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         let result = self
             .db
             .store()
-            .transact_retry(storage::corekv::RetryOptions::new(4), Box::new(attempt))
+            .transact_retry(self.db.options().retry_options(), Box::new(attempt))
             .await;
         let results = match result {
             Ok(value) => *value.downcast::<Vec<DeleteAttemptResult>>().map_err(|_| {

@@ -1559,7 +1559,7 @@ async fn duplicate_car_ingest_defers_without_waiting_for_root_owner() {
 }
 
 #[tokio::test]
-async fn car_put_many_conflict_retries_before_publishing_one_success_completion() {
+async fn car_put_many_conflict_is_reported_once_and_not_re_run() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
     let transport = NoopTransport::new();
@@ -1603,17 +1603,19 @@ async fn car_put_many_conflict_retries_before_publishing_one_success_completion(
         })
     };
 
+    // The blockstore settles its own conflicts in the engine; one it could
+    // not settle reaches the event once, and the event handler does not run
+    // the ingest again.
     assert_eq!(
         timeout(Duration::from_secs(1), completion)
             .await
-            .expect("final CAR completion should be published")
+            .expect("the CAR completion should be published")
             .expect("completion sender remains alive"),
-        crate::sync::manager::FetchCompletion::Success,
-        "a retriable attempt must not publish an intermediate failure",
+        crate::sync::manager::FetchCompletion::Failure,
     );
-    ingest.await.unwrap().unwrap();
-    assert_eq!(blockstore.put_many_attempts(), 2);
-    assert!(blockstore.has(&root_cid).await.unwrap());
+    assert!(ingest.await.unwrap().is_err());
+    assert_eq!(blockstore.put_many_attempts(), 1);
+    assert!(!blockstore.has(&root_cid).await.unwrap());
 }
 
 #[tokio::test]
@@ -3391,7 +3393,7 @@ async fn gossip_remains_rate_limited_when_bucket_is_empty() {
 }
 
 #[tokio::test]
-async fn pushlog_retries_transient_transaction_conflicts_without_sync_error() {
+async fn pushlog_block_conflict_is_reported_once_and_not_re_run() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
     let transport = NoopTransport::new();
@@ -3414,22 +3416,20 @@ async fn pushlog_retries_transient_transaction_conflicts_without_sync_error() {
         });
 
     let peer = random_peer_id();
-    coordinator
+    let _ = coordinator
         .handle_transport_event(pushlog_event(peer.clone(), "collection1"))
-        .await
-        .unwrap();
+        .await;
 
-    assert_eq!(blockstore.put_attempts(), 2);
-    match recv_complete_pushlog(&coordinator, &mut events).await {
-        SyncEvent::DagReady { sender_peer, .. } => {
-            assert_eq!(sender_peer.as_deref(), Some(peer.as_str()));
-        }
-        other => panic!("expected DagReady after retry, got {:?}", other),
+    assert_eq!(blockstore.put_attempts(), 1);
+    match recv_block_received(&mut events).await {
+        SyncEvent::SyncError { error, .. } => assert!(error.contains("conflict"), "{error}"),
+        other => panic!("expected the conflict as a sync error, got {:?}", other),
     }
+    assert!(coordinator.manager().pending_dag_cids().is_empty());
 }
 
 #[tokio::test]
-async fn gossip_retries_transient_transaction_conflicts_without_sync_error() {
+async fn gossip_block_conflict_is_reported_once_and_not_re_run() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
     let transport = NoopTransport::new();
@@ -3438,7 +3438,7 @@ async fn gossip_retries_transient_transaction_conflicts_without_sync_error() {
     let blockstore = Arc::new(ConflictOnceBlockstore::new());
 
     // A gossip origin is only a recovery provider while the transport has a
-    // route to it; this test is about conflict retries, so make it routable.
+    // route to it; this test is about a block conflict, so make it routable.
     let peer = random_peer_id();
     peer_state.peer_connected(peer.as_str());
 
@@ -3456,18 +3456,16 @@ async fn gossip_retries_transient_transaction_conflicts_without_sync_error() {
             rate_limiter: Arc::new(PeerRateLimiter::default()),
         });
 
-    coordinator
+    let _ = coordinator
         .handle_transport_event(gossip_event(peer.clone(), "collection1"))
-        .await
-        .unwrap();
+        .await;
 
-    assert_eq!(blockstore.put_attempts(), 2);
-    match recv_complete_pushlog(&coordinator, &mut events).await {
-        SyncEvent::DagReady { sender_peer, .. } => {
-            assert_eq!(sender_peer.as_deref(), Some(peer.as_str()));
-        }
-        other => panic!("expected DagReady after gossip retry, got {:?}", other),
+    assert_eq!(blockstore.put_attempts(), 1);
+    match recv_block_received(&mut events).await {
+        SyncEvent::SyncError { error, .. } => assert!(error.contains("conflict"), "{error}"),
+        other => panic!("expected the conflict as a sync error, got {:?}", other),
     }
+    assert!(coordinator.manager().pending_dag_cids().is_empty());
 }
 
 #[tokio::test]
