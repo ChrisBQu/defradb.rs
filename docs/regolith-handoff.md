@@ -39,9 +39,12 @@ The stack has the intended 11 PRs. Prep #1922 is already marked ready; the ten a
 
 ### Immediate blockers
 
-1. Complete basic/ACP/encryption/counter checks on the four lower checkpoints whose draft CI skips those suites. Fresh combined-stack CLI checks all pass.
-2. Re-run browser CI after the step-5 identity fix, and inspect current-head CI after publishing this restack. The previous step-5 browser run passed 70 tests but failed three signed-create tests: WASM request identity scopes were no-ops. A per-poll scope now preserves the caller without leaking identity across suspended tasks; all six native identity tests pass, including interleaved signed/anonymous polls. Browser runtime confirmation remains pending. The previous step-6 CI failures (obsolete document-queue benchmark and unused dependencies) are fixed at their removal boundaries; native lint now includes all benchmarks and the CLI.
-3. Complete §5.3 timing and allocation gates. Storage and direct DB-mutator tests prove disjoint-part commits; GraphQL still validates the complete document, so the end-to-end disjoint-update target remains open. A conservative explicit-ID projection is being developed separately. Nine removal checkpoints build; revised frozen executables are being prepared for measurements. No performance gate is waived. The key-buffer capacity optimization passed its exact-byte-layout tests and reduces allocations, but creates remain above main.
+1. Finish validation of the final query-projection integration and inspect current-head CI after the upper-stack restack. All four lower-checkpoint basic/ACP/encryption/full-counter gates now pass independently.
+2. Complete §5.3 timing and allocation gates on a quiet host. All nine removal checkpoints build; frozen final endpoints are being refreshed. No performance gate is waived. Creates remain about 4.6% above main in the latest allocation pair.
+
+The browser identity regression is fixed at step 5: identity is scoped per future poll and restored before suspension. CI at `1fb3ebed0` passes 73 browser library tests, two browser integration tests and four relay tests; six native identity tests also pass.
+
+Step 6 now supports projected GraphQL updates for unconditional explicit document IDs, scalar patches and `_docID`-only output. Full documents are materialized, with only relevant field dependencies validated. Filters, other returned fields, migrations, downsample and unsupported shapes retain conservative reads. Preparation uses the same dependency set, preserves found-target membership and invokes preparation hooks; custom mutators default to full validation. Eight real GraphQL regressions pass, including disjoint commits with required untouched fields, same-field/predicate/output/index conflicts and later full reads. A custom-mutator regression confirms hooks run and missing IDs stay excluded. Query 599, DB library 29, write 64 and index 61 tests pass. The final broad native/external run is in progress at code checkpoint `b4a2552f7`.
 
 ## Validation evidence
 
@@ -53,9 +56,19 @@ The stack has the intended 11 PRs. Prep #1922 is already marked ready; the ten a
 | Engine telemetry on combined stack | All 3 integration tests pass | Local native validation |
 | Step 5 alone `427da1b4e` | Batch retry tests 4/4, HTTP context tests 7/7, DB/query/HTTP all-target Clippy pass after workspace-cache cleanup | Does not include step-6 remote projection |
 | Earlier combined `9afeb8447` | Storage 257, P2P 395 and adapter 94 pass; external ACP 204 pass/16 ignored, basic 56, encryption 25; counter 9 pass/8 ignored; real point-read write-skew passes | Predates final retry-surface cleanup; exact Go pin `53f0e76a32d1761e3396a88ce607ebc3e37baa5a` |
-| Lower-stack CI inspection | Prep #1922 passes all 28 checks. Active checks pass on #1949/#1920/#1951/#1952; current completed checks pass on #1953/#1955/#1956 | Some lower draft suites are skipped; native ACP/macOS jobs were still pending on middle PRs |
+| Lower checkpoints `7fc488f2`, `f39db77d`, `5ed6e2fa`, `82047ca2` | At each: fresh CLI build; basic 56, ACP 204 (16 ignored), encryption 25 and full counter 9 (8 ignored) pass | Exact Go pin `53f0e76a32d1761e3396a88ce607ebc3e37baa5a`; see binary hashes below |
+| Remote CI inspection | #1922 and #1953 have 28 passing checks; #1955 has passing live checks; lower four active checks pass with explicit scope skips | New upper-stack CI remains required; cancelled prior attempts are excluded |
 | Step 8 current proof suite | All 162 configured TLC cases have expected verdicts verified across full-suite and focused runs; five library/registry and two Lean contract checks pass | Finite boundary models, not Rust verification |
 | Repaired step-6 removal history | All nine checkpoint benchmark builds pass; queue benchmark removal and dependency cleanup moved to their removal boundaries | Fresh timing measurements pending |
+
+Lower-checkpoint CLI SHA-256 values (the first checkpoint's integration run was serial; later runs used four test threads):
+
+| Revision | Saved CLI SHA-256 |
+|---|---|
+| `7fc488f21192` | `57865f5a57d16c8c56b317875fc24d4e47a346aeb48bd5174329787fdffa8f1d` |
+| `f39db77d84e9` | `e5ec041aa61268c255becf35a9722021ce74d375ca7350e0884c3c554abdf480` |
+| `5ed6e2fa8034` | `040b6925089f10647a4adce5c200b8917dd5c225626e6c985efa809f5bd2e692` |
+| `82047ca26fd7` | `cd7854bae0f7d0b6f91ad1dceb296cd1c84eb28ccdd6039e696dface5e077e22` |
 
 The single-update regression verifies that a concurrent change causes the engine retry to reselect targets instead of overwriting the winner. Prepared node permissions use the same acting identity as execution; authoritative local NAC checks remain inside the transaction. The local ACP revocation regression retains READ access and revokes UPDATE during the first attempt, then verifies an explicit denial and unchanged stored data. Read-denied documents are intentionally invisible and may produce an empty mutation result.
 
@@ -88,6 +101,8 @@ Fresh frozen step-3/4/5 binaries yield create medians **2980.7 / 2982.8 / 3411.4
 [Sharing immutable create inputs](benchmarks/create-retry-sharing.md) reduces the next exact paired create median from 3296.4 to **3231.3**, with get-by-ID unchanged at **160**. This remains about 8% above main for creates. The [schema-byte reuse pair](benchmarks/schema-wire-reuse.md) reduces its own five-run median from 3231.4 to 3189.3, with reads unchanged. That pair uses the default release profile; final release-fast gate measurements remain pending.
 
 [The release-fast key-buffer pair](benchmarks/doc-id-index-key-capacity.md) confirms a baseline create median of 3189.3 and reduces it to **3130.4**, with get-by-ID falling from **160 to 157**. The new create count is still about **4.6% above main**; the allocation gate remains open. Exact key bytes are unchanged, with all eight layout tests and storage all-target Clippy passing.
+
+The [gate runner and analyzer](../tools/regolith-gates/README.md) preserve source/executable hashes, all raw samples, failed and passed guard attempts, exact Criterion estimates and five allocation runs. They distinguish invalid evidence from observed regressions; historical #218 comparisons are descriptive because hardware/profile equivalence is unknown.
 
 Required timing evidence: before/after each step and lock-removal checkpoint, all writer counts/workloads/repetitions, commits/s, conflicts/commit, retries by layer, p50/p99, create benchmarks at 4/16 fields, branchable create at 14, and cold startup at 10 collections. Use `tools/perf-site/loadguard.py`, record its result and source revision, and do not treat a failed/missing guard as clean-host evidence.
 
