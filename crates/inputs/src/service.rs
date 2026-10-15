@@ -243,49 +243,15 @@ where
             if !lane.claim(self.config.flights_per_group) {
                 return;
             }
-            let inner = Arc::clone(self);
-            let group = group.clone();
-            let lane = Arc::clone(&lane);
-            self.runtime
-                .network
-                .spawn(Box::pin(async move { inner.drive(group, lane).await }));
-        }
-    }
-
-    /// One round-trip slot of a lane: takes the oldest waiting keys, makes
-    /// their round trip, settles their flights, and goes on while keys wait.
-    async fn drive(&self, group: S::Group, lane: LaneOf<S>) {
-        let mut driving = Driving {
-            inner: self,
-            lane: &lane,
-            holding: true,
-            batch: Vec::new(),
-        };
-        loop {
-            driving.batch = lane.take(self.config.max_batch);
-            if driving.batch.is_empty() {
-                driving.holding = false;
-                lane.release();
-                // A key pushed after the take saw the slot taken and left
-                // its round trip to this one.
-                if lane.has_waiting() && lane.claim(self.config.flights_per_group) {
-                    driving.holding = true;
-                    continue;
-                }
-                if lane.is_idle() {
-                    self.lanes.remove_if(&group, |current| {
-                        Arc::ptr_eq(current, &lane) && lane.is_idle()
-                    });
-                }
-                return;
-            }
-            let trip = self.trips.fetch_add(1, Ordering::Relaxed) + 1;
-            let outcome = {
-                let _permit = self.in_flight.acquire(1).await;
-                self.round_trip(&group, &driving.batch).await
+            let driving = Driving {
+                inner: Arc::clone(self),
+                group: group.clone(),
+                lane: Arc::clone(&lane),
+                holding: true,
+                started: false,
+                batch: Vec::new(),
             };
-            let batch = std::mem::take(&mut driving.batch);
-            self.deliver(batch, outcome, trip);
+            self.runtime.network.spawn(Box::pin(driving.run()));
         }
     }
 
@@ -462,32 +428,80 @@ fn micros(duration: Duration) -> u64 {
     u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
 }
 
-/// A drive in progress. Dropped mid-round-trip (its runtime stopping), it
-/// settles the batch it carried as [`Error::Closed`] and frees its slot, so
-/// no waiter or lane is left behind.
-struct Driving<'a, S>
+/// One round-trip slot of a lane, claimed before its task is spawned.
+///
+/// Dropped mid-round-trip (its runtime stopping), it settles the batch it
+/// carried as [`Error::Closed`] and frees its slot. Dropped before it ever
+/// ran (a runtime that refused the task), it also settles the keys waiting in
+/// its lane, which no round trip would take. No waiter or lane is left
+/// behind.
+struct Driving<S>
 where
     S: Source,
 {
-    inner: &'a Inner<S>,
-    lane: &'a Lane<S::Key>,
+    inner: Arc<Inner<S>>,
+    group: S::Group,
+    lane: LaneOf<S>,
     holding: bool,
+    started: bool,
     batch: Vec<S::Key>,
 }
 
-impl<S> Drop for Driving<'_, S>
+impl<S> Driving<S>
+where
+    S: Source,
+{
+    /// Takes the lane's oldest waiting keys, makes their round trip, settles
+    /// their flights, and goes on while keys wait.
+    async fn run(mut self) {
+        self.started = true;
+        let inner = Arc::clone(&self.inner);
+        loop {
+            self.batch = self.lane.take(inner.config.max_batch);
+            if self.batch.is_empty() {
+                self.holding = false;
+                self.lane.release();
+                // A key pushed after the take saw the slot taken and left
+                // its round trip to this one.
+                if self.lane.has_waiting() && self.lane.claim(inner.config.flights_per_group) {
+                    self.holding = true;
+                    continue;
+                }
+                if self.lane.is_idle() {
+                    let lane = &self.lane;
+                    inner.lanes.remove_if(&self.group, |current| {
+                        Arc::ptr_eq(current, lane) && lane.is_idle()
+                    });
+                }
+                return;
+            }
+            let trip = inner.trips.fetch_add(1, Ordering::Relaxed) + 1;
+            let outcome = {
+                let _permit = inner.in_flight.acquire(1).await;
+                inner.round_trip(&self.group, &self.batch).await
+            };
+            let batch = std::mem::take(&mut self.batch);
+            inner.deliver(batch, outcome, trip);
+        }
+    }
+}
+
+impl<S> Drop for Driving<S>
 where
     S: Source,
 {
     fn drop(&mut self) {
-        if !self.batch.is_empty() {
-            let now = self.inner.runtime.now();
-            for key in std::mem::take(&mut self.batch) {
-                self.inner.settle(key, Err(Error::Closed), 0, now);
-            }
+        let now = self.inner.runtime.now();
+        for key in std::mem::take(&mut self.batch) {
+            self.inner.settle(key, Err(Error::Closed), 0, now);
         }
         if self.holding {
             self.lane.release();
+        }
+        if !self.started {
+            for key in self.lane.take(usize::MAX) {
+                self.inner.settle(key, Err(Error::Closed), 0, now);
+            }
         }
     }
 }

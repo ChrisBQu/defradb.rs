@@ -366,3 +366,41 @@ fn a_histogram_bounds_its_quantiles() {
     assert!((50..=63).contains(&p50), "{p50}");
     assert_eq!(histogram.quantile(1.0), Some(100));
 }
+
+/// A network that refuses every task, as a stopping runtime does.
+struct Refusing;
+
+impl crate::Network for Refusing {
+    fn spawn(&self, work: MaybeBoxFuture<'static, ()>) {
+        drop(work);
+    }
+
+    fn sleep(&self, duration: Duration) -> MaybeBoxFuture<'static, ()> {
+        Box::pin(tokio::time::sleep(duration))
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_refused_round_trip_settles_its_keys_as_closed_and_frees_its_lane() {
+    let runtime = Runtime::new(
+        std::sync::Arc::new(Refusing),
+        std::sync::Arc::new(crate::RuntimeClock::new()),
+    );
+    let service = Service::new(Fake::with_latency(LATENCY), Config::default(), runtime);
+    let started = Instant::now();
+    assert_eq!(
+        service.get_many(vec![1, 2]).await,
+        vec![Err(Error::Closed), Err(Error::Closed)]
+    );
+    assert_eq!(
+        started.elapsed(),
+        Duration::ZERO,
+        "no caller waits for its deadline"
+    );
+    assert_eq!(
+        service.get(3).await,
+        Err(Error::Closed),
+        "the lane is not left claimed"
+    );
+    assert_eq!(service.source().round_trips(), 0);
+}

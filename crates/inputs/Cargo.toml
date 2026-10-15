@@ -23,8 +23,10 @@ regolith.workspace = true
 workers = { path = "../workers" }
 rapidhash.workspace = true
 tracing.workspace = true
-# The runtime a service runs its round trips on until the network edge
-# hands it one: tokio natively, the browser's event loop on wasm.
+# The network runtime round trips run on, through its `Edge` handle.
+edge = { path = "../edge" }
+# The ambient runtime, for a caller with no `Edge`: tokio natively, the
+# browser's event loop on wasm; and the combinators a wait races with.
 n0-future.workspace = true
 
 [dev-dependencies]

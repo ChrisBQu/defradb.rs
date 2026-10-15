@@ -37,6 +37,20 @@ impl Network for Ambient {
     }
 }
 
+/// The network edge: round trips run as its network tasks, so they stop
+/// with it, and its timers time deadlines and backoff.
+impl Network for edge::Edge {
+    fn spawn(&self, work: MaybeBoxFuture<'static, ()>) {
+        // Dropping the completion leaves the work running. A round trip
+        // refused at shutdown settles its keys as closed when dropped.
+        drop(edge::Edge::spawn(self, work));
+    }
+
+    fn sleep(&self, duration: Duration) -> MaybeBoxFuture<'static, ()> {
+        Box::pin(edge::Edge::sleep(self, duration))
+    }
+}
+
 /// The runtime's monotonic clock: tokio's natively (so a test that pauses
 /// tokio's time moves it too), the browser's on wasm.
 #[derive(Debug)]
@@ -82,6 +96,11 @@ impl Runtime {
     /// The caller's async runtime and its clock.
     pub fn ambient() -> Self {
         Self::new(Arc::new(Ambient), Arc::new(RuntimeClock::new()))
+    }
+
+    /// The network edge `edge` and its runtime's clock.
+    pub fn edge(edge: edge::Edge) -> Self {
+        Self::new(Arc::new(edge), Arc::new(RuntimeClock::new()))
     }
 
     /// The same network with `clock`.

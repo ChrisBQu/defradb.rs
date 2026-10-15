@@ -6521,6 +6521,7 @@ name = "inputs"
 version = "0.5.0"
 dependencies = [
  "defra-core",
+ "edge",
  "n0-future",
  "rapidhash",
  "regolith",
