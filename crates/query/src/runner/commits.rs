@@ -115,7 +115,16 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         .get("docID")
                         .and_then(|value| value.as_str())
                         .unwrap_or_default();
-                    if seen_commit_cids.insert((commit_cid.to_string(), doc_id.to_string())) {
+                    // An Immutable block is one commit per field, all under its CID.
+                    let field_name = commit
+                        .get("fieldName")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default();
+                    if seen_commit_cids.insert((
+                        commit_cid.to_string(),
+                        doc_id.to_string(),
+                        field_name.to_string(),
+                    )) {
                         commits.push(commit);
                     }
                 }
