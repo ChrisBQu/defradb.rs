@@ -1,9 +1,12 @@
+//! Document values: part operands, their CRDT order and the parts they touch.
+
 use document::stored::{StoredDocument, StoredField, ValueKind};
 use document::NormalValue;
 use regolith::MergeOperator;
-use storage::corekv::Store;
-use storage::merge::{document_parts, DefraMergeOperator};
-use storage::RegolithStore;
+
+use crate::corekv::Store;
+use crate::merge::{document_parts, DefraMergeOperator};
+use crate::RegolithStore;
 
 fn field(id: u32, priority: u64, value: NormalValue) -> StoredDocument {
     StoredDocument {
@@ -44,7 +47,6 @@ fn priorities_ties_and_tombstones_survive_materialization() {
     );
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn document_folds_and_touches_obey_engine_contracts() {
     use regolith::testing::proptest::prelude::*;
@@ -73,7 +75,6 @@ fn document_folds_and_touches_obey_engine_contracts() {
 
 /// Parts 0 to 2 are counters of `kind`, part 3 an LWW field; each part keeps
 /// one name, as a document value's parts do.
-#[cfg(not(target_arch = "wasm32"))]
 fn mixed_parts(
     kind: ValueKind,
 ) -> impl regolith::testing::proptest::strategy::Strategy<Value = StoredDocument> + Clone {
@@ -99,7 +100,6 @@ fn mixed_parts(
 
 /// Integer counter parts fold exactly in any grouping, alone or beside LWW
 /// parts, and a folded operand touches exactly the parts its operands touch.
-#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn integer_counter_parts_fold_exactly_and_touch_only_their_parts() {
     let documents = mixed_parts(ValueKind::Int64);
@@ -153,7 +153,6 @@ fn integer_counter_parts_fold_exactly_and_touch_only_their_parts() {
 
 /// Floating-point counter parts keep their order: no early fold, and
 /// `full_merge` agrees with applying the operands one at a time.
-#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn float_counter_parts_are_not_folded_early() {
     use regolith::testing::proptest::prelude::*;
@@ -312,7 +311,7 @@ fn corrupt_encodings_are_refused_without_trusting_lengths() {
 #[tokio::test]
 async fn encrypted_document_operands_survive_reopen_and_schema_put_terminates_old_operands() {
     let dir = tempfile::tempdir().unwrap();
-    let options = storage::RegolithStoreOptions::default().with_encryption_key([23; 32]);
+    let options = crate::RegolithStoreOptions::default().with_encryption_key([23; 32]);
     {
         let store = RegolithStore::open_with_options(dir.path(), options.clone()).unwrap();
         let mut seed = store.new_txn(false).await.unwrap();
@@ -363,4 +362,75 @@ async fn encrypted_document_operands_survive_reopen_and_schema_put_terminates_ol
         .unwrap();
     assert_eq!(doc.get("field1"), None);
     assert_eq!(doc.get("field2"), Some(&NormalValue::Int(40)));
+}
+
+/// Floating-point counter parts beside LWW parts: a fold, where one happens,
+/// touches exactly the parts its operands touch.
+#[test]
+fn float_counter_parts_keep_touches_through_folds() {
+    use regolith::testing::proptest::prelude::*;
+    for kind in [ValueKind::Float32, ValueKind::Float64] {
+        regolith::testing::check_touches(
+            &DefraMergeOperator,
+            Just(b"doc".to_vec()),
+            mixed_parts(kind).prop_map(|value| document_parts(&value).unwrap()),
+            regolith::testing::proptest::collection::vec(0u32..5, 0..6),
+        )
+        .unwrap();
+    }
+}
+
+/// The half of `touches`'s contract `check_touches` leaves to the caller: a
+/// part no operand touches keeps its bytes through `full_merge`, and the
+/// operator says the operands leave it alone.
+#[test]
+fn a_part_no_operand_touches_keeps_its_bytes() {
+    use regolith::testing::proptest::collection::vec;
+    use regolith::testing::proptest::test_runner::{Config, TestCaseError, TestRunner};
+
+    for kind in [ValueKind::Int64, ValueKind::Float64] {
+        let mut runner = TestRunner::new(Config {
+            failure_persistence: None,
+            ..Config::default()
+        });
+        runner
+            .run(
+                &(mixed_parts(kind), vec(mixed_parts(kind), 1..6)),
+                |(base, operands)| {
+                    let encoded: Vec<Vec<u8>> = operands
+                        .iter()
+                        .map(|operand| document_parts(operand).unwrap())
+                        .collect();
+                    let refs: Vec<&[u8]> = encoded.iter().map(Vec::as_slice).collect();
+                    let merged = DefraMergeOperator
+                        .full_merge(b"doc", Some(&base.encode().unwrap()), &refs)
+                        .ok_or_else(|| TestCaseError::fail("the operands must merge"))?;
+                    let merged = StoredDocument::decode(&merged)
+                        .ok_or_else(|| TestCaseError::fail("the merged value must decode"))?;
+                    for (id, field) in &base.fields {
+                        if operands
+                            .iter()
+                            .any(|operand| operand.fields.contains_key(id))
+                        {
+                            continue;
+                        }
+                        if encoded
+                            .iter()
+                            .any(|operand| DefraMergeOperator.touches(b"doc", operand, &[*id]))
+                        {
+                            return Err(TestCaseError::fail(format!(
+                                "an operand without part {id} touches it"
+                            )));
+                        }
+                        if merged.fields.get(id) != Some(field) {
+                            return Err(TestCaseError::fail(format!(
+                                "part {id} changed though no operand touches it"
+                            )));
+                        }
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
 }

@@ -51,7 +51,7 @@ pub const PROPERTIES: &[Property] = &[
         family: "Vector index link maintenance",
         name: "INV_NoLostLinks — blind additions preserve links and stale structural pruning aborts",
         axis: Tla,
-        anchor: "crates/storage/src/merge/vector.rs; crates/db/src/index/vector/engine/hnsw/insert.rs; crates/db/tests/vector/concurrent_hnsw.rs",
+        anchor: "crates/storage/src/backends/regolith/merge/vector.rs; crates/db/src/index/vector/engine/hnsw/insert.rs; crates/db/tests/vector/concurrent_hnsw.rs",
         model_ref: "MC_VectorLinks_Green.cfg / MC_VectorLinks_Red_Puts.cfg / MC_VectorLinks_Red_Prune.cfg",
         tiers: &[Contract],
     },

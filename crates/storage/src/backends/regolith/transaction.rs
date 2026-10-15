@@ -59,7 +59,7 @@ impl RegolithTxn {
         path: impl AsRef<std::path::Path>,
         options: super::RegolithStoreOptions,
     ) -> Result<Self> {
-        let db = regolith::Db::open_read_only(path.as_ref(), options.engine_with_keys()).map_err(
+        let db = regolith::Db::open_read_only(path.as_ref(), options.engine_for_open()).map_err(
             |error| Error::Backend(format!("failed to open regolith read-only: {error}")),
         )?;
         #[cfg(not(target_arch = "wasm32"))]
@@ -487,18 +487,5 @@ impl Txn for RegolithTxn {
 
     fn callback_count(&self) -> usize {
         self.callbacks.total()
-    }
-}
-
-impl regolith::LogLayout for crate::corekv::AppendLog {
-    fn head_key(&self) -> &[u8] {
-        &self.head_key
-    }
-    fn entry_key(&self, position: u64, out: &mut Vec<u8>) {
-        out.extend_from_slice(&self.entry_prefix);
-        out.extend_from_slice(format!("{position:020}").as_bytes());
-    }
-    fn max_entry_key_len(&self) -> usize {
-        self.entry_prefix.len() + 20
     }
 }

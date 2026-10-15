@@ -77,11 +77,10 @@ impl RegolithStore {
         let engine_stats = options.engine.get_statistics().cloned().unwrap_or_default();
         let stats = TransactionStatsHandle::from_engine(engine_stats.clone());
         let engine = options
-            .engine_with_keys()
+            .engine_for_open()
             .statistics(Some(engine_stats))
             .add_listener(Arc::new(StoreListener(stats.clone())))
-            .transaction_hooks(Arc::new(StoreHooks))
-            .merge_operator(Some(Arc::new(crate::merge::DefraMergeOperator)));
+            .transaction_hooks(Arc::new(StoreHooks));
         #[cfg(not(target_arch = "wasm32"))]
         let db = super::rewrite::open(&path, engine, &options)?;
         #[cfg(target_arch = "wasm32")]

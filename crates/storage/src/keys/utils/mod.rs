@@ -82,36 +82,41 @@ pub fn encode_uvarint_ascending(mut buf: Vec<u8>, value: u64) -> Vec<u8> {
     buf
 }
 
+/// The width and value of the uvarint `buf` starts with, or `None` when
+/// `buf` is empty or too short to hold it. The one reader of the encoding:
+/// it allocates nothing, so a caller that only needs to know where a value
+/// ends can afford it anywhere.
+pub(crate) fn read_uvarint(buf: &[u8]) -> Option<(usize, u64)> {
+    let first = *buf.first()?;
+    let width = match first {
+        0..=0xEF => 1,
+        0xF0..=0xF7 => 2,
+        _ => 1 + usize::from(first - 0xF7),
+    };
+    let encoded = buf.get(..width)?;
+    let value = match width {
+        1 => u64::from(first),
+        2 => 240 + (u64::from(first - 0xF0) << 8) + u64::from(encoded[1]),
+        _ => encoded[1..]
+            .iter()
+            .fold(0, |value, byte| (value << 8) | u64::from(*byte)),
+    };
+    Some((width, value))
+}
+
+/// The length of the uvarint `buf` starts with, or `None` when `buf` is
+/// empty or too short to hold it. Allocates nothing.
+pub fn uvarint_len(buf: &[u8]) -> Option<usize> {
+    read_uvarint(buf).map(|(width, _)| width)
+}
+
 /// Decodes a uvarint from the beginning of the buffer.
 /// Returns (remaining_bytes, decoded_value).
 pub fn decode_uvarint_ascending(buf: &[u8]) -> Result<(&[u8], u64)> {
-    if buf.is_empty() {
-        return Err(Error::Other("Empty buffer for uvarint decode".into()));
-    }
-
-    let first = buf[0];
-    if first < 240 {
-        Ok((&buf[1..], first as u64))
-    } else if first <= 0xF7 {
-        if buf.len() < 2 {
-            return Err(Error::Other("Buffer too short for 2-byte uvarint".into()));
-        }
-        let value = 240 + (((first - 0xF0) as u64) << 8) + buf[1] as u64;
-        Ok((&buf[2..], value))
-    } else {
-        let bytes_needed = (first - 0xF7) as usize;
-        if buf.len() < 1 + bytes_needed {
-            return Err(Error::Other(format!(
-                "Buffer too short for {}-byte uvarint",
-                bytes_needed
-            )));
-        }
-
-        let mut value: u64 = 0;
-        for i in 0..bytes_needed {
-            value = (value << 8) | buf[1 + i] as u64;
-        }
-        Ok((&buf[1 + bytes_needed..], value))
+    match read_uvarint(buf) {
+        Some((width, value)) => Ok((&buf[width..], value)),
+        None if buf.is_empty() => Err(Error::Other("Empty buffer for uvarint decode".into())),
+        None => Err(Error::Other("Buffer too short for its uvarint".into())),
     }
 }
 
