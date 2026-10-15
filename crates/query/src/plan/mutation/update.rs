@@ -22,6 +22,14 @@ use crate::planner::{Doc, PlanNode};
 use super::create_conversions::{json_to_normal_value_with_kind_and_time, normal_value_to_json};
 use chrono::{DateTime, FixedOffset};
 
+fn is_known_prepared_update_target(
+    targets: Option<&RapidHashSet<String>>,
+    writes: &RapidHashMap<String, Arc<document::WritePreparation>>,
+    id: &str,
+) -> bool {
+    targets.map_or_else(|| writes.contains_key(id), |targets| targets.contains(id))
+}
+
 /// Input for an update mutation - field values to patch on existing documents.
 #[derive(Debug, Clone)]
 pub struct UpdateInput {
@@ -496,9 +504,10 @@ impl PlanNode for UpdateNode {
 
                     if let Some(writes) = &self.prepared_writes {
                         let id = doc.id().map(ToString::to_string).unwrap_or_default();
-                        let known_target = self.prepared_update_targets.as_ref().map_or_else(
-                            || writes.contains_key(&id),
-                            |targets| targets.contains(&id),
+                        let known_target = is_known_prepared_update_target(
+                            self.prepared_update_targets.as_ref(),
+                            writes,
+                            &id,
                         );
                         if !known_target {
                             return Err(QueryError::transaction_conflict(
@@ -613,5 +622,150 @@ impl PlanNode for UpdateNode {
         }
 
         JsonValue::Object(obj)
+    }
+}
+
+#[cfg(test)]
+mod prepared_target_tests {
+    use super::*;
+    use crate::{
+        mutator::{CreateResult, DeleteResult},
+        planner::PlanNode,
+        test_utils::MockFetcher,
+    };
+    use async_trait::async_trait;
+    use document::DocID;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct RecordingMutator {
+        updates: Mutex<Vec<(String, bool)>>,
+    }
+
+    #[async_trait]
+    impl DocMutator for RecordingMutator {
+        async fn create(&self, _collection: &str, _doc: Document) -> Result<CreateResult> {
+            Err(QueryError::execution("unused in update target test"))
+        }
+
+        async fn update(
+            &self,
+            _collection: &str,
+            doc: Document,
+            fields: RapidHashSet<String>,
+        ) -> Result<UpdateResult> {
+            self.updates.lock().unwrap().push((
+                doc.id().unwrap().to_string(),
+                doc.write_preparation().is_some(),
+            ));
+            Ok(UpdateResult::new(doc, fields.len()))
+        }
+
+        async fn delete(&self, _collection: &str, id: &DocID) -> Result<DeleteResult> {
+            Ok(DeleteResult::new(id.clone(), false))
+        }
+
+        async fn exists(&self, _collection: &str, _id: &DocID) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn get_for_update(&self, _collection: &str, _id: &DocID) -> Result<Option<Document>> {
+            Ok(None)
+        }
+    }
+
+    fn doc(seed: &str) -> Document {
+        let mut doc = Document::from_json_str(r#"{"value":"before"}"#).unwrap();
+        doc.set_id(DocID::new_v0_from_seed(seed));
+        doc
+    }
+
+    fn make_node(
+        docs: &[Document],
+        ids: &[DocID],
+        targets: RapidHashSet<String>,
+        writes: RapidHashMap<String, Arc<document::WritePreparation>>,
+        mutator: Arc<RecordingMutator>,
+    ) -> UpdateNode {
+        let fetcher = Arc::new(MockFetcher::new());
+        for doc in docs {
+            fetcher.add_doc("Things", doc.clone());
+        }
+        let mut mapping = DocumentMapping::new();
+        mapping.add(0, "_docID");
+        mapping.add(1, "value");
+        UpdateNode::new("Things", mutator, fetcher, mapping)
+            .with_doc_ids(ids.iter().map(ToString::to_string).collect())
+            .with_input(UpdateInput::new().with_field("value", serde_json::json!("after")))
+            .with_prepared_writes(Some(writes))
+            .with_prepared_update_targets(Some(targets))
+    }
+
+    #[test]
+    fn update_node_accepts_matched_plain_and_keyed_targets() {
+        futures::executor::block_on(async {
+            let keyed_doc = doc("keyed-doc");
+            let plain_doc = doc("plain-doc");
+            let keyed = keyed_doc.id().unwrap().clone();
+            let plain = plain_doc.id().unwrap().clone();
+            let mut targets = RapidHashSet::default();
+            targets.insert(keyed.to_string());
+            targets.insert(plain.to_string());
+            let mut writes = RapidHashMap::default();
+            writes.insert(
+                keyed.to_string(),
+                Arc::new(document::WritePreparation::new(1, 1)),
+            );
+            let mutator = Arc::new(RecordingMutator::default());
+            let mut node = make_node(
+                &[keyed_doc, plain_doc],
+                &[keyed.clone(), plain.clone()],
+                targets,
+                writes,
+                Arc::clone(&mutator),
+            );
+            node.init().await.unwrap();
+            assert!(node.next().await.unwrap());
+            assert_eq!(node.updated_count(), 2);
+            let updates = mutator.updates.lock().unwrap().clone();
+            assert!(updates.contains(&(keyed.to_string(), true)));
+            assert!(updates.contains(&(plain.to_string(), false)));
+        });
+    }
+
+    #[test]
+    fn update_node_rejects_a_target_absent_from_prepared_target_set() {
+        futures::executor::block_on(async {
+            let keyed_doc = doc("keyed-doc");
+            let plain_doc = doc("plain-doc");
+            let appeared_doc = doc("appeared-after-preparation");
+            let keyed = keyed_doc.id().unwrap().clone();
+            let plain = plain_doc.id().unwrap().clone();
+            let appeared = appeared_doc.id().unwrap().clone();
+            let mut targets = RapidHashSet::default();
+            targets.insert(keyed.to_string());
+            targets.insert(plain.to_string());
+            let mut writes = RapidHashMap::default();
+            writes.insert(
+                keyed.to_string(),
+                Arc::new(document::WritePreparation::new(1, 1)),
+            );
+            let mutator = Arc::new(RecordingMutator::default());
+            let mut node = make_node(
+                &[keyed_doc, plain_doc, appeared_doc],
+                &[keyed.clone(), plain.clone(), appeared.clone()],
+                targets,
+                writes,
+                Arc::clone(&mutator),
+            );
+            node.init().await.unwrap();
+            let error = node.next().await.unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("mutation target changed after key preparation"));
+            let updates = mutator.updates.lock().unwrap().clone();
+            assert_eq!(updates.len(), 2);
+            assert!(!updates.iter().any(|(id, _)| id == &appeared.to_string()));
+        });
     }
 }
