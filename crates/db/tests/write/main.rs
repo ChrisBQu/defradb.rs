@@ -17,3 +17,4 @@ mod kms_authorization;
 mod kms_request;
 mod large_batch;
 mod update;
+mod version_key;
