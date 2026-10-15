@@ -1388,6 +1388,7 @@ mod tests {
     use kovan_queue::seg_queue::SegQueue;
     use rapidhash::RapidHashSet;
     use schema::{CollectionVersion, FieldDescription, FieldKind};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::mutator::{CollectionTruncator, CreateResult, DeleteResult, UpdateResult};
     use crate::test_utils::MockFetcher;
@@ -1396,6 +1397,7 @@ mod tests {
     struct CapturingMutator {
         created_docs: SegQueue<Document>,
         broadcast_creators: SegQueue<Option<String>>,
+        prepared_writes: AtomicUsize,
     }
 
     #[derive(Default)]
@@ -1427,6 +1429,7 @@ mod tests {
             Self {
                 created_docs: SegQueue::new(),
                 broadcast_creators: SegQueue::new(),
+                prepared_writes: AtomicUsize::new(0),
             }
         }
 
@@ -1507,6 +1510,17 @@ mod tests {
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     impl crate::mutator::DocMutator for CapturingMutator {
+        async fn prepare_write(
+            &self,
+            _collection_name: &str,
+            doc: Document,
+            _modified_fields: Option<RapidHashSet<String>>,
+            _encryption: Option<defra_core::encryption::EncryptionConfig>,
+        ) -> Result<Document> {
+            self.prepared_writes.fetch_add(1, Ordering::SeqCst);
+            Ok(doc)
+        }
+
         async fn create(&self, _collection_name: &str, mut doc: Document) -> Result<CreateResult> {
             self.broadcast_creators
                 .push(defra_core::signing::get_broadcast_creator_did());
@@ -1546,6 +1560,41 @@ mod tests {
         ) -> Result<Option<Document>> {
             Ok(None)
         }
+    }
+
+    #[tokio::test]
+    async fn update_preparation_keeps_custom_hook_and_only_records_found_targets() {
+        let collection = CollectionVersion::new(
+            "User",
+            "v1",
+            "coll-user",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "name", FieldKind::string()),
+            ],
+        );
+        let fetcher = MockFetcher::new();
+        let mut existing = Document::from_json_str(r#"{"name":"before"}"#).unwrap();
+        existing.set_id(DocID::new_v0_from_seed("preparation-existing"));
+        let existing_id = existing.id().unwrap().to_string();
+        let missing_id = "missing-before-preparation";
+        fetcher.add_doc("User", existing);
+        let mutator = Arc::new(CapturingMutator::new());
+        // This custom mutator has the trait defaults: it does not require
+        // external write preparation and does not opt in to projected reads.
+        assert!(!mutator.requires_write_preparation());
+        assert!(!mutator.supports_projected_updates());
+        let runner = QueryRunner::new(fetcher, vec![collection]).with_mutator(mutator.clone());
+        let request = QueryRequest::new(format!(
+            r#"mutation {{ update_User(docIDs: ["{existing_id}", "{missing_id}"], input: {{name: "after"}}) {{ _docID }} }}"#
+        ));
+
+        let prepared = runner.prepare_mutations(&request).await.unwrap().unwrap();
+        let entry = prepared.mutations.values().next().unwrap();
+        assert_eq!(entry.update_targets.len(), 1);
+        assert!(entry.update_targets.contains(&existing_id));
+        assert!(!entry.update_targets.contains(missing_id));
+        assert_eq!(mutator.prepared_writes.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
