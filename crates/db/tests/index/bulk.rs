@@ -189,7 +189,10 @@ async fn the_collection_source_streams_every_live_document() {
     let txn = db.new_txn(false).await.unwrap();
     let mutator = DbDocMutator::new(db.clone(), txn);
     for i in 0..25 {
-        mutator.create("docs", document(i)).await.unwrap();
+        mutator
+            .create(&defra_core::RequestContext::default(), "docs", document(i))
+            .await
+            .unwrap();
     }
     mutator.take_txn().await.unwrap().commit().await.unwrap();
 

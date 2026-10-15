@@ -453,6 +453,7 @@ async fn implicit_single_update_is_prepared_for_engine_owned_retry() {
     store_db.create_collection(test_collection()).await.unwrap();
     let created = db::write::autocommit::AutoCommitMutator::new(store_db.clone())
         .create(
+            &defra_core::RequestContext::default(),
             "TestDoc",
             document::Document::from_json_str(r#"{"x": 1}"#).unwrap(),
         )
@@ -473,6 +474,7 @@ async fn implicit_single_update_is_prepared_for_engine_owned_retry() {
             doc.set("x", 3_i64);
             mutator
                 .update(
+                    &defra_core::RequestContext::default(),
                     "TestDoc",
                     doc,
                     rapidhash::RapidHashSet::from_iter(["x".to_string()]),
@@ -612,6 +614,7 @@ async fn single_create_replays_after_engine_conflict_with_consistent_identity_an
 
     let result = db::write::autocommit::AutoCommitMutator::new(db.clone())
         .create(
+            &defra_core::RequestContext::default(),
             "TestDoc",
             document::Document::from_json_str(r#"{"x":7}"#).unwrap(),
         )
@@ -660,6 +663,7 @@ async fn transactional_acp_revoke_conflicts_and_denies_batch_update() {
 
     let original = db::write::autocommit::AutoCommitMutator::new(db.clone())
         .create(
+            &defra_core::RequestContext::default(),
             "TestDoc",
             document::Document::from_json_str(r#"{"x":1}"#).unwrap(),
         )

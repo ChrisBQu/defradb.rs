@@ -87,7 +87,7 @@ async fn populated() -> (Arc<DB<RegolithStore>>, u32) {
         doc.set("title", NormalValue::String(format!("doc-{i}")));
         doc.set("embedding", NormalValue::Float64Array(vector_at(i)));
         mutator
-            .create(COLLECTION, doc)
+            .create(&defra_core::RequestContext::default(), COLLECTION, doc)
             .await
             .expect("the document must be created");
     }

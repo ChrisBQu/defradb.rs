@@ -94,7 +94,7 @@ pub use definition::loader::{
     get_collection_by_version_id, get_collection_version_ids, get_collections_by_collection_id,
     load_active_collections,
 };
-pub use defra_core::encryption::{set_encryption_config, EncryptionConfig};
+pub use defra_core::encryption::EncryptionConfig;
 pub use defra_core::{Action, ActionExecution, ActionStatus};
 pub use downsample::GcDownsampleHistoriesOptions;
 pub use error::{Error, Result};

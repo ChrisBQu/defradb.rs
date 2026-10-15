@@ -53,7 +53,10 @@ async fn branchable_collection_writes_expose_collection_heads() {
     let mutator = AutoCommitMutator::new(db.clone());
     let mut doc = Document::new();
     doc.set("body", "first".to_string());
-    mutator.create("Transcript", doc).await.unwrap();
+    mutator
+        .create(&defra_core::RequestContext::default(), "Transcript", doc)
+        .await
+        .unwrap();
 
     let raw = raw_collection_head_keys(&store).await;
     let provider = DbHeadProvider::new(db);

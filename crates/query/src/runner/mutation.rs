@@ -26,27 +26,6 @@ pub(super) struct AuthorizedMutation {
     pub acp_filtered_doc_ids: Option<Vec<String>>,
 }
 
-/// RAII guard that clears the `encryption_config` thread-local on Drop.
-///
-/// `mutation.rs` sets the thread-local during execution. Without this
-/// guard, an early-return via `?` (or a panic unwind) leaves stale
-/// state on the blocking-pool worker thread, which the next
-/// `spawn_blocking` closure inherits — silent encryption-key confusion
-/// across requests. See #757.
-///
-/// Always clears to None on Drop, regardless of entry state. The
-/// function "owns" the mutation context for the duration of the call
-/// and leaves the worker thread in a clean state on exit (happy path,
-/// early-return via `?`, or panic unwind). This also self-heals against
-/// any previous task that may have leaked state.
-struct EncryptionConfigGuard;
-
-impl Drop for EncryptionConfigGuard {
-    fn drop(&mut self) {
-        defra_core::encryption::set_encryption_config(None);
-    }
-}
-
 fn preserve_acp_input_error(action: &str, doc_id: &str, error: QueryError) -> QueryError {
     match error {
         error @ QueryError::NeedsInput(_) => error,
@@ -704,21 +683,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
             }
         };
 
-        // Bind a RAII guard so the thread-local is cleared on every exit
-        // path (including `?`, panic unwind, and the happy path). See #757.
-        let _encryption_config_guard = EncryptionConfigGuard;
-
-        // Set encryption config for this mutation (thread-local, read by AutoCommitMutator)
-        if mutation.encrypt_doc || !mutation.encrypt_fields.is_empty() {
-            defra_core::encryption::set_encryption_config(Some(
-                defra_core::encryption::EncryptionConfig {
-                    encrypt_doc: mutation.encrypt_doc,
-                    encrypt_fields: mutation.encrypt_fields.clone(),
-                },
-            ));
-        } else {
-            defra_core::encryption::set_encryption_config(None);
-        }
+        // This mutation's own encryption, so it never reaches another one.
+        let context = self.context.clone().with_encryption(mutation.encryption());
 
         let _signing_config_reset = if matches!(mutation.mutation_type, MutationType::Create) {
             let current_signing_config = defra_core::signing::get_signing_config();
@@ -871,11 +837,16 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
             MutationType::Create => {
                 let inputs = self.build_create_inputs(mutation, &collection)?;
                 Box::new(
-                    CreateNode::new(&mutation.collection_name, mutator.clone(), mapping.clone())
-                        .with_collection(collection.clone())
-                        .with_request_time(request_time)
-                        .with_inputs(inputs)
-                        .with_prepared_documents(prepared.map(|p| p.creates.clone())),
+                    CreateNode::new(
+                        &mutation.collection_name,
+                        mutator.clone(),
+                        context.clone(),
+                        mapping.clone(),
+                    )
+                    .with_collection(collection.clone())
+                    .with_request_time(request_time)
+                    .with_inputs(inputs)
+                    .with_prepared_documents(prepared.map(|p| p.creates.clone())),
                 )
             }
             MutationType::Update => {
@@ -883,6 +854,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                 let mut node = UpdateNode::new(
                     &mutation.collection_name,
                     mutator.clone(),
+                    context.clone(),
                     fetcher.clone(),
                     mapping.clone(),
                 )
@@ -943,11 +915,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                 Box::new(node)
             }
             MutationType::Upsert => {
-                let mut node =
-                    UpsertNode::new(&mutation.collection_name, mutator.clone(), mapping.clone())
-                        .with_collection(collection.clone())
-                        .with_request_time(request_time)
-                        .with_prepared_writes(prepared.cloned());
+                let mut node = UpsertNode::new(
+                    &mutation.collection_name,
+                    mutator.clone(),
+                    context.clone(),
+                    mapping.clone(),
+                )
+                .with_collection(collection.clone())
+                .with_request_time(request_time)
+                .with_prepared_writes(prepared.cloned());
 
                 // Set create_input (from Go's 'add' argument)
                 if !mutation.create_input.is_empty() {
@@ -1035,11 +1011,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                 }
             }
         }
-
-        // Note: encryption_config and broadcast_creator_did are cleared
-        // automatically by the RAII guards declared above when this
-        // function returns. The bearer token store stays alive — the
-        // ACP registration block below needs it for vera.rs auth.
 
         let plan_execution_elapsed = plan_execution_start.elapsed();
         for doc_id in &result_doc_ids {
@@ -1360,6 +1331,7 @@ mod tests {
     struct CapturingMutator {
         created_docs: SegQueue<Document>,
         broadcast_creators: SegQueue<Option<String>>,
+        encryptions: SegQueue<Option<defra_core::encryption::EncryptionConfig>>,
         prepared_writes: AtomicUsize,
     }
 
@@ -1392,6 +1364,7 @@ mod tests {
             Self {
                 created_docs: SegQueue::new(),
                 broadcast_creators: SegQueue::new(),
+                encryptions: SegQueue::new(),
                 prepared_writes: AtomicUsize::new(0),
             }
         }
@@ -1475,18 +1448,24 @@ mod tests {
     impl crate::mutator::DocMutator for CapturingMutator {
         async fn prepare_write(
             &self,
+            _context: &defra_core::RequestContext,
             _collection_name: &str,
             doc: Document,
             _modified_fields: Option<RapidHashSet<String>>,
-            _encryption: Option<defra_core::encryption::EncryptionConfig>,
         ) -> Result<Document> {
             self.prepared_writes.fetch_add(1, Ordering::SeqCst);
             Ok(doc)
         }
 
-        async fn create(&self, _collection_name: &str, mut doc: Document) -> Result<CreateResult> {
+        async fn create(
+            &self,
+            context: &defra_core::RequestContext,
+            _collection_name: &str,
+            mut doc: Document,
+        ) -> Result<CreateResult> {
             self.broadcast_creators
                 .push(defra_core::signing::get_broadcast_creator_did());
+            self.encryptions.push(context.encryption().cloned());
             if doc.id().is_none() {
                 // Stand in for the genesis-CID identity a real create would
                 // derive: seed a valid DocID from the capture order.
@@ -1501,6 +1480,7 @@ mod tests {
 
         async fn update(
             &self,
+            _context: &defra_core::RequestContext,
             _collection_name: &str,
             doc: Document,
             modified_fields: RapidHashSet<String>,
@@ -1595,72 +1575,40 @@ mod tests {
         assert_eq!(defra_core::signing::get_broadcast_creator_did(), None);
     }
 
-    // =========================================================================
-    // RAII guard tests for #757
-    //
-    // These tests verify that the EncryptionConfigGuard and
-    // BroadcastCreatorDidGuard always clear their respective thread-locals
-    // on Drop, regardless of how the owning function exits. They are NOT
-    // #[tokio::test] because the entire point is to exercise thread-local
-    // semantics on a single thread synchronously.
-    // =========================================================================
+    #[tokio::test]
+    async fn each_create_carries_only_its_own_mutations_encryption() {
+        let collection = CollectionVersion::new(
+            "User",
+            "v1",
+            "coll-user",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "name", FieldKind::string()),
+            ],
+        );
+        let mutator = Arc::new(CapturingMutator::new());
+        let runner =
+            QueryRunner::new(MockFetcher::new(), vec![collection]).with_mutator(mutator.clone());
 
-    fn make_test_encryption_config() -> defra_core::encryption::EncryptionConfig {
-        defra_core::encryption::EncryptionConfig {
-            encrypt_doc: true,
-            encrypt_fields: vec![],
-        }
-    }
+        runner
+            .execute_mutation(
+                r#"mutation {
+                    sealed: add_User(input: { name: "Alice" }, encryptFields: ["name"]) { _docID }
+                    plain: add_User(input: { name: "Bob" }) { _docID }
+                }"#,
+            )
+            .await
+            .unwrap();
 
-    #[test]
-    fn encryption_config_guard_clears_on_normal_drop() {
-        // Pre-condition: ensure clean state
-        defra_core::encryption::set_encryption_config(None);
-
-        // Set state and bind guard
-        defra_core::encryption::set_encryption_config(Some(make_test_encryption_config()));
-        assert!(defra_core::encryption::get_encryption_config().is_some());
-
-        {
-            let _guard = EncryptionConfigGuard;
-            // Inside the guard scope the state is still set.
-            assert!(defra_core::encryption::get_encryption_config().is_some());
-            // Guard drops at end of scope.
-        }
-
-        // After guard drop the thread-local is cleared.
-        assert!(defra_core::encryption::get_encryption_config().is_none());
-    }
-
-    #[test]
-    fn encryption_config_guard_clears_on_panic_unwind() {
-        defra_core::encryption::set_encryption_config(None);
-        defra_core::encryption::set_encryption_config(Some(make_test_encryption_config()));
-
-        // Drive the guard's drop via a panic in a catch_unwind boundary,
-        // simulating an early-return from a panicking mutation.
-        let _ = std::panic::catch_unwind(|| {
-            let _guard = EncryptionConfigGuard;
-            panic!("simulated mutation panic");
-        });
-
-        // Even after a panic unwind, the guard cleared the thread-local.
-        assert!(defra_core::encryption::get_encryption_config().is_none());
-    }
-
-    #[test]
-    fn encryption_config_guard_self_heals_from_leaked_state() {
-        // Simulate a previous task that leaked stale state on this thread.
-        defra_core::encryption::set_encryption_config(Some(make_test_encryption_config()));
-        assert!(defra_core::encryption::get_encryption_config().is_some());
-
-        // Even if the guard is bound without us setting fresh state, on
-        // Drop it clears the thread-local — self-healing.
-        {
-            let _guard = EncryptionConfigGuard;
-        }
-
-        assert!(defra_core::encryption::get_encryption_config().is_none());
+        let encryptions = drain(&mutator.encryptions);
+        assert_eq!(encryptions.len(), 2);
+        assert!(encryptions[0]
+            .as_ref()
+            .is_some_and(|config| config.should_encrypt_field("name") && !config.encrypt_doc));
+        assert!(
+            encryptions[1].is_none(),
+            "an encrypted mutation's config reached the next mutation of its request"
+        );
     }
 
     #[tokio::test]

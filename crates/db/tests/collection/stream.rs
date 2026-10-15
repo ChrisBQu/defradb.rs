@@ -21,7 +21,10 @@ async fn fixture_with_docs(n: usize) -> (Arc<DB<RegolithStore>>, String) {
         let mutator = DbDocMutator::new(db.clone(), txn);
         let mut doc = Document::new();
         doc.set("name", NormalValue::String(format!("user-{i}")));
-        mutator.create("Users", doc).await.unwrap();
+        mutator
+            .create(&defra_core::RequestContext::default(), "Users", doc)
+            .await
+            .unwrap();
         let txn = mutator.take_txn().await.unwrap();
         txn.commit().await.unwrap();
     }

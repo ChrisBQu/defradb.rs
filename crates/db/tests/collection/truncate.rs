@@ -36,7 +36,11 @@ async fn create_user(mutator: &AutoCommitMutator<RegolithStore>, name: &str, age
     let mut doc = Document::new();
     doc.set("name", NormalValue::String(name.to_owned()));
     doc.set("age", NormalValue::Int(age));
-    mutator.create("Users", doc).await.unwrap().doc_id
+    mutator
+        .create(&defra_core::RequestContext::default(), "Users", doc)
+        .await
+        .unwrap()
+        .doc_id
 }
 
 #[tokio::test]
@@ -82,7 +86,10 @@ async fn filtered_truncate_includes_soft_deleted_documents() {
     let mut doc = Document::new();
     doc.set("name", NormalValue::String("Alice".into()));
     doc.set("age", NormalValue::Int(30));
-    let created = mutator.create("Users", doc).await.unwrap();
+    let created = mutator
+        .create(&defra_core::RequestContext::default(), "Users", doc)
+        .await
+        .unwrap();
     mutator.delete("Users", &created.doc_id).await.unwrap();
 
     db.truncate_collection_with_filter("Users", age_filter(30), None)
@@ -166,7 +173,10 @@ async fn filtered_truncate_processes_more_than_one_chunk() {
         let mut doc = Document::new();
         doc.set("age", NormalValue::Int(30));
         doc.set("seq", NormalValue::Int(seq));
-        mutator.create("Users", doc).await.unwrap();
+        mutator
+            .create(&defra_core::RequestContext::default(), "Users", doc)
+            .await
+            .unwrap();
     }
 
     db.truncate_collection_with_filter("Users", age_filter(30), None)

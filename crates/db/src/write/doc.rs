@@ -18,8 +18,8 @@ use crate::database::DB;
 use crate::event::emission::register_update_event_callback;
 use crate::txn::DbTxn;
 use crate::write::autocommit::helpers::write_branchable_collection_block;
-use defra_core::encryption::get_encryption_config;
 use defra_core::signing::get_signing_config;
+use defra_core::RequestContext;
 
 fn document_json_value(doc: &Document) -> Option<serde_json::Value> {
     Some(serde_json::Value::Object(
@@ -280,6 +280,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
 
     async fn create(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         mut doc: Document,
     ) -> query::error::Result<CreateResult> {
@@ -333,7 +334,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             })?;
 
             let schema_version_id = collection.version_id();
-            let enc_config = get_encryption_config();
+            let enc_config = context.encryption();
             let sign_config = get_signing_config();
             let kms = self.db.kms();
 
@@ -344,7 +345,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 schema_version_id,
                 identity,
                 None,
-                enc_config.as_ref(),
+                enc_config,
                 sign_config.as_ref(),
                 kms.as_ref(),
                 Some(&self.prepared_inputs),
@@ -409,6 +410,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
 
     async fn update(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         mut doc: Document,
         mut modified_fields: rapidhash::RapidHashSet<String>,
@@ -485,7 +487,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             })?;
 
             let schema_version_id = collection.version_id();
-            let enc_config = get_encryption_config();
+            let enc_config = context.encryption();
             let sign_config = get_signing_config();
             let kms = self.db.kms();
 
@@ -496,7 +498,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 schema_version_id,
                 DocStorageIdentity::new(collection.resolved_root_id(), doc_short_id),
                 Some(&modified_fields),
-                enc_config.as_ref(),
+                enc_config,
                 sign_config.as_ref(),
                 kms.as_ref(),
                 Some(&self.prepared_inputs),

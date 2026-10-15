@@ -29,7 +29,10 @@ async fn updating_a_document_that_holds_an_empty_string_array_succeeds() {
     let mut doc = Document::new();
     doc.set("title", NormalValue::String("first".to_string()));
     doc.set("tags", NormalValue::NillableStringArray(Some(Vec::new())));
-    let created = mutator.create("Post", doc).await.unwrap();
+    let created = mutator
+        .create(&defra_core::RequestContext::default(), "Post", doc)
+        .await
+        .unwrap();
 
     // The plan's full read of the stored document, as an update that returns
     // the document does it, carries the stored empty array into validation.
@@ -42,6 +45,7 @@ async fn updating_a_document_that_holds_an_empty_string_array_succeeds() {
     doc.set("title", NormalValue::String("second".to_string()));
     mutator
         .update_if_unchanged(
+            &defra_core::RequestContext::default(),
             "Post",
             expected,
             doc,
@@ -113,7 +117,10 @@ async fn immutable_tags_update(
     let mut doc = Document::new();
     doc.set("title", NormalValue::String("first".to_string()));
     doc.set("tags", NormalValue::NillableStringArray(Some(Vec::new())));
-    let created = mutator.create("Post", doc).await.unwrap();
+    let created = mutator
+        .create(&defra_core::RequestContext::default(), "Post", doc)
+        .await
+        .unwrap();
     let mut doc = mutator
         .get_for_update("Post", &created.doc_id)
         .await
@@ -131,6 +138,7 @@ async fn setting_an_immutable_empty_array_to_an_empty_array_is_not_a_change() {
 
     mutator
         .update(
+            &defra_core::RequestContext::default(),
             "Post",
             doc,
             RapidHashSet::from_iter(["title".to_string(), "tags".to_string()]),
@@ -163,6 +171,7 @@ async fn changing_an_immutable_empty_array_is_refused() {
 
     let error = mutator
         .update(
+            &defra_core::RequestContext::default(),
             "Post",
             doc,
             RapidHashSet::from_iter(["title".to_string(), "tags".to_string()]),

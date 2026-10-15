@@ -33,7 +33,10 @@ async fn resolves_collection_for_known_doc() {
     let txn = db.new_txn(false).await.expect("new_txn");
     let mutator = DbDocMutator::new(Arc::clone(&db), txn);
     let doc = Document::from_json_str(r#"{"x": 1}"#).expect("doc");
-    let result = mutator.create("TestDoc", doc).await.expect("create");
+    let result = mutator
+        .create(&defra_core::RequestContext::default(), "TestDoc", doc)
+        .await
+        .expect("create");
     let txn = mutator.take_txn().await.expect("take txn");
     txn.commit().await.expect("commit");
 

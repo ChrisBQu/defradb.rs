@@ -135,7 +135,11 @@ async fn schema_history_alias_cost_measurement() {
                 document::NormalValue::String("x".repeat(payload_bytes)),
             );
             db::AutoCommitMutator::new(db.clone())
-                .create_many("AliasCost", vec![doc])
+                .create_many(
+                    &defra_core::RequestContext::default(),
+                    "AliasCost",
+                    vec![doc],
+                )
                 .await
                 .unwrap();
             let registry = Arc::new(db::DbTransactionRegistry::new(db.clone()));
@@ -206,6 +210,7 @@ async fn a_projected_read_by_id_reads_each_identity_and_version_once() {
     for value in 0..3 {
         let created = mutator
             .create(
+                &defra_core::RequestContext::default(),
                 "Probe",
                 Document::from_json_str(&format!(r#"{{"left": {value}, "right": {value}}}"#))
                     .unwrap(),

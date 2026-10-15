@@ -26,9 +26,9 @@ async fn a_signed_create_without_a_kms_commits_the_blocks_prepared_for_it() {
     }));
     let prepared = mutator
         .prepare_write(
+            &defra_core::RequestContext::default(),
             "TestDoc",
             Document::from_json_str(r#"{"x":1}"#).unwrap(),
-            None,
             None,
         )
         .await;
@@ -38,7 +38,10 @@ async fn a_signed_create_without_a_kms_commits_the_blocks_prepared_for_it() {
 
     // Signing is off now, so a signed commit block can only come from the
     // blocks prepared above.
-    let created = mutator.create("TestDoc", prepared).await.unwrap();
+    let created = mutator
+        .create(&defra_core::RequestContext::default(), "TestDoc", prepared)
+        .await
+        .unwrap();
     let block = Block::from_dag_cbor(created.commit_block.as_ref().unwrap()).unwrap();
     assert!(block.signature.is_some(), "{block:?}");
 }

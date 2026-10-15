@@ -1,7 +1,8 @@
 //! Encryption configuration for CRDT delta encryption.
 //!
-//! Provides the EncryptionConfig type and thread-local storage for passing
-//! encryption config from the query layer to the block builder layer.
+//! Provides the EncryptionConfig type, which a mutation's
+//! [`RequestContext`](crate::RequestContext) carries from the query layer to
+//! the block builder layer.
 //!
 //! # Key generation model
 //!
@@ -46,7 +47,6 @@
 //! be enabled; production deployments must never set that variable.
 
 use rand::RngCore;
-use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -187,22 +187,6 @@ fn deterministic_test_crypto_allowed() -> bool {
             std::env::var(DETERMINISTIC_TEST_CRYPTO_ENV).as_deref(),
             Ok("1")
         )
-}
-
-thread_local! {
-    static CURRENT_ENCRYPTION_CONFIG: RefCell<Option<EncryptionConfig>> = const { RefCell::new(None) };
-}
-
-/// Set the encryption config for the current thread.
-pub fn set_encryption_config(config: Option<EncryptionConfig>) {
-    CURRENT_ENCRYPTION_CONFIG.with(|c| {
-        *c.borrow_mut() = config;
-    });
-}
-
-/// Get the current encryption config for this thread.
-pub fn get_encryption_config() -> Option<EncryptionConfig> {
-    CURRENT_ENCRYPTION_CONFIG.with(|c| c.borrow().clone())
 }
 
 #[cfg(test)]

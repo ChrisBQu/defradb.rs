@@ -29,7 +29,9 @@ struct MarkVerified(HopscotchMap<TransformId, (), RandomState>);
 #[async_trait]
 impl TransformStore for MarkVerified {
     fn new_isolated_store(&self) -> Arc<dyn TransformStore> {
-        Arc::new(MarkVerified(HopscotchMap::with_hasher(RandomState::default())))
+        Arc::new(MarkVerified(HopscotchMap::with_hasher(
+            RandomState::default(),
+        )))
     }
 
     async fn add(&self, config: LensConfig) -> lens::Result<TransformId> {
@@ -96,7 +98,7 @@ async fn verified_collection<S: Store + 'static>(store: S) -> (Arc<DB<S>>, Strin
     let mut doc = Document::new();
     doc.set("name", NormalValue::String("Ada".to_string()));
     db::AutoCommitMutator::new(db.clone())
-        .create_many("Probe", vec![doc])
+        .create_many(&defra_core::RequestContext::default(), "Probe", vec![doc])
         .await
         .unwrap();
     let v2 = db

@@ -42,7 +42,10 @@ async fn stale_disjoint_field_update_without_precondition_preserves_committed_fi
     let mutator = AutoCommitMutator::new(Arc::clone(&db));
 
     let initial = Document::from_json_str(r#"{"left": 0, "right": 0}"#).expect("initial document");
-    let created = mutator.create("Patch", initial).await.expect("create");
+    let created = mutator
+        .create(&defra_core::RequestContext::default(), "Patch", initial)
+        .await
+        .expect("create");
 
     let mut stale_left = mutator
         .get_for_update("Patch", &created.doc_id)
@@ -54,6 +57,7 @@ async fn stale_disjoint_field_update_without_precondition_preserves_committed_fi
     stale_left.set("left", NormalValue::Int(1));
     mutator
         .update(
+            &defra_core::RequestContext::default(),
             "Patch",
             stale_left,
             RapidHashSet::from_iter(["left".to_string()]),
@@ -64,6 +68,7 @@ async fn stale_disjoint_field_update_without_precondition_preserves_committed_fi
     stale_right.set("right", NormalValue::Int(1));
     mutator
         .update(
+            &defra_core::RequestContext::default(),
             "Patch",
             stale_right,
             RapidHashSet::from_iter(["right".to_string()]),
@@ -94,6 +99,7 @@ async fn explicit_disjoint_field_updates_on_one_document_both_commit() {
     let auto = AutoCommitMutator::new(Arc::clone(&db));
     let created = auto
         .create(
+            &defra_core::RequestContext::default(),
             "Patch",
             Document::from_json_str(r#"{"left": 0, "right": 0}"#).unwrap(),
         )
@@ -110,13 +116,19 @@ async fn explicit_disjoint_field_updates_on_one_document_both_commit() {
     let mut left = snapshot.clone();
     left.set("left", NormalValue::Int(1));
     first
-        .update("Patch", left, RapidHashSet::from_iter(["left".to_string()]))
+        .update(
+            &defra_core::RequestContext::default(),
+            "Patch",
+            left,
+            RapidHashSet::from_iter(["left".to_string()]),
+        )
         .await
         .expect("write left");
     let mut right = snapshot;
     right.set("right", NormalValue::Int(1));
     second
         .update(
+            &defra_core::RequestContext::default(),
             "Patch",
             right,
             RapidHashSet::from_iter(["right".to_string()]),
@@ -163,6 +175,7 @@ async fn stale_update_uses_fresh_unmodified_composite_index_component() {
     let mutator = AutoCommitMutator::new(Arc::clone(&db));
     let created = mutator
         .create(
+            &defra_core::RequestContext::default(),
             "Patch",
             Document::from_json_str(r#"{"left": 0, "right": 0}"#).unwrap(),
         )
@@ -178,6 +191,7 @@ async fn stale_update_uses_fresh_unmodified_composite_index_component() {
     right_update.set("right", NormalValue::Int(1));
     mutator
         .update(
+            &defra_core::RequestContext::default(),
             "Patch",
             right_update,
             RapidHashSet::from_iter(["right".to_string()]),
@@ -190,6 +204,7 @@ async fn stale_update_uses_fresh_unmodified_composite_index_component() {
     let explicit = DbDocMutator::new(Arc::clone(&db), db.new_txn(false).await.unwrap());
     explicit
         .update(
+            &defra_core::RequestContext::default(),
             "Patch",
             left_update,
             RapidHashSet::from_iter(["left".to_string()]),
@@ -230,6 +245,7 @@ async fn explicit_same_indexed_field_updates_conflict_on_the_old_index_entry() {
     let auto = AutoCommitMutator::new(Arc::clone(&db));
     let created = auto
         .create(
+            &defra_core::RequestContext::default(),
             "Patch",
             Document::from_json_str(r#"{"left": 0, "right": 0}"#).unwrap(),
         )
@@ -246,6 +262,7 @@ async fn explicit_same_indexed_field_updates_conflict_on_the_old_index_entry() {
     first_doc.set("left", NormalValue::Int(1));
     first
         .update(
+            &defra_core::RequestContext::default(),
             "Patch",
             first_doc,
             RapidHashSet::from_iter(["left".to_string()]),
@@ -256,6 +273,7 @@ async fn explicit_same_indexed_field_updates_conflict_on_the_old_index_entry() {
     second_doc.set("left", NormalValue::Int(2));
     second
         .update(
+            &defra_core::RequestContext::default(),
             "Patch",
             second_doc,
             RapidHashSet::from_iter(["left".to_string()]),
@@ -279,7 +297,10 @@ async fn stale_conditional_update_returns_conflict() {
     let mutator = AutoCommitMutator::new(Arc::clone(&db));
 
     let initial = Document::from_json_str(r#"{"left": 0, "right": 0}"#).expect("initial document");
-    let created = mutator.create("Patch", initial).await.expect("create");
+    let created = mutator
+        .create(&defra_core::RequestContext::default(), "Patch", initial)
+        .await
+        .expect("create");
 
     let mut first = mutator
         .get_for_update("Patch", &created.doc_id)
@@ -292,6 +313,7 @@ async fn stale_conditional_update_returns_conflict() {
     first.set("left", NormalValue::Int(1));
     mutator
         .update(
+            &defra_core::RequestContext::default(),
             "Patch",
             first,
             RapidHashSet::from_iter(["left".to_string()]),
@@ -302,6 +324,7 @@ async fn stale_conditional_update_returns_conflict() {
     second.set("right", NormalValue::Int(1));
     let error = mutator
         .update_if_unchanged(
+            &defra_core::RequestContext::default(),
             "Patch",
             expected_second,
             second,
@@ -337,7 +360,10 @@ async fn conditional_update_of_concurrently_deleted_document_returns_conflict() 
     let mutator = AutoCommitMutator::new(Arc::clone(&db));
 
     let initial = Document::from_json_str(r#"{"left": 0, "right": 0}"#).expect("initial document");
-    let created = mutator.create("Patch", initial).await.expect("create");
+    let created = mutator
+        .create(&defra_core::RequestContext::default(), "Patch", initial)
+        .await
+        .expect("create");
 
     let expected = mutator
         .get_for_update("Patch", &created.doc_id)
@@ -354,6 +380,7 @@ async fn conditional_update_of_concurrently_deleted_document_returns_conflict() 
 
     let error = mutator
         .update_if_unchanged(
+            &defra_core::RequestContext::default(),
             "Patch",
             expected,
             patched,
@@ -432,6 +459,7 @@ async fn update_reads_fresh_values_in_the_transaction_that_writes_them() {
     let mutator = AutoCommitMutator::new(db.clone());
     let created = mutator
         .create(
+            &defra_core::RequestContext::default(),
             "Patch",
             Document::from_json_str(r#"{"left":0,"right":0}"#).unwrap(),
         )
@@ -453,7 +481,12 @@ async fn update_reads_fresh_values_in_the_transaction_that_writes_them() {
     let mut patch = created.document;
     patch.set("right", 9_i64);
     mutator
-        .update("Patch", patch, ["right".to_string()].into_iter().collect())
+        .update(
+            &defra_core::RequestContext::default(),
+            "Patch",
+            patch,
+            ["right".to_string()].into_iter().collect(),
+        )
         .await
         .unwrap();
     let result = mutator

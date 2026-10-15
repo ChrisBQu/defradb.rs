@@ -29,7 +29,10 @@ async fn storage_stats_prints_aggregates_without_creating_config_or_keys() {
         "name",
         document::NormalValue::String("private value".into()),
     );
-    mutator.create("Users", doc).await.unwrap();
+    mutator
+        .create(&defra_core::RequestContext::default(), "Users", doc)
+        .await
+        .unwrap();
     mutator.take_txn().await.unwrap().commit().await.unwrap();
     drop(mutator);
     db.close().await.unwrap();

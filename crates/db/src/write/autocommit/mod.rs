@@ -34,8 +34,8 @@ use crate::txn::DbTxn;
 /// Captured per-mutation commit data: the document block (cid + bytes) plus,
 /// for branchable collections, the collection block (cid + bytes).
 pub(super) type CommitArtifacts = (Cid, Bytes, Option<(Cid, Bytes)>);
-use defra_core::encryption::get_encryption_config;
 use defra_core::signing::get_signing_config;
+use defra_core::RequestContext;
 
 pub use batch::BatchMutator;
 
@@ -271,12 +271,12 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
 
     async fn prepare_write(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         doc: Document,
         modified_fields: Option<rapidhash::RapidHashSet<String>>,
-        encryption: Option<defra_core::encryption::EncryptionConfig>,
     ) -> query::error::Result<Document> {
-        self.prepare_request_write(collection_name, doc, modified_fields, encryption)
+        self.prepare_request_write(context, collection_name, doc, modified_fields)
             .await
     }
 
@@ -296,44 +296,56 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
 
     async fn create(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         doc: Document,
     ) -> query::error::Result<CreateResult> {
-        self.create_with_resolved_inputs(collection_name, doc).await
+        self.create_with_resolved_inputs(context, collection_name, doc)
+            .await
     }
 
     async fn create_many(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         docs: Vec<Document>,
     ) -> query::error::Result<Vec<CreateResult>> {
-        self.create_many_with_resolved_inputs(collection_name, docs)
+        self.create_many_with_resolved_inputs(context, collection_name, docs)
             .await
     }
 
     async fn update(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         doc: Document,
         modified_fields: rapidhash::RapidHashSet<String>,
     ) -> query::error::Result<UpdateResult> {
-        self.update_with_resolved_inputs(collection_name, None, doc, modified_fields)
+        self.update_with_resolved_inputs(context, collection_name, None, doc, modified_fields)
             .await
     }
 
     async fn update_if_unchanged(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         expected: Document,
         doc: Document,
         modified_fields: rapidhash::RapidHashSet<String>,
     ) -> query::error::Result<UpdateResult> {
-        self.update_with_resolved_inputs(collection_name, Some(expected), doc, modified_fields)
-            .await
+        self.update_with_resolved_inputs(
+            context,
+            collection_name,
+            Some(expected),
+            doc,
+            modified_fields,
+        )
+        .await
     }
 
     async fn update_if_fields_unchanged(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         expected: Document,
         expected_fields: rapidhash::RapidHashSet<String>,
@@ -341,6 +353,7 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
         modified_fields: rapidhash::RapidHashSet<String>,
     ) -> query::error::Result<UpdateResult> {
         self.update_with_projected_resolved_inputs(
+            context,
             collection_name,
             Some(expected),
             Some(expected_fields),

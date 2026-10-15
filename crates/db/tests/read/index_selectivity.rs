@@ -77,7 +77,7 @@ async fn seeded_db() -> Arc<DB<CountingStore<RegolithStore>>> {
         })
         .collect();
     AutoCommitMutator::new(db.clone())
-        .create_many("Events", docs)
+        .create_many(&defra_core::RequestContext::default(), "Events", docs)
         .await
         .unwrap();
     db

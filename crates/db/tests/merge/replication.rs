@@ -28,7 +28,11 @@ async fn load_document_head_blocks_returns_current_composite_block() {
 
     let mutator = AutoCommitMutator::new(db.clone());
     let result = mutator
-        .create_many("Transcript", vec![make_transcript("first", 1)])
+        .create_many(
+            &defra_core::RequestContext::default(),
+            "Transcript",
+            vec![make_transcript("first", 1)],
+        )
         .await
         .unwrap()
         .pop()

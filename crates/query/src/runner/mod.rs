@@ -203,7 +203,7 @@ pub struct QueryRunner<F: DocFetcher, R: TransactionRegistry = NoOpTransactionRe
     pub(crate) introspection_cache: Arc<introspection::cache::IntrospectionSchemaCache>,
     /// The context of the request this runner serves; the default for a
     /// runner bound to none (see [`QueryRunner::for_request`]).
-    pub(crate) request: RequestContext,
+    pub(crate) context: RequestContext,
 }
 
 impl<F, R> Clone for QueryRunner<F, R>
@@ -230,7 +230,7 @@ where
             read_validator: self.read_validator.clone(),
             write_validator: self.write_validator.clone(),
             introspection_cache: self.introspection_cache.clone(),
-            request: self.request.clone(),
+            context: self.context.clone(),
         }
     }
 }
@@ -259,7 +259,7 @@ impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
             retry_inputs: None,
             se_transport: None,
             introspection_cache: Default::default(),
-            request: RequestContext::default(),
+            context: RequestContext::default(),
         }
     }
 
@@ -286,7 +286,7 @@ impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
             retry_inputs: None,
             se_transport: None,
             introspection_cache: Default::default(),
-            request: RequestContext::default(),
+            context: RequestContext::default(),
         }
     }
 }
@@ -315,7 +315,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             retry_inputs: None,
             se_transport: None,
             introspection_cache: Default::default(),
-            request: RequestContext::default(),
+            context: RequestContext::default(),
         }
     }
 
@@ -347,7 +347,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             write_validator: None,
             se_transport: None,
             introspection_cache: Default::default(),
-            request: RequestContext::default(),
+            context: RequestContext::default(),
         }
     }
 
@@ -378,7 +378,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             write_validator: None,
             se_transport: None,
             introspection_cache: Default::default(),
-            request: RequestContext::default(),
+            context: RequestContext::default(),
         }
     }
 
@@ -410,11 +410,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         }
     }
 
-    /// This runner serving one request: everything it runs reads `request`
+    /// This runner serving one request: everything it runs reads `context`
     /// for that request's own state.
-    pub fn for_request(&self, request: RequestContext) -> Self {
+    pub fn for_request(&self, context: RequestContext) -> Self {
         Self {
-            request,
+            context,
             ..self.clone()
         }
     }

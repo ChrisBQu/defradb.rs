@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use blockstore::Blockstore;
 use bytes::Bytes;
 use cid::Cid;
+use defra_core::RequestContext;
 use document::{DocID, Document};
 use kovan_queue::seg_queue::SegQueue;
 use p2p::sync::SyncCoordinator;
@@ -301,13 +302,13 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
 
     async fn prepare_write(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         doc: Document,
         modified_fields: Option<RapidHashSet<String>>,
-        encryption: Option<defra_core::encryption::EncryptionConfig>,
     ) -> query::error::Result<Document> {
         self.inner
-            .prepare_write(collection_name, doc, modified_fields, encryption)
+            .prepare_write(context, collection_name, doc, modified_fields)
             .await
     }
 
@@ -360,10 +361,11 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
 
     async fn create(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         doc: Document,
     ) -> query::error::Result<CreateResult> {
-        let result = self.inner.create(collection_name, doc).await?;
+        let result = self.inner.create(context, collection_name, doc).await?;
         let doc_id = result.doc_id.to_string();
         let document_json = document_json_value(&result.document);
         self.capture_broadcast(BroadcastCapture {
@@ -382,6 +384,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
 
     async fn update(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         doc: Document,
         modified_fields: RapidHashSet<String>,
@@ -389,7 +392,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         let se_fields: Vec<String> = modified_fields.iter().cloned().collect();
         let result = self
             .inner
-            .update(collection_name, doc, modified_fields)
+            .update(context, collection_name, doc, modified_fields)
             .await?;
 
         if let Some(doc_id) = result.document.id() {

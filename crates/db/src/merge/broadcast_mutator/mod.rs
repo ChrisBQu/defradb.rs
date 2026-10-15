@@ -14,6 +14,7 @@ pub mod broadcast;
 
 use async_trait::async_trait;
 use blockstore::Blockstore;
+use defra_core::RequestContext;
 use document::{DocID, Document};
 use kovan::Atom;
 use p2p::message::SEArtifact;
@@ -489,13 +490,13 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
 
     async fn prepare_write(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         doc: Document,
         modified_fields: Option<rapidhash::RapidHashSet<String>>,
-        encryption: Option<defra_core::encryption::EncryptionConfig>,
     ) -> query::error::Result<Document> {
         self.inner
-            .prepare_write(collection_name, doc, modified_fields, encryption)
+            .prepare_write(context, collection_name, doc, modified_fields)
             .await
     }
 
@@ -519,6 +520,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
 
     async fn create(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         doc: Document,
     ) -> query::error::Result<CreateResult> {
@@ -532,7 +534,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         let collection_id = collection.collection_id().to_string();
 
         // Execute the create mutation
-        let result = self.inner.create(collection_name, doc).await?;
+        let result = self.inner.create(context, collection_name, doc).await?;
 
         // Build the block result for broadcast
         let (cid, block, doc_id_str) = if let (Some(cid), Some(block)) =
@@ -689,6 +691,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
 
     async fn create_many(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         docs: Vec<Document>,
     ) -> query::error::Result<Vec<query::mutator::CreateResult>> {
@@ -701,7 +704,10 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         let collection_id = collection.collection_id().to_string();
 
         // Delegate to inner (single transaction for all docs)
-        let results = self.inner.create_many(collection_name, docs).await?;
+        let results = self
+            .inner
+            .create_many(context, collection_name, docs)
+            .await?;
 
         // Read broadcast creator DID before spawning (reads thread-local state).
         let creator_did = defra_core::signing::get_broadcast_creator_did();
@@ -894,6 +900,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
 
     async fn update(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         doc: Document,
         modified_fields: rapidhash::RapidHashSet<String>,
@@ -901,7 +908,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         let se_fields: Vec<String> = modified_fields.iter().cloned().collect();
         let result = self
             .inner
-            .update(collection_name, doc, modified_fields)
+            .update(context, collection_name, doc, modified_fields)
             .await?;
         self.broadcast_update_result(collection_name, se_fields, result)
             .await
@@ -909,6 +916,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
 
     async fn update_if_unchanged(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         expected: Document,
         doc: Document,
@@ -917,7 +925,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         let se_fields: Vec<String> = modified_fields.iter().cloned().collect();
         let result = self
             .inner
-            .update_if_unchanged(collection_name, expected, doc, modified_fields)
+            .update_if_unchanged(context, collection_name, expected, doc, modified_fields)
             .await?;
         self.broadcast_update_result(collection_name, se_fields, result)
             .await

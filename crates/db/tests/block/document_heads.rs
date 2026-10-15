@@ -355,6 +355,7 @@ async fn every_write_path_keeps_a_documents_stored_heads_to_its_live_heads() {
     let autocommit = db::AutoCommitMutator::new(db.clone());
     let doc_id = autocommit
         .create(
+            &defra_core::RequestContext::default(),
             "Rewritten",
             document::Document::from_json_str(r#"{"value": 0}"#).unwrap(),
         )
@@ -370,7 +371,12 @@ async fn every_write_path_keeps_a_documents_stored_heads_to_its_live_heads() {
             .unwrap();
         doc.set("value", document::NormalValue::Int(value));
         autocommit
-            .update("Rewritten", doc, modified())
+            .update(
+                &defra_core::RequestContext::default(),
+                "Rewritten",
+                doc,
+                modified(),
+            )
             .await
             .unwrap();
     }
@@ -386,7 +392,15 @@ async fn every_write_path_keeps_a_documents_stored_heads_to_its_live_heads() {
             .unwrap()
             .unwrap();
         doc.set("value", document::NormalValue::Int(value));
-        explicit.update("Rewritten", doc, modified()).await.unwrap();
+        explicit
+            .update(
+                &defra_core::RequestContext::default(),
+                "Rewritten",
+                doc,
+                modified(),
+            )
+            .await
+            .unwrap();
         explicit.take_txn().await.unwrap().commit().await.unwrap();
     }
     assert_eq!(stored(&db, b"/d/").await, 2);

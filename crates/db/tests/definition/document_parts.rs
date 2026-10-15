@@ -89,7 +89,13 @@ async fn legacy_store(path: &Path) -> (Vec<DocID>, Reads) {
             "b".repeat(8 << 10)
         ))
         .unwrap();
-        ids.push(mutator.create("Users", doc).await.unwrap().doc_id);
+        ids.push(
+            mutator
+                .create(&defra_core::RequestContext::default(), "Users", doc)
+                .await
+                .unwrap()
+                .doc_id,
+        );
     }
     let reads = read_all(&db, &ids).await;
     // Dropped, not closed: closing the database closes the store under it.

@@ -1075,6 +1075,7 @@ async fn interactive_counter_increment_and_concurrent_same_doc_merge_both_commit
     let mutator = ctx.doc_mutator().expect("mutator");
     let created = mutator
         .create(
+            &defra_core::RequestContext::default(),
             "Counters",
             Document::from_json_str(r#"{"score": 10}"#).unwrap(),
         )
@@ -1101,7 +1102,12 @@ async fn interactive_counter_increment_and_concurrent_same_doc_merge_both_commit
     let mut modified = rapidhash::RapidHashSet::new();
     modified.insert("score".to_string());
     mutator
-        .update("Counters", update_doc, modified)
+        .update(
+            &defra_core::RequestContext::default(),
+            "Counters",
+            update_doc,
+            modified,
+        )
         .await
         .expect("interactive update +3");
     drop(mutator);
@@ -3776,7 +3782,7 @@ async fn first_materialization_and_local_create_arrive_in_commit_order() {
     let mut document = document::Document::new();
     document.set("name", "local");
     let local_id = local
-        .create("Users", document)
+        .create(&defra_core::RequestContext::default(), "Users", document)
         .await
         .unwrap()
         .doc_id

@@ -183,7 +183,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             self.acp.as_ref(),
                             self.acp_registration_projection.as_deref(),
                             &identity,
-                            self.request.dac_bypass(),
+                            self.context.dac_bypass(),
                             &policy.id,
                             &policy.resource_name,
                             &collection.collection_id,

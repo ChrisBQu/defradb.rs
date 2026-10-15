@@ -195,7 +195,9 @@ where
             let input = defra_core::signing::RemoteSignatureInput::decode(request.exact_request())
                 .map_err(query::error::QueryError::execution)?;
             let signer = defra_core::signing::get_signing_config().ok_or_else(|| {
-                query::error::QueryError::execution("remote signature input has no configured signer")
+                query::error::QueryError::execution(
+                    "remote signature input has no configured signer",
+                )
             })?;
             let response = input
                 .resolve(&signer)
@@ -203,14 +205,16 @@ where
             Ok(std::sync::Arc::from(response))
         }
         query::prepared::PreparedInputKind::KmsKey => {
-            let operation: PreparedKmsOperation =
-                serde_json::from_slice(request.exact_request()).map_err(|error| {
-                    query::error::QueryError::execution(format!(
-                        "invalid prepared KMS request: {error}"
-                    ))
-                })?;
+            let operation: PreparedKmsOperation = serde_json::from_slice(request.exact_request())
+                .map_err(|error| {
+                query::error::QueryError::execution(format!(
+                    "invalid prepared KMS request: {error}"
+                ))
+            })?;
             let kms = db.kms().ok_or_else(|| {
-                query::error::QueryError::execution("prepared KMS input has no configured KMS provider")
+                query::error::QueryError::execution(
+                    "prepared KMS input has no configured KMS provider",
+                )
             })?;
             let context = match &operation {
                 PreparedKmsOperation::GetForRead {
@@ -276,9 +280,7 @@ where
         query::prepared::PreparedInputKind::NodePermission => {
             let (identity, permission): (String, String) =
                 serde_json::from_slice(request.exact_request()).map_err(|_| {
-                    query::error::QueryError::execution(
-                        "invalid prepared node permission request",
-                    )
+                    query::error::QueryError::execution("invalid prepared node permission request")
                 })?;
             // An attempt with no acting identity asks for the wildcard actor.
             let identity = if identity == identity::Did::wildcard().as_str() {
@@ -320,14 +322,12 @@ pub(crate) fn prepared_identity(doc: &Document) -> Option<DocStorageIdentity> {
 impl<S: Store + 'static> crate::AutoCommitMutator<S> {
     pub(super) async fn prepare_request_write(
         &self,
+        context: &defra_core::RequestContext,
         collection_name: &str,
         mut doc: Document,
         mut modified_fields: Option<RapidHashSet<String>>,
-        config: Option<EncryptionConfig>,
     ) -> query::error::Result<Document> {
         let collection = self.get_collection_or_err(collection_name)?;
-        let effective_encryption_config =
-            config.or_else(defra_core::encryption::get_encryption_config);
         let generated_embeddings = if let Some(fields) = modified_fields.as_mut() {
             let generated = crate::search::set_embedding(
                 &collection.schema().vector_embeddings,
@@ -431,7 +431,7 @@ impl<S: Store + 'static> crate::AutoCommitMutator<S> {
             &mut doc,
             identity,
             modified_fields.as_ref(),
-            effective_encryption_config.as_ref(),
+            context.encryption(),
             None,
             prior.as_deref(),
         )
@@ -454,7 +454,7 @@ impl<S: Store + 'static> crate::AutoCommitMutator<S> {
                     &doc,
                     collection.version_id(),
                     identity,
-                    effective_encryption_config.as_ref(),
+                    context.encryption(),
                     Some(signing_config),
                 )
                 .map_err(|error| {

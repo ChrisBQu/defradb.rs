@@ -271,7 +271,11 @@ impl Node {
         let mutator =
             BatchMutator::new(self.db.clone(), Arc::new(async_lock::Mutex::new(Some(txn)))).await;
         let created = mutator
-            .create(collection, Document::from_json_str(json).unwrap())
+            .create(
+                &defra_core::RequestContext::default(),
+                collection,
+                Document::from_json_str(json).unwrap(),
+            )
             .await
             .unwrap();
         mutator.commit().await.unwrap();

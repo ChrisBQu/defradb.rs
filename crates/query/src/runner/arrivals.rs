@@ -53,7 +53,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             acp: self.acp.as_ref(),
             projection: self.acp_registration_projection.as_deref(),
             identity: &identity,
-            dac_bypass: self.request.dac_bypass(),
+            dac_bypass: self.context.dac_bypass(),
         };
         let mut entries = Vec::new();
         for entry in page.entries {

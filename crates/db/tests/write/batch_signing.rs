@@ -13,6 +13,7 @@ async fn create_many_collects_field_and_composite_cids_for_both_documents() {
     batch_signing::set_batch_session_key(Some(session.to_string()));
     let result = AutoCommitMutator::new(db)
         .create_many(
+            &defra_core::RequestContext::default(),
             "TestDoc",
             vec![
                 Document::from_json_str(r#"{"x":1}"#).unwrap(),
@@ -57,6 +58,7 @@ async fn create_many_rollback_collects_no_cids() {
     let collected = collect_failed_write("create-many-rollback", || async {
         mutator
             .create_many(
+                &defra_core::RequestContext::default(),
                 "TestDoc",
                 vec![
                     Document::from_json_str(r#"{"x":1}"#).unwrap(),
@@ -76,9 +78,15 @@ async fn create_rollback_collects_no_cids() {
     db.create_collection(test_collection()).await.unwrap();
     let mutator = AutoCommitMutator::new(db);
     let doc = || Document::from_json_str(r#"{"x":1}"#).unwrap();
-    mutator.create("TestDoc", doc()).await.unwrap();
+    mutator
+        .create(&defra_core::RequestContext::default(), "TestDoc", doc())
+        .await
+        .unwrap();
     let collected = collect_failed_write("create-rollback", || async {
-        mutator.create("TestDoc", doc()).await.is_err()
+        mutator
+            .create(&defra_core::RequestContext::default(), "TestDoc", doc())
+            .await
+            .is_err()
     })
     .await;
     assert_eq!(collected, Vec::new());

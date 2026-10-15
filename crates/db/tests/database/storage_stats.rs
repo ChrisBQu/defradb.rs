@@ -84,6 +84,7 @@ async fn signed_branchable_documents_classify_collection_and_signature_blocks() 
     }));
     let created = db::AutoCommitMutator::new(db.clone())
         .create(
+            &defra_core::RequestContext::default(),
             "Users",
             Document::from_json_str(r#"{"name":"private name"}"#).unwrap(),
         )
@@ -341,7 +342,10 @@ async fn offline_scan_is_read_only_and_matches_the_live_snapshot() {
     let mutator = DbDocMutator::new(db.clone(), db.new_txn(false).await.unwrap());
     let mut doc = Document::new();
     doc.set("name", NormalValue::String("private value".into()));
-    mutator.create("Users", doc).await.unwrap();
+    mutator
+        .create(&defra_core::RequestContext::default(), "Users", doc)
+        .await
+        .unwrap();
     mutator.take_txn().await.unwrap().commit().await.unwrap();
     drop(mutator);
     let live = db.storage_stats(true).await.unwrap();
@@ -482,7 +486,13 @@ async fn shared_blocks_count_each_document_history_once() {
         let mut doc = Document::new();
         doc.set("name", NormalValue::String("shared".into()));
         doc.set("other", NormalValue::String(other.into()));
-        ids.push(mutator.create("Users", doc).await.unwrap().doc_id);
+        ids.push(
+            mutator
+                .create(&defra_core::RequestContext::default(), "Users", doc)
+                .await
+                .unwrap()
+                .doc_id,
+        );
         mutator.take_txn().await.unwrap().commit().await.unwrap();
     }
     let stats = db.storage_stats(true).await.unwrap();
@@ -496,7 +506,12 @@ async fn shared_blocks_count_each_document_history_once() {
     doc.set_id(ids[0].clone());
     doc.set("name", NormalValue::String("changed".into()));
     mutator
-        .update("Users", doc, ["name".to_string()].into_iter().collect())
+        .update(
+            &defra_core::RequestContext::default(),
+            "Users",
+            doc,
+            ["name".to_string()].into_iter().collect(),
+        )
         .await
         .unwrap();
     mutator.take_txn().await.unwrap().commit().await.unwrap();

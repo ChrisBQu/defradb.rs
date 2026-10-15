@@ -16,7 +16,7 @@ async fn graphql_creation_cursor_pages_and_docid_lookup() {
         doc.set("name", name);
         ids.push(
             mutator
-                .create("Users", doc)
+                .create(&defra_core::RequestContext::default(), "Users", doc)
                 .await
                 .unwrap()
                 .doc_id
@@ -52,7 +52,7 @@ async fn hidden_arrivals_advance_page_without_disclosing_document_ids() {
     let mut doc = Document::new();
     doc.set("name", "secret");
     let id = AutoCommitMutator::new(db.clone())
-        .create("Users", doc)
+        .create(&defra_core::RequestContext::default(), "Users", doc)
         .await
         .unwrap()
         .doc_id
@@ -95,7 +95,11 @@ async fn explicit_transaction_arrival_is_invisible_and_rollback_discards_it() {
     let mutator = db::DbDocMutator::new(db.clone(), db.new_txn(false).await.unwrap());
     let mut doc = Document::new();
     doc.set("name", "pending");
-    let id = mutator.create("Users", doc).await.unwrap().doc_id;
+    let id = mutator
+        .create(&defra_core::RequestContext::default(), "Users", doc)
+        .await
+        .unwrap()
+        .doc_id;
     let reader = db::DbDocFetcher::new(mutator.take_txn().await.unwrap());
     let options = DocumentArrivalOptions {
         collection: "Users".into(),
@@ -131,7 +135,9 @@ async fn concurrent_autocommit_arrivals_are_contiguous() {
         creates.spawn(async move {
             let mut doc = Document::new();
             doc.set("name", format!("arrival-{index}"));
-            AutoCommitMutator::new(db).create("Users", doc).await
+            AutoCommitMutator::new(db)
+                .create(&defra_core::RequestContext::default(), "Users", doc)
+                .await
         });
     }
     let mut ids = std::collections::HashSet::new();
@@ -168,9 +174,14 @@ async fn overlapping_explicit_transaction_creates_both_commit() {
     one.set("name", "first");
     let mut two = Document::new();
     two.set("name", "second");
-    let first_id = first.create("Users", one).await.unwrap().doc_id.to_string();
+    let first_id = first
+        .create(&defra_core::RequestContext::default(), "Users", one)
+        .await
+        .unwrap()
+        .doc_id
+        .to_string();
     let second_id = second
-        .create("Users", two)
+        .create(&defra_core::RequestContext::default(), "Users", two)
         .await
         .unwrap()
         .doc_id
@@ -201,7 +212,7 @@ async fn explicit_transaction_arrival_gets_a_cursor_only_on_commit() {
     let mut doc = Document::new();
     doc.set("name", "pending");
     let id = mutator
-        .create("Users", doc)
+        .create(&defra_core::RequestContext::default(), "Users", doc)
         .await
         .unwrap()
         .doc_id

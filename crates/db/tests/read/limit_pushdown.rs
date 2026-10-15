@@ -40,7 +40,7 @@ async fn seeded_db<S: Store + 'static>(store: S) -> Arc<DB<CountingStore<S>>> {
         })
         .collect();
     AutoCommitMutator::new(db.clone())
-        .create_many("Users", docs)
+        .create_many(&defra_core::RequestContext::default(), "Users", docs)
         .await
         .unwrap();
     db

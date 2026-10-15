@@ -45,17 +45,26 @@ impl<S: Store + 'static> storage::corekv::RetryAttemptFn for UpdateRetryAttempt<
 impl<S: Store + 'static> AutoCommitMutator<S> {
     pub(super) async fn update_with_resolved_inputs(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         expected: Option<Document>,
         doc: Document,
         fields: rapidhash::RapidHashSet<String>,
     ) -> query::error::Result<UpdateResult> {
-        self.update_with_projected_resolved_inputs(collection_name, expected, None, doc, fields)
-            .await
+        self.update_with_projected_resolved_inputs(
+            context,
+            collection_name,
+            expected,
+            None,
+            doc,
+            fields,
+        )
+        .await
     }
 
     pub(super) async fn update_with_projected_resolved_inputs(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         expected: Option<Document>,
         expected_fields: Option<rapidhash::RapidHashSet<String>>,
@@ -64,7 +73,14 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
     ) -> query::error::Result<UpdateResult> {
         if self.prepared_inputs.is_some() {
             return self
-                .update_impl(collection_name, expected, expected_fields, doc, fields)
+                .update_impl(
+                    context,
+                    collection_name,
+                    expected,
+                    expected_fields,
+                    doc,
+                    fields,
+                )
                 .await;
         }
         let inputs = query::prepared::PreparedInputMemo::default();
@@ -75,6 +91,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         loop {
             match mutator
                 .update_impl(
+                    context,
                     collection_name,
                     expected.clone(),
                     expected_fields.clone(),
@@ -95,6 +112,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
     pub(super) async fn update_impl(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         expected: Option<Document>,
         expected_fields: Option<rapidhash::RapidHashSet<String>>,
@@ -160,7 +178,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             input_doc_id,
             canonical_doc_id,
             signing_config: get_signing_config(),
-            encryption_config: get_encryption_config(),
+            encryption_config: context.encryption().cloned(),
             prepared_inputs: Some(self.prepared_inputs.clone().unwrap_or_default()),
         };
         let result = self

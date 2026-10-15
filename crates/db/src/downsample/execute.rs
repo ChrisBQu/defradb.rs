@@ -5,6 +5,7 @@ use super::types::*;
 use crate::block::builder::decode_priority_varint;
 use crate::error::{Error, Result};
 use chrono::Utc;
+use defra_core::RequestContext;
 use document::{DocID, Document, NormalValue};
 use query::fetcher::CommitsQueryOptions;
 use query::mutator::{DocMutator, MutationBatchController};
@@ -556,7 +557,9 @@ where
                     &self.series_doc_id,
                 )
                 .map_err(decide)?;
-            let created = mutator.create(target_name, doc).await?;
+            let created = mutator
+                .create(&RequestContext::default(), target_name, doc)
+                .await?;
             return Ok(serde_json::Value::String(created.doc_id.to_string()));
         };
         let id = doc.id().cloned().ok_or_else(|| {
@@ -587,7 +590,14 @@ where
         doc.set_collection(self.plan.target.clone());
         doc.set_schema_version_id(self.plan.target.version_id.clone());
         doc.set_id(id);
-        mutator.update(target_name, doc, modified_fields).await?;
+        mutator
+            .update(
+                &RequestContext::default(),
+                target_name,
+                doc,
+                modified_fields,
+            )
+            .await?;
         done
     }
 }

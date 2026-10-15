@@ -95,7 +95,14 @@ fn assert_vector(doc: &Document, values: Vec<f64>) {
 async fn autocommit_create_generates_embedding() {
     let fixture = fixture().await;
     let mutator = AutoCommitMutator::new(Arc::clone(&fixture.db));
-    let created = mutator.create("Texts", document("first")).await.unwrap();
+    let created = mutator
+        .create(
+            &defra_core::RequestContext::default(),
+            "Texts",
+            document("first"),
+        )
+        .await
+        .unwrap();
     assert_vector(&created.document, vec![1.0, 2.0]);
     let stored = mutator
         .get_for_update("Texts", &created.doc_id)
@@ -114,7 +121,11 @@ async fn explicit_txn_create_generates_embedding() {
     let txn = fixture.db.new_txn(false).await.unwrap();
     let mutator = DbDocMutator::new(Arc::clone(&fixture.db), txn);
     let error = mutator
-        .create("Texts", document("first"))
+        .create(
+            &defra_core::RequestContext::default(),
+            "Texts",
+            document("first"),
+        )
         .await
         .unwrap_err();
     let query::error::QueryError::NeedsInput(request) = error else {
@@ -130,7 +141,11 @@ async fn explicit_txn_create_generates_embedding() {
     let created = mutator
         .with_prepared_inputs(inputs)
         .unwrap()
-        .create("Texts", document("first"))
+        .create(
+            &defra_core::RequestContext::default(),
+            "Texts",
+            document("first"),
+        )
         .await
         .unwrap();
     assert_eq!(fixture.calls(), 1);
@@ -151,7 +166,14 @@ async fn explicit_txn_create_generates_embedding() {
 async fn explicit_txn_update_regenerates_embedding() {
     let fixture = fixture().await;
     let autocommit = AutoCommitMutator::new(Arc::clone(&fixture.db));
-    let created = autocommit.create("Texts", document("first")).await.unwrap();
+    let created = autocommit
+        .create(
+            &defra_core::RequestContext::default(),
+            "Texts",
+            document("first"),
+        )
+        .await
+        .unwrap();
     let txn = fixture.db.new_txn(false).await.unwrap();
     let mutator = DbDocMutator::new(Arc::clone(&fixture.db), txn);
     let mut doc = mutator
@@ -163,7 +185,12 @@ async fn explicit_txn_update_regenerates_embedding() {
     let calls_before = fixture.calls();
     let fields: rapidhash::RapidHashSet<String> = ["text".to_string()].into_iter().collect();
     let error = mutator
-        .update("Texts", doc.clone(), fields.clone())
+        .update(
+            &defra_core::RequestContext::default(),
+            "Texts",
+            doc.clone(),
+            fields.clone(),
+        )
         .await
         .unwrap_err();
     let query::error::QueryError::NeedsInput(request) = error else {
@@ -184,7 +211,7 @@ async fn explicit_txn_update_regenerates_embedding() {
     let updated = mutator
         .with_prepared_inputs(inputs)
         .unwrap()
-        .update("Texts", doc, fields)
+        .update(&defra_core::RequestContext::default(), "Texts", doc, fields)
         .await
         .unwrap();
     assert_eq!(fixture.calls(), calls_before + 1);
@@ -204,7 +231,11 @@ async fn explicit_txn_update_regenerates_embedding() {
 async fn explicit_txn_graphql_update_regenerates_embedding() {
     let fixture = fixture().await;
     let created = AutoCommitMutator::new(Arc::clone(&fixture.db))
-        .create("Texts", document("first"))
+        .create(
+            &defra_core::RequestContext::default(),
+            "Texts",
+            document("first"),
+        )
         .await
         .unwrap();
     let registry = Arc::new(DbTransactionRegistry::new(Arc::clone(&fixture.db)));

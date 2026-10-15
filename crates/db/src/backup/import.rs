@@ -41,6 +41,7 @@ struct PendingRelation {
 /// identity and relation fields are remapped through them, matching Go
 /// v1.0.0's import behavior.
 pub async fn import_database<S: Store + 'static>(
+    context: &defra_core::RequestContext,
     database: &Arc<DB<S>>,
     _runner: &Arc<dyn query::QueryExecutor>,
     data: &str,
@@ -172,7 +173,7 @@ pub async fn import_database<S: Store + 'static>(
                 })?;
             doc.set_collection(schema.clone());
 
-            let create_result = mutator.create(collection_name, doc).await;
+            let create_result = mutator.create(context, collection_name, doc).await;
             let created_doc = match create_result {
                 Ok(result) => result.document,
                 Err(e) => {
@@ -246,7 +247,7 @@ pub async fn import_database<S: Store + 'static>(
         modified_fields.insert(pending.fk_name.clone());
 
         mutator
-            .update(&pending.collection_name, doc, modified_fields)
+            .update(context, &pending.collection_name, doc, modified_fields)
             .await
             .map_err(|e| {
                 format!(

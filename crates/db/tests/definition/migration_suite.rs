@@ -289,7 +289,7 @@ async fn seed_user(db: &Arc<DB<RegolithStore>>) -> document::DocID {
     let mut doc = document::Document::new();
     doc.set("name", document::NormalValue::String("Alice".to_string()));
     AutoCommitMutator::new(db.clone())
-        .create("Users", doc)
+        .create(&defra_core::RequestContext::default(), "Users", doc)
         .await
         .unwrap()
         .doc_id
@@ -1000,6 +1000,7 @@ async fn concurrent_update_wins_over_stale_lazy_write_back() {
     update.set("name", document::NormalValue::String("Bob".to_string()));
     AutoCommitMutator::new(db.clone())
         .update(
+            &defra_core::RequestContext::default(),
             "Users",
             update,
             RapidHashSet::from_iter(["name".to_string()]),

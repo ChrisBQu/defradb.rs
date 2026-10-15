@@ -38,7 +38,10 @@ async fn batch_create_publishes_event_on_commit() {
     let mutator = BatchMutator::new(Arc::clone(&db), Arc::clone(&txn_arc)).await;
 
     let doc = Document::from_json_str(r#"{"x": 1}"#).expect("doc");
-    let result = mutator.create("TestDoc", doc).await.expect("create");
+    let result = mutator
+        .create(&defra_core::RequestContext::default(), "TestDoc", doc)
+        .await
+        .expect("create");
 
     // Before commit: no event should have fired
     assert!(
@@ -85,6 +88,7 @@ async fn batch_create_registers_external_acp_before_ordered_event() {
     let result = defra_core::signing::scope_broadcast_creator_did(
         Some(owner.to_string()),
         mutator.create(
+            &defra_core::RequestContext::default(),
             "TestDoc",
             Document::from_json_str(r#"{"x": 1}"#).expect("doc"),
         ),
@@ -154,7 +158,14 @@ async fn batch_delete_branchable_surfaces_collection_block_for_broadcast() {
     let mutator = BatchMutator::new(Arc::clone(&db), Arc::clone(&txn_arc)).await;
 
     let doc = Document::from_json_str(r#"{"x": 1}"#).expect("doc");
-    let create_result = mutator.create("TestBranchable", doc).await.expect("create");
+    let create_result = mutator
+        .create(
+            &defra_core::RequestContext::default(),
+            "TestBranchable",
+            doc,
+        )
+        .await
+        .expect("create");
     let doc_id = create_result.doc_id.clone();
 
     let delete_result = mutator

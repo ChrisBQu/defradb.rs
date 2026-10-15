@@ -77,6 +77,7 @@ async fn branchable_create_rolls_back_when_collection_block_fails() {
     defra_core::signing::set_signing_config(Some(failing_collection_signing_config()));
     let result = mutator
         .create(
+            &defra_core::RequestContext::default(),
             "Branchable",
             Document::from_json_str(r#"{"x": 1}"#).unwrap(),
         )
@@ -99,6 +100,7 @@ async fn branchable_update_rolls_back_when_collection_block_fails() {
     let mutator = db::AutoCommitMutator::new(Arc::clone(&db));
     let created = mutator
         .create(
+            &defra_core::RequestContext::default(),
             "Branchable",
             Document::from_json_str(r#"{"x": 1}"#).unwrap(),
         )
@@ -114,6 +116,7 @@ async fn branchable_update_rolls_back_when_collection_block_fails() {
     defra_core::signing::set_signing_config(Some(failing_collection_signing_config()));
     let result = mutator
         .update(
+            &defra_core::RequestContext::default(),
             "Branchable",
             doc,
             std::iter::once("x".to_string()).collect(),
@@ -182,7 +185,11 @@ async fn auto_commit_float32_counter_accumulates_with_float32_precision() {
 
     let mut doc = Document::new();
     doc.set("points", NormalValue::Float32(0.0));
-    let doc_id = mutator.create("FloatCounters", doc).await.unwrap().doc_id;
+    let doc_id = mutator
+        .create(&defra_core::RequestContext::default(), "FloatCounters", doc)
+        .await
+        .unwrap()
+        .doc_id;
 
     for (value, delta) in [(10.1f32, 10.1f32), (10.1f32 + 10.2f32, 10.2f32)] {
         let mut doc = mutator
@@ -194,6 +201,7 @@ async fn auto_commit_float32_counter_accumulates_with_float32_precision() {
         doc.set_counter_delta("points".into(), NormalValue::Float32(delta));
         mutator
             .update(
+                &defra_core::RequestContext::default(),
                 "FloatCounters",
                 doc,
                 std::iter::once("points".to_string()).collect(),
@@ -221,7 +229,10 @@ async fn alias_reads_and_mutations_use_the_canonical_doc_id() {
     let mutator = db::AutoCommitMutator::new(db.clone());
     let mut doc = Document::new();
     doc.set("x", NormalValue::Int(1));
-    let created = mutator.create("TestDoc", doc).await.unwrap();
+    let created = mutator
+        .create(&defra_core::RequestContext::default(), "TestDoc", doc)
+        .await
+        .unwrap();
     let canonical_doc_id = created.doc_id;
     let alias =
         DocID::new_v0(defra_core::block::generate_cid_from_bytes(b"imported-alias").unwrap());
@@ -254,6 +265,7 @@ async fn alias_reads_and_mutations_use_the_canonical_doc_id() {
     fetched.set("x", NormalValue::Int(2));
     let updated = mutator
         .update(
+            &defra_core::RequestContext::default(),
             "TestDoc",
             fetched,
             std::iter::once("x".to_string()).collect(),
@@ -293,7 +305,11 @@ async fn explicit_txn_counter_increment_advances_the_counter() {
     let mutator = ctx.doc_mutator().expect("mutator");
     let create_doc = Document::from_json_str(r#"{"count": 5}"#).expect("doc");
     let created = mutator
-        .create("Counters", create_doc)
+        .create(
+            &defra_core::RequestContext::default(),
+            "Counters",
+            create_doc,
+        )
         .await
         .expect("create");
     let doc_id = created.doc_id.to_string();
@@ -317,7 +333,12 @@ async fn explicit_txn_counter_increment_advances_the_counter() {
     let mut modified = rapidhash::RapidHashSet::new();
     modified.insert("count".to_string());
     mutator
-        .update("Counters", update_doc, modified)
+        .update(
+            &defra_core::RequestContext::default(),
+            "Counters",
+            update_doc,
+            modified,
+        )
         .await
         .expect("update");
     drop(mutator);
@@ -362,7 +383,11 @@ async fn explicit_txn_pcounter_increment_no_double_apply() {
     let mutator = ctx.doc_mutator().expect("mutator");
     let create_doc = Document::from_json_str(r#"{"count": 5}"#).expect("doc");
     let created = mutator
-        .create("PCounters", create_doc)
+        .create(
+            &defra_core::RequestContext::default(),
+            "PCounters",
+            create_doc,
+        )
         .await
         .expect("create");
     let doc_id = created.doc_id.to_string();
@@ -386,7 +411,12 @@ async fn explicit_txn_pcounter_increment_no_double_apply() {
     let mut modified = rapidhash::RapidHashSet::new();
     modified.insert("count".to_string());
     mutator
-        .update("PCounters", update_doc, modified)
+        .update(
+            &defra_core::RequestContext::default(),
+            "PCounters",
+            update_doc,
+            modified,
+        )
         .await
         .expect("update");
     drop(mutator);
@@ -416,6 +446,7 @@ async fn explicit_txn_multi_doc_counter_increments_advance_both() {
     let mutator = ctx.doc_mutator().expect("mutator");
     let doc_a = mutator
         .create(
+            &defra_core::RequestContext::default(),
             "Counters",
             Document::from_json_str(r#"{"count": 10}"#).unwrap(),
         )
@@ -425,6 +456,7 @@ async fn explicit_txn_multi_doc_counter_increments_advance_both() {
         .to_string();
     let doc_b = mutator
         .create(
+            &defra_core::RequestContext::default(),
             "Counters",
             Document::from_json_str(r#"{"count": 20}"#).unwrap(),
         )
@@ -447,7 +479,12 @@ async fn explicit_txn_multi_doc_counter_increments_advance_both() {
     let mut mod_a = rapidhash::RapidHashSet::new();
     mod_a.insert("count".to_string());
     mutator
-        .update("Counters", up_a, mod_a)
+        .update(
+            &defra_core::RequestContext::default(),
+            "Counters",
+            up_a,
+            mod_a,
+        )
         .await
         .expect("update a");
 
@@ -457,7 +494,12 @@ async fn explicit_txn_multi_doc_counter_increments_advance_both() {
     let mut mod_b = rapidhash::RapidHashSet::new();
     mod_b.insert("count".to_string());
     mutator
-        .update("Counters", up_b, mod_b)
+        .update(
+            &defra_core::RequestContext::default(),
+            "Counters",
+            up_b,
+            mod_b,
+        )
         .await
         .expect("update b");
 
@@ -528,6 +570,7 @@ async fn explicit_txn_pcounter_create_then_update_same_txn() {
 
     let created = mutator
         .create(
+            &defra_core::RequestContext::default(),
             "PCounters",
             Document::from_json_str(r#"{"count": 5}"#).unwrap(),
         )
@@ -541,7 +584,12 @@ async fn explicit_txn_pcounter_create_then_update_same_txn() {
     let mut modified = rapidhash::RapidHashSet::new();
     modified.insert("count".to_string());
     mutator
-        .update("PCounters", update_doc, modified)
+        .update(
+            &defra_core::RequestContext::default(),
+            "PCounters",
+            update_doc,
+            modified,
+        )
         .await
         .expect("update");
 
@@ -622,7 +670,12 @@ async fn an_increment_lands_on_a_directly_written_counter_value() {
     let mut modified = rapidhash::RapidHashSet::new();
     modified.insert("count".to_string());
     mutator
-        .update("Counters", update_doc, modified)
+        .update(
+            &defra_core::RequestContext::default(),
+            "Counters",
+            update_doc,
+            modified,
+        )
         .await
         .expect("update");
     drop(mutator);
@@ -653,6 +706,7 @@ async fn explicit_txn_pncounter_create_then_decrement_same_txn() {
 
     let created = mutator
         .create(
+            &defra_core::RequestContext::default(),
             "Counters",
             Document::from_json_str(r#"{"count": 3}"#).unwrap(),
         )
@@ -666,7 +720,12 @@ async fn explicit_txn_pncounter_create_then_decrement_same_txn() {
     let mut modified = rapidhash::RapidHashSet::new();
     modified.insert("count".to_string());
     mutator
-        .update("Counters", update_doc, modified)
+        .update(
+            &defra_core::RequestContext::default(),
+            "Counters",
+            update_doc,
+            modified,
+        )
         .await
         .expect("update");
 
@@ -698,6 +757,7 @@ async fn explicit_txn_discard_drops_pending_counter_ops() {
 
     let created = mutator
         .create(
+            &defra_core::RequestContext::default(),
             "Counters",
             Document::from_json_str(r#"{"count": 7}"#).unwrap(),
         )
@@ -711,7 +771,12 @@ async fn explicit_txn_discard_drops_pending_counter_ops() {
     let mut modified = rapidhash::RapidHashSet::new();
     modified.insert("count".to_string());
     mutator
-        .update("Counters", update_doc, modified)
+        .update(
+            &defra_core::RequestContext::default(),
+            "Counters",
+            update_doc,
+            modified,
+        )
         .await
         .expect("update");
 
@@ -747,6 +812,7 @@ async fn explicit_txn_multiple_updates_same_field_sum_once() {
     let mutator = ctx.doc_mutator().expect("mutator");
     let created = mutator
         .create(
+            &defra_core::RequestContext::default(),
             "Counters",
             Document::from_json_str(r#"{"count": 0}"#).unwrap(),
         )
@@ -767,14 +833,20 @@ async fn explicit_txn_multiple_updates_same_field_sum_once() {
     up1.set_counter_delta("count".to_string(), document::NormalValue::Int(3));
     let mut m1 = rapidhash::RapidHashSet::new();
     m1.insert("count".to_string());
-    mutator.update("Counters", up1, m1).await.expect("update 1");
+    mutator
+        .update(&defra_core::RequestContext::default(), "Counters", up1, m1)
+        .await
+        .expect("update 1");
 
     let mut up2 = Document::from_json_str(r#"{"count": 5}"#).unwrap();
     up2.set_id(document::DocID::from_string(&doc_id).unwrap());
     up2.set_counter_delta("count".to_string(), document::NormalValue::Int(2));
     let mut m2 = rapidhash::RapidHashSet::new();
     m2.insert("count".to_string());
-    mutator.update("Counters", up2, m2).await.expect("update 2");
+    mutator
+        .update(&defra_core::RequestContext::default(), "Counters", up2, m2)
+        .await
+        .expect("update 2");
 
     let visible = ctx
         .doc_fetcher()
@@ -836,6 +908,7 @@ async fn explicit_txn_indexed_counter_index_reflects_the_incremented_value() {
     let mutator = ctx.doc_mutator().expect("mutator");
     let created = mutator
         .create(
+            &defra_core::RequestContext::default(),
             "IdxCounters",
             Document::from_json_str(r#"{"count": 5}"#).unwrap(),
         )
@@ -856,7 +929,12 @@ async fn explicit_txn_indexed_counter_index_reflects_the_incremented_value() {
     let mut modified = rapidhash::RapidHashSet::new();
     modified.insert("count".to_string());
     mutator
-        .update("IdxCounters", update_doc, modified)
+        .update(
+            &defra_core::RequestContext::default(),
+            "IdxCounters",
+            update_doc,
+            modified,
+        )
         .await
         .expect("update");
     drop(mutator);
@@ -918,7 +996,10 @@ async fn create_in_tx_publishes_event_on_commit() {
     let mutator = DbDocMutator::new(Arc::clone(&db), txn);
 
     let doc = Document::from_json_str(r#"{"x": 1}"#).expect("doc");
-    let result = mutator.create("TestDoc", doc).await.expect("create");
+    let result = mutator
+        .create(&defra_core::RequestContext::default(), "TestDoc", doc)
+        .await
+        .expect("create");
 
     // Before commit: no event should have fired
     assert!(
@@ -964,6 +1045,7 @@ async fn auto_commit_create_registers_acp_before_publishing_update() {
         defra_core::signing::scope_broadcast_creator_did(
             Some(owner.to_string()),
             mutator.create(
+                &defra_core::RequestContext::default(),
                 "TestDoc",
                 Document::from_json_str(r#"{"x": 1}"#).expect("doc"),
             ),
@@ -1001,7 +1083,10 @@ async fn create_in_tx_publishes_no_event_on_discard() {
     let mutator = DbDocMutator::new(Arc::clone(&db), txn);
 
     let doc = Document::from_json_str(r#"{"x": 1}"#).expect("doc");
-    mutator.create("TestDoc", doc).await.expect("create");
+    mutator
+        .create(&defra_core::RequestContext::default(), "TestDoc", doc)
+        .await
+        .expect("create");
 
     let txn = mutator.take_txn().await.expect("take txn");
     txn.discard().expect("discard");
@@ -1109,6 +1194,7 @@ async fn transactional_broadcasts_and_releases_follow_commit_receipts() {
     );
     let first_doc = first
         .create(
+            &defra_core::RequestContext::default(),
             "TestDoc",
             Document::from_json_str(r#"{"x": 1}"#).expect("doc"),
         )
@@ -1129,6 +1215,7 @@ async fn transactional_broadcasts_and_releases_follow_commit_receipts() {
     );
     let second_doc = second
         .create(
+            &defra_core::RequestContext::default(),
             "TestDoc",
             Document::from_json_str(r#"{"x": 2}"#).expect("doc"),
         )
@@ -1187,7 +1274,10 @@ async fn create_in_tx_forwards_to_broadcaster_on_commit() {
         DbDocMutator::from_shared_txn_with_broadcaster(Arc::clone(&db), txn_arc, Some(broadcaster));
 
     let doc = Document::from_json_str(r#"{"x": 1}"#).expect("doc");
-    let result = mutator.create("TestDoc", doc).await.expect("create");
+    let result = mutator
+        .create(&defra_core::RequestContext::default(), "TestDoc", doc)
+        .await
+        .expect("create");
 
     // Broadcaster must NOT see anything before commit
     assert!(captured.is_empty(), "no broadcast before commit");
@@ -1231,7 +1321,10 @@ async fn create_in_tx_does_not_broadcast_on_discard() {
         DbDocMutator::from_shared_txn_with_broadcaster(Arc::clone(&db), txn_arc, Some(broadcaster));
 
     let doc = Document::from_json_str(r#"{"x": 1}"#).expect("doc");
-    mutator.create("TestDoc", doc).await.expect("create");
+    mutator
+        .create(&defra_core::RequestContext::default(), "TestDoc", doc)
+        .await
+        .expect("create");
 
     let txn = mutator.take_txn().await.expect("take txn");
     txn.discard().expect("discard");

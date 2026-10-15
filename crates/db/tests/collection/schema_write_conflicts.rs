@@ -32,7 +32,10 @@ async fn stage_create(db: &Arc<DB<RegolithStore>>, collection: &str) -> db::DbTx
     let mutator = DbDocMutator::new(db.clone(), db.new_txn(false).await.unwrap());
     let mut doc = Document::new();
     doc.set("value", "staged");
-    mutator.create(collection, doc).await.unwrap();
+    mutator
+        .create(&defra_core::RequestContext::default(), collection, doc)
+        .await
+        .unwrap();
     mutator.take_txn().await.unwrap()
 }
 

@@ -28,6 +28,7 @@ async fn node(sdl: &str) -> (Arc<DB<RegolithStore>>, Arc<RefusingStore>) {
     let db = Arc::new(db);
     db::AutoCommitMutator::new(db.clone())
         .create(
+            &defra_core::RequestContext::default(),
             "Users",
             Document::from_json_str(r#"{"name": "Ada"}"#).unwrap(),
         )

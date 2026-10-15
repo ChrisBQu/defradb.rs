@@ -51,7 +51,10 @@ async fn seed_user_in_txn(
     if let Some(age) = age {
         doc.set("age", NormalValue::Int(age));
     }
-    let result = mutator.create("Users", doc).await.unwrap();
+    let result = mutator
+        .create(&defra_core::RequestContext::default(), "Users", doc)
+        .await
+        .unwrap();
     let txn = mutator.take_txn().await.unwrap();
     (txn, result.doc_id)
 }

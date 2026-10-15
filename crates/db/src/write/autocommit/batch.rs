@@ -21,8 +21,8 @@ use crate::database::DB;
 use crate::event::emission::register_update_event_callback;
 use crate::txn::DbTxn;
 use datastore::BasicTxn;
-use defra_core::encryption::get_encryption_config;
 use defra_core::signing::get_signing_config;
+use defra_core::RequestContext;
 
 pub struct BatchMutator<S: Store> {
     db: Arc<DB<S>>,
@@ -333,6 +333,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
 
     async fn create(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         mut doc: Document,
     ) -> query::error::Result<CreateResult> {
@@ -372,7 +373,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
 
         let short_id = collection.resolved_root_id();
         let schema_version_id = collection.version_id();
-        let enc_config = get_encryption_config();
+        let enc_config = context.encryption();
         let sign_config = get_signing_config();
 
         let identity = match crate::write::prepare::prepared_identity(&doc) {
@@ -393,7 +394,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 &mut doc,
                 identity,
                 None,
-                enc_config.as_ref(),
+                enc_config,
                 Some((&blockstore, &headstore)),
                 None,
             )
@@ -410,7 +411,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 schema_version_id,
                 identity,
                 None,
-                enc_config.as_ref(),
+                enc_config,
                 sign_config.as_ref(),
                 self.db.kms().as_ref(),
                 self.prepared_inputs.as_ref(),
@@ -475,6 +476,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
 
     async fn update(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         mut doc: Document,
         mut modified_fields: RapidHashSet<String>,
@@ -538,7 +540,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
 
         let short_id = collection.resolved_root_id();
         let schema_version_id = collection.version_id();
-        let enc_config = get_encryption_config();
+        let enc_config = context.encryption();
         let sign_config = get_signing_config();
 
         {
@@ -548,7 +550,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 &mut doc,
                 DocStorageIdentity::new(short_id, doc_short_id),
                 Some(&modified_fields),
-                enc_config.as_ref(),
+                enc_config,
                 Some((&blockstore, &headstore)),
                 None,
             )
@@ -565,7 +567,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 schema_version_id,
                 DocStorageIdentity::new(short_id, doc_short_id),
                 Some(&modified_fields),
-                enc_config.as_ref(),
+                enc_config,
                 sign_config.as_ref(),
                 self.db.kms().as_ref(),
                 self.prepared_inputs.as_ref(),

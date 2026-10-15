@@ -14,7 +14,10 @@
 use std::fmt;
 use std::sync::Arc;
 
-/// What one request carries: who acts and with which privileges.
+use crate::encryption::EncryptionConfig;
+
+/// What one request carries: who acts, with which privileges, and how its
+/// writes are encrypted.
 ///
 /// The default context is an anonymous request with nothing granted.
 #[derive(Clone, Default)]
@@ -23,6 +26,7 @@ pub struct RequestContext(Arc<Fields>);
 #[derive(Clone, Default)]
 struct Fields {
     dac_bypass: bool,
+    encryption: Option<EncryptionConfig>,
 }
 
 impl RequestContext {
@@ -40,12 +44,27 @@ impl RequestContext {
         Arc::make_mut(&mut self.0).dac_bypass = bypass;
         self
     }
+
+    /// Which fields of the documents a mutation writes it encrypts, when the
+    /// mutation asks for encryption. Without one a write inherits each
+    /// field's encryption from its previous block.
+    pub fn encryption(&self) -> Option<&EncryptionConfig> {
+        self.0.encryption.as_ref()
+    }
+
+    /// This context with the encryption set to `encryption`.
+    #[must_use]
+    pub fn with_encryption(mut self, encryption: Option<EncryptionConfig>) -> Self {
+        Arc::make_mut(&mut self.0).encryption = encryption;
+        self
+    }
 }
 
 impl fmt::Debug for RequestContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RequestContext")
             .field("dac_bypass", &self.0.dac_bypass)
+            .field("encryption", &self.0.encryption)
             .finish()
     }
 }
@@ -56,7 +75,21 @@ mod tests {
 
     #[test]
     fn default_context_grants_nothing() {
-        assert!(!RequestContext::default().dac_bypass());
+        let context = RequestContext::default();
+        assert!(!context.dac_bypass());
+        assert!(context.encryption().is_none());
+    }
+
+    #[test]
+    fn with_encryption_sets_and_clears_the_encryption() {
+        let encrypted = RequestContext::default().with_encryption(Some(EncryptionConfig {
+            encrypt_doc: false,
+            encrypt_fields: vec!["secret".to_string()],
+        }));
+        assert!(encrypted
+            .encryption()
+            .is_some_and(|config| config.should_encrypt_field("secret")));
+        assert!(encrypted.with_encryption(None).encryption().is_none());
     }
 
     #[test]

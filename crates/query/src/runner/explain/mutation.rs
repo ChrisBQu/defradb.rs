@@ -149,6 +149,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         crate::plan::CreateNode::new(
                             &mutation.collection_name,
                             mutator.clone(),
+                            self.context.clone(),
                             mapping.clone(),
                         )
                         .with_collection(collection.clone())
@@ -162,6 +163,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     let mut node = crate::plan::UpdateNode::new(
                         &mutation.collection_name,
                         mutator.clone(),
+                        self.context.clone(),
                         fetcher,
                         mapping.clone(),
                     )
@@ -207,6 +209,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     let mut node = crate::plan::UpsertNode::new(
                         &mutation.collection_name,
                         mutator.clone(),
+                        self.context.clone(),
                         mapping.clone(),
                     )
                     .with_collection(collection.clone())

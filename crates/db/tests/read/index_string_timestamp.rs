@@ -76,7 +76,7 @@ async fn seeded_db() -> Arc<DB<RegolithStore>> {
         })
         .collect();
     AutoCommitMutator::new(db.clone())
-        .create_many("Stamps", docs)
+        .create_many(&defra_core::RequestContext::default(), "Stamps", docs)
         .await
         .unwrap();
     db

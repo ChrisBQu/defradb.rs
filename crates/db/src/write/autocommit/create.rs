@@ -104,11 +104,12 @@ impl<S: Store + 'static> storage::corekv::RetryAttemptFn for CreateManyRetryAtte
 impl<S: Store + 'static> AutoCommitMutator<S> {
     pub(super) async fn create_with_resolved_inputs(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         doc: Document,
     ) -> query::error::Result<CreateResult> {
         if self.prepared_inputs.is_some() {
-            return self.create_impl(collection_name, doc).await;
+            return self.create_impl(context, collection_name, doc).await;
         }
         let inputs = query::prepared::PreparedInputMemo::default();
         let mutator = Self {
@@ -120,7 +121,10 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .seed_create_identity(collection_name, &mut doc)
             .await?;
         loop {
-            match mutator.create_impl(collection_name, doc.clone()).await {
+            match mutator
+                .create_impl(context, collection_name, doc.clone())
+                .await
+            {
                 Err(query::error::QueryError::NeedsInput(request)) => {
                     inputs
                         .answer_miss(&request, || self.resolve_prepared_input(&request))
@@ -133,11 +137,12 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
     pub(super) async fn create_many_with_resolved_inputs(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         docs: Vec<Document>,
     ) -> query::error::Result<Vec<CreateResult>> {
         if self.prepared_inputs.is_some() {
-            return self.create_many_impl(collection_name, docs).await;
+            return self.create_many_impl(context, collection_name, docs).await;
         }
         let inputs = query::prepared::PreparedInputMemo::default();
         let mutator = Self {
@@ -150,7 +155,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         }
         loop {
             match mutator
-                .create_many_impl(collection_name, docs.clone())
+                .create_many_impl(context, collection_name, docs.clone())
                 .await
             {
                 Err(query::error::QueryError::NeedsInput(request)) => {
@@ -191,6 +196,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
     pub(super) async fn create_impl(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         mut doc: Document,
     ) -> query::error::Result<CreateResult> {
@@ -241,13 +247,13 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 &mut doc,
                 identity,
                 None,
-                get_encryption_config().as_ref(),
+                context.encryption(),
             )
             .await?;
         }
 
         let schema_version_id = collection.version_id().to_string();
-        let enc_config = get_encryption_config();
+        let enc_config = context.encryption();
         let sign_config = get_signing_config();
         let acp_registration = match (
             collection.schema().policy.as_ref(),
@@ -283,7 +289,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     &doc,
                     &schema_version_id,
                     identity,
-                    enc_config.as_ref(),
+                    enc_config,
                     sign_config.as_ref(),
                     self.prepared_inputs.as_ref(),
                 )
@@ -508,6 +514,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
     pub(super) async fn create_many_impl(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         docs: Vec<Document>,
     ) -> query::error::Result<Vec<CreateResult>> {
@@ -519,7 +526,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         if docs.len() == 1 {
             let doc = docs.into_iter().next().expect("length checked above");
             return self
-                .create_impl(collection_name, doc)
+                .create_impl(context, collection_name, doc)
                 .await
                 .map(|r| vec![r]);
         }
@@ -534,7 +541,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         let short_id = collection.resolved_root_id();
         let schema_version_id = collection.version_id().to_string();
         let sign_config = get_signing_config();
-        let enc_config = get_encryption_config();
+        let enc_config = context.encryption().cloned();
 
         // === Phase 1: Prepare documents (sequential — embeddings are async/external) ===
         let mut prepared_docs: Vec<Document> = Vec::with_capacity(docs.len());

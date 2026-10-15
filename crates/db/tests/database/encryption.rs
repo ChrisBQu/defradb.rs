@@ -37,7 +37,10 @@ async fn document_crud_roundtrips_through_encrypted_store() {
     // (allocates the doc short ID and derives the DocID from the genesis block).
     let mutator = AutoCommitMutator::new(db.clone());
     let doc = Document::from_json_str(r#"{"name": "Alice"}"#).unwrap();
-    let created = mutator.create("Users", doc).await.unwrap();
+    let created = mutator
+        .create(&defra_core::RequestContext::default(), "Users", doc)
+        .await
+        .unwrap();
 
     // Read it back in a fresh transaction; the value must decrypt cleanly.
     let fetched = mutator

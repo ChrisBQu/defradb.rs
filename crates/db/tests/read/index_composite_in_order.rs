@@ -76,7 +76,7 @@ async fn populated() -> (Arc<DB<RegolithStore>>, Vec<(i64, String)>) {
         doc.set("rank", NormalValue::Int(rank));
         doc.set("name", NormalValue::String(name.to_string()));
         let created = mutator
-            .create(COLLECTION, doc)
+            .create(&defra_core::RequestContext::default(), COLLECTION, doc)
             .await
             .expect("the document must be created");
         seeded.push((rank, created.doc_id.to_string()));

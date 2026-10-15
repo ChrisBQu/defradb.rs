@@ -36,7 +36,11 @@ fn tally() -> CollectionVersion {
 
 async fn create(db: &Arc<DB<RegolithStore>>, json: &str) -> DocID {
     AutoCommitMutator::new(db.clone())
-        .create("Tally", Document::from_json_str(json).unwrap())
+        .create(
+            &defra_core::RequestContext::default(),
+            "Tally",
+            Document::from_json_str(json).unwrap(),
+        )
         .await
         .unwrap()
         .doc_id
@@ -171,6 +175,7 @@ async fn accumulators_move_into_their_documents_once() {
     increment.set_counter_delta("up".to_string(), NormalValue::Int(1));
     AutoCommitMutator::new(reopened.clone())
         .update(
+            &defra_core::RequestContext::default(),
             "Tally",
             increment,
             RapidHashSet::from_iter(["up".to_string()]),

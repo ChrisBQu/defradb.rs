@@ -282,7 +282,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             .with_acp(
                 self.acp.clone(),
                 caller_identity.clone(),
-                self.request.dac_bypass(),
+                self.context.dac_bypass(),
             )
             .with_read_validator(self.read_validator.clone())
             .with_retry_inputs(self.retry_inputs.clone())
@@ -308,7 +308,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         .map(|policy| crate::plan::AcpRead {
                             acp: self.acp.clone(),
                             identity: Identity::from(caller_identity),
-                            dac_bypass: self.request.dac_bypass(),
+                            dac_bypass: self.context.dac_bypass(),
                             policy_id: policy.id.clone(),
                             resource_name: policy.resource_name.clone(),
                         }),
@@ -376,7 +376,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             let acp_filter = collection.policy.as_ref().map(|policy| plan::AcpFilter {
                 acp: self.acp.clone(),
                 identity: Identity::from(caller_identity),
-                dac_bypass: self.request.dac_bypass(),
+                dac_bypass: self.context.dac_bypass(),
                 policy_id: policy.id.clone(),
                 resource_name: policy.resource_name.clone(),
                 retry_inputs: self.retry_inputs.clone(),

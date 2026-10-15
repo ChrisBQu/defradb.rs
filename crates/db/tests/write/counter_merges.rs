@@ -35,7 +35,11 @@ async fn open() -> (Arc<RegolithStore>, Arc<DB<RegolithStore>>, DocID) {
     let db = Arc::new(DB::from_arc(store.clone()).unwrap());
     db.create_collection(tally()).await.unwrap();
     let doc_id = AutoCommitMutator::new(db.clone())
-        .create("Tally", Document::from_json_str(r#"{"count": 0}"#).unwrap())
+        .create(
+            &defra_core::RequestContext::default(),
+            "Tally",
+            Document::from_json_str(r#"{"count": 0}"#).unwrap(),
+        )
         .await
         .unwrap()
         .doc_id;
@@ -55,7 +59,12 @@ async fn increment(mutator: &AutoCommitMutator<RegolithStore>, doc_id: &DocID, b
     doc.set_id(doc_id.clone());
     doc.set_counter_delta("count".to_string(), NormalValue::Int(by));
     mutator
-        .update("Tally", doc, RapidHashSet::from_iter(["count".to_string()]))
+        .update(
+            &defra_core::RequestContext::default(),
+            "Tally",
+            doc,
+            RapidHashSet::from_iter(["count".to_string()]),
+        )
         .await
         .expect("an increment commits");
 }
@@ -97,7 +106,12 @@ async fn sixty_four_concurrent_increments_and_other_field_updates_never_conflict
             );
             start.wait().await;
             mutator
-                .update("Tally", doc, RapidHashSet::from_iter([field]))
+                .update(
+                    &defra_core::RequestContext::default(),
+                    "Tally",
+                    doc,
+                    RapidHashSet::from_iter([field]),
+                )
                 .await
                 .expect("an update of another field commits");
         }));
@@ -154,6 +168,7 @@ async fn an_increment_lands_on_the_stored_value_not_the_callers_copy() {
     stale.set_counter_delta("count".to_string(), NormalValue::Int(1));
     let updated = mutator
         .update(
+            &defra_core::RequestContext::default(),
             "Tally",
             stale,
             RapidHashSet::from_iter(["count".to_string()]),
@@ -178,7 +193,12 @@ async fn interactive_increments_and_other_field_updates_all_commit() {
         doc.set_id(doc_id.clone());
         doc.set_counter_delta("count".to_string(), NormalValue::Int(by));
         mutator
-            .update("Tally", doc, RapidHashSet::from_iter(["count".to_string()]))
+            .update(
+                &defra_core::RequestContext::default(),
+                "Tally",
+                doc,
+                RapidHashSet::from_iter(["count".to_string()]),
+            )
             .await
             .unwrap();
         open_txns.push(mutator);
@@ -189,6 +209,7 @@ async fn interactive_increments_and_other_field_updates_all_commit() {
     doc.set("label0", NormalValue::String("interactive".into()));
     labeler
         .update(
+            &defra_core::RequestContext::default(),
             "Tally",
             doc,
             RapidHashSet::from_iter(["label0".to_string()]),

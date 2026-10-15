@@ -7,6 +7,7 @@ use rapidhash::{HashMapExt, RapidHashMap, RapidHashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use defra_core::RequestContext;
 use document::{DocID, Document, NormalValue};
 use schema::{CType, CollectionVersion};
 use serde_json::Value as JsonValue;
@@ -174,7 +175,7 @@ fn increment_value(current: Option<&NormalValue>, increment: &NormalValue) -> Re
 /// let input = UpdateInput::new()
 ///     .with_field("email", json!("newemail@example.com"));
 ///
-/// let mut node = UpdateNode::new("Users", mutator, fetcher, mapping)
+/// let mut node = UpdateNode::new("Users", mutator, context, fetcher, mapping)
 ///     .with_doc_ids(vec!["bae-123".to_string()])
 ///     .with_input(input);
 ///
@@ -191,6 +192,8 @@ pub struct UpdateNode {
     collection_name: String,
     /// Document mutator for storage operations
     mutator: Arc<dyn DocMutator>,
+    /// The context of the request the updates serve
+    context: RequestContext,
     /// Document fetcher for resolving filters and getting all documents
     fetcher: Arc<dyn DocFetcher>,
     /// Document mapping for field positions
@@ -230,17 +233,20 @@ impl UpdateNode {
     ///
     /// * `collection_name` - Name of the collection to update documents in
     /// * `mutator` - Document mutator for storage operations
+    /// * `context` - The context of the request the updates serve
     /// * `fetcher` - Document fetcher for resolving filters and getting all documents
     /// * `document_mapping` - Field mapping for result documents
     pub fn new(
         collection_name: impl Into<String>,
         mutator: Arc<dyn DocMutator>,
+        context: RequestContext,
         fetcher: Arc<dyn DocFetcher>,
         document_mapping: DocumentMapping,
     ) -> Self {
         Self {
             collection_name: collection_name.into(),
             mutator,
+            context,
             fetcher,
             document_mapping,
             collection: None,
@@ -558,6 +564,7 @@ impl PlanNode for UpdateNode {
                     let result = if let Some(expected_fields) = projected_fields {
                         self.mutator
                             .update_if_fields_unchanged(
+                                &self.context,
                                 &self.collection_name,
                                 expected,
                                 expected_fields,
@@ -568,6 +575,7 @@ impl PlanNode for UpdateNode {
                     } else {
                         self.mutator
                             .update_if_unchanged(
+                                &self.context,
                                 &self.collection_name,
                                 expected,
                                 doc,
@@ -695,12 +703,18 @@ mod prepared_target_tests {
 
     #[async_trait]
     impl DocMutator for RecordingMutator {
-        async fn create(&self, _collection: &str, _doc: Document) -> Result<CreateResult> {
+        async fn create(
+            &self,
+            _context: &RequestContext,
+            _collection: &str,
+            _doc: Document,
+        ) -> Result<CreateResult> {
             Err(QueryError::execution("unused in update target test"))
         }
 
         async fn update(
             &self,
+            _context: &RequestContext,
             _collection: &str,
             doc: Document,
             fields: RapidHashSet<String>,
@@ -745,11 +759,17 @@ mod prepared_target_tests {
         let mut mapping = DocumentMapping::new();
         mapping.add(0, "_docID");
         mapping.add(1, "value");
-        UpdateNode::new("Things", mutator, fetcher, mapping)
-            .with_doc_ids(ids.iter().map(ToString::to_string).collect())
-            .with_input(UpdateInput::new().with_field("value", serde_json::json!("after")))
-            .with_prepared_writes(Some(writes))
-            .with_prepared_update_targets(Some(targets))
+        UpdateNode::new(
+            "Things",
+            mutator,
+            RequestContext::default(),
+            fetcher,
+            mapping,
+        )
+        .with_doc_ids(ids.iter().map(ToString::to_string).collect())
+        .with_input(UpdateInput::new().with_field("value", serde_json::json!("after")))
+        .with_prepared_writes(Some(writes))
+        .with_prepared_update_targets(Some(targets))
     }
 
     #[test]

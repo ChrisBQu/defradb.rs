@@ -69,7 +69,11 @@ where
 {
     let mut doc = Document::new();
     doc.set("name", NormalValue::String(name.to_owned()));
-    mutator.create(collection, doc).await.unwrap().doc_id
+    mutator
+        .create(&defra_core::RequestContext::default(), collection, doc)
+        .await
+        .unwrap()
+        .doc_id
 }
 
 /// Run `attempt` until it succeeds or fails for a reason other than a
@@ -272,6 +276,7 @@ async fn autocommit_writes_refresh_index_state_from_the_attempt_snapshot() {
     );
     mutator
         .update(
+            &defra_core::RequestContext::default(),
             "Racing",
             update,
             RapidHashSet::from_iter(["name".to_string()]),
@@ -323,7 +328,12 @@ async fn create_index_keeps_pace_with_concurrent_writers() {
                     doc.set_id(ids[i].clone());
                     doc.set("name", NormalValue::String(format!("upd-{i}")));
                     mutator
-                        .update("Racing", doc, RapidHashSet::from_iter(["name".to_string()]))
+                        .update(
+                            &defra_core::RequestContext::default(),
+                            "Racing",
+                            doc,
+                            RapidHashSet::from_iter(["name".to_string()]),
+                        )
                         .await
                 })
                 .await;
@@ -348,7 +358,9 @@ async fn create_index_keeps_pace_with_concurrent_writers() {
                 retrying(|| async {
                     let mut doc = Document::new();
                     doc.set("name", NormalValue::String(format!("new-{i}")));
-                    mutator.create("Racing", doc).await
+                    mutator
+                        .create(&defra_core::RequestContext::default(), "Racing", doc)
+                        .await
                 })
                 .await;
             }
@@ -663,6 +675,7 @@ async fn backfill_batch_aborts_when_a_document_it_read_changes() {
     doc.set("name", NormalValue::String("grace-hopper".to_string()));
     mutator
         .update(
+            &defra_core::RequestContext::default(),
             "Observed",
             doc,
             RapidHashSet::from_iter(["name".to_string()]),

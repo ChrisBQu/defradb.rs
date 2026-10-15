@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use chrono::{FixedOffset, Utc};
-use defra_core::encryption::EncryptionConfig;
 use identity::Did;
 use rapidhash::{HashMapExt, RapidHashMap, RapidHashSet};
 
@@ -171,19 +170,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 prepared.mutations.insert(mutation.output_name(), entry);
                 continue;
             }
-            let config = (mutation.encrypt_doc || !mutation.encrypt_fields.is_empty()).then(|| {
-                EncryptionConfig {
-                    encrypt_doc: mutation.encrypt_doc,
-                    encrypt_fields: mutation.encrypt_fields.clone(),
-                }
-            });
+            let context = self.context.clone().with_encryption(mutation.encryption());
             if mutation.mutation_type == MutationType::Create {
                 for input in self.build_create_inputs(mutation, collection)? {
                     let doc =
                         input.to_document_with_schema_and_time(collection, Some(request_time))?;
                     entry.creates.push(
                         mutator
-                            .prepare_write(&mutation.collection_name, doc, None, config.clone())
+                            .prepare_write(&context, &mutation.collection_name, doc, None)
                             .await?,
                     );
                 }
@@ -240,7 +234,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             .to_document_with_schema_and_time(collection, Some(request_time))?;
                         entry.creates.push(
                             mutator
-                                .prepare_write(&mutation.collection_name, doc, None, config.clone())
+                                .prepare_write(&context, &mutation.collection_name, doc, None)
                                 .await?,
                         );
                     }
@@ -272,10 +266,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         };
                         let doc = mutator
                             .prepare_write(
+                                &context,
                                 &mutation.collection_name,
                                 doc.clone(),
                                 Some(modified.clone()),
-                                config.clone(),
                             )
                             .await?;
                         if let (Some(id), Some(write)) = (doc.id(), doc.write_preparation()) {

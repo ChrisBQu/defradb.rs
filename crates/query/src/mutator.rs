@@ -6,6 +6,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use cid::Cid;
+use defra_core::RequestContext;
 use document::{DocID, Document};
 use identity::Did;
 use rapidhash::RapidHashSet;
@@ -419,6 +420,10 @@ impl MutationBatch {
 /// which provides read operations. Implementations are expected to be
 /// transaction-scoped, meaning all operations occur within a single transaction.
 ///
+/// Every write takes the [`RequestContext`] of the request it serves: how its
+/// blocks are encrypted, signed and attributed comes from there and from
+/// nowhere else.
+///
 /// # Transaction Semantics
 ///
 /// All mutations performed through a `DocMutator` should be atomic within
@@ -433,7 +438,7 @@ impl MutationBatch {
 ///     doc.set("name", name);
 ///     doc.set("age", age);
 ///
-///     let result = mutator.create("Users", doc).await?;
+///     let result = mutator.create(&RequestContext::default(), "Users", doc).await?;
 ///     Ok(result.doc_id)
 /// }
 /// ```
@@ -479,10 +484,10 @@ pub trait DocMutator: MaybeSendSync {
     /// Resolve persistent inputs without staging a document mutation.
     async fn prepare_write(
         &self,
+        _context: &RequestContext,
         _collection_name: &str,
         doc: Document,
         _modified_fields: Option<rapidhash::RapidHashSet<String>>,
-        _encryption: Option<defra_core::encryption::EncryptionConfig>,
     ) -> Result<Document> {
         Ok(doc)
     }
@@ -562,7 +567,12 @@ pub trait DocMutator: MaybeSendSync {
     /// - The collection does not exist
     /// - The document fails schema validation
     /// - A document with the same content already exists
-    async fn create(&self, collection_name: &str, doc: Document) -> Result<CreateResult>;
+    async fn create(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        doc: Document,
+    ) -> Result<CreateResult>;
 
     /// Create multiple documents in a single transaction.
     ///
@@ -570,12 +580,13 @@ pub trait DocMutator: MaybeSendSync {
     /// can override for single-transaction batching (one commit/fsync for N docs).
     async fn create_many(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         docs: Vec<Document>,
     ) -> Result<Vec<CreateResult>> {
         let mut results = Vec::with_capacity(docs.len());
         for doc in docs {
-            results.push(self.create(collection_name, doc).await?);
+            results.push(self.create(context, collection_name, doc).await?);
         }
         Ok(results)
     }
@@ -604,6 +615,7 @@ pub trait DocMutator: MaybeSendSync {
     /// - The document fails schema validation
     async fn update(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         doc: Document,
         modified_fields: RapidHashSet<String>,
@@ -618,13 +630,15 @@ pub trait DocMutator: MaybeSendSync {
     /// acquiring their per-document serialization guard.
     async fn update_if_unchanged(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         expected: Document,
         doc: Document,
         modified_fields: RapidHashSet<String>,
     ) -> Result<UpdateResult> {
         let _ = expected;
-        self.update(collection_name, doc, modified_fields).await
+        self.update(context, collection_name, doc, modified_fields)
+            .await
     }
 
     /// Update only if the named fields in the previously selected document
@@ -632,6 +646,7 @@ pub trait DocMutator: MaybeSendSync {
     /// the conservative full-document check.
     async fn update_if_fields_unchanged(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         expected: Document,
         expected_fields: RapidHashSet<String>,
@@ -639,7 +654,7 @@ pub trait DocMutator: MaybeSendSync {
         modified_fields: RapidHashSet<String>,
     ) -> Result<UpdateResult> {
         let _ = expected_fields;
-        self.update_if_unchanged(collection_name, expected, doc, modified_fields)
+        self.update_if_unchanged(context, collection_name, expected, doc, modified_fields)
             .await
     }
 
