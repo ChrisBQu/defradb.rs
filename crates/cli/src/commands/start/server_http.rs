@@ -77,7 +77,7 @@ impl Node {
         let mut server = defra_http::Server::from_arc_with_config(
             query_setup.runner.clone(),
             server_config,
-            edge.clone(),
+            edge,
         )
         .with_rest_arc(query_setup.rest_ops.clone())
         .with_dev_mode(config.development);
@@ -196,10 +196,9 @@ impl Node {
             crate::txn_adapter::TxnRegistryAdapter::new_arc_with_acp(
                 query_setup.registry.clone(),
                 acp_setup.document_acp.clone(),
-                edge,
             )
         } else {
-            crate::txn_adapter::TxnRegistryAdapter::new_arc(query_setup.registry.clone(), edge)
+            crate::txn_adapter::TxnRegistryAdapter::new_arc(query_setup.registry.clone())
         };
         server = server.with_txn_ops_arc(txn_adapter);
         info!("Transaction-scoped HTTP endpoints enabled");
