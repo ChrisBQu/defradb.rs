@@ -126,6 +126,7 @@ impl Node {
         let event_bus: Arc<dyn events::Bus> = Arc::new(events::ChannelBus::new());
         database.set_event_bus(event_bus.clone());
         info!("Event bus configured for subscriptions");
+        database.set_network(edge.clone());
 
         let database = Arc::new(database);
 
@@ -251,12 +252,13 @@ impl Node {
                 Some(t) => vec![t],
                 None => vec![],
             };
-            let kms_service: Arc<dyn kms::KmsService> = Arc::new(kms::DefraKms::new(
+            let kms_service: Arc<dyn kms::KmsService> = Arc::new(kms::DefraKms::with_inputs(
                 kms_store,
                 transports,
                 policy as Arc<dyn kms::AccessPolicy>,
                 Arc::new(db::DbBlockDocIDResolver::new(database.clone())),
                 node_did,
+                kms::KmsInputs::on(edge),
             ));
             kms_service.set_local_peer_id(p2p_setup.local_peer_id.clone());
 

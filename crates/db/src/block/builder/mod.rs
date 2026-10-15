@@ -323,9 +323,11 @@ fn compute_signature_prepared(
             "signing a block Go peers cannot verify; it will be rejected when replicating to a Go node"
         );
     }
+    // A miss is noted and the pass goes on: every signature of a wave is
+    // asked for at once.
     let response = inputs
         .expect("checked above")
-        .get(&request)
+        .get_or_want(&request)
         .ok_or(BuildError::NeedsInput(request))?;
     let signature = Signature::new(
         SignatureHeader::new(sig_type, signer.public_key_hex.as_bytes().to_vec()),

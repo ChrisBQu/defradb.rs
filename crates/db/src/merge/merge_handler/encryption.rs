@@ -16,8 +16,10 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     /// admission — which is also what makes an unauthorized node's request
     /// observable as a serve-side denial on the key holder
     /// (proofs/tests/behavioral/kms.rs). The prefetch runs detached so the
-    /// merge path never blocks on it; on success the reply handler caches the
-    /// key in the local store.
+    /// merge path never blocks on it. The KMS single-flights it with every
+    /// other request for the key, so the composite's merge joins it instead
+    /// of asking again; `prefetched_dek_cids` only keeps repeated deliveries
+    /// of one block from spawning a task each.
     pub fn spawn_dek_prefetch(&self, enc_cid: Cid, metadata: &BlockMetadata<'_>) {
         let Some(kms) = self.kms() else {
             return;
@@ -32,14 +34,9 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         let ctx = Self::kms_request_context(Some(metadata));
         let prefetched_dek_cids = Arc::clone(&self.prefetched_dek_cids);
         spawn_task(self.db.pool(), "db::dek_prefetch", async move {
-            let result = match kms.get_keys(&ctx, std::slice::from_ref(&enc_cid)).await {
-                Ok(results) => results.wait_all().await.map(|_| ()),
-                Err(error) => Err(error),
-            };
+            kms.prefetch_keys(&ctx, std::slice::from_ref(&enc_cid))
+                .await;
             prefetched_dek_cids.remove(&enc_cid);
-            if let Err(error) = result {
-                tracing::debug!(enc_cid = %enc_cid, error = %error, "DEK prefetch failed");
-            }
         });
     }
 
@@ -85,14 +82,14 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         // resolves the key locally or via cross-peer fetch and returns the
         // plaintext key; we then AES-GCM decrypt the block data.
         if let Some(kms) = self.kms() {
+            if let Some(answer) = self.prepared_key(enc_cid) {
+                return decrypt_with_key(data, answer.map_err(MergeError::Kms)?.as_slice());
+            }
             if let Some(keys) = self.retry_decryption_keys() {
                 let key = keys
                     .get(enc_cid)
                     .ok_or(MergeError::NeedsDecryptionKey(*enc_cid))?;
-                return crypto::encryption::aes::decrypt_aes(None, data, key.as_slice(), &[])
-                    .map_err(|e| {
-                        kms::Error::Crypto(format!("KMS-keyed decryption failed: {e}")).into()
-                    });
+                return decrypt_with_key(data, key.as_slice());
             }
             let ctx = Self::kms_request_context(metadata);
             let results = kms.get_keys(&ctx, std::slice::from_ref(enc_cid)).await?;
@@ -101,13 +98,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             let mut unavailable = None;
             while let Some(result) = receiver.recv().await {
                 match result {
-                    Ok((cid, key)) if cid == *enc_cid => {
-                        return crypto::encryption::aes::decrypt_aes(None, data, &key, &[])
-                            .map_err(|e| {
-                                kms::Error::Crypto(format!("KMS-keyed decryption failed: {e}"))
-                                    .into()
-                            });
-                    }
+                    Ok((cid, key)) if cid == *enc_cid => return decrypt_with_key(data, &key),
                     Ok(_) => {}
                     Err(error @ kms::Error::AccessDenied { .. }) => denied = Some(error),
                     Err(error) => unavailable = Some(error),
@@ -168,4 +159,10 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             }
         }
     }
+}
+
+/// AES-GCM decryption of a field delta with a key the KMS released.
+fn decrypt_with_key(data: &[u8], key: &[u8]) -> std::result::Result<Vec<u8>, MergeError> {
+    crypto::encryption::aes::decrypt_aes(None, data, key, &[])
+        .map_err(|e| kms::Error::Crypto(format!("KMS-keyed decryption failed: {e}")).into())
 }

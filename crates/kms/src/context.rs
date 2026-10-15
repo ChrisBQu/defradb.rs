@@ -8,7 +8,7 @@
 
 use identity::Did;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct RequestContext {
     user_identity: Option<Did>,
     explicit_replay_capability: Option<String>,

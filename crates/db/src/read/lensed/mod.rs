@@ -2,3 +2,4 @@
 
 pub mod autocommit;
 pub mod fetcher;
+mod generation_cache;

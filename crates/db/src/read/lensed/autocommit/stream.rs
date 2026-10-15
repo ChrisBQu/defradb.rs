@@ -7,10 +7,10 @@ use document::Document;
 use lens::TargetedHistoryLink;
 use query::doc_stream::DocStream;
 use storage::corekv::{IterOptions, Store};
-use tracing::warn;
 
 use crate::collection::stream::CollectionDocStream;
 use crate::collection::Collection;
+use crate::read::autocommit::AutoCommitDocStream;
 use crate::txn::DbTxn;
 
 use super::LensedAutoCommitFetcher;
@@ -18,18 +18,11 @@ use super::LensedAutoCommitFetcher;
 /// Pulls documents from storage and applies the auto-commit fetcher's
 /// per-document migration to each one as it is yielded.
 ///
-/// Owns its own read-only transaction (auto-commit fetchers open one per
-/// operation): `release_read_txn` drops the inner stream first so its
-/// `NamespaceView`s give up their `Arc<SharedTxn>` clones, then discards the
-/// transaction - `BasicTxn::discard` requires sole ownership of that Arc.
-///
-/// `txn` is wrapped in a `std::sync::Mutex` purely so `DbTxn`'s non-`Sync`
-/// callback storage doesn't stop this struct satisfying `DocStream`'s
-/// `MaybeSendSync` bound; every access goes through `&mut self` via
-/// `get_mut`, so it never actually locks.
+/// The source is an [`AutoCommitDocStream`], which owns the read-only
+/// transaction auto-commit fetchers open per operation and releases it when
+/// the source is exhausted, closed or dropped.
 pub struct LensedAutoCommitDocStream<S: Store + 'static> {
-    inner: Option<Box<dyn DocStream>>,
-    txn: std::sync::Mutex<Option<DbTxn<S>>>,
+    source: AutoCommitDocStream<S>,
     fetcher: LensedAutoCommitFetcher<S>,
     collection: Collection,
     has_migrations: bool,
@@ -38,7 +31,6 @@ pub struct LensedAutoCommitDocStream<S: Store + 'static> {
 
 impl<S: Store + 'static> LensedAutoCommitDocStream<S> {
     /// Wrap an inner stream, optionally holding the read transaction it owns.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         inner: Box<dyn DocStream>,
         txn: Option<DbTxn<S>>,
@@ -47,33 +39,17 @@ impl<S: Store + 'static> LensedAutoCommitDocStream<S> {
         has_migrations: bool,
         preloaded_history: Option<RapidHashMap<String, TargetedHistoryLink>>,
     ) -> Self {
+        let source = match txn {
+            Some(txn) => AutoCommitDocStream::new(inner, txn),
+            None => AutoCommitDocStream::without_txn(inner),
+        };
         Self {
-            inner: Some(inner),
-            txn: std::sync::Mutex::new(txn),
+            source,
             fetcher,
             collection,
             has_migrations,
             preloaded_history,
         }
-    }
-
-    fn release_read_txn(&mut self) {
-        self.inner = None;
-        let slot = self
-            .txn
-            .get_mut()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(txn) = slot.take() {
-            if let Err(e) = txn.discard() {
-                warn!(error = %e, "failed to discard lensed auto-commit stream transaction");
-            }
-        }
-    }
-}
-
-impl<S: Store + 'static> Drop for LensedAutoCommitDocStream<S> {
-    fn drop(&mut self) {
-        self.release_read_txn();
     }
 }
 
@@ -81,13 +57,7 @@ impl<S: Store + 'static> Drop for LensedAutoCommitDocStream<S> {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store + 'static> DocStream for LensedAutoCommitDocStream<S> {
     async fn next(&mut self) -> query::error::Result<Option<(Document, bool)>> {
-        let pulled = match self.inner.as_mut() {
-            Some(inner) => inner.next().await?,
-            None => None,
-        };
-
-        let Some((doc, is_deleted)) = pulled else {
-            self.close().await?;
+        let Some((doc, is_deleted)) = self.source.next().await? else {
             return Ok(None);
         };
 
@@ -105,12 +75,7 @@ impl<S: Store + 'static> DocStream for LensedAutoCommitDocStream<S> {
 
     /// Close the inner stream and release its read snapshot.
     async fn close(&mut self) -> query::error::Result<()> {
-        let closed = match self.inner.take() {
-            Some(mut inner) => inner.close().await,
-            None => Ok(()),
-        };
-        self.release_read_txn();
-        closed
+        self.source.close().await
     }
 }
 
@@ -160,14 +125,14 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
             show_deleted,
         );
 
-        Ok(Box::new(LensedAutoCommitDocStream {
-            inner: Some(Box::new(inner)),
-            txn: std::sync::Mutex::new(Some(txn)),
-            fetcher: self.clone_for_stream(),
+        Ok(Box::new(LensedAutoCommitDocStream::new(
+            Box::new(inner),
+            Some(txn),
+            self.clone_for_stream(),
             collection,
             has_migrations,
             preloaded_history,
-        }))
+        )))
     }
 }
 
@@ -203,19 +168,19 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
             query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
         })?;
 
-        Ok(Box::new(LensedAutoCommitDocStream {
-            inner: Some(Box::new(crate::collection::stream::ShortIdDocStream::new(
+        Ok(Box::new(LensedAutoCommitDocStream::new(
+            Box::new(crate::collection::stream::ShortIdDocStream::new(
                 collection.clone(),
                 datastore,
                 systemstore,
                 doc_short_ids.to_vec(),
                 show_deleted,
-            ))),
-            txn: std::sync::Mutex::new(Some(txn)),
-            fetcher: self.clone_for_stream(),
+            )),
+            Some(txn),
+            self.clone_for_stream(),
             collection,
             has_migrations,
             preloaded_history,
-        }))
+        )))
     }
 }

@@ -315,6 +315,8 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
             .iter()
             .map(|block| Self::kms_request_context(Some(&batch_block_metadata(block))))
             .collect();
+        self.prefill_batch_keys(blocks, &kms_contexts, &retry_deks)
+            .await;
 
         let result = loop {
             let attempt = BatchMergeRetryAttempt {
@@ -394,6 +396,50 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
         }
 
         result
+    }
+
+    /// Fills each block's key map before the first attempt: one KMS request
+    /// per authorization context for every key its blocks decrypt with, and
+    /// each block given only the keys asked under its own context.
+    async fn prefill_batch_keys(
+        &self,
+        blocks: &[MergeBlock],
+        contexts: &[kms::RequestContext],
+        retry_deks: &[RetryDecryptionKeys],
+    ) {
+        if self.kms().is_none() {
+            return;
+        }
+        let mut needed = Vec::with_capacity(blocks.len());
+        for block in blocks {
+            needed.push(match Block::from_dag_cbor(&block.block_data) {
+                Ok(decoded) => self.merge_key_cids(&decoded).await,
+                Err(_) => Vec::new(),
+            });
+        }
+        let mut grouped: Vec<(&kms::RequestContext, Vec<usize>)> = Vec::new();
+        for (index, context) in contexts.iter().enumerate() {
+            match grouped.iter_mut().find(|(seen, _)| *seen == context) {
+                Some((_, members)) => members.push(index),
+                None => grouped.push((context, vec![index])),
+            }
+        }
+        for (context, members) in grouped {
+            let mut cids: Vec<Cid> = members
+                .iter()
+                .flat_map(|index| needed[*index].iter().copied())
+                .collect();
+            cids.sort_unstable();
+            cids.dedup();
+            let answers = self.fetch_merge_keys(context, &cids).await;
+            for index in members {
+                for (cid, answer) in &answers {
+                    if let (Ok(key), true) = (answer, needed[index].contains(cid)) {
+                        retry_deks[index].insert(*cid, key.clone());
+                    }
+                }
+            }
+        }
     }
 
     /// Decode and apply a block within the caller-owned attempt.

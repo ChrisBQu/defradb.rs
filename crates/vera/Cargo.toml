@@ -56,6 +56,11 @@ commonware-codec = "2026.9.0"
 # Lock-free shared state
 kovan.workspace = true
 kovan-map.workspace = true
+kovan-queue.workspace = true
+
+# Remote decisions: single-flight, a deadline, retries, an in-flight cap,
+# metrics; the byte-bounded registration cache.
+inputs = { path = "../inputs" }
 
 # Logging
 tracing.workspace = true

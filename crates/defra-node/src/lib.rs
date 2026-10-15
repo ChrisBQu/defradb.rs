@@ -1482,6 +1482,9 @@ impl NodeBuilder {
 
         // Wire event bus so mutations publish events
         database.set_event_bus(event_bus.clone());
+        if let Some(network) = network.as_ref() {
+            database.set_network(network.edge().clone());
+        }
         let database = Arc::new(database);
         let closer = close_database(&database);
 
@@ -1619,12 +1622,16 @@ impl NodeBuilder {
                     .expect("static anonymous DID parses")
             });
 
-            let kms_service: Arc<dyn kms::KmsService> = Arc::new(kms::DefraKms::new(
+            let kms_service: Arc<dyn kms::KmsService> = Arc::new(kms::DefraKms::with_inputs(
                 key_store,
                 vec![p2p.kms_transport.clone()],
                 policy as Arc<dyn kms::AccessPolicy>,
                 Arc::new(db::DbBlockDocIDResolver::new(database.clone())),
                 kms_node_did,
+                network
+                    .as_ref()
+                    .map(|network| kms::KmsInputs::on(network.edge()))
+                    .unwrap_or_default(),
             ));
 
             // Bind this node's transport peer id into the KMS so served

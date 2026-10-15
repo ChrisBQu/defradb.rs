@@ -3,8 +3,10 @@
 use async_trait::async_trait;
 use defra_core::thread_bounds::MaybeSendSync;
 
+use rapidhash::{HashMapExt, RapidHashMap};
+
 use crate::context::RequestContext;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::results::KeyResults;
 use crate::types::{EncryptionCid, KeyScope};
 use crate::wire::{FetchEncryptionKeyReply, FetchEncryptionKeyRequest};
@@ -31,6 +33,50 @@ pub trait KmsService: MaybeSendSync {
     /// aggregator because keys may arrive from peers asynchronously.
     /// `ctx` carries the caller identity (set at HTTP/CLI entry points).
     async fn get_keys(&self, ctx: &RequestContext, cids: &[EncryptionCid]) -> Result<KeyResults>;
+
+    /// One answer per CID, in the order asked: the form a caller that asks
+    /// for several keys at once and needs each one's outcome uses. The keys
+    /// not held locally go to peers in one request.
+    ///
+    /// The default drains [`get_keys`](Self::get_keys), whose errors name no
+    /// CID: a CID it got no key for carries the last error it saw.
+    async fn get_keys_each(
+        &self,
+        ctx: &RequestContext,
+        cids: &[EncryptionCid],
+    ) -> Result<Vec<Result<[u8; 32]>>> {
+        let mut receiver = self.get_keys(ctx, cids).await?.into_receiver();
+        let mut keys = RapidHashMap::with_capacity(cids.len());
+        let mut last_error = None;
+        while let Some(item) = receiver.recv().await {
+            match item {
+                Ok((cid, key)) => {
+                    keys.insert(cid, key);
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Ok(cids
+            .iter()
+            .map(|cid| {
+                keys.get(cid)
+                    .copied()
+                    .ok_or_else(|| last_error.clone().unwrap_or(Error::KeyUnavailable))
+            })
+            .collect())
+    }
+
+    /// Starts fetching the keys of `cids` this node does not hold, without
+    /// waiting for them, so a merge that needs a key later finds it local or
+    /// joins the request in flight instead of making another.
+    ///
+    /// The default asks [`get_keys_each`](Self::get_keys_each) and drops the
+    /// answers.
+    async fn prefetch_keys(&self, ctx: &RequestContext, cids: &[EncryptionCid]) {
+        if let Err(error) = self.get_keys_each(ctx, cids).await {
+            tracing::debug!(%error, keys = cids.len(), "key prefetch failed");
+        }
+    }
 
     /// Generate a fresh DEK for the given scope, persist it locally, and
     /// return both the CID of the on-disk `Encryption` block AND the plain
