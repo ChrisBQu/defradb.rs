@@ -265,6 +265,11 @@ impl Pool {
         }
     }
 
+    /// Whether the pool has begun to shut down: it takes no new work.
+    pub fn is_closing(&self) -> bool {
+        self.handle.shared.closing.load(Ordering::Acquire)
+    }
+
     /// How many workers the pool runs.
     pub fn workers(&self) -> usize {
         self.handle.shared.workers.len()

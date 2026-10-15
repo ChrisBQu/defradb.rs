@@ -53,6 +53,7 @@ where
 /// attempt fails, or the policy's attempts are spent.
 pub(super) async fn transact(
     db: &Arc<OptimisticTransactionDb>,
+    queue: Option<regolith::QueueId>,
     isolation: regolith::IsolationLevel,
     event_order: &Arc<EventOrder>,
     options: RetryOptions,
@@ -91,10 +92,10 @@ pub(super) async fn transact(
             })
         }
     });
-    // On a worker the attempts run on its queue, polled between its tasks.
-    // Anywhere else the task drives a queue of its own and never parks its
-    // thread, so the executor it runs on keeps scheduling it.
-    let outcome = match super::worker_io::queue_for(db) {
+    // On a pool the attempts do their I/O on a worker's queue, polled
+    // between its tasks. Without one the task drives a queue of its own and
+    // never parks its thread, so the executor it runs on keeps scheduling it.
+    let outcome = match queue {
         Some(queue) => db.transact_async(queue, &policy, run).await,
         None => {
             let mut queue = db.db().io_queue();
