@@ -32,15 +32,15 @@ The stack now has the intended 11 draft PRs. Split into two stacks if further ne
 | 2 | Transactional decision reads, local ACP, relationship/NAC/downsample decisions | Preserve these fences through batch integration |
 | 3 | Arrival append, ID allocation, field/counter/vector/full-text operators, head markers, read-only lenses and known-field write projections | General query/output and conditional reads remain conservative; no blanket zero-conflict claim |
 | 4 | Receipt-ordered events and fallible ordered ACP hooks | Preserve winner-only hooks and suppress events on hook failure in whole-batch retries |
-| 5 | Engine retries for individual/many writes, merges, lenses, backfill and pending DAG writes; bounded prepared inputs | Whole implicit GraphQL batch conversion and request bearer propagation published at `d761f2fe`; fix CI-discovered plain-update preparation mismatch and finish combined tests |
+| 5 | Engine retries for individual/many writes, merges, lenses, backfill and pending DAG writes; bounded prepared inputs | Whole implicit GraphQL batch conversion, request bearer propagation and target/prepared-key separation published at `438cffd57`; final combined CI/performance pending |
 | 6 | Requested locks/cache/forced-read APIs removed; snapshot metadata, collection OCC, immutable ACP projections and peer generation fences replace them | Final batch projection, global backfill fence and safe allocation changes integrated locally at `0dc247b6c`; final combined validation and publication pending |
 | 7 | Native commit/policy tickers and bounded conflict reasons; caller instrumentation retained | Revalidate after lower-stack restack |
 | 8 | Obsolete cache/counter/queue proofs retired; HeadSet retained; pinned arrival proof and new adapter boundary models | Revalidate after lower-stack restack; models do not verify Rust or remote authorization |
 
 ### Immediate blockers
 
-1. Fix the CI-discovered preparation mismatch on plain update/upsert. Empty prepared key maps are incorrectly interpreted as missing mutation targets. Datetime feature tests and browser relay tests exposed this; a fix and focused regressions are in progress. Whole-batch QueryExecutor/direct API/local ACP revocation regressions pass. The step-6 remote-provider regression now uses a nontransactional adapter and proves only winning registration hooks run.
-2. Publish the combined step-6 repair at `0dc247b6c`. This includes the namespaced global allocator backfill cutoff, snapshot metadata reload, safe read/decode allocation changes, batch ACP projection and captured bearer contexts. Native all-target and WASM lint pass; exact deferred-ACP-removal boundary `e6d44f8f1` compiles. Steps 7/8 have been restacked locally.
+1. Finish combined validation. Plain update/upsert target membership is now tracked independently from optional key artifacts (`438cffd57`), fixing the DateTime/browser-relay preparation failure. Indexed/nonindexed DateTime tests and the hidden-target Upsert regression pass. Dedicated mixed-target coverage is being added. CI's mixed Go/Rust counter parity failure passed all three local runtime controls and ten additional mixed repeats, but remains unresolved until fresh CI.
+2. Publish the combined step-6 repair at `0dc247b6c`. This includes the namespaced global allocator backfill cutoff, snapshot metadata reload, safe read/decode allocation changes, batch ACP projection and captured bearer contexts. Native all-target and WASM lint pass; exact deferred-ACP-removal boundary `e6d44f8f1` compiles. Steps 7/8 have been restacked locally. Broader P2P library tests exposed stale boolean durability senders after the generation-token API change; a step-6 test repair is in progress.
 3. Run final combined native/WASM, external interoperability, counter conformance and fresh CI after restacking. Checkpoint passes below are not final-tip passes.
 4. Complete §5.3 performance and allocation gates. Existing measurements show regressions; none is waived. Prepare isolated benchmark binaries, then measure with a fresh load guard and no concurrent builds/tests.
 
@@ -51,7 +51,8 @@ The stack now has the intended 11 draft PRs. Split into two stacks if further ne
 | Published step 3 `230c36c1`, prep `199daa57` | All reported CI checks pass at latest inspection | Does not cover later PRs |
 | Published step 4 `3c8bed28` | All reported CI checks pass at inspection | Check live CI |
 | Step 5 before new whole-batch work | Native DB/storage/P2P and WASM Clippy pass; read/search/transaction/vector/view/write and merge checkpoints pass | Needs final combined rerun |
-| Step 5 `d761f2fe` | Native all-target and WASM Clippy pass; preceding DB/core/query library checkpoint passes 717 tests and all three batch conflicts pass | External tests running; CI plain-update mismatch remains open |
+| Step 5 `d761f2fe` | ACP 204 pass/16 ignored, basic 56 pass, encryption 25 pass, counter 9 pass/8 ignored; mixed runtime parity controls 3 pass plus ten mixed repeats | Predates target-set fix |
+| Step 5 `438cffd57` / combined tip `731a90a5c` | Native all-target step-5 lint and combined-tip WASM lint pass; DateTime and hidden-target Upsert regressions pass | Final native/external suites and fresh CI pending |
 | Step 6 `0dc247b6c` | Native all-target and WASM Clippy pass; remote ACP winner-only conflict regression and three bearer-hook tests pass | Full combined tests running |
 | Independent query provider-boundary candidate | 744 query tests pass | Predates final combined batch/projection changes |
 | Step 6 before latest repairs | 679 DB tail tests pass (14 ignored); 1275 query/storage/authorization tests pass | Later race repairs and batch changes require rerun |
