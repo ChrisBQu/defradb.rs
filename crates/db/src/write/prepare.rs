@@ -195,7 +195,9 @@ where
             let input = defra_core::signing::RemoteSignatureInput::decode(request.exact_request())
                 .map_err(query::error::QueryError::execution)?;
             let signer = defra_core::signing::get_signing_config().ok_or_else(|| {
-                query::error::QueryError::execution("remote signature input has no configured signer")
+                query::error::QueryError::execution(
+                    "remote signature input has no configured signer",
+                )
             })?;
             let response = input
                 .resolve(&signer)
@@ -203,14 +205,16 @@ where
             Ok(std::sync::Arc::from(response))
         }
         query::prepared::PreparedInputKind::KmsKey => {
-            let operation: PreparedKmsOperation =
-                serde_json::from_slice(request.exact_request()).map_err(|error| {
-                    query::error::QueryError::execution(format!(
-                        "invalid prepared KMS request: {error}"
-                    ))
-                })?;
+            let operation: PreparedKmsOperation = serde_json::from_slice(request.exact_request())
+                .map_err(|error| {
+                query::error::QueryError::execution(format!(
+                    "invalid prepared KMS request: {error}"
+                ))
+            })?;
             let kms = db.kms().ok_or_else(|| {
-                query::error::QueryError::execution("prepared KMS input has no configured KMS provider")
+                query::error::QueryError::execution(
+                    "prepared KMS input has no configured KMS provider",
+                )
             })?;
             let context = match &operation {
                 PreparedKmsOperation::GetForRead {
@@ -276,9 +280,7 @@ where
         query::prepared::PreparedInputKind::NodePermission => {
             let (identity, permission): (String, String) =
                 serde_json::from_slice(request.exact_request()).map_err(|_| {
-                    query::error::QueryError::execution(
-                        "invalid prepared node permission request",
-                    )
+                    query::error::QueryError::execution("invalid prepared node permission request")
                 })?;
             // An attempt with no acting identity asks for the wildcard actor.
             let identity = if identity == identity::Did::wildcard().as_str() {

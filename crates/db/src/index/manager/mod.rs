@@ -22,8 +22,8 @@ mod index_type;
 mod rebuild;
 mod unique;
 pub use index_type::IndexType;
-pub use unique::MergeConflictOutcome;
 use storage::keys::IndexIDSequenceKey;
+pub use unique::MergeConflictOutcome;
 
 pub mod doc_source;
 pub use doc_source::{DocumentSource, SliceSource};

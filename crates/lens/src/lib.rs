@@ -17,6 +17,8 @@ mod wasm_runtime;
 
 pub use config::{LensConfig, LensModule};
 pub use doc::{LensDoc, DELETED_FIELD, DOC_ID_FIELD};
+#[cfg(feature = "wasmtime-runtime")]
+pub use engine::WasmSandboxConfig;
 pub use engine::{default_store, UnsupportedTransformStore};
 pub use error::{Error, Result};
 pub use history::{build_targeted_history, CollectionHistoryLink, TargetedHistoryLink};
@@ -24,7 +26,5 @@ pub use pipeline::{transform_to_target, Lens, LensInput};
 pub use store::{
     LensDocResultStream, LensDocStream, MemoryTransformStore, TransformId, TransformStore,
 };
-#[cfg(feature = "wasmtime-runtime")]
-pub use engine::WasmSandboxConfig;
 #[cfg(feature = "wasmtime-runtime")]
 pub use wasm::WasmTransformStore;

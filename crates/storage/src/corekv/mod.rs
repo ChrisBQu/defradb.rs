@@ -74,8 +74,8 @@ pub mod types;
 
 // Re-export commonly used types and traits for convenience
 pub use callbacks::{
-    make_async_callback, make_callback, AsyncTxnCallback, BeforeCommit, CallOnce, CallbackMark, CommitHook,
-    Committed, Ended, OnAbort, OnCommit, TxnCallback, TxnCallbacks,
+    make_async_callback, make_callback, AsyncTxnCallback, BeforeCommit, CallOnce, CallbackMark,
+    CommitHook, Committed, Ended, OnAbort, OnCommit, TxnCallback, TxnCallbacks,
 };
 pub use errors::{Error, Result, TransactionConflict, UNIQUE_CONSTRAINT_VIOLATION_MESSAGE};
 pub use iterator::{Iterator, KvPair};

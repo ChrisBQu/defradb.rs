@@ -182,16 +182,27 @@ impl IndexManager {
         if let Some(holder) = holder {
             let key = self.encode_index_key(index.description(), values)?;
             if holder != doc_short_id
-                && [holder, doc_short_id]
-                    .iter()
-                    .any(|id| original_keys.get(id).is_some_and(|keys| !keys.contains(&key)))
+                && [holder, doc_short_id].iter().any(|id| {
+                    original_keys
+                        .get(id)
+                        .is_some_and(|keys| !keys.contains(&key))
+                })
             {
-                return Err(Error::Storage(storage::corekv::Error::UniqueConstraintViolation));
+                return Err(Error::Storage(
+                    storage::corekv::Error::UniqueConstraintViolation,
+                ));
             }
         }
-        self.save_resolving_unique_conflict(datastore, systemstore, index, doc_short_id, doc_id, values)
-            .await
-            .map_err(Error::Storage)?;
+        self.save_resolving_unique_conflict(
+            datastore,
+            systemstore,
+            index,
+            doc_short_id,
+            doc_id,
+            values,
+        )
+        .await
+        .map_err(Error::Storage)?;
         Ok(())
     }
 }

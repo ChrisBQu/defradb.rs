@@ -451,7 +451,10 @@ mod tests {
         let base =
             WasmTransformStore::with_sandbox(Some(WasmSandboxConfig::restrictive())).unwrap();
         let local = base.empty_with_shared_engine();
-        assert!(wasmtime::Engine::same(base.engine.engine(), local.engine.engine()));
+        assert!(wasmtime::Engine::same(
+            base.engine.engine(),
+            local.engine.engine()
+        ));
         let clock = base.engine.clock_handle().unwrap();
         assert!(clock.ptr_eq(&local.engine.clock_handle().unwrap()));
         drop(base);

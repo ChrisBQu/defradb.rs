@@ -17,9 +17,9 @@ const IDENTITY_PASSTHROUGH_WASM: &[u8] = &[
     0x00, // import lens.next
     0x03, 0x03, 0x02, 0x01, 0x00, // alloc and transform functions
     0x05, 0x03, 0x01, 0x00, 0x01, // one-page memory
-    0x07, 0x1e, 0x03, 0x06, b'm', b'e', b'm', b'o', b'r', b'y', 0x02, 0x00, 0x05, b'a', b'l',
-    b'l', b'o', b'c', 0x00, 0x01, 0x09, b't', b'r', b'a', b'n', b's', b'f', b'o', b'r', b'm',
-    0x00, 0x02, // exports
+    0x07, 0x1e, 0x03, 0x06, b'm', b'e', b'm', b'o', b'r', b'y', 0x02, 0x00, 0x05, b'a', b'l', b'l',
+    b'o', b'c', 0x00, 0x01, 0x09, b't', b'r', b'a', b'n', b's', b'f', b'o', b'r', b'm', 0x00,
+    0x02, // exports
     0x0a, 0x0c, 0x02, 0x05, 0x00, 0x41, 0x80, 0x08, 0x0b, 0x04, 0x00, 0x10, 0x00,
     0x0b,
     // alloc returns the same in-bounds scratch offset; transform returns the next input
@@ -159,8 +159,7 @@ fn measure_epoch_ticker_periods() {
         // Warm module instantiation, host marshalling, and the timer before sampling.
         for _ in 0..5 {
             let result =
-                execute_batch_transform(&engine, &module, input_docs.clone(), None, false)
-                    .unwrap();
+                execute_batch_transform(&engine, &module, input_docs.clone(), None, false).unwrap();
             assert_eq!(result, input_docs);
         }
 
@@ -184,8 +183,7 @@ fn measure_epoch_ticker_periods() {
                     Err(error) => panic!("light transform failed unexpectedly: {error}"),
                 }
             }
-            light_ns_per_doc
-                .push(started.elapsed().as_nanos() as f64 / doc_count.max(1) as f64);
+            light_ns_per_doc.push(started.elapsed().as_nanos() as f64 / doc_count.max(1) as f64);
             light_traps_per_sample.push(sample_traps);
         }
         let raw_light_ns_per_doc = light_ns_per_doc.clone();

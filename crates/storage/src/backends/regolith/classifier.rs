@@ -22,9 +22,9 @@ impl KeyClassifier for DefraKeyClassifier {
         };
         match family.class() {
             Class::Ordinary => KeyClass::Ordinary,
-            Class::CommutativeSet => family
-                .entity_len(key)
-                .map_or(KeyClass::Ordinary, |len| KeyClass::CommutativePrefix { len }),
+            Class::CommutativeSet => family.entity_len(key).map_or(KeyClass::Ordinary, |len| {
+                KeyClass::CommutativePrefix { len }
+            }),
             // CID parsing uses fixed-size multihash storage and allocates
             // nothing.
             Class::ContentAddressed if cid::Cid::try_from(family.rest(key)).is_ok() => {
