@@ -52,14 +52,21 @@ impl Collection {
             .await
     }
 
+    /// With `update`, a partial update of those fields, written as operands
+    /// ordered by the document heads it builds its blocks from; without, a
+    /// structural rewrite of the whole value.
     pub(crate) async fn update_with_indexes_parts(
         &self,
         datastore: &NamespaceView,
         doc: &Document,
         doc_short_id: u64,
         index_manager: &IndexManager,
-        modified: Option<&rapidhash::RapidHashSet<String>>,
+        update: Option<(
+            &rapidhash::RapidHashSet<String>,
+            &crate::block::builder::DocHeadsSnapshot,
+        )>,
     ) -> Result<()> {
+        let modified = update.map(|(fields, _)| fields);
         // Validate document against schema
         self.validate_document(doc)?;
 
@@ -74,22 +81,12 @@ impl Collection {
         // Get old document for index update
         let old_doc = match modified {
             Some(changed) => {
-                // A counter increment is a blind operand: its old value is a
-                // dependency only of an index over the counter, added below.
-                let mut fields: rapidhash::RapidHashSet<String> = changed
-                    .iter()
-                    .filter(|name| doc.get_counter_delta(name).is_none())
-                    .cloned()
-                    .collect();
-                for index in index_manager.get_indexes() {
-                    if index
-                        .fields
-                        .iter()
-                        .any(|field| changed.contains(&field.name))
-                    {
-                        fields.extend(index.fields.iter().map(|field| field.name.clone()));
-                    }
-                }
+                let fields = query::update_parts::written(
+                    &self.def,
+                    index_manager.get_indexes(),
+                    changed,
+                    |name| doc.get_counter_delta(name).is_some(),
+                );
                 self.get_with_datastore_fields(datastore, doc_short_id, doc_id, &fields)
                     .await?
             }
@@ -137,15 +134,16 @@ impl Collection {
             None => self.validate_immutable_fields_unchanged(&old_doc, doc)?,
         }
 
-        let series_changed = modified.is_none_or(|changed| changed.contains("source_doc_id"));
+        let series_changed =
+            modified.is_none_or(|changed| changed.contains(crate::downsample::SERIES_FIELD));
         if series_changed {
             self.release_series(datastore, &old_doc).await?;
             self.claim_series(datastore, doc).await?;
         }
 
-        match modified {
-            Some(fields) => {
-                self.merge_local_document_value(datastore, doc_short_id, doc, fields)
+        match update {
+            Some((fields, heads)) => {
+                self.merge_local_document_value(datastore, doc_short_id, doc, fields, heads)
                     .await?
             }
             None => {

@@ -228,33 +228,16 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         // The fresh read, stale-plan comparison, rebase, and writes all belong
         // to this attempt. A storage conflict therefore repeats the complete
         // decision against the next engine snapshot.
-        let mut dependencies = attempt
-            .expected_fields
-            .clone()
-            .unwrap_or_else(|| attempt.modified_fields.clone());
-        dependencies.extend(attempt.modified_fields.iter().cloned());
-        // A counter increment is a blind operand and decides nothing; an index
-        // or embedding over the counter adds it back below.
-        dependencies.retain(|field| attempt.input.get_counter_delta(field).is_none());
+        // The parts this update decides on: those its plan compared and those
+        // its writes decide on.
+        let mut dependencies = query::update_parts::written(
+            collection.schema(),
+            collection.write_indexes(),
+            &attempt.modified_fields,
+            |field| attempt.input.get_counter_delta(field).is_some(),
+        );
+        dependencies.extend(attempt.expected_fields.iter().flatten().cloned());
         let fetcher = if attempt.expected.is_none() || attempt.expected_fields.is_some() {
-            for index in collection.write_indexes() {
-                if index
-                    .fields
-                    .iter()
-                    .any(|field| attempt.modified_fields.contains(&field.name))
-                {
-                    dependencies.extend(index.fields.iter().map(|field| field.name.clone()));
-                }
-            }
-            for embedding in &collection.schema().vector_embeddings {
-                if embedding
-                    .fields
-                    .iter()
-                    .any(|field| attempt.modified_fields.contains(field))
-                {
-                    dependencies.extend(embedding.fields.iter().cloned());
-                }
-            }
             LensedDocFetcher::new_projected(
                 Arc::clone(&self.db),
                 txn,
@@ -336,6 +319,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         current_doc.set_id(canonical_doc_id.clone());
         let mut modified_fields = attempt.modified_fields.clone();
         let embedding_config = self.db.options().embedding_config();
+        let inputs = attempt.prepared_inputs.clone().unwrap_or_default();
         let index_manager = IndexManager::from_indexes(
             collection.resolved_root_id(),
             collection.schema(),
@@ -350,12 +334,14 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     .validate_downsample_write(
                         &datastore,
                         &systemstore,
-                        collection.schema(),
+                        &collection,
                         &current_doc,
                         Some(&modified_fields),
                     )
                     .await
                     .map_err(|error| query::error::QueryError::execution(error.to_string()))?;
+                let heads =
+                    super::helpers::load_update_heads(&datastore, doc_short_id).await?;
                 write_local_update(
                     &datastore,
                     &collection,
@@ -363,8 +349,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     doc_short_id,
                     &index_manager,
                     &mut modified_fields,
-                    Some(&embedding_config),
-                    attempt.prepared_inputs.as_ref(),
+                    &heads,
+                    &embedding_config,
+                    &inputs,
                 )
                 .await?;
                 let block_result = write_document_blocks_with_inputs(
@@ -378,6 +365,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     attempt.signing_config.as_ref(),
                     self.db.kms().as_ref(),
                     attempt.prepared_inputs.as_ref(),
+                    Some(&heads),
                 )
                 .await
                 .map_err(|error| match error {

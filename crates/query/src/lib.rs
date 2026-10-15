@@ -45,6 +45,7 @@ pub mod mutator;
 pub mod plan;
 pub mod planner;
 pub mod txn;
+pub mod update_parts;
 
 // Re-exports for convenience
 pub use document::{DocumentMapping, RenderKey};

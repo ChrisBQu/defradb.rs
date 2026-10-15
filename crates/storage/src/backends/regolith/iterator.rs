@@ -111,6 +111,8 @@ pub(crate) struct RegolithIterator {
     reverse: bool,
     keys_only: bool,
     validated: bool,
+    /// The parts a scan's decision used; see [`IterOptions::with_parts`].
+    parts: Option<Box<[u32]>>,
     closed: bool,
     /// An entry `seek` pulled off to answer whether one exists, handed
     /// back by the next `next` rather than skipped.
@@ -133,6 +135,7 @@ impl RegolithIterator {
             reverse: opts.reverse(),
             keys_only: opts.keys_only(),
             validated: opts.validated(),
+            parts: opts.parts().map(Box::from),
             closed: false,
             peeked: None,
         };
@@ -199,10 +202,10 @@ impl RegolithIterator {
                         regolith::ScanDirection::Forward,
                     )
                 };
-                let check = if self.validated {
-                    regolith::ScanCheck::Range
-                } else {
-                    regolith::ScanCheck::Stretch
+                let check = match (&self.parts, self.validated) {
+                    (_, true) => regolith::ScanCheck::Range,
+                    (Some(parts), false) => regolith::ScanCheck::Parts(parts.clone()),
+                    (None, false) => regolith::ScanCheck::Stretch,
                 };
                 Source::Txn {
                     cursor: txn.cursor(start.as_deref(), end.as_deref(), direction, check),

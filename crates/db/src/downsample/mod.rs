@@ -9,3 +9,4 @@ mod types;
 mod validate;
 
 pub use types::GcDownsampleHistoriesOptions;
+pub(crate) use types::SERIES_FIELD;

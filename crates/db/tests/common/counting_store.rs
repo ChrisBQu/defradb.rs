@@ -9,8 +9,14 @@
 //! The measurement point is the `Store` trait boundary. Whatever a backend
 //! does to refill its own window happens inside its `Iterator` implementation,
 //! below this decorator, and is not counted here.
+//!
+//! It also records the keys an explicit transaction reads by point, scans by
+//! prefix and writes, so a test can say which keys a write path touched.
+//! Engine-owned retry attempts (`transact_retry`) pass straight through and
+//! are neither counted nor recorded.
 
 use async_trait::async_trait;
+use regolith::sync::SegQueue;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -30,6 +36,20 @@ use storage::corekv::Writer;
 struct Counts {
     keys_read: AtomicUsize,
     point_gets: AtomicUsize,
+    point_keys: SegQueue<Vec<u8>>,
+    scan_prefixes: SegQueue<Vec<u8>>,
+    written_keys: SegQueue<Vec<u8>>,
+}
+
+impl Counts {
+    fn point(&self, key: &[u8]) {
+        self.point_gets.fetch_add(1, Ordering::SeqCst);
+        self.point_keys.push(key.to_vec());
+    }
+}
+
+fn drain(queue: &SegQueue<Vec<u8>>) -> Vec<Vec<u8>> {
+    std::iter::from_fn(|| queue.pop()).collect()
 }
 
 /// Wraps a store and counts what a query actually pulls out of it.
@@ -55,6 +75,21 @@ impl<S: Store> CountingStore<S> {
     /// assembly performs per document.
     pub(crate) fn point_gets(&self) -> usize {
         self.counts.point_gets.load(Ordering::SeqCst)
+    }
+
+    /// The keys read by point since the last call, oldest first.
+    pub(crate) fn take_point_keys(&self) -> Vec<Vec<u8>> {
+        drain(&self.counts.point_keys)
+    }
+
+    /// The prefix (empty without one) of each scan opened since the last call.
+    pub(crate) fn take_scan_prefixes(&self) -> Vec<Vec<u8>> {
+        drain(&self.counts.scan_prefixes)
+    }
+
+    /// The keys put, merged into or deleted since the last call.
+    pub(crate) fn take_written_keys(&self) -> Vec<Vec<u8>> {
+        drain(&self.counts.written_keys)
     }
 }
 
@@ -106,21 +141,29 @@ impl Sealed for CountingTxn {}
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Reader for CountingTxn {
     async fn get(&self, key: &[u8]) -> Result<Option<bytes::Bytes>> {
-        self.counts.point_gets.fetch_add(1, Ordering::SeqCst);
+        self.counts.point(key);
         self.inner.get(key).await
     }
 
+    async fn get_parts(&self, key: &[u8], parts: &[u32]) -> Result<Option<bytes::Bytes>> {
+        self.counts.point(key);
+        self.inner.get_parts(key, parts).await
+    }
+
     async fn has(&self, key: &[u8]) -> Result<bool> {
-        self.counts.point_gets.fetch_add(1, Ordering::SeqCst);
+        self.counts.point(key);
         self.inner.has(key).await
     }
 
     async fn get_size(&self, key: &[u8]) -> Result<Option<usize>> {
-        self.counts.point_gets.fetch_add(1, Ordering::SeqCst);
+        self.counts.point(key);
         self.inner.get_size(key).await
     }
 
     async fn iterator(&self, opts: IterOptions) -> Result<Box<dyn Iterator>> {
+        self.counts
+            .scan_prefixes
+            .push(opts.prefix().map(<[u8]>::to_vec).unwrap_or_default());
         Ok(Box::new(CountingIterator {
             inner: self.inner.iterator(opts).await?,
             counts: Arc::clone(&self.counts),
@@ -132,6 +175,7 @@ impl Reader for CountingTxn {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Writer for CountingTxn {
     async fn merge(&mut self, key: &[u8], operand: &[u8]) -> Result<()> {
+        self.counts.written_keys.push(key.to_vec());
         self.inner.merge(key, operand).await
     }
 
@@ -145,10 +189,12 @@ impl Writer for CountingTxn {
     }
 
     async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+        self.counts.written_keys.push(key.to_vec());
         self.inner.set(key, value).await
     }
 
     async fn delete(&mut self, key: &[u8]) -> Result<()> {
+        self.counts.written_keys.push(key.to_vec());
         self.inner.delete(key).await
     }
 }
@@ -158,6 +204,25 @@ impl Writer for CountingTxn {
 impl Txn for CountingTxn {
     async fn commit(self: Box<Self>) -> Result<()> {
         self.inner.commit().await
+    }
+
+    fn set_savepoint(&mut self) -> Result<()> {
+        self.inner.set_savepoint()
+    }
+
+    fn rollback_to_savepoint(&mut self) -> Result<()> {
+        self.inner.rollback_to_savepoint()
+    }
+
+    fn release_savepoint(&mut self) -> Result<()> {
+        self.inner.release_savepoint()
+    }
+
+    fn on_success_ordered_async(
+        &mut self,
+        callback: storage::corekv::AsyncOrderedTxnCallback,
+    ) -> Result<()> {
+        self.inner.on_success_ordered_async(callback)
     }
 
     fn discard(self: Box<Self>) {

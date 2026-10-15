@@ -322,12 +322,16 @@ pub async fn get_collection_with_lazy_load<S: Store + 'static>(
     collection_name: &str,
 ) -> query::error::Result<(Collection, NamespaceView, NamespaceView)> {
     // Extract what we need from the transaction while holding the lock briefly
-    let (collection_opt, systemstore, datastore) = {
+    let (collection_opt, shared, systemstore, datastore) = {
         let txn_guard = txn.lock().await;
         let db_txn = txn_guard
             .as_ref()
             .ok_or_else(|| query::error::QueryError::execution("transaction already consumed"))?;
         let collection_opt = db_txn.collection_cache().get(collection_name).cloned();
+        let shared = collection_opt
+            .is_none()
+            .then(|| db_txn.shared_collection(collection_name))
+            .flatten();
         let systemstore = db_txn.systemstore().map_err(|e| {
             query::error::QueryError::execution(format!(
                 "failed to get systemstore for collection '{}': {}",
@@ -340,15 +344,19 @@ pub async fn get_collection_with_lazy_load<S: Store + 'static>(
                 collection_name, e
             ))
         })?;
-        (collection_opt, systemstore, datastore)
+        (collection_opt, shared, systemstore, datastore)
     };
 
     // Return cached collection if found
     let collection = if let Some(col) = collection_opt {
         col
     } else {
-        // Cache miss: load from SystemStore
-        let loaded = load_collection_from_systemstore(&systemstore, collection_name).await?;
+        // Cache miss: load from SystemStore. A definition byte-equal to the
+        // database's committed handle reuses that handle's decoded schema and
+        // part-ID map instead of parsing them again.
+        let loaded =
+            load_collection_from_systemstore_impl(&systemstore, collection_name, shared.as_ref())
+                .await?;
         let collection = loaded
             .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
 

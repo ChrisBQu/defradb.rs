@@ -72,6 +72,18 @@ impl Namespace {
         prefixed
     }
 
+    /// `opts` scoped to this namespace: every bound prefixed, and the
+    /// namespace's own byte as the prefix when the caller gave none, so a scan
+    /// never leaves the namespace even when it has a start or an end.
+    pub(crate) fn scope(&self, opts: IterOptions) -> IterOptions {
+        let scoped = opts.map_keys(|key| self.prefix_key(key));
+        if scoped.prefix().is_some() {
+            scoped
+        } else {
+            scoped.with_prefix(vec![self.prefix()])
+        }
+    }
+
     /// Remove prefix from a key (for internal use)
     pub(crate) fn unprefix_key<'a>(&self, key: &'a [u8]) -> Result<&'a [u8]> {
         if key.is_empty() {
@@ -282,24 +294,8 @@ impl Reader for NamespacedRetryAttemptIO {
     }
 
     async fn iterator(&self, opts: IterOptions) -> Result<Box<dyn Iterator>> {
-        let mut prefixed = IterOptions::new();
-        if let Some(prefix) = opts.prefix() {
-            prefixed = prefixed.with_prefix(self.namespace.prefix_key(prefix));
-        } else {
-            prefixed = prefixed.with_prefix(vec![self.namespace.prefix()]);
-        }
-        if let Some(start) = opts.start() {
-            prefixed = prefixed.with_start(self.namespace.prefix_key(start));
-        }
-        if let Some(end) = opts.end() {
-            prefixed = prefixed.with_end(self.namespace.prefix_key(end));
-        }
-        prefixed = prefixed
-            .with_reverse(opts.reverse())
-            .with_keys_only(opts.keys_only())
-            .with_validation(opts.validated());
         Ok(Box::new(NamespacedIterator {
-            iter: self.inner().iterator(prefixed).await?,
+            iter: self.inner().iterator(self.namespace.scope(opts)).await?,
             namespace: self.namespace,
         }))
     }
@@ -376,33 +372,7 @@ impl Reader for NamespacedTxn {
     }
 
     async fn iterator(&self, opts: IterOptions) -> Result<Box<dyn Iterator>> {
-        // Prefix the iterator options
-        // IMPORTANT: If no prefix/start/end is specified, we MUST still scope to our namespace
-        // to prevent cross-namespace iteration
-        let mut prefixed_opts = IterOptions::new();
-
-        // Always scope to namespace via prefix to prevent cross-namespace data leakage
-        if let Some(prefix) = opts.prefix() {
-            // User specified a prefix - add namespace prefix to it
-            prefixed_opts = prefixed_opts.with_prefix(self.namespace.prefix_key(prefix));
-        } else {
-            // No user prefix specified - default to namespace prefix
-            // This ensures we ALWAYS iterate within our namespace, even when start/end are specified
-            prefixed_opts = prefixed_opts.with_prefix(vec![self.namespace.prefix()]);
-        }
-
-        if let Some(start) = opts.start() {
-            prefixed_opts = prefixed_opts.with_start(self.namespace.prefix_key(start));
-        }
-        if let Some(end) = opts.end() {
-            prefixed_opts = prefixed_opts.with_end(self.namespace.prefix_key(end));
-        }
-        prefixed_opts = prefixed_opts
-            .with_reverse(opts.reverse())
-            .with_keys_only(opts.keys_only())
-            .with_validation(opts.validated());
-
-        let iter = self.txn.iterator(prefixed_opts).await?;
+        let iter = self.txn.iterator(self.namespace.scope(opts)).await?;
         Ok(Box::new(NamespacedIterator {
             iter,
             namespace: self.namespace,

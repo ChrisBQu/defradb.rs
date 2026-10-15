@@ -47,8 +47,13 @@ pub(crate) async fn write_branchable_collection_block<S: storage::corekv::Store 
 
 /// Persist a local UPDATE: write the document's changed parts and maintain
 /// indexes. A counter increment is a blind operand on the counter's part of
-/// the document value, its only stored copy. When requested, embeddings use
-/// the final field values before persistence.
+/// the document value, its only stored copy. Embeddings over changed fields
+/// use the final field values, and come from `prepared_inputs`: an embedding
+/// is a remote input, so a miss ends the attempt with
+/// [`query::error::QueryError::NeedsInput`] before anything is written, and
+/// the caller fetches it outside the transaction and runs the update again.
+/// `heads` is the snapshot the update also builds its blocks from, so the
+/// document is scanned for its heads once.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn write_local_update(
     datastore: &NamespaceView,
@@ -57,8 +62,9 @@ pub(crate) async fn write_local_update(
     doc_short_id: u64,
     index_manager: &IndexManager,
     modified_fields: &mut rapidhash::RapidHashSet<String>,
-    embedding_config: Option<&crate::search::EmbeddingClientConfig>,
-    prepared_inputs: Option<&query::prepared::PreparedInputMemo>,
+    heads: &crate::block::builder::DocHeadsSnapshot,
+    embedding_config: &crate::search::EmbeddingClientConfig,
+    prepared_inputs: &query::prepared::PreparedInputMemo,
 ) -> query::error::Result<()> {
     collection
         .validate_write_definition(datastore, true)
@@ -66,36 +72,22 @@ pub(crate) async fn write_local_update(
         .map_err(crate::error::commit_query_error)?;
 
     set_incremented_counters(datastore, collection, doc, doc_short_id).await?;
-    if let Some(config) = embedding_config {
-        let generated = if let Some(inputs) = prepared_inputs {
-            crate::search::embedding::set_embedding_from_inputs(
-                &collection.schema().vector_embeddings,
-                doc,
-                false,
-                modified_fields,
-                config,
-                inputs,
-            )?
-        } else {
-            crate::search::set_embedding(
-                &collection.schema().vector_embeddings,
-                doc,
-                false,
-                Some(modified_fields),
-                config,
-            )
-            .await
-            .map_err(|e| query::error::QueryError::execution(format!("embedding error: {e}")))?
-        };
-        modified_fields.extend(generated);
-    }
+    let generated = crate::search::embedding::set_embedding_from_inputs(
+        &collection.schema().vector_embeddings,
+        doc,
+        false,
+        modified_fields,
+        embedding_config,
+        prepared_inputs,
+    )?;
+    modified_fields.extend(generated);
     collection
         .update_with_indexes_parts(
             datastore,
             doc,
             doc_short_id,
             index_manager,
-            Some(modified_fields),
+            Some((&*modified_fields, heads)),
         )
         .await
         .map_err(|e| match e {
@@ -125,6 +117,22 @@ pub(crate) async fn write_local_create(
         .await
         .map(|_| ())
         .map_err(|e| crate::error::index_write_query_error("create", e))
+}
+
+/// The heads of the document an update writes, read once for both its value
+/// operands and its blocks.
+pub(crate) async fn load_update_heads(
+    datastore: &NamespaceView,
+    doc_short_id: u64,
+) -> query::error::Result<crate::block::builder::DocHeadsSnapshot> {
+    crate::block::builder::DocHeadsSnapshot::load(
+        &datastore.sibling(storage::namespace::Namespace::Headstore),
+        doc_short_id,
+    )
+    .await
+    .map_err(|error| {
+        query::error::QueryError::execution(format!("failed to read document heads: {error}"))
+    })
 }
 
 /// Register the identity of a freshly created document (Go `save()` isAdd):

@@ -196,7 +196,15 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
     }
 
     async fn get_all(&self, collection_name: &str) -> query::error::Result<Vec<Document>> {
-        self.get_all_impl(collection_name).await
+        self.get_all_impl(collection_name, None).await
+    }
+
+    async fn get_all_projected(
+        &self,
+        collection_name: &str,
+        fields: &rapidhash::RapidHashSet<String>,
+    ) -> query::error::Result<Vec<Document>> {
+        self.get_all_impl(collection_name, Some(fields)).await
     }
 
     async fn get_all_with_deleted(
