@@ -86,6 +86,9 @@ impl Node {
 
         let failure_rx = db::merge::attach_failure_channel(&mut coordinator, 1024);
         let coordinator = Arc::new(coordinator);
+        // Its network work runs on the edge, also when a write on a pool
+        // worker hands it a broadcast.
+        coordinator.use_network(p2p::network::Network::on(edge.clone()));
         coordinator
             .install_pending_dag_store(Arc::new(
                 p2p::sync::PendingDagStore::new(store.clone())

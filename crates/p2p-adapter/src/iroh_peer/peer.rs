@@ -68,9 +68,6 @@ impl<S: Store + 'static> IrohPeer<S> {
             load_persisted_collections,
             replicator_push_options,
         } = config;
-        // Without KMS nothing in the peer runs on the edge yet.
-        #[cfg(not(feature = "kms"))]
-        let _ = edge;
 
         let secret_key = endpoint.secret_key.clone();
         let (command_tx, events, replicators, endpoint_task) =
@@ -110,6 +107,9 @@ impl<S: Store + 'static> IrohPeer<S> {
 
         let failure_rx = db::merge::attach_failure_channel(&mut coordinator, 1024);
         let coordinator = Arc::new(coordinator);
+        // Its network work runs on the edge, also when a write on a pool
+        // worker hands it a broadcast.
+        coordinator.use_network(p2p::network::Network::on(edge.clone()));
         coordinator
             .install_pending_dag_store(Arc::new(
                 p2p::sync::PendingDagStore::new(Arc::clone(&store))

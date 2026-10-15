@@ -227,6 +227,9 @@ struct SyncShutdownState {
     /// hidden pre-semaphore task queue (#1159).
     pending_dag_fetch_task_limit: usize,
     pending_dag_fetch_tasks: Atom<RapidHashMap<Cid, PendingDagFetchTask>>,
+    /// Where the coordinator's network work runs, set once by the node that
+    /// owns it (`SyncCoordinator::use_network`).
+    network: regolith::sync::OnceCell<crate::network::Network>,
 }
 
 #[derive(Clone)]
@@ -334,6 +337,7 @@ impl SyncShutdownHandle {
                 non_authoritative_broadcast_rejected: AtomicU64::new(0),
                 pending_dag_fetch_task_limit: pending_dag_fetch_task_limit.max(1),
                 pending_dag_fetch_tasks: Atom::new(RapidHashMap::new()),
+                network: regolith::sync::OnceCell::new(),
             }),
         }
     }
@@ -398,6 +402,11 @@ impl SyncShutdownHandle {
         }
     }
 
+    /// Where the coordinator's network work runs.
+    pub fn network(&self) -> crate::network::Network {
+        self.inner.network.get().cloned().unwrap_or_default()
+    }
+
     fn spawn_task<F>(&self, future: F) -> bool
     where
         F: std::future::Future<Output = ()> + MaybeSend + 'static,
@@ -405,6 +414,30 @@ impl SyncShutdownHandle {
         if self.is_shutting_down() {
             return false;
         }
+        // A pool worker (a write's broadcast, a merge's follow-up) has no
+        // reactor: the task is registered and run on the network edge.
+        let network = self.network();
+        if let Some(edge) = network.crossing() {
+            let handle = self.clone();
+            drop(edge.spawn(async move {
+                handle.spawn_here(future);
+            }));
+            return true;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if workers::on_worker() {
+            tracing::error!(
+                "network work was submitted from a pool worker of a node with no network edge; it did not run"
+            );
+            return false;
+        }
+        self.spawn_here(future)
+    }
+
+    fn spawn_here<F>(&self, future: F) -> bool
+    where
+        F: std::future::Future<Output = ()> + MaybeSend + 'static,
+    {
         // Retire completed handles on every registration so retained handles
         // track live tasks instead of total spawn count (#1099).
         self.prune_finished_tasks();
@@ -1043,6 +1076,18 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         self.runtime.shutdown.shutdown().await;
     }
 
+    /// Runs the coordinator's network work (its background tasks, the
+    /// broadcasts writes hand it, retry sleeps) on `network`. Set once, by the
+    /// node that owns the coordinator; later calls change nothing.
+    pub fn use_network(&self, network: crate::network::Network) {
+        let _ = self.runtime.shutdown.inner.network.set(network);
+    }
+
+    /// Where the coordinator's network work runs.
+    pub fn network(&self) -> crate::network::Network {
+        self.runtime.shutdown.network()
+    }
+
     /// Spawn work owned by this coordinator so shutdown can drain or cancel it.
     pub fn spawn_background_task<F>(&self, task_name: &'static str, future: F)
     where
@@ -1120,7 +1165,13 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     limit = NON_AUTHORITATIVE_BROADCAST_TASK_LIMIT,
                     "Non-authoritative background broadcast pool full; running inline"
                 );
-                future.await;
+                // Inline means on the network: a pool worker hands it over.
+                let _ = self
+                    .runtime
+                    .shutdown
+                    .network()
+                    .hand_off(move || future)
+                    .await;
             }
         }
     }

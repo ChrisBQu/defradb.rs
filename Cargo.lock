@@ -9525,6 +9525,7 @@ dependencies = [
  "unsigned-varint 0.8.0",
  "uuid",
  "web-time",
+ "workers",
 ]
 
 [[package]]
