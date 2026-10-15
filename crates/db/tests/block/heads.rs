@@ -366,7 +366,7 @@ async fn appends_through_the_db_store_only_the_live_head() {
             .unwrap();
     }
     let collection_id = {
-        let mut txn = db.new_txn(true).await.unwrap();
+        let txn = db.new_txn(true).await.unwrap();
         let id = txn
             .get_collection("Segment")
             .await

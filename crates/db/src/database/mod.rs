@@ -605,6 +605,25 @@ impl<S: Store> DB<S> {
         Ok(self.new_db_txn(basic_txn))
     }
 
+    /// Runs `read` against a read-only transaction lent to it, then discards
+    /// the transaction. `read` gets the transaction by value and must drop
+    /// every handle it made of it before it returns.
+    pub(crate) async fn read_lent<T, F, Fut>(&self, read: F) -> Result<T>
+    where
+        F: FnOnce(crate::txn::LentTxn<S>) -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        let txn = Arc::new(self.new_txn(true).await?);
+        let output = read(Arc::clone(&txn)).await;
+        match crate::txn::reclaim(txn).map(crate::txn::DbTxn::discard) {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) | Err(error) => {
+                tracing::warn!(%error, "failed to discard a read-only transaction");
+            }
+        }
+        Ok(output)
+    }
+
     /// Wraps a BasicTxn created by a storage-owned retry attempt while keeping
     /// database-scoped caches shared with ordinary transactions.
     pub(crate) fn new_db_txn(&self, basic_txn: BasicTxn) -> DbTxn<S> {

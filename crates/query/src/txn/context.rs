@@ -368,7 +368,10 @@ pub async fn check_doc_read_access_with_prepared_inputs(
 /// Transaction context that provides storage access within a transaction.
 ///
 /// This is implemented by the database layer to provide transaction-scoped
-/// document fetching and mutation.
+/// document fetching and mutation. A context is one request's view of a
+/// transaction on the worker that owns it ([`TxnTurn::context`](super::TxnTurn::context)):
+/// the handles it gives out share the transaction for that request and are
+/// dropped before the request ends.
 pub trait TransactionContext: MaybeSendSync {
     /// Get the transaction ID.
     fn id(&self) -> &str;
@@ -403,31 +406,6 @@ pub trait TransactionContext: MaybeSendSync {
     fn acp_registration_projection(&self) -> Option<Arc<AcpRegistrationProjection>> {
         None
     }
-
-    /// Get the mutex that serializes top-level actions on this transaction.
-    ///
-    /// Implementations that share one underlying storage transaction across
-    /// multiple public calls should override this so callers can prevent
-    /// concurrent use of that handle.
-    fn action_lock(&self) -> Option<Arc<async_lock::Mutex<()>>> {
-        None
-    }
-
-    /// Start an atomicity boundary around one explicit mutation statement.
-    /// Writable implementations must override this; the default fails closed.
-    fn set_statement_savepoint(&self) -> Result<(), String> {
-        Err("transaction context does not support statement savepoints".into())
-    }
-
-    fn finish_statement_savepoint(&self, _success: bool) -> Result<(), String> {
-        Err("transaction context does not support statement savepoints".into())
-    }
-
-    fn recover_pending_statement(&self) -> Result<(), String> {
-        Ok(())
-    }
-
-    fn mark_statement_rollback_pending(&self) {}
 
     /// Check if the transaction is still active (not yet committed or rolled back).
     ///

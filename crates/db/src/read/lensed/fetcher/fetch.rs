@@ -19,7 +19,7 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
         deciding_on: Option<&rapidhash::RapidHashSet<String>>,
     ) -> query::error::Result<Vec<Document>> {
         let (collection, datastore, systemstore) =
-            get_collection_with_lazy_load(&self.txn, collection_name).await?;
+            get_collection_with_lazy_load(&*self.shared_txn()?, collection_name).await?;
 
         // Check if collection has migrations by loading full version history (matching Go)
         let (_, has_migrations) = self.load_versions_and_check_migrations(&collection).await?;
@@ -88,7 +88,7 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
         show_deleted: bool,
     ) -> query::error::Result<Vec<(Document, bool)>> {
         let (collection, datastore, systemstore) =
-            get_collection_with_lazy_load(&self.txn, collection_name).await?;
+            get_collection_with_lazy_load(&*self.shared_txn()?, collection_name).await?;
 
         // Check if collection has migrations by loading full version history (matching Go)
         let (_, has_migrations) = self.load_versions_and_check_migrations(&collection).await?;
@@ -126,7 +126,7 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
         fields: &rapidhash::RapidHashSet<String>,
     ) -> query::error::Result<Option<FetchByIdsResult>> {
         let (collection, datastore, systemstore) =
-            get_collection_with_lazy_load(&self.txn, collection_name).await?;
+            get_collection_with_lazy_load(&*self.shared_txn()?, collection_name).await?;
         let storage_error = |error: crate::error::Error| {
             query::error::QueryError::execution(format!("storage error: {error}"))
         };
@@ -194,7 +194,7 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
         projection: Option<&rapidhash::RapidHashSet<String>>,
     ) -> query::error::Result<FetchByIdsResult> {
         let (collection, datastore, systemstore) =
-            get_collection_with_lazy_load(&self.txn, collection_name).await?;
+            get_collection_with_lazy_load(&*self.shared_txn()?, collection_name).await?;
 
         let mut docs = Vec::new();
         let mut missing_ids = Vec::new();
@@ -305,7 +305,7 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
         value: &str,
     ) -> query::error::Result<Vec<Document>> {
         let (collection, datastore, systemstore) =
-            get_collection_with_lazy_load(&self.txn, collection_name).await?;
+            get_collection_with_lazy_load(&*self.shared_txn()?, collection_name).await?;
 
         // Check if collection has migrations by loading full version history (matching Go)
         let (_, has_migrations) = self.load_versions_and_check_migrations(&collection).await?;
@@ -367,10 +367,7 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
         use storage::corekv::IterOptions;
         use storage::keys::datastore::ViewCacheKey;
 
-        let guard = self.txn.lock().await;
-        let txn = guard.as_ref().ok_or_else(|| {
-            query::error::QueryError::execution("transaction was already consumed")
-        })?;
+        let txn = &*self.shared_txn()?;
 
         let datastore = txn.datastore().map_err(|e| {
             query::error::QueryError::execution(format!("failed to get datastore: {}", e))

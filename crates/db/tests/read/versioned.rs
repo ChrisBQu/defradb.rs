@@ -1,4 +1,3 @@
-use async_lock::Mutex as TokioMutex;
 use db::read::versioned::*;
 use std::sync::Arc;
 
@@ -19,14 +18,10 @@ fn test_looks_like_cidv1() {
 }
 #[tokio::test]
 async fn kms_identity_prefers_caller_then_task_then_thread() {
-    let txn = Arc::new(TokioMutex::new(None));
     let caller = identity::Did::new("did:key:caller").unwrap();
-    let fetcher = VersionedFetcher::<storage::RegolithStore>::with_kms(
-        txn.clone(),
-        None,
-        Some(caller.clone()),
-    );
-    let ambient = VersionedFetcher::<storage::RegolithStore>::with_kms(txn, None, None);
+    let fetcher =
+        VersionedFetcher::<storage::RegolithStore>::with_kms(None, None, Some(caller.clone()));
+    let ambient = VersionedFetcher::<storage::RegolithStore>::with_kms(None, None, None);
     let _thread =
         defra_core::current_identity::scoped_current_identity(Some("did:key:thread".into()));
 
@@ -117,7 +112,7 @@ async fn collection_cid_doc_id_filter_accepts_an_alias() {
     txn.commit().await.unwrap();
 
     let version_txn = db.new_txn(true).await.unwrap();
-    let documents = VersionedFetcher::new(Arc::new(TokioMutex::new(Some(version_txn))))
+    let documents = VersionedFetcher::new(Arc::new(version_txn))
         .get_documents_at_cid(
             &collection_cid.to_string(),
             Some(&alias),

@@ -257,13 +257,15 @@ async fn test_noop_registry_begin_returns_error() {
 }
 
 #[tokio::test]
-async fn test_noop_registry_get_returns_not_found() {
+async fn test_noop_registry_runs_nothing() {
     let registry = NoOpTransactionRegistry;
     let handle: TransactionHandle = "any-id".parse().unwrap();
-    assert!(matches!(
-        registry.get(&handle),
-        GetTransactionResult::NotFound
-    ));
+    let ran = registry
+        .run(&handle, None, txn_job(|_| Box::pin(async {})))
+        .await;
+    assert!(matches!(ran, Err(TransactionError::NotSupported(_))));
+    let read = registry.read(None, txn_job(|_| Box::pin(async {}))).await;
+    assert!(matches!(read, Err(TransactionError::NotSupported(_))));
 }
 
 #[tokio::test]
@@ -309,40 +311,27 @@ fn test_transaction_handle_from_str_empty_returns_error() {
     assert!(err.to_string().contains("cannot be empty"));
 }
 
-#[test]
-fn test_get_transaction_result_into_result() {
+#[tokio::test]
+async fn test_shared_turn_lends_its_context_and_keeps_no_statements() {
     use std::sync::Arc;
-    // Test Found case
     struct MockCtx;
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     impl TransactionContext for MockCtx {
         fn id(&self) -> &str {
             "test"
         }
         fn is_readonly(&self) -> bool {
-            false
+            true
         }
         fn doc_fetcher(&self) -> Arc<dyn crate::fetcher::DocFetcher> {
-            unimplemented!()
+            Arc::new(crate::test_utils::MockFetcher::new())
         }
     }
 
-    let result = GetTransactionResult::Found(Arc::new(MockCtx));
-    let converted = result.into_result();
-    assert!(converted.is_ok());
-    assert!(converted.unwrap().is_some());
-
-    // Test NotFound case
-    let result = GetTransactionResult::NotFound;
-    let converted = result.into_result();
-    assert!(converted.is_ok());
-    assert!(converted.unwrap().is_none());
-
-    // Test LockPoisoned case
-    let result = GetTransactionResult::LockPoisoned;
-    let converted = result.into_result();
-    assert!(converted.is_err());
+    let mut turn = SharedTurn(Arc::new(MockCtx));
+    assert!(turn.is_readonly());
+    turn.begin_statement().unwrap();
+    assert_eq!(turn.context().unwrap().id(), "test");
+    turn.end_statement(false).unwrap();
 }
 
 #[test]

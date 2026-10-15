@@ -1,4 +1,3 @@
-use async_lock::Mutex as TokioMutex;
 use async_trait::async_trait;
 use bytes::Bytes;
 use cid::Cid;
@@ -19,24 +18,22 @@ use crate::block::builder::{write_delete_block_with_inputs, write_document_block
 use crate::collection::loader::{get_collection_with_index_manager, get_collection_with_lazy_load};
 use crate::database::DB;
 use crate::event::emission::register_update_event_callback;
-use crate::txn::DbTxn;
+use crate::txn::held::Held;
+use crate::txn::{DbTxn, LentTxn};
 use datastore::BasicTxn;
 use defra_core::encryption::get_encryption_config;
 use defra_core::signing::get_signing_config;
 
-pub struct BatchMutator<S: Store> {
+pub struct BatchMutator<S: Store + 'static> {
     db: Arc<DB<S>>,
     prepared_inputs: Option<query::prepared::PreparedInputMemo>,
-    txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
+    txn: Held<S>,
     acp_registration_projection: Arc<query::txn::AcpRegistrationProjection>,
 }
 
-impl<S: Store> BatchMutator<S> {
-    pub async fn new(db: Arc<DB<S>>, txn: Arc<TokioMutex<Option<DbTxn<S>>>>) -> Self {
-        let projection = match txn.lock().await.as_ref() {
-            Some(txn) => txn.acp_registration_projection(),
-            None => query::txn::AcpRegistrationProjection::detached_shared(),
-        };
+impl<S: Store + 'static> BatchMutator<S> {
+    pub async fn new(db: Arc<DB<S>>, txn: LentTxn<S>) -> Self {
+        let projection = txn.acp_registration_projection();
         Self::new_with_prepared_inputs(db, txn, None, projection)
     }
 
@@ -47,20 +44,20 @@ impl<S: Store> BatchMutator<S> {
         Self {
             db,
             prepared_inputs,
-            txn: Arc::new(TokioMutex::new(None)),
+            txn: Held::none(),
             acp_registration_projection: query::txn::AcpRegistrationProjection::detached_shared(),
         }
     }
 
     pub(crate) fn new_with_prepared_inputs(
         db: Arc<DB<S>>,
-        txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
+        txn: LentTxn<S>,
         prepared_inputs: Option<query::prepared::PreparedInputMemo>,
         acp_registration_projection: Arc<query::txn::AcpRegistrationProjection>,
     ) -> Self {
         Self {
             db,
-            txn,
+            txn: Held::new(txn),
             prepared_inputs,
             acp_registration_projection,
         }
@@ -69,10 +66,7 @@ impl<S: Store> BatchMutator<S> {
     async fn block_and_head_stores(
         &self,
     ) -> query::error::Result<(datastore::NamespaceView, datastore::NamespaceView)> {
-        let txn = self.txn.lock().await;
-        let txn = txn.as_ref().ok_or_else(|| {
-            query::error::QueryError::execution("mutation batch transaction is no longer active")
-        })?;
+        let txn = &*self.shared_txn()?;
         let blockstore = txn.blockstore().map_err(|e| {
             query::error::QueryError::execution(format!("failed to get blockstore: {}", e))
         })?;
@@ -86,17 +80,21 @@ impl<S: Store> BatchMutator<S> {
         &self,
         collection: &crate::collection::Collection,
     ) -> query::error::Result<()> {
-        let mut txn_guard = self.txn.lock().await;
-        let txn = txn_guard.as_mut().ok_or_else(|| {
-            query::error::QueryError::execution("mutation batch transaction is no longer active")
-        })?;
+        let txn = &*self.shared_txn()?;
         txn.validate_collection_for_write(collection)
             .await
             .map_err(crate::error::commit_query_error)
     }
 
     pub async fn take_txn(&self) -> query::error::Result<DbTxn<S>> {
-        self.txn.lock().await.take().ok_or_else(|| {
+        self.txn.take().ok_or_else(|| {
+            query::error::QueryError::execution("mutation batch transaction is no longer active")
+        })
+    }
+
+    /// The transaction, for one operation.
+    fn shared_txn(&self) -> query::error::Result<LentTxn<S>> {
+        self.txn.get().ok_or_else(|| {
             query::error::QueryError::execution("mutation batch transaction is no longer active")
         })
     }
@@ -144,10 +142,7 @@ impl<S: Store + 'static> BatchMutator<S> {
         collection: &crate::collection::Collection,
         doc_id: String,
     ) -> query::error::Result<()> {
-        let mut txn_guard = self.txn.lock().await;
-        let txn = txn_guard.as_mut().ok_or_else(|| {
-            query::error::QueryError::execution("mutation batch transaction is no longer active")
-        })?;
+        let txn = &*self.shared_txn()?;
         super::AutoCommitMutator::new(Arc::clone(&self.db))
             .register_created_doc_with_acp(txn, collection, doc_id)
     }
@@ -162,10 +157,7 @@ impl<S: Store + 'static> BatchMutator<S> {
         doc_block: Bytes,
         collection_block: Option<(Cid, Bytes)>,
     ) -> query::error::Result<()> {
-        let mut txn_guard = self.txn.lock().await;
-        let txn = txn_guard.as_mut().ok_or_else(|| {
-            query::error::QueryError::execution("mutation batch transaction is no longer active")
-        })?;
+        let txn = &*self.shared_txn()?;
         register_update_event_callback(
             txn,
             self.db.event_bus(),
@@ -257,15 +249,20 @@ impl<S: Store + 'static> storage::corekv::RetryAttemptFn for BatchRetryAttempt<S
                 .begin_attempt_io()
                 .map_err(storage::corekv::RetryAttemptError::Storage)?;
             let basic_txn = BasicTxn::from_retry_attempt_io(io, 0);
-            let txn = self.db.new_db_txn(basic_txn);
+            let txn: LentTxn<S> = Arc::new(self.db.new_db_txn(basic_txn));
             let acp_registration_projection = txn.acp_registration_projection();
             let fetcher = Arc::new(
-                crate::LensedDocFetcher::new(self.db.clone(), txn, self.db.lens_store.clone())
-                    .with_prepared_inputs(self.prepared_inputs.clone()),
+                crate::LensedDocFetcher::lent(
+                    self.db.clone(),
+                    &txn,
+                    self.db.lens_store.clone(),
+                    Default::default(),
+                )
+                .with_prepared_inputs(self.prepared_inputs.clone()),
             );
             let batch = Arc::new(BatchMutator {
                 db: self.db.clone(),
-                txn: fetcher.shared_txn(),
+                txn: Held::new(txn),
                 prepared_inputs: self.prepared_inputs.clone(),
                 acp_registration_projection,
             });
@@ -323,10 +320,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         &self,
         callback: storage::corekv::CommitHook,
     ) -> query::error::Result<()> {
-        let mut guard = self.txn.lock().await;
-        let txn = guard.as_mut().ok_or_else(|| {
-            query::error::QueryError::execution("mutation batch transaction is no longer active")
-        })?;
+        let txn = &*self.shared_txn()?;
         txn.on_commit(OnCommit::OrderedAsync(callback))
             .map_err(|error| query::error::QueryError::execution(error.to_string()))
     }
@@ -340,7 +334,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             .await?;
 
         let (collection, datastore, systemstore, index_manager) =
-            get_collection_with_index_manager(&self.txn, collection_name).await?;
+            get_collection_with_index_manager(&*self.shared_txn()?, collection_name).await?;
         self.db
             .check_node_access_in_txn(
                 systemstore.sibling(storage::namespace::Namespace::Acpstore),
@@ -483,7 +477,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             .await?;
 
         let (collection, datastore, systemstore, index_manager) =
-            get_collection_with_index_manager(&self.txn, collection_name).await?;
+            get_collection_with_index_manager(&*self.shared_txn()?, collection_name).await?;
         self.db
             .check_node_access_in_txn(
                 systemstore.sibling(storage::namespace::Namespace::Acpstore),
@@ -632,7 +626,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             .await?;
 
         let (collection, datastore, systemstore, index_manager) =
-            get_collection_with_index_manager(&self.txn, collection_name).await?;
+            get_collection_with_index_manager(&*self.shared_txn()?, collection_name).await?;
         self.db
             .check_node_access_in_txn(
                 systemstore.sibling(storage::namespace::Namespace::Acpstore),
@@ -717,12 +711,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         };
 
         {
-            let mut txn_guard = self.txn.lock().await;
-            let txn = txn_guard.as_mut().ok_or_else(|| {
-                query::error::QueryError::execution(
-                    "mutation batch transaction is no longer active",
-                )
-            })?;
+            let txn = &*self.shared_txn()?;
             super::AutoCommitMutator::new(Arc::clone(&self.db)).register_deleted_doc_with_acp(
                 txn,
                 &collection,
@@ -750,7 +739,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
 
     async fn exists(&self, collection_name: &str, doc_id: &DocID) -> query::error::Result<bool> {
         let (collection, datastore, systemstore) =
-            get_collection_with_lazy_load(&self.txn, collection_name).await?;
+            get_collection_with_lazy_load(&*self.shared_txn()?, collection_name).await?;
 
         collection
             .exists_by_doc_id(&datastore, &systemstore, doc_id)
@@ -764,7 +753,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         doc_id: &DocID,
     ) -> query::error::Result<Option<Document>> {
         let (collection, datastore, systemstore) =
-            get_collection_with_lazy_load(&self.txn, collection_name).await?;
+            get_collection_with_lazy_load(&*self.shared_txn()?, collection_name).await?;
 
         collection
             .get_by_doc_id(&datastore, &systemstore, doc_id)

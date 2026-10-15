@@ -78,7 +78,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         let delta = self.create_counter_delta_for(payload, numeric_kind, &doc_id_str)?;
 
         // Create a new transaction for this merge
-        let mut txn = self.db.new_txn(false).await?;
+        let txn = self.db.new_txn(false).await?;
         txn.validate_collection_schema_for_write(&collection)
             .await
             .map_err(MergeError::Database)?;

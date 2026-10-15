@@ -165,7 +165,7 @@ pub unsafe extern "C" fn block_verify_signature_in_txn(
             registry
                 .verify_block_signature_in_txn(
                     &txn_str,
-                    document_acp.as_ref(),
+                    document_acp.clone(),
                     &cid_str,
                     &pub_key_str,
                     crypto_key_type,

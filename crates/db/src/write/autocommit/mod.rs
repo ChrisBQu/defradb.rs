@@ -60,7 +60,7 @@ pub struct AutoCommitMutator<S: Store> {
     pub(super) prepared_inputs: Option<query::prepared::PreparedInputMemo>,
 }
 
-impl<S: Store> AutoCommitMutator<S> {
+impl<S: Store + 'static> AutoCommitMutator<S> {
     /// Create a new auto-committing mutator wrapping the given database.
     pub fn new(db: Arc<DB<S>>) -> Self {
         Self {
@@ -94,7 +94,7 @@ impl<S: Store> AutoCommitMutator<S> {
 
     pub(super) fn register_created_doc_with_acp(
         &self,
-        txn: &mut crate::txn::DbTxn<S>,
+        txn: &crate::txn::DbTxn<S>,
         collection: &Collection,
         doc_id: String,
     ) -> query::error::Result<()> {
@@ -141,7 +141,7 @@ impl<S: Store> AutoCommitMutator<S> {
 
     pub(super) fn register_deleted_doc_with_acp(
         &self,
-        txn: &mut crate::txn::DbTxn<S>,
+        txn: &crate::txn::DbTxn<S>,
         collection: &Collection,
         doc_id: String,
     ) -> query::error::Result<()> {
@@ -186,16 +186,17 @@ impl<S: Store> AutoCommitMutator<S> {
     pub async fn new_batch_components(
         &self,
     ) -> query::error::Result<(Arc<BatchMutator<S>>, Arc<LensedDocFetcher<S>>)> {
-        let txn = self.new_mutation_txn().await?;
+        let txn = Arc::new(self.new_mutation_txn().await?);
         let acp_registration_projection = txn.acp_registration_projection();
-        let fetcher = Arc::new(LensedDocFetcher::new(
+        let fetcher = Arc::new(LensedDocFetcher::lent(
             self.db.clone(),
-            txn,
+            &txn,
             self.db.lens_store.clone(),
+            Default::default(),
         ));
         let batch = Arc::new(BatchMutator::new_with_prepared_inputs(
             self.db.clone(),
-            fetcher.shared_txn(),
+            txn,
             self.prepared_inputs.clone(),
             acp_registration_projection,
         ));

@@ -272,7 +272,7 @@ impl Reader for RegolithTxn {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Writer for RegolithTxn {
-    async fn merge(&mut self, key: &[u8], operand: &[u8]) -> Result<()> {
+    async fn merge_shared(&self, key: &[u8], operand: &[u8]) -> Result<()> {
         if key.is_empty() {
             return Err(Error::EmptyKey);
         }
@@ -283,8 +283,8 @@ impl Writer for RegolithTxn {
         Ok(())
     }
 
-    async fn append(
-        &mut self,
+    async fn append_shared(
+        &self,
         log: &crate::corekv::AppendLog,
         entry: &[u8],
         once_key: Option<&[u8]>,
@@ -297,7 +297,7 @@ impl Writer for RegolithTxn {
         Ok(())
     }
 
-    async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+    async fn set_shared(&self, key: &[u8], value: &[u8]) -> Result<()> {
         if key.is_empty() {
             return Err(Error::EmptyKey);
         }
@@ -308,7 +308,7 @@ impl Writer for RegolithTxn {
         Ok(())
     }
 
-    async fn delete(&mut self, key: &[u8]) -> Result<()> {
+    async fn delete_shared(&self, key: &[u8]) -> Result<()> {
         if key.is_empty() {
             return Err(Error::EmptyKey);
         }

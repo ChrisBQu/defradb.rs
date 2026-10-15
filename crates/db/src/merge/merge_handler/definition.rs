@@ -213,7 +213,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         }
 
         // Store in systemstore
-        let mut txn = self.db.new_txn(false).await.map_err(MergeError::Database)?;
+        let txn = self.db.new_txn(false).await.map_err(MergeError::Database)?;
         {
             let systemstore = txn.systemstore().map_err(MergeError::Database)?;
             schema.root_id = crate::collection::ensure_persisted_collection_short_id(

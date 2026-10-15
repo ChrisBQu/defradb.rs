@@ -628,7 +628,7 @@ impl<S: Store> crate::database::DB<S> {
 
             if needs_update {
                 // Store updated schema with new indexes
-                let mut txn = self.new_txn(false).await?;
+                let txn = self.new_txn(false).await?;
                 let key = CollectionKey::new(&updated_schema.version_id);
                 let data = serde_json::to_vec(&updated_schema).map_err(|e| {
                     Error::collection_schema_json(

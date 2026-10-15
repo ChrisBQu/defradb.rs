@@ -1,5 +1,4 @@
 use crate::common::schema::test_schema;
-use async_lock::Mutex;
 use db::database::DB;
 use db::read::doc::DbDocFetcher;
 use db::write::doc::DbDocMutator;
@@ -52,10 +51,9 @@ async fn delete_nth_document(db: &Arc<DB<RegolithStore>>, collection_name: &str,
 /// that fail to decode as CBOR.
 async fn corrupt_nth_document(db: &Arc<DB<RegolithStore>>, collection_name: &str, n: usize) {
     let txn = db.new_txn(false).await.unwrap();
-    let shared = Arc::new(Mutex::new(Some(txn)));
     {
         let (collection, datastore, systemstore) =
-            db::collection::loader::get_collection_with_lazy_load(&shared, collection_name)
+            db::collection::loader::get_collection_with_lazy_load(&txn, collection_name)
                 .await
                 .unwrap();
         let entries = collection
@@ -69,7 +67,6 @@ async fn corrupt_nth_document(db: &Arc<DB<RegolithStore>>, collection_name: &str
             .unwrap();
     }
 
-    let txn = shared.lock().await.take().unwrap();
     txn.commit().await.unwrap();
 }
 

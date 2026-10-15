@@ -1,6 +1,5 @@
 //! Document fetcher for transaction-scoped queries.
 
-use async_lock::Mutex as TokioMutex;
 use async_trait::async_trait;
 use bytes::Bytes;
 use document::Document;
@@ -15,7 +14,8 @@ use crate::collection::loader::{get_collection_with_index_manager, get_collectio
 use crate::read::commits::{CommitsFetcher, CommitsQueryOptions as DbCommitsOptions};
 use crate::read::seek::apply_cursor_seek_to_iterator;
 use crate::read::versioned::VersionedFetcher;
-use crate::txn::DbTxn;
+use crate::txn::held::Held;
+use crate::txn::{DbTxn, LentTxn};
 
 /// Document fetcher that uses a database transaction.
 ///
@@ -24,14 +24,10 @@ use crate::txn::DbTxn;
 ///
 /// # Ownership Model
 ///
-/// The transaction is wrapped in `Arc<TokioMutex<Option<...>>>` because:
-/// - `Arc`: Enables the fetcher to be cloned and shared across multiple query
-///   executions within the same transaction (e.g., for parallel reads)
-/// - `TokioMutex`: Async-safe interior mutability for concurrent access
-/// - `Option`: Enables `take_txn()` to extract the transaction for commit/rollback
-///
-/// After `take_txn()` is called, all fetcher operations will return an error
-/// indicating the transaction was consumed. Use `is_consumed()` to check state.
+/// The fetcher holds a transaction lent to it ([`LentTxn`]): it and the other
+/// handles of one request (a mutator, a collection provider) share the
+/// transaction through `&self`, with no lock. [`take_txn`](Self::take_txn)
+/// gives it back once they are gone.
 ///
 /// # Collection Access
 ///
@@ -40,42 +36,43 @@ use crate::txn::DbTxn;
 /// duration of the transaction. Note: This provides transaction-level caching,
 /// not true snapshot isolation - if collections are accessed at different times,
 /// they reflect the store state at the time of first access.
-pub struct DbDocFetcher<S: Store> {
-    txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
+pub struct DbDocFetcher<S: Store + 'static> {
+    txn: Held<S>,
 }
 
-impl<S: Store> DbDocFetcher<S> {
+impl<S: Store + 'static> DbDocFetcher<S> {
     /// Create a new transaction-scoped document fetcher.
     ///
     /// Collections will be loaded lazily from the transaction's cache.
     pub fn new(txn: DbTxn<S>) -> Self {
         Self {
-            txn: Arc::new(TokioMutex::new(Some(txn))),
+            txn: Held::new(Arc::new(txn)),
         }
     }
 
-    /// Take the transaction out of the fetcher (for commit/rollback).
-    ///
-    /// After calling this, `is_consumed()` will return `true` and all
-    /// fetcher operations will return an error.
-    #[allow(dead_code)]
+    /// A fetcher over a transaction lent to it: whoever lent it keeps it.
+    pub fn lent(txn: &LentTxn<S>) -> Self {
+        Self {
+            txn: Held::borrowed(txn),
+        }
+    }
+
+    /// Take the transaction out of the fetcher (for commit/rollback). `None`
+    /// once it was taken, or while another handle still holds it.
     pub async fn take_txn(&self) -> Option<DbTxn<S>> {
-        self.txn.lock().await.take()
+        self.txn.take()
     }
 
     /// Check if the transaction has been consumed (via `take_txn()`).
-    ///
-    /// Returns `true` if `take_txn()` was called and the transaction is
-    /// no longer available for queries.
     pub async fn is_consumed(&self) -> bool {
-        self.txn.lock().await.is_none()
+        self.txn.is_taken()
     }
 
-    /// Get the shared transaction reference for use by other components.
-    ///
-    /// This allows DbDocMutator to share the same transaction.
-    pub(crate) fn shared_txn(&self) -> Arc<TokioMutex<Option<DbTxn<S>>>> {
-        self.txn.clone()
+    /// The transaction, for an operation or another handle to share.
+    pub(crate) fn shared_txn(&self) -> query::error::Result<LentTxn<S>> {
+        self.txn
+            .get()
+            .ok_or_else(|| query::error::QueryError::execution("transaction already consumed"))
     }
 }
 
@@ -84,7 +81,7 @@ impl<S: Store> DbDocFetcher<S> {
 impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
     async fn get_all(&self, collection_name: &str) -> query::error::Result<Vec<Document>> {
         let (collection, datastore, systemstore) =
-            get_collection_with_lazy_load(&self.txn, collection_name).await?;
+            get_collection_with_lazy_load(&*self.shared_txn()?, collection_name).await?;
 
         collection
             .get_all_with_datastore(&datastore, &systemstore)
@@ -98,7 +95,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         show_deleted: bool,
     ) -> query::error::Result<Vec<(Document, bool)>> {
         let (collection, datastore, systemstore) =
-            get_collection_with_lazy_load(&self.txn, collection_name).await?;
+            get_collection_with_lazy_load(&*self.shared_txn()?, collection_name).await?;
 
         collection
             .get_all_with_datastore_include_deleted(&datastore, &systemstore, show_deleted)
@@ -115,8 +112,8 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         effort: Option<usize>,
     ) -> query::error::Result<Vec<u64>> {
         let (collection, datastore, _) =
-            get_collection_with_lazy_load(&self.txn, collection_name).await?;
-        let codes = crate::collection::loader::vector_codes(&self.txn).await?;
+            get_collection_with_lazy_load(&*self.shared_txn()?, collection_name).await?;
+        let codes = self.shared_txn()?.vector_codes().clone();
 
         crate::read::vector::search_vector_index(
             &collection,
@@ -141,7 +138,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         show_deleted: bool,
     ) -> query::error::Result<Box<dyn query::doc_stream::DocStream>> {
         let (collection, datastore, systemstore) =
-            get_collection_with_lazy_load(&self.txn, collection_name).await?;
+            get_collection_with_lazy_load(&*self.shared_txn()?, collection_name).await?;
 
         Ok(Box::new(crate::collection::stream::ShortIdDocStream::new(
             collection,
@@ -158,7 +155,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         show_deleted: bool,
     ) -> query::error::Result<Box<dyn query::doc_stream::DocStream>> {
         let (collection, datastore, systemstore) =
-            get_collection_with_lazy_load(&self.txn, collection_name).await?;
+            get_collection_with_lazy_load(&*self.shared_txn()?, collection_name).await?;
 
         let prefix = collection.collection_key_prefix();
         let prefix_len = prefix.len();
@@ -186,7 +183,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         doc_ids: &[String],
     ) -> query::error::Result<FetchByIdsResult> {
         let (collection, datastore, systemstore) =
-            get_collection_with_lazy_load(&self.txn, collection_name).await?;
+            get_collection_with_lazy_load(&*self.shared_txn()?, collection_name).await?;
 
         let mut docs = Vec::new();
         let mut missing_ids = Vec::new();
@@ -236,7 +233,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         value: &str,
     ) -> query::error::Result<Vec<Document>> {
         let (collection, datastore, systemstore) =
-            get_collection_with_lazy_load(&self.txn, collection_name).await?;
+            get_collection_with_lazy_load(&*self.shared_txn()?, collection_name).await?;
 
         // Get all documents and filter by field value.
         // This is a fallback implementation - index-based lookup can be added later.
@@ -262,11 +259,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         &self,
         options: &query::fetcher::DocumentArrivalOptions,
     ) -> query::error::Result<query::fetcher::DocumentArrivalPage> {
-        let mut guard = self.txn.lock().await;
-        let txn = guard
-            .as_mut()
-            .ok_or_else(|| query::error::QueryError::execution("transaction no longer active"))?;
-        crate::event::arrivals::read(txn, options)
+        crate::event::arrivals::read(&*self.shared_txn()?, options)
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))
     }
@@ -285,7 +278,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
             field_name: options.field_name.clone(),
         };
 
-        let commits_fetcher = CommitsFetcher::new(self.txn.clone());
+        let commits_fetcher = CommitsFetcher::new(self.shared_txn()?);
         commits_fetcher
             .fetch_commits(&db_options)
             .await
@@ -301,7 +294,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         use storage::index::IndexIterator;
 
         let (collection, datastore, systemstore, index_manager) =
-            get_collection_with_index_manager(&self.txn, collection_name).await?;
+            get_collection_with_index_manager(&*self.shared_txn()?, collection_name).await?;
 
         // Get the index
         let index = index_manager.get_index(&params.index_name).ok_or_else(|| {
@@ -576,7 +569,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         cap: u64,
     ) -> query::error::Result<Option<u64>> {
         let (_, datastore, _, index_manager) =
-            get_collection_with_index_manager(&self.txn, collection_name).await?;
+            get_collection_with_index_manager(&*self.shared_txn()?, collection_name).await?;
         let Some(index) = index_manager.get_index(&params.index_name) else {
             return Ok(None);
         };
@@ -597,7 +590,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         expected_doc_id: Option<&str>,
         _caller_identity: Option<&identity::Did>,
     ) -> query::error::Result<Document> {
-        let versioned_fetcher = VersionedFetcher::new(self.txn.clone());
+        let versioned_fetcher = VersionedFetcher::new(self.shared_txn()?);
         versioned_fetcher
             .get_document_at_cid(cid, expected_doc_id)
             .await
@@ -611,7 +604,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         expected_doc_id: Option<&str>,
         _caller_identity: Option<&identity::Did>,
     ) -> query::error::Result<Vec<Document>> {
-        let versioned_fetcher = VersionedFetcher::new(self.txn.clone());
+        let versioned_fetcher = VersionedFetcher::new(self.shared_txn()?);
         versioned_fetcher
             .get_documents_at_cid(cid, expected_doc_id, Some(collection_short_id))
             .await
@@ -625,7 +618,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         query: &str,
     ) -> query::error::Result<rapidhash::RapidHashMap<String, f64>> {
         let (_collection, datastore, systemstore, index_manager) =
-            get_collection_with_index_manager(&self.txn, collection_name).await?;
+            get_collection_with_index_manager(&*self.shared_txn()?, collection_name).await?;
 
         let idx_name = crate::index::fulltext_index_name(field_name);
         let ft_index = index_manager
@@ -656,12 +649,7 @@ impl<S: Store + 'static> DocFetcher for DbDocFetcher<S> {
         use storage::corekv::IterOptions;
         use storage::keys::datastore::ViewCacheKey;
 
-        let guard = self.txn.lock().await;
-        let txn = guard.as_ref().ok_or_else(|| {
-            query::error::QueryError::execution("transaction was already consumed")
-        })?;
-
-        let datastore = txn.datastore().map_err(|e| {
+        let datastore = self.shared_txn()?.datastore().map_err(|e| {
             query::error::QueryError::execution(format!("failed to get datastore: {}", e))
         })?;
 

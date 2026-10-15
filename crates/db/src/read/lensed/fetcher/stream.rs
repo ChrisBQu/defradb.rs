@@ -55,7 +55,7 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
         show_deleted: bool,
     ) -> query::error::Result<Box<dyn DocStream>> {
         let (collection, datastore, systemstore) =
-            get_collection_with_lazy_load(&self.txn, collection_name).await?;
+            get_collection_with_lazy_load(&*self.shared_txn()?, collection_name).await?;
 
         // Full-history check (matching Go), same as the eager paths.
         let (_, has_migrations) = self.load_versions_and_check_migrations(&collection).await?;
@@ -99,7 +99,7 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
         show_deleted: bool,
     ) -> query::error::Result<Box<dyn DocStream>> {
         let (collection, datastore, systemstore) =
-            get_collection_with_lazy_load(&self.txn, collection_name).await?;
+            get_collection_with_lazy_load(&*self.shared_txn()?, collection_name).await?;
         let (_, has_migrations) = self.load_versions_and_check_migrations(&collection).await?;
 
         Ok(Box::new(LensedDocStream {

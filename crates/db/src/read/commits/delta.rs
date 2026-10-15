@@ -27,7 +27,7 @@ impl<S: Store> CommitsFetcher<S> {
     /// multiple documents now that their payloads no longer embed identity.
     pub(super) async fn get_doc_ids(
         &self,
-        txn: &mut DbTxn<S>,
+        txn: &DbTxn<S>,
         cid: &Cid,
         block: &defra_core::Block,
     ) -> crate::Result<Option<Vec<String>>> {
@@ -37,7 +37,7 @@ impl<S: Store> CommitsFetcher<S> {
 
     pub(super) async fn canonical_doc_id(
         &self,
-        txn: &mut DbTxn<S>,
+        txn: &DbTxn<S>,
         doc_id: &str,
     ) -> crate::Result<String> {
         let systemstore = txn.systemstore()?;
