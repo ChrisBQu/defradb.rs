@@ -177,6 +177,10 @@ impl CollectionIndex for SimpleIndex {
         &self.desc
     }
 
+    fn key_prefix(&self) -> Vec<u8> {
+        IndexDataStoreKey::index_prefix(self.collection_short_id, self.desc.id)
+    }
+
     async fn save<T: Reader + Writer + MaybeSend>(
         &self,
         txn: &mut T,

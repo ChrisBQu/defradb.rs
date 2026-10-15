@@ -375,6 +375,10 @@ impl CollectionIndex for FullTextIndex {
         &self.desc
     }
 
+    fn key_prefix(&self) -> Vec<u8> {
+        self.index_prefix()
+    }
+
     async fn save<T: Reader + Writer + MaybeSend>(
         &self,
         txn: &mut T,

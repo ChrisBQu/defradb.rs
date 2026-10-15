@@ -364,6 +364,14 @@ impl CollectionIndex for VectorIndex {
         &self.desc
     }
 
+    fn key_prefix(&self) -> Vec<u8> {
+        storage::keys::datastore::vector_epoch_prefix(
+            self.collection_short_id,
+            self.desc.id,
+            LIVE_EPOCH,
+        )
+    }
+
     async fn save<T: Reader + Writer + MaybeSend>(
         &self,
         txn: &mut T,
