@@ -760,6 +760,9 @@ impl<S: Store> DB<S> {
     }
 }
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod close_tests;
+
 #[cfg(test)]
 mod vector_cache_tests {
     use super::*;
