@@ -533,7 +533,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                                 continue;
                             }
                             // Phase 1: Check if the identity can read the document
-                            let can_read = self
+                            let can_read = match self
                                 .check_doc_access_prepared(
                                     &identity_for_acp,
                                     DocumentPermission::Read,
@@ -544,7 +544,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                                     strict_attempt,
                                 )
                                 .await
-                                .unwrap_or(false);
+                            {
+                                Ok(allowed) => allowed,
+                                Err(error @ QueryError::NeedsInput(_)) => return Err(error),
+                                Err(_) => false,
+                            };
 
                             if !can_read {
                                 // Document is invisible to this identity -- skip silently
@@ -587,7 +591,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                                 continue;
                             }
                             // Phase 1: Check if the identity can read the document
-                            let can_read = self
+                            let can_read = match self
                                 .check_doc_access_prepared(
                                     &identity_for_acp,
                                     DocumentPermission::Read,
@@ -598,7 +602,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                                     strict_attempt,
                                 )
                                 .await
-                                .unwrap_or(false);
+                            {
+                                Ok(allowed) => allowed,
+                                Err(error @ QueryError::NeedsInput(_)) => return Err(error),
+                                Err(_) => false,
+                            };
 
                             if !can_read {
                                 // Document is invisible to this identity -- skip silently
