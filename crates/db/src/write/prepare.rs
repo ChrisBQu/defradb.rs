@@ -13,8 +13,9 @@ pub(crate) enum PreparedKmsOperation {
     Get {
         cid: String,
     },
-    GetForRead {
-        cid: String,
+    /// Every key one read decrypts with, under its caller's identity.
+    ReadKeys {
+        cids: Vec<String>,
         caller_identity: Option<String>,
     },
     Generate {
@@ -27,6 +28,14 @@ pub(crate) enum PreparedKmsOperation {
 pub(crate) struct PreparedKmsResponse {
     pub cid: String,
     pub key: Vec<u8>,
+}
+
+/// One key of a [`PreparedKmsOperation::ReadKeys`] answer: the key, or why
+/// the KMS released none.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct PreparedReadKey {
+    pub cid: String,
+    pub key: Result<Vec<u8>, String>,
 }
 
 pub(crate) fn kms_input_request(
@@ -203,35 +212,63 @@ where
             Ok(std::sync::Arc::from(response))
         }
         query::prepared::PreparedInputKind::KmsKey => {
-            let operation: PreparedKmsOperation =
-                serde_json::from_slice(request.exact_request()).map_err(|error| {
-                    query::error::QueryError::execution(format!(
-                        "invalid prepared KMS request: {error}"
-                    ))
-                })?;
-            let kms = db.kms().ok_or_else(|| {
-                query::error::QueryError::execution("prepared KMS input has no configured KMS provider")
+            let operation: PreparedKmsOperation = serde_json::from_slice(request.exact_request())
+                .map_err(|error| {
+                query::error::QueryError::execution(format!(
+                    "invalid prepared KMS request: {error}"
+                ))
             })?;
-            let context = match &operation {
-                PreparedKmsOperation::GetForRead {
-                    caller_identity: Some(did),
-                    ..
-                } => kms::RequestContext::with_user(
-                    identity::Did::new(did)
-                        .map_err(|error| query::error::QueryError::execution(error.to_string()))?,
-                ),
-                _ => kms::RequestContext::anonymous(),
-            };
+            let kms = db.kms().ok_or_else(|| {
+                query::error::QueryError::execution(
+                    "prepared KMS input has no configured KMS provider",
+                )
+            })?;
             let (cid, key) = match operation {
-                PreparedKmsOperation::Get { cid }
-                | PreparedKmsOperation::GetForRead { cid, .. } => {
+                PreparedKmsOperation::ReadKeys {
+                    cids,
+                    caller_identity,
+                } => {
+                    let context = match caller_identity {
+                        Some(did) => {
+                            kms::RequestContext::with_user(identity::Did::new(&did).map_err(
+                                |error| query::error::QueryError::execution(error.to_string()),
+                            )?)
+                        }
+                        None => kms::RequestContext::anonymous(),
+                    };
+                    let cids = cids
+                        .iter()
+                        .map(|cid| {
+                            cid::Cid::try_from(cid.as_str()).map_err(|error| {
+                                query::error::QueryError::execution(format!(
+                                    "invalid encryption CID in prepared KMS request: {error}"
+                                ))
+                            })
+                        })
+                        .collect::<query::error::Result<Vec<_>>>()?;
+                    let answers = kms.get_keys_each(&context, &cids).await.map_err(|error| {
+                        query::error::QueryError::execution(format!("kms get_keys: {error}"))
+                    })?;
+                    let keys: Vec<PreparedReadKey> = cids
+                        .iter()
+                        .zip(answers)
+                        .map(|(cid, answer)| PreparedReadKey {
+                            cid: cid.to_string(),
+                            key: answer.map(|key| key.to_vec()).map_err(|e| e.to_string()),
+                        })
+                        .collect();
+                    let response = serde_json::to_vec(&keys)
+                        .map_err(|error| query::error::QueryError::execution(error.to_string()))?;
+                    return Ok(std::sync::Arc::from(response));
+                }
+                PreparedKmsOperation::Get { cid } => {
                     let cid = cid::Cid::try_from(cid.as_str()).map_err(|error| {
                         query::error::QueryError::execution(format!(
                             "invalid encryption CID in prepared KMS request: {error}"
                         ))
                     })?;
                     let key = kms
-                        .get_keys(&context, &[cid])
+                        .get_keys(&kms::RequestContext::anonymous(), &[cid])
                         .await
                         .map_err(|error| {
                             query::error::QueryError::execution(format!(

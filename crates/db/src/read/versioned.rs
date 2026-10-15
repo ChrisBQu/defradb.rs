@@ -414,10 +414,11 @@ impl<S: Store> VersionedFetcher<S> {
             blocks.insert(cid, block);
         }
 
+        self.decrypt_blocks(txn, start_cid, &mut blocks).await?;
         Ok(blocks)
     }
 
-    /// Load a block from blockstore by CID.
+    /// Load a block from blockstore by CID, its payload as stored.
     async fn load_block(&self, txn: &mut DbTxn<S>, cid: &Cid) -> Result<Block> {
         let blockstore = txn.blockstore()?;
 
@@ -428,114 +429,187 @@ impl<S: Store> VersionedFetcher<S> {
             .map_err(Error::Storage)?
             .ok_or_else(|| Error::Serialization(BLOCK_NOT_FOUND.to_string()))?;
 
-        let mut block = Block::from_dag_cbor(&data)
-            .map_err(|e| Error::Serialization(format!("Failed to decode block: {}", e)))?;
-
-        let Some(encryption_cid) = block.encryption else {
-            return Ok(block);
-        };
-        let encrypted_data = match &block.delta {
-            CrdtDelta::Lww(payload) => payload.data.clone(),
-            CrdtDelta::Counter(payload) => payload.data.clone(),
-            _ => return Ok(block),
-        };
-        let plaintext = self
-            .decrypt_block_data(txn, &encrypted_data, &encryption_cid)
-            .await?;
-        match &mut block.delta {
-            CrdtDelta::Lww(payload) => payload.data = plaintext,
-            CrdtDelta::Counter(payload) => payload.data = plaintext,
-            _ => unreachable!("encrypted block kind checked above"),
-        }
-
-        Ok(block)
+        Block::from_dag_cbor(&data)
+            .map_err(|e| Error::Serialization(format!("Failed to decode block: {}", e)))
     }
 
+    /// Decrypts the encrypted field deltas of a walk, with every distinct
+    /// key it needs asked for in one request. A block whose key is not
+    /// released is left out of the history, as a block that cannot be read
+    /// is; the walk's own `start` block fails the read instead.
+    async fn decrypt_blocks(
+        &self,
+        txn: &mut DbTxn<S>,
+        start: &Cid,
+        blocks: &mut RapidHashMap<Cid, Block>,
+    ) -> Result<()> {
+        let mut cids: Vec<Cid> = blocks
+            .values()
+            .filter(|block| matches!(block.delta, CrdtDelta::Lww(_) | CrdtDelta::Counter(_)))
+            .filter_map(|block| block.encryption)
+            .collect();
+        if cids.is_empty() {
+            return Ok(());
+        }
+        cids.sort_unstable();
+        cids.dedup();
+        let keys = self.read_keys(txn, &cids).await?;
+        let mut unreadable = Vec::new();
+        for (cid, block) in blocks.iter_mut() {
+            let Some(encryption_cid) = block.encryption else {
+                continue;
+            };
+            let payload = match &mut block.delta {
+                CrdtDelta::Lww(payload) => &mut payload.data,
+                CrdtDelta::Counter(payload) => &mut payload.data,
+                _ => continue,
+            };
+            let plaintext = keys
+                .get(&encryption_cid)
+                .ok_or_else(|| format!("encryption key {encryption_cid} is unavailable"))
+                .and_then(|key| key.clone())
+                .and_then(|key| decrypt_with_key(payload, &key));
+            match plaintext {
+                Ok(plaintext) => *payload = plaintext,
+                Err(error) if cid == start => return Err(Error::Serialization(error)),
+                Err(error) => {
+                    tracing::debug!(
+                        block = %cid,
+                        %encryption_cid,
+                        %error,
+                        "historical block left out: its key is not released"
+                    );
+                    unreadable.push(*cid);
+                }
+            }
+        }
+        for cid in unreadable {
+            blocks.remove(&cid);
+        }
+        Ok(())
+    }
+
+    /// One delta's decryption through the same key path as a walk's.
+    #[cfg(test)]
     async fn decrypt_block_data(
         &self,
         txn: &mut DbTxn<S>,
         data: &[u8],
         encryption_cid: &Cid,
     ) -> Result<Vec<u8>> {
-        let key = if let Some(kms) = &self.kms {
-            let request_context = self.kms_request_context();
-            if let Some(inputs) = &self.prepared_inputs {
-                let request = crate::write::prepare::kms_input_request(
-                    crate::write::prepare::PreparedKmsOperation::GetForRead {
-                        cid: encryption_cid.to_string(),
-                        caller_identity: request_context.user_identity().map(ToString::to_string),
-                    },
-                );
-                let response = inputs
-                    .get(&request)
-                    .ok_or(Error::Query(query::error::QueryError::NeedsInput(request)))?;
-                let response: crate::write::prepare::PreparedKmsResponse =
-                    serde_json::from_slice(&response).map_err(|error| {
-                        Error::Serialization(format!("invalid prepared read key: {error}"))
-                    })?;
-                if response.cid != encryption_cid.to_string() || response.key.len() != 32 {
-                    return Err(Error::Serialization(
-                        "prepared read key does not match encryption block".into(),
-                    ));
-                }
-                return crypto::encryption::aes::decrypt_aes(None, data, &response.key, &[])
-                    .map_err(|error| {
-                        Error::Serialization(format!("failed to decrypt versioned block: {error}"))
-                    });
+        let key = self
+            .read_keys(txn, std::slice::from_ref(encryption_cid))
+            .await?
+            .remove(encryption_cid)
+            .unwrap_or_else(|| Err(format!("encryption key {encryption_cid} is unavailable")))
+            .map_err(Error::Serialization)?;
+        decrypt_with_key(data, &key).map_err(Error::Serialization)
+    }
+
+    /// The keys `cids` names, each with the reason it has none: through the
+    /// KMS in one request (an attempt with a prepared-input memo reads the
+    /// answer from it, or ends asking for it), or, without a KMS, from the
+    /// encryption blocks this node stores.
+    async fn read_keys(
+        &self,
+        txn: &mut DbTxn<S>,
+        cids: &[Cid],
+    ) -> Result<RapidHashMap<Cid, std::result::Result<[u8; 32], String>>> {
+        let Some(kms) = &self.kms else {
+            let mut keys = RapidHashMap::with_capacity(cids.len());
+            for cid in cids {
+                keys.insert(*cid, self.stored_key(txn, cid).await?);
             }
-            let results = kms
-                .get_keys(&request_context, std::slice::from_ref(encryption_cid))
+            return Ok(keys);
+        };
+        let request_context = self.kms_request_context();
+        let Some(inputs) = &self.prepared_inputs else {
+            let answers = kms
+                .get_keys_each(&request_context, cids)
                 .await
                 .map_err(|e| {
                     Error::Serialization(format!("failed to fetch encryption key: {e}"))
                 })?;
-            let mut receiver = results.into_receiver();
-            let mut key = None;
-            while let Some(result) = receiver.recv().await {
-                let (cid, resolved_key) = result.map_err(|e| {
-                    Error::Serialization(format!("failed to fetch encryption key: {e}"))
-                })?;
-                if cid == *encryption_cid {
-                    key = Some(resolved_key);
-                    break;
-                }
-            }
-            key.ok_or_else(|| {
-                Error::Serialization(format!("encryption key {} is unavailable", encryption_cid))
-            })?
+            return Ok(cids
+                .iter()
+                .copied()
+                .zip(answers.into_iter().map(|answer| {
+                    answer.map_err(|e| format!("failed to fetch encryption key: {e}"))
+                }))
+                .collect());
+        };
+        let request = crate::write::prepare::kms_input_request(
+            crate::write::prepare::PreparedKmsOperation::ReadKeys {
+                cids: cids.iter().map(ToString::to_string).collect(),
+                caller_identity: request_context.user_identity().map(ToString::to_string),
+            },
+        );
+        let response = inputs
+            .get(&request)
+            .ok_or(Error::Query(query::error::QueryError::NeedsInput(request)))?;
+        let answers: Vec<crate::write::prepare::PreparedReadKey> =
+            serde_json::from_slice(&response).map_err(|error| {
+                Error::Serialization(format!("invalid prepared read keys: {error}"))
+            })?;
+        if answers.len() != cids.len()
+            || answers
+                .iter()
+                .zip(cids)
+                .any(|(answer, cid)| answer.cid != cid.to_string())
+        {
+            return Err(Error::Serialization(
+                "prepared read keys do not match the encryption blocks".into(),
+            ));
+        }
+        Ok(cids
+            .iter()
+            .copied()
+            .zip(answers.into_iter().map(|answer| {
+                answer.key.and_then(|key| {
+                    key.try_into()
+                        .map_err(|_| "prepared read key is not 32 bytes".to_string())
+                })
+            }))
+            .collect())
+    }
+
+    /// The key an `Encryption` block this node stores carries: the encstore
+    /// first, then the blockstore.
+    async fn stored_key(
+        &self,
+        txn: &mut DbTxn<S>,
+        encryption_cid: &Cid,
+    ) -> Result<std::result::Result<[u8; 32], String>> {
+        let encryption_key = encryption_cid.to_bytes();
+        let encstore = txn.encstore()?;
+        let blockstore = txn.blockstore()?;
+        let encryption_data = if let Some(data) = encstore
+            .get(&encryption_key)
+            .await
+            .map_err(Error::Storage)?
+        {
+            data
         } else {
-            let encryption_key = encryption_cid.to_bytes();
-            let encstore = txn.encstore()?;
-            let blockstore = txn.blockstore()?;
-            let encryption_data = if let Some(data) = encstore
+            match blockstore
                 .get(&encryption_key)
                 .await
                 .map_err(Error::Storage)?
             {
-                data
-            } else {
-                blockstore
-                    .get(&encryption_key)
-                    .await
-                    .map_err(Error::Storage)?
-                    .ok_or_else(|| {
-                        Error::Serialization(format!(
-                            "encryption block {} is unavailable",
-                            encryption_cid
-                        ))
-                    })?
-            };
-            let encryption = Encryption::from_dag_cbor(&encryption_data).map_err(|e| {
-                Error::Serialization(format!("failed to decode encryption block: {e}"))
-            })?;
-            encryption
-                .key
-                .try_into()
-                .map_err(|_| Error::Serialization("invalid AES-256 encryption key".into()))?
+                Some(data) => data,
+                None => {
+                    return Ok(Err(format!(
+                        "encryption block {} is unavailable",
+                        encryption_cid
+                    )))
+                }
+            }
         };
-
-        crypto::encryption::aes::decrypt_aes(None, data, &key, &[])
-            .map_err(|e| Error::Serialization(format!("failed to decrypt versioned block: {e}")))
+        let encryption = Encryption::from_dag_cbor(&encryption_data)
+            .map_err(|e| Error::Serialization(format!("failed to decode encryption block: {e}")))?;
+        Ok(encryption
+            .key
+            .try_into()
+            .map_err(|_| "invalid AES-256 encryption key".to_string()))
     }
 
     pub fn kms_request_context(&self) -> kms::RequestContext {
@@ -703,3 +777,9 @@ impl<S: Store> VersionedFetcher<S> {
 #[cfg(test)]
 #[path = "versioned_retry_tests.rs"]
 mod retry_tests;
+
+/// AES-GCM decryption of a historical field delta.
+fn decrypt_with_key(data: &[u8], key: &[u8; 32]) -> std::result::Result<Vec<u8>, String> {
+    crypto::encryption::aes::decrypt_aes(None, data, key, &[])
+        .map_err(|e| format!("failed to decrypt versioned block: {e}"))
+}
