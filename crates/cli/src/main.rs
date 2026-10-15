@@ -12,9 +12,9 @@ use cli::cli::{Cli, Command};
 use cli::config::Config;
 use cli::error::Result;
 
-/// The process's one network runtime is started here, every command runs on
-/// it, and it is shut down in order once the command returns, on this
-/// thread, outside any async context.
+/// The process's one network runtime is started here and every command runs
+/// on it. Once the command returns, this thread waits while it shuts down in
+/// order, its owner thread dropping it outside any async context.
 fn main() -> ExitCode {
     let runtime = match edge::EdgeRuntime::start(edge::EdgeConfig::default()) {
         Ok(runtime) => runtime,
