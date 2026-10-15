@@ -15,43 +15,43 @@ use storage::RegolithStore;
 
 mod collection;
 
-/// One headstore write, identified by the CID it records, that the store refuses.
+/// One headstore write, identified by the CID it records, that the store
+/// refuses. A head set is written by one merge per set, so the points that
+/// name a document's head, its parent or a collection's head or parent refuse
+/// the merge that carries that CID.
 #[derive(Clone, Copy, Debug)]
 enum FailPoint {
     SetHead(Cid),
     SupersedeHead(Cid),
     SetPriority(Cid),
-    /// The head key of a collection block.
+    /// The head set merge that adds a collection block.
     CollectionHead(Cid),
-    /// A marker that this collection block superseded one of its parents.
+    /// The head set merge that supersedes a parent for this collection block.
     CollectionSupersede(Cid),
 }
 
 impl FailPoint {
-    fn refuses(self, delete: bool, key: &[u8]) -> bool {
+    fn refuses(self, key: &[u8], value: Option<&[u8]>) -> bool {
         let Some(key) = key.strip_prefix(b"h") else {
             return false;
         };
-        let head = storage::keys::headstore::HeadstoreDocKey::parse(key);
+        let names = |cid: Cid| {
+            let text = cid.to_string();
+            value.is_some_and(|value| {
+                value
+                    .windows(text.len())
+                    .any(|window| window == text.as_bytes())
+            })
+        };
         match self {
-            Self::SetHead(cid) => !delete && head.is_some_and(|head| head.cid == cid),
-            Self::SupersedeHead(cid) => {
-                !delete
-                    && key.strip_prefix(b"/ds/").is_some_and(|rest| {
-                        let Some(last) = rest.iter().rposition(|byte| *byte == b'/') else {
-                            return false;
-                        };
-                        rest[..last].ends_with(cid.to_string().as_bytes())
-                    })
+            Self::SetHead(cid) | Self::SupersedeHead(cid) => {
+                key.starts_with(b"/hd/") && names(cid)
             }
             Self::SetPriority(cid) => {
-                !delete && key.starts_with(b"/p/") && key.ends_with(&cid.to_bytes())
+                value.is_some() && key.starts_with(b"/p/") && key.ends_with(&cid.to_bytes())
             }
-            Self::CollectionHead(cid) => {
-                !delete && key.starts_with(b"/c/") && key.ends_with(cid.to_string().as_bytes())
-            }
-            Self::CollectionSupersede(child) => {
-                !delete && key.starts_with(b"/cs/") && key.ends_with(child.to_string().as_bytes())
+            Self::CollectionHead(cid) | Self::CollectionSupersede(cid) => {
+                key.starts_with(b"/hc/") && names(cid)
             }
         }
     }
@@ -85,12 +85,11 @@ impl Store for FailingHeadStore {
     ) -> std::result::Result<RetryAttemptValue, RetryAttemptError> {
         let fail = self.fail.clone();
         let interceptor: RetryWriteInterceptor = Arc::new(move |key, value| {
-            let delete = value.is_none();
             match fail
                 .lock()
                 .unwrap()
                 .iter()
-                .find(|point| point.refuses(delete, key))
+                .find(|point| point.refuses(key, value))
             {
                 Some(point) => Err(storage::Error::Other(format!(
                     "injected head write failure at {point:?}"
@@ -114,13 +113,13 @@ struct FailingHeadTxn {
 impl Sealed for FailingHeadTxn {}
 
 impl FailingHeadTxn {
-    fn check(&self, delete: bool, key: &[u8]) -> Result<()> {
+    fn check(&self, key: &[u8], value: Option<&[u8]>) -> Result<()> {
         match self
             .fail
             .lock()
             .unwrap()
             .iter()
-            .find(|point| point.refuses(delete, key))
+            .find(|point| point.refuses(key, value))
         {
             Some(point) => Err(storage::Error::Other(format!(
                 "injected head write failure at {point:?}"
@@ -150,6 +149,7 @@ impl Reader for FailingHeadTxn {
 #[async_trait]
 impl Writer for FailingHeadTxn {
     async fn merge(&mut self, key: &[u8], operand: &[u8]) -> Result<()> {
+        self.check(key, Some(operand))?;
         self.inner.merge(key, operand).await
     }
 
@@ -163,11 +163,11 @@ impl Writer for FailingHeadTxn {
     }
 
     async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
-        self.check(false, key)?;
+        self.check(key, Some(value))?;
         self.inner.set(key, value).await
     }
     async fn delete(&mut self, key: &[u8]) -> Result<()> {
-        self.check(true, key)?;
+        self.check(key, None)?;
         self.inner.delete(key).await
     }
 }

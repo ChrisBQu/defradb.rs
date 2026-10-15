@@ -4,12 +4,11 @@
 
 use std::str::FromStr;
 
-use proptest::prelude::*;
 use regolith::{KeyClass, KeyClassifier};
 
 use super::DefraKeyClassifier;
-use crate::corekv::{Error, IterOptions, Key, Store};
-use crate::keys::{encode_doc_short_id, HeadstoreColKey, HeadstoreColSuperseded, HeadstoreDocKey};
+use crate::corekv::{Error, Key, Store};
+use crate::keys::{HeadstoreColPublishedKey, HeadstoreColSetKey, HeadstoreDocSetKey};
 use crate::{RegolithStore, RegolithStoreOptions};
 
 const CID: &str = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
@@ -23,67 +22,38 @@ fn headstore(key: &[u8]) -> Vec<u8> {
     [b"h".as_slice(), key].concat()
 }
 
-/// One document's heads, and the markers against them, are each one set,
-/// whatever the width of the document's short ID.
+/// A head set is one ordinary key, whatever the width of the document's short
+/// ID: a merge into it is blind and a read of it names no parts.
 #[test]
-fn a_documents_heads_and_markers_are_each_one_commutative_set() {
+fn head_set_keys_are_ordinary() {
     let cid = cid::Cid::from_str(CID).unwrap();
     for id in [1u64, 47, 239, 240, 287, 2287, 2288, u64::MAX] {
-        let heads = headstore(&HeadstoreDocKey::document_prefix(id));
-        let head = headstore(&HeadstoreDocKey::new(id, "field", cid).bytes());
         assert_eq!(
-            class(&head),
-            KeyClass::CommutativePrefix { len: heads.len() }
+            class(&headstore(&HeadstoreDocSetKey::new(id).bytes())),
+            KeyClass::Ordinary
         );
-        let markers = [b"h/ds/".as_slice(), &encode_doc_short_id(id), b"/"].concat();
-        for set in [heads, markers] {
-            for suffix in [b"".as_slice(), b"field/parent/child", b"\xff\0/"] {
-                assert_eq!(
-                    class(&[set.as_slice(), suffix].concat()),
-                    KeyClass::CommutativePrefix { len: set.len() },
-                    "{set:?}"
-                );
-            }
-        }
     }
-}
-
-/// One collection's heads, and the markers against them, are each one set.
-#[test]
-fn a_collections_heads_and_markers_are_each_one_commutative_set() {
-    let cid = cid::Cid::from_str(CID).unwrap();
     for id in [0u32, 7, 42, u32::MAX] {
-        let heads = headstore(&HeadstoreColKey::collection_prefix(id));
-        let markers = headstore(&HeadstoreColSuperseded::collection_prefix(id));
-        let head = headstore(&HeadstoreColKey::new(id, cid).bytes());
-        let marker = headstore(&HeadstoreColSuperseded::new(id, cid, cid).bytes());
         assert_eq!(
-            class(&head),
-            KeyClass::CommutativePrefix { len: heads.len() }
+            class(&headstore(&HeadstoreColSetKey::new(id).bytes())),
+            KeyClass::Ordinary
         );
         assert_eq!(
-            class(&marker),
-            KeyClass::CommutativePrefix { len: markers.len() }
+            class(&headstore(&HeadstoreColPublishedKey::new(id, cid).bytes())),
+            KeyClass::Ordinary
         );
     }
 }
 
-/// A head key cut short or malformed names no set, and stays ordinary.
+/// A key of the old head layout is not in any family: it stays ordinary,
+/// like any key a family does not recognise.
 #[test]
-fn malformed_head_keys_stay_ordinary() {
+fn keys_of_the_old_head_layout_stay_ordinary() {
     for key in [
-        b"h/d/".as_slice(),
-        b"h/d/\x00/field/cid",
-        b"h/d/\xf0",
-        b"h/d/\x01",
-        b"h/d/\x01x/",
-        b"h/ds/",
-        b"h/ds/\x01",
-        b"h/c/",
-        b"h/c//cid",
-        b"h/c/1x/cid",
-        b"h/c/1",
-        b"h/cs/a/parent/child",
+        b"h/d/\x01/field/cid".as_slice(),
+        b"h/ds/\x01/field/parent/child",
+        b"h/c/1/cid",
+        b"h/cs/1/parent/child",
         b"h/d",
         b"h/different/",
     ] {
@@ -129,103 +99,37 @@ fn every_other_family_has_its_declared_class() {
     }
 }
 
-/// A head set's keys and a malformed tail: any of them is fine, since only
-/// the set's prefix decides the class.
-fn suffixes() -> impl Strategy<Value = Vec<u8>> {
-    proptest::collection::vec(
-        prop_oneof![Just(b'/'), Just(0u8), Just(0xf0u8), any::<u8>()],
-        0..16,
-    )
-}
-
-proptest! {
-    /// regolith's rule for a commutative prefix of `len` bytes: every key
-    /// that shares those bytes is in the same one.
-    #[test]
-    fn a_commutative_set_holds_every_key_that_shares_its_prefix(
-        id in 1u64..,
-        collection in any::<u32>(),
-        mine in suffixes(),
-        theirs in suffixes(),
-    ) {
-        let document = encode_doc_short_id(id);
-        let collection = collection.to_string();
-        for set in [
-            [b"h/d/".as_slice(), &document, b"/"].concat(),
-            [b"h/ds/".as_slice(), &document, b"/"].concat(),
-            [b"h/c/".as_slice(), collection.as_bytes(), b"/"].concat(),
-            [b"h/cs/".as_slice(), collection.as_bytes(), b"/"].concat(),
-        ] {
-            let expected = KeyClass::CommutativePrefix { len: set.len() };
-            prop_assert_eq!(class(&[set.as_slice(), &mine].concat()), expected);
-            prop_assert_eq!(class(&[set.as_slice(), &theirs].concat()), expected);
-        }
-    }
-}
-
-/// Seeds `keys`, then lets two transactions each scan `prefix` and delete
-/// `doomed` inside what they scanned, as two writers reclaiming the same
-/// superseded head do. Returns whether the second commit conflicted.
-async fn second_reclaim_conflicts(keys: &[&[u8]], prefix: &[u8], doomed: &[u8]) -> bool {
-    let store = RegolithStore::in_memory().unwrap();
-    let mut seed = store.new_txn(false).await.unwrap();
-    for key in keys {
-        seed.set(key, b"").await.unwrap();
-    }
-    seed.commit().await.unwrap();
-    let mut first = store.new_txn(false).await.unwrap();
-    let mut second = store.new_txn(false).await.unwrap();
-    for txn in [&mut first, &mut second] {
-        let mut iter = txn
-            .iterator(IterOptions::new().with_prefix(prefix.to_vec()))
-            .await
-            .unwrap();
-        let mut scanned = 0;
-        while iter.next().await.unwrap().is_some() {
-            scanned += 1;
-        }
-        iter.close().await.unwrap();
-        drop(iter);
-        assert_eq!(scanned, keys.len(), "{prefix:?}");
-        txn.delete(doomed).await.unwrap();
-    }
-    first.commit().await.unwrap();
-    match second.commit().await {
-        Ok(()) => false,
-        Err(Error::TxnConflictDetails(_)) => true,
-        Err(error) => panic!("{prefix:?}: {error}"),
-    }
-}
-
-/// Two writers of one document's (or one collection's) head set reclaim the
-/// same superseded head at once, each having scanned that set: both commit,
-/// because the set is commutative.
+/// Two writers of one head set each read it without naming parts and merge
+/// into it: both commit, and neither read is validated.
 #[tokio::test]
 async fn one_head_set_commutes() {
-    let heads: &[&[u8]] = &[b"h/d/\x01/field/a", b"h/d/\x01/field/b"];
-    assert!(!second_reclaim_conflicts(heads, b"h/d/\x01/", heads[0]).await);
-    let markers: &[&[u8]] = &[b"h/ds/\x01/field/a/x", b"h/ds/\x01/field/b/y"];
-    assert!(!second_reclaim_conflicts(markers, b"h/ds/\x01/", markers[0]).await);
-    let heads: &[&[u8]] = &[b"h/c/1/a", b"h/c/1/b"];
-    assert!(!second_reclaim_conflicts(heads, b"h/c/1/", heads[0]).await);
-    let markers: &[&[u8]] = &[b"h/cs/1/a/x", b"h/cs/1/b/y"];
-    assert!(!second_reclaim_conflicts(markers, b"h/cs/1/", markers[0]).await);
-}
-
-/// A scan across two documents' (or two collections') head sets is no head
-/// set: a delete inside it is validated as a read, so the second of two such
-/// reclaims conflicts. While a whole family counted as one set, both
-/// committed.
-#[tokio::test]
-async fn a_scan_across_head_sets_is_validated() {
-    let heads: &[&[u8]] = &[b"h/d/\x01/field/a", b"h/d/\x02/field/b"];
-    assert!(second_reclaim_conflicts(heads, b"h/d/", heads[0]).await);
-    let markers: &[&[u8]] = &[b"h/ds/\x01/field/a/x", b"h/ds/\x02/field/b/y"];
-    assert!(second_reclaim_conflicts(markers, b"h/ds/", markers[0]).await);
-    let heads: &[&[u8]] = &[b"h/c/1/a", b"h/c/2/b"];
-    assert!(second_reclaim_conflicts(heads, b"h/c/", heads[0]).await);
-    let markers: &[&[u8]] = &[b"h/cs/1/a/x", b"h/cs/2/b/y"];
-    assert!(second_reclaim_conflicts(markers, b"h/cs/", markers[0]).await);
+    for key in [
+        HeadstoreDocSetKey::new(1).bytes(),
+        HeadstoreColSetKey::new(1).bytes(),
+    ] {
+        let key = headstore(&key);
+        let store = RegolithStore::in_memory().unwrap();
+        let operand = |name: &[u8]| {
+            let mut write = crate::merge::head_set::Write::default();
+            write.add(name, 1);
+            write.operand()
+        };
+        let mut seed = store.new_txn(false).await.unwrap();
+        seed.merge(&key, &operand(b"a")).await.unwrap();
+        seed.commit().await.unwrap();
+        let mut first = store.new_txn(false).await.unwrap();
+        let mut second = store.new_txn(false).await.unwrap();
+        for (txn, name) in [(&mut first, b"b"), (&mut second, b"c")] {
+            assert!(txn.get_parts(&key, &[]).await.unwrap().is_some());
+            txn.merge(&key, &operand(name)).await.unwrap();
+        }
+        first.commit().await.unwrap();
+        second.commit().await.unwrap();
+        let read = store.new_txn(true).await.unwrap();
+        let set = crate::merge::head_set::Set::read(&read.get(&key).await.unwrap().unwrap())
+            .unwrap();
+        assert_eq!(set.live().count(), 3, "{key:?}");
+    }
 }
 
 async fn same_block_writes(options: RegolithStoreOptions) {
@@ -258,6 +162,7 @@ async fn ordinary_decision_keys_have_one_winner() {
         b"bm\x01\x55\x00\x03abc".as_slice(),
         b"h/p/applied",
         b"h/r/\x01/field/cid",
+        b"h/rc/1/cid",
         b"s/d/p/doc",
         b"a/zanzibar/owner",
         b"d/del/doc",

@@ -2,7 +2,7 @@ use rapidhash::{HashSetExt, RapidHashSet};
 use std::sync::Arc;
 
 use storage::keys::{
-    DataStoreKey, DatastoreSE, HeadstoreDocKey, HeadstorePriorityKey, InstanceType,
+    DataStoreKey, DatastoreSE, HeadstorePriorityKey, InstanceType,
     PrimaryDataStoreKey,
 };
 
@@ -197,31 +197,19 @@ impl<S: Store> crate::database::DB<S> {
                     .await?;
                 }
 
-                let head_prefix = HeadstoreDocKey::document_prefix(*doc_short_id);
-                let mut block_cids = Vec::new();
-                let mut head_iter = headstore
-                    .iterator(IterOptions::new().with_prefix(head_prefix.clone()))
+                let heads = crate::block::heads::document::load(&headstore, *doc_short_id)
                     .await
                     .map_err(Error::Storage)?;
-                while let Some(pair) = head_iter.next().await.map_err(Error::Storage)? {
-                    if let Some(cid_str) = extract_last_path_segment_str(&pair.key) {
-                        if let Ok(cid) = cid::Cid::try_from(cid_str.as_str()) {
-                            block_cids.push(cid);
-                        }
-                    }
-                }
-                head_iter.close().await.map_err(Error::Storage)?;
-                delete_prefix(
-                    &headstore,
-                    crate::block::heads::document::document_markers(*doc_short_id),
-                )
-                .await?;
+                let block_cids = crate::block::heads::document::live_cids(&heads);
+                headstore
+                    .delete(&crate::block::heads::document::set_key(*doc_short_id))
+                    .await
+                    .map_err(Error::Storage)?;
                 delete_prefix(
                     &headstore,
                     crate::block::heads::document::document_publications(*doc_short_id),
                 )
                 .await?;
-                delete_prefix(&headstore, head_prefix).await?;
                 delete_prefix(
                     &headstore,
                     HeadstorePriorityKey::document_prefix(*doc_short_id),

@@ -34,7 +34,7 @@ proptest! {
 /// The name a table records: stable, and naming this extractor alone.
 #[test]
 fn the_extractor_is_named_for_its_cuts() {
-    assert_eq!(DefraPrefixExtractor.name(), "defradb-entities-v1");
+    assert_eq!(DefraPrefixExtractor.name(), "defradb-entities-v2");
     assert_ne!(
         DefraPrefixExtractor.name(),
         regolith::FixedLengthPrefix(4).name()
@@ -65,12 +65,9 @@ async fn a_prefix_scan_reads_what_it_did_and_skips_tables_without_its_entity() {
     for entity in [1u8, 3] {
         let digit = b'0' + entity;
         keys.extend([
-            [b"h/d/".as_slice(), &[entity], b"/field/a"].concat(),
-            [b"h/d/".as_slice(), &[entity], b"/field/b"].concat(),
-            [b"h/ds/".as_slice(), &[entity], b"/field/a/b"].concat(),
+            [b"h/r/".as_slice(), &[entity], b"/field/a"].concat(),
+            [b"h/r/".as_slice(), &[entity], b"/field/b"].concat(),
             [b"h/p/".as_slice(), &[entity], b"/0000000000000001/a"].concat(),
-            [b"h/c/".as_slice(), &[digit], b"/a"].concat(),
-            [b"h/cs/".as_slice(), &[digit], b"/a/b"].concat(),
             [b"d/d/col".as_slice(), &[digit], b"/\x01"].concat(),
             [b"d/\x01/".as_slice(), &[entity], b"/value/\x01"].concat(),
             [
@@ -82,7 +79,7 @@ async fn a_prefix_scan_reads_what_it_did_and_skips_tables_without_its_entity() {
         ]);
     }
     // A key that names no entity, between the others.
-    keys.push(b"h/d/".to_vec());
+    keys.push(b"h/p/".to_vec());
     keys.sort();
     for key in &keys {
         db.db().put(key, key).unwrap();
@@ -95,19 +92,16 @@ async fn a_prefix_scan_reads_what_it_did_and_skips_tables_without_its_entity() {
     for entity in [1u8, 2, 3] {
         let digit = b'0' + entity;
         prefixes.extend([
-            [b"h/d/".as_slice(), &[entity], b"/"].concat(),
-            [b"h/d/".as_slice(), &[entity], b"/field/"].concat(),
-            [b"h/ds/".as_slice(), &[entity], b"/"].concat(),
+            [b"h/r/".as_slice(), &[entity], b"/"].concat(),
+            [b"h/r/".as_slice(), &[entity], b"/field/"].concat(),
             [b"h/p/".as_slice(), &[entity], b"/"].concat(),
-            [b"h/c/".as_slice(), &[digit], b"/"].concat(),
-            [b"h/cs/".as_slice(), &[digit], b"/a/"].concat(),
             [b"d/d/col".as_slice(), &[digit], b"/"].concat(),
             [b"d/\x01/".as_slice(), &[entity], b"/value/"].concat(),
             [b"a/zanzibar/1/rel/users/bae-".as_slice(), &[digit], b"/"].concat(),
         ]);
     }
     // Prefixes that stop short of an entity, or name none.
-    prefixes.extend([b"h/d/".to_vec(), b"h/".to_vec(), b"d/".to_vec(), Vec::new()]);
+    prefixes.extend([b"h/p/".to_vec(), b"h/".to_vec(), b"d/".to_vec(), Vec::new()]);
     prefixes.push(vec![0xff, 0xff]);
     for prefix in prefixes {
         let options = IterOptions::new().with_prefix(prefix.clone());
@@ -122,8 +116,8 @@ async fn a_prefix_scan_reads_what_it_did_and_skips_tables_without_its_entity() {
 
     let before = statistics.get_ticker(Ticker::BloomFilterUseful);
     for absent in [
-        b"h/d/\x02/".as_slice(),
-        b"h/c/2/",
+        b"h/r/\x02/".as_slice(),
+        b"h/p/\x02/",
         b"d/d/col2/",
         b"d/\x01/\x02/",
         b"a/zanzibar/1/rel/users/bae-2/",

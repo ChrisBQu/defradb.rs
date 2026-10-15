@@ -1,32 +1,67 @@
-//! Document heads use the same parent/child markers as collection heads.
+//! A document's head set: every field's heads and the composite's (`C`)
+//! together, under one key, so an update reads all of them with one point read.
 //!
-//! A head key is `/d/{doc}/{field}/{cid}`, a marker `/ds/{doc}/{field}/{parent}/{child}`
-//! and a publication guard `/r/{doc}/{field}/{cid}`. A marker may arrive before
-//! its parent; it is kept until its parent is published and reclaimed.
+//! A name is `{field}/{cid text}`, the bytes a head key has after its
+//! document prefix, so [`iterator`] rebuilds the head keys of the earlier
+//! layout from the set and its callers read the live heads unchanged: live
+//! heads only, in head-key order, with seek and reverse.
+//!
+//! A head is published once, behind its publication guard (`h/r/`), which
+//! survives the head being superseded: it is what tells a parent that was
+//! published from one whose block has not arrived.
+
 use async_trait::async_trait;
 use cid::Cid;
 use storage::corekv::{Error, IterOptions, Iterator, Key, KvPair, Reader, Result};
-use storage::keys::headstore::HeadstoreDocKey;
+use storage::keys::doc_id_index::decode_doc_short_id_prefix;
+use storage::keys::headstore::{HeadstoreDocKey, HeadstoreDocSetKey};
+use storage::merge::head_set::{Set, Write};
+use std::collections::VecDeque;
 
-use super::reclamation::{marker_parent, Reclamation};
-use super::walk::HeadWalk;
-use super::{PruneOutcome, RECLAIM_MAX_KEYS};
+use super::{merge_set, read_set};
+use crate::block::builder::encode_priority_varint;
 
 const HEADS: &[u8] = b"/d/";
-const MARKERS: &[u8] = b"/ds/";
 const PUBLISHED: &[u8] = b"/r/";
 
-/// The same document-head name under another family's prefix, or `None` for
-/// a key outside the head family.
-fn renamed(head_family_key: &[u8], family: &[u8]) -> Option<Vec<u8>> {
-    let name = head_family_key.strip_prefix(HEADS)?;
-    Some([family, name].concat())
+/// The name of a head in its document's set.
+pub fn name(field: &str, cid: &Cid) -> Vec<u8> {
+    format!("{field}/{cid}").into_bytes()
 }
 
-/// The markers of every head of one document.
-pub fn document_markers(doc_short_id: u64) -> Vec<u8> {
-    let prefix = HeadstoreDocKey::document_prefix(doc_short_id);
-    [MARKERS, &prefix[HEADS.len()..]].concat()
+/// The field and CID a head's name holds.
+pub fn parse_name(name: &[u8]) -> Option<(&str, Cid)> {
+    let (field, cid) = std::str::from_utf8(name).ok()?.rsplit_once('/')?;
+    Some((field, cid.parse().ok()?))
+}
+
+/// The CIDs of a set's live heads.
+pub fn live_cids(set: &Set) -> Vec<Cid> {
+    set.live()
+        .filter_map(|(name, _)| parse_name(name).map(|(_, cid)| cid))
+        .collect()
+}
+
+/// The key of a document's head set.
+pub fn set_key(doc_short_id: u64) -> Vec<u8> {
+    HeadstoreDocSetKey::new(doc_short_id).bytes()
+}
+
+/// The document's head set: one point read, never validated.
+pub async fn load<R>(reader: &R, doc_short_id: u64) -> Result<Set>
+where
+    R: Reader + ?Sized,
+{
+    read_set(reader, &set_key(doc_short_id)).await
+}
+
+/// Merge a write into the document's set. One per set per transaction.
+pub async fn commit(
+    writer: &datastore::NamespaceView,
+    doc_short_id: u64,
+    write: &Write,
+) -> Result<()> {
+    merge_set(writer, &set_key(doc_short_id), write).await
 }
 
 /// The publication guards of every head of one document.
@@ -37,15 +72,23 @@ pub fn document_publications(doc_short_id: u64) -> Vec<u8> {
 
 /// Durable publication identity, separate from CRDT application: a standalone
 /// counter can be applied before its composite publishes the field head.
-/// This guard survives head reclamation so replay cannot resurrect a parent.
+/// This guard survives the head being superseded so replay cannot resurrect a
+/// parent.
 pub fn publication_key(head: &HeadstoreDocKey) -> Vec<u8> {
     [PUBLISHED, &head.bytes()[HEADS.len()..]].concat()
 }
 
+/// Publish a replicated head once, into `write`: it becomes a head at
+/// `priority` and each of `parents` stops being one. `set` is the document's
+/// set as the caller read it. A parent live in `set` or with a publication
+/// guard is superseded; any other has not arrived, and is held ahead until it
+/// does. The guard reads are validated.
 pub async fn publish(
     writer: &datastore::NamespaceView,
+    set: &Set,
+    write: &mut Write,
     head: &HeadstoreDocKey,
-    priority: &[u8],
+    priority: u64,
     parents: &[Cid],
 ) -> Result<()> {
     let recorded = publication_key(head);
@@ -53,177 +96,136 @@ pub async fn publish(
         return Ok(());
     }
     for parent in parents {
-        let parent_key = HeadstoreDocKey::new(head.doc_short_id, &head.field_id, *parent);
-        supersede(writer, &parent_key.bytes(), head.cid).await?;
+        let name = name(&head.field_id, parent);
+        let parent_head = HeadstoreDocKey::new(head.doc_short_id, &head.field_id, *parent);
+        if set.is_live(&name) || writer.has(&publication_key(&parent_head)).await? {
+            write.supersede(&name);
+        } else {
+            write.supersede_ahead(&name);
+        }
     }
-    writer.set(&head.bytes(), priority).await?;
+    write.add(&name(&head.field_id, &head.cid), priority);
     writer.set(&recorded, &[]).await
 }
 
-/// Each writer names its own child, so sibling writers never overwrite a parent.
-/// `parent_key` is the stored head key, byte for byte. Returns the marker written.
-pub async fn supersede(
-    writer: &datastore::NamespaceView,
-    parent_key: &[u8],
-    child: Cid,
-) -> Result<Vec<u8>> {
-    let mut marker = renamed(parent_key, MARKERS)
-        .ok_or_else(|| Error::Other("a document head marker needs a /d/ head key".into()))?;
-    marker.push(b'/');
-    marker.extend_from_slice(child.to_string().as_bytes());
-    writer.set(&marker, &[]).await?;
-    Ok(marker)
-}
-
-/// The heads one local write superseded, each with the marker it wrote, so
-/// its reclamation needs no second walk of the document's heads.
-#[derive(Debug, Default)]
-pub struct HeadWrites {
-    superseded: Vec<(Vec<u8>, Vec<u8>)>,
-}
-
-impl HeadWrites {
-    /// [`supersede`], remembering the parent and its marker.
-    pub async fn supersede(
-        &mut self,
-        writer: &datastore::NamespaceView,
-        parent_key: &[u8],
-        child: Cid,
-    ) -> Result<()> {
-        let marker = supersede(writer, parent_key, child).await?;
-        self.superseded.push((parent_key.to_vec(), marker));
-        Ok(())
-    }
-}
-
-/// What a load of one document's heads found to reclaim, gathered by the same
-/// walk, so the write that loaded them reclaims without walking them again.
-#[derive(Debug, Default)]
-pub struct Reclaimable {
-    gathered: Reclamation,
-    orphans: Vec<Vec<u8>>,
-}
-
-/// Walk one document's heads and markers once: hand each live head to `live`
-/// and gather what is superseded, under the same budget as [`reclaim`].
-pub async fn load<R>(reader: &R, doc_short_id: u64, live: impl FnMut(KvPair)) -> Result<Reclaimable>
-where
-    R: Reader + ?Sized,
-{
-    let heads = reader
-        .iterator(IterOptions::new().with_prefix(HeadstoreDocKey::document_prefix(doc_short_id)))
-        .await?;
-    let markers = reader
-        .iterator(
-            IterOptions::new()
-                .with_prefix(document_markers(doc_short_id))
-                .with_keys_only(true),
-        )
-        .await?;
-    let mut walk = HeadWalk::new(heads, markers, HEADS.len(), MARKERS.len(), false)
-        .collect_orphans(RECLAIM_MAX_KEYS);
-    let gathered = Reclamation::gather(&mut walk, RECLAIM_MAX_KEYS, false, live).await?;
-    let orphans = walk.take_orphans();
-    walk.close().await?;
-    Ok(Reclaimable { gathered, orphans })
-}
-
-impl Reclaimable {
-    /// Reclaim, in the writer's transaction, what the load found and what
-    /// `writes` superseded since, by the same rules as [`reclaim`].
-    ///
-    /// The load may predate the transaction's view, so a marker gathered as an
-    /// orphan whose parent's head key is stored now leaves together with that
-    /// head, as a fresh walk would group them: a marker never leaves while
-    /// its head stays.
-    pub async fn reclaim(
-        self,
-        writer: &datastore::NamespaceView,
-        writes: HeadWrites,
-    ) -> Result<PruneOutcome> {
-        let Self {
-            mut gathered,
-            orphans,
-        } = self;
-        for (parent, marker) in writes.superseded {
-            gathered.offer(vec![marker, parent], RECLAIM_MAX_KEYS);
-        }
-        let mut headless = Vec::with_capacity(orphans.len());
-        for marker in orphans {
-            let Some(head) =
-                marker_parent(&marker, MARKERS.len()).map(|parent| [HEADS, parent].concat())
-            else {
-                continue;
-            };
-            if writer.get_parts(&head, &[]).await?.is_some() {
-                gathered.offer(vec![marker, head], RECLAIM_MAX_KEYS);
-            } else {
-                headless.push(marker);
-            }
-        }
-        gathered
-            .finish(
-                writer,
-                headless,
-                Some(PUBLISHED),
-                MARKERS.len(),
-                RECLAIM_MAX_KEYS,
-            )
-            .await
-    }
-}
-
-/// Reclaim the document's superseded heads in the caller's transaction.
-///
-/// Every write that publishes a document head calls this once, so a
-/// document's backlog is what its latest writes superseded. Bounded by
-/// [`RECLAIM_MAX_KEYS`]; [`super::reclaim`] says why it never conflicts.
-pub async fn reclaim(writer: &datastore::NamespaceView, doc_short_id: u64) -> Result<PruneOutcome> {
-    super::reclaim(
-        writer,
-        HeadstoreDocKey::document_prefix(doc_short_id),
-        document_markers(doc_short_id),
-        (HEADS.len(), MARKERS.len()),
-        Some(PUBLISHED),
-        RECLAIM_MAX_KEYS,
-    )
-    .await
-}
-
-/// Iterate live heads in one snapshot, excluding parents named by markers.
-///
-/// The heads and the markers of the prefix are walked side by side, so the
-/// iterator holds one marker at a time however long the history. This scan is
-/// advisory: choosing parents may fork the DAG, never a business decision.
+/// The live heads of the documents `options` names, as head keys with their
+/// priority as the value: one document's set is one point read, and a prefix
+/// that names no single document walks the sets, one at a time.
 pub async fn iterator<R>(reader: &R, options: IterOptions) -> Result<Box<dyn Iterator>>
 where
     R: Reader + ?Sized,
 {
-    let marker_prefix = options
+    let prefix = options
         .prefix()
-        .and_then(|prefix| renamed(prefix, MARKERS))
-        .ok_or_else(|| Error::Iterator("document head iterator requires a /d/ prefix".into()))?;
+        .filter(|prefix| prefix.starts_with(HEADS))
+        .ok_or_else(|| Error::Iterator("document head iterator requires a /d/ prefix".into()))?
+        .to_vec();
     let reverse = options.reverse();
-    let markers = reader
-        .iterator(
-            IterOptions::new()
-                .with_prefix(marker_prefix)
-                .with_keys_only(true)
-                .with_reverse(reverse),
-        )
-        .await?;
-    let heads = reader.iterator(options).await?;
+    let one_document = decode_doc_short_id_prefix(&prefix[HEADS.len()..])
+        .ok()
+        .filter(|(rest, _)| rest.first() == Some(&b'/'))
+        .map(|(_, doc_short_id)| doc_short_id);
+    let source = match one_document {
+        Some(doc_short_id) => Source::One(doc_short_id, load(reader, doc_short_id).await?),
+        None => Source::Many(
+            reader
+                .iterator(
+                    IterOptions::new()
+                        .with_prefix(HeadstoreDocSetKey::family_prefix())
+                        .with_reverse(reverse),
+                )
+                .await?,
+        ),
+    };
     Ok(Box::new(LiveHeads {
-        walk: HeadWalk::new(heads, markers, HEADS.len(), MARKERS.len(), reverse),
+        source,
+        prefix,
+        start: options.start().map(<[u8]>::to_vec),
+        end: options.end().map(<[u8]>::to_vec),
         reverse,
-        pending: None,
+        bound: None,
+        buffer: VecDeque::new(),
+        armed: true,
     }))
 }
 
+enum Source {
+    One(u64, Set),
+    Many(Box<dyn Iterator>),
+}
+
 struct LiveHeads {
-    walk: HeadWalk,
+    source: Source,
+    prefix: Vec<u8>,
+    start: Option<Vec<u8>>,
+    end: Option<Vec<u8>>,
     reverse: bool,
-    pending: Option<KvPair>,
+    /// Where a seek landed: keys before it (after it, in reverse) are skipped.
+    bound: Option<Vec<u8>>,
+    buffer: VecDeque<KvPair>,
+    /// A single document's set not yet loaded into the buffer.
+    armed: bool,
+}
+
+impl LiveHeads {
+    fn admits(&self, key: &[u8]) -> bool {
+        key.starts_with(&self.prefix)
+            && self.start.as_deref().is_none_or(|start| key >= start)
+            && self.end.as_deref().is_none_or(|end| key < end)
+            && self.bound.as_deref().is_none_or(|bound| {
+                if self.reverse {
+                    key <= bound
+                } else {
+                    key >= bound
+                }
+            })
+    }
+
+    fn load(&mut self, doc_short_id: u64, set: &Set) {
+        let document = HeadstoreDocKey::document_prefix(doc_short_id);
+        let mut pairs: Vec<KvPair> = set
+            .live()
+            .map(|(name, priority)| {
+                KvPair::new(
+                    [document.as_slice(), name].concat(),
+                    encode_priority_varint(priority),
+                )
+            })
+            .filter(|pair| self.admits(&pair.key))
+            .collect();
+        if self.reverse {
+            pairs.reverse();
+        }
+        self.buffer.extend(pairs);
+    }
+
+    /// Refill the buffer from the next set; false when the sets are done.
+    async fn refill(&mut self) -> Result<bool> {
+        let mut loaded = None;
+        match &mut self.source {
+            Source::One(doc_short_id, set) => {
+                if !std::mem::take(&mut self.armed) {
+                    return Ok(false);
+                }
+                loaded = Some((*doc_short_id, set.clone()));
+            }
+            Source::Many(sets) => {
+                if let Some(pair) = sets.next().await? {
+                    let doc = HeadstoreDocSetKey::parse(&pair.key).ok_or_else(|| {
+                        Error::Iterator("a head set key is malformed".into())
+                    })?;
+                    let set = Set::read(&pair.value)
+                        .ok_or_else(|| Error::Iterator("a head set is malformed".into()))?;
+                    loaded = Some((doc.doc_short_id, set));
+                }
+            }
+        }
+        let Some((doc_short_id, set)) = loaded else {
+            return Ok(false);
+        };
+        self.load(doc_short_id, &set);
+        Ok(true)
+    }
 }
 
 impl storage::corekv::private::Sealed for LiveHeads {}
@@ -231,43 +233,58 @@ impl storage::corekv::private::Sealed for LiveHeads {}
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Iterator for LiveHeads {
     async fn next(&mut self) -> Result<Option<KvPair>> {
-        if let Some(pair) = self.pending.take() {
-            return Ok(Some(pair));
-        }
-        while let Some(head) = self.walk.next().await? {
-            if !head.superseded {
-                return Ok(Some(head.pair));
+        while self.buffer.is_empty() {
+            if !self.refill().await? {
+                return Ok(None);
             }
         }
-        Ok(None)
+        Ok(self.buffer.pop_front())
     }
     async fn close(&mut self) -> Result<()> {
-        self.pending = None;
-        self.walk.close().await
+        self.buffer.clear();
+        self.armed = false;
+        match &mut self.source {
+            Source::One(..) => Ok(()),
+            Source::Many(sets) => sets.close().await,
+        }
     }
     async fn seek(&mut self, key: &[u8]) -> Result<bool> {
-        self.pending = None;
-        // A head's markers sort right after its name: forward, seek the
-        // markers to the name; in reverse, to just past every marker of it.
-        let marker_key = match renamed(key, MARKERS) {
-            Some(mut marker) if self.reverse => {
-                marker.push(b'/' + 1);
-                marker
+        self.buffer.clear();
+        self.bound = Some(key.to_vec());
+        match &mut self.source {
+            Source::One(..) => self.armed = true,
+            Source::Many(sets) => {
+                let doc = key
+                    .strip_prefix(HEADS)
+                    .and_then(|rest| decode_doc_short_id_prefix(rest).ok())
+                    .map(|(_, doc_short_id)| HeadstoreDocSetKey::new(doc_short_id).bytes());
+                match doc {
+                    Some(set_key) => sets.seek(&set_key).await?,
+                    None => {
+                        sets.reset().await?;
+                        false
+                    }
+                };
             }
-            Some(marker) => marker,
-            None => MARKERS.to_vec(),
-        };
-        if !self.walk.seek(key, &marker_key).await? {
-            return Ok(false);
         }
-        self.pending = self.next().await?;
-        Ok(self.pending.is_some())
+        Ok(self.next().await?.is_some_and(|pair| {
+            self.buffer.push_front(pair);
+            true
+        }))
     }
     async fn reset(&mut self) -> Result<()> {
-        self.pending = None;
-        self.walk.reset().await
+        self.buffer.clear();
+        self.bound = None;
+        match &mut self.source {
+            Source::One(..) => self.armed = true,
+            Source::Many(sets) => sets.reset().await?,
+        }
+        Ok(())
     }
     fn is_valid(&self) -> bool {
-        self.walk.is_valid()
+        match &self.source {
+            Source::One(..) => true,
+            Source::Many(sets) => sets.is_valid(),
+        }
     }
 }

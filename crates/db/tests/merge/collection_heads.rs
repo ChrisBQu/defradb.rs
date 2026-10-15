@@ -37,7 +37,7 @@ async fn raw_collection_head_keys(store: &Arc<RegolithStore>) -> Vec<String> {
     let mut keys = Vec::new();
     while let Some(pair) = iter.next().await.unwrap() {
         let key = String::from_utf8_lossy(&pair.key).into_owned();
-        if key.contains("/c/") {
+        if key.contains("/hc/") {
             keys.push(key);
         }
     }
@@ -64,6 +64,6 @@ async fn branchable_collection_writes_expose_collection_heads() {
     assert!(
         !heads.is_empty(),
         "a branchable collection with one committed document must expose \
-         collection heads to BranchableSync; raw '/c/' keys in the store: {raw:?}"
+         collection heads to BranchableSync; raw '/hc/' keys in the store: {raw:?}"
     );
 }

@@ -10,7 +10,6 @@ use async_lock::Mutex as TokioMutex;
 use cid::Cid;
 use document::Document;
 use rapidhash::{HashMapExt, HashSetExt, RapidHashSet};
-use std::collections::BTreeSet;
 use std::str::FromStr;
 use std::sync::Arc;
 use storage::corekv::{IterOptions, Store};
@@ -359,24 +358,7 @@ impl<S: Store> CommitsFetcher<S> {
         let mut cids = Vec::new();
 
         if options.doc_id.is_none() {
-            let col_opts = IterOptions::new().with_prefix(b"/c/".to_vec());
-            let mut col_iter = headstore.iterator(col_opts).await.map_err(Error::Storage)?;
-            let mut collection_ids = BTreeSet::new();
-
-            while let Some(pair) = col_iter.next().await.map_err(Error::Storage)? {
-                let Ok(key) = std::str::from_utf8(&pair.key) else {
-                    continue;
-                };
-                let Some((collection_id, _)) =
-                    key.strip_prefix("/c/").and_then(|key| key.split_once('/'))
-                else {
-                    continue;
-                };
-                if let Ok(collection_id) = collection_id.parse() {
-                    collection_ids.insert(collection_id);
-                }
-            }
-            col_iter.close().await.map_err(Error::Storage)?;
+            let collection_ids = crate::block::heads::collections_with_heads(&headstore).await?;
 
             for collection_id in collection_ids {
                 let heads =

@@ -61,11 +61,9 @@ async fn backfill_indexes_a_shared_cid_for_each_document() {
             .await
             .unwrap();
         for doc_short_id in [1, 2] {
-            headstore
-                .set(
-                    &storage::keys::HeadstoreDocKey::new(doc_short_id, "name", cid).bytes(),
-                    &[],
-                )
+            let mut heads = storage::merge::head_set::Write::default();
+            heads.add(&db::block::heads::document::name("name", &cid), 0);
+            db::block::heads::document::commit(&headstore, doc_short_id, &heads)
                 .await
                 .unwrap();
         }

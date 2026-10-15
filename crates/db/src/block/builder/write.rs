@@ -1,4 +1,5 @@
 use super::*;
+use crate::block::heads::document as doc_heads;
 
 /// The `Encryption` link a new block should carry forward, read off the
 /// previous block, when the write brings no config of its own.
@@ -151,13 +152,13 @@ pub(crate) async fn inherited_encryption_policy(
     fields: &[String],
 ) -> Result<(bool, rapidhash::RapidHashSet<String>), String> {
     let snapshot = DocHeadsSnapshot::load(headstore, identity.doc_short_id).await?;
-    let heads: Vec<_> = snapshot.field_heads("C").iter().map(|h| h.cid).collect();
+    let heads = snapshot.field_heads("C");
     let encrypt_doc = inherited_encryption_cid(blockstore, &heads)
         .await?
         .is_some();
     let mut encrypted_fields = rapidhash::RapidHashSet::default();
     for field in fields {
-        let heads: Vec<_> = snapshot.field_heads(field).iter().map(|h| h.cid).collect();
+        let heads = snapshot.field_heads(field);
         if inherited_encryption_cid(blockstore, &heads)
             .await?
             .is_some()
@@ -319,8 +320,7 @@ pub async fn write_document_blocks(
 
 /// [`write_document_blocks`] with prepared remote inputs. An update that has
 /// already read the document's heads passes them in `heads`, so they are not
-/// scanned a second time, not even to reclaim what they supersede; without
-/// them an update reads them here.
+/// read a second time; without them an update reads them here.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn write_document_blocks_with_inputs(
     blockstore: &NamespaceView,
@@ -348,7 +348,7 @@ pub(crate) async fn write_document_blocks_with_inputs(
         Some(heads) => Some(heads),
         None => Some(DocHeadsSnapshot::load(headstore, identity.doc_short_id).await?),
     };
-    let mut head_writes = crate::block::heads::document::HeadWrites::default();
+    let mut head_write = storage::merge::head_set::Write::default();
     let composite_priority: u64 = if is_create {
         1
     } else {
@@ -359,15 +359,13 @@ pub(crate) async fn write_document_blocks_with_inputs(
             + 1
     };
 
-    let (composite_head_entries, composite_heads) = if is_create {
-        (Vec::new(), Vec::new())
+    let composite_heads: Vec<Cid> = if is_create {
+        Vec::new()
     } else {
-        let entries = snapshot
+        snapshot
             .as_ref()
             .ok_or_else(|| "snapshot required for updates".to_string())?
-            .field_heads("C");
-        let heads: Vec<Cid> = entries.iter().map(|h| h.cid).collect();
-        (entries, heads)
+            .field_heads("C")
     };
 
     // The composite block's encryption link is set only for whole-document
@@ -402,7 +400,7 @@ pub(crate) async fn write_document_blocks_with_inputs(
         };
 
         if should_create_block {
-            let heads: Vec<Cid> = field_head_entries.iter().map(|h| h.cid).collect();
+            let heads = field_head_entries.clone();
             let field_priority = if is_create {
                 1
             } else {
@@ -580,18 +578,11 @@ pub(crate) async fn write_document_blocks_with_inputs(
                 .map_err(|e| format!("Failed to store field block: {}", e))?;
 
             for old_head in &field_head_entries {
-                head_writes
-                    .supersede(headstore, &old_head.key, field_cid)
-                    .await
-                    .map_err(|e| format!("Failed to delete old field head: {}", e))?;
+                head_write.supersede(&doc_heads::name(field_name, old_head));
             }
+            head_write.add(&doc_heads::name(field_name, &field_cid), field_priority);
 
             let head_key = HeadstoreDocKey::new(identity.doc_short_id, field_name, field_cid);
-            let priority_bytes = encode_priority_varint(field_priority);
-            headstore
-                .set(&head_key.bytes(), &priority_bytes)
-                .await
-                .map_err(|e| format!("Failed to write field head: {}", e))?;
             headstore
                 .set(
                     &crate::block::heads::document::publication_key(&head_key),
@@ -651,7 +642,7 @@ pub(crate) async fn write_document_blocks_with_inputs(
 
     let mut composite_block = Block::new_with_options(
         CrdtDelta::Composite(composite_payload),
-        composite_heads,
+        composite_heads.clone(),
         field_links,
         composite_encryption_cid,
         None,
@@ -676,19 +667,12 @@ pub(crate) async fn write_document_blocks_with_inputs(
         .await
         .map_err(|e| format!("Failed to store composite block: {}", e))?;
 
-    for old_head in &composite_head_entries {
-        head_writes
-            .supersede(headstore, &old_head.key, composite_cid)
-            .await
-            .map_err(|e| format!("Failed to delete old composite head: {}", e))?;
+    for old_head in &composite_heads {
+        head_write.supersede(&doc_heads::name("C", old_head));
     }
+    head_write.add(&doc_heads::name("C", &composite_cid), composite_priority);
 
     let composite_head_key = HeadstoreDocKey::new(identity.doc_short_id, "C", composite_cid);
-    let priority_bytes = encode_priority_varint(composite_priority);
-    headstore
-        .set(&composite_head_key.bytes(), &priority_bytes)
-        .await
-        .map_err(|e| format!("Failed to write composite head: {}", e))?;
     headstore
         .set(
             &crate::block::heads::document::publication_key(&composite_head_key),
@@ -703,9 +687,9 @@ pub(crate) async fn write_document_blocks_with_inputs(
         )
         .await
         .map_err(|e| format!("Failed to write composite priority index: {}", e))?;
-    if let Some(snapshot) = snapshot {
-        snapshot.reclaim(headstore, head_writes).await?;
-    }
+    doc_heads::commit(headstore, identity.doc_short_id, &head_write)
+        .await
+        .map_err(|e| format!("Failed to write document heads: {}", e))?;
 
     let doc_id_str = if is_create {
         derive_doc_id(&composite_cid)
@@ -719,7 +703,7 @@ pub(crate) async fn write_document_blocks_with_inputs(
         doc_id = %doc_id_str,
         cid = %composite_cid,
         field_count = field_cids.len(),
-        prev_heads = composite_head_entries.len(),
+        prev_heads = composite_heads.len(),
         "Built composite block with field links and wrote heads"
     );
 
@@ -770,11 +754,10 @@ pub(crate) async fn write_delete_block_with_inputs(
     prepared_inputs: Option<&query::prepared::PreparedInputMemo>,
 ) -> Result<BlockResult, BuildError> {
     let snapshot = DocHeadsSnapshot::load(headstore, doc_short_id).await?;
-    let mut head_writes = crate::block::heads::document::HeadWrites::default();
+    let mut head_write = storage::merge::head_set::Write::default();
     let priority: u64 = snapshot.max_priority() + 1;
 
-    let composite_head_entries = snapshot.field_heads("C");
-    let composite_heads: Vec<Cid> = composite_head_entries.iter().map(|h| h.cid).collect();
+    let composite_heads = snapshot.field_heads("C");
 
     let composite_payload = CompositeDeltaPayload {
         schema_version_id: schema_version_id.to_string(),
@@ -786,7 +769,7 @@ pub(crate) async fn write_delete_block_with_inputs(
 
     let mut composite_block = Block::new_with_options(
         CrdtDelta::Composite(composite_payload),
-        composite_heads,
+        composite_heads.clone(),
         vec![],
         composite_encryption_cid,
         None,
@@ -811,19 +794,12 @@ pub(crate) async fn write_delete_block_with_inputs(
         .await
         .map_err(|e| format!("Failed to store delete composite block: {}", e))?;
 
-    for old_head in &composite_head_entries {
-        head_writes
-            .supersede(headstore, &old_head.key, composite_cid)
-            .await
-            .map_err(|e| format!("Failed to delete old composite head: {}", e))?;
+    for old_head in &composite_heads {
+        head_write.supersede(&doc_heads::name("C", old_head));
     }
+    head_write.add(&doc_heads::name("C", &composite_cid), priority);
 
     let composite_head_key = HeadstoreDocKey::new(doc_short_id, "C", composite_cid);
-    let priority_bytes = encode_priority_varint(priority);
-    headstore
-        .set(&composite_head_key.bytes(), &priority_bytes)
-        .await
-        .map_err(|e| format!("Failed to write delete composite head: {}", e))?;
     headstore
         .set(
             &crate::block::heads::document::publication_key(&composite_head_key),
@@ -838,7 +814,9 @@ pub(crate) async fn write_delete_block_with_inputs(
         )
         .await
         .map_err(|e| format!("Failed to write delete priority index: {}", e))?;
-    snapshot.reclaim(headstore, head_writes).await?;
+    doc_heads::commit(headstore, doc_short_id, &head_write)
+        .await
+        .map_err(|e| format!("Failed to write delete heads: {}", e))?;
 
     tracing::debug!(
         doc_id = %doc_id,

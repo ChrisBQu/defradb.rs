@@ -13,11 +13,9 @@
 //! A compaction filter decides on one entry at a time, from its key and value
 //! alone, and nothing the store keeps can be dropped on that evidence:
 //!
-//! - a superseded head key, or a marker against one, is garbage only beside
-//!   another key (the marker that names the head, the head the marker names,
-//!   the head's publication guard). Writers reclaim them in their own
-//!   transactions, and regolith's deletion-density compaction retires the
-//!   tombstones (`db::block::heads`);
+//! - a head set is one value that regolith folds with the merge operator
+//!   (`merge::head_set`); no entry of it is dropped by a filter, because
+//!   whether a name is still needed depends on the writes that follow it;
 //! - nothing the store keeps expires by time alone. A pending DAG record
 //!   carries its replay authorization's expiry, yet it leaves only when its
 //!   root is merged or quarantined; downsample retention is cut from the
