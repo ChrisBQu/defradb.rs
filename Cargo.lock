@@ -10631,6 +10631,7 @@ dependencies = [
  "lens",
  "rapidhash",
  "regex",
+ "regolith",
  "schema",
  "serde",
  "serde_json",

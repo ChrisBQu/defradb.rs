@@ -4,6 +4,7 @@
 //! The HTTP crate depends on this trait, allowing parallel development of HTTP and query execution.
 
 use async_trait::async_trait;
+use defra_core::thread_bounds::{MaybeBoxFuture, MaybeSend};
 use identity::Did;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -11,6 +12,16 @@ use storage::corekv::MaybeSendSync;
 
 use crate::error::{Result, TransactionError};
 use crate::txn::TransactionHandle;
+
+/// Where an asynchronous request's response goes: called once, on the
+/// thread that finished the request (see [`QueryExecutor::execute_then`]).
+/// `Send` on native targets, not required to be in the browser.
+pub trait Respond: FnOnce(QueryResponse) + MaybeSend + 'static {}
+
+impl<F> Respond for F where F: FnOnce(QueryResponse) + MaybeSend + 'static {}
+
+/// A boxed [`Respond`].
+pub type ResponseCallback = Box<dyn Respond>;
 
 /// Stable GraphQL extension code for retryable transaction conflicts.
 pub const TXN_CONFLICT_ERROR_CODE: &str = "TXN_CONFLICT";
@@ -468,6 +479,22 @@ pub trait QueryExecutor: MaybeSendSync {
 
     /// Get the GraphQL schema for introspection.
     async fn schema(&self) -> Result<String>;
+
+    /// [`execute`](Self::execute) for a caller that is called back instead
+    /// of waiting: runs `request` and calls `done` with its response. The
+    /// returned future completes once the request is under way, so its
+    /// caller waits at most for the request to be admitted. An executor
+    /// that runs requests elsewhere (a worker pool) calls `done` where the
+    /// request ran, and drops it uncalled only when the request never ran
+    /// (shutdown, or a panic); this default runs the request in the
+    /// returned future itself.
+    fn execute_then<'a>(
+        &'a self,
+        request: QueryRequest,
+        done: ResponseCallback,
+    ) -> MaybeBoxFuture<'a, ()> {
+        Box::pin(async move { done(self.execute(request).await) })
+    }
 }
 
 #[cfg(test)]

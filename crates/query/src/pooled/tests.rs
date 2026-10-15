@@ -194,3 +194,115 @@ fn a_stopped_pool_answers_with_an_error_not_a_hang() {
     .unwrap();
     assert!(!response.errors.is_empty());
 }
+
+/// Answers every request once `release` is set.
+struct Gated {
+    release: regolith::sync::Event,
+}
+
+#[async_trait]
+impl QueryExecutor for Gated {
+    async fn execute(&self, _request: QueryRequest) -> QueryResponse {
+        self.release.wait().await;
+        QueryResponse::success(
+            serde_json::json!({ "ran_on": workers::current_worker().map(|worker| worker.index) }),
+        )
+    }
+
+    async fn execute_in_txn(
+        &self,
+        request: QueryRequest,
+        _handle: &TransactionHandle,
+    ) -> QueryResponse {
+        self.execute(request).await
+    }
+
+    async fn begin_txn(
+        &self,
+        _readonly: bool,
+    ) -> std::result::Result<TransactionHandle, TransactionError> {
+        Ok(TransactionHandle::new("t-1".into()))
+    }
+
+    async fn commit_txn(
+        &self,
+        _handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError> {
+        Ok(())
+    }
+
+    async fn rollback_txn(
+        &self,
+        _handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError> {
+        Ok(())
+    }
+
+    fn abandon_txn(&self, _handle: &TransactionHandle) {}
+
+    async fn schema(&self) -> Result<String> {
+        Ok(String::new())
+    }
+}
+
+/// A request whose caller is called back is admitted and left running: the
+/// caller's wait ends before the response exists, and the response reaches
+/// the callback on the worker that ran the request.
+#[test]
+fn a_called_back_request_answers_on_the_worker_that_ran_it() {
+    let pool = workers::Pool::start(workers::Config::unplaced(2)).unwrap();
+    let gated = Arc::new(Gated {
+        release: regolith::sync::Event::new(),
+    });
+    let inner: Arc<dyn QueryExecutor> = gated.clone();
+    let executor = PooledExecutor::new(inner, pool.clone());
+    let answered = Arc::new(regolith::sync::Event::new());
+    let answers = Arc::new(SegQueue::new());
+
+    let (signal, store) = (Arc::clone(&answered), Arc::clone(&answers));
+    workers::block_on_timeout(
+        executor.execute_then(
+            QueryRequest::new("{ User { name } }"),
+            Box::new(move |response| {
+                store.push((
+                    workers::current_worker().map(|worker| worker.index),
+                    response,
+                ));
+                signal.set();
+            }),
+        ),
+        DEADLINE,
+    )
+    .unwrap();
+    assert!(answers.is_empty(), "the caller waited only for admission");
+
+    gated.release.set();
+    workers::block_on_timeout(answered.wait(), DEADLINE).unwrap();
+    let (answered_on, response) = answers.pop().unwrap();
+    assert!(answered_on.is_some(), "the callback runs on a worker");
+    let ran_on = response.data.unwrap()["ran_on"].as_u64();
+    assert_eq!(ran_on, answered_on.map(|index| index as u64));
+    pool.shutdown_blocking().unwrap();
+}
+
+/// A pool that cannot run the request drops its callback uncalled, and the
+/// caller does not wait for an answer that will not come.
+#[test]
+fn a_called_back_request_the_pool_refuses_drops_its_callback() {
+    let (recorder, executor, pool) = pooled(1);
+    pool.shutdown_blocking().unwrap();
+    let called = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&called);
+    workers::block_on_timeout(
+        executor.execute_then(
+            QueryRequest::new("{ User { name } }"),
+            Box::new(move |_| {
+                count.fetch_add(1, Ordering::SeqCst);
+            }),
+        ),
+        DEADLINE,
+    )
+    .unwrap();
+    assert_eq!(called.load(Ordering::SeqCst), 0);
+    assert!(recorder.workers().is_empty());
+}
