@@ -1,6 +1,6 @@
-use db::error::Error;
 use db::error::commit_query_error;
 use db::error::index_write_query_error;
+use db::error::Error;
 
 #[test]
 fn document_at_key_preserves_display_message() {
@@ -25,11 +25,9 @@ fn collection_schema_json_preserves_display_message() {
     );
 
     assert!(matches!(error, Error::CollectionSchemaJson { .. }));
-    assert!(
-        error
-            .to_string()
-            .starts_with("failed to deserialize schema for collection 'users': ")
-    );
+    assert!(error
+        .to_string()
+        .starts_with("failed to deserialize schema for collection 'users': "));
 }
 
 #[test]
@@ -38,11 +36,9 @@ fn lens_config_json_preserves_display_message() {
     let error = Error::lens_config_json("failed to serialize lens config", source);
 
     assert!(matches!(error, Error::LensConfigJson { .. }));
-    assert!(
-        error
-            .to_string()
-            .starts_with("failed to serialize lens config: ")
-    );
+    assert!(error
+        .to_string()
+        .starts_with("failed to serialize lens config: "));
 }
 
 #[test]
