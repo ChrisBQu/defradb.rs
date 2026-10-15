@@ -1,10 +1,9 @@
-//! Bounded channels backed by the native runtime or a WASM-compatible queue.
+//! Bounded channels between the KMS's tasks: a closed receiver hands a sent
+//! value back, and a sender can wait for every receiver to close. The same
+//! queue on every target, runtime-free.
 
 /// Sending side of a bounded channel.
 pub struct Sender<T> {
-    #[cfg(not(target_arch = "wasm32"))]
-    inner: tokio::sync::mpsc::Sender<T>,
-    #[cfg(target_arch = "wasm32")]
     inner: async_channel::Sender<T>,
 }
 
@@ -19,10 +18,6 @@ impl<T> Clone for Sender<T> {
 impl<T> Sender<T> {
     /// Send a value, returning it when the receiver is closed.
     pub async fn send(&self, value: T) -> Result<(), T> {
-        #[cfg(not(target_arch = "wasm32"))]
-        return self.inner.send(value).await.map_err(|error| error.0);
-
-        #[cfg(target_arch = "wasm32")]
         self.inner.send(value).await.map_err(|error| error.0)
     }
 
@@ -34,28 +29,17 @@ impl<T> Sender<T> {
 
 /// Receiving side of a bounded channel.
 pub struct Receiver<T> {
-    #[cfg(not(target_arch = "wasm32"))]
-    inner: tokio::sync::mpsc::Receiver<T>,
-    #[cfg(target_arch = "wasm32")]
     inner: async_channel::Receiver<T>,
 }
 
 impl<T> Receiver<T> {
     /// Receive the next value, or `None` once every sender is closed.
     pub async fn recv(&mut self) -> Option<T> {
-        #[cfg(not(target_arch = "wasm32"))]
-        return self.inner.recv().await;
-
-        #[cfg(target_arch = "wasm32")]
         self.inner.recv().await.ok()
     }
 }
 
 pub fn bounded<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
-    #[cfg(not(target_arch = "wasm32"))]
-    let (sender, receiver) = tokio::sync::mpsc::channel(capacity);
-    #[cfg(target_arch = "wasm32")]
     let (sender, receiver) = async_channel::bounded(capacity);
-
     (Sender { inner: sender }, Receiver { inner: receiver })
 }

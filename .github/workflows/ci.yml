@@ -80,6 +80,14 @@ jobs:
         with:
           save-if: ${{ env.SAVE_CACHE == 'true' }}
       - run: cargo clippy --all --all-targets -- -D warnings
+      - name: Data path confinement
+        env:
+          CLIPPY_CONF_DIR: .github/clippy/data-path
+        run: >-
+          cargo clippy --lib
+          -p storage -p datastore -p blockstore -p crdt -p defra-core -p query -p db
+          -p acp -p zanzibar -p lens -p kms -p events
+          -- -A clippy::all -D clippy::disallowed_methods
 
   feature-checks:
     name: Feature checks (${{ matrix.group }})
