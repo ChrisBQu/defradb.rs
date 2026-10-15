@@ -27,11 +27,28 @@ pub struct StoredField {
     pub value: Vec<u8>,
 }
 
+/// What an LWW field stores for `value`: nothing for nil, its CBOR otherwise.
+fn lww_cbor(value: &NormalValue) -> Result<Option<ciborium::Value>> {
+    if value.is_nil() {
+        return Ok(None);
+    }
+    normal_value_to_cbor(value).map(Some)
+}
+
+/// Whether two values of one LWW field store the same value. A value read
+/// back from storage carries no kind (an empty array of any kind reads back as
+/// an empty JSON array), so values compare by what they store, never by
+/// variant. An absent field stores nothing, as nil does.
+pub fn stores_same_lww(left: Option<&NormalValue>, right: Option<&NormalValue>) -> Result<bool> {
+    let stored = |value: Option<&NormalValue>| value.map_or(Ok(None), lww_cbor);
+    Ok(stored(left)? == stored(right)?)
+}
+
 impl StoredField {
     pub fn lww(name: String, priority: u64, value: &NormalValue) -> Result<Self> {
         let mut bytes = Vec::new();
-        if !value.is_nil() {
-            ciborium::into_writer(&normal_value_to_cbor(value)?, &mut bytes)
+        if let Some(cbor) = lww_cbor(value)? {
+            ciborium::into_writer(&cbor, &mut bytes)
                 .map_err(|error| Error::CborEncode(error.to_string()))?;
         }
         Ok(Self {
@@ -327,6 +344,55 @@ mod tests {
             document.get("name").and_then(NormalValue::as_str),
             Some("Ada")
         );
+    }
+
+    #[test]
+    fn values_that_store_alike_compare_the_same_whatever_their_variant() {
+        let empty = [
+            NormalValue::JsonArray(Vec::new()),
+            NormalValue::StringArray(Vec::new()),
+            NormalValue::NillableStringArray(Some(Vec::new())),
+            NormalValue::NillableStringElementArray(Vec::new()),
+            NormalValue::IntArray(Vec::new()),
+        ];
+        for left in &empty {
+            for right in &empty {
+                assert!(
+                    stores_same_lww(Some(left), Some(right)).unwrap(),
+                    "{left:?} and {right:?}"
+                );
+            }
+        }
+        assert!(stores_same_lww(
+            Some(&NormalValue::StringArray(vec!["a".to_owned()])),
+            Some(&NormalValue::NillableStringArray(Some(
+                vec!["a".to_owned()]
+            ))),
+        )
+        .unwrap());
+        assert!(stores_same_lww(None, Some(&NormalValue::Null)).unwrap());
+        assert!(stores_same_lww(None, Some(&NormalValue::NillableStringArray(None))).unwrap());
+    }
+
+    #[test]
+    fn values_that_store_differently_compare_as_changed() {
+        let empty = NormalValue::JsonArray(Vec::new());
+        for other in [
+            NormalValue::StringArray(vec!["a".to_owned()]),
+            NormalValue::NillableStringArray(None),
+            NormalValue::String(String::new()),
+        ] {
+            assert!(
+                !stores_same_lww(Some(&empty), Some(&other)).unwrap(),
+                "{other:?}"
+            );
+        }
+        assert!(!stores_same_lww(None, Some(&empty)).unwrap());
+        assert!(!stores_same_lww(
+            Some(&NormalValue::Int(5)),
+            Some(&NormalValue::String("5".to_owned())),
+        )
+        .unwrap());
     }
 
     #[test]
