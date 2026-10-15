@@ -7328,6 +7328,7 @@ dependencies = [
  "cid",
  "crypto",
  "defra-core",
+ "edge",
  "futures",
  "identity 0.5.0",
  "inputs",
@@ -7344,7 +7345,6 @@ dependencies = [
  "tracing",
  "uuid",
  "vera",
- "wasm-bindgen-futures",
  "x25519-dalek 2.0.1",
  "zeroize",
 ]

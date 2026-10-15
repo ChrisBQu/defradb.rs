@@ -38,6 +38,18 @@ pub struct KmsInputs {
     pub key_tier_bytes: usize,
 }
 
+impl KmsInputs {
+    /// Peer requests on the network edge `edge`, with the default bounds.
+    pub fn on(edge: &edge::Edge) -> Self {
+        Self {
+            runtime: inputs::Runtime::edge(edge.clone()),
+            ..Self::default()
+        }
+    }
+}
+
+/// Peer requests on the caller's own async runtime. A node passes its
+/// network edge instead, through [`KmsInputs::on`].
 impl Default for KmsInputs {
     fn default() -> Self {
         Self {
@@ -74,6 +86,8 @@ pub struct DefraKms {
 
 impl DefraKms {
     /// Construct a new `DefraKms`. Transports may be empty (single-node).
+    /// Peer requests run on the caller's async runtime; a node passes its
+    /// network edge through [`with_inputs`](Self::with_inputs).
     pub fn new(
         store: Arc<dyn KeyStore>,
         transports: Vec<Arc<dyn KeyTransport>>,

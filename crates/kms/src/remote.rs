@@ -10,6 +10,7 @@
 use std::sync::Arc;
 
 use defra_core::thread_bounds::MaybeBoxFuture;
+use futures::stream::{FuturesUnordered, StreamExt};
 use identity::Did;
 use kovan::AtomOption;
 use rapidhash::{HashMapExt, RapidHashMap};
@@ -18,9 +19,9 @@ use zeroize::Zeroizing;
 use crate::error::{Error, Result};
 use crate::store::StoredKey;
 use crate::tier::{verified_key, KeyTier};
-use crate::transport::{EncodedFetchRequest, KeyTransport};
+use crate::transport::{EncodedFetchRequest, KeyTransport, TransportReplyStream};
 use crate::types::EncryptionCid;
-use crate::wire::FetchEncryptionKeyRequest;
+use crate::wire::{FetchEncryptionKeyReply, FetchEncryptionKeyRequest};
 
 /// One remote key request: the key's CID and the capability it is asked
 /// under.
@@ -40,22 +41,6 @@ pub(crate) struct RemoteKeys {
     pub(crate) node_identity: Did,
     /// Test-only deterministic ephemeral. `None` in prod: fresh per request.
     pub(crate) test_ephemeral: Arc<AtomOption<x25519_dalek::StaticSecret>>,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn spawn_task<F>(future: F)
-where
-    F: std::future::Future<Output = ()> + Send + 'static,
-{
-    tokio::spawn(future);
-}
-
-#[cfg(target_arch = "wasm32")]
-fn spawn_task<F>(future: F)
-where
-    F: std::future::Future<Output = ()> + 'static,
-{
-    wasm_bindgen_futures::spawn_local(future);
 }
 
 impl inputs::Source for RemoteKeys {
@@ -100,6 +85,17 @@ impl inputs::Source for RemoteKeys {
     }
 }
 
+/// The next reply on `stream`, with the stream to read the one after.
+async fn next_reply(
+    mut stream: TransportReplyStream,
+) -> (
+    Option<Result<(FetchEncryptionKeyReply, String)>>,
+    TransportReplyStream,
+) {
+    let item = stream.recv().await;
+    (item, stream)
+}
+
 impl RemoteKeys {
     fn ephemeral(&self) -> Result<x25519_dalek::StaticSecret> {
         match self.test_ephemeral.load() {
@@ -137,32 +133,16 @@ impl RemoteKeys {
             wanted.insert(key.cid, index);
         }
 
-        let (transport_tx, mut transport_rx) =
-            crate::channel::bounded(self.transports.len().max(1) * 16);
-        let mut sent = 0usize;
+        // Every transport's replies, read as they come, in this request.
+        let mut replies = FuturesUnordered::new();
         let mut send_error = None;
         for transport in &self.transports {
-            let mut rx = match transport.send_request(encoded.clone()).await {
-                Ok(rx) => rx,
-                Err(error) => {
-                    send_error = Some(error);
-                    continue;
-                }
-            };
-            sent += 1;
-            let transport_tx = transport_tx.clone();
-            spawn_task(async move {
-                while let Some(result) =
-                    crate::channel::recv_until_closed(&mut rx, &transport_tx).await
-                {
-                    if transport_tx.send(result).await.is_err() {
-                        break;
-                    }
-                }
-            });
+            match transport.send_request(encoded.clone()).await {
+                Ok(stream) => replies.push(next_reply(stream)),
+                Err(error) => send_error = Some(error),
+            }
         }
-        drop(transport_tx);
-        if sent == 0 {
+        if replies.is_empty() {
             return Err(send_error.unwrap_or(Error::NoTransport));
         }
 
@@ -171,9 +151,14 @@ impl RemoteKeys {
         let mut denied = None;
         let mut unavailable = None;
         while remaining > 0 {
-            let Some(transport_result) = transport_rx.recv().await else {
+            let Some((item, stream)) = replies.next().await else {
                 break;
             };
+            // A closed stream: that transport stopped listening.
+            let Some(transport_result) = item else {
+                continue;
+            };
+            replies.push(next_reply(stream));
             let (reply, responder_peer_id) = match transport_result {
                 Ok(reply) => reply,
                 Err(error @ Error::AccessDenied { .. }) => {
