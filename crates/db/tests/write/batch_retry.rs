@@ -378,9 +378,10 @@ async fn implicit_single_update_is_prepared_for_engine_owned_retry() {
     .with_mutator(Arc::new(db::write::autocommit::AutoCommitMutator::new(
         store_db.clone(),
     )));
-    let request = QueryRequest::new(
+    let mut request = QueryRequest::new(
         r#"mutation { update_TestDoc(filter: {x: {_eq: 1}}, input: {x: 2}) { _docID x } }"#,
     );
+    request.identity = Some(identity::Did::new("did:key:z6Mkalice").unwrap());
     let prepared = runner.prepare_request(&request).await.unwrap();
     assert!(
         prepared
