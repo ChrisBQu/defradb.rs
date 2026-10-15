@@ -32,3 +32,15 @@ A follow-up compares the same combined candidate at `05fa4d004` with the downsam
 - Downsample filter candidate `fc7800ad7`: `/tmp/defra-downsample-alloc/release-fast/deps/allocs-8978f3dd8ac8be84`; SHA-256 `30dba1727df0e09e031a05379049ed36e991ae3067729677cebdcb4f07c58d78`.
 
 Raw document-create samples were 3346.4, 3346.4, 3346.4, 3346.5, 3346.3 on the base, and 3307.4, 3307.5, 3307.3, 3307.4, 3307.4 on the candidate. The five-sample medians are 3346.4 and 3307.4, a reduction of 39 allocations/op. Get-by-ID remained 160 allocations/op; document-to-map remained 36; document-from-JSON remained 76.
+
+## Frozen step3–step5 checkpoints
+
+These historical checkpoint binaries were supplied from the frozen adoption builds. Each was run five times for allocation counts only; no timing values were collected or used. Build profile was `release-fast`.
+
+| Checkpoint | Executable SHA-256 | Document create allocations/op | Get by ID | To map | From JSON |
+|---|---|---:|---:|---:|---:|
+| Step3 `081806acb` | `a601407a3f39650bcce38754cc9759238c9e2a52d9f98b03ba2d6f752b9fee35` | 2980.7, 2980.6, 2980.7, 2980.8, 2980.8 | 269 each | 36 each | 76 each |
+| Step4 `5feca8675` | `8718846fab15a9f3a764f7222c31f434554cff9f07cd5429e5158da2dd2ec49a` | 2982.7, 2982.7, 2982.8, 2982.8, 2982.8 | 269 each | 36 each | 76 each |
+| Step5 `56ea4db1a` | `a17f3f9c26851611664fe08dc5094f7552b431e29a29d48f4057f6beef796820` | 3411.4, 3411.4, 3411.3, 3411.5, 3411.4 | 269 each | 36 each | 76 each |
+
+Executable paths were `/tmp/defra-perf-artifacts/bin/step3-081806acb/allocs`, `.../step4-5feca8675/allocs`, and `.../step5-56ea4db1a/allocs`. The five-sample medians for create are 2980.7, 2982.8, and 3411.4 respectively. Treat these only as checkpoint observations; unrelated changes between checkpoints prevent attributing the differences to one patch.
