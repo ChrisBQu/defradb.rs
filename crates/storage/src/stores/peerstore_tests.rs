@@ -387,8 +387,7 @@ async fn transient_marker_io_failure_recovers_durable_scopes() {
             crate::corekv::Error::Backend("injected transient marker failure".to_string()),
         ),
     ] {
-        let peerstore =
-            Peerstore::new(FaultyTransactStore::over(backing.clone(), failure, 1, 0));
+        let peerstore = Peerstore::new(FaultyTransactStore::over(backing.clone(), failure, 1, 0));
         let error = peerstore
             .record_push_failure("peer", doc_id, "collection", &retry_info)
             .await

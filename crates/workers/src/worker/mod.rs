@@ -83,6 +83,30 @@ where
     local.spawn(std::any::type_name::<F>(), future, false)
 }
 
+/// [`spawn_local`] under `name`, the task's name in stuck and panic reports.
+pub(crate) fn spawn_named<F>(name: &'static str, future: F) -> Result<Completion<F::Output>, Error>
+where
+    F: Future + 'static,
+    F::Output: 'static,
+{
+    let local = current().ok_or(Error::NotOnWorker)?;
+    local.spawn(name, future, false)
+}
+
+/// [`spawn_named`] for a daemon: shutdown does not wait for it, and it is
+/// dropped (its completion failing) when the worker stops.
+pub(crate) fn spawn_daemon_named<F>(
+    name: &'static str,
+    future: F,
+) -> Result<Completion<F::Output>, Error>
+where
+    F: Future + 'static,
+    F::Output: 'static,
+{
+    let local = current().ok_or(Error::NotOnWorker)?;
+    local.spawn(name, future, true)
+}
+
 /// [`spawn_local`] for background work (a periodic job, a sweep) that
 /// shutdown does not wait for: it is dropped when the worker stops.
 pub fn spawn_daemon<F>(future: F) -> Result<(), Error>

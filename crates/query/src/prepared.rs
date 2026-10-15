@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use chrono::{DateTime, FixedOffset};
@@ -8,6 +9,57 @@ use kovan_queue::seg_queue::SegQueue;
 use rapidhash::fast::{RandomState, RapidHashMap};
 
 use crate::error::{QueryError, Result};
+
+/// What requests spent waiting on external inputs, since the process started.
+#[derive(Debug)]
+pub struct InputWaitStats {
+    /// Attempts that ended asking for inputs and ran again once they came.
+    pub waves: AtomicU64,
+    /// Inputs those waves fetched.
+    pub inputs: AtomicU64,
+    /// Attempts that ran again because an input's dependency changed under
+    /// them (an embedding's source field read differently in the attempt).
+    pub dependency_reruns: AtomicU64,
+    /// Microseconds each wave kept its request suspended, holding no
+    /// transaction.
+    pub suspended_micros: inputs::Histogram,
+}
+
+static INPUT_WAITS: InputWaitStats = InputWaitStats {
+    waves: AtomicU64::new(0),
+    inputs: AtomicU64::new(0),
+    dependency_reruns: AtomicU64::new(0),
+    suspended_micros: inputs::Histogram::new(),
+};
+
+/// The input-wait metrics of this process.
+pub fn input_wait_stats() -> &'static InputWaitStats {
+    &INPUT_WAITS
+}
+
+/// Counts an attempt that runs again because an input's dependency changed.
+pub fn record_dependency_rerun() {
+    INPUT_WAITS
+        .dependency_reruns
+        .fetch_add(1, Ordering::Relaxed);
+}
+
+/// Resolves one wave of inputs, recording what the wait cost.
+async fn timed_wave<Fut>(count: usize, wave: Fut) -> Result<Vec<Arc<[u8]>>>
+where
+    Fut: Future<Output = Result<Vec<Arc<[u8]>>>>,
+{
+    let stopwatch = inputs::Stopwatch::start();
+    let answers = wave.await;
+    INPUT_WAITS.waves.fetch_add(1, Ordering::Relaxed);
+    INPUT_WAITS
+        .inputs
+        .fetch_add(count as u64, Ordering::Relaxed);
+    INPUT_WAITS
+        .suspended_micros
+        .record(stopwatch.elapsed_micros());
+    answers
+}
 
 /// A network input request, represented by its complete wire request bytes.
 /// Keeping the exact bytes in the key avoids accidental reuse when any
@@ -155,7 +207,10 @@ impl PreparedInputMemo {
                 request.kind()
             )));
         }
-        let response = resolve().await?;
+        let response = timed_wave(1, async { resolve().await.map(|answer| vec![answer]) })
+            .await?
+            .pop()
+            .ok_or_else(|| QueryError::execution("external input went unanswered"))?;
         self.insert(request.clone(), response);
         Ok(())
     }
@@ -188,7 +243,7 @@ impl PreparedInputMemo {
                 wave.push(wanted);
             }
         }
-        let answers = resolve(wave.clone()).await?;
+        let answers = timed_wave(wave.len(), resolve(wave.clone())).await?;
         if answers.len() != wave.len() {
             return Err(QueryError::execution(format!(
                 "asked for {} external inputs, got {} answers",
@@ -461,5 +516,40 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("requested again"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_wave_records_its_inputs_and_how_long_it_kept_the_request_suspended() {
+        let stats = input_wait_stats();
+        let (waves, inputs, suspended) = (
+            stats.waves.load(Ordering::Relaxed),
+            stats.inputs.load(Ordering::Relaxed),
+            stats.suspended_micros.count(),
+        );
+        let memo = PreparedInputMemo::default();
+        let ended = PreparedInputRequest::new(PreparedInputKind::Embedding, b"one".as_slice());
+        memo.want(PreparedInputRequest::new(
+            PreparedInputKind::Embedding,
+            b"two".as_slice(),
+        ));
+        memo.answer_wave(&ended, |wave| async move {
+            Ok(wave
+                .iter()
+                .map(|request| Arc::<[u8]>::from(request.exact_request()))
+                .collect())
+        })
+        .await
+        .unwrap();
+        // Other tests of this binary record too: the counters only grow.
+        assert!(stats.waves.load(Ordering::Relaxed) > waves);
+        assert!(stats.inputs.load(Ordering::Relaxed) >= inputs + 2);
+        assert!(stats.suspended_micros.count() > suspended);
+    }
+
+    #[test]
+    fn a_dependency_rerun_is_counted() {
+        let before = input_wait_stats().dependency_reruns.load(Ordering::Relaxed);
+        record_dependency_rerun();
+        assert!(input_wait_stats().dependency_reruns.load(Ordering::Relaxed) > before);
     }
 }

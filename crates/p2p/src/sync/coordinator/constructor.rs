@@ -285,6 +285,14 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
     pub fn set_failure_channel(&mut self, tx: tokio::sync::mpsc::Sender<super::PushFailure>) {
         self.runtime.failure_tx.store_some(tx);
     }
+
+    /// A bounded channel of `capacity` push failures, installed as this
+    /// coordinator's failure channel; the receiver is the caller's.
+    pub fn attach_failure_channel(&mut self, capacity: usize) -> super::PushFailureReceiver {
+        let (tx, rx) = tokio::sync::mpsc::channel(capacity);
+        self.set_failure_channel(tx);
+        rx
+    }
 }
 
 /// Resolve the effective DocSync request doc-ID limit from a configured value.

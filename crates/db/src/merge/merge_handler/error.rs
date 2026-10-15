@@ -148,3 +148,11 @@ impl CounterMergeResult {
         self.value.as_ref()
     }
 }
+
+/// A merge the worker pool could not run (it was shutting down, or the task
+/// panicked) stays retryable: nothing of it was applied.
+impl From<workers::Error> for MergeError {
+    fn from(error: workers::Error) -> Self {
+        MergeError::Storage(format!("the merge did not run: {error}"))
+    }
+}

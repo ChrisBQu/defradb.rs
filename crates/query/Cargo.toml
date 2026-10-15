@@ -11,6 +11,8 @@ repository.workspace = true
 bench = false
 
 [dependencies]
+# Query deadlines on the worker pool's deadline queue.
+workers = { path = "../workers" }
 bytes.workspace = true
 web-time.workspace = true
 
@@ -21,6 +23,8 @@ rapidhash.workspace = true
 kovan.workspace = true
 kovan-map.workspace = true
 kovan-queue.workspace = true
+# Input-wait metrics share the remote-input histogram and stopwatch.
+inputs = { path = "../inputs" }
 
 # Internal crates
 cursor = { path = "../cursor" }

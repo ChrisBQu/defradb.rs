@@ -35,7 +35,7 @@ impl<S: Store> BatchMutator<S> {
     pub async fn new(db: Arc<DB<S>>, txn: Arc<TokioMutex<Option<DbTxn<S>>>>) -> Self {
         let projection = match txn.lock().await.as_ref() {
             Some(txn) => txn.acp_registration_projection(),
-            None => Arc::new(query::txn::AcpRegistrationProjection::detached()),
+            None => query::txn::AcpRegistrationProjection::detached_shared(),
         };
         Self::new_with_prepared_inputs(db, txn, None, projection)
     }
@@ -48,7 +48,7 @@ impl<S: Store> BatchMutator<S> {
             db,
             prepared_inputs,
             txn: Arc::new(TokioMutex::new(None)),
-            acp_registration_projection: Arc::new(query::txn::AcpRegistrationProjection::detached()),
+            acp_registration_projection: query::txn::AcpRegistrationProjection::detached_shared(),
         }
     }
 
@@ -681,6 +681,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 schema_version_id,
                 sign_config.as_ref(),
                 self.prepared_inputs.as_ref(),
+                None,
             )
             .await
             .map_err(|error| {

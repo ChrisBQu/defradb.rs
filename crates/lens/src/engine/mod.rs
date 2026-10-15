@@ -40,7 +40,7 @@ pub(crate) use call::{CompiledModule, Pipeline};
 #[cfg(feature = "wasmtime-runtime")]
 pub(crate) use clock::ThreadTicks;
 #[cfg(feature = "wasmtime-runtime")]
-pub use clock::{EpochTick, TickGuard, TickSource};
+pub use clock::{EpochTick, PoolTicks, TickGuard, TickSource};
 #[cfg(feature = "wasmtime-runtime")]
 pub use sandbox::WasmSandboxConfig;
 #[cfg(feature = "wasmtime-runtime")]
@@ -57,9 +57,25 @@ pub fn default_store() -> Result<Arc<dyn TransformStore>> {
     Ok(Arc::new(store))
 }
 
+/// [`default_store`] whose epoch ticks are a job of `pool`'s deadline queue.
+#[cfg(feature = "wasmtime-runtime")]
+pub fn default_store_on(pool: &workers::Pool) -> Result<Arc<dyn TransformStore>> {
+    let store = crate::WasmTransformStore::with_tick_source(
+        Some(WasmSandboxConfig::restrictive()),
+        &PoolTicks(pool.clone()),
+    )?;
+    Ok(Arc::new(store))
+}
+
 /// The transform store a database runs its lens migrations on. Built without
 /// the `wasmtime-runtime` feature, it refuses every transform.
 #[cfg(not(feature = "wasmtime-runtime"))]
 pub fn default_store() -> Result<Arc<dyn TransformStore>> {
     Ok(Arc::new(UnsupportedTransformStore))
+}
+
+/// [`default_store`]: a build without the runtime ticks nothing.
+#[cfg(not(feature = "wasmtime-runtime"))]
+pub fn default_store_on(_pool: &workers::Pool) -> Result<Arc<dyn TransformStore>> {
+    default_store()
 }

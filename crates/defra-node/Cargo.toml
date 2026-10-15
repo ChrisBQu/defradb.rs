@@ -63,6 +63,8 @@ vera = { path = "../vera", optional = true }
 identity = { path = "../identity" }
 defra-core = { path = "../defra-core" }
 edge = { path = "../edge" }
+# The worker pool the node's data path runs on.
+workers = { path = "../workers" }
 schema = { path = "../schema" }
 lens = { path = "../lens", default-features = false }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "net", "sync", "time"] }

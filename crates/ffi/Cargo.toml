@@ -35,6 +35,8 @@ profiling = ["dep:tracing-chrome", "dep:tracing-subscriber"]
 rapidhash.workspace = true
 # The network runtime every call blocks its C caller's thread on.
 edge = { path = "../edge" }
+# The worker pool the node's data path runs on.
+workers = { path = "../workers" }
 async-trait.workspace = true
 
 # Serialization

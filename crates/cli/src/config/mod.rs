@@ -10,6 +10,7 @@ mod iroh_relay_server;
 mod secret_file;
 mod sections;
 mod types;
+mod workers;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -25,6 +26,7 @@ pub use sections::{
     AcpConfig, ApiConfig, DatastoreConfig, EmbeddingConfig, KeyringConfig, LogConfig, NetConfig,
 };
 pub use types::{AcpDocumentType, DatastoreType, LogFormat, LogLevel, LogOutput, TransportType};
+pub use workers::WorkersConfig;
 // KeyringBackend is available but not currently used externally
 #[allow(unused_imports)]
 pub use types::KeyringBackend;
@@ -48,6 +50,9 @@ pub struct Config {
     pub telemetry_disabled: bool,
     #[serde(default = "default_replicator_retry_intervals")]
     pub replicator_retry_intervals: Vec<u32>,
+    /// The worker pool the data path runs on.
+    #[serde(default)]
+    pub workers: WorkersConfig,
 }
 
 fn default_replicator_retry_intervals() -> Vec<u32> {
@@ -69,6 +74,7 @@ impl Default for Config {
             secret_file: ".env".to_string(),
             telemetry_disabled: false,
             replicator_retry_intervals: default_replicator_retry_intervals(),
+            workers: WorkersConfig::default(),
         }
     }
 }
@@ -113,6 +119,7 @@ impl Config {
         self.net.validate()?;
         self.acp.validate()?;
         self.retry_schedule()?;
+        self.workers.validate()?;
         Ok(())
     }
 

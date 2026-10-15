@@ -111,6 +111,47 @@ pub(crate) async fn write_local_create(
         .map_err(|e| crate::error::index_write_query_error("create", e))
 }
 
+/// The heads of `doc_ids`' documents, read at one snapshot before the
+/// transaction of an update or delete that writes them, by document short
+/// ID. Every attempt builds and signs its blocks from these heads, so a block
+/// signed once is the same block in every attempt and never signed again; a
+/// write that lands in between makes a fork, which the head set keeps and
+/// CRDT order resolves, as a merge does. A document not found here is read
+/// in its attempt.
+pub(crate) async fn snapshot_heads<S>(
+    db: &crate::database::DB<S>,
+    collection: &Collection,
+    doc_ids: &[DocID],
+) -> query::error::Result<rapidhash::RapidHashMap<u64, crate::block::builder::DocHeadsSnapshot>>
+where
+    S: storage::corekv::Store + 'static,
+{
+    let failed = |error: &dyn std::fmt::Display| {
+        query::error::QueryError::execution(format!("failed to read document heads: {error}"))
+    };
+    let txn = db.new_txn(true).await.map_err(|error| failed(&error))?;
+    let mut heads = rapidhash::RapidHashMap::default();
+    {
+        let systemstore = txn.systemstore().map_err(|error| failed(&error))?;
+        let headstore = txn.headstore().map_err(|error| failed(&error))?;
+        for doc_id in doc_ids {
+            let Some((doc_short_id, _)) = collection
+                .resolve_doc_identity(&systemstore, doc_id)
+                .await
+                .map_err(|error| failed(&error))?
+            else {
+                continue;
+            };
+            let snapshot = crate::block::builder::DocHeadsSnapshot::load(&headstore, doc_short_id)
+                .await
+                .map_err(|error| failed(&error))?;
+            heads.insert(doc_short_id, snapshot);
+        }
+    }
+    txn.discard().map_err(|error| failed(&error))?;
+    Ok(heads)
+}
+
 /// The heads of the document an update writes, read once for both its value
 /// operands and its blocks.
 pub(crate) async fn load_update_heads(

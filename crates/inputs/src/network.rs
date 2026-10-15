@@ -79,6 +79,23 @@ impl Clock for RuntimeClock {
     }
 }
 
+/// Time since it was started, on the network runtime's clock: what a caller
+/// measures its own wait with.
+#[derive(Debug)]
+pub struct Stopwatch(n0_future::time::Instant);
+
+impl Stopwatch {
+    /// A stopwatch running from now.
+    pub fn start() -> Self {
+        Self(n0_future::time::Instant::now())
+    }
+
+    /// Microseconds since it started.
+    pub fn elapsed_micros(&self) -> u64 {
+        u64::try_from(self.0.elapsed().as_micros()).unwrap_or(u64::MAX)
+    }
+}
+
 /// A service's network and clock, passed together.
 #[derive(Clone)]
 pub struct Runtime {

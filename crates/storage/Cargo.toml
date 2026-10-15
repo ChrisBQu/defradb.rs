@@ -16,6 +16,8 @@ defra-core = { path = "../defra-core" }
 document = { path = "../document" }
 schema = { path = "../schema" }
 regolith.workspace = true
+# The worker pool: each worker's regolith queues, detached callbacks.
+workers = { path = "../workers" }
 bytes.workspace = true
 chrono = { version = "0.4", features = ["serde"] }
 
@@ -40,8 +42,6 @@ sha2.workspace = true
 # At-rest keys
 zeroize = "1.8"
 
-# The deadline `close` waits with
-n0-future.workspace = true
 
 # Logging
 tracing.workspace = true
@@ -55,20 +55,22 @@ hex = "0.4"
 
 [features]
 # regolith is the only backend, on every target, so there is nothing here to
-# select between. `wasm` still exists because it turns off the tokio-dependent
-# parts of this crate, not because it picks a different store.
+# select between. `wasm` marks the browser build, not a different store.
 default = []
 wasm = []
+# The backend conformance suite (`backends::test_suite`), for a test that
+# links the library. It drives concurrent transactions from tokio tasks, so
+# tokio comes with it and with nothing else in this crate.
+test-suite = ["dep:tokio"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
 uuid = { version = "1.0", features = ["v4", "js"] }
 
-# Tokio is only available on non-WASM targets
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time"] }
-# Used by backends::test_suite, which is part of the library so an integration
-# test can link it.
+# Only for the `test-suite` feature.
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time"], optional = true }
+# Catches a panicking post-commit hook; the conformance suite joins its tasks.
 futures.workspace = true
 # Decrypts, once, a store the previous release encrypted value by value.
 crypto = { path = "../crypto" }
@@ -76,6 +78,8 @@ crypto = { path = "../crypto" }
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 regolith = { workspace = true, features = ["testing"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+# The crate's own conformance suite, for its integration test.
+storage = { path = ".", features = ["test-suite"] }
 
 [dev-dependencies]
 proptest.workspace = true

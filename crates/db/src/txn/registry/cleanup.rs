@@ -86,29 +86,29 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         Ok(result)
     }
 
-    /// Start a periodic task that cleans up transactions idle for longer than
-    /// `max_idle_age`.
+    /// Starts the sweep that cleans up transactions idle for longer than
+    /// `max_idle_age`: a background job of the database's worker pool, run
+    /// every `sweep_interval` on its worker's deadline queue until it is
+    /// aborted or its worker stops.
     ///
     /// # Panics
     ///
     /// Panics if `sweep_interval` is zero.
-    #[cfg(all(not(target_arch = "wasm32"), feature = "native"))]
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn start_stale_transaction_cleanup(
         self: &Arc<Self>,
         max_idle_age: Duration,
         sweep_interval: Duration,
-    ) -> tokio::task::JoinHandle<()> {
+    ) -> workers::Background {
         assert!(
             !sweep_interval.is_zero(),
             "transaction cleanup sweep interval must be non-zero"
         );
 
         let registry = Arc::clone(self);
-
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(sweep_interval).await;
-
+        let pool = registry.db.pool().cloned();
+        workers::spawn_background(pool.as_ref(), "db::transaction_sweep", move || async move {
+            let Err(error) = workers::every(sweep_interval, || async {
                 match registry.cleanup_stale_transactions(max_idle_age).await {
                     Ok(result) if result.attempted() > 0 && result.is_complete() => {
                         tracing::info!(
@@ -134,7 +134,9 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
                         );
                     }
                 }
-            }
+            })
+            .await;
+            tracing::error!(%error, "the transaction sweep stopped: it runs only on a worker");
         })
     }
 }

@@ -41,12 +41,15 @@ pub(crate) async fn build_node_state(
     transport: embedded::TransportConfig,
     edge: edge::Edge,
 ) -> Result<NodeState, String> {
-    let (store, persistence, db_path_opt) = resolve_store(&options)?;
+    // The data path's worker pool comes before the store, which places its
+    // compaction threads by the pool's plan.
+    let pool = embedded::start_node_pool(None, Some(&edge)).map_err(|error| error.to_string())?;
+    let (store, persistence, db_path_opt) = resolve_store(&options, &pool)?;
     let mut config = resolve_embedded_config(&options, persistence)?;
     config.transport = with_derived_iroh_key_path(transport, &db_path_opt);
     config.edge = Some(edge);
 
-    let node = embedded::build_with_store(store, config)
+    let node = embedded::build_with_store_on_pool(store, config, pool)
         .await
         .map_err(|error| error.to_string())?;
 
@@ -78,6 +81,7 @@ pub(crate) async fn build_node_state(
 
 fn resolve_store(
     options: &NodeInitOptions,
+    pool: &workers::Pool,
 ) -> Result<(Arc<FfiStore>, embedded::Persistence, Option<String>), String> {
     let backend_name = unsafe { c_str_to_string(options.datastore_backend) }
         .unwrap_or_default()
@@ -86,9 +90,11 @@ fn resolve_store(
     if options.in_memory != 0 || backend_name == "memory" || options.db_path.is_null() {
         return Ok((
             Arc::new(FfiStore::Regolith(
-                storage::RegolithStore::in_memory().map_err(|error| {
-                    format!("failed to open in-memory regolith store: {}", error)
-                })?,
+                storage::RegolithStore::open_with_options(
+                    "regolith-memory",
+                    storage::RegolithStoreOptions::memory().placed_on(pool),
+                )
+                .map_err(|error| format!("failed to open in-memory regolith store: {}", error))?,
             )),
             embedded::Persistence::Memory,
             None,
@@ -108,8 +114,11 @@ fn resolve_store(
     }
 
     let store = Arc::new(FfiStore::Regolith(
-        storage::RegolithStore::open(&path)
-            .map_err(|error| format!("failed to open regolith store at '{}': {}", path, error))?,
+        storage::RegolithStore::open_with_options(
+            &path,
+            storage::RegolithStoreOptions::default().placed_on(pool),
+        )
+        .map_err(|error| format!("failed to open regolith store at '{}': {}", path, error))?,
     ));
 
     Ok((store, embedded::Persistence::Persistent, Some(path)))

@@ -20,6 +20,7 @@ pub(crate) async fn create_document_acp<S>(
     store: Arc<S>,
     _persistence: Persistence,
     config: &crate::DocumentAcpConfig,
+    network: Option<&edge::Edge>,
 ) -> Result<DocumentAcpSetup>
 where
     S: storage::corekv::Store + 'static,
@@ -38,7 +39,7 @@ where
                 )
                 .map_err(|error| anyhow!("failed to create Vera provider: {error}"))?,
             );
-            let sh_acp = Arc::new(vera::VeraDocumentACP::new(provider, tuning.cache_ttl));
+            let sh_acp = Arc::new(vera::VeraDocumentACP::tuned(provider, &tuning, network));
             Ok(DocumentAcpSetup {
                 document_acp: gate_external_acp(sh_acp.clone(), store),
                 local_zanzibar_store: None,
@@ -62,7 +63,7 @@ where
                 )
                 .map_err(|error| anyhow!("failed to create Vera provider: {error}"))?,
             );
-            let vera_acp = Arc::new(vera::VeraDocumentACP::new(provider, tuning.cache_ttl));
+            let vera_acp = Arc::new(vera::VeraDocumentACP::tuned(provider, &tuning, network));
             Ok(DocumentAcpSetup {
                 document_acp: gate_external_acp(vera_acp.clone(), store),
                 local_zanzibar_store: None,
@@ -136,7 +137,7 @@ mod tests {
     #[tokio::test]
     async fn local_document_acp_enforces_stored_custom_policy() {
         let store = Arc::new(storage::RegolithStore::in_memory().unwrap());
-        let acp_setup = create_document_acp(store, Persistence::Memory, &DocumentAcpConfig::Local)
+        let acp_setup = create_document_acp(store, Persistence::Memory, &DocumentAcpConfig::Local, None)
             .await
             .unwrap();
 

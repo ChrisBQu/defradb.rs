@@ -177,7 +177,9 @@ fn a_registry_without_before_commit_work_skips_the_pass() {
 
     let seen = Seen::default();
     let mut callbacks = TxnCallbacks::default();
-    callbacks.on_commit(OnCommit::Sync(seen.sync("commit"))).unwrap();
+    callbacks
+        .on_commit(OnCommit::Sync(seen.sync("commit")))
+        .unwrap();
     assert!(!callbacks.before);
     callbacks.run_before_commit().unwrap();
     assert_eq!(callbacks.len(), 1);
@@ -190,11 +192,15 @@ fn a_registry_without_before_commit_work_skips_the_pass() {
 async fn before_commit_work_runs_in_order_and_leaves_the_other_callbacks() {
     let seen = Seen::default();
     let mut callbacks = TxnCallbacks::default();
-    callbacks.on_commit(OnCommit::Sync(seen.sync("commit 1"))).unwrap();
+    callbacks
+        .on_commit(OnCommit::Sync(seen.sync("commit 1")))
+        .unwrap();
     callbacks.before_commit(seen.before("before 1"));
     callbacks.on_abort(OnAbort::Sync(seen.sync("abort")));
     callbacks.before_commit(seen.before("before 2"));
-    callbacks.on_commit(OnCommit::Sync(seen.sync("commit 2"))).unwrap();
+    callbacks
+        .on_commit(OnCommit::Sync(seen.sync("commit 2")))
+        .unwrap();
 
     callbacks.run_before_commit().unwrap();
     assert_eq!(seen.take(), ["before 1", "before 2"]);

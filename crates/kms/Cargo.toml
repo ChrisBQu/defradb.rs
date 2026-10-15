@@ -61,12 +61,8 @@ rand = { workspace = true }
 uuid = { workspace = true }
 cid = { workspace = true }
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }
-
-[target.'cfg(target_arch = "wasm32")'.dependencies]
+# The KMS's bounded channels, on every target.
 async-channel = "2"
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = { version = "1.35", default-features = false, features = ["rt", "sync", "macros"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "test-util"] }

@@ -14,15 +14,40 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use regolith::sync::ArrayQueue;
 use regolith::{OptimisticTransactionDb, TxnOptions};
 
 use super::event_order::EventOrder;
 use super::post_commit::PostCommit;
 use super::transaction::RegolithTxn;
 use crate::corekv::{
-    Error, Result, RetryAttempt, RetryAttemptError, RetryAttemptIO, RetryAttemptValue,
-    RetryOptions, RetryTxn, TxnCallbacks,
+    Error, Result, RetryAttempt, RetryAttemptError, RetryAttemptFuture, RetryAttemptIO,
+    RetryAttemptValue, RetryOptions, RetryTxn, TxnCallbacks,
 };
+
+/// What one attempt hands the next: the caller's attempt, and the work the
+/// latest attempt registered. Exactly one attempt runs at a time, so it
+/// takes the baton when it starts and gives it back when it ends.
+struct Baton {
+    attempt: RetryAttempt,
+    /// regolith runs exactly one outcome per attempt: an attempt that lost
+    /// already let go of its place in the stream through its own
+    /// `on_abort`, and its abort callbacks run when the next one starts.
+    latest: Option<PostCommit>,
+}
+
+/// Gives `attempts` its higher-ranked signature: each call's future borrows
+/// only that call's transaction, and is `Send` wherever futures must be,
+/// which an async closure cannot yet promise.
+fn attempts<F>(attempts: F) -> F
+where
+    F: for<'txn, 'lost> FnMut(
+        &'txn mut regolith::Transaction,
+        Option<&'lost regolith::Conflict>,
+    ) -> RetryAttemptFuture<'txn>,
+{
+    attempts
+}
 
 /// Runs `attempt` in engine transactions of `db` until one commits, an
 /// attempt fails, or the policy's attempts are spent.
@@ -31,69 +56,54 @@ pub(super) async fn transact(
     isolation: regolith::IsolationLevel,
     event_order: &Arc<EventOrder>,
     options: RetryOptions,
-    mut attempt: RetryAttempt,
+    attempt: RetryAttempt,
 ) -> std::result::Result<RetryAttemptValue, RetryAttemptError> {
-    let queue_db = Arc::clone(db);
     let policy = regolith::RetryPolicy::new(options.max_attempts.max(1));
-    // The work the latest attempt registered. regolith runs exactly one
-    // outcome per attempt: an attempt that lost already let go of its
-    // place in the stream through its own `on_abort`, and its abort
-    // callbacks run here when the next one starts.
-    let mut latest: Option<PostCommit> = None;
-    let outcome = {
-        let mut queue = queue_db.db().io_queue();
-        let queue_id = queue.id();
-        let future = queue_db.transact_async(queue_id, &policy, async |txn, lost| {
-            if lost.is_some() {
-                telemetry::record_retry_attempt(telemetry::RetryLayer::Engine);
-            }
-            if let Some(previous) = latest.take() {
-                previous.failed().await;
-            }
-            let mut retry_txn = RegolithRetryTxn {
-                previous_conflict: lost.map(crate::corekv::TransactionConflict::from),
-                txn,
-                db: Arc::clone(db),
-                isolation,
-                attempt_io_active: false,
-                callbacks: TxnCallbacks::default(),
-            };
-            let mut value = attempt.run(&mut retry_txn).await;
-            if value.is_ok() && retry_txn.attempt_io_active {
-                value = Err(RetryAttemptError::Storage(Error::Other(
-                    "retry attempt returned with scoped IO still active".into(),
-                )));
-            }
-            if value.is_ok() {
-                let mut callbacks = std::mem::take(&mut retry_txn.callbacks);
-                match callbacks.run_before_commit() {
-                    Ok(()) => {
-                        latest = Some(PostCommit::bind(event_order, retry_txn.txn, callbacks));
-                    }
-                    Err(error) => {
-                        let (_, aborted) = callbacks.into_ends();
-                        aborted.run().await;
-                        value = Err(RetryAttemptError::Storage(error));
-                    }
-                }
-            }
-            value
-        });
-        // Regolith drives this future on its own I/O queue. Tokio's
-        // cooperative budget cannot be replenished by its scheduler while
-        // this synchronous bridge owns the thread; an exhausted budget
-        // would park an otherwise ready storage operation forever.
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            super::blocking(|| queue.block_on(tokio::task::unconstrained(future)))
+    let baton = Arc::new(ArrayQueue::new(1));
+    let _ = baton.push(Baton {
+        attempt,
+        latest: None,
+    });
+    let run = attempts({
+        let (baton, db, event_order) = (
+            Arc::clone(&baton),
+            Arc::clone(db),
+            Arc::clone(event_order),
+        );
+        move |txn, lost| {
+            let previous_conflict = lost.map(crate::corekv::TransactionConflict::from);
+            let (baton, db, event_order) = (
+                Arc::clone(&baton),
+                Arc::clone(&db),
+                Arc::clone(&event_order),
+            );
+            Box::pin(async move {
+                let Some(mut held) = baton.pop() else {
+                    return Err(RetryAttemptError::Storage(Error::Other(
+                        "a retry attempt started while another was running".into(),
+                    )));
+                };
+                let value = run_attempt(&mut held, txn, previous_conflict, db, isolation, &event_order)
+                    .await;
+                // Cannot be full: this attempt took the one baton.
+                let _ = baton.push(held);
+                value
+            })
         }
-        #[cfg(target_arch = "wasm32")]
-        {
-            drive_browser_queue(&mut queue, future).await
+    });
+    // On a worker the attempts run on its queue, polled between its tasks.
+    // Anywhere else the task drives a queue of its own and never parks its
+    // thread, so the executor it runs on keeps scheduling it.
+    let outcome = match super::worker_io::queue_for(db) {
+        Some(queue) => db.transact_async(queue, &policy, run).await,
+        None => {
+            let mut queue = db.db().io_queue();
+            let future = db.transact_async(queue.id(), &policy, run);
+            super::worker_io::drive(&mut queue, future).await
         }
     };
     let committed = outcome.is_ok();
-    if let Some(latest) = latest {
+    if let Some(latest) = baton.pop().and_then(|held| held.latest) {
         if committed {
             latest.committed().await;
         } else {
@@ -113,6 +123,52 @@ pub(super) async fn transact(
             "unknown regolith transaction retry failure".into(),
         ))),
     }
+}
+
+/// One attempt: the previous attempt's work fails, `held`'s attempt runs in
+/// `txn`, and what it registered for after its end is bound to the stream.
+async fn run_attempt(
+    held: &mut Baton,
+    txn: &mut regolith::Transaction,
+    previous_conflict: Option<crate::corekv::TransactionConflict>,
+    db: Arc<OptimisticTransactionDb>,
+    isolation: regolith::IsolationLevel,
+    event_order: &Arc<EventOrder>,
+) -> std::result::Result<RetryAttemptValue, RetryAttemptError> {
+    if previous_conflict.is_some() {
+        telemetry::record_retry_attempt(telemetry::RetryLayer::Engine);
+    }
+    if let Some(previous) = held.latest.take() {
+        previous.failed().await;
+    }
+    let mut retry_txn = RegolithRetryTxn {
+        previous_conflict,
+        txn,
+        db,
+        isolation,
+        attempt_io_active: false,
+        callbacks: TxnCallbacks::default(),
+    };
+    let mut value = held.attempt.run(&mut retry_txn).await;
+    if value.is_ok() && retry_txn.attempt_io_active {
+        value = Err(RetryAttemptError::Storage(Error::Other(
+            "retry attempt returned with scoped IO still active".into(),
+        )));
+    }
+    if value.is_ok() {
+        let mut callbacks = std::mem::take(&mut retry_txn.callbacks);
+        match callbacks.run_before_commit() {
+            Ok(()) => {
+                held.latest = Some(PostCommit::bind(event_order, retry_txn.txn, callbacks));
+            }
+            Err(error) => {
+                let (_, aborted) = callbacks.into_ends();
+                aborted.run().await;
+                value = Err(RetryAttemptError::Storage(error));
+            }
+        }
+    }
+    value
 }
 
 struct RegolithRetryTxn<'a> {
@@ -215,47 +271,6 @@ impl RetryTxn for RegolithRetryTxn<'_> {
         self.attempt_io_active = false;
         Ok(())
     }
-}
-
-/// Browser transactions yield to the event loop instead of parking a thread.
-#[cfg(target_arch = "wasm32")]
-async fn drive_browser_queue<F: std::future::Future>(
-    queue: &mut regolith::IoQueue,
-    future: F,
-) -> F::Output {
-    use std::{future::Future, pin::Pin, task::Poll};
-    let mut future = std::pin::pin!(future);
-    type Timer = (web_time::Instant, Pin<Box<dyn Future<Output = ()>>>);
-    let mut timer: Option<Timer> = None;
-    std::future::poll_fn(|cx| {
-        if let Poll::Ready(result) = future.as_mut().poll(cx) {
-            return Poll::Ready(result);
-        }
-        let progress = queue.poll(regolith::IoBudget::ALL);
-        if progress.completed > 0 {
-            cx.waker().wake_by_ref();
-        }
-        queue.idle_waker(cx.waker());
-        if let Some(delay) = progress.wake_in {
-            let deadline = web_time::Instant::now() + delay;
-            if timer
-                .as_ref()
-                .is_none_or(|(current, _)| deadline < *current)
-            {
-                timer = Some((deadline, Box::pin(n0_future::time::sleep(delay))));
-            }
-            if let Some((_, sleep)) = timer.as_mut() {
-                if sleep.as_mut().poll(cx).is_ready() {
-                    timer = None;
-                    cx.waker().wake_by_ref();
-                }
-            }
-        } else {
-            timer = None;
-        }
-        Poll::Pending
-    })
-    .await
 }
 
 #[cfg(test)]

@@ -16,7 +16,7 @@ pub use identity::IdentityArgs;
 pub use keyring_cmd::KeyringArgs;
 pub use sdl::SdlArgs;
 pub use server_dump::ServerDumpArgs;
-pub use start::{Node, StartArgs};
+pub use start::{Node, StartArgs, StartCommand, WorkerArgs};
 pub use storage::StorageArgs;
 pub use version::VersionArgs;
 

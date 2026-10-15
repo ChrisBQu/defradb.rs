@@ -87,7 +87,9 @@ impl Node {
         let runner = Arc::new(query_runner);
         let rest_ops: Arc<dyn query::rest::RestOperations> =
             Arc::new(query::rest::RestOperationsImpl::new(runner.clone()));
-        let runner: Arc<dyn query::executor::QueryExecutor> = runner;
+        // GraphQL requests run on the database's worker pool, routed there
+        // once at the edge.
+        let runner = query::pooled::PooledExecutor::wrap(runner, database.pool());
 
         QueryRunnerSetup {
             runner,

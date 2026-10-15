@@ -151,8 +151,7 @@ fn counts_obey_the_engine_contract_and_leave_routing_alone() {
             waste,
             rebuilds,
         });
-    let counts =
-        (any::<i64>(), any::<u64>()).prop_map(|(live, waste)| vector::counts(live, waste));
+    let counts = (any::<i64>(), any::<u64>()).prop_map(|(live, waste)| vector::counts(live, waste));
     let checked = regolith::testing::check_merge_operator(
         &DefraMergeOperator,
         Just(b"meta".to_vec()),
@@ -237,10 +236,14 @@ fn links_leave_the_structural_part_alone() {
                 let merged = DefraMergeOperator
                     .full_merge(b"node", Some(&encode_node(&base)), &refs)
                     .ok_or_else(|| TestCaseError::fail("links within its layers must merge"))?;
-                let merged = decode_node(&merged)
-                    .map_err(|error| TestCaseError::fail(error.to_string()))?;
-                if (merged.id, &merged.vector, merged.layers.len(), merged.deleted)
-                    != (base.id, &base.vector, base.layers.len(), base.deleted)
+                let merged =
+                    decode_node(&merged).map_err(|error| TestCaseError::fail(error.to_string()))?;
+                if (
+                    merged.id,
+                    &merged.vector,
+                    merged.layers.len(),
+                    merged.deleted,
+                ) != (base.id, &base.vector, base.layers.len(), base.deleted)
                 {
                     return Err(TestCaseError::fail(format!(
                         "{merged:?} lost the structure of {base:?}"

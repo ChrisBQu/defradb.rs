@@ -44,7 +44,8 @@ impl<S: Store> DB<S> {
             .await?;
         let (done, outcome) = oneshot::channel();
         let db = Arc::clone(self);
-        spawn_task(async move {
+        // A job of its own, so it finishes even when the caller stops waiting.
+        spawn_task(self.pool(), "db::index_backfill", async move {
             let _ = done.send(db.backfill_index(lease, plan).await);
         });
         outcome

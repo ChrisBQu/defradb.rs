@@ -100,12 +100,9 @@ pub fn engine_ticker_totals() -> Vec<(&'static str, u64)> {
         .zip(sources.retired)
         .filter(|(ticker, _)| is_exported(**ticker))
         .map(|(ticker, retired)| {
-            let total = sources
-                .live
-                .iter()
-                .fold(retired, |sum, (_, statistics)| {
-                    sum.wrapping_add(statistics.get_ticker(*ticker))
-                });
+            let total = sources.live.iter().fold(retired, |sum, (_, statistics)| {
+                sum.wrapping_add(statistics.get_ticker(*ticker))
+            });
             (ticker.name(), total)
         })
         .collect()
