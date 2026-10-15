@@ -138,12 +138,13 @@ async fn implicit_batch_replays_atomically_inside_engine_attempt() {
     let response = runner.execute_prepared(request, prepared).await;
     assert!(!response.has_errors(), "{:?}", response.errors);
     assert_eq!(store.attempts.load(Ordering::SeqCst), 2);
-    let attempt_ids = store.attempt_ids.lock().unwrap();
-    assert_eq!(attempt_ids.len(), 2);
-    assert_eq!(attempt_ids[0], attempt_ids[1]);
-    let mut returned = attempt_ids[1].clone();
+    let mut returned = {
+        let attempt_ids = store.attempt_ids.lock().unwrap();
+        assert_eq!(attempt_ids.len(), 2);
+        assert_eq!(attempt_ids[0], attempt_ids[1]);
+        attempt_ids[1].clone()
+    };
     assert_eq!(returned.len(), 2);
-    drop(attempt_ids);
     let mut doc_events = Vec::new();
     for _ in 0..2 {
         let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
@@ -203,12 +204,13 @@ async fn direct_mutation_api_replays_atomically_inside_engine_attempt() {
         .unwrap();
     assert!(response.is_object());
     assert_eq!(store.attempts.load(Ordering::SeqCst), 2);
-    let attempt_ids = store.attempt_ids.lock().unwrap();
-    assert_eq!(attempt_ids.len(), 2);
-    assert_eq!(attempt_ids[0], attempt_ids[1]);
-    let mut returned = attempt_ids[1].clone();
+    let mut returned = {
+        let attempt_ids = store.attempt_ids.lock().unwrap();
+        assert_eq!(attempt_ids.len(), 2);
+        assert_eq!(attempt_ids[0], attempt_ids[1]);
+        attempt_ids[1].clone()
+    };
     assert_eq!(returned.len(), 2);
-    drop(attempt_ids);
     let mut doc_events = Vec::new();
     for _ in 0..2 {
         let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
