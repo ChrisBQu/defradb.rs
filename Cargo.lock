@@ -3997,6 +3997,7 @@ dependencies = [
  "tracing",
  "wasm-bindgen-futures",
  "web-time",
+ "workers",
  "zeroize",
 ]
 

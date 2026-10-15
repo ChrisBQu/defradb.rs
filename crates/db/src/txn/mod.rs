@@ -18,6 +18,7 @@ use storage::keys::systemstore::{CollectionKey, CollectionNameKey};
 
 pub mod context;
 pub(crate) mod lenses;
+pub(crate) mod owner;
 pub mod registry;
 
 #[derive(Clone)]
