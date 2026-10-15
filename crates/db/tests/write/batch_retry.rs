@@ -107,14 +107,17 @@ impl DocumentACP for RevokeAfterAttemptRead {
     async fn check_doc_access(
         &self,
         _identity: &Identity,
-        _permission: acp::DocumentPermission,
+        permission: acp::DocumentPermission,
         _policy_id: &str,
         _resource_name: &str,
         _doc_id: &str,
     ) -> acp::Result<bool> {
         self.permission_checks.fetch_add(1, Ordering::SeqCst);
         let value = self.read_permission().await?;
-        let allowed = value.is_some_and(|value| value.as_ref() == b"allow");
+        // Keep read access so a revoked update is an explicit denial,
+        // rather than the documented empty result for an invisible document.
+        let allowed = permission == acp::DocumentPermission::Read
+            || value.is_some_and(|value| value.as_ref() == b"allow");
         if allowed && self.view.is_some() && !self.revoked.swap(true, Ordering::SeqCst) {
             self.revoke_outside_attempt().await?;
         }
@@ -541,6 +544,9 @@ async fn transactional_acp_revoke_conflicts_and_denies_batch_update() {
     ));
     request.identity = Some(identity::Did::new("did:key:batch-reader").unwrap());
     let prepared = runner.prepare_request(&request).await.unwrap();
+    // Count only the request attempts, excluding setup and preparation.
+    store.attempts.store(0, Ordering::SeqCst);
+    permission_checks.store(0, Ordering::SeqCst);
     let response = runner.execute_prepared(request, prepared).await;
 
     assert!(
