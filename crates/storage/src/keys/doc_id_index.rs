@@ -94,7 +94,14 @@ impl DocRef {
 }
 
 fn doc_id_index_key(segments: &[&[u8]]) -> Vec<u8> {
-    let mut result = DOC_ID_INDEX.as_bytes().to_vec();
+    let capacity = DOC_ID_INDEX.len()
+        + segments
+            .iter()
+            .filter(|segment| !segment.is_empty())
+            .map(|segment| 1 + segment.len())
+            .sum::<usize>();
+    let mut result = Vec::with_capacity(capacity);
+    result.extend_from_slice(DOC_ID_INDEX.as_bytes());
     for segment in segments {
         if !segment.is_empty() {
             result.push(b'/');
