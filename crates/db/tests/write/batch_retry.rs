@@ -605,6 +605,7 @@ async fn single_create_replays_after_engine_conflict_with_consistent_identity_an
         attempts: Arc::new(AtomicUsize::new(0)),
         raced: Arc::new(AtomicBool::new(false)),
         attempt_ids: Arc::new(Mutex::new(Vec::new())),
+        race_operation: Arc::new(Mutex::new(None)),
     };
     let db = Arc::new(DB::new(store.clone()).unwrap());
     db.create_collection(test_collection()).await.unwrap();
@@ -727,6 +728,7 @@ async fn remote_acp_batch_replays_with_attempt_local_registration_projection() {
         attempts: Arc::new(AtomicUsize::new(0)),
         raced: Arc::new(AtomicBool::new(false)),
         attempt_ids: Arc::new(Mutex::new(Vec::new())),
+        race_operation: Arc::new(Mutex::new(None)),
     };
     let bus: Arc<dyn Bus> = Arc::new(ChannelBus::new());
     let mut db = DB::new(store.clone()).unwrap();
