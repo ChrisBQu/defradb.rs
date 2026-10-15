@@ -1177,6 +1177,19 @@ mod tests {
         }
     }
 
+    async fn check_live_admission(
+        tx: &tokio::sync::mpsc::Sender<p2p::sync::PushFailure>,
+        marker_generation: u64,
+    ) -> Option<u64> {
+        let (durable_tx, durable_rx) = tokio::sync::oneshot::channel();
+        let mut check = failure(false);
+        check.admission_only = true;
+        check.marker_generation = Some(marker_generation);
+        check.durable_tx = Some(durable_tx);
+        tx.send(check).await.unwrap();
+        durable_rx.await.unwrap()
+    }
+
     #[tokio::test]
     async fn shared_failure_recorder_registers_then_clears_current_scope() {
         let store = Arc::new(storage::backends::RegolithStore::in_memory().unwrap());
@@ -1255,5 +1268,61 @@ mod tests {
             peerstore.get_retry_documents("peer-a").await.unwrap().len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn live_admission_requires_current_peer_scope_generation_and_elapsed_deadline() {
+        let store = Arc::new(storage::backends::RegolithStore::in_memory().unwrap());
+        let peerstore = storage::stores::Peerstore::new(store.clone());
+        let replicator = p2p::ReplicatorInfo::from_raw(
+            "peer-a".into(),
+            vec!["collection-a".into()],
+            Vec::new(),
+        );
+        peerstore
+            .create_replicator("peer-a", &replicator.to_bytes().unwrap())
+            .await
+            .unwrap();
+        let old_generation = peerstore
+            .observe_push_head_with_generation("peer-a", "doc-a", "collection-a")
+            .await
+            .unwrap()
+            .unwrap();
+
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        let recorder = spawn_failure_recorder(peerstore.clone(), rx);
+
+        // A normal first push is admitted only while its exact marker is live.
+        assert_eq!(check_live_admission(&tx, old_generation).await, Some(old_generation));
+
+        // A live marker does not bypass the durable peer backoff deadline.
+        peerstore
+            .record_retry_after("peer-a", Duration::from_secs(45))
+            .await
+            .unwrap();
+        assert_eq!(check_live_admission(&tx, old_generation).await, None);
+
+        // Forget removes both the peer and its marker. A job queued before the
+        // forget is rejected when it reaches the admission linearization point.
+        peerstore.delete_replicator("peer-a").await.unwrap();
+        assert_eq!(check_live_admission(&tx, old_generation).await, None);
+
+        // Re-adding the peer creates a fresh generation. It admits the new job,
+        // while the queued old job remains fenced out.
+        peerstore
+            .create_replicator("peer-a", &replicator.to_bytes().unwrap())
+            .await
+            .unwrap();
+        let new_generation = peerstore
+            .observe_push_head_with_generation("peer-a", "doc-a", "collection-a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(new_generation > old_generation);
+        assert_eq!(check_live_admission(&tx, old_generation).await, None);
+        assert_eq!(check_live_admission(&tx, new_generation).await, Some(new_generation));
+
+        drop(tx);
+        recorder.await.unwrap();
     }
 }
