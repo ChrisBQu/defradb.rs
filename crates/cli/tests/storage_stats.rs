@@ -155,3 +155,64 @@ fn encrypted_storage_stats_does_not_generate_a_missing_key() {
     ));
     assert!(!config.data_path().exists());
 }
+
+/// A key rotation through the keyring: the store was sealed under the key now
+/// kept as a previous key, and stays readable while the current key is new.
+#[tokio::test]
+async fn storage_stats_reads_a_store_sealed_under_a_previous_key() {
+    use keyring::{
+        FileKeyring, Keyring, ENCRYPTION_KEY, KEYRING_SECRET_ENV, PREVIOUS_ENCRYPTION_KEYS,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let mut config = cli::config::Config {
+        rootdir: root.path().to_path_buf(),
+        ..Default::default()
+    };
+    config.datastore.at_rest_encryption = true;
+    let secret = "storage-stats-rotation";
+    std::fs::write(
+        root.path().join("config.yaml"),
+        serde_yaml::to_string(&config).unwrap(),
+    )
+    .unwrap();
+    let database = db::DB::new(
+        storage::RegolithStore::open_with_options(
+            config.data_path(),
+            storage::RegolithStoreOptions::default().with_encryption_key([42; 32]),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    database
+        .create_collections_atomic(query::parse_sdl("type Users { name: String }").unwrap())
+        .await
+        .unwrap();
+    database.close().await.unwrap();
+    drop(database);
+
+    let keyring = FileKeyring::open(config.keyring_path(), secret.as_bytes()).unwrap();
+    keyring.set(ENCRYPTION_KEY, &[43; 32]).unwrap();
+    let stats = || {
+        command(root.path())
+            .env(KEYRING_SECRET_ENV, secret)
+            .output()
+            .unwrap()
+    };
+    assert!(
+        !stats().status.success(),
+        "the new key alone opened the store"
+    );
+    keyring
+        .set(PREVIOUS_ENCRYPTION_KEYS, &[[41; 32], [42; 32]].concat())
+        .unwrap();
+    let output = stats();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    keyring.set(PREVIOUS_ENCRYPTION_KEYS, &[42; 31]).unwrap();
+    let output = stats();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("32-byte keys"));
+}

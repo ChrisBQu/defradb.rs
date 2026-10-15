@@ -100,6 +100,12 @@ impl StoredDocument {
         Self::decode_inner(bytes, true)
     }
 
+    /// Whether `bytes` are in this format rather than a whole CBOR value
+    /// written before it existed. Checks the leading tag only.
+    pub fn is_field_format(bytes: &[u8]) -> bool {
+        bytes.starts_with(MAGIC)
+    }
+
     fn decode_inner(bytes: &[u8], validate_values: bool) -> Option<Self> {
         let mut input = bytes.strip_prefix(MAGIC)?;
         let count = u32::from_be_bytes(take(&mut input, 4)?.try_into().ok()?) as usize;

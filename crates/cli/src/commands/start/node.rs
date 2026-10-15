@@ -149,17 +149,42 @@ impl Node {
         Ok(Some(key))
     }
 
+    /// The keyring's previous at-rest keys, kept after a key rotation so the
+    /// files they sealed stay readable. None when the keyring has none.
+    fn load_previous_encryption_keys(config: &Config) -> Result<Vec<[u8; 32]>> {
+        use crate::error::Error;
+        use keyring::PREVIOUS_ENCRYPTION_KEYS;
+
+        let kr = crate::commands::open_keyring(config)?;
+        let bytes = match kr.get(PREVIOUS_ENCRYPTION_KEYS) {
+            Ok(bytes) => bytes,
+            Err(keyring::Error::NotFound(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(Error::Keyring(e.to_string())),
+        };
+        let (keys, rest) = bytes.as_chunks::<32>();
+        if !rest.is_empty() || keys.is_empty() {
+            return Err(Error::Keyring(format!(
+                "keyring {PREVIOUS_ENCRYPTION_KEYS} must hold one or more 32-byte keys, got {} bytes",
+                bytes.len()
+            )));
+        }
+        Ok(keys.to_vec())
+    }
+
     /// Resolve encryption before opening the engine. Diagnostics never create keys.
     pub(crate) fn encryption_options(
         config: &Config,
         options: storage::RegolithStoreOptions,
         create: bool,
     ) -> Result<storage::RegolithStoreOptions> {
-        if config.datastore.at_rest_encryption {
-            Ok(options.with_encryption_key(Self::load_encryption_key(config, create)?))
-        } else {
-            Ok(options)
+        if !config.datastore.at_rest_encryption {
+            return Ok(options);
         }
+        let current = Self::load_encryption_key(config, create)?;
+        let previous = Self::load_previous_encryption_keys(config)?;
+        options
+            .with_encryption_keys(current, previous)
+            .map_err(|e| crate::error::Error::Keyring(e.to_string()))
     }
 
     /// Build ACP and database services over the same engine-encrypted store.

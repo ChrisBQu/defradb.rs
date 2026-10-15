@@ -264,6 +264,7 @@ pub struct NodeBuilder {
     data_path: Option<PathBuf>,
     config: EmbeddedNodeConfig,
     at_rest_encryption_key: Option<[u8; 32]>,
+    previous_at_rest_encryption_keys: Vec<[u8; 32]>,
     #[cfg(feature = "iroh")]
     access_hooks: Option<crate::AccessHooks>,
 }
@@ -354,6 +355,29 @@ impl NodeBuilder {
         self
     }
 
+    /// Keys the store's files may still be sealed under after a rotation to
+    /// the key given to [`NodeBuilder::with_at_rest_encryption_key`]. They
+    /// only open what they sealed; new files use the current key.
+    pub fn with_previous_at_rest_encryption_keys<I>(mut self, keys: I) -> Self
+    where
+        I: IntoIterator<Item = [u8; 32]>,
+    {
+        self.previous_at_rest_encryption_keys = keys.into_iter().collect();
+        self
+    }
+
+    fn with_at_rest_keys(
+        &self,
+        options: storage::RegolithStoreOptions,
+    ) -> Result<storage::RegolithStoreOptions> {
+        match self.at_rest_encryption_key {
+            Some(key) => options
+                .with_encryption_keys(key, self.previous_at_rest_encryption_keys.iter().copied())
+                .context("invalid at-rest encryption keys"),
+            None => Ok(options),
+        }
+    }
+
     pub async fn build(mut self) -> Result<EmbeddedNode<EmbeddedStore>> {
         let (store, persistence) = if let Some(path) = self.data_path.take() {
             if let Some(parent) = path.parent() {
@@ -378,10 +402,7 @@ impl NodeBuilder {
 
             // `Options::embedded` sizes the engine for a 1-4 MiB working
             // set, which is what an embedded node has to live inside.
-            let mut opts = storage::RegolithStoreOptions::embedded();
-            if let Some(key) = self.at_rest_encryption_key {
-                opts = opts.with_encryption_key(key);
-            }
+            let opts = self.with_at_rest_keys(storage::RegolithStoreOptions::embedded())?;
             let store =
                 storage::RegolithStore::open_with_options(&path, opts).with_context(|| {
                     format!("failed to open regolith store at '{}'", path.display())
@@ -395,13 +416,10 @@ impl NodeBuilder {
             );
             (
                 EmbeddedStore::Regolith(
-                    storage::RegolithStore::open_with_options("memory", {
-                        let opts = storage::RegolithStoreOptions::memory();
-                        match self.at_rest_encryption_key {
-                            Some(key) => opts.with_encryption_key(key),
-                            None => opts,
-                        }
-                    })
+                    storage::RegolithStore::open_with_options(
+                        "memory",
+                        self.with_at_rest_keys(storage::RegolithStoreOptions::memory())?,
+                    )
                     .context("failed to open in-memory regolith store")?,
                 ),
                 Persistence::Memory,

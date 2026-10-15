@@ -22,7 +22,7 @@ use crate::DB;
 pub const CURRENT_INDEX_FORMAT: u32 = 2;
 
 /// Systemstore key holding the format the indexes on disk were written with.
-pub const INDEX_FORMAT_KEY: &[u8] = b"/system/index_format";
+pub use storage::keys::systemstore::INDEX_FORMAT_KEY;
 
 impl<S: Store> DB<S> {
     /// Rebuild secondary indexes when the store predates the current encoding.

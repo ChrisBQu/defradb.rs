@@ -1,17 +1,21 @@
 //! Opening options for the regolith backend.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use regolith::{DurabilityMode as EngineDurability, IsolationLevel, Options};
 
+use super::encryption::AtRestKeys;
 use crate::backends::shared::DurabilityMode;
+use crate::corekv::Result;
 
 /// How a [`super::RegolithStore`] opens and commits.
 #[derive(Clone)]
 pub struct RegolithStoreOptions {
     /// Engine options. Built from a regolith profile, so a target that
     /// needs a different memory budget picks it up by construction rather
-    /// than by a caller remembering to tune it.
+    /// than by a caller remembering to tune it. The at-rest keys are not in
+    /// here: the open installs them ([`Self::engine_with_keys`]).
     pub engine: Options,
     /// Commit-time validation. DefraLevel uses the installed key classifier
     /// to allow identical content-addressed block writes. Other key families
@@ -19,20 +23,52 @@ pub struct RegolithStoreOptions {
     pub isolation: IsolationLevel,
     /// How long `close` waits for in-flight transactions to finish.
     pub close_timeout: Duration,
+    /// The at-rest keys. Kept apart from [`Self::engine`] because a store the
+    /// previous release encrypted value by value is first looked at without
+    /// them, and decrypted once with them (`super::rewrite`).
+    at_rest: Option<Arc<AtRestKeys>>,
 }
 
 impl RegolithStoreOptions {
     /// Seal engine files with a key resolved before opening the store.
     ///
     /// Values remain plaintext inside the engine, so equality checks,
-    /// allocations, appends and merge operands retain their meaning.
-    /// This does not decrypt values written by the legacy `EncryptedStore`
-    /// wrapper. This format targets new installations.
-    pub fn with_encryption_key(mut self, key: [u8; 32]) -> Self {
-        self.engine = self.engine.key_provider(std::sync::Arc::new(
-            super::encryption::AtRestKeyProvider::new(key),
-        ));
+    /// allocations, appends and merge operands retain their meaning. A store
+    /// the previous release encrypted value by value with this key is
+    /// rewritten once, at its first open, into one the engine seals.
+    pub fn with_encryption_key(self, key: [u8; 32]) -> Self {
+        self.with_keys(AtRestKeys::single(key))
+    }
+
+    /// Seal new files with `current` while files sealed under any of `older`
+    /// stay readable: a key rotation. Compaction re-seals files under the
+    /// current key as it rewrites them, so keep an older key for as long as
+    /// a file sealed under it may remain. Two different keys that share a
+    /// derived key id are refused.
+    pub fn with_encryption_keys<I>(self, current: [u8; 32], older: I) -> Result<Self>
+    where
+        I: IntoIterator<Item = [u8; 32]>,
+    {
+        Ok(self.with_keys(AtRestKeys::rotated(current, older)?))
+    }
+
+    fn with_keys(mut self, keys: AtRestKeys) -> Self {
+        self.at_rest = Some(Arc::new(keys));
         self
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn at_rest_keys(&self) -> Option<&AtRestKeys> {
+        self.at_rest.as_deref()
+    }
+
+    /// [`Self::engine`] with the at-rest keys installed: what every open of
+    /// the store uses.
+    pub(super) fn engine_with_keys(&self) -> Options {
+        match &self.at_rest {
+            Some(keys) => self.engine.clone().key_provider(keys.clone()),
+            None => self.engine.clone(),
+        }
     }
 
     /// Server defaults: DefraLevel, fsync on every commit.
@@ -41,6 +77,7 @@ impl RegolithStoreOptions {
             engine: Options::default().durability(EngineDurability::Immediate),
             isolation: IsolationLevel::DefraLevel,
             close_timeout: Duration::from_secs(30),
+            at_rest: None,
         }
     }
 

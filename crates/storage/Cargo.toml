@@ -35,6 +35,10 @@ thiserror.workspace = true
 
 # Hashing
 rapidhash.workspace = true
+sha2.workspace = true
+
+# At-rest keys
+zeroize = "1.8"
 
 # Lock-free shared state
 kovan.workspace = true
@@ -68,6 +72,8 @@ tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time"] }
 # Used by backends::test_suite, which is part of the library so an integration
 # test can link it.
 futures.workspace = true
+# Decrypts, once, a store the previous release encrypted value by value.
+crypto = { path = "../crypto" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 regolith = { workspace = true, features = ["testing"] }
