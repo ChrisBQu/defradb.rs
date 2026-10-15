@@ -27,6 +27,7 @@ mod error;
 mod gate;
 mod handle;
 mod platform;
+mod pool;
 mod runtime;
 mod shared;
 mod stats;

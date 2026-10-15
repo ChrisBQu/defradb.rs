@@ -471,6 +471,25 @@ impl Pool {
         self.handle.shared.abandon();
     }
 
+    /// [`shutdown`](Self::shutdown), then completes once every worker has
+    /// stopped or the configured deadline passed, from any executor. Past
+    /// the deadline it abandons what is left and returns
+    /// [`Error::TimedOut`]. Called on a worker it returns
+    /// [`Error::OnWorker`] at once: a worker cannot wait for itself to stop.
+    pub async fn stop(&self) -> Result<(), Error> {
+        if crate::worker::on_worker() {
+            return Err(Error::OnWorker);
+        }
+        self.shutdown();
+        match crate::timeout(self.handle.shutdown_deadline, self.stopped()).await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.abandon();
+                Err(error)
+            }
+        }
+    }
+
     /// [`shutdown`](Self::shutdown), then waits on a plain thread up to the
     /// configured deadline. Past it, abandons what is left and returns
     /// [`Error::TimedOut`]; workers still inside a poll are left to stop when

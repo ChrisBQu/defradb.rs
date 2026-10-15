@@ -19,6 +19,8 @@ testing = []
 defra-core = { path = "../defra-core" }
 # regolith::sync: the gate's drain and closing signals, the owner's stop request.
 regolith = { workspace = true }
+# The worker pool whose stuck-poll monitor runs on the edge's timer.
+workers = { path = "../workers" }
 # Task and timer types: tokio's natively, wasm-bindgen-futures and browser
 # timers on wasm32, with one API.
 n0-future.workspace = true

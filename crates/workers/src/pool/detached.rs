@@ -102,9 +102,10 @@ where
 }
 
 /// The process-wide pool for work submitted where no pool runs: one worker,
-/// unplaced ([`Config::unplaced`]), started on first use and kept for the
-/// life of the process. Production code is handed its database's pool and
-/// never reaches this.
+/// unplaced ([`Config::unplaced`](crate::Config::unplaced)), started on first
+/// use and kept for the life of the process. It serves code that runs off
+/// every pool (a test, a one-shot tool) and the timers of waits made off a
+/// worker, such as the deadline of a pool's own [`Pool::stop`].
 #[cfg(not(target_family = "wasm"))]
 pub fn fallback() -> Result<&'static Pool, Error> {
     static FALLBACK: regolith::sync::OnceCell<Pool> = regolith::sync::OnceCell::new();
