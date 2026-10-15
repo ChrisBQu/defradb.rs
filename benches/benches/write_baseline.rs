@@ -48,40 +48,20 @@ fn metrics(sample: &Measurement) -> Vec<(&'static str, &'static str, bool, f64)>
             sample.storage_conflicts as f64 / commits,
         ),
         (
-            "HTTP conflicts",
+            "client conflicts",
             "conflicts/commit",
             true,
-            (after.http_auto_commit.attempts - before.http_auto_commit.attempts
-                + after.http_auto_commit.exhaustions
-                - before.http_auto_commit.exhaustions) as f64
-                / commits,
+            sample.client_conflicts as f64 / commits,
         ),
+        ("HTTP retries (retired)", "retries/commit", true, 0.0),
+        ("embedded retries (retired)", "retries/commit", true, 0.0),
         (
-            "HTTP retries",
+            "short ID reservation retries (retired)",
             "retries/commit",
             true,
-            (after.http_auto_commit.attempts - before.http_auto_commit.attempts) as f64 / commits,
+            0.0,
         ),
-        (
-            "embedded retries",
-            "retries/commit",
-            true,
-            (after.embedded_execute.attempts - before.embedded_execute.attempts) as f64 / commits,
-        ),
-        (
-            "short ID reservation retries",
-            "retries/commit",
-            true,
-            (after.doc_short_id_reservation.attempts - before.doc_short_id_reservation.attempts)
-                as f64
-                / commits,
-        ),
-        (
-            "merge retries",
-            "retries/commit",
-            true,
-            (after.merge.attempts - before.merge.attempts) as f64 / commits,
-        ),
+        ("merge retries (retired)", "retries/commit", true, 0.0),
         (
             "push marker retries",
             "retries/commit",
@@ -89,10 +69,10 @@ fn metrics(sample: &Measurement) -> Vec<(&'static str, &'static str, bool, f64)>
             (after.push_marker.attempts - before.push_marker.attempts) as f64 / commits,
         ),
         (
-            "HTTP exhausted requests",
+            "client conflict requests",
             "requests",
             true,
-            sample.exhaustions as f64,
+            sample.client_conflicts as f64,
         ),
         (
             "engine exhausted requests",
@@ -143,7 +123,6 @@ fn main() {
                 "durability": "Immediate", "store": "disk", "writers": writers,
                 "operations_per_writer": operations, "repetitions": repetitions,
             "shared_documents": workload::SHARED_DOCUMENTS,
-            "max_http_retries": workload::MAX_HTTP_RETRIES,
                 "load_guard": guard,
             }
         })
@@ -178,7 +157,7 @@ fn main() {
                         "baseline_sample": {
                             "workload": scenario.name(), "writers": count, "repetition": repetition,
                             "requests": sample.latencies.len(), "commits": sample.commits,
-                            "http_exhaustions": sample.exhaustions,
+                            "client_conflicts": sample.client_conflicts,
                             "engine_exhaustions": sample.engine_exhaustions,
                             "elapsed_seconds": sample.elapsed.as_secs_f64(),
                             "metrics": metrics.iter().map(|(name, _, _, value)| (*name, *value)).collect::<std::collections::BTreeMap<_, _>>(),
@@ -200,7 +179,7 @@ fn main() {
         }
         let mut family = Family::new(
             format!("Concurrent writes: {}", scenario.name()),
-            format!("On-disk Immediate durability; {operations} requests per writer; {repetitions} fresh-store repetitions. HTTP execution including retry backoff, without sockets, signing or ACP. Latencies include exhausted requests. Storage conflicts exclude pre-commit query conflicts; HTTP conflicts count both retries and exhausted requests. Zero retries at unused layers means those layers were not exercised."),
+            format!("On-disk Immediate durability; {operations} requests per writer; {repetitions} fresh-store repetitions. HTTP execution without sockets, signing or ACP. Latencies include client-conflict and engine-exhausted requests. Storage conflicts exclude pre-commit query conflicts; client conflicts count requests returned with a transaction conflict. Engine exhaustion is reported separately. Retired retry layers report zero by definition."),
         ).trust(if guard.passed { Trust::Clean } else { Trust::Contaminated });
         for group in groups {
             family = family.group(group);

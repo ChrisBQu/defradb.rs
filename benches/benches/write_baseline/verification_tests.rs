@@ -71,7 +71,7 @@ async fn measured_engine_exhaustions_are_failures_not_commits() {
 
     let sample = run(Scenario::SharedUpdates, 2, 4).await;
     assert_eq!(
-        sample.commits + sample.exhaustions + sample.engine_exhaustions,
+        sample.commits + sample.client_conflicts + sample.engine_exhaustions,
         8
     );
     assert_eq!(sample.engine_exhaustions, 0);

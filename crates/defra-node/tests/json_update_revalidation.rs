@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use defra_node::{EmbeddedNode, ExecuteRetryPolicy, QueryRequest};
+use defra_node::{EmbeddedNode, QueryRequest};
 use serde_json::{json, Value};
 
 #[tokio::test]
@@ -26,10 +26,9 @@ async fn retained_json_survives_unrelated_updates() -> Result<()> {
         Value::Null,
     ];
     for (index, payload) in payloads.into_iter().enumerate() {
-        let created = node.execute_request_with_retry(
+        let created = node.execute_request(
             QueryRequest::new("mutation($key:String!,$payload:JSON){create_JsonProbe(input:{key:$key,payload:$payload,sibling:\"before\"}){_docID}}")
                 .with_variables(json!({"key":index.to_string(),"payload":payload})),
-            ExecuteRetryPolicy::default(),
         ).await;
         assert!(
             !created.has_errors(),

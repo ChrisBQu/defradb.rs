@@ -44,7 +44,6 @@ use std::time::Duration;
 
 use defra_core::signing::SigningConfig;
 use identity::{Identity as _, IdentityKeyType, RawIdentity};
-use rand::Rng;
 
 /// Re-exported so callers can name `Arc<dyn DocumentACP>` (the type
 /// [`EmbeddedNode::document_acp`] returns) without depending on `acp` directly.
@@ -76,38 +75,6 @@ use signed_query_runtime::{
     execute_with_signing_context, unavailable_node_signer_response, SignedQueryRuntime,
     SIGNED_QUERY_DRAIN_TIMEOUT,
 };
-
-/// Retry policy for [`EmbeddedNode::execute_with_retry`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ExecuteRetryPolicy {
-    /// Number of retries after the initial attempt.
-    pub max_retries: u32,
-    /// Backoff before the first retry.
-    pub initial_backoff: Duration,
-    /// Maximum backoff between retries.
-    pub max_backoff: Duration,
-}
-
-impl ExecuteRetryPolicy {
-    /// Create a retry policy with bounded exponential backoff.
-    pub const fn new(max_retries: u32, initial_backoff: Duration, max_backoff: Duration) -> Self {
-        Self {
-            max_retries,
-            initial_backoff,
-            max_backoff,
-        }
-    }
-}
-
-impl Default for ExecuteRetryPolicy {
-    fn default() -> Self {
-        Self {
-            max_retries: 3,
-            initial_backoff: Duration::from_millis(10),
-            max_backoff: Duration::from_millis(250),
-        }
-    }
-}
 
 /// Type-erased schema operations so we can store DB<S> without leaking the Store generic.
 #[async_trait::async_trait]
@@ -220,49 +187,41 @@ impl EmbeddedNode {
             .await
     }
 
-    /// Execute a GraphQL query or mutation, retrying transient transaction conflicts.
+    /// Execute a prepared query request once, resolving external inputs between attempts.
     ///
-    /// A configured node identity is used as the document ACP actor on every
-    /// attempt.
-    pub async fn execute_with_retry(
-        &self,
-        query_str: &str,
-        policy: ExecuteRetryPolicy,
-    ) -> QueryResponse {
-        self.execute_request_with_retry(QueryRequest::new(query_str), policy)
-            .await
+    /// Storage conflicts are returned to the caller. Eligible implicit mutations
+    /// retry inside the engine-owned transaction boundary.
+    pub async fn execute_request(&self, request: QueryRequest) -> QueryResponse {
+        self.execute_prepared_request(request, None).await
     }
 
-    /// Execute a prepared query request, retrying transient transaction conflicts.
+    /// Execute a prepared query request within an existing transaction.
     ///
-    /// Requests without an identity use the configured node identity for
-    /// document ACP. An explicit request identity takes precedence.
-    pub async fn execute_request_with_retry(
+    /// The node identity context and explicit request identity are applied
+    /// the same way as [`Self::execute_request`].
+    pub async fn execute_request_in_txn(
         &self,
         request: QueryRequest,
-        policy: ExecuteRetryPolicy,
+        handle: &TransactionHandle,
     ) -> QueryResponse {
-        self.execute_prepared_request(request, None, Some(policy))
+        self.execute_prepared_request(request, Some(handle.clone()))
             .await
     }
 
     async fn execute_request_once(&self, request: QueryRequest) -> QueryResponse {
-        self.execute_prepared_request(request, None, None).await
+        self.execute_prepared_request(request, None).await
     }
 
     async fn execute_prepared_request(
         &self,
         request: QueryRequest,
         txn_handle: Option<TransactionHandle>,
-        retry_policy: Option<ExecuteRetryPolicy>,
     ) -> QueryResponse {
         let request = self.with_default_query_identity(request);
         let Some(node_identity_did) = self.node_identity_did.as_deref() else {
             return match txn_handle {
                 Some(handle) => self.runner.execute_in_txn(request, &handle).await,
-                None => {
-                    execute_autocommit_request(self.runner.as_ref(), request, retry_policy).await
-                }
+                None => execute_autocommit_request(self.runner.as_ref(), request).await,
             };
         };
 
@@ -296,27 +255,12 @@ impl EmbeddedNode {
             self.runner.clone(),
             request,
             txn_handle,
-            retry_policy,
             signing_config,
             node_identity_did.to_string(),
             signed_query_runtime.handle(),
             signed_query_permit,
         )
         .await
-    }
-
-    /// Execute a prepared query request within an existing transaction.
-    ///
-    /// When the node has a configured identity, the same signing and ambient
-    /// identity context used by [`Self::execute`] is applied to this request.
-    /// It is also the document ACP actor unless the request supplies one.
-    pub async fn execute_request_in_txn(
-        &self,
-        request: QueryRequest,
-        handle: &TransactionHandle,
-    ) -> QueryResponse {
-        self.execute_prepared_request(request, Some(handle.clone()), None)
-            .await
     }
 
     fn with_default_query_identity(&self, mut request: QueryRequest) -> QueryRequest {
@@ -753,14 +697,9 @@ impl EmbeddedNode {
 async fn execute_autocommit_request(
     executor: &dyn QueryExecutor,
     request: QueryRequest,
-    policy: Option<ExecuteRetryPolicy>,
 ) -> QueryResponse {
-    // Preparation is required even for one-shot execution: remote embedding
-    // and KMS work must happen outside the retriable mutation attempt. A
-    // missing conflict policy means zero storage-conflict retries, while
-    // typed NeedsInput outcomes still resolve and re-enter the request.
-    let policy =
-        policy.unwrap_or_else(|| ExecuteRetryPolicy::new(0, Duration::ZERO, Duration::ZERO));
+    // Remote preparation is resolved outside mutation attempts. Storage and
+    // business conflicts are returned after one attempt.
     let prepared = match executor.prepare_request(&request).await {
         Ok(prepared) => prepared,
         Err(error) => {
@@ -771,18 +710,14 @@ async fn execute_autocommit_request(
             }
         }
     };
-    execute_prepared_request_with_retry_loop(executor, request, prepared, policy).await
+    execute_prepared_request_resolving_inputs(executor, request, prepared).await
 }
 
-async fn execute_prepared_request_with_retry_loop(
+async fn execute_prepared_request_resolving_inputs(
     executor: &dyn QueryExecutor,
     request: QueryRequest,
     mut prepared: Option<std::sync::Arc<query::prepared::PreparedMutations>>,
-    policy: ExecuteRetryPolicy,
 ) -> QueryResponse {
-    let mut retry_count = 0;
-    let mut backoff = policy.initial_backoff.min(policy.max_backoff);
-
     loop {
         let response = executor
             .execute_prepared(request.clone(), prepared.clone())
@@ -806,106 +741,13 @@ async fn execute_prepared_request_with_retry_loop(
                 }
             }
         }
-        if is_transaction_conflict_response(&response)
-            && prepared
-                .as_ref()
-                .is_some_and(|prepared| prepared.engine_managed_retry)
-        {
-            return response;
-        }
-        if !is_transaction_conflict_response(&response) {
-            if retry_count > 0 {
-                telemetry::record_retry_success(telemetry::RetryLayer::EmbeddedExecute);
-            }
-            return response;
-        }
-        if retry_count >= policy.max_retries {
-            telemetry::record_retry_exhaustion(telemetry::RetryLayer::EmbeddedExecute);
-            return response;
-        }
-
-        telemetry::record_retry_attempt(telemetry::RetryLayer::EmbeddedExecute);
-        retry_count += 1;
-        let delay = jittered_backoff(backoff);
-        tracing::warn!(
-            retry = retry_count,
-            max_retries = policy.max_retries,
-            backoff_ms = delay.as_millis(),
-            "retrying embedded execute after transaction conflict"
-        );
-        if !delay.is_zero() {
-            tokio::time::sleep(delay).await;
-        }
-        backoff = next_retry_backoff(backoff, policy.max_backoff);
+        return response;
     }
 }
 
 #[cfg(test)]
 #[path = "request_preparation_tests.rs"]
 mod request_preparation_tests;
-
-#[cfg(test)]
-async fn execute_request_with_retry_loop<F, Fut>(
-    request: QueryRequest,
-    policy: ExecuteRetryPolicy,
-    mut execute_once: F,
-) -> QueryResponse
-where
-    F: FnMut(QueryRequest) -> Fut,
-    Fut: std::future::Future<Output = QueryResponse>,
-{
-    let mut retry_count = 0;
-    let mut backoff = policy.initial_backoff.min(policy.max_backoff);
-
-    loop {
-        let response = execute_once(request.clone()).await;
-        if !is_transaction_conflict_response(&response) {
-            if retry_count > 0 {
-                telemetry::record_retry_success(telemetry::RetryLayer::EmbeddedExecute);
-            }
-            return response;
-        }
-        if retry_count >= policy.max_retries {
-            telemetry::record_retry_exhaustion(telemetry::RetryLayer::EmbeddedExecute);
-            return response;
-        }
-
-        telemetry::record_retry_attempt(telemetry::RetryLayer::EmbeddedExecute);
-        retry_count += 1;
-        let delay = jittered_backoff(backoff);
-        tracing::warn!(
-            retry = retry_count,
-            max_retries = policy.max_retries,
-            backoff_ms = delay.as_millis(),
-            "retrying embedded execute after transaction conflict"
-        );
-
-        if !delay.is_zero() {
-            tokio::time::sleep(delay).await;
-        }
-        backoff = next_retry_backoff(backoff, policy.max_backoff);
-    }
-}
-
-fn is_transaction_conflict_response(response: &QueryResponse) -> bool {
-    response.is_transaction_conflict()
-}
-
-fn jittered_backoff(max_backoff: Duration) -> Duration {
-    if max_backoff.is_zero() {
-        return Duration::ZERO;
-    }
-
-    let max_nanos = max_backoff.as_nanos().min(u64::MAX as u128) as u64;
-    Duration::from_nanos(rand::thread_rng().gen_range(0..=max_nanos))
-}
-
-fn next_retry_backoff(current: Duration, max_backoff: Duration) -> Duration {
-    if current.is_zero() {
-        return Duration::ZERO;
-    }
-    current.saturating_mul(2).min(max_backoff)
-}
 
 fn resolve_registered_node_identity(did: &str) -> anyhow::Result<SigningConfig> {
     let config = defra_core::signing::get_identity(did).ok_or_else(|| {
@@ -1253,8 +1095,6 @@ impl NodeBuilder {
             }
             options
         };
-        #[cfg(feature = "http")]
-        let max_txn_retries = db_options.max_txn_retries();
 
         // 2. Extract configs before moving self
         #[cfg(feature = "http")]
@@ -1374,7 +1214,6 @@ impl NodeBuilder {
             let server_config = defra_http::ServerConfig {
                 address: http_cfg.address,
                 request_timeout: timeout_secs(http_cfg.request_timeout),
-                max_txn_retries,
                 query_limits,
                 ..Default::default()
             };
@@ -1804,14 +1643,12 @@ impl NodeBuilder {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, LazyLock};
 
     use defra_core::signing::{RemoteSigner, SigningConfig, SigningKeyType};
-    use query::{QueryRequest, QueryResponseError};
     use tokio::sync::Mutex;
 
-    use super::{EmbeddedNode, ExecuteRetryPolicy};
+    use super::EmbeddedNode;
 
     #[cfg(feature = "http")]
     use axum::{routing::get, Router};
@@ -1984,101 +1821,6 @@ mod tests {
         assert_eq!(super::timeout_secs(std::time::Duration::from_millis(1)), 1);
         assert_eq!(super::timeout_secs(std::time::Duration::new(2, 1)), 3);
         assert_eq!(super::timeout_secs(std::time::Duration::from_secs(5)), 5);
-    }
-
-    #[test]
-    fn execute_retry_policy_defaults_are_bounded() {
-        let policy = ExecuteRetryPolicy::default();
-
-        assert_eq!(policy.max_retries, 3);
-        assert_eq!(policy.initial_backoff, std::time::Duration::from_millis(10));
-        assert_eq!(policy.max_backoff, std::time::Duration::from_millis(250));
-    }
-
-    #[test]
-    fn execute_retry_backoff_doubles_until_cap() {
-        let max = std::time::Duration::from_millis(25);
-
-        assert_eq!(
-            super::next_retry_backoff(std::time::Duration::from_millis(10), max),
-            std::time::Duration::from_millis(20)
-        );
-        assert_eq!(
-            super::next_retry_backoff(std::time::Duration::from_millis(20), max),
-            max
-        );
-    }
-
-    #[test]
-    fn execute_retry_classifier_matches_transaction_conflicts_only() {
-        let conflict = query::QueryResponse::transaction_conflict(
-            "commit error: datastore error: storage error: transaction conflict. Please retry",
-        );
-        assert!(super::is_transaction_conflict_response(&conflict));
-
-        let validation = query::QueryResponse::error("schema error: invalid field");
-        assert!(!super::is_transaction_conflict_response(&validation));
-
-        let partial = query::QueryResponse::partial(
-            serde_json::json!({"ok": true}),
-            vec![QueryResponseError::new(
-                "commit error: transaction conflict. Please retry",
-            )],
-        );
-        assert!(!super::is_transaction_conflict_response(&partial));
-    }
-
-    #[tokio::test]
-    async fn execute_retry_loop_retries_conflicts_until_success() {
-        // Asserts a delta on process-global conflict metrics, so it cannot run
-        // beside the other tests that drive the embedded execute path. They
-        // already take this guard.
-        let _serial = SIGNING_STORE_GUARD.lock().await;
-        let metrics_before = telemetry::conflict_metrics_snapshot().embedded_execute;
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let policy =
-            ExecuteRetryPolicy::new(3, std::time::Duration::ZERO, std::time::Duration::ZERO);
-
-        let response = super::execute_request_with_retry_loop(
-            QueryRequest::new("mutation { noop }"),
-            policy,
-            {
-                let attempts = attempts.clone();
-                move |_request| {
-                    let attempts = attempts.clone();
-                    async move {
-                        let attempt = attempts.fetch_add(1, Ordering::SeqCst);
-                        if attempt < 2 {
-                            query::QueryResponse::transaction_conflict(
-                                "commit error: storage error: transaction conflict. Please retry",
-                            )
-                        } else {
-                            query::QueryResponse::success(serde_json::json!({"ok": true}))
-                        }
-                    }
-                }
-            },
-        )
-        .await;
-
-        assert_eq!(attempts.load(Ordering::SeqCst), 3);
-        assert!(!response.has_errors());
-        assert_eq!(response.data, Some(serde_json::json!({"ok": true})));
-        // The conflict counters are process-global and every test that runs a
-        // query through the retry loop moves them, so an exact delta is a race:
-        // it read 3 where it wanted 2 in CI. The loop's own behaviour is pinned
-        // exactly by `attempts` above; what is left to check here is that the
-        // telemetry fired at all, which a lower bound does without depending on
-        // what else the binary is running.
-        let metrics_after = telemetry::conflict_metrics_snapshot().embedded_execute;
-        assert!(
-            metrics_after.attempts - metrics_before.attempts >= 2,
-            "the two retried attempts must be recorded"
-        );
-        assert!(
-            metrics_after.successes - metrics_before.successes >= 1,
-            "the eventual success must be recorded"
-        );
     }
 
     #[tokio::test]

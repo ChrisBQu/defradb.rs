@@ -78,19 +78,11 @@ impl QueryExecutor for ConflictExecutor {
 }
 
 #[tokio::test]
-async fn embedded_retry_prepares_once_before_all_attempts() {
+async fn embedded_returns_conflict_after_one_prepared_attempt() {
     let executor = ConflictExecutor::default();
-    let response = super::execute_autocommit_request(
-        &executor,
-        QueryRequest::new("{ probe }"),
-        Some(super::ExecuteRetryPolicy::new(
-            3,
-            std::time::Duration::ZERO,
-            std::time::Duration::ZERO,
-        )),
-    )
-    .await;
-    assert!(!response.has_errors());
+    let response =
+        super::execute_autocommit_request(&executor, QueryRequest::new("{ probe }")).await;
+    assert!(response.is_transaction_conflict());
     assert_eq!(executor.preparations.load(Ordering::SeqCst), 1);
-    assert_eq!(executor.auto_commit_attempts.load(Ordering::SeqCst), 3);
+    assert_eq!(executor.auto_commit_attempts.load(Ordering::SeqCst), 1);
 }

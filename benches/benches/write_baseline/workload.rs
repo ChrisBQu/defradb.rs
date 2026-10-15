@@ -21,7 +21,6 @@ mod verify;
 
 const COLLECTION: &str = "Sample";
 pub const SHARED_DOCUMENTS: usize = 8;
-pub const MAX_HTTP_RETRIES: u32 = 16;
 
 #[derive(Clone, Copy, Debug)]
 pub enum Scenario {
@@ -68,11 +67,12 @@ impl Scenario {
     }
 }
 
+#[allow(dead_code)] // Some fields are consumed only by the benchmark target.
 pub struct Measurement {
     pub elapsed: Duration,
     pub latencies: Vec<Duration>,
     pub commits: u64,
-    pub exhaustions: u64,
+    pub client_conflicts: u64,
     pub engine_exhaustions: u64,
     pub storage_conflicts: u64,
     pub retries_before: ConflictMetricsSnapshot,
@@ -147,11 +147,7 @@ impl Fixture {
             }
         }
         Self {
-            state: Arc::new(
-                AppStateBuilder::new(Arc::new(runner))
-                    .with_max_txn_retries(MAX_HTTP_RETRIES)
-                    .build(),
-            ),
+            state: Arc::new(AppStateBuilder::new(Arc::new(runner)).build()),
             store,
             db,
             ids,
@@ -175,7 +171,7 @@ pub async fn run(scenario: Scenario, writers: usize, operations: usize) -> Measu
             let mut latencies = Vec::with_capacity(operations);
             let mut successes = Vec::with_capacity(operations);
             let mut engine_exhaustions = 0u64;
-            let mut http_exhaustions = 0u64;
+            let mut client_conflicts = 0u64;
             for operation in 0..operations {
                 let request = QueryRequest::new(scenario.mutation(writer, operation, &ids));
                 let start = Instant::now();
@@ -191,7 +187,7 @@ pub async fn run(scenario: Scenario, writers: usize, operations: usize) -> Measu
                     continue;
                 }
                 if response.is_transaction_conflict() {
-                    http_exhaustions += 1;
+                    client_conflicts += 1;
                     continue;
                 }
                 {
@@ -221,18 +217,18 @@ pub async fn run(scenario: Scenario, writers: usize, operations: usize) -> Measu
                     successes.push((writer, operation));
                 }
             }
-            (latencies, successes, http_exhaustions, engine_exhaustions)
+            (latencies, successes, client_conflicts, engine_exhaustions)
         });
     }
     let mut latencies = Vec::with_capacity(writers * operations);
     let mut successes = Vec::with_capacity(writers * operations);
-    let mut http_exhaustions = 0u64;
+    let mut client_conflicts = 0u64;
     let mut engine_exhaustions = 0u64;
     while let Some(result) = tasks.join_next().await {
         let (samples, succeeded, http_failed, engine_failed) = result.unwrap();
         latencies.extend(samples);
         successes.extend(succeeded);
-        http_exhaustions += http_failed;
+        client_conflicts += http_failed;
         engine_exhaustions += engine_failed;
     }
     let elapsed = start.elapsed();
@@ -241,7 +237,7 @@ pub async fn run(scenario: Scenario, writers: usize, operations: usize) -> Measu
         elapsed,
         latencies,
         commits,
-        exhaustions: http_exhaustions,
+        client_conflicts,
         engine_exhaustions,
         storage_conflicts: stats.snapshot().conflicts - storage_before.conflicts,
         retries_before,

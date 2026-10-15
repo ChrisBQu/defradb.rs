@@ -7,17 +7,12 @@
 //! `Handle::block_on` — the same pattern the FFI uses with `rt.block_on()`.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use query::executor::{QueryExecutor, QueryRequest, QueryResponse};
 use query::txn::TransactionHandle;
-use rand::Rng;
 
 use crate::identity_extractor::ExtractIdentity;
 use crate::router::AppState;
-
-const INITIAL_RETRY_BACKOFF: Duration = Duration::from_millis(10);
-const MAX_RETRY_BACKOFF: Duration = Duration::from_millis(250);
 
 /// Execute a GraphQL query with signing config and DAC bypass context.
 pub async fn execute_with_context(
@@ -35,7 +30,6 @@ pub async fn execute_with_context(
         return execute_prepared_request(state, request).await;
     }
     let executor = state.executor.clone();
-    let max_retries = state.max_txn_retries;
     let handle = tokio::runtime::Handle::current();
 
     let batch_session_key = signing_config.as_ref().map(|s| s.public_key_hex.clone());
@@ -53,7 +47,7 @@ pub async fn execute_with_context(
         handle.block_on(defra_core::signing::scope_request_bearer_token(
             acting_did,
             bearer,
-            execute_prepared_with_executor(executor.as_ref(), request, max_retries),
+            execute_prepared_with_executor(executor.as_ref(), request),
         ))
     })
     .await
@@ -64,13 +58,12 @@ pub async fn execute_with_context(
 }
 
 async fn execute_prepared_request(state: &AppState, request: QueryRequest) -> QueryResponse {
-    execute_prepared_with_executor(state.executor.as_ref(), request, state.max_txn_retries).await
+    execute_prepared_with_executor(state.executor.as_ref(), request).await
 }
 
 async fn execute_prepared_with_executor(
     executor: &dyn QueryExecutor,
     request: QueryRequest,
-    max_retries: u32,
 ) -> QueryResponse {
     let prepared = match executor.prepare_request(&request).await {
         Ok(prepared) => prepared,
@@ -80,28 +73,14 @@ async fn execute_prepared_with_executor(
             ))
         }
     };
-    execute_prepared_request_with_retry_loop(
-        executor,
-        request,
-        prepared,
-        max_retries,
-        INITIAL_RETRY_BACKOFF,
-        MAX_RETRY_BACKOFF,
-    )
-    .await
+    execute_prepared_request_resolving_inputs(executor, request, prepared).await
 }
 
-async fn execute_prepared_request_with_retry_loop(
+async fn execute_prepared_request_resolving_inputs(
     executor: &dyn QueryExecutor,
     request: QueryRequest,
     mut prepared: Option<Arc<query::prepared::PreparedMutations>>,
-    max_retries: u32,
-    initial_backoff: Duration,
-    max_backoff: Duration,
 ) -> QueryResponse {
-    let mut retry_count = 0;
-    let mut backoff = initial_backoff.min(max_backoff);
-
     loop {
         let response = executor
             .execute_prepared(request.clone(), prepared.clone())
@@ -127,49 +106,8 @@ async fn execute_prepared_request_with_retry_loop(
                 }
             }
         }
-        if response.is_transaction_conflict()
-            && prepared
-                .as_ref()
-                .is_some_and(|prepared| prepared.engine_managed_retry)
-        {
-            return response;
-        }
-        if !response.is_transaction_conflict() {
-            if retry_count > 0 {
-                telemetry::record_retry_success(telemetry::RetryLayer::HttpAutoCommit);
-            }
-            return response;
-        }
-        if retry_count >= max_retries {
-            telemetry::record_retry_exhaustion(telemetry::RetryLayer::HttpAutoCommit);
-            return response;
-        }
-
-        telemetry::record_retry_attempt(telemetry::RetryLayer::HttpAutoCommit);
-        retry_count += 1;
-        let delay = jittered_backoff(backoff);
-        tracing::warn!(
-            retry = retry_count,
-            max_retries,
-            backoff_ms = delay.as_millis(),
-            "retrying auto-commit GraphQL request after transaction conflict"
-        );
-        tokio::time::sleep(delay).await;
-        backoff = next_retry_backoff(backoff, max_backoff);
+        return response;
     }
-}
-
-fn jittered_backoff(max_backoff: Duration) -> Duration {
-    if max_backoff.is_zero() {
-        return Duration::ZERO;
-    }
-
-    let max_nanos = max_backoff.as_nanos().min(u64::MAX as u128) as u64;
-    Duration::from_nanos(rand::thread_rng().gen_range(0..=max_nanos))
-}
-
-fn next_retry_backoff(current: Duration, max_backoff: Duration) -> Duration {
-    current.saturating_mul(2).min(max_backoff)
 }
 
 /// Execute a GraphQL query within a transaction with signing config and DAC bypass context.
@@ -294,11 +232,6 @@ mod tests {
     use super::*;
     use crate::router::AppStateBuilder;
 
-    // Retry telemetry counters are process-global. These tests take snapshots
-    // around their own HTTP retry sequences, so serialize the two cases that
-    // record this layer's counters.
-    static RETRY_METRICS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
     #[derive(Default)]
     struct ConflictExecutor {
         preparations: AtomicUsize,
@@ -329,8 +262,7 @@ mod tests {
             let attempt = self.auto_commit_attempts.fetch_add(1, Ordering::SeqCst);
             if self.input_on_second {
                 match attempt {
-                    0 | 2 => QueryResponse::transaction_conflict("transaction conflict"),
-                    1 => QueryResponse::error(query::QueryResponseError::from_query_error(
+                    0 => QueryResponse::error(query::QueryResponseError::from_query_error(
                         query::error::QueryError::NeedsInput(
                             query::prepared::PreparedInputRequest::new(
                                 query::prepared::PreparedInputKind::Embedding,
@@ -338,6 +270,7 @@ mod tests {
                             ),
                         ),
                     )),
+                    1 => QueryResponse::transaction_conflict("transaction conflict"),
                     _ => QueryResponse::success(serde_json::json!({"_docID": "doc"})),
                 }
             } else if attempt < 2 {
@@ -399,13 +332,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auto_commit_execution_retries_typed_conflicts() {
-        let _metrics_guard = RETRY_METRICS_TEST_LOCK.lock().await;
-        let metrics_before = telemetry::conflict_metrics_snapshot().http_auto_commit;
+    async fn auto_commit_returns_business_conflict_without_replaying_request() {
         let executor = Arc::new(ConflictExecutor::default());
-        let state = AppStateBuilder::new(executor.clone())
-            .with_max_txn_retries(3)
-            .build();
+        let state = AppStateBuilder::new(executor.clone()).build();
 
         let response = execute_with_context(
             &state,
@@ -415,11 +344,8 @@ mod tests {
         .await;
 
         assert_eq!(executor.preparations.load(Ordering::SeqCst), 1);
-        assert_eq!(executor.auto_commit_attempts.load(Ordering::SeqCst), 3);
-        assert!(!response.has_errors());
-        let metrics_after = telemetry::conflict_metrics_snapshot().http_auto_commit;
-        assert_eq!(metrics_after.attempts - metrics_before.attempts, 2);
-        assert_eq!(metrics_after.successes - metrics_before.successes, 1);
+        assert_eq!(executor.auto_commit_attempts.load(Ordering::SeqCst), 1);
+        assert!(response.is_transaction_conflict());
     }
 
     #[tokio::test]
@@ -428,9 +354,7 @@ mod tests {
             engine_managed_retry: true,
             ..Default::default()
         });
-        let state = AppStateBuilder::new(executor.clone())
-            .with_max_txn_retries(3)
-            .build();
+        let state = AppStateBuilder::new(executor.clone()).build();
 
         let response = execute_with_context(
             &state,
@@ -445,15 +369,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auto_commit_resolves_input_outside_attempt_and_preserves_it_across_conflict() {
-        let _metrics_guard = RETRY_METRICS_TEST_LOCK.lock().await;
+    async fn auto_commit_resolves_input_then_returns_conflict_without_replaying_it() {
         let executor = Arc::new(ConflictExecutor {
             input_on_second: true,
             ..Default::default()
         });
-        let state = AppStateBuilder::new(executor.clone())
-            .with_max_txn_retries(3)
-            .build();
+        let state = AppStateBuilder::new(executor.clone()).build();
 
         let response = execute_with_context(
             &state,
@@ -463,17 +384,15 @@ mod tests {
         .await;
 
         assert_eq!(executor.preparations.load(Ordering::SeqCst), 1);
-        assert_eq!(executor.auto_commit_attempts.load(Ordering::SeqCst), 4);
+        assert_eq!(executor.auto_commit_attempts.load(Ordering::SeqCst), 2);
         assert_eq!(executor.input_resolutions.load(Ordering::SeqCst), 1);
-        assert!(!response.has_errors());
+        assert!(response.is_transaction_conflict());
     }
 
     #[tokio::test]
     async fn explicit_transaction_execution_is_not_retried() {
         let executor = Arc::new(ConflictExecutor::default());
-        let state = AppStateBuilder::new(executor.clone())
-            .with_max_txn_retries(3)
-            .build();
+        let state = AppStateBuilder::new(executor.clone()).build();
 
         let response = execute_in_txn_with_context(
             &state,

@@ -251,35 +251,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
             prepared.map_or_else(|| Utc::now().with_timezone(&utc_offset), |p| p.request_time);
         let mut created_ids = RapidHashMap::default();
 
-        // Batch implicit multi-mutation requests when the mutator supports it.
-        //
-        // Explicit `/tx` requests already provide their own shared transaction
-        // through `fetcher_override`. Local authorization always shares this
-        // transaction, including single-field mutations. Remote ACP retains
-        // its network-boundary handling.
-        let has_policy_backed_mutation = if fetcher_override.is_none() {
-            let mut has_policy = false;
-            for mutation in &mutations {
-                match self.get_collection(&mutation.collection_name).await {
-                    Ok(collection) => {
-                        if collection.policy.is_some() {
-                            has_policy = true;
-                            break;
-                        }
-                    }
-                    Err(QueryError::CollectionNotFound(_)) => {}
-                    Err(err) => return Err(err),
-                }
-            }
-            has_policy
-        } else {
-            false
-        };
-
+        // Run eligible implicit mutations as one engine-owned retry unit so
+        // selection and expected-value reads are rebuilt after a conflict.
+        // Explicit `/tx` requests have their own transaction and are never
+        // replayed here. The prepared capsule records whether all policy and
+        // retry-boundary checks allowed engine ownership.
         if fetcher_override.is_none()
-            && prepared.is_some()
-            && (self.acp.supports_transactions()
-                || (mutations.len() > 1 && !has_policy_backed_mutation))
+            && prepared.is_some_and(|prepared| prepared.engine_managed_retry)
         {
             if let Some(batch) = mutator.begin_batch().await? {
                 let runner = Arc::new(self.scoped_runner(self.acp.clone()));

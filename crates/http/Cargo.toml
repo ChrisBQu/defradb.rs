@@ -20,7 +20,6 @@ server = [
     "dep:axum",
     "dep:axum-server",
     "dep:hyper",
-    "dep:rand",
     "dep:rustls",
     "dep:telemetry",
     "dep:tokio",
@@ -86,7 +85,6 @@ tracing.workspace = true
 telemetry = { path = "../telemetry", optional = true }
 
 # Retry jitter
-rand = { workspace = true, optional = true }
 
 # db's native runtime is the only one it builds with off-wasm, server or not.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

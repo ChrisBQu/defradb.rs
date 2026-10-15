@@ -8,6 +8,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc, Mutex,
 };
+use std::{future::Future, pin::Pin};
 use storage::corekv::{RetryAttempt, RetryAttemptError, RetryAttemptFn, RetryAttemptFuture};
 use storage::{RegolithStore, Result, Store, Txn};
 
@@ -162,7 +163,11 @@ struct ConflictStore {
     attempts: Arc<AtomicUsize>,
     raced: Arc<AtomicBool>,
     attempt_ids: Arc<Mutex<Vec<Vec<String>>>>,
+    race_operation: Arc<Mutex<Option<RaceOperation>>>,
 }
+
+type RaceOperation =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>;
 
 impl storage::corekv::private::Sealed for ConflictStore {}
 
@@ -184,6 +189,7 @@ impl Store for ConflictStore {
             attempts: Arc<AtomicUsize>,
             raced: Arc<AtomicBool>,
             attempt_ids: Arc<Mutex<Vec<Vec<String>>>>,
+            race_operation: Arc<Mutex<Option<RaceOperation>>>,
             inner: RetryAttempt,
         }
         impl RetryAttemptFn for InjectConflict {
@@ -193,11 +199,16 @@ impl Store for ConflictStore {
             ) -> RetryAttemptFuture<'a> {
                 Box::pin(async move {
                     if !self.raced.swap(true, Ordering::SeqCst) {
-                        txn.get(b"batch-conflict").await?;
-                        txn.set(b"batch-conflict", b"loser").await?;
-                        let mut winner = self.store.new_txn(false).await?;
-                        winner.set(b"batch-conflict", b"winner").await?;
-                        winner.commit().await?;
+                        let race_operation = self.race_operation.lock().unwrap().clone();
+                        if let Some(race_operation) = race_operation {
+                            race_operation().await?;
+                        } else {
+                            txn.get(b"batch-conflict").await?;
+                            txn.set(b"batch-conflict", b"loser").await?;
+                            let mut winner = self.store.new_txn(false).await?;
+                            winner.set(b"batch-conflict", b"winner").await?;
+                            winner.commit().await?;
+                        }
                     }
                     let result = self.inner.run(txn).await?;
                     self.attempts.fetch_add(1, Ordering::SeqCst);
@@ -218,6 +229,7 @@ impl Store for ConflictStore {
                     attempts: self.attempts.clone(),
                     raced: self.raced.clone(),
                     attempt_ids: self.attempt_ids.clone(),
+                    race_operation: self.race_operation.clone(),
                     inner: attempt,
                 }),
             )
@@ -255,6 +267,7 @@ async fn implicit_batch_replays_atomically_inside_engine_attempt() {
         attempts: Arc::new(AtomicUsize::new(0)),
         raced: Arc::new(AtomicBool::new(false)),
         attempt_ids: Arc::new(Mutex::new(Vec::new())),
+        race_operation: Arc::new(Mutex::new(None)),
     };
     let bus: Arc<dyn Bus> = Arc::new(ChannelBus::new());
     let mut db = DB::new(store.clone()).unwrap();
@@ -315,6 +328,96 @@ async fn implicit_batch_replays_atomically_inside_engine_attempt() {
 }
 
 #[tokio::test]
+async fn implicit_single_update_is_prepared_for_engine_owned_retry() {
+    let inner = RegolithStore::in_memory().unwrap();
+    let store = ConflictStore {
+        inner: inner.clone(),
+        attempts: Arc::new(AtomicUsize::new(0)),
+        raced: Arc::new(AtomicBool::new(true)),
+        attempt_ids: Arc::new(Mutex::new(Vec::new())),
+        race_operation: Arc::new(Mutex::new(None)),
+    };
+    let store_db = Arc::new(DB::new(store.clone()).unwrap());
+    store_db.create_collection(test_collection()).await.unwrap();
+    let created = db::write::autocommit::AutoCommitMutator::new(store_db.clone())
+        .create(
+            "TestDoc",
+            document::Document::from_json_str(r#"{"x": 1}"#).unwrap(),
+        )
+        .await
+        .unwrap();
+    let race_db = store_db.clone();
+    let race_doc_id = created.doc_id.clone();
+    *store.race_operation.lock().unwrap() = Some(Arc::new(move || {
+        let db = race_db.clone();
+        let doc_id = race_doc_id.clone();
+        Box::pin(async move {
+            let mutator = db::write::autocommit::AutoCommitMutator::new(db);
+            let mut doc = mutator
+                .get_for_update("TestDoc", &doc_id)
+                .await
+                .map_err(|error| storage::Error::Other(error.to_string()))?
+                .ok_or_else(|| storage::Error::Other("test document disappeared".into()))?;
+            doc.set("x", 3_i64);
+            mutator
+                .update(
+                    "TestDoc",
+                    doc,
+                    rapidhash::RapidHashSet::from_iter(["x".to_string()]),
+                )
+                .await
+                .map_err(|error| storage::Error::Other(error.to_string()))?;
+            Ok(())
+        })
+    }));
+
+    let runner = query::QueryRunner::with_provider(
+        LensedAutoCommitFetcher::new(store_db.clone()),
+        DbCollectionProvider::new_arc(store_db.clone()),
+    )
+    .with_mutator(Arc::new(db::write::autocommit::AutoCommitMutator::new(
+        store_db.clone(),
+    )));
+    let request = QueryRequest::new(
+        r#"mutation { update_TestDoc(filter: {x: {_eq: 1}}, input: {x: 2}) { _docID x } }"#,
+    );
+    let prepared = runner.prepare_request(&request).await.unwrap();
+    assert!(
+        prepared
+            .as_ref()
+            .is_some_and(|prepared| prepared.engine_managed_retry),
+        "single implicit mutations must use the engine-owned retry boundary"
+    );
+
+    store.attempts.store(0, Ordering::SeqCst);
+    store.raced.store(false, Ordering::SeqCst);
+    let response = runner.execute_prepared(request, prepared).await;
+    assert!(!response.has_errors(), "{:?}", response.errors);
+    // Counts include the injected concurrent update as well as the two
+    // complete request-attempt bodies.
+    assert_eq!(store.attempts.load(Ordering::SeqCst), 3);
+    {
+        let attempt_ids = store.attempt_ids.lock().unwrap();
+        assert_eq!(attempt_ids.len(), 2);
+        assert_eq!(attempt_ids[0], vec![created.doc_id.to_string()]);
+        assert!(
+            attempt_ids[1].is_empty(),
+            "selection must rerun on fresh snapshot"
+        );
+    }
+    assert!(response.data.unwrap()["update_TestDoc"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    let final_doc = db::write::autocommit::AutoCommitMutator::new(store_db)
+        .get_for_update("TestDoc", &created.doc_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(final_doc.get("x"), Some(&document::NormalValue::Int(3)));
+}
+
+#[tokio::test]
 async fn direct_mutation_api_replays_atomically_inside_engine_attempt() {
     let inner = RegolithStore::in_memory().unwrap();
     let store = ConflictStore {
@@ -322,6 +425,7 @@ async fn direct_mutation_api_replays_atomically_inside_engine_attempt() {
         attempts: Arc::new(AtomicUsize::new(0)),
         raced: Arc::new(AtomicBool::new(false)),
         attempt_ids: Arc::new(Mutex::new(Vec::new())),
+        race_operation: Arc::new(Mutex::new(None)),
     };
     let bus: Arc<dyn Bus> = Arc::new(ChannelBus::new());
     let mut db = DB::new(store.clone()).unwrap();
@@ -388,6 +492,7 @@ async fn transactional_acp_revoke_conflicts_and_denies_batch_update() {
         attempts: Arc::new(AtomicUsize::new(0)),
         raced: Arc::new(AtomicBool::new(true)),
         attempt_ids: Arc::new(Mutex::new(Vec::new())),
+        race_operation: Arc::new(Mutex::new(None)),
     };
     let db = Arc::new(DB::new(store.clone()).unwrap());
     db.create_collection(

@@ -14,26 +14,18 @@ use opentelemetry::KeyValue;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum RetryLayer {
-    HttpAutoCommit,
-    EmbeddedExecute,
-    Merge,
     PushMarker,
-    DocShortIdReservation,
 }
 
 impl RetryLayer {
-    const COUNT: usize = 5;
+    const COUNT: usize = 1;
 
     #[cfg(feature = "otlp")]
     const fn labels(self) -> &'static [&'static str] {
         match self {
-            Self::HttpAutoCommit => &["http_auto_commit"],
-            Self::EmbeddedExecute => &["embedded_execute"],
-            Self::Merge => &["merge"],
             // Preserve the pre-stage-3 label for one compatibility window
             // while exposing the marker-based name to new dashboards.
             Self::PushMarker => &["push_marker", "push_ledger"],
-            Self::DocShortIdReservation => &["doc_short_id_reservation"],
         }
     }
 }
@@ -52,10 +44,14 @@ pub struct RetryLayerSnapshot {
 /// Process-lifetime conflict retry and escape counters.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ConflictMetricsSnapshot {
+    /// Retired HTTP retry layer, preserved as zero for historical readers.
     pub http_auto_commit: RetryLayerSnapshot,
+    /// Retired embedded retry layer, preserved as zero for historical readers.
     pub embedded_execute: RetryLayerSnapshot,
+    /// Retired merge retry layer, preserved as zero for historical readers.
     pub merge: RetryLayerSnapshot,
     pub push_marker: RetryLayerSnapshot,
+    /// Retired ID-reservation retry layer, preserved as zero for historical readers.
     pub doc_short_id_reservation: RetryLayerSnapshot,
     /// Typed transaction conflicts returned through a client API.
     pub escaped_to_clients: u64,
@@ -93,11 +89,11 @@ static RETRIES: RetryCounters = RetryCounters::new();
 /// Capture process-lifetime conflict retry and escape counters.
 pub fn conflict_metrics_snapshot() -> ConflictMetricsSnapshot {
     ConflictMetricsSnapshot {
-        http_auto_commit: RETRIES.layer(RetryLayer::HttpAutoCommit),
-        embedded_execute: RETRIES.layer(RetryLayer::EmbeddedExecute),
-        merge: RETRIES.layer(RetryLayer::Merge),
+        http_auto_commit: RetryLayerSnapshot::default(),
+        embedded_execute: RetryLayerSnapshot::default(),
+        merge: RetryLayerSnapshot::default(),
         push_marker: RETRIES.layer(RetryLayer::PushMarker),
-        doc_short_id_reservation: RETRIES.layer(RetryLayer::DocShortIdReservation),
+        doc_short_id_reservation: RetryLayerSnapshot::default(),
         escaped_to_clients: RETRIES.escaped_to_clients.load(Ordering::Relaxed),
     }
 }

@@ -53,7 +53,6 @@ pub struct AppState {
     pub node_identity_did: Option<String>,
     pub signing_enabled: bool,
     pub dev_mode: bool,
-    pub max_txn_retries: u32,
     pub query_limits: QueryLimits,
 }
 
@@ -115,7 +114,6 @@ impl std::fmt::Debug for AppState {
             )
             .field("node_identity_did", &self.node_identity_did)
             .field("dev_mode", &self.dev_mode)
-            .field("max_txn_retries", &self.max_txn_retries)
             .field("query_limits", &self.query_limits)
             .finish()
     }
@@ -296,7 +294,6 @@ pub struct AppStateBuilder {
     node_identity_did: Option<String>,
     signing_enabled: bool,
     dev_mode: bool,
-    max_txn_retries: u32,
     query_limits: QueryLimits,
 }
 
@@ -327,7 +324,6 @@ impl AppStateBuilder {
             node_identity_did: None,
             signing_enabled: false,
             dev_mode: false,
-            max_txn_retries: db::DEFAULT_MAX_TXN_RETRIES,
             query_limits: QueryLimits::default(),
         }
     }
@@ -478,12 +474,6 @@ impl AppStateBuilder {
         self
     }
 
-    /// Set the maximum number of auto-commit transaction conflict retries.
-    pub fn with_max_txn_retries(mut self, retries: u32) -> Self {
-        self.max_txn_retries = retries;
-        self
-    }
-
     /// Set GraphQL parsing and filter evaluation limits.
     pub fn with_query_limits(mut self, limits: QueryLimits) -> Self {
         self.query_limits = limits;
@@ -516,7 +506,6 @@ impl AppStateBuilder {
             node_identity_did: self.node_identity_did,
             signing_enabled: self.signing_enabled,
             dev_mode: self.dev_mode,
-            max_txn_retries: self.max_txn_retries,
             query_limits: self.query_limits,
         }
     }

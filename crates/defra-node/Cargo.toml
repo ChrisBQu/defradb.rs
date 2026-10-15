@@ -58,7 +58,6 @@ db = { path = "../db", default-features = false }
 storage = { path = "../storage" }
 query = { path = "../query" }
 events = { path = "../events" }
-rand.workspace = true
 acp = { path = "../acp" }
 vera = { path = "../vera", optional = true }
 identity = { path = "../identity" }

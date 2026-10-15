@@ -54,7 +54,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             has_embeddings
         };
         let mut has_policy_backed_mutation = false;
-        if mutations.len() > 1 && !self.acp.supports_transactions() {
+        if !self.acp.supports_transactions() {
             let provider = self.effective_provider();
             for mutation in mutations {
                 if provider
@@ -67,7 +67,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 }
             }
         }
-        let request_batch = mutations.len() > 1 || self.acp.supports_transactions();
+        let contains_truncate = mutations
+            .iter()
+            .any(|mutation| mutation.mutation_type == MutationType::Truncate);
+        let request_batch = mutations.len() > 1
+            || self.acp.supports_transactions()
+            || (!contains_truncate && !has_policy_backed_mutation);
         if !mutator.requires_write_preparation() && !schema_has_embeddings && !request_batch {
             return Ok(None);
         }
@@ -87,8 +92,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             engine_managed_retry: !mutations
                 .iter()
                 .any(|mutation| mutation.mutation_type == MutationType::Truncate)
-                && (self.acp.supports_transactions()
-                    || (mutations.len() > 1 && !has_policy_backed_mutation))
+                && (self.acp.supports_transactions() || !has_policy_backed_mutation)
                 && mutator.engine_retries_batches(),
         };
         if prepared.engine_managed_retry {
