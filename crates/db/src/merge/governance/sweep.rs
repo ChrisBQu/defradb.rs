@@ -189,7 +189,7 @@ pub fn start_governance_sweep<S, B>(
     handler: std::sync::Arc<DbMergeHandler<S, B>>,
     interval: std::time::Duration,
     shutdown: p2p::sync::SyncShutdownHandle,
-) -> Result<workers::Background, workers::Error>
+) -> workers::Background
 where
     S: Store + 'static,
     B: blockstore::Blockstore + MaybeSendSync + 'static,

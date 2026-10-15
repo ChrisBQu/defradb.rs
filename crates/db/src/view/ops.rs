@@ -180,9 +180,7 @@ impl<S: Store> crate::database::DB<S> {
     /// every 250 ms on its worker's deadline queue until it is aborted or its
     /// worker stops.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn start_scheduled_view_refresh_task(
-        self: Arc<Self>,
-    ) -> std::result::Result<workers::Background, workers::Error>
+    pub fn start_scheduled_view_refresh_task(self: Arc<Self>) -> workers::Background
     where
         S: 'static,
     {

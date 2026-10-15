@@ -50,8 +50,7 @@ impl TickSource for PoolTicks {
             })
             .await;
             error!(%error, "lens epoch ticks stopped: they run only on a worker");
-        })
-        .map_err(|error| crate::Error::WasmLoad(format!("lens epoch ticks did not start: {error}")))?;
+        });
         Ok(Box::new(StopOnDrop(job)))
     }
 }

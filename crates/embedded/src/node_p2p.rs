@@ -232,8 +232,7 @@ where
         replication.merge_handler_inner.clone(),
         db::merge::governance::SWEEP_INTERVAL,
         coordinator.shutdown_handle(),
-    )
-    .map_err(|error| anyhow::anyhow!("the governance sweep did not start: {error}"))?;
+    );
     let governance_sweep_task = tokio::spawn(async move {
         let _ = governance_sweep.await;
     });

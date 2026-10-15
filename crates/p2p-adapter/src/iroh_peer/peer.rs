@@ -250,18 +250,11 @@ impl<S: Store + 'static> IrohPeer<S> {
         // page's one worker is this thread, so the sweep is a task here.
         // Either way it ends with the coordinator's shutdown.
         #[cfg(not(target_arch = "wasm32"))]
-        drop(
-            db::merge::governance::start_governance_sweep(
-                Arc::clone(&replication.merge_handler_inner),
-                db::merge::governance::SWEEP_INTERVAL,
-                coordinator.shutdown_handle(),
-            )
-            .map_err(|error| {
-                p2p::Error::Io(std::io::Error::other(format!(
-                    "the governance sweep did not start: {error}"
-                )))
-            })?,
-        );
+        drop(db::merge::governance::start_governance_sweep(
+            Arc::clone(&replication.merge_handler_inner),
+            db::merge::governance::SWEEP_INTERVAL,
+            coordinator.shutdown_handle(),
+        ));
         #[cfg(target_arch = "wasm32")]
         {
             let sweep_handler = Arc::clone(&replication.merge_handler_inner);

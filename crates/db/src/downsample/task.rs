@@ -40,7 +40,7 @@ where
 impl<S: Store + 'static> crate::database::DB<S> {
     /// Starts the downsample job on the database's pool. It runs until it is
     /// aborted or its worker stops.
-    pub fn start_downsample_task(self: Arc<Self>) -> Result<workers::Background, workers::Error> {
+    pub fn start_downsample_task(self: Arc<Self>) -> workers::Background {
         let pool = self.pool().cloned();
         workers::spawn_background(pool.as_ref(), "db::downsample", move || async move {
             self.run_downsamples().await

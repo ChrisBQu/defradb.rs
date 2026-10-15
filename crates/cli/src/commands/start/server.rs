@@ -136,15 +136,10 @@ impl Node {
             .len();
         info!("Loaded {} collection schema(s)", collection_count);
 
-        let downsample_task = Some(database.clone().start_downsample_task().map_err(|e| {
-            Error::InvalidConfig(format!("the downsample job did not start: {e}"))
-        })?);
+        let downsample_task = Some(database.clone().start_downsample_task());
         info!("Downsample worker enabled");
 
-        let vector_rebuild_task =
-            Some(database.clone().start_vector_rebuild_task().map_err(|e| {
-                Error::InvalidConfig(format!("the vector rebuild job did not start: {e}"))
-            })?);
+        let vector_rebuild_task = Some(database.clone().start_vector_rebuild_task());
         info!("Vector index rebuild worker enabled");
 
         let acp_setup = Self::setup_document_acp(

@@ -213,14 +213,11 @@ impl Node {
         // index held before this process started.
         // It runs on the database's worker pool and ends with the
         // coordinator's shutdown.
-        drop(
-            db::merge::governance::start_governance_sweep(
-                replication.merge_handler_inner.clone(),
-                db::merge::governance::SWEEP_INTERVAL,
-                coordinator.shutdown_handle(),
-            )
-            .map_err(|e| Error::InvalidConfig(format!("the governance sweep did not start: {e}")))?,
-        );
+        drop(db::merge::governance::start_governance_sweep(
+            replication.merge_handler_inner.clone(),
+            db::merge::governance::SWEEP_INTERVAL,
+            coordinator.shutdown_handle(),
+        ));
 
         let coordinator_for_events = coordinator.clone();
         let se_store = store.clone();

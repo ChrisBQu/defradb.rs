@@ -31,9 +31,7 @@ impl<S: Store + 'static> DB<S> {
     /// graph owed one (last written before self-link-free inserts, or heavy
     /// with tombstones) is rebuilt on the sweep's own transaction.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn start_vector_rebuild_task(
-        self: Arc<Self>,
-    ) -> Result<workers::Background, workers::Error> {
+    pub fn start_vector_rebuild_task(self: Arc<Self>) -> workers::Background {
         let pool = self.pool().cloned();
         workers::spawn_background(pool.as_ref(), "db::vector_rebuild", move || async move {
             let sweep = || async {

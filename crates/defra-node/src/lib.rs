@@ -150,7 +150,7 @@ pub struct EmbeddedNode {
     #[cfg(not(target_arch = "wasm32"))]
     transaction_stats: Option<storage::TransactionStatsHandle>,
     #[cfg(feature = "http")]
-    txn_cleanup_task: kovan_queue::seg_queue::SegQueue<tokio::task::JoinHandle<()>>,
+    txn_cleanup_task: kovan_queue::seg_queue::SegQueue<workers::Background>,
     #[cfg(feature = "p2p")]
     p2p_ops: Option<Arc<dyn defra_http::P2POperations>>,
     #[cfg(feature = "p2p")]
