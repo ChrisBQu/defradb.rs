@@ -148,6 +148,10 @@ pub(super) const DELETED_MARKER: u8 = 0x01;
 pub struct Collection {
     /// The collection schema definition.
     def: Arc<CollectionVersion>,
+    /// A canonical serialized definition captured once when this immutable
+    /// collection is built. It is only a fast-path hint: snapshot readers must
+    /// still fetch the persisted value and require an exact byte match.
+    definition_wire: Option<Arc<[u8]>>,
     write_indexes: Vec<IndexDescription>,
     queryable_indexes: Vec<IndexDescription>,
     /// `def` with the queryable index set substituted, built once here
@@ -170,6 +174,10 @@ fn query_schema_of(
     Arc::new(schema)
 }
 
+fn serialize_definition_hint(def: &CollectionVersion) -> Option<Arc<[u8]>> {
+    serde_json::to_vec(def).ok().map(Arc::from)
+}
+
 impl Collection {
     pub(crate) async fn load_index_actions(
         def: CollectionVersion,
@@ -183,10 +191,12 @@ impl Collection {
     /// Create a new collection with the given schema definition.
     pub fn new(def: CollectionVersion) -> Self {
         let def = Arc::new(def);
+        let definition_wire = serialize_definition_hint(&def);
         let indexes = def.indexes.clone();
         let query_schema = query_schema_of(&def, &indexes);
         Self {
             def,
+            definition_wire,
             write_indexes: indexes.clone(),
             queryable_indexes: indexes,
             query_schema,
@@ -195,6 +205,27 @@ impl Collection {
 
     pub(crate) fn with_index_actions(
         def: CollectionVersion,
+        actions: &rapidhash::RapidHashMap<u32, ActionStatus>,
+    ) -> Self {
+        let def = Arc::new(def);
+        let definition_wire = serialize_definition_hint(&def);
+        Self::with_index_actions_and_wire(def, definition_wire, actions)
+    }
+
+    pub(crate) fn with_index_actions_reusing_schema(
+        expected: &Self,
+        actions: &rapidhash::RapidHashMap<u32, ActionStatus>,
+    ) -> Self {
+        Self::with_index_actions_and_wire(
+            Arc::clone(&expected.def),
+            expected.definition_wire.clone(),
+            actions,
+        )
+    }
+
+    fn with_index_actions_and_wire(
+        def: Arc<CollectionVersion>,
+        definition_wire: Option<Arc<[u8]>>,
         actions: &rapidhash::RapidHashMap<u32, ActionStatus>,
     ) -> Self {
         let write_indexes = def
@@ -209,10 +240,10 @@ impl Collection {
             .filter(|index| !actions.contains_key(&index.id))
             .cloned()
             .collect();
-        let def = Arc::new(def);
         let query_schema = query_schema_of(&def, &queryable_indexes);
         Self {
             def,
+            definition_wire,
             write_indexes,
             queryable_indexes,
             query_schema,
@@ -239,6 +270,10 @@ impl Collection {
     /// Get the collection schema.
     pub fn schema(&self) -> &CollectionVersion {
         &self.def
+    }
+
+    pub(crate) fn definition_wire(&self) -> Option<&[u8]> {
+        self.definition_wire.as_deref()
     }
 
     /// Get the storage prefix ID used for indexes, heads, and view cache keys.
@@ -454,6 +489,32 @@ impl Collection {
     ) -> Result<()> {
         let key = self.version_key(doc_short_id);
         datastore.delete(&key).await.map_err(Error::Storage)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Collection;
+    use defra_core::ActionStatus;
+    use rapidhash::{HashMapExt, RapidHashMap};
+    use schema::{CollectionVersion, IndexDescription};
+    use std::sync::Arc;
+
+    #[test]
+    fn reused_schema_arc_gets_fresh_snapshot_index_statuses() {
+        let mut schema = CollectionVersion::new("users", "version", "collection", vec![]);
+        let mut index = IndexDescription::new("by_name");
+        index.id = 1;
+        schema.indexes.push(index);
+        let expected = Collection::new(schema);
+
+        let mut actions = RapidHashMap::new();
+        actions.insert(1, ActionStatus::IN_PROGRESS);
+        let snapshot = Collection::with_index_actions_reusing_schema(&expected, &actions);
+
+        assert!(Arc::ptr_eq(&expected.def, &snapshot.def));
+        assert_eq!(snapshot.write_indexes().len(), 1);
+        assert!(snapshot.queryable_indexes().is_empty());
     }
 }
 

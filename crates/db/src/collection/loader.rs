@@ -124,7 +124,7 @@ pub(crate) async fn load_collection_for_write_attempt(
     name: &str,
     expected: &Collection,
 ) -> crate::error::Result<Collection> {
-    let collection = load_collection_from_systemstore(systemstore, name)
+    let collection = load_collection_from_systemstore_impl(systemstore, name, Some(expected))
         .await
         .map_err(|error| crate::error::Error::Other(error.to_string()))?
         .ok_or_else(|| crate::error::Error::CollectionNotFound(name.to_string()))?;
@@ -247,6 +247,14 @@ pub(crate) async fn load_collection_from_systemstore(
     systemstore: &NamespaceView,
     name: &str,
 ) -> query::error::Result<Option<Collection>> {
+    load_collection_from_systemstore_impl(systemstore, name, None).await
+}
+
+async fn load_collection_from_systemstore_impl(
+    systemstore: &NamespaceView,
+    name: &str,
+    expected: Option<&Collection>,
+) -> query::error::Result<Option<Collection>> {
     // Step 1: Get version_id from /collection/name/{name}
     let name_key = CollectionNameKey::new(name);
 
@@ -288,6 +296,35 @@ pub(crate) async fn load_collection_from_systemstore(
             query::error::QueryError::execution(format!("storage error: {}", e))
         })? {
         Some(data) => {
+            if let Some(expected) = expected {
+                if version_id == expected.version_id()
+                    && expected.definition_wire() == Some(data.as_ref())
+                {
+                    let root_id = crate::collection::load_persisted_collection_short_id(
+                        systemstore,
+                        &expected.schema().collection_id,
+                    )
+                    .await
+                    .map_err(|error| query::error::QueryError::execution(error.to_string()))?;
+                    if exact_schema_wire_matches(expected, &version_id, &data, root_id) {
+                        let actions = crate::database::action::index_action_statuses(
+                            systemstore,
+                            &expected.schema().collection_id,
+                        )
+                        .await
+                        .map_err(|e| {
+                            query::error::QueryError::execution(format!(
+                                "failed to load index actions for collection '{}': {}",
+                                name, e
+                            ))
+                        })?;
+                        return Ok(Some(Collection::with_index_actions_reusing_schema(
+                            expected, &actions,
+                        )));
+                    }
+                }
+            }
+
             let mut schema: CollectionVersion = serde_json::from_slice(&data).map_err(|e| {
                 error!(
                     error = ?e,
@@ -332,6 +369,18 @@ pub(crate) async fn load_collection_from_systemstore(
             Ok(None)
         }
     }
+}
+
+fn exact_schema_wire_matches(
+    expected: &Collection,
+    version_id: &str,
+    persisted_wire: &[u8],
+    persisted_root_id: Option<u32>,
+) -> bool {
+    expected.schema().root_id > 0
+        && version_id == expected.version_id()
+        && expected.definition_wire() == Some(persisted_wire)
+        && persisted_root_id == Some(expected.schema().root_id)
 }
 
 /// Get a collection by name with lazy loading from the SystemStore.
@@ -440,7 +489,8 @@ pub async fn get_collection_with_index_manager<S: Store + 'static>(
 
 #[cfg(test)]
 mod tests {
-    use super::same_schema_except_indexes;
+    use super::{exact_schema_wire_matches, same_schema_except_indexes};
+    use crate::collection::Collection;
     use schema::{CollectionVersion, IndexDescription};
 
     #[test]
@@ -452,5 +502,47 @@ mod tests {
 
         right.is_branchable = true;
         assert!(!same_schema_except_indexes(&left, &right));
+    }
+
+    #[test]
+    fn exact_definition_fast_path_requires_schema_and_runtime_root_match() {
+        let mut schema = CollectionVersion::new("users", "version", "collection", vec![]);
+        schema.root_id = 17;
+        let expected = Collection::new(schema.clone());
+        let wire = serde_json::to_vec(&schema).unwrap();
+
+        assert!(exact_schema_wire_matches(
+            &expected,
+            "version",
+            &wire,
+            Some(17)
+        ));
+        assert!(!exact_schema_wire_matches(
+            &expected,
+            "version",
+            &wire,
+            Some(18)
+        ));
+        assert!(!exact_schema_wire_matches(
+            &expected, "version", &wire, None
+        ));
+
+        schema.is_branchable = true;
+        let stale_schema_wire = serde_json::to_vec(&schema).unwrap();
+        assert!(!exact_schema_wire_matches(
+            &expected,
+            "version",
+            &stale_schema_wire,
+            Some(17)
+        ));
+        schema.is_branchable = false;
+        schema.indexes.push(IndexDescription::new("by_name"));
+        assert!(!exact_schema_wire_matches(
+            &expected,
+            "version",
+            &serde_json::to_vec(&schema).unwrap(),
+            Some(17)
+        ));
+        assert!(same_schema_except_indexes(expected.schema(), &schema));
     }
 }
