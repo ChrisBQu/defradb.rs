@@ -422,3 +422,43 @@ async fn policy_id_reproducible_with_explicit_counter() {
     creator.shutdown().await;
     follower.shutdown().await;
 }
+
+/// N identical policies added at once through the embedded API get N distinct
+/// IDs, and IDs stay distinct after the node restarts over the same store.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_identical_policy_adds_get_distinct_ids_across_a_restart() {
+    const ADDS: usize = 8;
+    let dir = tempfile::tempdir().unwrap();
+    let mut ids = Vec::new();
+    {
+        let node = std::sync::Arc::new(
+            EmbeddedNode::builder()
+                .data_path(dir.path())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let adds: Vec<_> = (0..ADDS)
+            .map(|_| {
+                let node = std::sync::Arc::clone(&node);
+                tokio::spawn(async move { node.add_dac_policy(DID_A, POLICY_YAML).await })
+            })
+            .collect();
+        for add in adds {
+            ids.push(add.await.unwrap().unwrap());
+        }
+        node.shutdown().await;
+    }
+    let node = EmbeddedNode::builder()
+        .data_path(dir.path())
+        .build()
+        .await
+        .unwrap();
+    ids.push(node.add_dac_policy(DID_A, POLICY_YAML).await.unwrap());
+    node.shutdown().await;
+
+    let mut distinct = ids.clone();
+    distinct.sort();
+    distinct.dedup();
+    assert_eq!(distinct.len(), ADDS + 1, "repeated policy IDs: {ids:?}");
+}

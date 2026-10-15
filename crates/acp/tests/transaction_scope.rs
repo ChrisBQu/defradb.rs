@@ -190,3 +190,295 @@ async fn bound_transactions_share_one_policy_snapshot() {
         txn.discard().unwrap();
     }
 }
+
+fn exclusion_policy() -> zanzibar::types::Policy {
+    use zanzibar::types::{Policy, Relation, Resource};
+    use zanzibar::RelationExpression;
+    Policy::new("p", "items with an exclusion")
+        .with_resource(Resource::new("group").with_relation(Relation::direct("member")))
+        .with_resource(
+            Resource::new("items")
+                .with_relation(Relation::direct("owner"))
+                .with_relation(Relation::direct("updater"))
+                .with_relation(Relation::direct("banned"))
+                .with_relation(Relation::computed(
+                    "update",
+                    RelationExpression::difference(
+                        RelationExpression::union(vec![
+                            RelationExpression::computed_userset("owner"),
+                            RelationExpression::computed_userset("updater"),
+                        ]),
+                        RelationExpression::computed_userset("banned"),
+                    ),
+                )),
+        )
+}
+
+async fn exclusion_fixture() -> (
+    Arc<RegolithStore>,
+    Arc<PersistentZanzibarStore<RegolithStore>>,
+    ZanzibarDocumentACP<PersistentZanzibarStore<RegolithStore>>,
+) {
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
+    let persistent = Arc::new(PersistentZanzibarStore::from_store(store.clone()));
+    persistent.store_policy(&exclusion_policy()).await.unwrap();
+    let acp = ZanzibarDocumentACP::new(persistent.clone());
+    acp.register_doc_object(&did("alice"), "p", "items", "doc")
+        .await
+        .unwrap();
+    (store, persistent, acp)
+}
+
+async fn may_update(
+    acp: &ZanzibarDocumentACP<PersistentZanzibarStore<RegolithStore>>,
+    txn: &BasicTxn,
+    who: &str,
+) -> bool {
+    acp.bind_transaction(txn.acpstore())
+        .unwrap()
+        .check_doc_access(
+            &Identity::Authenticated(did(who)),
+            DocumentPermission::Update,
+            "p",
+            "items",
+            "doc",
+        )
+        .await
+        .unwrap()
+}
+
+/// A grant that reaches the writer only through a userset is found by a scan
+/// of the relation's subjects; revoking it must abort the writer all the same.
+#[tokio::test]
+async fn revocation_through_the_scan_path_invalidates_the_writer() {
+    let (store, persistent, acp) = exclusion_fixture().await;
+    let userset = Relationship::new(
+        "items",
+        "doc",
+        "updater",
+        zanzibar::types::Subject::entity_set("group", "eng", "member"),
+    );
+    persistent.store_relationship("p", &userset).await.unwrap();
+    persistent
+        .store_relationship(
+            "p",
+            &Relationship::with_entity("group", "eng", "member", did("bob")),
+        )
+        .await
+        .unwrap();
+
+    let write = BasicTxn::new(store.as_ref(), 1, false).await.unwrap();
+    assert!(may_update(&acp, &write, "bob").await);
+    persistent.delete_relationship("p", &userset).await.unwrap();
+    write
+        .datastore()
+        .set(b"document", b"bob's edit")
+        .await
+        .unwrap();
+    assert!(write.commit().await.is_err());
+
+    let retry = BasicTxn::new(store.as_ref(), 2, false).await.unwrap();
+    assert!(!may_update(&acp, &retry, "bob").await);
+    retry.discard().unwrap();
+}
+
+/// The writer decided that bob is not excluded; a grant that excludes him and
+/// commits first must abort the writer, and the re-run denies.
+#[tokio::test]
+async fn a_grant_into_an_exclusion_invalidates_the_writer() {
+    let (store, persistent, acp) = exclusion_fixture().await;
+    persistent
+        .store_relationship(
+            "p",
+            &Relationship::with_entity("items", "doc", "updater", did("bob")),
+        )
+        .await
+        .unwrap();
+
+    let write = BasicTxn::new(store.as_ref(), 1, false).await.unwrap();
+    assert!(may_update(&acp, &write, "bob").await);
+    persistent
+        .store_relationship(
+            "p",
+            &Relationship::with_entity("items", "doc", "banned", did("bob")),
+        )
+        .await
+        .unwrap();
+    write
+        .datastore()
+        .set(b"document", b"bob's edit")
+        .await
+        .unwrap();
+    assert!(write.commit().await.is_err());
+
+    let retry = BasicTxn::new(store.as_ref(), 2, false).await.unwrap();
+    assert!(!may_update(&acp, &retry, "bob").await);
+    retry.discard().unwrap();
+}
+
+async fn relations_left(
+    persistent: &PersistentZanzibarStore<RegolithStore>,
+) -> Vec<zanzibar::types::Subject> {
+    let mut left = Vec::new();
+    for relation in ["owner", "updater"] {
+        left.extend(
+            persistent
+                .get_relation_subjects("p", "items", "doc", relation)
+                .await
+                .unwrap(),
+        );
+    }
+    left
+}
+
+/// A grant and an unregistration of the same document race. Whichever
+/// commits first, the other aborts, and its re-run leaves no grant on an
+/// unregistered document.
+#[tokio::test]
+async fn a_grant_racing_an_unregister_leaves_no_orphaned_grant() {
+    for grant_first in [false, true] {
+        let (store, persistent, acp) = exclusion_fixture().await;
+        let grant = BasicTxn::new(store.as_ref(), 1, false).await.unwrap();
+        let unregister = BasicTxn::new(store.as_ref(), 2, false).await.unwrap();
+        let grant_acp = acp.bind_transaction(grant.acpstore()).unwrap();
+        let unregister_acp = acp.bind_transaction(unregister.acpstore()).unwrap();
+        assert!(grant_acp
+            .add_relationship(
+                &did("alice"),
+                zanzibar::types::Subject::Entity(did("bob")),
+                "p",
+                "items",
+                "doc",
+                "updater",
+                &[],
+            )
+            .await
+            .unwrap());
+        unregister_acp
+            .unregister_doc_object("p", "items", "doc")
+            .await
+            .unwrap();
+        drop(grant_acp);
+        drop(unregister_acp);
+
+        if grant_first {
+            grant.commit().await.unwrap();
+            assert!(unregister.commit().await.is_err());
+            let retry = BasicTxn::new(store.as_ref(), 3, false).await.unwrap();
+            acp.bind_transaction(retry.acpstore())
+                .unwrap()
+                .unregister_doc_object("p", "items", "doc")
+                .await
+                .unwrap();
+            retry.commit().await.unwrap();
+        } else {
+            unregister.commit().await.unwrap();
+            assert!(grant.commit().await.is_err());
+            let retry = BasicTxn::new(store.as_ref(), 3, false).await.unwrap();
+            assert!(matches!(
+                acp.bind_transaction(retry.acpstore())
+                    .unwrap()
+                    .add_relationship(
+                        &did("alice"),
+                        zanzibar::types::Subject::Entity(did("bob")),
+                        "p",
+                        "items",
+                        "doc",
+                        "updater",
+                        &[],
+                    )
+                    .await,
+                Err(acp::Error::NotOwner { .. })
+            ));
+            retry.discard().unwrap();
+        }
+        assert!(
+            relations_left(&persistent).await.is_empty(),
+            "grant_first={grant_first}: a grant outlived the unregistration"
+        );
+    }
+}
+
+/// While documents are created and registered, a concurrent stranger reads
+/// every snapshot it can take: no snapshot ever shows a created document
+/// without its owner, so the stranger never reads one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn no_snapshot_ever_shows_a_created_document_without_its_owner() {
+    const DOCS: usize = 64;
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
+    let persistent = Arc::new(PersistentZanzibarStore::from_store(store.clone()));
+    persistent
+        .store_policy(
+            &ZanzibarDocumentACP::<PersistentZanzibarStore<RegolithStore>>::create_default_policy(
+                "p", "items",
+            ),
+        )
+        .await
+        .unwrap();
+    let acp = Arc::new(ZanzibarDocumentACP::new(persistent));
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let writer = {
+        let (store, acp, done) = (store.clone(), acp.clone(), done.clone());
+        tokio::spawn(async move {
+            for index in 0..DOCS {
+                let txn = BasicTxn::new(store.as_ref(), index as u64, false)
+                    .await
+                    .unwrap();
+                acp.bind_transaction(txn.acpstore())
+                    .unwrap()
+                    .register_doc_object(&did("alice"), "p", "items", &format!("doc-{index}"))
+                    .await
+                    .unwrap();
+                txn.datastore()
+                    .set(format!("doc-{index}").as_bytes(), b"body")
+                    .await
+                    .unwrap();
+                txn.commit().await.unwrap();
+            }
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+    };
+
+    let mut snapshots = 0usize;
+    loop {
+        let finished = done.load(std::sync::atomic::Ordering::SeqCst);
+        let read = BasicTxn::new(store.as_ref(), 0, true).await.unwrap();
+        let reader = acp.bind_transaction(read.acpstore()).unwrap();
+        let mut iter = read
+            .datastore()
+            .iterator(storage::corekv::IterOptions::new().with_prefix(b"doc-".to_vec()))
+            .await
+            .unwrap();
+        let mut seen = 0;
+        while let Some(entry) = iter.next().await.unwrap() {
+            let key = String::from_utf8_lossy(&entry.key);
+            let doc_id = &key[key.find("doc-").unwrap()..];
+            assert!(
+                !reader
+                    .check_doc_access(
+                        &Identity::Authenticated(did("mallory")),
+                        DocumentPermission::Read,
+                        "p",
+                        "items",
+                        doc_id,
+                    )
+                    .await
+                    .unwrap(),
+                "a stranger read {doc_id} in a snapshot"
+            );
+            seen += 1;
+        }
+        drop(iter);
+        drop(reader);
+        read.discard().unwrap();
+        snapshots += 1;
+        if finished {
+            assert_eq!(seen, DOCS);
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    writer.await.unwrap();
+    assert!(snapshots > 0);
+}
