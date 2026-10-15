@@ -67,6 +67,7 @@ async fn install_per_poll<F: Future>(context: RequestContext, future: F) -> F::O
 }
 
 struct Installed {
+    identity: Option<String>,
     dac_bypass: bool,
     encryption: Option<EncryptionConfig>,
     signing: Option<SigningConfig>,
@@ -77,6 +78,7 @@ struct Installed {
 impl From<&RequestContext> for Installed {
     fn from(context: &RequestContext) -> Self {
         Self {
+            identity: context.identity().map(str::to_owned),
             dac_bypass: context.dac_bypass(),
             encryption: context.encryption().cloned(),
             signing: context.signing().cloned(),
@@ -87,7 +89,10 @@ impl From<&RequestContext> for Installed {
 }
 
 fn swap(state: Installed) -> Installed {
+    let identity = crate::current_identity::get_current_identity();
+    crate::current_identity::set_current_identity(state.identity);
     Installed {
+        identity,
         dac_bypass: DAC_BYPASS.replace(state.dac_bypass),
         encryption: ENCRYPTION.replace(state.encryption),
         signing: SIGNING.replace(state.signing),

@@ -11,6 +11,7 @@
 //! one `Arc`, and each `with_*` call copies them only when the context is
 //! shared.
 
+use std::borrow::Cow;
 use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
@@ -55,6 +56,15 @@ impl RequestContext {
         return crate::ambient::mirror(self.clone(), future);
         #[cfg(not(any(test, feature = "ambient")))]
         future
+    }
+
+    /// `bound`, the context a handle was bound to, or
+    /// [`RequestContext::ambient`] for a handle bound to no request.
+    pub fn bound_or_ambient(bound: Option<&Self>) -> Cow<'_, Self> {
+        match bound {
+            Some(context) => Cow::Borrowed(context),
+            None => Cow::Owned(Self::ambient()),
+        }
     }
 
     /// This context with every field it leaves unset taken from

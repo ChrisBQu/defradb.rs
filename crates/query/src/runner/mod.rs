@@ -428,10 +428,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
     /// The context of the request this runner serves.
     pub(crate) fn context(&self) -> std::borrow::Cow<'_, RequestContext> {
-        match &self.context {
-            Some(context) => std::borrow::Cow::Borrowed(context),
-            None => std::borrow::Cow::Owned(RequestContext::ambient()),
-        }
+        RequestContext::bound_or_ambient(self.context.as_ref())
     }
 
     /// This runner serving a request `caller` makes: the creator of what it
