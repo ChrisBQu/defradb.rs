@@ -299,3 +299,72 @@ fn test_subscription_collection_filter() {
     close_subscription(sub_handle);
     node_close(node);
 }
+
+/// Polls of one handle from several threads take no lock: each event goes to
+/// exactly one poller, and none is lost or repeated.
+#[test]
+fn concurrent_polls_of_one_subscription_deliver_each_event_once() {
+    const EVENTS: usize = 256;
+    const POLLERS: usize = 4;
+
+    assert!(crate::runtime::init_runtime());
+    let result = new_node(NodeInitOptions::default());
+    assert_eq!(result.status, 0);
+    let node = result.node_ptr;
+
+    let result = unsafe { create_subscription(node, ptr::null()) };
+    assert_eq!(result.status, 0);
+    let sub_handle = result.subscription_handle;
+
+    let cid = defra_core::block::generate_cid_from_bytes(b"block").unwrap();
+    crate::state::NODES
+        .get(node, |state| {
+            for index in 0..EVENTS {
+                state
+                    .event_bus
+                    .publish(events::Message::update(events::Update::new(
+                        format!("doc-{index}"),
+                        cid,
+                        "collection".to_string(),
+                        b"block".to_vec(),
+                        false,
+                        false,
+                    )));
+            }
+        })
+        .unwrap();
+
+    let pollers: Vec<_> = (0..POLLERS)
+        .map(|_| {
+            std::thread::spawn(move || {
+                let mut doc_ids = Vec::new();
+                loop {
+                    let result = poll_subscription(sub_handle);
+                    match result.status {
+                        0 => {
+                            let value =
+                                unsafe { std::ffi::CStr::from_ptr(result.value).to_string_lossy() };
+                            let event: serde_json::Value = serde_json::from_str(&value).unwrap();
+                            doc_ids.push(event["doc_id"].as_str().unwrap().to_string());
+                            unsafe { crate::types::defra_free_string(result.value) };
+                        }
+                        2 => return doc_ids,
+                        other => panic!("unexpected poll status {other}"),
+                    }
+                }
+            })
+        })
+        .collect();
+
+    let mut doc_ids: Vec<String> = pollers
+        .into_iter()
+        .flat_map(|poller| poller.join().unwrap())
+        .collect();
+    doc_ids.sort();
+    let mut expected: Vec<String> = (0..EVENTS).map(|index| format!("doc-{index}")).collect();
+    expected.sort();
+    assert_eq!(doc_ids, expected);
+
+    close_subscription(sub_handle);
+    node_close(node);
+}
