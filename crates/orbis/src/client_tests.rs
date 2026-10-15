@@ -114,20 +114,14 @@ async fn client(
             .await
             .unwrap();
     });
-    let client = tokio::task::spawn_blocking(move || {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(OrbisClient::new(
-                endpoint,
-                DERIVATION.into(),
-                key(7).sk_to_pk().compress().to_vec(),
-                identity,
-            ))
-    })
+    let client = OrbisClient::new(
+        endpoint,
+        DERIVATION.into(),
+        key(7).sk_to_pk().compress().to_vec(),
+        identity,
+        edge::testing::edge(),
+    )
     .await
-    .unwrap()
     .unwrap();
     (client, task, tokens)
 }
@@ -198,6 +192,7 @@ async fn invalid_configuration_fails_before_connecting() {
             derivation.into(),
             pk.clone(),
             identity(),
+            edge::testing::edge(),
         )
         .await;
         assert!(result.err().unwrap().to_string().contains("derivation ID"));
@@ -208,6 +203,32 @@ async fn invalid_configuration_fails_before_connecting() {
         )
         .unwrap(),
     );
-    let result = OrbisClient::new("not an endpoint".into(), DERIVATION.into(), pk, secp).await;
+    let result = OrbisClient::new(
+        "not an endpoint".into(),
+        DERIVATION.into(),
+        pk,
+        secp,
+        edge::testing::edge(),
+    )
+    .await;
     assert!(result.err().unwrap().to_string().contains("Ed25519"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn signs_from_a_thread_outside_any_runtime() {
+    let (client, task, tokens) = client(None).await;
+    let client = Arc::new(client);
+    let signer = Arc::clone(&client);
+
+    let signature = std::thread::spawn(move || signer.sign_sync(b"plain thread", None))
+        .join()
+        .unwrap()
+        .unwrap();
+
+    assert!(client
+        .public_key
+        .verify(b"plain thread", &signature)
+        .unwrap());
+    assert_eq!(tokens.lock().unwrap().len(), 1);
+    task.abort();
 }

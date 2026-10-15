@@ -158,7 +158,9 @@ async fn node_shutdown_closes_existing_https_connections() {
         .timeout(Duration::from_secs(2))
         .build()
         .unwrap();
-    let node = cli::commands::Node::new(config, None).await.unwrap();
+    let node = cli::commands::Node::new(config, None, edge::testing::edge())
+        .await
+        .unwrap();
     let shutdown = node.shutdown_tx.clone();
     let task = tokio::spawn(node.run());
     timeout(Duration::from_secs(10), async {

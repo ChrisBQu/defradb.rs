@@ -54,7 +54,7 @@ pub unsafe extern "C" fn p2p_sync_documents(
 
                 let collection_name = collection_name_str.clone();
                 let doc_ids = doc_ids.clone();
-                rt.block_on(async move {
+                crate::helpers::block_on(rt, async move {
                     p2p.system
                         .ops()
                         .sync_documents(&collection_name, doc_ids, None)
@@ -105,7 +105,7 @@ pub unsafe extern "C" fn p2p_sync_branchable_collection(
                 };
 
                 let collection_id = collection_id_str.clone();
-                rt.block_on(async move {
+                crate::helpers::block_on(rt, async move {
                     p2p.system
                         .ops()
                         .sync_branchable_collection(&collection_id)

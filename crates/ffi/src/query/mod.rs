@@ -43,7 +43,7 @@ pub(crate) fn nac_permission_for_query(query_str: &str) -> NodePermission {
 /// Whether the identity has the `DacBypass` NAC permission (NAC
 /// admin/owner), the request's DAC bypass.
 pub(crate) fn resolve_dac_bypass(
-    rt: &tokio::runtime::Runtime,
+    rt: &edge::Edge,
     node_ptr: usize,
     identity_did: *const c_char,
 ) -> bool {
@@ -61,10 +61,16 @@ pub(crate) fn resolve_dac_bypass(
         return false;
     };
 
-    let status = rt.block_on(nac_manager.status());
-    rt.block_on(acp::nac::should_bypass_dac(
-        status,
-        did.as_ref(),
-        |d, p| async move { nac_manager.check_permission(d, p).await.unwrap_or(false) },
-    ))
+    // A call the runtime cannot run leaves the bypass off.
+    rt.block_on(async {
+        let status = nac_manager.status().await;
+        acp::nac::should_bypass_dac(status, did.as_ref(), |d, p| async move {
+            nac_manager.check_permission(d, p).await.unwrap_or(false)
+        })
+        .await
+    })
+    .unwrap_or_else(|error| {
+        tracing::warn!(%error, "could not resolve DAC bypass; leaving it off");
+        false
+    })
 }

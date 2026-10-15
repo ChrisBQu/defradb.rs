@@ -195,10 +195,12 @@ mod tests {
 
     #[tokio::test]
     async fn set_migration_uses_tx_header_without_global_lens_ops() {
-        let state =
-            AppStateBuilder::new(Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>)
-                .with_txn_ops(Arc::new(MockTransactionOperations::new()))
-                .build();
+        let state = AppStateBuilder::new(
+            Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>,
+            edge::testing::edge(),
+        )
+        .with_txn_ops(Arc::new(MockTransactionOperations::new()))
+        .build();
         let mut headers = HeaderMap::new();
         headers.insert(TX_HEADER_NAME, HeaderValue::from_static("txn-123"));
 

@@ -43,7 +43,7 @@ impl BlockOperations for RecordingBlock {
 async fn signed_block_route_returns_canonical_material() {
     let executor = Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>;
     let block = Arc::new(RecordingBlock::default());
-    let state = AppStateBuilder::new(executor)
+    let state = AppStateBuilder::new(executor, edge::testing::edge())
         .with_block(block.clone() as Arc<dyn BlockOperations>)
         .build();
 

@@ -29,6 +29,7 @@ impl Node {
         zanzibar_store: Arc<dyn acp::ZanzibarStore>,
         node_identity: Option<Arc<identity::RawIdentity>>,
         se_key: Option<[u8; 32]>,
+        edge: &edge::Edge,
     ) -> Result<ServerSetup> {
         let user_did = match &user_identity {
             Some(identity) => Some(identity.did().map_err(|e| {
@@ -146,6 +147,7 @@ impl Node {
             zanzibar_store.clone(),
             event_bus.clone(),
             db::node_access_checker(database.clone()),
+            edge,
         )
         .await?;
 
@@ -158,6 +160,7 @@ impl Node {
             node_identity,
             se_key,
             acp_setup.document_acp.clone(),
+            edge,
         )
         .await?;
 
@@ -328,6 +331,7 @@ impl Node {
             zanzibar_store,
             user_did: user_did.as_ref(),
             node_identity_did: node_did.map(|did| did.to_string()),
+            edge: edge.clone(),
         })?;
         #[cfg(feature = "postgres")]
         let pg_server = Self::build_pg_server(

@@ -6,8 +6,10 @@ use std::sync::Arc;
 
 use db::database::DB;
 use db::definition::migration::ReindexReport;
+use db::DbCollectionProvider;
 use document::Document;
 use lens::{LensConfig, LensModule};
+use query::fetcher::CollectionProvider;
 use query::mutator::DocMutator;
 use storage::RegolithStore;
 
@@ -96,5 +98,52 @@ async fn a_schema_change_with_nothing_to_rebuild_owes_nothing_once_it_commits() 
     assert!(
         db.owed_reindexes().await.unwrap().is_empty(),
         "a collection without indexes has nothing to rebuild"
+    );
+}
+
+#[tokio::test]
+async fn while_a_reindex_is_owed_no_index_answers_queries_and_writers_keep_them() {
+    let (db, store) = node("type Users { name: String @index }").await;
+    db.patch_collection_with_migration("Users", ADD_AGE_PATCH, Some(migration()), None)
+        .await
+        .unwrap();
+    assert_eq!(db.owed_reindexes().await.unwrap().len(), 1);
+
+    let provider = DbCollectionProvider::new(db.clone());
+    let planned = provider.get_collection("Users").await.unwrap().unwrap();
+    assert!(
+        planned.indexes.is_empty(),
+        "the planner sees no index while the reindex is owed, so it plans a scan"
+    );
+    assert_eq!(
+        db.get_collection("Users")
+            .unwrap()
+            .unwrap()
+            .get_indexes()
+            .len(),
+        1
+    );
+
+    db::AutoCommitMutator::new(db.clone())
+        .create(
+            "Users",
+            Document::from_json_str(r#"{"name": "Grace"}"#).unwrap(),
+        )
+        .await
+        .expect("an owed reindex changes nothing for writers");
+
+    store.allow();
+    db.settle_owed_reindexes().await.unwrap();
+    assert!(db.owed_reindexes().await.unwrap().is_empty());
+    assert_eq!(
+        provider
+            .get_collection("Users")
+            .await
+            .unwrap()
+            .unwrap()
+            .indexes
+            .len(),
+        1,
+        "the settled reindex gives the planner its index back"
     );
 }

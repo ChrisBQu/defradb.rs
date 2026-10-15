@@ -30,7 +30,7 @@ async fn run() -> Result<()> {
 
     let store = WasmTransformStore::new()?;
     let transform_id = store.add(config).await?;
-    let output = store.transform_json(&transform_id, input)?;
+    let output = store.transform_json(&transform_id, input).await?;
 
     write_json_array(output)?;
     Ok(())

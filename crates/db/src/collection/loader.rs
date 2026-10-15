@@ -223,7 +223,7 @@ async fn load_collection_from_systemstore_impl(
                     .await
                     .map_err(|error| query::error::QueryError::execution(error.to_string()))?;
                     if exact_schema_wire_matches(expected, &version_id, &data, root_id) {
-                        let actions = crate::database::action::index_action_statuses(
+                        let statuses = crate::collection::IndexStatuses::load(
                             systemstore,
                             &expected.schema().collection_id,
                         )
@@ -235,7 +235,7 @@ async fn load_collection_from_systemstore_impl(
                             ))
                         })?;
                         return Ok(Some(Collection::with_index_actions_reusing_schema(
-                            expected, &actions,
+                            expected, &statuses,
                         )));
                     }
                 }
@@ -263,8 +263,8 @@ async fn load_collection_from_systemstore_impl(
                     ))
                 })?;
 
-            let actions =
-                crate::database::action::index_action_statuses(systemstore, &schema.collection_id)
+            let statuses =
+                crate::collection::IndexStatuses::load(systemstore, &schema.collection_id)
                     .await
                     .map_err(|e| {
                         query::error::QueryError::execution(format!(
@@ -273,7 +273,7 @@ async fn load_collection_from_systemstore_impl(
                         ))
                     })?;
 
-            Ok(Some(Collection::with_index_actions(schema, &actions)))
+            Ok(Some(Collection::with_index_actions(schema, &statuses)))
         }
         None => {
             // version_id found but schema missing - inconsistent state

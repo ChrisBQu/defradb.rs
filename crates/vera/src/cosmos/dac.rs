@@ -47,10 +47,13 @@ impl VeraDocumentACP {
         }
     }
 
+    /// Invalidate the access cache from the Cosmos chain's ACP events, read
+    /// over a WebSocket that runs on the network runtime `edge`.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn with_cosmos_event_invalidation(
         mut self,
         websocket_url: impl Into<String>,
+        edge: &edge::Edge,
     ) -> std::result::Result<Self, ProviderError> {
         let cache = self.access_cache.as_ref().ok_or_else(|| {
             ProviderError::Config(
@@ -60,6 +63,7 @@ impl VeraDocumentACP {
         self.event_subscriber = Some(super::event_subscriber::CosmosEventSubscriber::start(
             websocket_url.into(),
             Arc::clone(cache),
+            edge,
         )?);
         Ok(self)
     }

@@ -1,15 +1,31 @@
 use std::ffi::c_char;
+use std::future::Future;
 use std::sync::Arc;
+
+use edge::{Edge, EdgeError};
 
 use crate::state::NODES;
 use crate::types::{c_str_to_string, FfiResult};
 use crate::ERR_INVALID_NODE_HANDLE;
 
-/// Get the global Tokio runtime or return an FfiResult error.
-pub fn get_rt() -> Result<&'static tokio::runtime::Runtime, FfiResult> {
-    crate::runtime::RUNTIME
-        .get()
-        .ok_or_else(|| FfiResult::error("runtime not initialized - call defra_init() first"))
+/// What a call made before `defra_init` reports.
+pub(crate) const ERR_RUNTIME_NOT_INITIALIZED: &str =
+    "runtime not initialized - call defra_init() first";
+
+/// Get the network runtime's handle or return an FfiResult error.
+pub fn get_rt() -> Result<&'static Edge, FfiResult> {
+    crate::runtime::edge().ok_or_else(|| FfiResult::error(ERR_RUNTIME_NOT_INITIALIZED))
+}
+
+/// Runs `future` on the network runtime, blocking the C caller's thread
+/// until it completes. A failure of the runtime itself (it is shutting down,
+/// or the call panicked) becomes the call's own error.
+pub fn block_on<F, T, E>(rt: &Edge, future: F) -> Result<T, E>
+where
+    F: Future<Output = Result<T, E>>,
+    E: From<EdgeError>,
+{
+    rt.block_on(future)?
 }
 
 /// Parse a required C string, returning FfiResult error if null.

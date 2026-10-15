@@ -13,7 +13,6 @@
 use crate::error::{Error, Result};
 use crate::index::IndexManager;
 use datastore::NamespaceView;
-use defra_core::ActionStatus;
 use document::{DocID, Document, NormalValue};
 use schema::{
     legacy_collection_short_id, CollectionVersion, FieldKind, IndexDescription, ScalarArrayKind,
@@ -29,6 +28,7 @@ pub mod cache;
 mod crud;
 pub(crate) mod epoch;
 mod index;
+pub(crate) mod index_status;
 pub mod loader;
 pub mod map;
 pub mod name;
@@ -43,6 +43,7 @@ pub mod stream;
 mod truncator;
 pub mod validation;
 
+pub(crate) use index_status::IndexStatuses;
 pub use truncator::DbCollectionTruncator;
 
 /// Derive the legacy short ID from a collection_id string.
@@ -153,7 +154,10 @@ pub struct Collection {
     /// still fetch the persisted value and require an exact byte match.
     definition_wire: Option<Arc<[u8]>>,
     write_indexes: Vec<IndexDescription>,
-    queryable_indexes: Vec<IndexDescription>,
+    /// The indexes that were built and that no action is changing.
+    built_indexes: Vec<IndexDescription>,
+    /// A reindex is owed, so no index answers queries ([`index_status`]).
+    reindex_owed: bool,
     /// `def` with the queryable index set substituted, built once here
     /// because a `Collection` never changes after construction. Query-side
     /// callers take a pointer clone of this instead of deep-copying the
@@ -162,6 +166,15 @@ pub struct Collection {
     /// This version's decoded part-ID map, shared with every handle built
     /// from the same definition (see `parts`).
     part_id_snapshot: Arc<parts::PartIdSnapshot>,
+}
+
+/// The indexes of `built_indexes` that answer queries.
+fn queryable(built_indexes: &[IndexDescription], reindex_owed: bool) -> &[IndexDescription] {
+    if reindex_owed {
+        &[]
+    } else {
+        built_indexes
+    }
 }
 
 /// `def` with the queryable index set substituted in.
@@ -186,9 +199,8 @@ impl Collection {
         def: CollectionVersion,
         systemstore: &datastore::NamespaceView,
     ) -> crate::error::Result<Self> {
-        let actions =
-            crate::database::action::index_action_statuses(systemstore, &def.collection_id).await?;
-        Ok(Self::with_index_actions(def, &actions))
+        let statuses = IndexStatuses::load(systemstore, &def.collection_id).await?;
+        Ok(Self::with_index_actions(def, &statuses))
     }
 
     /// Create a new collection with the given schema definition.
@@ -201,32 +213,30 @@ impl Collection {
             def,
             definition_wire,
             write_indexes: indexes.clone(),
-            queryable_indexes: indexes,
+            built_indexes: indexes,
+            reindex_owed: false,
             query_schema,
             part_id_snapshot: Arc::default(),
         }
     }
 
-    pub(crate) fn with_index_actions(
-        def: CollectionVersion,
-        actions: &rapidhash::RapidHashMap<u32, ActionStatus>,
-    ) -> Self {
+    pub(crate) fn with_index_actions(def: CollectionVersion, statuses: &IndexStatuses) -> Self {
         let def = Arc::new(def);
         let definition_wire = serialize_definition_hint(&def);
-        Self::with_index_actions_and_wire(def, definition_wire, Arc::default(), actions)
+        Self::with_index_actions_and_wire(def, definition_wire, Arc::default(), statuses)
     }
 
     /// `expected`'s definition with fresh index statuses. The definition is
     /// the same version, so its decoded part-ID map is shared as well.
     pub(crate) fn with_index_actions_reusing_schema(
         expected: &Self,
-        actions: &rapidhash::RapidHashMap<u32, ActionStatus>,
+        statuses: &IndexStatuses,
     ) -> Self {
         Self::with_index_actions_and_wire(
             Arc::clone(&expected.def),
             expected.definition_wire.clone(),
             Arc::clone(&expected.part_id_snapshot),
-            actions,
+            statuses,
         )
     }
 
@@ -234,29 +244,56 @@ impl Collection {
         def: Arc<CollectionVersion>,
         definition_wire: Option<Arc<[u8]>>,
         part_id_snapshot: Arc<parts::PartIdSnapshot>,
-        actions: &rapidhash::RapidHashMap<u32, ActionStatus>,
+        statuses: &IndexStatuses,
     ) -> Self {
         let write_indexes = def
             .indexes
             .iter()
-            .filter(|index| actions.get(&index.id) != Some(&ActionStatus::ERRORED))
+            .filter(|index| statuses.takes_writes(index))
             .cloned()
             .collect();
-        let queryable_indexes: Vec<IndexDescription> = def
+        let built_indexes: Vec<IndexDescription> = def
             .indexes
             .iter()
-            .filter(|index| !actions.contains_key(&index.id))
+            .filter(|index| statuses.is_built(index))
             .cloned()
             .collect();
-        let query_schema = query_schema_of(&def, &queryable_indexes);
+        let reindex_owed = statuses.reindex_owed();
+        let query_schema = query_schema_of(&def, queryable(&built_indexes, reindex_owed));
         Self {
             def,
             definition_wire,
             write_indexes,
-            queryable_indexes,
+            built_indexes,
+            reindex_owed,
             query_schema,
             part_id_snapshot,
         }
+    }
+
+    /// This collection with a reindex owed or settled, as the cache publishes
+    /// it when the owed record commits or is cleared.
+    pub(crate) fn with_reindex_owed(&self, reindex_owed: bool) -> Self {
+        Self {
+            reindex_owed,
+            query_schema: query_schema_of(&self.def, queryable(&self.built_indexes, reindex_owed)),
+            ..self.clone()
+        }
+    }
+
+    /// Whether `other` has the same indexes taking writes and built: what a
+    /// writer checks its cached definition against. An owed reindex does not
+    /// count, since it changes only which indexes answer queries.
+    pub(crate) fn same_index_statuses(&self, other: &Self) -> bool {
+        let normalize = |indexes: &[IndexDescription]| {
+            indexes
+                .iter()
+                .cloned()
+                .map(IndexDescription::normalized)
+                .collect::<Vec<_>>()
+        };
+        normalize(&self.write_indexes) == normalize(&other.write_indexes)
+            && normalize(&self.built_indexes) == normalize(&other.built_indexes)
     }
 
     /// Get the collection name.
@@ -299,8 +336,9 @@ impl Collection {
         &self.write_indexes
     }
 
+    /// The indexes that answer queries: the built ones, none while a reindex is owed.
     pub(crate) fn queryable_indexes(&self) -> &[IndexDescription] {
-        &self.queryable_indexes
+        queryable(&self.built_indexes, self.reindex_owed)
     }
 
     pub(crate) fn schema_for_queries(&self) -> Arc<CollectionVersion> {
@@ -503,7 +541,7 @@ impl Collection {
 
 #[cfg(test)]
 mod tests {
-    use super::Collection;
+    use super::{Collection, IndexStatuses};
     use defra_core::ActionStatus;
     use rapidhash::{HashMapExt, RapidHashMap};
     use schema::{CollectionVersion, IndexDescription};
@@ -519,11 +557,36 @@ mod tests {
 
         let mut actions = RapidHashMap::new();
         actions.insert(1, ActionStatus::IN_PROGRESS);
-        let snapshot = Collection::with_index_actions_reusing_schema(&expected, &actions);
+        let snapshot = Collection::with_index_actions_reusing_schema(
+            &expected,
+            &IndexStatuses::from_actions(actions),
+        );
 
         assert!(Arc::ptr_eq(&expected.def, &snapshot.def));
         assert_eq!(snapshot.write_indexes().len(), 1);
         assert!(snapshot.queryable_indexes().is_empty());
+    }
+
+    #[test]
+    fn an_owed_reindex_hides_every_index_from_queries_but_not_from_writes() {
+        let mut schema = CollectionVersion::new("users", "version", "collection", vec![]);
+        let mut index = IndexDescription::new("by_name");
+        index.id = 1;
+        schema.indexes.push(index);
+        let settled = Collection::new(schema);
+
+        let owed = settled.with_reindex_owed(true);
+        assert!(owed.queryable_indexes().is_empty());
+        assert!(owed.schema_for_queries().indexes.is_empty());
+        assert_eq!(owed.write_indexes().len(), 1);
+        assert!(
+            owed.same_index_statuses(&settled),
+            "a writer's check is not about which indexes answer queries"
+        );
+
+        let again = owed.with_reindex_owed(false);
+        assert_eq!(again.queryable_indexes().len(), 1);
+        assert_eq!(again.schema_for_queries().indexes.len(), 1);
     }
 }
 

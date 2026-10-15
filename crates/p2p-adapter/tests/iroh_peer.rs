@@ -27,7 +27,7 @@ async fn start_peer(store: Arc<RegolithStore>, strict: bool) -> IrohPeer<Regolit
         bind_addr: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
         ..IrohEndpointConfig::default()
     };
-    let mut config = IrohPeerConfig::new(endpoint, document_acp);
+    let mut config = IrohPeerConfig::new(endpoint, document_acp, edge::testing::edge());
     config.strict_replicated_doc_access = strict;
     IrohPeer::start(store, database, Arc::new(events::ChannelBus::new()), config)
         .await

@@ -17,6 +17,14 @@ pub enum Error {
     #[error("WASM transform execution failed: {0}")]
     WasmExecution(String),
 
+    /// A lens call ran past its sandbox's time for one input document.
+    #[error("lens transform ran past its time limit for one document")]
+    TimeLimit,
+
+    /// A lens call ran out of its sandbox's fuel for one input document.
+    #[error("lens transform ran out of fuel for one document")]
+    FuelLimit,
+
     /// Transform not found.
     #[error("transform not found: {0}")]
     TransformNotFound(String),

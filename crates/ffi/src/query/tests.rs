@@ -26,7 +26,7 @@ fn node_identity_is_not_promoted_to_nac_dac_bypass() {
     let node_did = CString::new(node_did).unwrap();
 
     assert!(!resolve_dac_bypass(
-        crate::runtime::runtime_handle().unwrap(),
+        crate::runtime::edge().unwrap(),
         node,
         node_did.as_ptr(),
     ));

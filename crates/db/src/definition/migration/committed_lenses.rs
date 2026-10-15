@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use datastore::NamespaceView;
 use futures::TryStreamExt;
 use kovan_map::HopscotchMap;
-use lens::{LensConfig, LensDocResultStream, LensDocStream, TransformId, TransformStore};
+use lens::{LensConfig, LensDoc, LensDocResultStream, LensDocStream, TransformId, TransformStore};
 use rapidhash::fast::RandomState;
 use rapidhash::RapidHashMap;
 use storage::corekv::{IterOptions, Key, Store};
@@ -69,16 +69,7 @@ impl CommittedLensStore {
         let owed = Arc::clone(&self.owed);
         Box::pin(
             futures::stream::once(async move {
-                register(base.as_ref(), &owed, &id, &config)
-                    .await
-                    .inspect_err(|error| {
-                        tracing::debug!(
-                            transform_id = %id,
-                            %error,
-                            "An owed lens registration failed again"
-                        );
-                    })?;
-                tracing::info!(transform_id = %id, "Registered an owed committed lens");
+                register_owed(base.as_ref(), &owed, &id, &config).await?;
                 if inverse {
                     base.inverse(&id, docs)
                 } else {
@@ -88,6 +79,26 @@ impl CommittedLensStore {
             .try_flatten(),
         )
     }
+}
+
+/// Registers the owed lens `id` before a use of it.
+async fn register_owed(
+    base: &dyn TransformStore,
+    owed: &Owed,
+    id: &TransformId,
+    config: &LensConfig,
+) -> lens::Result<()> {
+    register(base, owed, id, config)
+        .await
+        .inspect_err(|error| {
+            tracing::debug!(
+                transform_id = %id,
+                %error,
+                "An owed lens registration failed again"
+            );
+        })?;
+    tracing::info!(transform_id = %id, "Registered an owed committed lens");
+    Ok(())
 }
 
 /// Registers `id` in `base`. A registered lens is owed no longer.
@@ -145,6 +156,18 @@ impl TransformStore for CommittedLensStore {
 
     fn inverse(&self, id: &TransformId, docs: LensDocStream) -> lens::Result<LensDocResultStream> {
         self.run(id, docs, true)
+    }
+
+    async fn transform_doc(
+        &self,
+        id: &TransformId,
+        doc: LensDoc,
+        inverse: bool,
+    ) -> lens::Result<LensDoc> {
+        if let Some(config) = self.owed.get(id) {
+            register_owed(self.base.as_ref(), &self.owed, id, &config).await?;
+        }
+        self.base.transform_doc(id, doc, inverse).await
     }
 
     fn has_transform(&self, id: &TransformId) -> bool {

@@ -7,24 +7,24 @@ mod config;
 mod doc;
 mod engine;
 mod error;
+mod feed;
 mod history;
 mod pipeline;
 mod store;
 #[cfg(feature = "wasmtime-runtime")]
 mod wasm;
-#[cfg(feature = "wasmtime-runtime")]
-mod wasm_runtime;
 
 pub use config::{LensConfig, LensModule};
 pub use doc::{LensDoc, DELETED_FIELD, DOC_ID_FIELD};
 pub use engine::{default_store, UnsupportedTransformStore};
+#[cfg(feature = "wasmtime-runtime")]
+pub use engine::{EpochTick, TickGuard, TickSource, WasmSandboxConfig};
 pub use error::{Error, Result};
+pub use feed::{FeedStep, LensFeed};
 pub use history::{build_targeted_history, CollectionHistoryLink, TargetedHistoryLink};
 pub use pipeline::{transform_to_target, Lens, LensInput};
 pub use store::{
     LensDocResultStream, LensDocStream, MemoryTransformStore, TransformId, TransformStore,
 };
-#[cfg(feature = "wasmtime-runtime")]
-pub use engine::WasmSandboxConfig;
 #[cfg(feature = "wasmtime-runtime")]
 pub use wasm::WasmTransformStore;

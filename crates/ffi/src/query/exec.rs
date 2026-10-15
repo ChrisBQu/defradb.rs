@@ -177,13 +177,14 @@ pub unsafe extern "C" fn exec_request_with_signing(
             let (result_tx, result_rx) = kovan_channel::bounded::<String>(256);
 
             // Capture the acting identity before spawning: it is a thread-local
-            // set on this thread, but the spawned task runs on a different
-            // tokio thread.
+            // set on this thread, but the service runs on a thread of the
+            // network runtime.
             let sub_acting_did = defra_core::current_identity::get_current_identity();
 
-            // Spawn background task that processes events and executes queries at event time.
+            // A background service processes events and executes queries at event time.
             // This ensures the DB state at query execution matches the event's state.
-            let task = rt.spawn(async move {
+            let edge = rt.clone();
+            let service = rt.spawn_service(async move {
                 while let Some(message) = subscription.recv().await {
                     if let Some(update) = message.as_update() {
                         let event_doc_id = update.doc_id.clone();
@@ -221,20 +222,28 @@ pub unsafe extern "C" fn exec_request_with_signing(
                             request = request.with_variables(vars.clone());
                         }
 
-                        // Execute inside spawn_blocking to pin thread-locals, matching
-                        // HTTP's execute_with_resolved_context pattern.
+                        // Execute pinned to one thread to keep the thread-locals,
+                        // matching HTTP's execute_with_resolved_context pattern.
                         let runner = query_runner.clone();
                         let acting_did = sub_acting_did.clone();
-                        let handle = tokio::runtime::Handle::current();
-                        let response = match tokio::task::spawn_blocking(move || {
-                            let _identity_guard =
-                                defra_core::current_identity::scoped_current_identity(acting_did);
-                            handle.block_on(async { runner.execute(request).await })
-                        })
-                        .await
+                        let response = match edge
+                            .spawn_pinned(move || {
+                                let identity_guard =
+                                    defra_core::current_identity::scoped_current_identity(
+                                        acting_did,
+                                    );
+                                async move {
+                                    let _identity_guard = identity_guard;
+                                    runner.execute(request).await
+                                }
+                            })
+                            .await
                         {
                             Ok(r) => r,
-                            Err(_) => continue,
+                            Err(error) => {
+                                tracing::warn!(%error, "subscription query did not run");
+                                continue;
+                            }
                         };
 
                         // Skip empty results (filter excluded the document)
@@ -253,7 +262,7 @@ pub unsafe extern "C" fn exec_request_with_signing(
                 result_receiver: result_rx,
                 node_handle: node_ptr,
                 event_sub_id: sub_id,
-                task_abort: task.abort_handle(),
+                service,
             };
 
             let handle = GRAPHQL_SUBSCRIPTIONS.insert(state);

@@ -9,6 +9,7 @@ use crate::config::Config;
 use crate::error::{Error, Result};
 
 impl Node {
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn setup_libp2p_p2p(
         store: Arc<storage::DynStore>,
         database: Arc<db::DB<storage::DynStore>>,
@@ -17,6 +18,7 @@ impl Node {
         peer_keypair: Option<p2p::Keypair>,
         node_identity: Option<Arc<identity::RawIdentity>>,
         se_key: Option<[u8; 32]>,
+        edge: &edge::Edge,
     ) -> Result<P2PSetup> {
         let retry_schedule = config.retry_schedule()?;
         let max_txn_retries = database.options().max_txn_retries();
@@ -100,6 +102,7 @@ impl Node {
         let kms_transport = p2p::kms::PubsubKeyTransport::new(
             p2p::Libp2pTransport::new(handle.clone()),
             Arc::new(p2p::HandlePeerIdentityResolver::new(handle.clone())),
+            edge.clone(),
         )
         .await
         .map_err(|e| Error::Server(format!("failed to create KMS transport: {e}")))?;

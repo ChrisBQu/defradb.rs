@@ -88,7 +88,13 @@ impl<S: Store> crate::database::DB<S> {
                 .set(&name_key.bytes(), version_id.as_bytes())
                 .await
                 .map_err(Error::Storage)?;
-            crate::definition::migration::owe_reindex(&systemstore, &collection_id, None).await?;
+            crate::definition::migration::owe_reindex(
+                &systemstore,
+                &self.collections,
+                &collection_id,
+                None,
+            )
+            .await?;
 
             // Find and deactivate other versions with the same collection_id
             let version_prefix = CollectionVersionKey::collection_prefix(&collection_id);
@@ -107,16 +113,34 @@ impl<S: Store> crate::database::DB<S> {
                             .await
                             .map_err(Error::Storage)?
                         {
-                            if let Ok(mut other_schema) =
-                                serde_json::from_slice::<CollectionVersion>(&other_bytes)
-                            {
-                                if other_schema.is_active {
+                            match serde_json::from_slice::<CollectionVersion>(&other_bytes) {
+                                Ok(mut other_schema) if other_schema.is_active => {
                                     other_schema.is_active = false;
-                                    if let Ok(other_data) = serde_json::to_vec(&other_schema) {
-                                        let _ =
-                                            systemstore.set(&other_key.bytes(), &other_data).await;
-                                    }
+                                    let other_data =
+                                        serde_json::to_vec(&other_schema).map_err(|e| {
+                                            Error::collection_schema_json(
+                                                format!(
+                                                    "failed to serialize schema for version_id '{}'",
+                                                    other_version_id
+                                                ),
+                                                e,
+                                            )
+                                        })?;
+                                    systemstore
+                                        .set(&other_key.bytes(), &other_data)
+                                        .await
+                                        .map_err(Error::Storage)?;
                                 }
+                                Ok(_) => {}
+                                // The name now points at the version being activated,
+                                // and version scans skip an undecodable record
+                                // (`get_all_collection_versions_with_txn`), so it is
+                                // not served; it is reported rather than failing the switch.
+                                Err(error) => tracing::warn!(
+                                    version_id = %other_version_id,
+                                    %error,
+                                    "A stored collection version cannot be decoded, so it was not deactivated"
+                                ),
                             }
                         }
                     }

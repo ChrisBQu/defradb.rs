@@ -81,7 +81,7 @@ pub unsafe extern "C" fn block_verify_signature(
             .and_then(|d| identity::Did::try_from(d.clone()).ok())
             .into();
 
-        let result = rt.block_on(async {
+        let result = crate::helpers::block_on(rt, async {
             db::block::verify::verify_block_signature(
                 &database,
                 document_acp.as_ref(),

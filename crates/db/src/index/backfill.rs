@@ -24,27 +24,21 @@ use storage::keys::systemstore::ActionProgressKey;
 
 use crate::collection::Collection;
 use crate::database::action::{action_executions, ActionExecutionLease};
-use crate::definition::lens::{
-    build_collection_history, doc_to_lens_doc, migration_path_has_transform,
-};
+use crate::definition::lens::build_collection_history;
 use crate::definition::loader::get_collections_by_collection_id;
 use crate::definition::migration::helpers::{
-    cache_migrated_document_with_indexes, lens_doc_to_document,
+    cache_migrated_document_with_indexes, migrate_to_active, ToActive,
 };
 use crate::error::{Error, Result};
 use crate::index::manager::DocumentSource;
+use crate::index::pages::{Page, PAGE_ITEMS};
 use crate::index::{BatchIndexResult, IndexManager};
 use crate::{BackfillSource, DB};
 
 type History = RapidHashMap<String, TargetedHistoryLink>;
 
-/// Documents per backfill transaction at most. Each adds a handful of index
-/// keys to the write set, so a batch, and with it the window in which a
-/// concurrent write to one of its documents conflicts, stays well under a
-/// millisecond for an ordered index. A conflict halves the next attempt
-/// down to one document, so a stream of writes into the range being walked
-/// slows the backfill rather than starving it; a commit doubles it back.
-pub const BACKFILL_BATCH_DOCS: usize = 256;
+/// Documents per backfill transaction at most ([`PAGE_ITEMS`]).
+pub const BACKFILL_BATCH_DOCS: usize = PAGE_ITEMS;
 
 /// What a backfill needs to know to run or resume.
 #[derive(Debug, Clone)]
@@ -257,41 +251,13 @@ impl<S: Store> DB<S> {
         last: u64,
         max_docs: &mut usize,
     ) -> Result<BatchIndexResult> {
-        let collection = self.require_collection(&plan.collection_name)?;
-        // Each conflict halves the batch, so the policy's budget is extended
-        // by the halvings that can bring it down to one document.
-        let attempts = self
-            .options()
-            .retry_options()
-            .max_attempts
-            .saturating_add(max_docs.ilog2());
-        let attempt = BackfillRetryAttempt {
-            collection,
+        let page = BackfillPage {
+            collection: self.require_collection(&plan.collection_name)?,
             plan: plan.clone(),
             last,
-            max_docs: *max_docs,
             lens_store: Arc::clone(&self.lens_store),
         };
-        let result = self
-            .store()
-            .transact_retry(
-                storage::corekv::RetryOptions::new(attempts),
-                Box::new(attempt),
-            )
-            .await;
-        match result {
-            Ok(value) => {
-                let (batch, size) = *value
-                    .downcast::<(BatchIndexResult, usize)>()
-                    .map_err(|_| Error::Other("invalid backfill retry result".into()))?;
-                *max_docs = (size * 2).min(BACKFILL_BATCH_DOCS);
-                Ok(batch)
-            }
-            Err(error) => match error.downcast_abort::<Error>() {
-                Ok(error) => Err(error),
-                Err(error) => Err(Error::Storage(error.into_storage())),
-            },
-        }
+        self.run_page(page, max_docs).await
     }
 }
 
@@ -335,43 +301,34 @@ impl storage::corekv::RetryAttemptFn for FinishIndexAttempt {
     }
 }
 
-struct BackfillRetryAttempt {
+/// One backfill batch: the documents after `last` and below the fence.
+struct BackfillPage {
     collection: Collection,
     plan: BackfillPlan,
     last: u64,
-    max_docs: usize,
     lens_store: Arc<dyn TransformStore>,
 }
 
-impl storage::corekv::RetryAttemptFn for BackfillRetryAttempt {
-    fn run<'a>(
-        &'a mut self,
-        retry: &'a mut dyn storage::corekv::RetryTxn,
-    ) -> storage::corekv::RetryAttemptFuture<'a> {
-        Box::pin(async move {
-            if let Some(reason) = retry.previous_conflict() {
-                self.max_docs = (self.max_docs / 2).max(1);
-                tracing::debug!(access = ?reason.access, winning_write = ?reason.winning_write,
-                    max_docs = self.max_docs, "shrinking conflicted index backfill attempt");
-            }
-            let io = retry.begin_attempt_io()?;
-            let txn = datastore::BasicTxn::from_retry_attempt_io(io, 0);
-            let result = self
-                .index(txn.datastore(), txn.systemstore())
-                .await
-                .map_err(|error| storage::corekv::RetryAttemptError::Abort(Box::new(error)))?;
-            let (io, callbacks) = txn.into_retry_attempt()?;
-            retry.finish_attempt_io(io, callbacks)?;
-            Ok(Box::new((result, self.max_docs)) as storage::corekv::RetryAttemptValue)
-        })
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Page for BackfillPage {
+    type Output = BatchIndexResult;
+
+    async fn run(
+        &mut self,
+        txn: &mut datastore::BasicTxn,
+        size: usize,
+    ) -> Result<BatchIndexResult> {
+        self.index(txn.datastore(), txn.systemstore(), size).await
     }
 }
 
-impl BackfillRetryAttempt {
+impl BackfillPage {
     async fn index(
         &self,
         datastore: NamespaceView,
         systemstore: NamespaceView,
+        max_docs: usize,
     ) -> Result<BatchIndexResult> {
         let collection = crate::collection::loader::load_collection_for_write_attempt(
             &systemstore,
@@ -405,7 +362,7 @@ impl BackfillRetryAttempt {
             &systemstore,
             &self.plan,
             &mut source,
-            self.max_docs,
+            max_docs,
         )
         .await?;
         Ok(batch)
@@ -451,27 +408,13 @@ impl DocumentSource for MigratingSource {
         let Some((doc_short_id, doc)) = self.inner.next().await? else {
             return Ok(None);
         };
-        let target = self.collection.version_id();
-        let Some(version) = doc.schema_version_id().map(str::to_string) else {
+        let ToActive::Migrated(migrated) =
+            migrate_to_active(&doc, &self.collection, &self.history, &self.lens_store)
+                .await
+                .map_err(|error| IndexError::Other(error.to_string()))?
+        else {
             return Ok(Some((doc_short_id, doc)));
         };
-        if !self.history.contains_key(&version)
-            || !migration_path_has_transform(&self.history, &version, target)
-        {
-            return Ok(Some((doc_short_id, doc)));
-        }
-        let lens_doc = doc_to_lens_doc(&doc).ok_or_else(|| {
-            IndexError::Other(format!("document {:?} cannot be migrated", doc.id()))
-        })?;
-        let migrated = lens::transform_to_target(
-            &self.lens_store,
-            target,
-            &self.history,
-            lens::LensInput::new(&version, lens_doc),
-        )
-        .await
-        .map_err(|error| IndexError::Other(error.to_string()))?;
-        let migrated = lens_doc_to_document(migrated, &doc, &self.collection);
         cache_migrated_document_with_indexes(
             &self.datastore,
             &self.systemstore,

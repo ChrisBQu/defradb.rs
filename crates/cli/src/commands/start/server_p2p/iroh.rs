@@ -18,6 +18,7 @@ impl Node {
         node_identity: Option<Arc<identity::RawIdentity>>,
         se_key: Option<[u8; 32]>,
         document_acp: Arc<dyn acp::DocumentACP>,
+        edge: &edge::Edge,
     ) -> Result<P2PSetup> {
         info!("Initializing P2P network (iroh)");
 
@@ -37,6 +38,7 @@ impl Node {
                 allowlist: Self::iroh_allowlist(config),
             },
             document_acp,
+            edge.clone(),
         );
         peer_config.sync = Self::sync_config(config);
         peer_config.access_mode = Self::access_mode(config);

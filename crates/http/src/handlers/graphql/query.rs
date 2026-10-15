@@ -417,7 +417,7 @@ async fn graphql_sse(
                     acting_did.clone(), bearer.clone(), async {
                         let dac_bypass = crate::query_context::resolve_dac_bypass(&state, &identity).await;
                         execute_with_resolved_context(
-                            executor.clone(), req, signing_config.clone(), dac_bypass, acting_did.clone(),
+                            &state.edge, executor.clone(), req, signing_config.clone(), dac_bypass, acting_did.clone(),
                         ).await
                     },
                 ).await;
@@ -461,9 +461,12 @@ mod tests {
     use crate::{router::AppStateBuilder, MockQueryExecutor};
 
     fn state_with_limits(query_limits: QueryLimits) -> AppState {
-        AppStateBuilder::new(Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>)
-            .with_query_limits(query_limits)
-            .build()
+        AppStateBuilder::new(
+            Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>,
+            edge::testing::edge(),
+        )
+        .with_query_limits(query_limits)
+        .build()
     }
 
     fn deep_encrypted_query(depth: usize) -> String {

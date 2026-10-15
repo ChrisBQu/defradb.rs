@@ -104,6 +104,7 @@ async fn scenario(
 
 async fn build_node(signing: SigningConfig) -> Result<Node> {
     let config = EmbeddedNodeConfig {
+        edge: Some(edge::testing::edge()),
         transport: TransportConfig::Libp2p(Libp2pConfig {
             listen_addr: "/ip4/127.0.0.1/tcp/0".to_string(),
         }),

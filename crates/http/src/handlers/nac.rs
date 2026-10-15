@@ -420,10 +420,12 @@ mod tests {
         let requestor = identity::Did::new("did:key:requestor").unwrap();
         let target = identity::Did::new("did:key:target").unwrap();
         let nac = Arc::new(MockNodeAcpOperations::enabled_with_owner(requestor.clone()));
-        let state =
-            AppStateBuilder::new(Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>)
-                .with_nac(Arc::clone(&nac) as Arc<dyn NodeAcpOperations>)
-                .build();
+        let state = AppStateBuilder::new(
+            Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>,
+            edge::testing::edge(),
+        )
+        .with_nac(Arc::clone(&nac) as Arc<dyn NodeAcpOperations>)
+        .build();
         let identity = ExtractIdentity::from_did(Some(requestor));
 
         let result = go_add_relationships(

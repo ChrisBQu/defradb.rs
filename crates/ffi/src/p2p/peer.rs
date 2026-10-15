@@ -43,7 +43,7 @@ pub unsafe extern "C" fn p2p_peer_info(node_ptr: usize, identity_did: *const c_c
                     None => return Ok("[]".to_string()),
                 };
 
-                rt.block_on(async {
+                crate::helpers::block_on(rt, async {
                     let addresses = p2p
                         .system
                         .ops()
@@ -131,7 +131,7 @@ pub unsafe extern "C" fn p2p_shareable_address(
                     None => return Ok("null".to_string()),
                 };
 
-                rt.block_on(async {
+                crate::helpers::block_on(rt, async {
                     let address = p2p
                         .system
                         .ops()
@@ -190,7 +190,7 @@ pub unsafe extern "C" fn p2p_notify_network_change(
                     None => return Err(FfiP2PError::no_p2p_system()),
                 };
 
-                rt.block_on(async {
+                crate::helpers::block_on(rt, async {
                     p2p.system
                         .ops()
                         .notify_network_change()
@@ -240,7 +240,7 @@ pub unsafe extern "C" fn p2p_active_peers(
                     None => return Err(FfiP2PError::no_p2p_system()),
                 };
 
-                rt.block_on(async {
+                crate::helpers::block_on(rt, async {
                     let peers = p2p
                         .system
                         .ops()
@@ -301,7 +301,7 @@ pub unsafe extern "C" fn p2p_connect(
                     None => return Err(FfiP2PError::no_p2p_system()),
                 };
 
-                rt.block_on(async {
+                crate::helpers::block_on(rt, async {
                     p2p.system
                         .ops()
                         .connect_peer(&addr_str)
@@ -354,7 +354,7 @@ pub unsafe extern "C" fn p2p_disconnect(
                     None => return Err(FfiP2PError::no_p2p_system()),
                 };
 
-                rt.block_on(async {
+                crate::helpers::block_on(rt, async {
                     p2p.system
                         .ops()
                         .disconnect_peer(&addr_str)

@@ -221,8 +221,13 @@ impl<S: Store> DB<S> {
             )
             .await?;
             if !dst_col.name.is_empty() {
-                super::owe_reindex(&systemstore, &dst_col.collection_id, Some(&dest_version_id))
-                    .await?;
+                super::owe_reindex(
+                    &systemstore,
+                    &self.collections,
+                    &dst_col.collection_id,
+                    Some(&dest_version_id),
+                )
+                .await?;
             }
         }
         if !collection_name.is_empty() {
@@ -462,8 +467,13 @@ impl<S: Store> DB<S> {
             )
             .await?;
             if !dst_col.name.is_empty() {
-                super::owe_reindex(&systemstore, &dst_col.collection_id, Some(&dest_version_id))
-                    .await?;
+                super::owe_reindex(
+                    &systemstore,
+                    &self.collections,
+                    &dst_col.collection_id,
+                    Some(&dest_version_id),
+                )
+                .await?;
             }
         }
 

@@ -46,7 +46,8 @@ async fn concurrent_same_identity_requests_keep_distinct_bearers() {
     let first = token(3600);
     let second = token(7200);
     assert_ne!(first, second);
-    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new())).build();
+    let state =
+        AppStateBuilder::new(Arc::new(MockQueryExecutor::new()), edge::testing::edge()).build();
     let app = Router::new()
         .route("/probe", get(observe))
         .layer(Extension(Arc::new(Barrier::new(2))))

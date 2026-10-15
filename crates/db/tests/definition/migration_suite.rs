@@ -31,12 +31,16 @@ use storage::index::IndexIterator;
 use storage::RegolithStore;
 use tokio::sync::Notify;
 
+mod paged_reindex;
 mod unique_conflicts;
 
 #[derive(Default)]
 struct SetVerifiedStore {
     transforms: TransformIdSet,
     transform_calls: AtomicUsize,
+    /// The transform call (counting from one) that fails, as a lens does
+    /// when it cannot run; zero for none.
+    fail_call: AtomicUsize,
     verified_value: Option<serde_json::Value>,
     before_transform: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
@@ -93,7 +97,10 @@ impl TransformStore for SetVerifiedStore {
         if !self.has_transform(id) {
             return Err(lens::Error::TransformNotFound(id.to_string()));
         }
-        self.transform_calls.fetch_add(1, Ordering::SeqCst);
+        let call = self.transform_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.fail_call.load(Ordering::SeqCst) == call {
+            return Err(lens::Error::Pipeline("the lens cannot run".to_string()));
+        }
         let hook = self.before_transform.lock().unwrap().take();
         if let Some(hook) = hook {
             hook();

@@ -9,6 +9,7 @@ use std::ffi::c_char;
 use std::sync::Arc;
 
 use acp::nac::{NacStatus, NodePermission};
+use edge::Edge;
 
 use crate::state::{FfiNacManager, NODES};
 use crate::types::{c_str_to_string, FfiResult};
@@ -24,54 +25,46 @@ use crate::ERR_INVALID_NODE_HANDLE;
 /// - NAC enabled + identity has permission -> Ok
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn check_nac_permission(
-    rt: &tokio::runtime::Runtime,
+    rt: &Edge,
     nac_manager: &Arc<FfiNacManager>,
     identity_did: *const c_char,
     permission: NodePermission,
 ) -> Result<(), FfiResult> {
-    // Check runtime NAC status directly rather than is_enabled(),
-    // because is_enabled() also requires config.enabled which is a
-    // startup flag. FFI nodes start with config.enabled=false and
-    // enable NAC at runtime via enable_nac().
-    let status = rt.block_on(nac_manager.status());
-    if status != NacStatus::Enabled {
-        return Ok(());
-    }
-
     // SAFETY: `identity_did` is either null or a valid C string from the FFI caller.
     let identity_str = unsafe { c_str_to_string(identity_did) };
 
-    let err_msg = format!(
-        "not authorized to perform operation. Permission: {}",
-        permission.as_str()
-    );
-
-    let did = match identity_str {
-        Some(s) if !s.is_empty() => match identity::Did::new(&s) {
-            Ok(d) => d,
-            Err(_) => return Err(FfiResult::error(&err_msg)),
-        },
-        _ => {
-            // Empty identity: check if wildcard has the permission
-            let wildcard = identity::Did::wildcard();
-            let wildcard_has_perm = rt
-                .block_on(nac_manager.check_permission(&wildcard, permission))
-                .unwrap_or(false);
-            if wildcard_has_perm {
-                return Ok(());
+    // One trip to the runtime decides. Check runtime NAC status directly
+    // rather than is_enabled(), because is_enabled() also requires
+    // config.enabled which is a startup flag. FFI nodes start with
+    // config.enabled=false and enable NAC at runtime via enable_nac().
+    // An empty identity is checked as the wildcard; a malformed one is
+    // denied. A call the runtime cannot run fails with its reason.
+    let allowed = rt
+        .block_on(async {
+            if nac_manager.status().await != NacStatus::Enabled {
+                return true;
             }
-            return Err(FfiResult::error(&err_msg));
-        }
-    };
+            let did = match identity_str {
+                Some(s) if !s.is_empty() => match identity::Did::new(&s) {
+                    Ok(d) => d,
+                    Err(_) => return false,
+                },
+                _ => identity::Did::wildcard(),
+            };
+            nac_manager
+                .check_permission(&did, permission)
+                .await
+                .unwrap_or(false)
+        })
+        .map_err(|error| FfiResult::error(error.to_string()))?;
 
-    let has_perm = rt
-        .block_on(nac_manager.check_permission(&did, permission))
-        .unwrap_or(false);
-
-    if has_perm {
+    if allowed {
         Ok(())
     } else {
-        Err(FfiResult::error(&err_msg))
+        Err(FfiResult::error(format!(
+            "not authorized to perform operation. Permission: {}",
+            permission.as_str()
+        )))
     }
 }
 
@@ -80,7 +73,7 @@ pub fn check_nac_permission(
 /// Returns `Ok(())` if authorized, `Err(FfiResult)` if the node handle
 /// is invalid or the caller is not authorized.
 pub fn check_nac_for_node(
-    rt: &tokio::runtime::Runtime,
+    rt: &Edge,
     node_ptr: usize,
     identity_did: *const c_char,
     permission: NodePermission,

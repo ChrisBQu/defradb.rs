@@ -62,7 +62,7 @@ pub unsafe extern "C" fn p2p_add_documents(
                     None => return Err(FfiP2PError::no_p2p_system()),
                 };
 
-                rt.block_on(async {
+                crate::helpers::block_on(rt, async {
                     p2p.system
                         .ops()
                         .add_documents(docs)
@@ -127,7 +127,7 @@ pub unsafe extern "C" fn p2p_delete_documents(
                     None => return Err(FfiP2PError::no_p2p_system()),
                 };
 
-                rt.block_on(async {
+                crate::helpers::block_on(rt, async {
                     p2p.system
                         .ops()
                         .remove_documents(docs)
@@ -177,7 +177,7 @@ pub unsafe extern "C" fn p2p_list_documents(
                     None => return Err(FfiP2PError::no_p2p_system()),
                 };
 
-                rt.block_on(async {
+                crate::helpers::block_on(rt, async {
                     let documents = p2p
                         .system
                         .ops()

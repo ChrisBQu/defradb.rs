@@ -14,7 +14,7 @@ const OVERSIZED: usize = 64;
 const LIMIT: u64 = 8;
 
 fn server(config: ServerConfig) -> Server {
-    Server::with_config(MockQueryExecutor::new(), config)
+    Server::with_config(MockQueryExecutor::new(), config, edge::testing::edge())
         .with_backup_arc(std::sync::Arc::new(MockBackupOperations::default()))
 }
 
@@ -331,7 +331,8 @@ async fn route_limit_never_exceeds_the_global_limit() {
 const TEST_DID: &str = "did:key:z6MkTestNodeIdentity";
 
 fn signing_server(config: ServerConfig) -> Server {
-    Server::with_config(MockQueryExecutor::new(), config).with_node_identity_did(TEST_DID.into())
+    Server::with_config(MockQueryExecutor::new(), config, edge::testing::edge())
+        .with_node_identity_did(TEST_DID.into())
 }
 
 /// Asserts through `app_state()` rather than the private predicate, so that
@@ -361,6 +362,10 @@ fn no_signing_disables_signing_even_with_a_node_identity() {
 
 #[test]
 fn signing_stays_off_without_a_node_identity() {
-    let server = Server::with_config(MockQueryExecutor::new(), ServerConfig::default());
+    let server = Server::with_config(
+        MockQueryExecutor::new(),
+        ServerConfig::default(),
+        edge::testing::edge(),
+    );
     assert!(!server.app_state().signing_enabled);
 }

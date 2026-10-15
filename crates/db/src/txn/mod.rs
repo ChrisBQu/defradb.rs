@@ -727,17 +727,13 @@ impl<S: Store> DbTxn<S> {
                 collection.version_id()
             )));
         }
-        let persisted = Collection::load_index_actions(persisted_schema, &systemstore).await?;
-        let normalize = |indexes: &[schema::IndexDescription]| {
-            indexes
-                .iter()
-                .cloned()
-                .map(schema::IndexDescription::normalized)
-                .collect::<Vec<_>>()
-        };
-        if normalize(persisted.write_indexes()) != normalize(collection.write_indexes())
-            || normalize(persisted.queryable_indexes()) != normalize(collection.queryable_indexes())
-        {
+        let statuses = crate::collection::IndexStatuses::load_actions(
+            &systemstore,
+            collection.collection_id(),
+        )
+        .await?;
+        let persisted = Collection::with_index_actions(persisted_schema, &statuses);
+        if !persisted.same_index_statuses(collection) {
             return Err(Error::Other(format!(
                 "cached index actions differ for collection '{}'",
                 collection.name()
