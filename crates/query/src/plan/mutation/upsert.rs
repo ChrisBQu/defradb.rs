@@ -297,10 +297,14 @@ impl UpsertNode {
 
             if let Some(prepared) = &self.prepared_writes {
                 let id = doc.id().map(ToString::to_string).unwrap_or_default();
-                let write = prepared.updates.get(&id).ok_or_else(|| {
-                    QueryError::transaction_conflict("upsert target changed after key preparation")
-                })?;
-                doc.set_write_preparation(Arc::clone(write));
+                if !prepared.update_targets.contains(&id) {
+                    return Err(QueryError::transaction_conflict(
+                        "upsert target changed after key preparation",
+                    ));
+                }
+                if let Some(write) = prepared.updates.get(&id) {
+                    doc.set_write_preparation(Arc::clone(write));
+                }
             }
             let result = self
                 .mutator

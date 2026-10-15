@@ -234,6 +234,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                 }
                             }
                         }
+                        if let Some(id) = doc.id().map(ToString::to_string) {
+                            entry.update_targets.insert(id);
+                        }
                         let modified: rapidhash::RapidHashSet<String> = if mutation.mutation_type
                             == MutationType::Update
                         {

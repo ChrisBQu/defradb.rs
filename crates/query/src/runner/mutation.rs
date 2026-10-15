@@ -904,6 +904,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
         let bound_prepared = prepared.map(|prepared| {
             let mut prepared = prepared.clone();
             for (projected, actual) in created_ids.iter() {
+                if prepared.update_targets.remove(projected) {
+                    prepared.update_targets.insert(actual.clone());
+                }
                 if let Some(write) = prepared.updates.remove(projected) {
                     prepared.updates.insert(actual.clone(), write);
                 }
@@ -939,6 +942,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                 .with_request_time(request_time)
                 .with_input(input)
                 .with_prepared_writes(prepared.map(|p| p.updates.clone()))
+                .with_prepared_update_targets(prepared.map(|p| p.update_targets.clone()))
                 .with_prepared_embeddings(prepared.map(|p| p.embeddings.clone()), prepared_inputs);
 
                 // Use ACP-filtered doc_ids (invisible docs removed), or resolved/original

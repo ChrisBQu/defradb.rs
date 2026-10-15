@@ -169,6 +169,10 @@ impl Default for PreparedMutations {
 #[derive(Debug, Clone, Default)]
 pub struct PreparedMutation {
     pub creates: Vec<Document>,
+    /// Existing targets observed and matched during write preparation. This
+    /// is separate from `updates`: some targets need no key payload, but a
+    /// retry must still reject targets that appeared after preparation.
+    pub update_targets: rapidhash::RapidHashSet<String>,
     pub updates: RapidHashMap<String, Arc<WritePreparation>>,
     pub embeddings: RapidHashMap<String, Vec<PreparedEmbedding>>,
     pub doc_ids: Option<Vec<String>>,

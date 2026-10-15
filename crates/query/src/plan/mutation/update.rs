@@ -198,6 +198,7 @@ pub struct UpdateNode {
     /// Update input (fields to patch)
     input: UpdateInput,
     prepared_writes: Option<RapidHashMap<String, Arc<document::WritePreparation>>>,
+    prepared_update_targets: Option<RapidHashSet<String>>,
     prepared_embeddings: Option<RapidHashMap<String, Vec<crate::prepared::PreparedEmbedding>>>,
     prepared_inputs: Option<crate::prepared::PreparedInputMemo>,
     /// Updated documents (populated after first next())
@@ -240,6 +241,7 @@ impl UpdateNode {
             filter: None,
             input: UpdateInput::new(),
             prepared_writes: None,
+            prepared_update_targets: None,
             prepared_embeddings: None,
             prepared_inputs: None,
             updated_docs: Vec::new(),
@@ -274,6 +276,11 @@ impl UpdateNode {
         writes: Option<RapidHashMap<String, Arc<document::WritePreparation>>>,
     ) -> Self {
         self.prepared_writes = writes;
+        self
+    }
+
+    pub fn with_prepared_update_targets(mut self, targets: Option<RapidHashSet<String>>) -> Self {
+        self.prepared_update_targets = targets;
         self
     }
 
@@ -489,12 +496,18 @@ impl PlanNode for UpdateNode {
 
                     if let Some(writes) = &self.prepared_writes {
                         let id = doc.id().map(ToString::to_string).unwrap_or_default();
-                        let prepared = writes.get(&id).ok_or_else(|| {
-                            QueryError::transaction_conflict(
+                        let known_target = self.prepared_update_targets.as_ref().map_or_else(
+                            || writes.contains_key(&id),
+                            |targets| targets.contains(&id),
+                        );
+                        if !known_target {
+                            return Err(QueryError::transaction_conflict(
                                 "mutation target changed after key preparation",
-                            )
-                        })?;
-                        doc.set_write_preparation(Arc::clone(prepared));
+                            ));
+                        }
+                        if let Some(prepared) = writes.get(&id) {
+                            doc.set_write_preparation(Arc::clone(prepared));
+                        }
                     }
 
                     // Persist update with modified field tracking
