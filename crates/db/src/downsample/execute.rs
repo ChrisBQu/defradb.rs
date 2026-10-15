@@ -115,7 +115,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
     /// (a first-time create before its genesis identity is assigned).
     pub(super) fn series_doc_id_opt(&self, source_doc: &Document) -> Option<String> {
         source_doc
-            .get("source_doc_id")
+            .get(SERIES_FIELD)
             .and_then(|value| value.as_str())
             .map(str::to_string)
             .or_else(|| source_doc.id().map(ToString::to_string))
@@ -148,7 +148,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
         self.set_field(
             doc,
             &mut modified_fields,
-            "source_doc_id",
+            SERIES_FIELD,
             NormalValue::String(series_doc_id.to_string()),
             false,
         );

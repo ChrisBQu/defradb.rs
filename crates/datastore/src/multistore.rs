@@ -398,26 +398,13 @@ fn unprefix_key(namespace: Namespace, key: &[u8]) -> Result<Vec<u8>> {
 
 /// Helper to prefix iterator options.
 fn prefix_iter_options(namespace: Namespace, opts: IterOptions) -> IterOptions {
-    let mut prefixed_opts = IterOptions::new();
-
-    if let Some(prefix) = opts.prefix() {
-        prefixed_opts = prefixed_opts.with_prefix(prefix_key(namespace, prefix));
-    } else if opts.start().is_none() && opts.end().is_none() {
-        prefixed_opts = prefixed_opts.with_prefix(vec![namespace.prefix()]);
+    let unbounded = opts.prefix().is_none() && opts.start().is_none() && opts.end().is_none();
+    let prefixed_opts = opts.map_keys(|key| prefix_key(namespace, key));
+    if unbounded {
+        prefixed_opts.with_prefix(vec![namespace.prefix()])
+    } else {
+        prefixed_opts
     }
-
-    if let Some(start) = opts.start() {
-        prefixed_opts = prefixed_opts.with_start(prefix_key(namespace, start));
-    }
-    if let Some(end) = opts.end() {
-        prefixed_opts = prefixed_opts.with_end(prefix_key(namespace, end));
-    }
-    prefixed_opts = prefixed_opts
-        .with_reverse(opts.reverse())
-        .with_keys_only(opts.keys_only())
-        .with_validation(opts.validated());
-
-    prefixed_opts
 }
 
 /// Iterator that strips namespace prefix from keys.

@@ -8,7 +8,6 @@ use rapidhash::{HashMapExt, RapidHashMap, RapidHashSet};
 use crate::error::{QueryError, Result};
 use crate::executor::QueryRequest;
 use crate::mapper::MutationType;
-use crate::plan::mutation::projected_update_fields;
 use crate::prepared::{PreparedMutation, PreparedMutations};
 use crate::query_parse::{parse_request_with_limits, validate_parsed_operation, ParsedOperation};
 use crate::txn::TransactionRegistry;
@@ -217,13 +216,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 {
                     let patch_fields: RapidHashSet<String> =
                         mutation.update_input.keys().cloned().collect();
-                    projected_update_fields(
-                        collection,
-                        &patch_fields,
-                        &authorized.mapping,
-                        true,
-                        false,
-                    )
+                    crate::update_parts::planned(collection, &patch_fields, None)
                 } else {
                     None
                 };

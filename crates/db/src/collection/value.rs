@@ -185,12 +185,16 @@ impl Collection {
             .transpose()
     }
 
+    /// Write a local update's changed fields as one operand, each at the
+    /// priority its new block takes: one above the field's heads in `heads`,
+    /// the snapshot the update builds its blocks from.
     pub(crate) async fn merge_local_document_value(
         &self,
         datastore: &NamespaceView,
         doc_short_id: u64,
         doc: &Document,
         modified: &rapidhash::RapidHashSet<String>,
+        heads: &crate::block::builder::DocHeadsSnapshot,
     ) -> Result<()> {
         let key = self.doc_key(doc_short_id);
         let ids = self.part_ids(datastore).await?;
@@ -199,12 +203,6 @@ impl Collection {
             .await
             .map_err(Error::Storage)?;
         let stored = bytes.as_deref().and_then(StoredDocument::decode);
-        let heads = crate::block::builder::DocHeadsSnapshot::load(
-            &datastore.sibling(Namespace::Headstore),
-            doc_short_id,
-        )
-        .await
-        .map_err(Error::InvalidDocument)?;
         let priorities: Priorities = modified
             .iter()
             .map(|name| {

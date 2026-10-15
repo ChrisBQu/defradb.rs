@@ -11,9 +11,12 @@ use crate::collection::loader::get_collection_with_lazy_load;
 use super::LensedDocFetcher;
 
 impl<S: Store + 'static> LensedDocFetcher<S> {
+    /// Every live document, read for a decision on `deciding_on` when it is
+    /// given (see `Collection::get_all_with_datastore_deciding_on`).
     pub(super) async fn get_all_impl(
         &self,
         collection_name: &str,
+        deciding_on: Option<&rapidhash::RapidHashSet<String>>,
     ) -> query::error::Result<Vec<Document>> {
         let (collection, datastore, systemstore) =
             get_collection_with_lazy_load(&self.txn, collection_name).await?;
@@ -30,10 +33,19 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
             );
         }
 
-        let docs = collection
-            .get_all_with_datastore(&datastore, &systemstore)
-            .await
-            .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?;
+        let docs = match deciding_on {
+            Some(fields) => {
+                collection
+                    .get_all_with_datastore_deciding_on(&datastore, &systemstore, fields)
+                    .await
+            }
+            None => {
+                collection
+                    .get_all_with_datastore(&datastore, &systemstore)
+                    .await
+            }
+        }
+        .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?;
 
         // Count documents needing migration for logging
         let needs_migration_count = docs
@@ -116,26 +128,10 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
         let (collection, datastore, systemstore) =
             get_collection_with_lazy_load(&self.txn, collection_name).await?;
 
-        // Downsample validation can inspect the source timestamp even when the
-        // update patch does not touch it. Keep that path on the full read until
-        // its dependency set is available to the query planner.
-        if !self
-            .db
-            .local_downsample_targets_for_source(collection_name)
-            .map_err(crate::error::commit_query_error)?
-            .is_empty()
-        {
-            return Ok(None);
-        }
-
-        let (_, has_migrations) = self.load_versions_and_check_migrations(&collection).await?;
-        if has_migrations {
-            return Ok(None);
-        }
-
         // Field projections are exact only for documents written with the
-        // current schema. Historical or legacy values require the full read
-        // and migration path.
+        // current schema, which no lens migration touches. Historical or
+        // legacy values require the full read and migration path. Downsample
+        // validation reads the parts it decides on itself.
         for id in doc_ids {
             let Ok(doc_id) = document::DocID::from_string(id) else {
                 continue;

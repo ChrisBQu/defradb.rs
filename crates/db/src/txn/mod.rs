@@ -93,6 +93,9 @@ pub struct DbTxn<S: Store> {
     pending_collection_acp_registrations: Vec<PendingCollectionAcpRegistration>,
     /// The database's resident DiskANN codes, for searches in this transaction.
     vector_codes: Arc<CodeCaches>,
+    /// The database's committed collections, so a collection this transaction
+    /// loads with the same definition reuses the cached handle's decoded state.
+    shared_collections: Option<Arc<crate::collection::epoch::EpochedCollections>>,
     statement_savepoint: Option<StatementSavepoint>,
     /// Phantom data for the store type.
     _marker: std::marker::PhantomData<S>,
@@ -108,6 +111,7 @@ impl<S: Store> DbTxn<S> {
             locally_created_collection_ids: RapidHashSet::new(),
             pending_collection_acp_registrations: Vec::new(),
             vector_codes: Arc::default(),
+            shared_collections: None,
             statement_savepoint: None,
             _marker: std::marker::PhantomData,
         }
@@ -122,6 +126,21 @@ impl<S: Store> DbTxn<S> {
         &self.vector_codes
     }
 
+    pub(crate) fn with_shared_collections(
+        mut self,
+        collections: Arc<crate::collection::epoch::EpochedCollections>,
+    ) -> Self {
+        self.shared_collections = Some(collections);
+        self
+    }
+
+    /// The database's committed handle for `name`, if it has one.
+    pub(crate) fn shared_collection(&self, name: &str) -> Option<Collection> {
+        self.shared_collections
+            .as_ref()?
+            .peek(|map| map.get(name).cloned())
+    }
+
     /// Create a new explicit DbTxn.
     pub fn new_explicit(txn: BasicTxn) -> Self {
         Self {
@@ -131,6 +150,7 @@ impl<S: Store> DbTxn<S> {
             locally_created_collection_ids: RapidHashSet::new(),
             pending_collection_acp_registrations: Vec::new(),
             vector_codes: Arc::default(),
+            shared_collections: None,
             statement_savepoint: None,
             _marker: std::marker::PhantomData,
         }

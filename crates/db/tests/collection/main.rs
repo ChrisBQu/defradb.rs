@@ -8,6 +8,7 @@ mod delete;
 mod index_actions;
 mod map;
 mod name;
+mod part_ids;
 mod retriever;
 mod schema_write_conflicts;
 mod selector;

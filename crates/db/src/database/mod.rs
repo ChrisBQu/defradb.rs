@@ -559,7 +559,9 @@ impl<S: Store> DB<S> {
     /// Wraps a BasicTxn created by a storage-owned retry attempt while keeping
     /// database-scoped caches shared with ordinary transactions.
     pub(crate) fn new_db_txn(&self, basic_txn: BasicTxn) -> DbTxn<S> {
-        DbTxn::new(basic_txn).with_vector_codes(self.vector_codes.clone())
+        DbTxn::new(basic_txn)
+            .with_vector_codes(self.vector_codes.clone())
+            .with_shared_collections(Arc::clone(&self.collections))
     }
 
     pub(crate) fn vector_codes(&self) -> &crate::index::vector::engine::diskann::CodeCaches {

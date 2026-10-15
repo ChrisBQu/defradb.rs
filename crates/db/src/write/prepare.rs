@@ -169,6 +169,148 @@ pub(crate) async fn prepare_keys_with_stores<S: Store + 'static>(
     Ok(())
 }
 
+/// Fetch the one external input `request` names, outside any transaction, for
+/// the per-request memo the next attempt reads it from. The single resolver of
+/// every input kind a write prepares: embeddings, signatures, KMS keys and
+/// node permissions.
+pub(crate) async fn resolve_input<S>(
+    db: &DB<S>,
+    request: &query::prepared::PreparedInputRequest,
+) -> query::error::Result<Arc<[u8]>>
+where
+    S: Store + 'static,
+{
+    match request.kind() {
+        query::prepared::PreparedInputKind::Embedding => {
+            let response = crate::search::embedding::resolve_prepared_embedding_request(
+                request.exact_request(),
+            )
+            .await
+            .map_err(|error| {
+                query::error::QueryError::execution(format!("embedding error: {error}"))
+            })?;
+            Ok(std::sync::Arc::from(response))
+        }
+        query::prepared::PreparedInputKind::Signature => {
+            let input = defra_core::signing::RemoteSignatureInput::decode(request.exact_request())
+                .map_err(query::error::QueryError::execution)?;
+            let signer = defra_core::signing::get_signing_config().ok_or_else(|| {
+                query::error::QueryError::execution("remote signature input has no configured signer")
+            })?;
+            let response = input
+                .resolve(&signer)
+                .map_err(query::error::QueryError::execution)?;
+            Ok(std::sync::Arc::from(response))
+        }
+        query::prepared::PreparedInputKind::KmsKey => {
+            let operation: PreparedKmsOperation =
+                serde_json::from_slice(request.exact_request()).map_err(|error| {
+                    query::error::QueryError::execution(format!(
+                        "invalid prepared KMS request: {error}"
+                    ))
+                })?;
+            let kms = db.kms().ok_or_else(|| {
+                query::error::QueryError::execution("prepared KMS input has no configured KMS provider")
+            })?;
+            let context = match &operation {
+                PreparedKmsOperation::GetForRead {
+                    caller_identity: Some(did),
+                    ..
+                } => kms::RequestContext::with_user(
+                    identity::Did::new(did)
+                        .map_err(|error| query::error::QueryError::execution(error.to_string()))?,
+                ),
+                _ => kms::RequestContext::anonymous(),
+            };
+            let (cid, key) = match operation {
+                PreparedKmsOperation::Get { cid }
+                | PreparedKmsOperation::GetForRead { cid, .. } => {
+                    let cid = cid::Cid::try_from(cid.as_str()).map_err(|error| {
+                        query::error::QueryError::execution(format!(
+                            "invalid encryption CID in prepared KMS request: {error}"
+                        ))
+                    })?;
+                    let key = kms
+                        .get_keys(&context, &[cid])
+                        .await
+                        .map_err(|error| {
+                            query::error::QueryError::execution(format!(
+                                "kms get_keys for {cid}: {error}"
+                            ))
+                        })?
+                        .wait_all()
+                        .await
+                        .map_err(|error| {
+                            query::error::QueryError::execution(format!(
+                                "kms get_keys for {cid}: {error}"
+                            ))
+                        })?
+                        .remove(&cid)
+                        .ok_or_else(|| {
+                            query::error::QueryError::execution(format!(
+                                "Encryption block {cid} not found"
+                            ))
+                        })?;
+                    (cid, key.to_vec())
+                }
+                PreparedKmsOperation::Generate { doc_id, field } => {
+                    let scope = kms::KeyScope::Document { doc_id, field };
+                    let (cid, key) = kms
+                        .generate_key(&kms::RequestContext::anonymous(), scope)
+                        .await
+                        .map_err(|error| {
+                            query::error::QueryError::execution(format!(
+                                "kms generate_key: {error}"
+                            ))
+                        })?;
+                    (cid, key.to_vec())
+                }
+            };
+            let response = serde_json::to_vec(&PreparedKmsResponse {
+                cid: cid.to_string(),
+                key,
+            })
+            .map_err(|error| query::error::QueryError::execution(error.to_string()))?;
+            Ok(std::sync::Arc::from(response))
+        }
+        query::prepared::PreparedInputKind::NodePermission => {
+            let (identity, permission): (String, String) =
+                serde_json::from_slice(request.exact_request()).map_err(|_| {
+                    query::error::QueryError::execution(
+                        "invalid prepared node permission request",
+                    )
+                })?;
+            // An attempt with no acting identity asks for the wildcard actor.
+            let identity = if identity == identity::Did::wildcard().as_str() {
+                identity::Did::wildcard()
+            } else {
+                identity::Did::new(identity).map_err(|_| {
+                    query::error::QueryError::execution(
+                        "invalid identity in node permission request",
+                    )
+                })?
+            };
+            let permission = match permission.as_str() {
+                "update-document" => acp::nac::NodePermission::DocumentUpdate,
+                "delete-document" => acp::nac::NodePermission::DocumentDelete,
+                "truncate-collection" => acp::nac::NodePermission::CollectionTruncate,
+                _ => {
+                    return Err(query::error::QueryError::execution(
+                        "invalid prepared node permission",
+                    ))
+                }
+            };
+            db.check_node_access(Some(&identity), permission)
+                .await
+                .map_err(|error| query::error::QueryError::permission_denied(error.to_string()))?;
+            Ok(std::sync::Arc::from(b"true".as_slice()))
+        }
+        kind => Err(query::error::QueryError::execution(format!(
+            "prepared {kind:?} input resolution is not available"
+        ))),
+    }
+}
+
 pub(crate) fn prepared_identity(doc: &Document) -> Option<DocStorageIdentity> {
     doc.write_preparation().map(|prepared| {
         DocStorageIdentity::new(prepared.collection_short_id, prepared.doc_short_id)

@@ -625,15 +625,42 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
 
                         mutator.set_document_acp(self.acp.clone());
                         let txn_fetcher = txn_ctx.doc_fetcher();
-                        scoped_runner
-                            .execute_mutation_internal_with_vars(
-                                &request.query,
-                                mutator,
-                                identity,
-                                variables.as_ref(),
-                                Some(txn_fetcher),
-                            )
-                            .await
+                        // A remote input the statement needs (an embedding)
+                        // is never fetched inside it: the statement ends, is
+                        // rolled back to its savepoint, the input is fetched
+                        // with nothing of the transaction in flight, and the
+                        // statement runs again reading it from the memo.
+                        let inputs = crate::prepared::PreparedInputMemo::default();
+                        loop {
+                            let attempt = mutator
+                                .with_prepared_inputs(inputs.clone())
+                                .unwrap_or_else(|| mutator.clone());
+                            match scoped_runner
+                                .execute_mutation_internal_with_vars(
+                                    &request.query,
+                                    attempt,
+                                    identity.clone(),
+                                    variables.as_ref(),
+                                    Some(Arc::clone(&txn_fetcher)),
+                                )
+                                .await
+                            {
+                                Err(crate::error::QueryError::NeedsInput(input)) => {
+                                    txn_ctx
+                                        .finish_statement_savepoint(false)
+                                        .map_err(crate::error::QueryError::execution)?;
+                                    inputs
+                                        .answer_miss(&input, || {
+                                            mutator.resolve_prepared_input(&input)
+                                        })
+                                        .await?;
+                                    txn_ctx
+                                        .set_statement_savepoint()
+                                        .map_err(crate::error::QueryError::execution)?;
+                                }
+                                result => break result,
+                            }
+                        }
                     }
                 }
                 ParsedOperation::Subscription { .. } => {

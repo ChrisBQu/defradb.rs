@@ -366,7 +366,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         // genesis block inside the txn; the mapping duplicate check is the gate.
 
         self.db
-            .validate_downsample_write(&datastore, &systemstore, collection.schema(), &doc, None)
+            .validate_downsample_write(&datastore, &systemstore, &collection, &doc, None)
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
@@ -414,6 +414,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 sign_config.as_ref(),
                 self.db.kms().as_ref(),
                 self.prepared_inputs.as_ref(),
+                None,
             )
             .await
             .map_err(|error| match error {
@@ -497,20 +498,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         self.validate_collection_for_write(&collection).await?;
         ensure_collection_is_active(&self.db, collection_name, &collection)?;
         let embedding_config = self.db.options().embedding_config();
-
         let prepared_inputs = self.prepared_inputs.clone().unwrap_or_default();
-        let generated = crate::search::embedding::set_embedding_from_inputs(
-            &collection.schema().vector_embeddings,
-            &mut doc,
-            false,
-            &modified_fields,
-            &embedding_config,
-            &prepared_inputs,
-        )?;
-
-        for field in generated {
-            modified_fields.insert(field);
-        }
 
         let doc_id = doc
             .id()
@@ -531,13 +519,14 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             .validate_downsample_write(
                 &datastore,
                 &systemstore,
-                collection.schema(),
+                &collection,
                 &doc,
                 Some(&modified_fields),
             )
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
+        let heads = super::helpers::load_update_heads(&datastore, doc_short_id).await?;
         write_local_update(
             &datastore,
             &collection,
@@ -545,8 +534,9 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             doc_short_id,
             &index_manager,
             &mut modified_fields,
-            None,
-            self.prepared_inputs.as_ref(),
+            &heads,
+            &embedding_config,
+            &prepared_inputs,
         )
         .await?;
 
@@ -583,6 +573,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 sign_config.as_ref(),
                 self.db.kms().as_ref(),
                 self.prepared_inputs.as_ref(),
+                Some(&heads),
             )
             .await
             .map_err(|error| match error {

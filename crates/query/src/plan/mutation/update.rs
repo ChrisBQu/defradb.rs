@@ -351,98 +351,16 @@ impl UpdateNode {
         Ok(doc)
     }
 
+    /// The parts this update decides on, or `None` when it reads its
+    /// documents whole (see [`crate::update_parts`]).
     fn projected_update_fields(&self) -> Option<RapidHashSet<String>> {
+        if !self.mutator.supports_projected_updates() {
+            return None;
+        }
         let collection = self.collection.as_deref()?;
-        let patch_fields: RapidHashSet<String> = self.input.fields.keys().cloned().collect();
-        projected_update_fields(
-            collection,
-            &patch_fields,
-            &self.document_mapping,
-            self.doc_ids.is_some(),
-            self.filter.is_some(),
-        )
+        let patch: RapidHashSet<String> = self.input.fields.keys().cloned().collect();
+        crate::update_parts::planned(collection, &patch, self.filter.as_ref())
     }
-}
-
-/// Return the fields needed for the supported unconditional, ID-targeted
-/// scalar update. Query predicates and returned fields outside `_docID` need
-/// their normal full query snapshot and stay conservative.
-pub(crate) fn projected_update_fields(
-    collection: &CollectionVersion,
-    patch_fields: &RapidHashSet<String>,
-    mapping: &DocumentMapping,
-    has_doc_ids: bool,
-    has_filter: bool,
-) -> Option<RapidHashSet<String>> {
-    if !has_doc_ids || has_filter {
-        return None;
-    }
-    let rendered_doc_id_only = mapping.render_keys.len() == 1
-        && mapping.render_keys[0].key == "_docID"
-        && mapping.render_keys[0].index == 0
-        && mapping
-            .indexes_by_name_iter()
-            .all(|(name, indexes)| name == "_docID" && indexes == [0])
-        && mapping.child_mappings.iter().all(Option::is_none);
-    if !rendered_doc_id_only || patch_fields.is_empty() {
-        return None;
-    }
-
-    // A projected fetch cannot safely perform a schema migration or a
-    // query-backed view transformation.
-    if collection.previous_version.is_some() || collection.query.is_some() {
-        return None;
-    }
-
-    // The dependency set below models top-level scalar patches. Relation,
-    // object, and other structural input forms keep the full read until their
-    // nested mutation dependencies can be enumerated here.
-    if patch_fields.iter().any(|name| {
-        collection
-            .fields
-            .iter()
-            .find(|field| field.name == *name)
-            .is_none_or(|field| !field.kind.is_scalar() || field.relation_name.is_some())
-    }) {
-        return None;
-    }
-
-    // A counter in the patch is an increment, a blind operand that decides
-    // nothing; an index or embedding over it adds it back below.
-    let mut fields: RapidHashSet<String> = patch_fields
-        .iter()
-        .filter(|name| {
-            !collection
-                .fields
-                .iter()
-                .any(|field| field.name == **name && field.crdt_type.is_counter())
-        })
-        .cloned()
-        .collect();
-    // Index maintenance reads every component of an index touched by this
-    // patch. Including inactive schema indexes is a harmless superset.
-    for index in &collection.indexes {
-        if index
-            .fields
-            .iter()
-            .any(|field| patch_fields.contains(&field.name))
-        {
-            fields.extend(index.fields.iter().map(|field| field.name.clone()));
-        }
-    }
-    // Embedding generation may depend on fields beyond the patch itself. The
-    // generated vector field is included for index maintenance as well.
-    for embedding in &collection.vector_embeddings {
-        if embedding
-            .fields
-            .iter()
-            .any(|field| patch_fields.contains(field))
-        {
-            fields.extend(embedding.fields.iter().cloned());
-            fields.insert(embedding.field_name.clone());
-        }
-    }
-    Some(fields)
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -470,13 +388,21 @@ impl PlanNode for UpdateNode {
 
         // On first call, perform all updates
         if !self.did_update {
+            let decided_on = self.projected_update_fields();
             // Get document IDs to update
             let doc_ids_to_update = if let Some(ref ids) = self.doc_ids {
                 // Explicit doc_ids provided
                 ids.clone()
             } else {
                 // No doc_ids - fetch documents and optionally filter
-                let all_docs = self.fetcher.get_all(&self.collection_name).await?;
+                let all_docs = match &decided_on {
+                    Some(fields) => {
+                        self.fetcher
+                            .get_all_projected(&self.collection_name, fields)
+                            .await?
+                    }
+                    None => self.fetcher.get_all(&self.collection_name).await?,
+                };
                 let mut matching_ids = Vec::new();
 
                 for doc in all_docs {
@@ -513,12 +439,7 @@ impl PlanNode for UpdateNode {
                 // the lensedFetcher migrates documents on read, ensuring migrated
                 // field values (e.g., SetDefault) are present before the update
                 // patch is applied and the result is returned.
-                let projected_fields = self
-                    .mutator
-                    .supports_projected_updates()
-                    .then(|| self.projected_update_fields())
-                    .flatten();
-                let projected_result = if let Some(fields) = &projected_fields {
+                let projected_result = if let Some(fields) = &decided_on {
                     self.fetcher
                         .get_by_ids_projected(
                             &self.collection_name,
@@ -530,7 +451,7 @@ impl PlanNode for UpdateNode {
                     None
                 };
                 let (fetch_result, projected_fields) = match projected_result {
-                    Some(result) => (result, projected_fields),
+                    Some(result) => (result, decided_on.clone()),
                     None => (
                         self.fetcher
                             .get_by_ids(&self.collection_name, std::slice::from_ref(&doc_id_str))
@@ -897,63 +818,5 @@ mod prepared_target_tests {
             assert_eq!(updates.len(), 2);
             assert!(!updates.iter().any(|(id, _)| id == &appeared.to_string()));
         });
-    }
-}
-
-#[cfg(test)]
-mod projected_fields_tests {
-    use super::*;
-    use schema::{CType, FieldDescription, FieldKind, IndexDescription};
-
-    fn tally() -> CollectionVersion {
-        CollectionVersion::new(
-            "Tally",
-            "tally-v1",
-            "col-tally",
-            vec![
-                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
-                FieldDescription::new("2", "count", FieldKind::int())
-                    .with_crdt_type(CType::PnCounter),
-                FieldDescription::new("3", "label", FieldKind::string()),
-            ],
-        )
-    }
-
-    fn doc_id_only() -> DocumentMapping {
-        let mut mapping = DocumentMapping::new();
-        mapping.add(0, "_docID");
-        mapping.add_render_key(0, "_docID");
-        mapping
-    }
-
-    fn fields(collection: &CollectionVersion, patch: &[&str]) -> Option<RapidHashSet<String>> {
-        let patch = patch.iter().map(|name| (*name).to_owned()).collect();
-        projected_update_fields(collection, &patch, &doc_id_only(), true, false)
-    }
-
-    /// An increment decides nothing, so it adds no validated part.
-    #[test]
-    fn a_counter_increment_is_not_a_projected_dependency() {
-        let collection = tally();
-        assert_eq!(
-            fields(&collection, &["count"]),
-            Some(RapidHashSet::default())
-        );
-        assert_eq!(
-            fields(&collection, &["count", "label"]),
-            Some(RapidHashSet::from_iter(["label".to_owned()]))
-        );
-    }
-
-    /// An index over the counter reads its old value, so the counter is a
-    /// dependency again.
-    #[test]
-    fn an_indexed_counter_stays_a_projected_dependency() {
-        let collection =
-            tally().with_index(IndexDescription::new("by_count").with_field("count", false));
-        assert_eq!(
-            fields(&collection, &["count"]),
-            Some(RapidHashSet::from_iter(["count".to_owned()]))
-        );
     }
 }
