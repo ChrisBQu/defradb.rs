@@ -213,7 +213,10 @@ once keys and reopen through the adapter.
 an attempt and reused after a commit conflict; its RED cases run provider work
 inside an attempt or clear the memo and repeat provider work. It does not establish that every remote ACP/Vera/KMS/decrypt call
 is lifted out of retry attempts. `RetryMarkerGeneration.tla` models generation
-compare-delete and the peer-incarnation fence on clear across forget/re-add. Their
+compare-delete and the peer-incarnation fence on clear across forget/re-add.
+`RetryPushAdmission.tla` checks that queued pushes still own the exact live marker
+and satisfy backpressure at admission. Its mutants remove presence, generation
+or deadline checks; already-admitted external I/O is outside that boundary. Their
 conformance tier is deliberately `Boundary`: these models are not driven against
 the public binary. The focused storage and DB tests remain the implementation
 checks. `CollectionVersionOCC.tla` separately models why a writer selected against

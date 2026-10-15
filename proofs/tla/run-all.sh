@@ -13,6 +13,10 @@ RUNS=(
   "MC_RetryMarkerGeneration_Green.cfg RetryMarkerGeneration.tla GREEN" # old ack and peer clear are fenced
   "MC_RetryMarkerGeneration_Red_StaleAck.cfg RetryMarkerGeneration.tla RED" # stale ack erases newer registration
   "MC_RetryMarkerGeneration_Red_Readd.cfg RetryMarkerGeneration.tla RED" # stale peer clear erases re-added retry state
+  "MC_RetryPushAdmission_Green.cfg RetryPushAdmission.tla GREEN"
+  "MC_RetryPushAdmission_Red_NoPresence.cfg RetryPushAdmission.tla RED"
+  "MC_RetryPushAdmission_Red_NoGeneration.cfg RetryPushAdmission.tla RED"
+  "MC_RetryPushAdmission_Red_NoDeadline.cfg RetryPushAdmission.tla RED"
   "MC_CollectionVersionOCC_Green.cfg CollectionVersionOCC.tla GREEN" # schema-version dependency rejects stale writer
   "MC_CollectionVersionOCC_Red_NoValidation.cfg CollectionVersionOCC.tla RED" # stale schema-dependent write is admitted
   "MC_EventOrder_Green.cfg EventOrder.tla GREEN"

@@ -99,6 +99,14 @@ pub const PROPERTIES: &[Property] = &[
         tiers: &[Boundary],
     },
     Property {
+        family: "Queued push admission",
+        name: "INV_QueuedPushOwnsLiveMarker — admission requires current durable ownership and elapsed backpressure",
+        axis: Tla,
+        anchor: "crates/storage/src/stores/peerstore.rs admit_push_scope; crates/p2p-adapter/src/retry.rs spawn_failure_recorder; crates/p2p/src/sync/coordinator/push_worker.rs run_push_job",
+        model_ref: "MC_RetryPushAdmission_{Green,Red_*}.cfg",
+        tiers: &[Boundary],
+    },
+    Property {
         family: "Collection schema-version OCC",
         name: "INV_NoStaleSchemaWrite — a writer cannot commit against an obsolete structural version",
         axis: Tla,
