@@ -229,6 +229,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .clone()
             .unwrap_or_else(|| attempt.modified_fields.clone());
         dependencies.extend(attempt.modified_fields.iter().cloned());
+        // A counter increment is a blind operand and decides nothing; an index
+        // or embedding over the counter adds it back below.
+        dependencies.retain(|field| attempt.input.get_counter_delta(field).is_none());
         let fetcher = if attempt.expected.is_none() || attempt.expected_fields.is_some() {
             for index in collection.write_indexes() {
                 if index

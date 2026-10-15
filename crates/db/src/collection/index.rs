@@ -74,7 +74,13 @@ impl Collection {
         // Get old document for index update
         let old_doc = match modified {
             Some(changed) => {
-                let mut fields = changed.clone();
+                // A counter increment is a blind operand: its old value is a
+                // dependency only of an index over the counter, added below.
+                let mut fields: rapidhash::RapidHashSet<String> = changed
+                    .iter()
+                    .filter(|name| doc.get_counter_delta(name).is_none())
+                    .cloned()
+                    .collect();
                 for index in index_manager.get_indexes() {
                     if index
                         .fields

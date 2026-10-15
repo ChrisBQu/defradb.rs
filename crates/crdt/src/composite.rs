@@ -333,9 +333,11 @@ impl CompositeDAG {
                     )));
                 }
 
+                // Each counter field is its own one-part document value.
                 let counter = Counter::new(
                     self.schema_version_id.clone(),
-                    self.doc_id.as_str().as_bytes(),
+                    self.build_value_key(field_name),
+                    0,
                     field_name.to_string(),
                     *allow_decrement,
                     *kind,

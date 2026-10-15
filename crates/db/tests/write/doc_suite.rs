@@ -4,9 +4,6 @@ use acp::DocumentACP;
 use acp::LocalDocumentACP;
 use acp::MemoryAcpStore;
 use async_lock::Mutex as TokioMutex;
-use crdt::traits::ValueReader;
-use crdt::Counter;
-use crdt::NumericKind;
 use db::database::DB;
 use db::index::IndexManager;
 use db::txn::registry::DbTransactionRegistry;
@@ -161,30 +158,17 @@ fn float32_counter_collection() -> CollectionVersion {
     )
 }
 
-/// Read the PNCounter accumulation store value for a doc/field from the
-/// committed store (a fresh read txn), proving the authoritative store — not
-/// just the materialized blob — advanced.
+/// Read a counter's committed value: its part of the document value, the
+/// counter's only stored copy, through a fresh read transaction.
 async fn read_counter_store(
     db: &Arc<DB<RegolithStore>>,
-    schema_version_id: &str,
+    collection_name: &str,
     doc_id: &str,
     field: &str,
 ) -> i64 {
-    let txn = db.new_txn(true).await.expect("read txn");
-    let datastore = txn.datastore().expect("datastore");
-    let counter = Counter::new(
-        schema_version_id.to_string(),
-        doc_id.as_bytes(),
-        field.to_string(),
-        true,
-        NumericKind::Int64,
-    )
-    .expect("counter");
-    let bytes = ValueReader::value(&counter, &datastore)
+    read_counter_store_opt(db, collection_name, doc_id, field)
         .await
-        .expect("counter value");
-    assert_eq!(bytes.len(), 8, "int64 counter store value is 8 bytes");
-    i64::from_be_bytes(bytes.as_ref().try_into().unwrap())
+        .expect("the counter has a committed value")
 }
 
 #[tokio::test]
@@ -226,23 +210,6 @@ async fn auto_commit_float32_counter_accumulates_with_float32_precision() {
     assert_eq!(
         doc.get("points"),
         Some(&NormalValue::Float64(f64::from(expected)))
-    );
-
-    let txn = db.new_txn(true).await.unwrap();
-    let datastore = txn.datastore().unwrap();
-    let counter = crdt::Counter::new(
-        "fcv1".into(),
-        doc_id.to_string().as_bytes(),
-        "points".into(),
-        true,
-        crdt::NumericKind::Float32,
-    )
-    .unwrap();
-    let bytes = ValueReader::value(&counter, &datastore).await.unwrap();
-    assert_eq!(bytes.len(), 4);
-    assert_eq!(
-        f32::from_be_bytes(bytes.as_ref().try_into().unwrap()),
-        expected
     );
 }
 
@@ -309,14 +276,9 @@ async fn alias_reads_and_mutations_use_the_canonical_doc_id() {
 }
 
 #[tokio::test]
-async fn explicit_txn_counter_increment_advances_accumulation_store() {
-    // Regression for #1021 (now #1044 record-then-finalize): an
-    // explicit-transaction counter increment must read-modify-write the
-    // authoritative CRDT accumulation store (not only the materialized blob).
-    // The RMW is now deferred to the registry commit-time finalize, so the
-    // test drives commit through the registry (not a bare force_commit, which
-    // would skip the finalize) — keeping the original intent: after commit the
-    // authoritative store reflects the increment.
+async fn explicit_txn_counter_increment_advances_the_counter() {
+    // Regression for #1021: an explicit-transaction counter increment must
+    // reach the counter's committed value, driven through the registry commit.
 
     let (db, _bus) = make_test_db_with_bus().await;
     db.create_collection(counter_collection())
@@ -339,9 +301,9 @@ async fn explicit_txn_counter_increment_advances_accumulation_store() {
     registry.commit(&handle).await.expect("commit");
 
     assert_eq!(
-        read_counter_store(&db, "cv1", &doc_id, "count").await,
+        read_counter_store(&db, "Counters", &doc_id, "count").await,
         5,
-        "create must seed the accumulation store at finalize"
+        "create must store the counter at 5"
     );
 
     // Increment by 3 in a fresh explicit txn, commit via the registry.
@@ -362,15 +324,14 @@ async fn explicit_txn_counter_increment_advances_accumulation_store() {
     registry.commit(&handle).await.expect("commit");
 
     assert_eq!(
-        read_counter_store(&db, "cv1", &doc_id, "count").await,
+        read_counter_store(&db, "Counters", &doc_id, "count").await,
         8,
-        "explicit-txn increment must advance the accumulation store at finalize (#1044)"
+        "an explicit-txn increment must advance the counter (#1021)"
     );
 }
 
-/// PCounter (increment-only) collection: reconcile MIGRATES a present store
-/// upward via max, so the finalize must NOT re-read the provisional blob as the
-/// reconcile base (that would double-apply the delta). See #1044 BUG 1.
+/// PCounter (increment-only) collection: an increment must be applied once,
+/// whatever value the caller's copy of the document carries (#1044 BUG 1).
 fn pcounter_collection() -> CollectionVersion {
     CollectionVersion::new(
         "PCounters",
@@ -384,11 +345,8 @@ fn pcounter_collection() -> CollectionVersion {
 }
 
 /// Regression for #1044 BUG 1 (PCounter explicit-txn double-apply): create a
-/// PCounter doc at 5, then increment +3 in a separate explicit txn. The
-/// authoritative store must end at 8, NOT 11. Before the fix the finalize
-/// re-read the provisional blob (8) as the reconcile base, migrated the present
-/// store (5) UPWARD to 8 via PCounter max, then applied +3 → 11. Capturing the
-/// pre-write committed value (5) as the reconcile base fixes it.
+/// PCounter doc at 5, then increment +3 in a separate explicit txn whose
+/// document copy already says 8. The counter must end at 8, NOT 11.
 #[tokio::test]
 async fn explicit_txn_pcounter_increment_no_double_apply() {
     let (db, _bus) = make_test_db_with_bus().await;
@@ -412,9 +370,9 @@ async fn explicit_txn_pcounter_increment_no_double_apply() {
     registry.commit(&handle).await.expect("commit");
 
     assert_eq!(
-        read_counter_store(&db, "pcv1", &doc_id, "count").await,
+        read_counter_store(&db, "PCounters", &doc_id, "count").await,
         5,
-        "create must seed the PCounter accumulation store at 5"
+        "create must store the PCounter at 5"
     );
 
     // Increment by 3 in a fresh explicit txn (provisional blob = 8).
@@ -435,17 +393,16 @@ async fn explicit_txn_pcounter_increment_no_double_apply() {
     registry.commit(&handle).await.expect("commit");
 
     assert_eq!(
-        read_counter_store(&db, "pcv1", &doc_id, "count").await,
+        read_counter_store(&db, "PCounters", &doc_id, "count").await,
         8,
-        "PCounter increment must NOT double-apply: store == 8 (not 11) (#1044)"
+        "PCounter increment must NOT double-apply: 8, not 11 (#1044)"
     );
 }
 
-/// Multi-doc finalize: an explicit txn that increments counters on TWO
-/// different docs must, after commit, leave BOTH accumulation stores
-/// advanced — exercising the sorted multi-doc acquire in the finalize driver.
+/// An explicit txn that increments counters on TWO different docs must, after
+/// commit, leave BOTH counters advanced.
 #[tokio::test]
-async fn explicit_txn_multi_doc_counter_finalize_advances_both_stores() {
+async fn explicit_txn_multi_doc_counter_increments_advance_both() {
     let (db, _bus) = make_test_db_with_bus().await;
     db.create_collection(counter_collection())
         .await
@@ -478,7 +435,7 @@ async fn explicit_txn_multi_doc_counter_finalize_advances_both_stores() {
     drop(ctx);
     registry.commit(&handle).await.expect("commit creates");
 
-    // Increment BOTH docs in a single explicit txn (multi-doc finalize).
+    // Increment BOTH docs in a single explicit txn.
     let handle = registry.begin(false).await.expect("begin");
     let ctx = registry.get(&handle).into_result().unwrap().unwrap();
     let mutator = ctx.doc_mutator().expect("mutator");
@@ -508,43 +465,29 @@ async fn explicit_txn_multi_doc_counter_finalize_advances_both_stores() {
     registry.commit(&handle).await.expect("commit updates");
 
     assert_eq!(
-        read_counter_store(&db, "cv1", &doc_a, "count").await,
+        read_counter_store(&db, "Counters", &doc_a, "count").await,
         11,
-        "doc A store must reflect +1"
+        "doc A must reflect +1"
     );
     assert_eq!(
-        read_counter_store(&db, "cv1", &doc_b, "count").await,
+        read_counter_store(&db, "Counters", &doc_b, "count").await,
         25,
-        "doc B store must reflect +5"
+        "doc B must reflect +5"
     );
 }
 
-/// Read the counter accumulation store value, returning `None` when the store
-/// key is absent (the counter was never durably finalized). Used by the
-/// discard test to prove a rolled-back interactive txn ran no RMW.
+/// A counter's committed value, or `None` when the document or the counter's
+/// part is absent.
 async fn read_counter_store_opt(
     db: &Arc<DB<RegolithStore>>,
-    schema_version_id: &str,
+    collection_name: &str,
     doc_id: &str,
     field: &str,
 ) -> Option<i64> {
-    let txn = db.new_txn(true).await.expect("read txn");
-    let datastore = txn.datastore().expect("datastore");
-    let counter = Counter::new(
-        schema_version_id.to_string(),
-        doc_id.as_bytes(),
-        field.to_string(),
-        true,
-        NumericKind::Int64,
-    )
-    .expect("counter");
-    match ValueReader::value(&counter, &datastore).await {
-        Ok(bytes) => {
-            assert_eq!(bytes.len(), 8, "int64 counter store value is 8 bytes");
-            Some(i64::from_be_bytes(bytes.as_ref().try_into().unwrap()))
-        }
-        Err(_) => None,
-    }
+    read_committed_doc(db, collection_name, doc_id)
+        .await?
+        .get(field)
+        .and_then(NormalValue::as_int)
 }
 
 /// Read a doc from the committed store via a fresh read txn; `None` if absent.
@@ -568,20 +511,8 @@ async fn read_committed_doc(
 }
 
 /// PCounter create-then-update in ONE registry txn: create at 5 then +3 in the
-/// SAME txn, commit. The update's `committed_pre_write` read sees the
-/// same-txn-staged create (5), so the recorded base is 5 and the finalize ends
-/// at exactly 8 (NOT 11 from a double-apply).
-///
-/// Note: this test does NOT exercise base-capture's load-bearing path. Because
-/// the create stages the accumulation store at 5 in the same txn, the update's
-/// reconcile(base) is a no-op for any base ≤ 5 (the store is already present at
-/// 5; reconcile is init-if-absent / migrate-via-max, and neither base=5 nor a
-/// missing base=0 raises a present 5), and the +3 is then added UNCONDITIONALLY
-/// (counter merge is plain addition, not max) → 8. So a missing base would also
-/// yield 8 here — the base value is irrelevant once the create has seeded the
-/// store. The missing-base → wrong-value guard lives in
-/// `update_seeds_absent_store_from_committed_base_load_bearing`, where the
-/// accumulation store is absent at update-finalize.
+/// SAME txn, commit. The increment lands on the value the create staged: 8,
+/// not 11 from a double-apply.
 #[tokio::test]
 async fn explicit_txn_pcounter_create_then_update_same_txn() {
     let (db, _bus) = make_test_db_with_bus().await;
@@ -618,39 +549,24 @@ async fn explicit_txn_pcounter_create_then_update_same_txn() {
     registry.commit(&handle).await.expect("commit");
 
     assert_eq!(
-        read_counter_store(&db, "pcv1", &doc_id, "count").await,
+        read_counter_store(&db, "PCounters", &doc_id, "count").await,
         8,
-        "PCounter create(5)+update(+3) in one txn must finalize to exactly 8"
+        "PCounter create(5)+update(+3) in one txn must commit exactly 8"
     );
 }
 
-/// LOAD-BEARING regression for the #1044 base-capture: the finalize must seed
-/// the accumulation store init-if-absent from the PRE-WRITE COMMITTED value
-/// (`base`) before applying the delta. This is the ONLY scenario where base is
-/// load-bearing — a doc whose materialized blob holds a counter value but whose
-/// accumulation store is ABSENT (e.g. a legacy / pre-#1021 / migrated doc that
-/// was written before counter stores were seeded on create).
-///
-/// Setup writes the doc DIRECTLY via `create_with_indexes` (blob + indexes
-/// only), deliberately bypassing `init_counter_stores_on_create`, so the store
-/// key is absent while the blob value is 5. A PNCounter field is used so the
-/// PCounter migrate-via-max can't mask a missing base. An interactive UPDATE +3
-/// then commits: the finalize seeds 5 from the committed base (init-if-absent)
-/// and applies +3 → 8.
-///
-/// Without base-capture (forcing `base = None`) the finalize would seed 0 then
-/// apply +3 → 3 (verified fail-before / pass-after: 3 vs 8). The assertion of
-/// EXACTLY 8 is what makes base-capture load-bearing.
+/// A document written straight through `create_with_indexes`, as a legacy or
+/// migrated document is, holds its counter only in the document value. An
+/// interactive UPDATE +3 lands on that value: 5 + 3 = 8, never 0 + 3.
 #[tokio::test]
-async fn update_seeds_absent_store_from_committed_base_load_bearing() {
+async fn an_increment_lands_on_a_directly_written_counter_value() {
     let (db, _bus) = make_test_db_with_bus().await;
     db.create_collection(counter_collection())
         .await
         .expect("schema");
 
-    // SETUP: write a doc with blob `count = 5` directly via create_with_indexes
-    // (blob + indexes), WITHOUT seeding the counter accumulation store. Commit
-    // via force_commit so the registry finalize never runs for this setup.
+    // SETUP: write a doc with `count = 5` directly via create_with_indexes and
+    // commit it with force_commit, outside any registry transaction.
     let collection = db
         .get_collection("Counters")
         .expect("get collection")
@@ -685,12 +601,6 @@ async fn update_seeds_absent_store_from_committed_base_load_bearing() {
     drop(systemstore);
     setup_txn.force_commit().await.expect("force commit setup");
 
-    // Confirm the setup left the store ABSENT but the blob value present.
-    assert_eq!(
-        read_counter_store_opt(&db, "cv1", &doc_id, "count").await,
-        None,
-        "setup must leave the accumulation store ABSENT (blob-only doc)"
-    );
     let committed = read_committed_doc(&db, "Counters", &doc_id)
         .await
         .expect("committed doc present after setup");
@@ -700,7 +610,7 @@ async fn update_seeds_absent_store_from_committed_base_load_bearing() {
         "setup blob must hold the committed counter value 5"
     );
 
-    // Interactive UPDATE +3 on the absent-store doc, commit via the registry.
+    // Interactive UPDATE +3, commit via the registry.
     let registry = DbTransactionRegistry::new(Arc::clone(&db));
     let handle = registry.begin(false).await.expect("begin");
     let ctx = registry.get(&handle).into_result().unwrap().unwrap();
@@ -718,19 +628,16 @@ async fn update_seeds_absent_store_from_committed_base_load_bearing() {
     drop(ctx);
     registry.commit(&handle).await.expect("commit");
 
-    // base-capture seeds the absent store from the committed base (5), then
-    // applies +3 → 8. A missing base would seed 0 and finalize to 3.
     assert_eq!(
-        read_counter_store(&db, "cv1", &doc_id, "count").await,
+        read_counter_store(&db, "Counters", &doc_id, "count").await,
         8,
-        "absent-store finalize must seed committed base 5 (init-if-absent) then +3 → 8 (NOT 3)"
+        "the increment lands on the stored 5: 8, not 3"
     );
 }
 
 /// PNCounter create-then-update in ONE registry txn: +3 then -5 in one txn
-/// (create at 3, then decrement by 5). The signed accumulation store result is
-/// -2 (3 + (-5)), proving the same-txn decrement path stages and finalizes the
-/// signed delta against the same-txn-staged base.
+/// (create at 3, then decrement by 5). The signed result is -2 (3 + (-5)): the
+/// decrement lands on the value the create staged in the same txn.
 #[tokio::test]
 async fn explicit_txn_pncounter_create_then_decrement_same_txn() {
     let (db, _bus) = make_test_db_with_bus().await;
@@ -767,16 +674,15 @@ async fn explicit_txn_pncounter_create_then_decrement_same_txn() {
     registry.commit(&handle).await.expect("commit");
 
     assert_eq!(
-        read_counter_store(&db, "cv1", &doc_id, "count").await,
+        read_counter_store(&db, "Counters", &doc_id, "count").await,
         -2,
-        "PNCounter create(+3)+decrement(-5) in one txn must finalize to exactly -2"
+        "PNCounter create(+3)+decrement(-5) in one txn must commit exactly -2"
     );
 }
 
 /// Discard with pending counter ops: create a counter doc and increment it in
-/// one registry txn, then roll back. The accumulation store must have NO value
-/// and the doc must be absent — proving discard drops the pending ops and never
-/// ran the finalize RMW.
+/// one registry txn, then roll back. The counter must have NO value and the doc
+/// must be absent: discard drops the staged operands.
 #[tokio::test]
 async fn explicit_txn_discard_drops_pending_counter_ops() {
     let (db, _bus) = make_test_db_with_bus().await;
@@ -813,9 +719,9 @@ async fn explicit_txn_discard_drops_pending_counter_ops() {
     registry.rollback(&handle).await.expect("rollback");
 
     assert_eq!(
-        read_counter_store_opt(&db, "cv1", &doc_id, "count").await,
+        read_counter_store_opt(&db, "Counters", &doc_id, "count").await,
         None,
-        "discard must leave NO accumulation store value (finalize RMW never ran)"
+        "discard must leave NO counter value"
     );
     assert!(
         read_committed_doc(&db, "Counters", &doc_id).await.is_none(),
@@ -824,8 +730,8 @@ async fn explicit_txn_discard_drops_pending_counter_ops() {
 }
 
 /// Multiple updates to the SAME counter field in ONE registry txn: create at 0,
-/// then +3 then +2 in the same txn. The two recorded delta ops both finalize
-/// against the SAME doc/field, summing to exactly 5 (each delta applied once).
+/// then +3 then +2 in the same txn. The two operands land on the SAME part,
+/// summing to exactly 5 (each delta applied once).
 #[tokio::test]
 async fn explicit_txn_multiple_updates_same_field_sum_once() {
     let (db, _bus) = make_test_db_with_bus().await;
@@ -880,7 +786,7 @@ async fn explicit_txn_multiple_updates_same_field_sum_once() {
         Some(&document::NormalValue::Int(5))
     );
     assert_eq!(
-        read_counter_store(&db, "cv1", &doc_id, "count").await,
+        read_counter_store(&db, "Counters", &doc_id, "count").await,
         0,
         "uncommitted operands stay inside their transaction"
     );
@@ -890,14 +796,14 @@ async fn explicit_txn_multiple_updates_same_field_sum_once() {
     registry.commit(&handle).await.expect("commit updates");
 
     assert_eq!(
-        read_counter_store(&db, "cv1", &doc_id, "count").await,
+        read_counter_store(&db, "Counters", &doc_id, "count").await,
         5,
         "two same-field updates (+3,+2) in one txn must sum to exactly 5"
     );
 }
 
-/// Counter collection with an @index on the counter field, exercising the
-/// finalize blob-correction's `update_with_indexes` index maintenance.
+/// Counter collection with an @index on the counter field, exercising
+/// `update_with_indexes` index maintenance for an increment.
 fn indexed_counter_collection() -> CollectionVersion {
     let mut col = CollectionVersion::new(
         "IdxCounters",
@@ -913,12 +819,11 @@ fn indexed_counter_collection() -> CollectionVersion {
 }
 
 /// Indexed counter: increment in an interactive txn, commit, then assert the
-/// index entry materialized at the AUTHORITATIVE post-RMW value (8), proving
-/// the finalize blob-correction maintained the index. The unit-test layer has
+/// index entry materialized at the incremented value (8). The unit-test layer has
 /// no GraphQL filter-query executor, so this asserts the index entry directly
 /// (the value a filter query would resolve against).
 #[tokio::test]
-async fn explicit_txn_indexed_counter_index_reflects_post_rmw_value() {
+async fn explicit_txn_indexed_counter_index_reflects_the_incremented_value() {
     let (db, _bus) = make_test_db_with_bus().await;
     let col_version = indexed_counter_collection();
     db.create_collection(col_version).await.expect("schema");
@@ -959,12 +864,12 @@ async fn explicit_txn_indexed_counter_index_reflects_post_rmw_value() {
 
     // Authoritative store advanced to 8.
     assert_eq!(
-        read_counter_store(&db, "icv1", &doc_id, "count").await,
+        read_counter_store(&db, "IdxCounters", &doc_id, "count").await,
         8,
-        "indexed counter store must reflect +3 → 8"
+        "indexed counter must reflect +3 → 8"
     );
 
-    // The index entry must exist at the post-RMW value 8 (what a filter query
+    // The index entry must exist at the incremented value 8 (what a filter query
     // `count: {_eq: 8}` would resolve), and must NOT exist at the stale 5.
     let collection = db
         .get_collection("IdxCounters")
@@ -985,7 +890,7 @@ async fn explicit_txn_indexed_counter_index_reflects_post_rmw_value() {
     assert_eq!(
         entries_8.len(),
         1,
-        "index must have exactly one entry at the post-RMW value 8"
+        "index must have exactly one entry at the incremented value 8"
     );
 
     let mut iter_5 = index
@@ -998,14 +903,6 @@ async fn explicit_txn_indexed_counter_index_reflects_post_rmw_value() {
         "index must NOT have a stale entry at the pre-update value 5"
     );
 }
-
-// finalize-error-rollback and concurrent-finalize-vs-merge are intentionally
-// NOT tested at this unit layer: there is no fault-injection seam to force a
-// finalize error mid-RMW and no deterministic interleave seam for a concurrent
-// merge. The error path is covered by the whole-txn discard semantics
-// (`explicit_txn_discard_drops_pending_counter_ops` proves a non-committed txn
-// applies no RMW), and the concurrent-finalize-vs-merge guard lifecycle is
-// retired with the batch gate; ordinary transaction validation now protects the mirror.
 
 #[tokio::test]
 async fn create_in_tx_publishes_event_on_commit() {

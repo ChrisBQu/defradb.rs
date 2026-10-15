@@ -3459,6 +3459,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "defra-core",
+ "document",
  "proptest",
  "rapidhash",
  "serde",

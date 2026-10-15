@@ -5,17 +5,24 @@
 //! for Float64. This is not a traditional PN-Counter (which uses separate
 //! per-replica counters); instead it uses a single accumulated value.
 //!
-//! Merge is unconditional — idempotency is enforced upstream by the blockstore
-//! (`is_merged(cid)` / `get_unmerged()`) on every ingest path. Matches Go's
-//! counter Merge which also ignores the delta nonce.
+//! The value is one part of a document value: an increment is a blind merge of
+//! a document operand that carries only that part, which the engine adds to
+//! the stored value at read and folds in compaction (exactly, for Int64). No
+//! read precedes it, so increments of one counter never conflict.
+//!
+//! Merge is unconditional: idempotency is enforced upstream by the applied
+//! keys and the blockstore (`is_merged(cid)` / `get_unmerged()`) on every
+//! ingest path. Matches Go's counter Merge which also ignores the delta nonce.
 
 use crate::traits::{Context, Delta, MergeResult, ReplicatedData, ValueReader};
 use async_trait::async_trait;
 use bytes::Bytes;
 use defra_core::{Error, Result};
+use document::stored::{StoredDocument, StoredField, ValueKind};
+use document::NormalValue;
 use serde::{Deserialize, Serialize};
 use std::any::Any;
-use storage::{corekv::Key, keys::CRDTValueKey, Reader, ReaderWriter};
+use storage::{Reader, ReaderWriter};
 
 /// Numeric kind for counter values.
 ///
@@ -37,6 +44,17 @@ pub enum NumericKind {
     Float32,
     /// Non-convergent across replicas — see the type-level convergence warning above.
     Float64,
+}
+
+impl NumericKind {
+    /// How a document value stores a counter of this kind.
+    pub fn value_kind(self) -> ValueKind {
+        match self {
+            NumericKind::Int64 => ValueKind::Int64,
+            NumericKind::Float32 => ValueKind::Float32,
+            NumericKind::Float64 => ValueKind::Float64,
+        }
+    }
 }
 
 /// Counter Delta - represents an increment/decrement operation
@@ -191,6 +209,35 @@ impl CounterDelta {
         self.kind
     }
 
+    /// The increment as a value, once it is checked against a counter of
+    /// `kind` that accepts a negative increment only with `allow_decrement`.
+    pub fn checked_value(&self, kind: NumericKind, allow_decrement: bool) -> Result<NormalValue> {
+        if self.kind != kind {
+            return Err(Error::MergeError(format!(
+                "numeric kind mismatch for field '{}': counter is {:?}, delta is {:?}",
+                self.field_name, kind, self.kind
+            )));
+        }
+        let (negative, value) = match kind {
+            NumericKind::Int64 => {
+                let value = self.decode_int64()?;
+                (value < 0, NormalValue::Int(value))
+            }
+            NumericKind::Float32 => {
+                let value = self.decode_float32()?;
+                (value < 0.0, NormalValue::Float32(value))
+            }
+            NumericKind::Float64 => {
+                let value = self.decode_float64()?;
+                (value < 0.0, NormalValue::Float64(value))
+            }
+        };
+        if negative && !allow_decrement {
+            return Err(Error::MergeError("decrement not allowed".into()));
+        }
+        Ok(value)
+    }
+
     /// Decode the increment value as i64
     pub fn decode_int64(&self) -> Result<i64> {
         let arr: [u8; 8] = self.data[..].try_into().map_err(|_| {
@@ -253,12 +300,15 @@ impl Delta for CounterDelta {
 
 /// Counter CRDT - supports increment/decrement with commutative merge
 ///
-/// This CRDT does not own storage. Instead, it receives a `ReaderWriter`
-/// reference for each operation, matching Go DefraDB's pattern where
-/// CRDTs operate on a provided `corekv.ReaderWriter`.
+/// This CRDT does not own storage. It receives a `ReaderWriter` for each
+/// operation, matching Go DefraDB's pattern where CRDTs operate on a provided
+/// `corekv.ReaderWriter`, and keeps its value in part `part` of the document
+/// value stored at `value_key`.
 pub struct Counter {
-    /// Storage key for the counter value
+    /// Key of the document value holding the counter
     value_key: Vec<u8>,
+    /// The counter's part ID in that document value
+    part: u32,
     /// Schema version
     schema_version_id: String,
     /// Field name
@@ -274,16 +324,18 @@ impl Counter {
     ///
     /// # Arguments
     /// * `schema_version_id` - Schema version identifier (must not be empty)
-    /// * `doc_id` - Document identifier (must not be empty)
+    /// * `value_key` - Key of the document value (must not be empty)
+    /// * `part` - The field's part ID in that value
     /// * `field_name` - Field name (must not be empty)
     /// * `allow_decrement` - Whether negative increments are allowed
-    /// * `kind` - Numeric type (Int64 or Float64)
+    /// * `kind` - Numeric type (Int64, Float32 or Float64)
     ///
     /// # Errors
-    /// Returns an error if schema_version_id, doc_id, or field_name is empty.
+    /// Returns an error if schema_version_id, value_key, or field_name is empty.
     pub fn new(
         schema_version_id: String,
-        doc_id: &[u8],
+        value_key: Vec<u8>,
+        part: u32,
         field_name: String,
         allow_decrement: bool,
         kind: NumericKind,
@@ -293,21 +345,15 @@ impl Counter {
                 "schema_version_id cannot be empty".into(),
             ));
         }
-        if doc_id.is_empty() {
-            return Err(Error::MergeError("doc_id cannot be empty".into()));
+        if value_key.is_empty() {
+            return Err(Error::MergeError("value_key cannot be empty".into()));
         }
         if field_name.is_empty() {
             return Err(Error::MergeError("field_name cannot be empty".into()));
         }
-
-        let value_key = CRDTValueKey::new(
-            schema_version_id.clone(),
-            doc_id.to_vec(),
-            field_name.clone(),
-        );
-
         Ok(Self {
-            value_key: value_key.bytes(),
+            value_key,
+            part,
             schema_version_id,
             field_name,
             allow_decrement,
@@ -315,150 +361,63 @@ impl Counter {
         })
     }
 
-    /// Set value as i64
-    async fn set_int64(&self, rw: &mut dyn ReaderWriter, value: i64) -> Result<()> {
-        rw.set(&self.value_key, &value.to_be_bytes())
-            .await
-            .map_err(|e| Error::Storage(e.to_string()))
+    /// The document operand that adds `delta`, after checking it is a delta
+    /// this counter accepts.
+    fn operand(&self, delta: &CounterDelta) -> Result<Vec<u8>> {
+        let value = delta.checked_value(self.kind, self.allow_decrement)?;
+        let part = StoredField::counter(
+            self.field_name.clone(),
+            self.kind.value_kind(),
+            delta.priority(),
+            &value,
+        )
+        .map_err(|error| Error::MergeError(error.to_string()))?;
+        storage::merge::document_parts(&StoredDocument {
+            fields: [(self.part, part)].into(),
+        })
+        .ok_or_else(|| {
+            Error::MergeError(format!("invalid counter delta for '{}'", self.field_name))
+        })
     }
 
-    /// Set value as f32
-    async fn set_float32(&self, rw: &mut dyn ReaderWriter, value: f32) -> Result<()> {
-        rw.set(&self.value_key, &value.to_be_bytes())
-            .await
-            .map_err(|e| Error::Storage(e.to_string()))
-    }
-
-    /// Set value as f64
-    async fn set_float64(&self, rw: &mut dyn ReaderWriter, value: f64) -> Result<()> {
-        rw.set(&self.value_key, &value.to_be_bytes())
-            .await
-            .map_err(|e| Error::Storage(e.to_string()))
-    }
-
-    /// Apply an increment/decrement.
+    /// Apply an increment/decrement as a blind merge of its operand.
     ///
     /// Merge is unconditional: every delta that reaches this method is
-    /// applied. Per-delta idempotency is the blockstore's job via
-    /// `is_merged(cid)` / `get_unmerged()` on every ingest path (PushLog,
-    /// DAG traversal, crash recovery). Do not reintroduce a nonce-based
-    /// dedup check here — doing so causes Rust↔Go state divergence on
-    /// legitimate block retransmits (#847). The `delta.nonce` field
-    /// exists only so the resulting DAG block has a unique CID.
+    /// applied. Per-delta idempotency is the caller's applied key and the
+    /// blockstore's `is_merged(cid)` / `get_unmerged()` on every ingest path
+    /// (PushLog, DAG traversal, crash recovery). Do not reintroduce a
+    /// nonce-based dedup check here: doing so causes Rust/Go state divergence
+    /// on legitimate block retransmits (#847). The `delta.nonce` field exists
+    /// only so the resulting DAG block has a unique CID.
     async fn apply_delta(
         &self,
         rw: &mut dyn ReaderWriter,
         delta: &CounterDelta,
-        is_create: bool,
     ) -> Result<MergeResult> {
-        // Validate numeric kind matches
-        if delta.kind() != self.kind {
-            return Err(Error::MergeError(format!(
-                "numeric kind mismatch for field '{}': counter is {:?}, delta is {:?}",
-                self.field_name,
-                self.kind,
-                delta.kind()
-            )));
-        }
-
-        // Validate before staging the operand. No read of the counter is needed.
-        let (value, operand) = match self.kind {
-            NumericKind::Int64 => {
-                let value = delta.decode_int64()?;
-                if !self.allow_decrement && value < 0 {
-                    return Err(Error::MergeError("decrement not allowed".into()));
-                }
-                (
-                    value.to_be_bytes().to_vec(),
-                    storage::merge::counter_i64(value),
-                )
-            }
-            NumericKind::Float32 => {
-                let value = delta.decode_float32()?;
-                if !self.allow_decrement && value < 0.0 {
-                    return Err(Error::MergeError("decrement not allowed".into()));
-                }
-                (
-                    value.to_be_bytes().to_vec(),
-                    storage::merge::counter_f32(value),
-                )
-            }
-            NumericKind::Float64 => {
-                let value = delta.decode_float64()?;
-                if !self.allow_decrement && value < 0.0 {
-                    return Err(Error::MergeError("decrement not allowed".into()));
-                }
-                (
-                    value.to_be_bytes().to_vec(),
-                    storage::merge::counter_f64(value),
-                )
-            }
-        };
-        if is_create {
-            rw.set(&self.value_key, &value).await
-        } else {
-            rw.merge(&self.value_key, &operand).await
-        }
-        .map_err(|error| Error::Storage(error.to_string()))?;
-
+        let operand = self.operand(delta)?;
+        rw.merge(&self.value_key, &operand)
+            .await
+            .map_err(|error| Error::Storage(error.to_string()))?;
         Ok(MergeResult::Applied)
     }
 
-    /// Seed an absent counter during creation. Existing stores are authoritative;
-    /// no value is adopted from a materialized document during an update.
-    pub async fn reconcile_int64(&self, rw: &mut dyn ReaderWriter, value: i64) -> Result<()> {
-        if !self.has_value(rw).await? {
-            self.set_int64(rw, value).await?;
-        }
-        Ok(())
-    }
-
-    pub async fn reconcile_float64(&self, rw: &mut dyn ReaderWriter, value: f64) -> Result<()> {
-        if !self.has_value(rw).await? {
-            self.set_float64(rw, value).await?;
-        }
-        Ok(())
-    }
-
-    pub async fn reconcile_float32(&self, rw: &mut dyn ReaderWriter, value: f32) -> Result<()> {
-        if !self.has_value(rw).await? {
-            self.set_float32(rw, value).await?;
-        }
-        Ok(())
-    }
-
-    /// Whether the accumulation store (`value_key`) currently holds a value.
-    async fn has_value(&self, reader: &dyn Reader) -> Result<bool> {
-        // Present accumulators are updated only through blind operands. The
-        // document's deletion/version dependencies protect their lifecycle.
-        if reader
+    /// Current value bytes. The read is never validated: no decision rests on
+    /// it, and an increment must not turn into a read-modify-write.
+    async fn get_value_internal(&self, reader: &dyn Reader) -> Result<Bytes> {
+        let missing = || {
+            Error::MergeError(format!(
+                "counter value not found for field '{}' in schema '{}'",
+                self.field_name, self.schema_version_id
+            ))
+        };
+        let bytes = reader
             .get_parts(&self.value_key, &[])
             .await
-            .map_err(|error| Error::Storage(error.to_string()))?
-            .is_some()
-        {
-            return Ok(true);
-        }
-        // First initialization (including a new schema version) is a one-winner
-        // race. An absent point read must be validated before putting the seed.
-        reader
-            .has(&self.value_key)
-            .await
-            .map_err(|error| Error::Storage(error.to_string()))
-    }
-
-    /// Get current value bytes (for internal use)
-    async fn get_value_internal(&self, reader: &dyn Reader) -> Result<Bytes> {
-        reader
-            .get(&self.value_key)
-            .await
             .map_err(|e| Error::Storage(e.to_string()))?
-            .ok_or_else(|| {
-                Error::MergeError(format!(
-                    "counter value not found for field '{}' in schema '{}'",
-                    self.field_name, self.schema_version_id
-                ))
-            })
+            .ok_or_else(missing)?;
+        let stored = StoredDocument::decode(&bytes).ok_or_else(missing)?;
+        let field = stored.fields.get(&self.part).ok_or_else(missing)?;
+        Ok(Bytes::copy_from_slice(&field.value))
     }
 }
 
@@ -468,7 +427,7 @@ impl ReplicatedData for Counter {
     async fn merge(
         &self,
         rw: &mut dyn ReaderWriter,
-        ctx: &Context,
+        _ctx: &Context,
         delta: &dyn Delta,
     ) -> Result<MergeResult> {
         // Downcast to CounterDelta
@@ -497,8 +456,7 @@ impl ReplicatedData for Counter {
             )));
         }
 
-        // Apply delta
-        self.apply_delta(rw, counter_delta, ctx.is_create).await
+        self.apply_delta(rw, counter_delta).await
     }
 }
 

@@ -95,8 +95,15 @@ fn make_counter_setup(
     initial: &CounterDelta,
 ) -> (Box<dyn Txn>, Counter, Context) {
     block_on(async move {
-        let counter =
-            Counter::new("v1".to_string(), b"doc1", "count".to_string(), true, kind).unwrap();
+        let counter = Counter::new(
+            "v1".to_string(),
+            b"doc1".to_vec(),
+            0,
+            "count".to_string(),
+            true,
+            kind,
+        )
+        .unwrap();
         let ctx = make_context();
         let mut txn = RegolithStore::in_memory()
             .unwrap()

@@ -13,6 +13,15 @@ use defra_core::types::DocId;
 use std::collections::HashMap;
 use storage::{RegolithStore, Store};
 
+/// A composite stores each counter field as a one-part document value.
+fn counter_part(bytes: &[u8]) -> Vec<u8> {
+    document::stored::StoredDocument::decode(bytes)
+        .unwrap()
+        .fields[&0]
+        .value
+        .clone()
+}
+
 #[tokio::test]
 async fn test_composite_multiple_fields() {
     let store = RegolithStore::in_memory().unwrap();
@@ -64,7 +73,7 @@ async fn test_composite_multiple_fields() {
     // Verify count field
     let count_key = b"/data/v1/doc1/count".to_vec();
     let count_bytes = txn.get(&count_key).await.unwrap().unwrap();
-    let count = i64::from_be_bytes(count_bytes.as_ref().try_into().unwrap());
+    let count = i64::from_be_bytes(counter_part(&count_bytes).try_into().unwrap());
     assert_eq!(count, 5);
 }
 
@@ -318,7 +327,7 @@ async fn test_composite_float64_counter_overflow_becomes_positive_infinity() {
     let txn = store.new_txn(true).await.unwrap();
     let count_key = b"/data/v1/doc1/count".to_vec();
     let count_bytes = txn.get(&count_key).await.unwrap().unwrap();
-    let count = f64::from_be_bytes(count_bytes.as_ref().try_into().unwrap());
+    let count = f64::from_be_bytes(counter_part(&count_bytes).try_into().unwrap());
     assert!(count.is_infinite());
     assert!(count.is_sign_positive());
 }
@@ -354,7 +363,7 @@ async fn test_composite_float64_counter_nan_increment_propagates_nan() {
     let txn = store.new_txn(true).await.unwrap();
     let count_key = b"/data/v1/doc1/count".to_vec();
     let count_bytes = txn.get(&count_key).await.unwrap().unwrap();
-    let count = f64::from_be_bytes(count_bytes.as_ref().try_into().unwrap());
+    let count = f64::from_be_bytes(counter_part(&count_bytes).try_into().unwrap());
     assert!(count.is_nan());
 }
 
@@ -389,7 +398,7 @@ async fn test_composite_float64_counter_negative_zero_normalizes_to_positive_zer
     let txn = store.new_txn(true).await.unwrap();
     let count_key = b"/data/v1/doc1/count".to_vec();
     let count_bytes = txn.get(&count_key).await.unwrap().unwrap();
-    let count = f64::from_be_bytes(count_bytes.as_ref().try_into().unwrap());
+    let count = f64::from_be_bytes(counter_part(&count_bytes).try_into().unwrap());
     assert_eq!(count.to_bits(), 0.0f64.to_bits());
 }
 

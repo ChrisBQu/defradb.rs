@@ -71,6 +71,148 @@ fn document_folds_and_touches_obey_engine_contracts() {
     assert!(checked.folds > 0);
 }
 
+/// Parts 0 to 2 are counters of `kind`, part 3 an LWW field; each part keeps
+/// one name, as a document value's parts do.
+#[cfg(not(target_arch = "wasm32"))]
+fn mixed_parts(
+    kind: ValueKind,
+) -> impl regolith::testing::proptest::strategy::Strategy<Value = StoredDocument> + Clone {
+    use regolith::testing::proptest::prelude::*;
+    let part = (0u32..4, 1u64..4, -1000i64..1000).prop_map(move |(id, priority, value)| {
+        let field = if id < 3 {
+            StoredField::counter(
+                format!("count{id}"),
+                kind,
+                priority,
+                &NormalValue::Int(value),
+            )
+            .unwrap()
+        } else {
+            StoredField::lww(format!("field{id}"), priority, &NormalValue::Int(value)).unwrap()
+        };
+        (id, field)
+    });
+    regolith::testing::proptest::collection::vec(part, 1..3).prop_map(|parts| StoredDocument {
+        fields: parts.into_iter().collect(),
+    })
+}
+
+/// Integer counter parts fold exactly in any grouping, alone or beside LWW
+/// parts, and a folded operand touches exactly the parts its operands touch.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn integer_counter_parts_fold_exactly_and_touch_only_their_parts() {
+    let documents = mixed_parts(ValueKind::Int64);
+    let operands = {
+        use regolith::testing::proptest::prelude::*;
+        documents
+            .clone()
+            .prop_map(|value| document_parts(&value).unwrap())
+    };
+    let checked = regolith::testing::check_merge_operator(
+        &DefraMergeOperator,
+        regolith::testing::proptest::prelude::Just(b"doc".to_vec()),
+        {
+            use regolith::testing::proptest::prelude::*;
+            documents.prop_map(|value| value.encode().unwrap())
+        },
+        operands.clone(),
+    )
+    .unwrap();
+    assert!(checked.folds > 0, "integer counter operands must fold");
+    let count = |value: i64| {
+        document_parts(&StoredDocument {
+            fields: [(
+                0,
+                StoredField::counter(
+                    "count0".into(),
+                    ValueKind::Int64,
+                    1,
+                    &NormalValue::Int(value),
+                )
+                .unwrap(),
+            )]
+            .into(),
+        })
+        .unwrap()
+    };
+    assert_eq!(
+        DefraMergeOperator.partial_merge(b"doc", &count(i64::MAX), &count(2)),
+        Some(count(i64::MIN + 1)),
+        "two increments of one counter fold into their wrapping sum"
+    );
+    let checked = regolith::testing::check_touches(
+        &DefraMergeOperator,
+        regolith::testing::proptest::prelude::Just(b"doc".to_vec()),
+        operands,
+        regolith::testing::proptest::collection::vec(0u32..5, 0..6),
+    )
+    .unwrap();
+    assert!(checked.folds > 0);
+}
+
+/// Floating-point counter parts keep their order: no early fold, and
+/// `full_merge` agrees with applying the operands one at a time.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn float_counter_parts_are_not_folded_early() {
+    use regolith::testing::proptest::prelude::*;
+    for kind in [ValueKind::Float32, ValueKind::Float64] {
+        let documents = mixed_parts(kind);
+        regolith::testing::check_merge_operator(
+            &DefraMergeOperator,
+            Just(b"doc".to_vec()),
+            documents.clone().prop_map(|value| value.encode().unwrap()),
+            documents.prop_map(|value| document_parts(&value).unwrap()),
+        )
+        .unwrap();
+    }
+    let float = |value: f64| {
+        document_parts(&StoredDocument {
+            fields: [(
+                0,
+                StoredField::counter(
+                    "count".into(),
+                    ValueKind::Float64,
+                    1,
+                    &NormalValue::Float64(value),
+                )
+                .unwrap(),
+            )]
+            .into(),
+        })
+        .unwrap()
+    };
+    assert!(DefraMergeOperator
+        .partial_merge(b"doc", &float(1e20), &float(-1e20))
+        .is_none());
+}
+
+/// A counter part the stored value lacks starts from zero: a negative-zero
+/// increment reads back as zero, as it would on a stored zero.
+#[test]
+fn an_absent_counter_part_starts_from_zero() {
+    let increment = document_parts(&StoredDocument {
+        fields: [(
+            0,
+            StoredField::counter(
+                "count".into(),
+                ValueKind::Float64,
+                1,
+                &NormalValue::Float64(-0.0),
+            )
+            .unwrap(),
+        )]
+        .into(),
+    })
+    .unwrap();
+    let bytes = DefraMergeOperator
+        .full_merge(b"doc", None, &[&increment])
+        .unwrap();
+    let stored = StoredDocument::decode(&bytes).unwrap();
+    assert_eq!(stored.fields[&0].value, 0.0f64.to_be_bytes());
+}
+
 #[tokio::test]
 async fn disjoint_document_operands_commit_and_projected_reads_validate_only_named_fields() {
     let store = RegolithStore::in_memory().unwrap();

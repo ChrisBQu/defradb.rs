@@ -7,7 +7,6 @@
 //! - Float64 support
 //! - Validation and error cases
 
-use bytes::Bytes;
 use crdt::traits::{Context, MergeResult, ReplicatedData, ValueReader};
 use crdt::{Counter, CounterDelta, LwwDelta, NumericKind};
 use defra_core::types::DocId;
@@ -18,7 +17,8 @@ async fn test_counter_increment() {
     let store = RegolithStore::in_memory().unwrap();
     let counter = Counter::new(
         "v1".to_string(),
-        b"doc1",
+        b"doc1".to_vec(),
+        0,
         "count".to_string(),
         true,
         NumericKind::Int64,
@@ -75,7 +75,8 @@ async fn test_counter_retransmit_applies_twice() {
     let store = RegolithStore::in_memory().unwrap();
     let counter = Counter::new(
         "v1".to_string(),
-        b"doc1",
+        b"doc1".to_vec(),
+        0,
         "count".to_string(),
         true,
         NumericKind::Int64,
@@ -120,7 +121,8 @@ async fn test_counter_decrement_not_allowed() {
     let store = RegolithStore::in_memory().unwrap();
     let counter = Counter::new(
         "v1".to_string(),
-        b"doc1",
+        b"doc1".to_vec(),
+        0,
         "count".to_string(),
         false, // Decrement not allowed
         NumericKind::Int64,
@@ -155,7 +157,8 @@ async fn test_counter_overflow_wrapping() {
     let store = RegolithStore::in_memory().unwrap();
     let counter = Counter::new(
         "v1".to_string(),
-        b"doc1",
+        b"doc1".to_vec(),
+        0,
         "count".to_string(),
         true,
         NumericKind::Int64,
@@ -208,7 +211,8 @@ async fn test_counter_field_name_mismatch() {
     let store = RegolithStore::in_memory().unwrap();
     let counter = Counter::new(
         "v1".to_string(),
-        b"doc1",
+        b"doc1".to_vec(),
+        0,
         "count".to_string(),
         true,
         NumericKind::Int64,
@@ -247,7 +251,8 @@ async fn test_counter_schema_version_mismatch() {
     let store = RegolithStore::in_memory().unwrap();
     let counter = Counter::new(
         "v1".to_string(),
-        b"doc1",
+        b"doc1".to_vec(),
+        0,
         "count".to_string(),
         true,
         NumericKind::Int64,
@@ -325,7 +330,8 @@ async fn test_counter_float64_overflow_becomes_positive_infinity() {
     let store = RegolithStore::in_memory().unwrap();
     let counter = Counter::new(
         "v1".to_string(),
-        b"doc1",
+        b"doc1".to_vec(),
+        0,
         "count".to_string(),
         true,
         NumericKind::Float64,
@@ -376,7 +382,8 @@ async fn test_counter_float64_nan_increment_propagates_nan() {
     let store = RegolithStore::in_memory().unwrap();
     let counter = Counter::new(
         "v1".to_string(),
-        b"doc1",
+        b"doc1".to_vec(),
+        0,
         "count".to_string(),
         true,
         NumericKind::Float64,
@@ -413,7 +420,8 @@ async fn test_counter_float64_negative_zero_normalizes_to_positive_zero() {
     let store = RegolithStore::in_memory().unwrap();
     let counter = Counter::new(
         "v1".to_string(),
-        b"doc1",
+        b"doc1".to_vec(),
+        0,
         "count".to_string(),
         true,
         NumericKind::Float64,
@@ -450,7 +458,8 @@ async fn test_counter_float64_basic() {
     let store = RegolithStore::in_memory().unwrap();
     let counter = Counter::new(
         "v1".to_string(),
-        b"doc1",
+        b"doc1".to_vec(),
+        0,
         "count".to_string(),
         true,
         NumericKind::Float64,
@@ -502,7 +511,8 @@ async fn test_counter_merge_result_applied() {
     let store = RegolithStore::in_memory().unwrap();
     let counter = Counter::new(
         "v1".to_string(),
-        b"doc1",
+        b"doc1".to_vec(),
+        0,
         "count".to_string(),
         true,
         NumericKind::Int64,
@@ -536,7 +546,8 @@ async fn test_counter_wrong_delta_type() {
     let store = RegolithStore::in_memory().unwrap();
     let counter = Counter::new(
         "v1".to_string(),
-        b"doc1",
+        b"doc1".to_vec(),
+        0,
         "count".to_string(),
         true,
         NumericKind::Int64,
@@ -574,7 +585,8 @@ async fn test_counter_numeric_kind_mismatch() {
     let store = RegolithStore::in_memory().unwrap();
     let counter = Counter::new(
         "v1".to_string(),
-        b"doc1",
+        b"doc1".to_vec(),
+        0,
         "count".to_string(),
         true,
         NumericKind::Int64, // Int64 counter
@@ -612,7 +624,8 @@ async fn test_counter_numeric_kind_mismatch() {
 fn test_counter_constructor_empty_schema_version() {
     let result = Counter::new(
         "".to_string(),
-        b"doc1",
+        b"doc1".to_vec(),
+        0,
         "count".to_string(),
         true,
         NumericKind::Int64,
@@ -625,24 +638,26 @@ fn test_counter_constructor_empty_schema_version() {
 }
 
 #[test]
-fn test_counter_constructor_empty_doc_id() {
+fn test_counter_constructor_empty_value_key() {
     let result = Counter::new(
         "v1".to_string(),
-        b"",
+        b"".to_vec(),
+        0,
         "count".to_string(),
         true,
         NumericKind::Int64,
     );
     assert!(result.is_err());
     let err = result.err().unwrap();
-    assert!(err.to_string().contains("doc_id cannot be empty"));
+    assert!(err.to_string().contains("value_key cannot be empty"));
 }
 
 #[test]
 fn test_counter_constructor_empty_field_name() {
     let result = Counter::new(
         "v1".to_string(),
-        b"doc1",
+        b"doc1".to_vec(),
+        0,
         "".to_string(),
         true,
         NumericKind::Int64,
@@ -691,7 +706,8 @@ async fn test_counter_float32_basic() {
     let store = RegolithStore::in_memory().unwrap();
     let counter = Counter::new(
         "v1".to_string(),
-        b"doc1",
+        b"doc1".to_vec(),
+        0,
         "score".to_string(),
         true,
         NumericKind::Float32,
@@ -733,7 +749,8 @@ async fn test_counter_float32_accumulation_uses_f32_precision() {
     let store = RegolithStore::in_memory().unwrap();
     let counter = Counter::new(
         "v1".to_string(),
-        b"doc1",
+        b"doc1".to_vec(),
+        0,
         "score".to_string(),
         true,
         NumericKind::Float32,
@@ -771,67 +788,4 @@ async fn test_counter_float32_accumulation_uses_f32_precision() {
         value, f64_result,
         "Float32 result should differ from f64-promoted arithmetic"
     );
-}
-
-/// Creation may seed an absent accumulator, but never migrate it via max.
-#[tokio::test]
-async fn test_pcounter_seed_never_overwrites_an_accumulator() {
-    let store = RegolithStore::in_memory().unwrap();
-    // allow_decrement = false => PCounter.
-    let counter = Counter::new(
-        "v1".to_string(),
-        b"doc1",
-        "count".to_string(),
-        false,
-        NumericKind::Int64,
-    )
-    .unwrap();
-    let mut txn = store.new_txn(false).await.unwrap();
-
-    let read = |bytes: Bytes| i64::from_be_bytes(bytes.as_ref().try_into().unwrap());
-
-    // Absent -> initialize from the materialized value.
-    counter.reconcile_int64(&mut *txn, 5).await.unwrap();
-    assert_eq!(read(counter.value(&*txn).await.unwrap()), 5);
-
-    // A materialized mirror never replaces the authoritative accumulator.
-    counter.reconcile_int64(&mut *txn, 8).await.unwrap();
-    assert_eq!(read(counter.value(&*txn).await.unwrap()), 5);
-
-    // Present and AHEAD of the passed value (intra-batch lag) -> no-op, never lower.
-    counter.reconcile_int64(&mut *txn, 3).await.unwrap();
-    assert_eq!(read(counter.value(&*txn).await.unwrap()), 5);
-
-    txn.commit().await.unwrap();
-}
-
-/// PNCounter (decrement-capable) reconcile stays STRICT init-if-absent: a present
-/// store is never overwritten. With decrements allowed, `value < store` is
-/// ambiguous (a legitimate decrement vs. a stale store), so `max` would be unsound.
-#[tokio::test]
-async fn test_pncounter_reconcile_init_if_absent_only() {
-    let store = RegolithStore::in_memory().unwrap();
-    // allow_decrement = true => PNCounter.
-    let counter = Counter::new(
-        "v1".to_string(),
-        b"doc1",
-        "count".to_string(),
-        true,
-        NumericKind::Int64,
-    )
-    .unwrap();
-    let mut txn = store.new_txn(false).await.unwrap();
-
-    let read = |bytes: Bytes| i64::from_be_bytes(bytes.as_ref().try_into().unwrap());
-
-    counter.reconcile_int64(&mut *txn, 5).await.unwrap();
-    assert_eq!(read(counter.value(&*txn).await.unwrap()), 5);
-
-    // Present -> never overwritten, regardless of the value passed (higher or lower).
-    counter.reconcile_int64(&mut *txn, 8).await.unwrap();
-    assert_eq!(read(counter.value(&*txn).await.unwrap()), 5);
-    counter.reconcile_int64(&mut *txn, 2).await.unwrap();
-    assert_eq!(read(counter.value(&*txn).await.unwrap()), 5);
-
-    txn.commit().await.unwrap();
 }

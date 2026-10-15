@@ -25,6 +25,10 @@ fn decode(bytes: &[u8]) -> Option<(u8, &[u8])> {
     Some((*bytes.first()?, &bytes[1..]))
 }
 
+/// Operands of the standalone counter values written before counters became
+/// parts of the document value. Nothing writes them now; the operator still
+/// folds them so a store keeps reading until the counter migration moves them
+/// into their documents.
 pub fn counter_i64(delta: i64) -> Vec<u8> {
     encode(INT64, &delta.to_be_bytes())
 }
@@ -140,13 +144,19 @@ impl MergeOperator for DefraMergeOperator {
         if let (Some((DOCUMENT, left)), Some((DOCUMENT, right))) = (decode(left), decode(right)) {
             let mut left = document::stored::StoredDocument::decode(left)?;
             let right = document::stored::StoredDocument::decode(right)?;
-            // A join of LWW fields is associative, including deletion markers.
-            // Counter operands retain order (especially floating-point sums).
+            // A join of LWW fields is associative, including deletion markers,
+            // and wrapping integer counter sums are exact in any grouping.
+            // Floating-point counter sums are not, so they keep their order.
             if left
                 .fields
                 .values()
                 .chain(right.fields.values())
-                .any(|field| field.kind != document::stored::ValueKind::Lww)
+                .any(|field| {
+                    !matches!(
+                        field.kind,
+                        document::stored::ValueKind::Lww | document::stored::ValueKind::Int64
+                    )
+                })
             {
                 return None;
             }

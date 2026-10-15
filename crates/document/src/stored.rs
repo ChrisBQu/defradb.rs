@@ -42,6 +42,43 @@ impl StoredField {
         })
     }
 
+    /// A counter part: its value for a document put, or its increment for an
+    /// operand. Integers, `Float32` and `Float64` convert as the schema kind
+    /// says; an LWW kind is refused.
+    pub fn counter(
+        name: String,
+        kind: ValueKind,
+        priority: u64,
+        value: &NormalValue,
+    ) -> Result<Self> {
+        let bytes = match kind {
+            ValueKind::Int64 => value.as_int().map(|v| v.to_be_bytes().to_vec()),
+            ValueKind::Float32 => value
+                .as_float32()
+                .or_else(|| value.as_float64().map(|v| v as f32))
+                .or_else(|| value.as_int().map(|v| v as f32))
+                .map(|v| v.to_be_bytes().to_vec()),
+            ValueKind::Float64 => value
+                .as_float64()
+                .or_else(|| value.as_float32().map(f64::from))
+                .or_else(|| value.as_int().map(|v| v as f64))
+                .map(|v| v.to_be_bytes().to_vec()),
+            ValueKind::Lww => None,
+        };
+        let Some(value) = bytes else {
+            return Err(Error::InvalidFieldValue {
+                field: name,
+                message: format!("not a counter value of kind {kind:?}"),
+            });
+        };
+        Ok(Self {
+            name,
+            kind,
+            priority,
+            value,
+        })
+    }
+
     pub fn materialize(&self) -> Option<NormalValue> {
         match self.kind {
             ValueKind::Lww if self.value.is_empty() => Some(NormalValue::Null),
@@ -159,7 +196,7 @@ impl StoredDocument {
     /// Apply one operand in commit order. Callers put a fresh value instead
     /// when the schema version changes; IDs and names cannot be repurposed.
     pub fn apply(&mut self, operand: Self) -> Option<()> {
-        for (id, incoming) in operand.fields {
+        for (id, mut incoming) in operand.fields {
             let Some(current) = self.fields.get_mut(&id) else {
                 if self
                     .fields
@@ -167,6 +204,16 @@ impl StoredDocument {
                     .any(|field| field.name == incoming.name)
                 {
                     return None;
+                }
+                // A counter part the value lacks starts from zero, so the
+                // increment lands exactly as it would on a stored zero.
+                if incoming.kind != ValueKind::Lww {
+                    let zero: &[u8] = if incoming.kind == ValueKind::Float32 {
+                        &[0; 4]
+                    } else {
+                        &[0; 8]
+                    };
+                    incoming.value = counter_sum(incoming.kind, zero, &incoming.value)?;
                 }
                 self.fields.insert(id, incoming);
                 continue;
@@ -181,29 +228,56 @@ impl StoredDocument {
                     }
                     incoming.value
                 }
-                ValueKind::Int64 => i64::from_be_bytes(current.value.as_slice().try_into().ok()?)
-                    .wrapping_add(i64::from_be_bytes(
-                        incoming.value.as_slice().try_into().ok()?,
-                    ))
-                    .to_be_bytes()
-                    .to_vec(),
-                ValueKind::Float32 => {
-                    (f32::from_be_bytes(current.value.as_slice().try_into().ok()?)
-                        + f32::from_be_bytes(incoming.value.as_slice().try_into().ok()?))
-                    .to_be_bytes()
-                    .to_vec()
-                }
-                ValueKind::Float64 => {
-                    (f64::from_be_bytes(current.value.as_slice().try_into().ok()?)
-                        + f64::from_be_bytes(incoming.value.as_slice().try_into().ok()?))
-                    .to_be_bytes()
-                    .to_vec()
-                }
+                kind => counter_sum(kind, &current.value, &incoming.value)?,
             };
             current.priority = current.priority.max(incoming.priority);
         }
         Some(())
     }
+}
+
+/// `current + increment` for a counter of `kind`, both big-endian: wrapping
+/// for integers, IEEE-754 addition at the kind's own precision for floats.
+fn counter_sum(kind: ValueKind, current: &[u8], increment: &[u8]) -> Option<Vec<u8>> {
+    Some(match kind {
+        ValueKind::Int64 => i64::from_be_bytes(current.try_into().ok()?)
+            .wrapping_add(i64::from_be_bytes(increment.try_into().ok()?))
+            .to_be_bytes()
+            .to_vec(),
+        ValueKind::Float32 => (f32::from_be_bytes(current.try_into().ok()?)
+            + f32::from_be_bytes(increment.try_into().ok()?))
+        .to_be_bytes()
+        .to_vec(),
+        ValueKind::Float64 => (f64::from_be_bytes(current.try_into().ok()?)
+            + f64::from_be_bytes(increment.try_into().ok()?))
+        .to_be_bytes()
+        .to_vec(),
+        ValueKind::Lww => return None,
+    })
+}
+
+/// `stored` plus `delta` for a counter of `kind`, added exactly as the merge
+/// operator adds an increment to a stored value. An absent value counts as 0.
+pub fn add_counter(
+    name: &str,
+    kind: ValueKind,
+    stored: Option<&NormalValue>,
+    delta: &NormalValue,
+) -> Result<NormalValue> {
+    const ZERO: NormalValue = NormalValue::Int(0);
+    let part = |value| StoredField::counter(name.to_owned(), kind, 0, value);
+    let mut sum = StoredDocument {
+        fields: [(0, part(stored.unwrap_or(&ZERO))?)].into(),
+    };
+    let increment = StoredDocument {
+        fields: [(0, part(delta)?)].into(),
+    };
+    sum.apply(increment)
+        .and_then(|()| sum.fields.get(&0)?.materialize())
+        .ok_or_else(|| Error::InvalidFieldValue {
+            field: name.to_owned(),
+            message: "the counter sum cannot be stored".into(),
+        })
 }
 
 fn take<'a>(input: &mut &'a [u8], length: usize) -> Option<&'a [u8]> {

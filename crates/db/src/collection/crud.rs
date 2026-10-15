@@ -55,7 +55,8 @@ impl Collection {
     }
 
     /// Read the complete document while validating only the named field parts
-    /// when the stored schema version is current. A lens transition needs the
+    /// when the stored schema version is current; with no fields, nothing is
+    /// validated but the deletion marker. A lens transition needs the
     /// conservative whole-blob dependency.
     pub(crate) async fn get_with_datastore_fields(
         &self,
@@ -64,11 +65,6 @@ impl Collection {
         doc_id: &DocID,
         fields: &rapidhash::RapidHashSet<String>,
     ) -> Result<Option<Document>> {
-        if fields.is_empty() {
-            return self
-                .get_with_datastore(datastore, doc_short_id, doc_id)
-                .await;
-        }
         let deleted_key = self.deleted_key(doc_short_id);
         if datastore.has(&deleted_key).await.map_err(Error::Storage)? {
             return Ok(None);
@@ -82,8 +78,9 @@ impl Collection {
                 .collect::<Option<Vec<_>>>()
         });
         let key = self.doc_key(doc_short_id);
+        // No fields is a read no decision rests on, never validated.
         let data = match (version.as_deref() == Some(self.version_id()), parts) {
-            (true, Some(parts)) if !parts.is_empty() => {
+            (true, Some(parts)) => {
                 let projected = datastore
                     .get_parts(&key, &parts)
                     .await

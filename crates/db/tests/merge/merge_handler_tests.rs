@@ -4,11 +4,8 @@ use blockstore::DefraBlockstore;
 use cid::Cid;
 use crdt::traits::Context;
 use crdt::traits::ReplicatedData;
-use crdt::traits::ValueReader;
-use crdt::Counter;
 use crdt::Lww;
 use crdt::LwwDelta;
-use crdt::NumericKind;
 use crypto::PrivateKey as _;
 use db::collection::Collection;
 use db::database::DB;
@@ -948,8 +945,11 @@ async fn synced_collection_definition_persists_short_id_mapping() {
     );
 }
 
+/// A standalone counter block for a document whose value does not exist yet
+/// is left to its composite: applying it alone would write a value holding
+/// one part. The composite applies it once and marks it merged.
 #[tokio::test]
-async fn counter_merge_marks_cid_merged() {
+async fn counter_merge_of_an_unmaterialized_document_waits_for_its_composite() {
     let (handler, blockstore) = make_handler_with_counter_schema().await;
     let doc_id = DocID::new_v0(
         "bafyreihgg6a5auqhikq4nvw6fj3kbreovdbazlisbs5kerkahoqwwiz75i"
@@ -992,36 +992,38 @@ async fn counter_merge_marks_cid_merged() {
         .process_counter_delta(&cid, &payload, &metadata)
         .await
         .unwrap();
-    assert_eq!(outcome, MergeOutcome::Merged);
-    // The blockstore merged-set is the single source of CRDT idempotency
-    // (see #847). The counter merge path no longer keeps per-delta nonce
-    // markers, so there is nothing else to assert here.
-    assert!(blockstore.is_merged(&cid).await.unwrap());
+    assert!(outcome.is_terminal_skip(), "{outcome:?}");
+    assert!(!blockstore.is_merged(&cid).await.unwrap());
+    let collection = handler.db().get_collection("Counters").unwrap().unwrap();
+    let txn = handler.db().new_txn(true).await.unwrap();
+    let stored = collection
+        .get_by_doc_id(
+            &txn.datastore().unwrap(),
+            &txn.systemstore().unwrap(),
+            &DocID::from_string(&doc_id).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(stored.is_none(), "no partial document value was written");
 }
 
-/// Read the PNCounter accumulation store value (authoritative store, not the
-/// materialized blob) for a doc/field via a fresh read txn on `db`.
-async fn read_counter_accumulation_store(
-    db: &Arc<DB<RegolithStore>>,
-    schema_version_id: &str,
-    doc_id: &str,
-    field: &str,
-) -> i64 {
+/// A counter's committed value: its part of the document value, the counter's
+/// only stored copy, read through a fresh read txn on `db`.
+async fn read_counter_value(db: &Arc<DB<RegolithStore>>, doc_id: &str, field: &str) -> i64 {
+    let collection = db.get_collection("Counters").unwrap().unwrap();
     let txn = db.new_txn(true).await.expect("read txn");
-    let datastore = txn.datastore().expect("datastore");
-    let counter = Counter::new(
-        schema_version_id.to_string(),
-        doc_id.as_bytes(),
-        field.to_string(),
-        true,
-        NumericKind::Int64,
-    )
-    .expect("counter");
-    let bytes = ValueReader::value(&counter, &datastore)
+    let doc = collection
+        .get_by_doc_id(
+            &txn.datastore().unwrap(),
+            &txn.systemstore().unwrap(),
+            &document::DocID::from_string(doc_id).unwrap(),
+        )
         .await
-        .expect("counter value");
-    assert_eq!(bytes.len(), 8, "int64 counter store value is 8 bytes");
-    i64::from_be_bytes(bytes.as_ref().try_into().unwrap())
+        .unwrap()
+        .expect("the document exists");
+    doc.get(field)
+        .and_then(NormalValue::as_int)
+        .expect("the counter has a value")
 }
 
 /// Build + store a standalone counter delta block for `doc_id`/`score` with the
@@ -1057,11 +1059,11 @@ async fn put_counter_delta_block(
     (cid, payload)
 }
 
-/// The accumulator accepts blind operands, but the materialized document/index
-/// update still depends on the value read. A competing committed field merge
-/// must invalidate that decision; retry then applies each increment once.
+/// An interactive increment and a concurrent replicated increment of the same
+/// counter are both blind operands on the counter's part: both commit, and
+/// each is applied once.
 #[tokio::test]
-async fn interactive_counter_increment_conflicts_with_concurrent_same_doc_merge() {
+async fn interactive_counter_increment_and_concurrent_same_doc_merge_both_commit() {
     let (handler, blockstore) = make_handler_with_counter_schema().await;
     let db = Arc::clone(handler.db());
     // Both writers use the same engine.
@@ -1083,9 +1085,9 @@ async fn interactive_counter_increment_conflicts_with_concurrent_same_doc_merge(
     drop(ctx);
     registry.commit(&handle).await.expect("commit seed");
     assert_eq!(
-        read_counter_accumulation_store(&db, "v1", &doc_id, "score").await,
+        read_counter_value(&db, &doc_id, "score").await,
         10,
-        "seed must leave the accumulation store at N=10"
+        "seed must store N=10"
     );
 
     // (2) Begin an EXPLICIT txn and increment +3 through the interactive
@@ -1107,8 +1109,7 @@ async fn interactive_counter_increment_conflicts_with_concurrent_same_doc_merge(
     // NOTE: NOT committed yet.
 
     // (3) BEFORE committing, apply a concurrent same-doc merge of +5 through the
-    // REAL merge handler. Its transaction validates the counter application marker
-    // and commits its OWN txn, advancing the accumulation store to N+D2 = 15.
+    // REAL merge handler, in its OWN transaction: N+D2 = 15.
     let (merge_cid, merge_payload) =
         put_counter_delta_block(&blockstore, &doc_id, 5, 2, 7777).await;
     register_test_block_owner(&handler, 1, &doc_id, &merge_cid).await;
@@ -1125,59 +1126,21 @@ async fn interactive_counter_increment_conflicts_with_concurrent_same_doc_merge(
         .expect("merge handler must apply the +5 delta");
     assert_eq!(merge_outcome, MergeOutcome::Merged);
     assert_eq!(
-        read_counter_accumulation_store(&db, "v1", &doc_id, "score").await,
+        read_counter_value(&db, &doc_id, "score").await,
         15,
-        "merge of +5 must advance the accumulation store to N+D2 = 15"
+        "merge of +5 must advance the counter to N+D2 = 15"
     );
 
-    // (4) Now COMMIT the interactive txn. Its begin() snapshot is stale (the
-    // merge committed after it), so the OCC tracker aborts the commit with a
-    // TxnConflict.
-    let commit_result = registry.commit(&handle).await;
-    let err = commit_result.expect_err(
-        "interactive commit MUST conflict with the committed merge — if it \
-             succeeds it silently clobbered the merge (CRITICAL production bug)",
-    );
-    let err_msg = err.to_string().to_lowercase();
-    assert!(
-        err_msg.contains("transaction conflict"),
-        "interactive commit must fail with the storage OCC TxnConflict \
-             (corekv Error::TxnConflict = \"transaction conflict. Please retry\"), \
-             got: {err}"
-    );
-    // (4b) The merge's value survived; the interactive txn did NOT clobber it
-    // down to N+D1 = 13.
-    assert_eq!(
-        read_counter_accumulation_store(&db, "v1", &doc_id, "score").await,
-        15,
-        "after the conflicted interactive commit the merge's value (15) must \
-             survive — NOT be clobbered to 13"
-    );
-
-    // (5) Correct recovery: RETRY the +3 in a fresh explicit txn (snapshot now
-    // sees 15) → store == N+D2+D1 = 18. Conflict → retry → correct convergence.
-    let handle = registry.begin(false).await.expect("begin retry");
-    let ctx = registry.get(&handle).into_result().unwrap().unwrap();
-    let mutator = ctx.doc_mutator().expect("mutator");
-    let mut retry_doc = Document::from_json_str(r#"{"score": 18}"#).unwrap();
-    retry_doc.set_id(document::DocID::from_string(&doc_id).unwrap());
-    retry_doc.set_counter_delta("score".to_string(), NormalValue::Int(3));
-    let mut modified = rapidhash::RapidHashSet::new();
-    modified.insert("score".to_string());
-    mutator
-        .update("Counters", retry_doc, modified)
-        .await
-        .expect("retry update +3");
-    drop(mutator);
-    drop(ctx);
+    // (4) Now COMMIT the interactive txn. Its snapshot predates the merge, and
+    // both are blind operands on one part: it commits, and nothing is lost.
     registry
         .commit(&handle)
         .await
-        .expect("retry commit must succeed");
+        .expect("an increment never conflicts with a concurrent increment");
     assert_eq!(
-        read_counter_accumulation_store(&db, "v1", &doc_id, "score").await,
+        read_counter_value(&db, &doc_id, "score").await,
         18,
-        "retry on a fresh snapshot must converge to N+D2+D1 = 18"
+        "both increments land once: N+D2+D1 = 18"
     );
     let collection = db.get_collection("Counters").unwrap().unwrap();
     let reader = db.new_txn(true).await.unwrap();
@@ -1190,8 +1153,11 @@ async fn interactive_counter_increment_conflicts_with_concurrent_same_doc_merge(
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(doc.get("score"), Some(&NormalValue::Int(18)),
-        "the blob must include the earlier standalone field merge as well as the retried local increment");
+    assert_eq!(
+        doc.get("score"),
+        Some(&NormalValue::Int(18)),
+        "the document value includes the replicated and the local increment"
+    );
 }
 
 #[tokio::test]
@@ -1311,31 +1277,31 @@ async fn shared_counter_block_is_applied_once_per_document() {
         {
             let mut datastore = txn.datastore().unwrap();
             let headstore = txn.headstore().unwrap();
-            let result = handler
-                .process_counter_delta_in_txn(
-                    &mut datastore,
-                    &headstore,
-                    &cid,
-                    &payload,
-                    Some("col-counters"),
-                    doc_id,
-                    doc_short_id,
-                )
-                .await
-                .unwrap();
-            assert!(result.applied());
+            for attempt in 0..2 {
+                let result = handler
+                    .process_counter_delta_in_txn(
+                        &mut datastore,
+                        &headstore,
+                        &cid,
+                        &payload,
+                        Some("col-counters"),
+                        doc_id,
+                        doc_short_id,
+                    )
+                    .await
+                    .unwrap();
+                // Once per document: the second delivery finds its applied key.
+                assert_eq!(result.applied(), attempt == 0);
+                // No document value exists yet: the first delivery hands its
+                // composite the sum to put, the second has nothing to add.
+                let expected = (attempt == 0).then_some(NormalValue::Int(5));
+                assert_eq!(result.value(), expected.as_ref());
+            }
         }
         txn.force_commit().await.unwrap();
         if index == 0 {
             blockstore.mark_as_merged(&cid).await.unwrap();
         }
-    }
-
-    for doc_id in &doc_ids {
-        assert_eq!(
-            read_counter_accumulation_store(handler.db(), "v1", doc_id, "score").await,
-            5
-        );
     }
 }
 
