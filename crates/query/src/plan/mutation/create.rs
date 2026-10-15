@@ -337,7 +337,7 @@ impl PlanNode for CreateNode {
             // Batch create: single transaction, single commit/fsync
             let results = self
                 .mutator
-                .create_many_in(&self.context, &self.collection_name, docs)
+                .create_many_as(&self.context, &self.collection_name, docs)
                 .await?;
 
             for result in &results {

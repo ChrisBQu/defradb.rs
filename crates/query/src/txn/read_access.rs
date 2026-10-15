@@ -10,7 +10,7 @@ use super::context::{
 
 /// Object access through a transaction's overlay. The NAC `bypass-dac`
 /// privilege is checked before this rule runs (see
-/// [`super::check_doc_read_access_in`]), as Go's checkDocAccess checks
+/// [`super::check_doc_read_access_as`]), as Go's checkDocAccess checks
 /// canDACBypass first on every path.
 pub struct OverlayChecker<'a> {
     pub acp: &'a dyn DocumentACP,

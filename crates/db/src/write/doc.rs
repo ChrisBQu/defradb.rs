@@ -256,6 +256,14 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
 
     async fn resolve_prepared_input(
         &self,
+        request: &query::prepared::PreparedInputRequest,
+    ) -> query::error::Result<Arc<[u8]>> {
+        self.resolve_prepared_input_as(&RequestContext::ambient(), request)
+            .await
+    }
+
+    async fn resolve_prepared_input_as(
+        &self,
         context: &RequestContext,
         request: &query::prepared::PreparedInputRequest,
     ) -> query::error::Result<Arc<[u8]>> {
@@ -280,12 +288,21 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
 
     async fn create(
         &self,
+        collection_name: &str,
+        doc: Document,
+    ) -> query::error::Result<CreateResult> {
+        self.create_as(&RequestContext::ambient(), collection_name, doc)
+            .await
+    }
+
+    async fn create_as(
+        &self,
         context: &RequestContext,
         collection_name: &str,
         mut doc: Document,
     ) -> query::error::Result<CreateResult> {
         self.db
-            .check_node_access(context, acp::nac::NodePermission::DocumentUpdate)
+            .check_node_access_as(context, acp::nac::NodePermission::DocumentUpdate)
             .await
             .map_err(|e| query::error::QueryError::permission_denied(e.to_string()))?;
 
@@ -414,13 +431,28 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
 
     async fn update(
         &self,
+        collection_name: &str,
+        doc: Document,
+        modified_fields: rapidhash::RapidHashSet<String>,
+    ) -> query::error::Result<UpdateResult> {
+        self.update_as(
+            &RequestContext::ambient(),
+            collection_name,
+            doc,
+            modified_fields,
+        )
+        .await
+    }
+
+    async fn update_as(
+        &self,
         context: &RequestContext,
         collection_name: &str,
         mut doc: Document,
         mut modified_fields: rapidhash::RapidHashSet<String>,
     ) -> query::error::Result<UpdateResult> {
         self.db
-            .check_node_access(context, acp::nac::NodePermission::DocumentUpdate)
+            .check_node_access_as(context, acp::nac::NodePermission::DocumentUpdate)
             .await
             .map_err(|e| query::error::QueryError::permission_denied(e.to_string()))?;
 
@@ -560,12 +592,21 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
 
     async fn delete(
         &self,
+        collection_name: &str,
+        doc_id: &DocID,
+    ) -> query::error::Result<DeleteResult> {
+        self.delete_as(&RequestContext::ambient(), collection_name, doc_id)
+            .await
+    }
+
+    async fn delete_as(
+        &self,
         context: &RequestContext,
         collection_name: &str,
         doc_id: &DocID,
     ) -> query::error::Result<DeleteResult> {
         self.db
-            .check_node_access(context, acp::nac::NodePermission::DocumentDelete)
+            .check_node_access_as(context, acp::nac::NodePermission::DocumentDelete)
             .await
             .map_err(|e| query::error::QueryError::permission_denied(e.to_string()))?;
 

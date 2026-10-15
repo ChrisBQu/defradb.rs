@@ -275,12 +275,18 @@ impl<S: Store> crate::database::DB<S> {
         txn.commit().await
     }
 
+    /// [`Self::list_actions_as`] in [`defra_core::RequestContext::ambient`].
+    pub async fn list_actions(&self) -> Result<Vec<ActionExecution>> {
+        self.list_actions_as(&defra_core::RequestContext::ambient())
+            .await
+    }
+
     /// List actions that are in progress or ended with an error.
-    pub async fn list_actions(
+    pub async fn list_actions_as(
         &self,
         context: &defra_core::RequestContext,
     ) -> Result<Vec<ActionExecution>> {
-        self.check_node_access(context, acp::nac::NodePermission::ActionList)
+        self.check_node_access_as(context, acp::nac::NodePermission::ActionList)
             .await?;
 
         let txn = self.new_txn(true).await?;
@@ -291,12 +297,21 @@ impl<S: Store> crate::database::DB<S> {
         Ok(executions)
     }
 
+    /// [`Self::list_index_actions_as`] in [`defra_core::RequestContext::ambient`].
     pub async fn list_index_actions(
+        &self,
+        collection_id: &str,
+    ) -> Result<RapidHashMap<u32, ActionExecution>> {
+        self.list_index_actions_as(&defra_core::RequestContext::ambient(), collection_id)
+            .await
+    }
+
+    pub async fn list_index_actions_as(
         &self,
         context: &defra_core::RequestContext,
         collection_id: &str,
     ) -> Result<RapidHashMap<u32, ActionExecution>> {
-        self.check_node_access(context, acp::nac::NodePermission::IndexList)
+        self.check_node_access_as(context, acp::nac::NodePermission::IndexList)
             .await?;
 
         let txn = self.new_txn(true).await?;

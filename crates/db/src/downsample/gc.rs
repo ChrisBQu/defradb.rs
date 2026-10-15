@@ -253,7 +253,16 @@ impl<S: Store + 'static> crate::database::DB<S> {
         Ok(())
     }
 
+    /// [`Self::gc_downsample_histories_as`] in [`defra_core::RequestContext::ambient`].
     pub async fn gc_downsample_histories(
+        self: &Arc<Self>,
+        options: Option<GcDownsampleHistoriesOptions>,
+    ) -> Result<()> {
+        self.gc_downsample_histories_as(&defra_core::RequestContext::ambient(), options)
+            .await
+    }
+
+    pub async fn gc_downsample_histories_as(
         self: &Arc<Self>,
         context: &defra_core::RequestContext,
         options: Option<GcDownsampleHistoriesOptions>,
@@ -266,7 +275,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
         let bootstrap_names = names_filter
             .as_ref()
             .map(|names| names.iter().cloned().collect::<Vec<_>>());
-        self.bootstrap_downsamples(context, bootstrap_names.as_deref())
+        self.bootstrap_downsamples_as(context, bootstrap_names.as_deref())
             .await?;
 
         let mut grouped_plans: RapidHashMap<String, Vec<DownsamplePlan>> = RapidHashMap::new();

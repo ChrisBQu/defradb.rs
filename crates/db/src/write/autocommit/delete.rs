@@ -78,7 +78,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             match mutator.delete_impl(context, collection_name, doc_id).await {
                 Err(query::error::QueryError::NeedsInput(request)) => {
                     inputs
-                        .answer_miss(&request, || self.resolve_prepared_input(context, &request))
+                        .answer_miss(&request, || {
+                            self.resolve_prepared_input_as(context, &request)
+                        })
                         .await?;
                 }
                 result => return result,
@@ -86,7 +88,17 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         }
     }
 
+    /// [`Self::delete_many_impl_as`] in [`RequestContext::ambient`].
     pub async fn delete_many_impl(
+        &self,
+        collection_name: &str,
+        doc_ids: &[DocID],
+    ) -> query::error::Result<Vec<DeleteResult>> {
+        self.delete_many_impl_as(&RequestContext::ambient(), collection_name, doc_ids)
+            .await
+    }
+
+    pub async fn delete_many_impl_as(
         &self,
         context: &RequestContext,
         collection_name: &str,
@@ -109,7 +121,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             {
                 Err(query::error::QueryError::NeedsInput(request)) => {
                     inputs
-                        .answer_miss(&request, || self.resolve_prepared_input(context, &request))
+                        .answer_miss(&request, || {
+                            self.resolve_prepared_input_as(context, &request)
+                        })
                         .await?;
                 }
                 result => return result,
@@ -124,7 +138,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         doc_id: &DocID,
     ) -> query::error::Result<DeleteResult> {
         self.db
-            .check_node_access(context, acp::nac::NodePermission::DocumentDelete)
+            .check_node_access_as(context, acp::nac::NodePermission::DocumentDelete)
             .await
             .map_err(|e| query::error::QueryError::permission_denied(e.to_string()))?;
 
@@ -288,7 +302,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             }
         };
         if let Some((cid, block, col_data)) = &artifacts {
-            self.register_deleted_doc_with_acp(
+            self.register_deleted_doc_with_acp_as(
                 &attempt.context,
                 &mut txn,
                 &collection,
@@ -517,7 +531,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         };
         for (doc_id, _, artifacts) in &results {
             if artifacts.is_some() {
-                self.register_deleted_doc_with_acp(
+                self.register_deleted_doc_with_acp_as(
                     &attempt.context,
                     &mut txn,
                     &collection,

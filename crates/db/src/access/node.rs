@@ -10,14 +10,20 @@ use storage::corekv::Store;
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait NodeAccessChecker: defra_core::thread_bounds::MaybeSendSync {
-    /// Enforce `permission` for the identity acting in `context`. Mirrors
-    /// `DB::check_node_access`: a no-op when NAC is unset or disabled, with
-    /// node-identity bypass.
-    async fn check_node_access(
+    /// Enforce `permission` for the identity acting in
+    /// [`RequestContext::ambient`]. Mirrors `DB::check_node_access`: a no-op
+    /// when NAC is unset or disabled, with node-identity bypass.
+    async fn check_node_access(&self, permission: NodePermission) -> Result<()>;
+
+    /// Enforce `permission` for the identity acting in `context`. The default
+    /// runs [`Self::check_node_access`] inside [`RequestContext::mirror`].
+    async fn check_node_access_as(
         &self,
         context: &RequestContext,
         permission: NodePermission,
-    ) -> Result<()>;
+    ) -> Result<()> {
+        context.mirror(self.check_node_access(permission)).await
+    }
 }
 
 struct DbNodeAccessChecker<S: Store> {
@@ -27,12 +33,16 @@ struct DbNodeAccessChecker<S: Store> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store> NodeAccessChecker for DbNodeAccessChecker<S> {
-    async fn check_node_access(
+    async fn check_node_access(&self, permission: NodePermission) -> Result<()> {
+        self.db.check_node_access(None, permission).await
+    }
+
+    async fn check_node_access_as(
         &self,
         context: &RequestContext,
         permission: NodePermission,
     ) -> Result<()> {
-        self.db.check_node_access(context, permission).await
+        self.db.check_node_access_as(context, permission).await
     }
 }
 

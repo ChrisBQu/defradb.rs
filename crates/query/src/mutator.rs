@@ -31,7 +31,7 @@ pub trait CollectionTruncator: MaybeSendSync {
 
     /// [`Self::truncate`] for the request `context` serves. The default runs
     /// `truncate` for the request's creator inside [`RequestContext::mirror`].
-    async fn truncate_in(
+    async fn truncate_as(
         &self,
         context: &RequestContext,
         collection_name: &str,
@@ -434,12 +434,16 @@ impl MutationBatch {
 /// which provides read operations. Implementations are expected to be
 /// transaction-scoped, meaning all operations occur within a single transaction.
 ///
-/// Each write comes twice: `*_in` takes the [`RequestContext`] of the request
+/// Each write comes twice: `*_as` takes the [`RequestContext`] of the request
 /// it serves, and how its blocks are encrypted, signed and attributed comes
 /// from there; the plain form runs in [`RequestContext::ambient`]. A storage
-/// mutator overrides both. The `*_in` defaults run the plain form inside
-/// [`RequestContext::mirror`], so a mutator that implements only the plain
-/// form still serves a request.
+/// mutator overrides both forms of every write it implements. The defaults of
+/// `create_as`, `update_as`, `delete_as` and the preparation calls run the
+/// plain form inside [`RequestContext::mirror`], so a mutator that implements
+/// only the plain form still serves a request; the defaults of the composite
+/// writes (`create_many_as`, `update_if_unchanged_as`,
+/// `update_if_fields_unchanged_as`) compose the `*_as` writes, as the plain
+/// defaults compose the plain ones.
 ///
 /// # Transaction Semantics
 ///
@@ -455,7 +459,7 @@ impl MutationBatch {
 ///     doc.set("name", name);
 ///     doc.set("age", age);
 ///
-///     let result = mutator.create_in(&RequestContext::default(), "Users", doc).await?;
+///     let result = mutator.create_as(&RequestContext::default(), "Users", doc).await?;
 ///     Ok(result.doc_id)
 /// }
 /// ```
@@ -489,7 +493,7 @@ pub trait DocMutator: MaybeSendSync {
     }
 
     /// [`Self::requires_write_preparation`] for the request `context` serves.
-    fn requires_write_preparation_in(&self, _context: &RequestContext) -> bool {
+    fn requires_write_preparation_as(&self, _context: &RequestContext) -> bool {
         self.requires_write_preparation()
     }
 
@@ -516,7 +520,7 @@ pub trait DocMutator: MaybeSendSync {
 
     /// [`Self::prepare_write`] for the request `context` serves, encrypting
     /// as its context says.
-    async fn prepare_write_in(
+    async fn prepare_write_as(
         &self,
         context: &RequestContext,
         collection_name: &str,
@@ -546,7 +550,7 @@ pub trait DocMutator: MaybeSendSync {
     }
 
     /// [`Self::resolve_prepared_input`] for the request `context` serves.
-    async fn resolve_prepared_input_in(
+    async fn resolve_prepared_input_as(
         &self,
         context: &RequestContext,
         request: &crate::prepared::PreparedInputRequest,
@@ -620,7 +624,7 @@ pub trait DocMutator: MaybeSendSync {
     async fn create(&self, collection_name: &str, doc: Document) -> Result<CreateResult>;
 
     /// [`Self::create`] for the request `context` serves.
-    async fn create_in(
+    async fn create_as(
         &self,
         context: &RequestContext,
         collection_name: &str,
@@ -646,15 +650,17 @@ pub trait DocMutator: MaybeSendSync {
     }
 
     /// [`Self::create_many`] for the request `context` serves.
-    async fn create_many_in(
+    async fn create_many_as(
         &self,
         context: &RequestContext,
         collection_name: &str,
         docs: Vec<Document>,
     ) -> Result<Vec<CreateResult>> {
-        context
-            .mirror(self.create_many(collection_name, docs))
-            .await
+        let mut results = Vec::with_capacity(docs.len());
+        for doc in docs {
+            results.push(self.create_as(context, collection_name, doc).await?);
+        }
+        Ok(results)
     }
 
     /// Update an existing document.
@@ -687,7 +693,7 @@ pub trait DocMutator: MaybeSendSync {
     ) -> Result<UpdateResult>;
 
     /// [`Self::update`] for the request `context` serves.
-    async fn update_in(
+    async fn update_as(
         &self,
         context: &RequestContext,
         collection_name: &str,
@@ -718,7 +724,7 @@ pub trait DocMutator: MaybeSendSync {
     }
 
     /// [`Self::update_if_unchanged`] for the request `context` serves.
-    async fn update_if_unchanged_in(
+    async fn update_if_unchanged_as(
         &self,
         context: &RequestContext,
         collection_name: &str,
@@ -726,8 +732,8 @@ pub trait DocMutator: MaybeSendSync {
         doc: Document,
         modified_fields: RapidHashSet<String>,
     ) -> Result<UpdateResult> {
-        context
-            .mirror(self.update_if_unchanged(collection_name, expected, doc, modified_fields))
+        let _ = expected;
+        self.update_as(context, collection_name, doc, modified_fields)
             .await
     }
 
@@ -748,7 +754,7 @@ pub trait DocMutator: MaybeSendSync {
     }
 
     /// [`Self::update_if_fields_unchanged`] for the request `context` serves.
-    async fn update_if_fields_unchanged_in(
+    async fn update_if_fields_unchanged_as(
         &self,
         context: &RequestContext,
         collection_name: &str,
@@ -757,14 +763,8 @@ pub trait DocMutator: MaybeSendSync {
         doc: Document,
         modified_fields: RapidHashSet<String>,
     ) -> Result<UpdateResult> {
-        context
-            .mirror(self.update_if_fields_unchanged(
-                collection_name,
-                expected,
-                expected_fields,
-                doc,
-                modified_fields,
-            ))
+        let _ = expected_fields;
+        self.update_if_unchanged_as(context, collection_name, expected, doc, modified_fields)
             .await
     }
 
@@ -787,7 +787,7 @@ pub trait DocMutator: MaybeSendSync {
     async fn delete(&self, collection_name: &str, doc_id: &DocID) -> Result<DeleteResult>;
 
     /// [`Self::delete`] for the request `context` serves.
-    async fn delete_in(
+    async fn delete_as(
         &self,
         context: &RequestContext,
         collection_name: &str,

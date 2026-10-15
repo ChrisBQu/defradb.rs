@@ -568,7 +568,7 @@ impl PlanNode for UpdateNode {
                     // Persist update with modified field tracking
                     let result = if let Some(expected_fields) = projected_fields {
                         self.mutator
-                            .update_if_fields_unchanged_in(
+                            .update_if_fields_unchanged_as(
                                 &self.context,
                                 &self.collection_name,
                                 expected,
@@ -579,7 +579,7 @@ impl PlanNode for UpdateNode {
                             .await?
                     } else {
                         self.mutator
-                            .update_if_unchanged_in(
+                            .update_if_unchanged_as(
                                 &self.context,
                                 &self.collection_name,
                                 expected,

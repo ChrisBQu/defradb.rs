@@ -369,19 +369,19 @@ pub struct ErrorLocation {
 ///     queries: Vec<QueryRequest>,
 /// ) -> Result<Vec<QueryResponse>, TransactionError> {
 ///     let context = RequestContext::default();
-///     let handle = executor.begin_txn_in(&context, false).await?;
+///     let handle = executor.begin_txn_as(&context, false).await?;
 ///     let mut responses = Vec::new();
 ///
 ///     for query in queries {
 ///         let resp = executor.execute_in_txn(query, &handle).await;
 ///         if resp.has_errors() {
-///             executor.rollback_txn_in(&context, &handle).await.ok();
+///             executor.rollback_txn_as(&context, &handle).await.ok();
 ///             return Err(TransactionError::execution("query failed"));
 ///         }
 ///         responses.push(resp);
 ///     }
 ///
-///     executor.commit_txn_in(&context, &handle).await?;
+///     executor.commit_txn_as(&context, &handle).await?;
 ///     Ok(responses)
 /// }
 /// ```
@@ -457,7 +457,7 @@ pub trait QueryExecutor: MaybeSendSync {
     /// [`Self::begin_txn`] for the request `context` serves: the transaction
     /// belongs to its identity. The default runs `begin_txn` inside
     /// [`RequestContext::mirror`].
-    async fn begin_txn_in(
+    async fn begin_txn_as(
         &self,
         context: &RequestContext,
         readonly: bool,
@@ -476,7 +476,7 @@ pub trait QueryExecutor: MaybeSendSync {
 
     /// [`Self::commit_txn`] for the request `context` serves. The default runs
     /// `commit_txn` inside [`RequestContext::mirror`].
-    async fn commit_txn_in(
+    async fn commit_txn_as(
         &self,
         context: &RequestContext,
         handle: &TransactionHandle,
@@ -495,7 +495,7 @@ pub trait QueryExecutor: MaybeSendSync {
 
     /// [`Self::rollback_txn`] for the request `context` serves. The default
     /// runs `rollback_txn` inside [`RequestContext::mirror`].
-    async fn rollback_txn_in(
+    async fn rollback_txn_as(
         &self,
         context: &RequestContext,
         handle: &TransactionHandle,

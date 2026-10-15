@@ -276,12 +276,18 @@ impl<S: Store> crate::database::DB<S> {
         Ok(schema)
     }
 
+    /// [`Self::create_collection_as`] in [`defra_core::RequestContext::ambient`].
+    pub async fn create_collection(&self, schema: CollectionVersion) -> Result<()> {
+        self.create_collection_as(&defra_core::RequestContext::ambient(), schema)
+            .await
+    }
+
     /// Create a new collection.
     ///
     /// This creates a new transaction, calls `create_collection_with_txn`, commits,
     /// and updates the process-wide cache.
     #[instrument(skip(self, schema), fields(collection = %schema.name), name = "db.create_collection_auto")]
-    pub async fn create_collection(
+    pub async fn create_collection_as(
         &self,
         context: &defra_core::RequestContext,
         schema: CollectionVersion,
@@ -291,11 +297,27 @@ impl<S: Store> crate::database::DB<S> {
             .map(|_| ())
     }
 
+    /// [`Self::create_collection_with_acp_registration_as`] in [`defra_core::RequestContext::ambient`].
+    pub async fn create_collection_with_acp_registration(
+        &self,
+        schema: CollectionVersion,
+        document_acp: std::sync::Arc<dyn acp::DocumentACP>,
+        creator: Option<identity::Did>,
+    ) -> Result<CollectionVersion> {
+        self.create_collection_with_acp_registration_as(
+            &defra_core::RequestContext::ambient(),
+            schema,
+            document_acp,
+            creator,
+        )
+        .await
+    }
+
     /// Create a new collection, registering branchable ACP before commit.
     ///
     /// If collection ACP registration fails, the DB transaction is discarded so
     /// the protected collection is not persisted without its ACP object.
-    pub async fn create_collection_with_acp_registration(
+    pub async fn create_collection_with_acp_registration_as(
         &self,
         context: &defra_core::RequestContext,
         schema: CollectionVersion,
@@ -313,7 +335,7 @@ impl<S: Store> crate::database::DB<S> {
         document_acp: Option<std::sync::Arc<dyn acp::DocumentACP>>,
         creator: Option<identity::Did>,
     ) -> Result<CollectionVersion> {
-        self.check_node_access(context, acp::nac::NodePermission::CollectionPatch)
+        self.check_node_access_as(context, acp::nac::NodePermission::CollectionPatch)
             .await?;
         let mut txn = self.new_txn(false).await?;
         let existing = self.get_all_collection_versions_with_txn(&mut txn).await?;
@@ -349,11 +371,20 @@ impl<S: Store> crate::database::DB<S> {
         Ok(finalized_schema)
     }
 
+    /// [`Self::create_collections_atomic_as`] in [`defra_core::RequestContext::ambient`].
+    pub async fn create_collections_atomic(
+        &self,
+        schemas: Vec<CollectionVersion>,
+    ) -> Result<Vec<CollectionVersion>> {
+        self.create_collections_atomic_as(&defra_core::RequestContext::ambient(), schemas)
+            .await
+    }
+
     /// Create multiple collections atomically in a single transaction.
     ///
     /// This is useful for creating related collections (e.g., with relations between them)
     /// where all must succeed or none should be created.
-    pub async fn create_collections_atomic(
+    pub async fn create_collections_atomic_as(
         &self,
         context: &defra_core::RequestContext,
         schemas: Vec<CollectionVersion>,
@@ -362,11 +393,27 @@ impl<S: Store> crate::database::DB<S> {
             .await
     }
 
+    /// [`Self::create_collections_atomic_with_acp_registration_as`] in [`defra_core::RequestContext::ambient`].
+    pub async fn create_collections_atomic_with_acp_registration(
+        &self,
+        schemas: Vec<CollectionVersion>,
+        document_acp: std::sync::Arc<dyn acp::DocumentACP>,
+        creator: Option<identity::Did>,
+    ) -> Result<Vec<CollectionVersion>> {
+        self.create_collections_atomic_with_acp_registration_as(
+            &defra_core::RequestContext::ambient(),
+            schemas,
+            document_acp,
+            creator,
+        )
+        .await
+    }
+
     /// Create multiple collections atomically, registering branchable ACP before commit.
     ///
     /// If any collection ACP registration fails, the DB transaction is discarded
     /// and none of the collections are persisted.
-    pub async fn create_collections_atomic_with_acp_registration(
+    pub async fn create_collections_atomic_with_acp_registration_as(
         &self,
         context: &defra_core::RequestContext,
         schemas: Vec<CollectionVersion>,
@@ -384,7 +431,7 @@ impl<S: Store> crate::database::DB<S> {
         document_acp: Option<std::sync::Arc<dyn acp::DocumentACP>>,
         creator: Option<identity::Did>,
     ) -> Result<Vec<CollectionVersion>> {
-        self.check_node_access(context, acp::nac::NodePermission::CollectionPatch)
+        self.check_node_access_as(context, acp::nac::NodePermission::CollectionPatch)
             .await?;
         let mut txn = self.new_txn(false).await?;
         let existing = self.get_all_collection_versions_with_txn(&mut txn).await?;

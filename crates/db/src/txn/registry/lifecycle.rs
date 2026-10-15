@@ -68,6 +68,13 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
 
     async fn begin(
         &self,
+        readonly: bool,
+    ) -> std::result::Result<TransactionHandle, TransactionError> {
+        self.begin_as(&RequestContext::ambient(), readonly).await
+    }
+
+    async fn begin_as(
+        &self,
         context: &RequestContext,
         readonly: bool,
     ) -> std::result::Result<TransactionHandle, TransactionError> {
@@ -76,12 +83,23 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
 
     async fn begin_implicit_read(
         &self,
+    ) -> std::result::Result<TransactionHandle, TransactionError> {
+        self.begin_implicit_read_as(&RequestContext::ambient())
+            .await
+    }
+
+    async fn begin_implicit_read_as(
+        &self,
         context: &RequestContext,
     ) -> std::result::Result<TransactionHandle, TransactionError> {
         self.begin_with_options(context, true).await
     }
 
-    fn get(&self, context: &RequestContext, handle: &TransactionHandle) -> GetTransactionResult {
+    fn get(&self, handle: &TransactionHandle) -> GetTransactionResult {
+        self.get_as(&RequestContext::ambient(), handle)
+    }
+
+    fn get_as(&self, context: &RequestContext, handle: &TransactionHandle) -> GetTransactionResult {
         match self
             .transactions
             .get(handle.as_str())
@@ -95,6 +113,13 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
     }
 
     async fn commit(
+        &self,
+        handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError> {
+        self.commit_as(&RequestContext::ambient(), handle).await
+    }
+
+    async fn commit_as(
         &self,
         context: &RequestContext,
         handle: &TransactionHandle,
@@ -118,6 +143,13 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
     }
 
     async fn rollback(
+        &self,
+        handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError> {
+        self.rollback_as(&RequestContext::ambient(), handle).await
+    }
+
+    async fn rollback_as(
         &self,
         context: &RequestContext,
         handle: &TransactionHandle,
@@ -144,6 +176,15 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
     }
 
     async fn finish_implicit_read(
+        &self,
+        handle: &TransactionHandle,
+        _apply_read_effects: bool,
+    ) -> std::result::Result<(), TransactionError> {
+        self.finish_implicit_read_as(&RequestContext::ambient(), handle, _apply_read_effects)
+            .await
+    }
+
+    async fn finish_implicit_read_as(
         &self,
         context: &RequestContext,
         handle: &TransactionHandle,

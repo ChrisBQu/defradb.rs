@@ -169,12 +169,17 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         self.db.get_collection(name)
     }
 
+    /// [`Self::get_ctx_as`] in [`RequestContext::ambient`].
+    pub fn get_ctx(&self, txn_id: &str) -> Result<Option<Arc<DbTransactionContext<S>>>> {
+        self.get_ctx_as(&RequestContext::ambient(), txn_id)
+    }
+
     /// Get an existing transaction by ID (for internal use).
     ///
     /// Returns `Ok(None)` if the transaction doesn't exist, belongs to an
     /// identity other than the one acting in `context`, or a cleanup sweep has
     /// already claimed it.
-    pub fn get_ctx(
+    pub fn get_ctx_as(
         &self,
         context: &RequestContext,
         txn_id: &str,

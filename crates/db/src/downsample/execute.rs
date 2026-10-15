@@ -262,10 +262,31 @@ impl<S: Store + 'static> crate::database::DB<S> {
         Ok(modified_fields)
     }
 
+    /// [`Self::persist_window_update_as`] in [`RequestContext::ambient`].
+    #[cfg(test)]
+    async fn persist_window_update(
+        self: &Arc<Self>,
+        plan: &DownsamplePlan,
+        source_doc: &Document,
+        series_doc_id: &str,
+        target_doc_id: Option<&DocID>,
+        aggregate: &WindowAggregate,
+    ) -> Result<DocID> {
+        self.persist_window_update_as(
+            &RequestContext::ambient(),
+            plan,
+            source_doc,
+            series_doc_id,
+            target_doc_id,
+            aggregate,
+        )
+        .await
+    }
+
     /// Upsert one aggregation window into the target doc. Returns the target
     /// DocID so a create in the first window threads its derived identity to
     /// the remaining windows (the DocID only exists after the create).
-    async fn persist_window_update(
+    async fn persist_window_update_as(
         self: &Arc<Self>,
         context: &RequestContext,
         plan: &DownsamplePlan,
@@ -361,7 +382,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
             match controller.run(Arc::clone(&operation), None, None).await {
                 Err(query::error::QueryError::NeedsInput(request)) => inputs
                     .answer_miss(&request, || {
-                        mutator.resolve_prepared_input(context, &request)
+                        mutator.resolve_prepared_input_as(context, &request)
                     })
                     .await
                     .map_err(Error::Query)?,
@@ -445,7 +466,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
 
         for aggregate in windows {
             let persisted_id = self
-                .persist_window_update(
+                .persist_window_update_as(
                     context,
                     plan,
                     source_doc,
@@ -473,9 +494,15 @@ impl<S: Store + 'static> crate::database::DB<S> {
         Ok(())
     }
 
+    /// [`Self::bootstrap_downsamples_as`] in [`RequestContext::ambient`].
+    pub async fn bootstrap_downsamples(self: &Arc<Self>, names: Option<&[String]>) -> Result<()> {
+        self.bootstrap_downsamples_as(&RequestContext::ambient(), names)
+            .await
+    }
+
     /// Downsample every source document of the plans `names` selects (all of
     /// them for `None`), writing the windows in `context`.
-    pub async fn bootstrap_downsamples(
+    pub async fn bootstrap_downsamples_as(
         self: &Arc<Self>,
         context: &RequestContext,
         names: Option<&[String]>,
@@ -586,7 +613,7 @@ where
                     &self.series_doc_id,
                 )
                 .map_err(decide)?;
-            let created = mutator.create(&self.context, target_name, doc).await?;
+            let created = mutator.create_as(&self.context, target_name, doc).await?;
             return Ok(serde_json::Value::String(created.doc_id.to_string()));
         };
         let id = doc.id().cloned().ok_or_else(|| {
@@ -618,7 +645,7 @@ where
         doc.set_schema_version_id(self.plan.target.version_id.clone());
         doc.set_id(id);
         mutator
-            .update(&self.context, target_name, doc, modified_fields)
+            .update_as(&self.context, target_name, doc, modified_fields)
             .await?;
         done
     }

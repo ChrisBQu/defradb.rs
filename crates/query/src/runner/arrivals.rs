@@ -55,7 +55,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             let allowed = match &collection.policy {
                 None => true,
                 Some(policy) => {
-                    crate::txn::check_doc_read_access_in(
+                    crate::txn::check_doc_read_access_as(
                         &context,
                         self.acp.as_ref(),
                         self.acp_registration_projection.as_deref(),

@@ -90,7 +90,18 @@ impl<S: Store> AutoCommitMutator<S> {
         })
     }
 
+    /// [`Self::register_created_doc_with_acp_as`] in [`RequestContext::ambient`].
+    #[cfg(test)]
     pub(super) fn register_created_doc_with_acp(
+        &self,
+        txn: &mut crate::txn::DbTxn<S>,
+        collection: &Collection,
+        doc_id: String,
+    ) -> query::error::Result<()> {
+        self.register_created_doc_with_acp_as(&RequestContext::ambient(), txn, collection, doc_id)
+    }
+
+    pub(super) fn register_created_doc_with_acp_as(
         &self,
         context: &RequestContext,
         txn: &mut crate::txn::DbTxn<S>,
@@ -138,7 +149,18 @@ impl<S: Store> AutoCommitMutator<S> {
         registration.map_err(|error| query::error::QueryError::execution(error.to_string()))
     }
 
+    /// [`Self::register_deleted_doc_with_acp_as`] in [`RequestContext::ambient`].
+    #[cfg(test)]
     pub(super) fn register_deleted_doc_with_acp(
+        &self,
+        txn: &mut crate::txn::DbTxn<S>,
+        collection: &Collection,
+        doc_id: String,
+    ) -> query::error::Result<()> {
+        self.register_deleted_doc_with_acp_as(&RequestContext::ambient(), txn, collection, doc_id)
+    }
+
+    pub(super) fn register_deleted_doc_with_acp_as(
         &self,
         context: &RequestContext,
         txn: &mut crate::txn::DbTxn<S>,
@@ -231,7 +253,11 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
         }))
     }
 
-    fn requires_write_preparation(&self, context: &RequestContext) -> bool {
+    fn requires_write_preparation(&self) -> bool {
+        self.requires_write_preparation_as(&RequestContext::ambient())
+    }
+
+    fn requires_write_preparation_as(&self, context: &RequestContext) -> bool {
         let embedding = self.db.options().embedding_config();
         self.db.kms().is_some()
             || !embedding.url.is_empty()
@@ -240,6 +266,14 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
     }
 
     async fn resolve_prepared_input(
+        &self,
+        request: &query::prepared::PreparedInputRequest,
+    ) -> query::error::Result<std::sync::Arc<[u8]>> {
+        self.resolve_prepared_input_as(&RequestContext::ambient(), request)
+            .await
+    }
+
+    async fn resolve_prepared_input_as(
         &self,
         context: &RequestContext,
         request: &query::prepared::PreparedInputRequest,
@@ -273,6 +307,22 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
 
     async fn prepare_write(
         &self,
+        collection_name: &str,
+        doc: Document,
+        modified_fields: Option<rapidhash::RapidHashSet<String>>,
+        encryption: Option<defra_core::encryption::EncryptionConfig>,
+    ) -> query::error::Result<Document> {
+        self.prepare_write_as(
+            &RequestContext::ambient().or_encryption(encryption),
+            collection_name,
+            doc,
+            modified_fields,
+        )
+        .await
+    }
+
+    async fn prepare_write_as(
+        &self,
         context: &RequestContext,
         collection_name: &str,
         doc: Document,
@@ -298,6 +348,15 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
 
     async fn create(
         &self,
+        collection_name: &str,
+        doc: Document,
+    ) -> query::error::Result<CreateResult> {
+        self.create_as(&RequestContext::ambient(), collection_name, doc)
+            .await
+    }
+
+    async fn create_as(
+        &self,
         context: &RequestContext,
         collection_name: &str,
         doc: Document,
@@ -307,6 +366,15 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
     }
 
     async fn create_many(
+        &self,
+        collection_name: &str,
+        docs: Vec<Document>,
+    ) -> query::error::Result<Vec<CreateResult>> {
+        self.create_many_as(&RequestContext::ambient(), collection_name, docs)
+            .await
+    }
+
+    async fn create_many_as(
         &self,
         context: &RequestContext,
         collection_name: &str,
@@ -318,6 +386,21 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
 
     async fn update(
         &self,
+        collection_name: &str,
+        doc: Document,
+        modified_fields: rapidhash::RapidHashSet<String>,
+    ) -> query::error::Result<UpdateResult> {
+        self.update_as(
+            &RequestContext::ambient(),
+            collection_name,
+            doc,
+            modified_fields,
+        )
+        .await
+    }
+
+    async fn update_as(
+        &self,
         context: &RequestContext,
         collection_name: &str,
         doc: Document,
@@ -328,6 +411,23 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
     }
 
     async fn update_if_unchanged(
+        &self,
+        collection_name: &str,
+        expected: Document,
+        doc: Document,
+        modified_fields: rapidhash::RapidHashSet<String>,
+    ) -> query::error::Result<UpdateResult> {
+        self.update_if_unchanged_as(
+            &RequestContext::ambient(),
+            collection_name,
+            expected,
+            doc,
+            modified_fields,
+        )
+        .await
+    }
+
+    async fn update_if_unchanged_as(
         &self,
         context: &RequestContext,
         collection_name: &str,
@@ -346,6 +446,25 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
     }
 
     async fn update_if_fields_unchanged(
+        &self,
+        collection_name: &str,
+        expected: Document,
+        expected_fields: rapidhash::RapidHashSet<String>,
+        doc: Document,
+        modified_fields: rapidhash::RapidHashSet<String>,
+    ) -> query::error::Result<UpdateResult> {
+        self.update_if_fields_unchanged_as(
+            &RequestContext::ambient(),
+            collection_name,
+            expected,
+            expected_fields,
+            doc,
+            modified_fields,
+        )
+        .await
+    }
+
+    async fn update_if_fields_unchanged_as(
         &self,
         context: &RequestContext,
         collection_name: &str,
@@ -366,6 +485,15 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
     }
 
     async fn delete(
+        &self,
+        collection_name: &str,
+        doc_id: &DocID,
+    ) -> query::error::Result<DeleteResult> {
+        self.delete_as(&RequestContext::ambient(), collection_name, doc_id)
+            .await
+    }
+
+    async fn delete_as(
         &self,
         context: &RequestContext,
         collection_name: &str,

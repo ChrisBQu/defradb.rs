@@ -110,7 +110,7 @@ impl<S: Store + 'static> BatchMutator<S> {
         let Some(inputs) = &self.prepared_inputs else {
             return self
                 .db
-                .check_node_access(context, permission)
+                .check_node_access_as(context, permission)
                 .await
                 .map_err(|error| query::error::QueryError::permission_denied(error.to_string()));
         };
@@ -151,7 +151,7 @@ impl<S: Store + 'static> BatchMutator<S> {
             query::error::QueryError::execution("mutation batch transaction is no longer active")
         })?;
         super::AutoCommitMutator::new(Arc::clone(&self.db))
-            .register_created_doc_with_acp(context, txn, collection, doc_id)
+            .register_created_doc_with_acp_as(context, txn, collection, doc_id)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -335,6 +335,15 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
 
     async fn create(
         &self,
+        collection_name: &str,
+        doc: Document,
+    ) -> query::error::Result<CreateResult> {
+        self.create_as(&RequestContext::ambient(), collection_name, doc)
+            .await
+    }
+
+    async fn create_as(
+        &self,
         context: &RequestContext,
         collection_name: &str,
         mut doc: Document,
@@ -480,6 +489,21 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
     }
 
     async fn update(
+        &self,
+        collection_name: &str,
+        doc: Document,
+        modified_fields: RapidHashSet<String>,
+    ) -> query::error::Result<UpdateResult> {
+        self.update_as(
+            &RequestContext::ambient(),
+            collection_name,
+            doc,
+            modified_fields,
+        )
+        .await
+    }
+
+    async fn update_as(
         &self,
         context: &RequestContext,
         collection_name: &str,
@@ -634,6 +658,15 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
 
     async fn delete(
         &self,
+        collection_name: &str,
+        doc_id: &DocID,
+    ) -> query::error::Result<DeleteResult> {
+        self.delete_as(&RequestContext::ambient(), collection_name, doc_id)
+            .await
+    }
+
+    async fn delete_as(
+        &self,
         context: &RequestContext,
         collection_name: &str,
         doc_id: &DocID,
@@ -734,7 +767,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                     "mutation batch transaction is no longer active",
                 )
             })?;
-            super::AutoCommitMutator::new(Arc::clone(&self.db)).register_deleted_doc_with_acp(
+            super::AutoCommitMutator::new(Arc::clone(&self.db)).register_deleted_doc_with_acp_as(
                 context,
                 txn,
                 &collection,

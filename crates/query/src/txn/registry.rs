@@ -16,11 +16,13 @@ use super::result::GetTransactionResult;
 /// context that began it, and only a request carrying that identity reaches
 /// it again.
 ///
-/// Each operation comes twice: `*_in` takes the [`RequestContext`] of the
+/// Each operation comes twice: `*_as` takes the [`RequestContext`] of the
 /// request it serves, and the plain form runs in
 /// [`RequestContext::ambient`]. An implementation that tracks ownership
-/// overrides both; the async `*_in` defaults run the plain form inside
-/// [`RequestContext::mirror`], and `get_in` calls `get`.
+/// overrides both forms of each. The defaults of `begin_as`, `commit_as` and
+/// `rollback_as` run the plain form inside [`RequestContext::mirror`] and
+/// `get_as` calls `get`; the implicit-read defaults compose the `*_as`
+/// calls, as the plain defaults compose the plain ones.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait TransactionRegistry: MaybeSendSync + 'static {
@@ -34,7 +36,7 @@ pub trait TransactionRegistry: MaybeSendSync + 'static {
     ) -> std::result::Result<TransactionHandle, TransactionError>;
 
     /// [`Self::begin`] for the request `context` serves.
-    async fn begin_in(
+    async fn begin_as(
         &self,
         context: &RequestContext,
         readonly: bool,
@@ -53,11 +55,11 @@ pub trait TransactionRegistry: MaybeSendSync + 'static {
     }
 
     /// [`Self::begin_implicit_read`] for the request `context` serves.
-    async fn begin_implicit_read_in(
+    async fn begin_implicit_read_as(
         &self,
         context: &RequestContext,
     ) -> std::result::Result<TransactionHandle, TransactionError> {
-        context.mirror(self.begin_implicit_read()).await
+        self.begin_as(context, true).await
     }
 
     /// Get an existing transaction by handle.
@@ -68,7 +70,7 @@ pub trait TransactionRegistry: MaybeSendSync + 'static {
     fn get(&self, handle: &TransactionHandle) -> GetTransactionResult;
 
     /// [`Self::get`] for the request `context` serves.
-    fn get_in(
+    fn get_as(
         &self,
         _context: &RequestContext,
         handle: &TransactionHandle,
@@ -83,7 +85,7 @@ pub trait TransactionRegistry: MaybeSendSync + 'static {
         -> std::result::Result<(), TransactionError>;
 
     /// [`Self::commit`] for the request `context` serves.
-    async fn commit_in(
+    async fn commit_as(
         &self,
         context: &RequestContext,
         handle: &TransactionHandle,
@@ -100,7 +102,7 @@ pub trait TransactionRegistry: MaybeSendSync + 'static {
     ) -> std::result::Result<(), TransactionError>;
 
     /// [`Self::rollback`] for the request `context` serves.
-    async fn rollback_in(
+    async fn rollback_as(
         &self,
         context: &RequestContext,
         handle: &TransactionHandle,
@@ -126,15 +128,14 @@ pub trait TransactionRegistry: MaybeSendSync + 'static {
     }
 
     /// [`Self::finish_implicit_read`] for the request `context` serves.
-    async fn finish_implicit_read_in(
+    async fn finish_implicit_read_as(
         &self,
         context: &RequestContext,
         handle: &TransactionHandle,
         apply_read_effects: bool,
     ) -> std::result::Result<(), TransactionError> {
-        context
-            .mirror(self.finish_implicit_read(handle, apply_read_effects))
-            .await
+        let _ = apply_read_effects;
+        self.rollback_as(context, handle).await
     }
 }
 

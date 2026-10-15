@@ -190,7 +190,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                             )
                         })?;
                         mutator
-                            .resolve_prepared_input_in(&runner.context(), input)
+                            .resolve_prepared_input_as(&runner.context(), input)
                             .await
                     }
                 }
@@ -249,12 +249,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         self.registry.begin(readonly).await
     }
 
-    async fn begin_txn_in(
+    async fn begin_txn_as(
         &self,
         context: &RequestContext,
         readonly: bool,
     ) -> std::result::Result<TransactionHandle, TransactionError> {
-        self.registry.begin_in(context, readonly).await
+        self.registry.begin_as(context, readonly).await
     }
 
     async fn commit_txn(
@@ -264,12 +264,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         self.registry.commit(handle).await
     }
 
-    async fn commit_txn_in(
+    async fn commit_txn_as(
         &self,
         context: &RequestContext,
         handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError> {
-        self.registry.commit_in(context, handle).await
+        self.registry.commit_as(context, handle).await
     }
 
     async fn rollback_txn(
@@ -279,12 +279,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         self.registry.rollback(handle).await
     }
 
-    async fn rollback_txn_in(
+    async fn rollback_txn_as(
         &self,
         context: &RequestContext,
         handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError> {
-        self.registry.rollback_in(context, handle).await
+        self.registry.rollback_as(context, handle).await
     }
 
     fn abandon_txn(&self, handle: &TransactionHandle) {
@@ -340,13 +340,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         };
 
         if matches!(&parsed, ParsedOperation::Query { .. }) {
-            match self.registry.begin_implicit_read_in(&self.context()).await {
+            match self.registry.begin_implicit_read_as(&self.context()).await {
                 Ok(handle) => {
                     let response = self.run_in_txn(request.clone(), &handle).await;
                     let apply_read_effects = response.errors.is_empty();
                     if let Err(error) = self
                         .registry
-                        .finish_implicit_read_in(&self.context(), &handle, apply_read_effects)
+                        .finish_implicit_read_as(&self.context(), &handle, apply_read_effects)
                         .await
                     {
                         if apply_read_effects {
@@ -511,7 +511,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
     /// [`QueryExecutor::execute_in_txn`] on a runner bound to the request.
     async fn run_in_txn(&self, request: QueryRequest, handle: &TransactionHandle) -> QueryResponse {
-        let txn_ctx = match self.registry.get_in(&self.context(), handle) {
+        let txn_ctx = match self.registry.get_as(&self.context(), handle) {
             GetTransactionResult::Found(ctx) => ctx,
             GetTransactionResult::NotFound => {
                 return QueryResponse::error(format!(
@@ -722,7 +722,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                     let context = self.context();
                                     inputs
                                         .answer_miss(&input, || {
-                                            mutator.resolve_prepared_input_in(&context, &input)
+                                            mutator.resolve_prepared_input_as(&context, &input)
                                         })
                                         .await?;
                                     txn_ctx

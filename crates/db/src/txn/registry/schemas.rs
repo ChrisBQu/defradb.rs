@@ -4,6 +4,17 @@ use super::*;
 use storage::corekv::OnCommit;
 
 impl<S: Store + 'static> DbTransactionRegistry<S> {
+    /// [`Self::set_migration_in_txn_as`] for `identity`, or for the identity acting in [`RequestContext::ambient`] when there is none.
+    pub async fn set_migration_in_txn(
+        &self,
+        txn_id: &str,
+        config: lens::LensConfig,
+        identity: Option<&identity::Did>,
+    ) -> Result<lens::TransformId> {
+        self.set_migration_in_txn_as(&crate::access::nac::ambient_as(identity), txn_id, config)
+            .await
+    }
+
     /// Set a migration within an existing transaction.
     ///
     /// This registers a lens migration configuration within the specified transaction.
@@ -17,17 +28,17 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
     /// # Returns
     ///
     /// The transform ID that was registered.
-    pub async fn set_migration_in_txn(
+    pub async fn set_migration_in_txn_as(
         &self,
         context: &RequestContext,
         txn_id: &str,
         config: lens::LensConfig,
     ) -> Result<lens::TransformId> {
         self.db
-            .check_node_access(context, acp::nac::NodePermission::MigrationSet)
+            .check_node_access_as(context, acp::nac::NodePermission::MigrationSet)
             .await?;
         let ctx = self
-            .get_ctx(context, txn_id)?
+            .get_ctx_as(context, txn_id)?
             .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
         let action_lock = ctx.action_lock();
         let _action_guard = action_lock.lock().await;
@@ -85,24 +96,52 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         Ok(transform_id)
     }
 
+    /// [`Self::add_schema_in_txn_as`] in [`RequestContext::ambient`].
+    pub async fn add_schema_in_txn(
+        &self,
+        txn_id: &str,
+        sdl: &str,
+    ) -> Result<Vec<schema::CollectionVersion>> {
+        self.add_schema_in_txn_as(&RequestContext::ambient(), txn_id, sdl)
+            .await
+    }
+
     /// Add a schema within an existing transaction.
     ///
     /// Parses the SDL and creates collections within the transaction.
     /// The collections are only visible after the transaction is committed,
     /// but can be used by queries within the same transaction.
-    pub async fn add_schema_in_txn(
+    pub async fn add_schema_in_txn_as(
         &self,
         context: &RequestContext,
         txn_id: &str,
         sdl: &str,
     ) -> Result<Vec<schema::CollectionVersion>> {
-        self.add_schema_in_txn_with_acp(context, txn_id, sdl, None, None)
+        self.add_schema_in_txn_with_acp_as(context, txn_id, sdl, None, None)
             .await
+    }
+
+    /// [`Self::add_schema_in_txn_with_acp_as`] in [`RequestContext::ambient`].
+    pub async fn add_schema_in_txn_with_acp(
+        &self,
+        txn_id: &str,
+        sdl: &str,
+        document_acp: Option<Arc<dyn acp::DocumentACP>>,
+        creator: Option<identity::Did>,
+    ) -> Result<Vec<schema::CollectionVersion>> {
+        self.add_schema_in_txn_with_acp_as(
+            &RequestContext::ambient(),
+            txn_id,
+            sdl,
+            document_acp,
+            creator,
+        )
+        .await
     }
 
     /// Add a schema within an existing transaction, optionally registering
     /// branchable collection ACP objects before the storage commit.
-    pub async fn add_schema_in_txn_with_acp(
+    pub async fn add_schema_in_txn_with_acp_as(
         &self,
         context: &RequestContext,
         txn_id: &str,
@@ -111,10 +150,10 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         creator: Option<identity::Did>,
     ) -> Result<Vec<schema::CollectionVersion>> {
         let ctx = self
-            .get_ctx(context, txn_id)?
+            .get_ctx_as(context, txn_id)?
             .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
         self.db
-            .check_node_access(context, acp::nac::NodePermission::CollectionPatch)
+            .check_node_access_as(context, acp::nac::NodePermission::CollectionPatch)
             .await?;
         let action_lock = ctx.action_lock();
         let _action_guard = action_lock.lock().await;

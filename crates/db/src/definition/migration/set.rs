@@ -33,12 +33,22 @@ impl<S: Store> DB<S> {
         source = %config.source_schema_version_id,
         dest = %config.destination_schema_version_id
     ))]
+    /// [`Self::set_migration_as`] for `identity`, or for the identity acting in [`defra_core::RequestContext::ambient`] when there is none.
     pub async fn set_migration(
+        &self,
+        config: LensConfig,
+        identity: Option<&identity::Did>,
+    ) -> Result<TransformId> {
+        self.set_migration_as(&crate::access::nac::ambient_as(identity), config)
+            .await
+    }
+
+    pub async fn set_migration_as(
         &self,
         context: &defra_core::RequestContext,
         config: LensConfig,
     ) -> Result<TransformId> {
-        self.check_node_access(context, acp::nac::NodePermission::MigrationSet)
+        self.check_node_access_as(context, acp::nac::NodePermission::MigrationSet)
             .await?;
         let dest_version_id = config.destination_schema_version_id.clone();
         let source_version_id = config.source_schema_version_id.clone();
@@ -270,13 +280,24 @@ impl<S: Store> DB<S> {
         source = %config.source_schema_version_id,
         dest = %config.destination_schema_version_id
     ))]
+    /// [`Self::set_migration_in_txn_as`] for `identity`, or for the identity acting in [`defra_core::RequestContext::ambient`] when there is none.
     pub async fn set_migration_in_txn(
+        &self,
+        txn: &DbTxn<S>,
+        config: LensConfig,
+        identity: Option<&identity::Did>,
+    ) -> Result<TransformId> {
+        self.set_migration_in_txn_as(&crate::access::nac::ambient_as(identity), txn, config)
+            .await
+    }
+
+    pub async fn set_migration_in_txn_as(
         &self,
         context: &defra_core::RequestContext,
         txn: &DbTxn<S>,
         config: LensConfig,
     ) -> Result<TransformId> {
-        self.check_node_access(context, acp::nac::NodePermission::MigrationSet)
+        self.check_node_access_as(context, acp::nac::NodePermission::MigrationSet)
             .await?;
         self.set_migration_in_txn_with_store(txn, self.lens_store.clone(), config)
             .await

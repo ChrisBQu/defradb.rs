@@ -307,7 +307,7 @@ where
             // resolving context.
             let attempt =
                 defra_core::RequestContext::default().with_identity(Some(identity.to_string()));
-            db.check_node_access(&attempt, permission)
+            db.check_node_access_as(&attempt, permission)
                 .await
                 .map_err(|error| query::error::QueryError::permission_denied(error.to_string()))?;
             Ok(std::sync::Arc::from(b"true".as_slice()))

@@ -538,10 +538,17 @@ impl<S: Store> VersionedFetcher<S> {
             .map_err(|e| Error::Serialization(format!("failed to decrypt versioned block: {e}")))
     }
 
-    /// The KMS request a read key is fetched under: the identity reading.
+    /// The KMS request a read key is fetched under: the identity reading, or
+    /// the one acting in [`defra_core::RequestContext::ambient`] when the
+    /// fetcher names none.
     pub fn kms_request_context(&self) -> kms::RequestContext {
         self.caller_identity
             .clone()
+            .or_else(|| {
+                defra_core::RequestContext::ambient()
+                    .identity()
+                    .and_then(|did| identity::Did::new(did).ok())
+            })
             .map(kms::RequestContext::with_user)
             .unwrap_or_else(kms::RequestContext::anonymous)
     }

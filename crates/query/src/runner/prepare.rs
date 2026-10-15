@@ -36,7 +36,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         else {
             return Ok(None);
         };
-        let schema_has_embeddings = if mutator.requires_write_preparation_in(&self.context()) {
+        let schema_has_embeddings = if mutator.requires_write_preparation_as(&self.context()) {
             false
         } else {
             let provider = self.effective_provider();
@@ -57,7 +57,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             .any(|mutation| mutation.mutation_type == MutationType::Truncate);
         let request_batch =
             mutations.len() > 1 || self.acp.supports_transactions() || !contains_truncate;
-        if !mutator.requires_write_preparation_in(&self.context())
+        if !mutator.requires_write_preparation_as(&self.context())
             && !schema_has_embeddings
             && !request_batch
         {
@@ -172,14 +172,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             let context = self
                 .context()
                 .into_owned()
-                .with_encryption(mutation.encryption());
+                .or_encryption(mutation.encryption());
             if mutation.mutation_type == MutationType::Create {
                 for input in self.build_create_inputs(mutation, collection)? {
                     let doc =
                         input.to_document_with_schema_and_time(collection, Some(request_time))?;
                     entry.creates.push(
                         mutator
-                            .prepare_write_in(&context, &mutation.collection_name, doc, None)
+                            .prepare_write_as(&context, &mutation.collection_name, doc, None)
                             .await?,
                     );
                 }
@@ -206,7 +206,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     && mutation.filter.is_none()
                     && mutation.encrypt_fields.is_empty()
                     && !mutation.encrypt_doc
-                    && !mutator.requires_write_preparation_in(&self.context())
+                    && !mutator.requires_write_preparation_as(&self.context())
                     && collection.vector_embeddings.is_empty()
                     && mutator.supports_projected_updates()
                 {
@@ -236,7 +236,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             .to_document_with_schema_and_time(collection, Some(request_time))?;
                         entry.creates.push(
                             mutator
-                                .prepare_write_in(&context, &mutation.collection_name, doc, None)
+                                .prepare_write_as(&context, &mutation.collection_name, doc, None)
                                 .await?,
                         );
                     }
@@ -267,7 +267,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             input.fields.keys().cloned().collect()
                         };
                         let doc = mutator
-                            .prepare_write_in(
+                            .prepare_write_as(
                                 &context,
                                 &mutation.collection_name,
                                 doc.clone(),

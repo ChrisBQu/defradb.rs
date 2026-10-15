@@ -216,7 +216,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                 )
             })?;
             truncator
-                .truncate_in(
+                .truncate_as(
                     &self.context(),
                     &mutation.collection_name,
                     mutation.filter.clone(),

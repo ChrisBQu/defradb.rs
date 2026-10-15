@@ -240,7 +240,7 @@ pub async fn check_doc_read_access_with_prepared_inputs(
     doc_id: &str,
     inputs: Option<&crate::prepared::PreparedInputMemo>,
 ) -> crate::error::Result<bool> {
-    check_doc_read_access_in(
+    check_doc_read_access_as(
         &RequestContext::ambient(),
         acp,
         projection,
@@ -259,7 +259,7 @@ pub async fn check_doc_read_access_with_prepared_inputs(
 /// serves: an authenticated reader whose node access grants it `bypass-dac`
 /// reads every document.
 #[allow(clippy::too_many_arguments)]
-pub async fn check_doc_read_access_in(
+pub async fn check_doc_read_access_as(
     context: &RequestContext,
     acp: &dyn DocumentACP,
     projection: Option<&AcpRegistrationProjection>,

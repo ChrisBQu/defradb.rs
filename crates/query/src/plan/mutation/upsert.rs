@@ -319,7 +319,7 @@ impl UpsertNode {
             }
             let result = self
                 .mutator
-                .update_in(&self.context, &self.collection_name, doc, modified_fields)
+                .update_as(&self.context, &self.collection_name, doc, modified_fields)
                 .await?;
 
             let plan_doc = self.result_to_doc(&result.document)?;
@@ -369,7 +369,7 @@ impl UpsertNode {
             let doc = self.prepared_create(doc)?;
             let result = self
                 .mutator
-                .create_in(&self.context, &self.collection_name, doc)
+                .create_as(&self.context, &self.collection_name, doc)
                 .await?;
 
             let plan_doc = self.result_to_doc(&result.document)?;
@@ -405,7 +405,7 @@ impl UpsertNode {
         let doc = self.prepared_create(doc)?;
         let result = self
             .mutator
-            .create_in(&self.context, &self.collection_name, doc)
+            .create_as(&self.context, &self.collection_name, doc)
             .await?;
 
         let plan_doc = self.result_to_doc(&result.document)?;

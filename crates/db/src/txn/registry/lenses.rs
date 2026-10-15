@@ -5,22 +5,28 @@ use crate::definition::migration::committed_lenses::PreparedLens;
 use storage::corekv::OnCommit;
 
 impl<S: Store + 'static> DbTransactionRegistry<S> {
+    /// [`Self::add_lens_in_txn_as`] in [`RequestContext::ambient`].
+    pub async fn add_lens_in_txn(&self, txn_id: &str, config: LensConfig) -> Result<TransformId> {
+        self.add_lens_in_txn_as(&RequestContext::ambient(), txn_id, config)
+            .await
+    }
+
     /// Add a standalone lens within a transaction.
     ///
     /// The lens is visible only within this transaction until commit. Its blocks
     /// and config are written into the transaction, so the lens is durable with
     /// its commit; the commit then registers it in the database's lens store.
-    pub async fn add_lens_in_txn(
+    pub async fn add_lens_in_txn_as(
         &self,
         context: &RequestContext,
         txn_id: &str,
         config: LensConfig,
     ) -> Result<TransformId> {
         let ctx = self
-            .get_ctx(context, txn_id)?
+            .get_ctx_as(context, txn_id)?
             .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
         self.db
-            .check_node_access(context, acp::nac::NodePermission::LensCreate)
+            .check_node_access_as(context, acp::nac::NodePermission::LensCreate)
             .await?;
         let lens = PreparedLens::new(config).await?;
         let action_lock = ctx.action_lock();
@@ -56,14 +62,23 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         Ok(lens.id)
     }
 
-    /// List all lenses visible within a transaction.
+    /// [`Self::list_lenses_in_txn_as`] in [`RequestContext::ambient`].
     pub async fn list_lenses_in_txn(
+        &self,
+        txn_id: &str,
+    ) -> Result<rapidhash::RapidHashMap<String, LensModule>> {
+        self.list_lenses_in_txn_as(&RequestContext::ambient(), txn_id)
+            .await
+    }
+
+    /// List all lenses visible within a transaction.
+    pub async fn list_lenses_in_txn_as(
         &self,
         context: &RequestContext,
         txn_id: &str,
     ) -> Result<rapidhash::RapidHashMap<String, LensModule>> {
         let ctx = self
-            .get_ctx(context, txn_id)?
+            .get_ctx_as(context, txn_id)?
             .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
         let action_lock = ctx.action_lock();
         let _action_guard = action_lock.lock().await;

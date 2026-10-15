@@ -637,7 +637,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     ) -> Result<Arc<dyn CollectionProvider>> {
         let context = self
             .registry
-            .get_in(&self.context(), handle)
+            .get_as(&self.context(), handle)
             .into_result()
             .map_err(|error| QueryError::execution(error.to_string()))?
             .ok_or_else(|| QueryError::execution(format!("transaction '{handle}' not found")))?;

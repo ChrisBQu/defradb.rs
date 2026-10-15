@@ -14,14 +14,14 @@ impl<S: Store + 'static> crate::database::DB<S> {
             let mut ticker = time::interval(std::time::Duration::from_millis(250));
             ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-            if let Err(error) = self.bootstrap_downsamples(&context, None).await {
+            if let Err(error) = self.bootstrap_downsamples_as(&context, None).await {
                 tracing::warn!(error = %error, "Failed to bootstrap downsample collections");
             }
 
             let Some(bus) = self.event_bus().cloned() else {
                 loop {
                     ticker.tick().await;
-                    if let Err(error) = self.bootstrap_downsamples(&context, None).await {
+                    if let Err(error) = self.bootstrap_downsamples_as(&context, None).await {
                         tracing::warn!(error = %error, "Failed to refresh downsample collections");
                     }
                 }
@@ -32,7 +32,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
             loop {
                 tokio::select! {
                     _ = ticker.tick() => {
-                        if let Err(error) = self.bootstrap_downsamples(&context, None).await {
+                        if let Err(error) = self.bootstrap_downsamples_as(&context, None).await {
                             tracing::warn!(error = %error, "Failed to refresh downsample collections");
                         }
                     }
@@ -45,7 +45,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
                             tracing::warn!(
                                 "Downsample event subscription dropped messages; rebuilding all downsample collections"
                             );
-                            if let Err(error) = self.bootstrap_downsamples(&context, None).await {
+                            if let Err(error) = self.bootstrap_downsamples_as(&context, None).await {
                                 tracing::warn!(
                                     error = %error,
                                     "Failed to rebuild downsample collections after dropped events"

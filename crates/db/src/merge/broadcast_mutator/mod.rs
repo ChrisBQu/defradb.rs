@@ -465,10 +465,18 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
 
     async fn resolve_prepared_input(
         &self,
+        request: &query::prepared::PreparedInputRequest,
+    ) -> query::error::Result<Arc<[u8]>> {
+        self.resolve_prepared_input_as(&RequestContext::ambient(), request)
+            .await
+    }
+
+    async fn resolve_prepared_input_as(
+        &self,
         context: &RequestContext,
         request: &query::prepared::PreparedInputRequest,
     ) -> query::error::Result<Arc<[u8]>> {
-        self.inner.resolve_prepared_input(context, request).await
+        self.inner.resolve_prepared_input_as(context, request).await
     }
 
     async fn prepared_embedding_request(
@@ -486,11 +494,31 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         true
     }
 
-    fn requires_write_preparation(&self, context: &RequestContext) -> bool {
-        self.inner.requires_write_preparation(context)
+    fn requires_write_preparation(&self) -> bool {
+        self.requires_write_preparation_as(&RequestContext::ambient())
+    }
+
+    fn requires_write_preparation_as(&self, context: &RequestContext) -> bool {
+        self.inner.requires_write_preparation_as(context)
     }
 
     async fn prepare_write(
+        &self,
+        collection_name: &str,
+        doc: Document,
+        modified_fields: Option<rapidhash::RapidHashSet<String>>,
+        encryption: Option<defra_core::encryption::EncryptionConfig>,
+    ) -> query::error::Result<Document> {
+        self.prepare_write_as(
+            &RequestContext::ambient().or_encryption(encryption),
+            collection_name,
+            doc,
+            modified_fields,
+        )
+        .await
+    }
+
+    async fn prepare_write_as(
         &self,
         context: &RequestContext,
         collection_name: &str,
@@ -498,7 +526,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         modified_fields: Option<rapidhash::RapidHashSet<String>>,
     ) -> query::error::Result<Document> {
         self.inner
-            .prepare_write(context, collection_name, doc, modified_fields)
+            .prepare_write_as(context, collection_name, doc, modified_fields)
             .await
     }
 
@@ -522,6 +550,15 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
 
     async fn create(
         &self,
+        collection_name: &str,
+        doc: Document,
+    ) -> query::error::Result<CreateResult> {
+        self.create_as(&RequestContext::ambient(), collection_name, doc)
+            .await
+    }
+
+    async fn create_as(
+        &self,
         context: &RequestContext,
         collection_name: &str,
         doc: Document,
@@ -536,7 +573,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         let collection_id = collection.collection_id().to_string();
 
         // Execute the create mutation
-        let result = self.inner.create(context, collection_name, doc).await?;
+        let result = self.inner.create_as(context, collection_name, doc).await?;
 
         // Build the block result for broadcast
         let (cid, block, doc_id_str) = if let (Some(cid), Some(block)) =
@@ -692,6 +729,15 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
 
     async fn create_many(
         &self,
+        collection_name: &str,
+        docs: Vec<Document>,
+    ) -> query::error::Result<Vec<query::mutator::CreateResult>> {
+        self.create_many_as(&RequestContext::ambient(), collection_name, docs)
+            .await
+    }
+
+    async fn create_many_as(
+        &self,
         context: &RequestContext,
         collection_name: &str,
         docs: Vec<Document>,
@@ -707,7 +753,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         // Delegate to inner (single transaction for all docs)
         let results = self
             .inner
-            .create_many(context, collection_name, docs)
+            .create_many_as(context, collection_name, docs)
             .await?;
 
         let creator_did = context.creator().map(str::to_owned);
@@ -900,6 +946,21 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
 
     async fn update(
         &self,
+        collection_name: &str,
+        doc: Document,
+        modified_fields: rapidhash::RapidHashSet<String>,
+    ) -> query::error::Result<UpdateResult> {
+        self.update_as(
+            &RequestContext::ambient(),
+            collection_name,
+            doc,
+            modified_fields,
+        )
+        .await
+    }
+
+    async fn update_as(
+        &self,
         context: &RequestContext,
         collection_name: &str,
         doc: Document,
@@ -908,13 +969,30 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         let se_fields: Vec<String> = modified_fields.iter().cloned().collect();
         let result = self
             .inner
-            .update(context, collection_name, doc, modified_fields)
+            .update_as(context, collection_name, doc, modified_fields)
             .await?;
         self.broadcast_update_result(context, collection_name, se_fields, result)
             .await
     }
 
     async fn update_if_unchanged(
+        &self,
+        collection_name: &str,
+        expected: Document,
+        doc: Document,
+        modified_fields: rapidhash::RapidHashSet<String>,
+    ) -> query::error::Result<UpdateResult> {
+        self.update_if_unchanged_as(
+            &RequestContext::ambient(),
+            collection_name,
+            expected,
+            doc,
+            modified_fields,
+        )
+        .await
+    }
+
+    async fn update_if_unchanged_as(
         &self,
         context: &RequestContext,
         collection_name: &str,
@@ -925,13 +1003,22 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         let se_fields: Vec<String> = modified_fields.iter().cloned().collect();
         let result = self
             .inner
-            .update_if_unchanged(context, collection_name, expected, doc, modified_fields)
+            .update_if_unchanged_as(context, collection_name, expected, doc, modified_fields)
             .await?;
         self.broadcast_update_result(context, collection_name, se_fields, result)
             .await
     }
 
     async fn delete(
+        &self,
+        collection_name: &str,
+        doc_id: &DocID,
+    ) -> query::error::Result<DeleteResult> {
+        self.delete_as(&RequestContext::ambient(), collection_name, doc_id)
+            .await
+    }
+
+    async fn delete_as(
         &self,
         context: &RequestContext,
         collection_name: &str,
@@ -958,7 +1045,10 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         };
 
         // Execute the delete mutation
-        let result = self.inner.delete(context, collection_name, doc_id).await?;
+        let result = self
+            .inner
+            .delete_as(context, collection_name, doc_id)
+            .await?;
 
         // No-op delete (missing doc): the inner mutator wrote nothing, so
         // there's no tombstone block to read or broadcast. Returning here

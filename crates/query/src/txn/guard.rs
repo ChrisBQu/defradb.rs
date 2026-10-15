@@ -32,7 +32,7 @@ use super::TransactionHandle;
 ///     executor: &E,
 ///     queries: Vec<QueryRequest>,
 /// ) -> Result<Vec<QueryResponse>, TransactionError> {
-///     let guard = TransactionGuard::begin_in(executor, RequestContext::default(), false).await?;
+///     let guard = TransactionGuard::begin_as(executor, RequestContext::default(), false).await?;
 ///     let mut responses = Vec::new();
 ///
 ///     for query in queries {
@@ -78,12 +78,12 @@ impl<'a, E: crate::QueryExecutor + ?Sized> TransactionGuard<'a, E> {
     /// guard for it.
     ///
     /// Dropping the returned guard abandons the transaction.
-    pub async fn begin_in(
+    pub async fn begin_as(
         executor: &'a E,
         context: RequestContext,
         readonly: bool,
     ) -> std::result::Result<Self, TransactionError> {
-        let handle = executor.begin_txn_in(&context, readonly).await?;
+        let handle = executor.begin_txn_as(&context, readonly).await?;
         Ok(Self {
             executor,
             context: Some(context),
@@ -120,7 +120,7 @@ impl<'a, E: crate::QueryExecutor + ?Sized> TransactionGuard<'a, E> {
             .as_ref()
             .ok_or_else(|| TransactionError::already_finalized("transaction already finalized"))?;
         match &self.context {
-            Some(context) => self.executor.commit_txn_in(context, handle).await?,
+            Some(context) => self.executor.commit_txn_as(context, handle).await?,
             None => self.executor.commit_txn(handle).await?,
         }
         self.handle = None;
@@ -136,7 +136,7 @@ impl<'a, E: crate::QueryExecutor + ?Sized> TransactionGuard<'a, E> {
             .as_ref()
             .ok_or_else(|| TransactionError::already_finalized("transaction already finalized"))?;
         match &self.context {
-            Some(context) => self.executor.rollback_txn_in(context, handle).await?,
+            Some(context) => self.executor.rollback_txn_as(context, handle).await?,
             None => self.executor.rollback_txn(handle).await?,
         }
         self.handle = None;

@@ -98,18 +98,24 @@ where
             .map(|_| ())
     }
 
+    /// [`Self::materialize_collection_as`] in [`defra_core::RequestContext::ambient`].
+    pub async fn materialize_collection(&self, collection_name: &str) -> Result<usize> {
+        self.materialize_collection_as(&defra_core::RequestContext::ambient(), collection_name)
+            .await
+    }
+
     /// Eagerly advance every known-version document in a collection to its active version.
     ///
     /// This writes only the datastore blob, version key, and secondary indexes. It does not
     /// create CRDT commits, update heads, emit mutation events, or gossip data to peers.
     ///
     /// Returns the number of documents whose stored version was advanced.
-    pub async fn materialize_collection(
+    pub async fn materialize_collection_as(
         &self,
         context: &defra_core::RequestContext,
         collection_name: &str,
     ) -> Result<usize> {
-        self.check_node_access(context, acp::nac::NodePermission::CollectionPatch)
+        self.check_node_access_as(context, acp::nac::NodePermission::CollectionPatch)
             .await?;
         self.reindex_in_pages(collection_name, None, true).await
     }

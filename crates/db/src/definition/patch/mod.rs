@@ -23,6 +23,21 @@ use storage::keys::systemstore::{CollectionKey, CollectionNameKey, CollectionVer
 use tracing::instrument;
 
 impl<S: Store> crate::database::DB<S> {
+    /// [`Self::patch_collection_as`] for `identity`, or for the identity acting in [`defra_core::RequestContext::ambient`] when there is none.
+    pub async fn patch_collection(
+        &self,
+        collection_name: &str,
+        patch: &str,
+        identity: Option<&identity::Did>,
+    ) -> Result<CollectionVersion> {
+        self.patch_collection_as(
+            &crate::access::nac::ambient_as(identity),
+            collection_name,
+            patch,
+        )
+        .await
+    }
+
     /// Apply a JSON Patch to a collection schema.
     ///
     /// This method takes a JSON Patch document (RFC 6902) and applies it to
@@ -52,26 +67,43 @@ impl<S: Store> crate::database::DB<S> {
     /// - `CollectionNotFound` if the collection doesn't exist
     /// - `InvalidPatch` if the patch is invalid or cannot be applied
     /// - `Schema` if the resulting schema is invalid
-    pub async fn patch_collection(
+    pub async fn patch_collection_as(
         &self,
         context: &defra_core::RequestContext,
         collection_name: &str,
         patch: &str,
     ) -> Result<CollectionVersion> {
-        self.patch_collection_with_migration(context, collection_name, patch, None)
+        self.patch_collection_with_migration_as(context, collection_name, patch, None)
             .await
+    }
+
+    /// [`Self::patch_collection_with_migration_as`] for `identity`, or for the identity acting in [`defra_core::RequestContext::ambient`] when there is none.
+    pub async fn patch_collection_with_migration(
+        &self,
+        collection_name: &str,
+        patch: &str,
+        migration: Option<lens::LensConfig>,
+        identity: Option<&identity::Did>,
+    ) -> Result<CollectionVersion> {
+        self.patch_collection_with_migration_as(
+            &crate::access::nac::ambient_as(identity),
+            collection_name,
+            patch,
+            migration,
+        )
+        .await
     }
 
     /// Apply a JSON Patch and its migration as one operation.
     #[instrument(skip(self, patch, migration), fields(collection = %collection_name), name = "db.patch_collection")]
-    pub async fn patch_collection_with_migration(
+    pub async fn patch_collection_with_migration_as(
         &self,
         context: &defra_core::RequestContext,
         collection_name: &str,
         patch: &str,
         migration: Option<lens::LensConfig>,
     ) -> Result<CollectionVersion> {
-        self.check_node_access(context, acp::nac::NodePermission::CollectionPatch)
+        self.check_node_access_as(context, acp::nac::NodePermission::CollectionPatch)
             .await?;
         // Parse the patch early - needed for both collection lookup fallbacks and processing
         let patch_ops: serde_json::Value =
@@ -208,7 +240,7 @@ impl<S: Store> crate::database::DB<S> {
         {
             // True deletion: remove from store entirely (matches Go behavior)
             if is_deactivation {
-                self.delete_collection_version(context, &old_version_id, &[])
+                self.delete_collection_version_as(context, &old_version_id, &[])
                     .await?;
                 new_schema.is_active = false;
                 new_schema.version_id = old_version_id.clone();

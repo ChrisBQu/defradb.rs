@@ -15,11 +15,11 @@ async fn statements_in_a_transaction_see_the_collection_it_added() {
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     let registry = Arc::new(DbTransactionRegistry::new(Arc::clone(&db)));
     let handle = registry
-        .begin(&defra_core::RequestContext::default(), false)
+        .begin_as(&defra_core::RequestContext::default(), false)
         .await
         .unwrap();
     registry
-        .add_schema_in_txn(
+        .add_schema_in_txn_as(
             &defra_core::RequestContext::default(),
             handle.as_str(),
             "type TxnOnly { value: Int }",
@@ -52,7 +52,7 @@ async fn statements_in_a_transaction_see_the_collection_it_added() {
     );
 
     registry
-        .rollback(&defra_core::RequestContext::default(), &handle)
+        .rollback_as(&defra_core::RequestContext::default(), &handle)
         .await
         .unwrap();
 }

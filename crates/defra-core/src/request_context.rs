@@ -130,6 +130,16 @@ impl RequestContext {
         self
     }
 
+    /// This context with the encryption set to `encryption` when there is
+    /// one, and its own kept otherwise.
+    #[must_use]
+    pub fn or_encryption(self, encryption: Option<EncryptionConfig>) -> Self {
+        match encryption {
+            Some(encryption) => self.with_encryption(Some(encryption)),
+            None => self,
+        }
+    }
+
     /// The key this request signs the blocks it writes with; unsigned blocks
     /// without one.
     pub fn signing(&self) -> Option<&SigningConfig> {

@@ -11,6 +11,16 @@ fn acting_did(context: &RequestContext) -> Option<Did> {
     context.identity().and_then(|value| Did::new(value).ok())
 }
 
+/// The context a base-shaped call runs in: [`RequestContext::ambient`], with
+/// `identity` acting in it when the call names one.
+pub(crate) fn ambient_as(identity: Option<&Did>) -> RequestContext {
+    let context = RequestContext::ambient();
+    match identity {
+        Some(identity) => context.with_identity(Some(identity.to_string())),
+        None => context,
+    }
+}
+
 impl<S: Store> DB<S> {
     pub(crate) async fn check_node_access_in_txn(
         &self,
@@ -42,6 +52,17 @@ impl<S: Store> DB<S> {
         }
     }
 
+    /// [`Self::check_node_access_as`] for `identity`, or for the identity
+    /// acting in [`RequestContext::ambient`] when there is none.
+    pub async fn check_node_access(
+        &self,
+        identity: Option<&Did>,
+        permission: NodePermission,
+    ) -> Result<()> {
+        self.check_node_access_as(&ambient_as(identity), permission)
+            .await
+    }
+
     /// Check NAC permission for the identity acting in `context` before
     /// proceeding with a node-level operation. Matches Go's
     /// `db.checkNodeAccess()` pattern.
@@ -49,7 +70,7 @@ impl<S: Store> DB<S> {
     /// Returns `Ok(())` when NAC is not configured or not enabled (all
     /// operations allowed), or when the identity holds the permission.
     /// Returns `Error::NotAuthorized` when the identity lacks it.
-    pub async fn check_node_access(
+    pub async fn check_node_access_as(
         &self,
         context: &RequestContext,
         permission: NodePermission,

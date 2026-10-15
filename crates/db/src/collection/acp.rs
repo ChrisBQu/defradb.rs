@@ -31,22 +31,44 @@ use acp::{DocumentACP, DocumentPermission, Identity};
 use identity::Did;
 use schema::CollectionVersion;
 
-/// Check if identity has permission for a document operation.
+/// [`check_doc_permission_as`] in [`defra_core::RequestContext::ambient`].
+pub async fn check_doc_permission(
+    acp: &dyn DocumentACP,
+    identity: &Identity,
+    permission: DocumentPermission,
+    collection: &CollectionVersion,
+    doc_id: &str,
+    node_identity: Option<&Did>,
+) -> acp::Result<bool> {
+    check_doc_permission_as(
+        &defra_core::RequestContext::ambient(),
+        acp,
+        identity,
+        permission,
+        collection,
+        doc_id,
+        node_identity,
+    )
+    .await
+}
+
+/// Check if identity has permission for a document operation in the request
+/// `context` serves.
 ///
 /// Returns true if any of the following holds:
 /// 1. Collection has no policy (ACP not enforced)
-/// 2. `dac_bypass` is set for an authenticated identity: the request's DAC
-///    bypass (`RequestContext::dac_bypass`), resolved at the HTTP/FFI entry
-///    point via `should_bypass_dac()` for a NAC admin with `bypass-dac`
+/// 2. The request's DAC bypass (`RequestContext::dac_bypass`) is set for an
+///    authenticated identity (NAC admin with `bypass-dac`, resolved at the
+///    HTTP/FFI entry point via `should_bypass_dac()`)
 /// 3. The request identity equals the configured `node_identity` (the
 ///    process owner gets full access — matches Go DefraDB's
 ///    `internal/db/collection_acp.go:60-62`)
 /// 4. Document is unregistered (public) — handled inside the backend
 /// 5. Identity has the required relation/permission — handled by the backend
-pub async fn check_doc_permission(
+pub async fn check_doc_permission_as(
+    context: &defra_core::RequestContext,
     acp: &dyn DocumentACP,
     identity: &Identity,
-    dac_bypass: bool,
     permission: DocumentPermission,
     collection: &CollectionVersion,
     doc_id: &str,
@@ -58,8 +80,10 @@ pub async fn check_doc_permission(
         None => return Ok(true),
     };
 
+    // DAC bypass resolved by the HTTP/FFI entry point via
+    // `acp::nac::should_bypass_dac`.
     // Mirrors how the query path honors the bypass via `permission_filter`.
-    if identity.is_authenticated() && dac_bypass {
+    if identity.is_authenticated() && context.dac_bypass() {
         return Ok(true);
     }
 
@@ -211,8 +235,6 @@ pub struct AcpContext {
     pub acp: Arc<dyn DocumentACP>,
     /// Identity making the request
     pub identity: Identity,
-    /// The request's DAC bypass (`RequestContext::dac_bypass`)
-    pub dac_bypass: bool,
     /// Node identity (process owner) — granted full access if equal to `identity`
     pub node_identity: Option<Did>,
 }
@@ -223,7 +245,6 @@ impl AcpContext {
         Self {
             acp,
             identity,
-            dac_bypass: false,
             node_identity,
         }
     }
@@ -237,15 +258,8 @@ impl AcpContext {
         Self {
             acp,
             identity: Identity::from(did),
-            dac_bypass: false,
             node_identity,
         }
-    }
-
-    /// This context with the request's DAC bypass set to `bypass`.
-    pub fn with_dac_bypass(mut self, bypass: bool) -> Self {
-        self.dac_bypass = bypass;
-        self
     }
 
     /// Check if identity has permission for a document operation.
@@ -258,7 +272,6 @@ impl AcpContext {
         check_doc_permission(
             self.acp.as_ref(),
             &self.identity,
-            self.dac_bypass,
             permission,
             collection,
             doc_id,

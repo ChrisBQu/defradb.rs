@@ -210,7 +210,7 @@ impl PlanNode for DeleteNode {
                 for (doc_id_str, doc_id) in parsed_ids {
                     let result = self
                         .mutator
-                        .delete_in(&self.context, &self.collection_name, &doc_id)
+                        .delete_as(&self.context, &self.collection_name, &doc_id)
                         .await?;
 
                     if result.existed {
@@ -252,7 +252,7 @@ impl PlanNode for DeleteNode {
 
                         let result = self
                             .mutator
-                            .delete_in(&self.context, &self.collection_name, &doc_id)
+                            .delete_as(&self.context, &self.collection_name, &doc_id)
                             .await?;
 
                         if result.existed {

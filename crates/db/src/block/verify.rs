@@ -322,7 +322,6 @@ async fn load_authorized_block_signature<S: Store>(
                 let checker = acp::read_access::DirectChecker {
                     acp: document_acp,
                     identity: caller_identity,
-                    dac_bypass,
                 };
 
                 let candidates = if owning_doc_ids.is_empty() {
@@ -331,21 +330,25 @@ async fn load_authorized_block_signature<S: Store>(
                     owning_doc_ids
                 };
 
-                let mut has_permission = false;
-                for doc_id in &candidates {
-                    if acp::read_access::check_doc_read_access(
-                        &checker,
-                        &policy.id,
-                        &policy.resource_name,
-                        &collection.collection_id,
-                        collection.is_branchable,
-                        doc_id,
-                    )
-                    .await
-                    .map_err(|e| format!("ACP check failed: {}", e))?
-                    {
-                        has_permission = true;
-                        break;
+                // The NAC `bypass-dac` privilege reads every block, the first
+                // check of the read rule on every path.
+                let mut has_permission = caller_identity.is_authenticated() && dac_bypass;
+                if !has_permission {
+                    for doc_id in &candidates {
+                        if acp::read_access::check_doc_read_access(
+                            &checker,
+                            &policy.id,
+                            &policy.resource_name,
+                            &collection.collection_id,
+                            collection.is_branchable,
+                            doc_id,
+                        )
+                        .await
+                        .map_err(|e| format!("ACP check failed: {}", e))?
+                        {
+                            has_permission = true;
+                            break;
+                        }
                     }
                 }
 
