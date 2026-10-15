@@ -422,16 +422,14 @@ impl Store for RegolithStore {
                 Ok(value)
             }
             Err(regolith::TransactError::Closure(error)) => Err(error),
-            Err(regolith::TransactError::Exhausted(conflict)) => {
-                Err(RetryAttemptError::Exhausted(
-                    crate::corekv::TransactionConflict {
-                        access: conflict.mine(),
-                        winning_write: conflict.theirs(),
-                        observed_seq: conflict.observed_seq(),
-                        latest_seq: conflict.latest_seq(),
-                    },
-                ))
-            }
+            Err(regolith::TransactError::Exhausted(conflict)) => Err(RetryAttemptError::Exhausted(
+                crate::corekv::TransactionConflict {
+                    access: conflict.mine(),
+                    winning_write: conflict.theirs(),
+                    observed_seq: conflict.observed_seq(),
+                    latest_seq: conflict.latest_seq(),
+                },
+            )),
             Err(regolith::TransactError::Engine(error)) => Err(RetryAttemptError::Storage(
                 super::transaction::map_txn_error(error),
             )),

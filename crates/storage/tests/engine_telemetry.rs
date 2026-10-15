@@ -1,6 +1,6 @@
 use std::sync::{
-    Arc,
     atomic::{AtomicU64, AtomicUsize, Ordering},
+    Arc,
 };
 use storage::corekv::{
     Error, RetryAttemptError, RetryAttemptFn, RetryAttemptFuture, RetryAttemptValue,
