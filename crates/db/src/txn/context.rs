@@ -4,7 +4,6 @@ use query::fetcher::CollectionProvider;
 use query::mutator::DocMutator;
 use query::runner::DocFetcher;
 use query::txn::{DeferredAcpMutations, TransactionContext};
-use std::collections::BTreeMap;
 use std::result::Result;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
