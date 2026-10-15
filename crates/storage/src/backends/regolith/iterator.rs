@@ -437,3 +437,58 @@ mod tests {
         assert_eq!(page_request(1000, 0), PAGE_ENTRIES);
     }
 }
+
+#[cfg(test)]
+mod scan_tests {
+    use super::*;
+    use crate::backends::RegolithStore;
+    use crate::corekv::IterOptions;
+    use crate::corekv::{Store, Txn};
+    use regolith::{PerfContext, PerfLevel};
+
+    async fn scan_lookups(txn: &dyn Txn, rows: usize) -> u64 {
+        PerfContext::reset();
+        let mut iter = txn
+            .iterator(IterOptions::new().with_prefix(b"row/".to_vec()))
+            .await
+            .unwrap();
+        let mut count = 0;
+        while iter.next().await.unwrap().is_some() {
+            count += 1;
+        }
+        iter.close().await.unwrap();
+        assert_eq!(count, rows);
+        PerfContext::capture().block_cache_lookup_count
+    }
+
+    /// A scan of a writing transaction walks the tables once, as a snapshot
+    /// scan does, rather than seeking them again for every page.
+    #[tokio::test]
+    async fn an_unvalidated_scan_of_a_writing_transaction_reads_each_block_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = RegolithStore::open(directory.path()).unwrap();
+        let rows = 3 * PAGE_ENTRIES + 7;
+        let mut seed = store.new_txn(false).await.unwrap();
+        for row in 0..rows {
+            seed.set(format!("row/{row:06}").as_bytes(), &[7; 64])
+                .await
+                .unwrap();
+        }
+        seed.commit().await.unwrap();
+        store.engine().db().flush().unwrap();
+
+        let level = PerfContext::set_level(PerfLevel::EnableCount);
+        let snapshot = store.new_txn(true).await.unwrap();
+        let snapshot_lookups = scan_lookups(snapshot.as_ref(), rows).await;
+        snapshot.discard();
+        let mut writing = store.new_txn(false).await.unwrap();
+        writing.set(b"other", b"own").await.unwrap();
+        let writing_lookups = scan_lookups(writing.as_ref(), rows).await;
+        writing.discard();
+        PerfContext::set_level(level);
+
+        assert!(snapshot_lookups > 0);
+        assert_eq!(writing_lookups, snapshot_lookups);
+        store.close().await.unwrap();
+    }
+}

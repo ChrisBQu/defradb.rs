@@ -508,3 +508,42 @@ mod append_tests {
         txn.discard();
     }
 }
+
+#[cfg(test)]
+mod discard_tests {
+    use super::*;
+    use crate::backends::RegolithStore;
+    use crate::corekv::{Store, Writer};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn counting(count: &Arc<AtomicUsize>) -> crate::corekv::TxnCallback {
+        let count = Arc::clone(count);
+        Box::new(move || {
+            count.fetch_add(1, Ordering::SeqCst);
+        })
+    }
+
+    /// A transaction dropped without a commit or a discard ends without
+    /// committing, so its discard callbacks run, once.
+    #[tokio::test]
+    async fn a_dropped_transaction_runs_its_discard_callbacks_once() {
+        let store = RegolithStore::in_memory().unwrap();
+        let discarded = Arc::new(AtomicUsize::new(0));
+        let mut dropped = store.new_txn(false).await.unwrap();
+        dropped.set(b"key", b"value").await.unwrap();
+        dropped.on_discard(counting(&discarded));
+        drop(dropped);
+        assert_eq!(discarded.load(Ordering::SeqCst), 1);
+
+        let mut explicit = store.new_txn(false).await.unwrap();
+        explicit.on_discard(counting(&discarded));
+        explicit.discard();
+        assert_eq!(discarded.load(Ordering::SeqCst), 2);
+
+        let mut committed = store.new_txn(false).await.unwrap();
+        committed.set(b"key", b"value").await.unwrap();
+        committed.on_discard(counting(&discarded));
+        committed.commit().await.unwrap();
+        assert_eq!(discarded.load(Ordering::SeqCst), 2);
+    }
+}

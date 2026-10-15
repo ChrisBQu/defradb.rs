@@ -69,11 +69,7 @@ pub(super) async fn transact(
             }
             if value.is_ok() {
                 let callbacks = std::mem::take(&mut retry_txn.callbacks);
-                latest = Some(AttemptWork::bind(
-                    event_order,
-                    retry_txn.txn,
-                    callbacks,
-                ));
+                latest = Some(AttemptWork::bind(event_order, retry_txn.txn, callbacks));
             }
             value
         });
