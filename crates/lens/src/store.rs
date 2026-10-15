@@ -6,7 +6,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use kovan_map::HopscotchMap;
 use rapidhash::fast::RandomState;
 use rapidhash::RapidHashMap;
@@ -83,11 +83,46 @@ pub trait TransformStore: Send + Sync {
     /// Applies the reverse transformation (destination -> source schema version).
     fn inverse(&self, id: &TransformId, docs: LensDocStream) -> Result<LensDocResultStream>;
 
+    /// Transform one document, forward or inverse, and return the first
+    /// document the lens yields.
+    ///
+    /// The call has its whole input in hand and its caller waits only on it,
+    /// so a store may make it wait for room among the calls it bounds (the
+    /// WASM store does). [`transform`](Self::transform) never waits for that
+    /// room: a streaming caller may hold a call while it reads the source the
+    /// call consumes, and that read may run lens calls of its own.
+    async fn transform_doc(
+        &self,
+        id: &TransformId,
+        doc: LensDoc,
+        inverse: bool,
+    ) -> Result<LensDoc> {
+        let input: LensDocStream = Box::pin(futures::stream::iter([doc]));
+        let output = if inverse {
+            self.inverse(id, input)?
+        } else {
+            self.transform(id, input)?
+        };
+        first_output(output).await
+    }
+
     /// Check if a transform exists.
     fn has_transform(&self, id: &TransformId) -> bool;
 
     /// Remove a registered transform.
     async fn remove(&self, id: &TransformId) -> Result<()>;
+}
+
+/// The first document `output` yields: what a call over one document returns.
+pub(crate) async fn first_output<S>(output: S) -> Result<LensDoc>
+where
+    S: Stream<Item = Result<LensDoc>>,
+{
+    let mut output = std::pin::pin!(output);
+    output
+        .next()
+        .await
+        .ok_or_else(|| Error::Pipeline("transform produced no output".to_string()))?
 }
 
 /// In-memory transform store for testing.
@@ -157,13 +192,7 @@ impl TransformStore for MemoryTransformStore {
         }
 
         // In-memory store just passes through documents unchanged (for testing)
-        Ok(Box::pin(futures::stream::unfold(
-            docs,
-            |mut stream| async {
-                use futures::StreamExt;
-                stream.next().await.map(|doc| (Ok(doc), stream))
-            },
-        )))
+        Ok(Box::pin(docs.map(Ok)))
     }
 
     fn inverse(&self, id: &TransformId, docs: LensDocStream) -> Result<LensDocResultStream> {
@@ -172,13 +201,7 @@ impl TransformStore for MemoryTransformStore {
         }
 
         // In-memory store just passes through documents unchanged (for testing)
-        Ok(Box::pin(futures::stream::unfold(
-            docs,
-            |mut stream| async {
-                use futures::StreamExt;
-                stream.next().await.map(|doc| (Ok(doc), stream))
-            },
-        )))
+        Ok(Box::pin(docs.map(Ok)))
     }
 
     fn has_transform(&self, id: &TransformId) -> bool {
