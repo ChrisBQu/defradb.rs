@@ -10,7 +10,10 @@ use kovan_map::HopscotchMap;
 use rapidhash::fast::RandomState;
 use rapidhash::RapidHashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 use wasmtime::{Config, Engine, Module, StoreLimits, StoreLimitsBuilder};
 
 use tracing::{info, warn};
@@ -33,6 +36,9 @@ pub struct WasmSandboxConfig {
 
     /// Epoch deadline ticks before interruption.
     pub epoch_deadline_ticks: Option<u64>,
+
+    /// Period at which the shared engine advances its epoch clock.
+    pub epoch_tick_period: Option<Duration>,
 }
 
 impl WasmSandboxConfig {
@@ -42,6 +48,91 @@ impl WasmSandboxConfig {
             max_memory_bytes: Some(64 * 1024 * 1024), // 64 MiB
             fuel_budget: Some(1_000_000),
             epoch_deadline_ticks: Some(2),
+            epoch_tick_period: Some(Duration::from_millis(100)),
+        }
+    }
+}
+
+/// One epoch clock per shared Wasmtime engine. Runtime tasks are preferred;
+/// the owned thread fallback is used when a store is constructed outside a
+/// multi-thread Tokio runtime, where a synchronous WASM call could otherwise
+/// prevent the runtime from advancing the epoch.
+struct EpochTicker {
+    worker: Option<EpochTickerWorker>,
+}
+
+enum EpochTickerWorker {
+    Runtime {
+        cancel: tokio::sync::oneshot::Sender<()>,
+        task: tokio::task::JoinHandle<()>,
+    },
+    Thread {
+        stop: Arc<AtomicBool>,
+        worker: JoinHandle<()>,
+    },
+}
+
+impl EpochTicker {
+    fn start(engine: Engine, period: Duration) -> Result<Self> {
+        if period.is_zero() {
+            return Err(Error::InvalidConfig(
+                "WASM epoch tick period must be greater than zero".into(),
+            ));
+        }
+
+        if let Some(runtime) = tokio::runtime::Handle::try_current()
+            .ok()
+            .filter(|runtime| {
+                runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+            })
+        {
+            let (cancel, mut cancelled) = tokio::sync::oneshot::channel();
+            let task = runtime.spawn(async move {
+                let mut interval = tokio::time::interval(period);
+                interval.tick().await;
+                loop {
+                    tokio::select! {
+                        _ = &mut cancelled => break,
+                        _ = interval.tick() => engine.increment_epoch(),
+                    }
+                }
+            });
+            return Ok(Self {
+                worker: Some(EpochTickerWorker::Runtime { cancel, task }),
+            });
+        }
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = stop.clone();
+        let worker = thread::Builder::new()
+            .name("defradb-lens-epoch".into())
+            .spawn(move || loop {
+                thread::park_timeout(period);
+                if worker_stop.load(Ordering::Acquire) {
+                    break;
+                }
+                engine.increment_epoch();
+            })?;
+
+        Ok(Self {
+            worker: Some(EpochTickerWorker::Thread { stop, worker }),
+        })
+    }
+}
+
+impl Drop for EpochTicker {
+    fn drop(&mut self) {
+        match self.worker.take() {
+            Some(EpochTickerWorker::Runtime { cancel, task }) => {
+                let _ = cancel.send(());
+                task.abort();
+            }
+            Some(EpochTickerWorker::Thread { stop, worker }) => {
+                stop.store(true, Ordering::Release);
+                worker.thread().unpark();
+                let _ = worker.join();
+            }
+            None => {}
         }
     }
 }
@@ -54,6 +145,7 @@ pub struct WasmTransformStore {
     modules: HopscotchMap<TransformId, Arc<Vec<CompiledModule>>, RandomState>,
     configs: HopscotchMap<TransformId, LensConfig, RandomState>,
     sandbox: Option<WasmSandboxConfig>,
+    epoch_ticker: Option<Arc<EpochTicker>>,
 }
 
 #[derive(Clone)]
@@ -91,13 +183,38 @@ impl WasmTransformStore {
         }
         let engine = Engine::new(&config)
             .map_err(|e| Error::WasmLoad(format!("failed to create WASM engine: {}", e)))?;
+        let epoch_ticker = match sandbox.as_ref() {
+            Some(sb) => match (sb.epoch_deadline_ticks, sb.epoch_tick_period) {
+                (Some(_), Some(period)) => {
+                    Some(Arc::new(EpochTicker::start(engine.clone(), period)?))
+                }
+                (Some(_), None) => {
+                    return Err(Error::InvalidConfig(
+                        "WASM epoch interruption requires an epoch tick period".into(),
+                    ));
+                }
+                _ => None,
+            },
+            None => None,
+        };
 
         Ok(Self {
             engine,
             modules: HopscotchMap::with_hasher(RandomState::default()),
             configs: HopscotchMap::with_hasher(RandomState::default()),
             sandbox,
+            epoch_ticker,
         })
+    }
+
+    fn empty_with_shared_engine(&self) -> Self {
+        Self {
+            engine: self.engine.clone(),
+            modules: HopscotchMap::with_hasher(RandomState::default()),
+            configs: HopscotchMap::with_hasher(RandomState::default()),
+            sandbox: self.sandbox.clone(),
+            epoch_ticker: self.epoch_ticker.clone(),
+        }
     }
 
     /// Load a WASM module from the given lens configuration.
@@ -216,6 +333,10 @@ impl WasmTransformStore {
 
 #[async_trait]
 impl TransformStore for WasmTransformStore {
+    fn new_isolated_store(&self) -> Option<Arc<dyn TransformStore>> {
+        Some(Arc::new(self.empty_with_shared_engine()))
+    }
+
     async fn add(&self, config: LensConfig) -> Result<TransformId> {
         use sha2::{Digest, Sha256};
 
@@ -504,6 +625,36 @@ mod tests {
     fn test_wasm_store_with_sandbox() {
         let store = WasmTransformStore::with_sandbox(Some(WasmSandboxConfig::restrictive()));
         assert!(store.is_ok());
+    }
+
+    #[test]
+    fn shared_engine_epoch_ticker_interrupts_an_infinite_call() {
+        // A module with one exported function whose body loops forever.
+        const INFINITE_LOOP_WASM: &[u8] = &[
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // header
+            0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type () -> ()
+            0x03, 0x02, 0x01, 0x00, // one function of type 0
+            0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x00, // export run
+            0x0a, 0x09, 0x01, 0x07, 0x00, 0x03, 0x40, 0x0c, 0x00, 0x0b, 0x0b, // loop { br 0 }
+        ];
+
+        let mut sandbox = WasmSandboxConfig::restrictive();
+        sandbox.fuel_budget = None;
+        sandbox.epoch_deadline_ticks = Some(1);
+        sandbox.epoch_tick_period = Some(Duration::from_millis(2));
+        let base = WasmTransformStore::with_sandbox(Some(sandbox)).unwrap();
+        // Transaction-local stores share the base engine and its ticker.
+        let local = base.empty_with_shared_engine();
+        let module = Module::new(&local.engine, INFINITE_LOOP_WASM).unwrap();
+        let mut store = wasmtime::Store::new(&local.engine, ());
+        store.set_epoch_deadline(1);
+        let run = module.get_typed_func::<(), ()>(&store, "run").unwrap();
+
+        let result = run.call(&mut store, ());
+        assert!(
+            result.is_err(),
+            "the ticked epoch deadline must interrupt the loop"
+        );
     }
 
     #[test]

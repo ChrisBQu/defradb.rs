@@ -52,6 +52,14 @@ pub type LensDocResultStream = Pin<Box<dyn Stream<Item = Result<LensDoc>> + Send
 /// Matches Go's lens/host-go/store.Store interface.
 #[async_trait]
 pub trait TransformStore: Send + Sync {
+    /// Create an empty store for transaction-local registrations that shares
+    /// immutable runtime resources with this store. Implementations that do
+    /// not have shareable runtime state may return `None`; callers can then
+    /// use their normal isolated-store fallback.
+    fn new_isolated_store(&self) -> Option<std::sync::Arc<dyn TransformStore>> {
+        None
+    }
+
     /// Register a new lens transform.
     ///
     /// Returns the unique ID for the registered transform.
