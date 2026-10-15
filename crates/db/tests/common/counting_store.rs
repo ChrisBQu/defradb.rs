@@ -172,28 +172,28 @@ impl Reader for CountingTxn {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Writer for CountingTxn {
-    async fn merge(&mut self, key: &[u8], operand: &[u8]) -> Result<()> {
+    async fn merge_shared(&self, key: &[u8], operand: &[u8]) -> Result<()> {
         self.counts.written_keys.push(key.to_vec());
-        self.inner.merge(key, operand).await
+        self.inner.merge_shared(key, operand).await
     }
 
-    async fn append(
-        &mut self,
+    async fn append_shared(
+        &self,
         log: &storage::corekv::AppendLog,
         entry: &[u8],
         once_key: Option<&[u8]>,
     ) -> storage::Result<()> {
-        self.inner.append(log, entry, once_key).await
+        self.inner.append_shared(log, entry, once_key).await
     }
 
-    async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+    async fn set_shared(&self, key: &[u8], value: &[u8]) -> Result<()> {
         self.counts.written_keys.push(key.to_vec());
-        self.inner.set(key, value).await
+        self.inner.set_shared(key, value).await
     }
 
-    async fn delete(&mut self, key: &[u8]) -> Result<()> {
+    async fn delete_shared(&self, key: &[u8]) -> Result<()> {
         self.counts.written_keys.push(key.to_vec());
-        self.inner.delete(key).await
+        self.inner.delete_shared(key).await
     }
 }
 

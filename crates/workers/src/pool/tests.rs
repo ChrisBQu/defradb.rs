@@ -676,3 +676,34 @@ fn compaction_and_edge_threads_run_on_the_spare_cpus() {
     assert_eq!(edge.pinning.fell_back, None, "{edge:?}");
     pool.shutdown_blocking().unwrap();
 }
+
+#[test]
+fn a_submission_that_may_not_wait_is_refused_while_its_worker_is_full() {
+    let pool = Pool::start(Config {
+        inbox_items: 1,
+        ..small(1)
+    })
+    .unwrap();
+    let gate = Arc::new(Event::new());
+    let held = gate.clone();
+    let first = pool
+        .try_submit_with(Target::Worker(0), Submit::default(), move || async move {
+            held.wait().await;
+            1
+        })
+        .unwrap();
+    assert_eq!(
+        pool.try_submit_with(Target::Worker(0), Submit::default(), || async { 2 })
+            .err(),
+        Some(Error::Full),
+        "the one admission is held by the running job"
+    );
+    gate.set();
+    assert_eq!(first.wait(), Ok(1));
+    assert_eq!(
+        pool.submit_and_wait(Target::Worker(0), || async { 3 }),
+        Ok(3),
+        "a refused submission leaves nothing behind"
+    );
+    pool.shutdown_blocking().unwrap();
+}

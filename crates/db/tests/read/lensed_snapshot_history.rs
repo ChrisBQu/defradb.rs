@@ -28,10 +28,10 @@ struct MarkVerified(HopscotchMap<TransformId, (), RandomState>);
 
 #[async_trait]
 impl TransformStore for MarkVerified {
+    // A transaction's own registrations run in a real WASM store, as they did
+    // when this double had no isolated store of its own.
     fn new_isolated_store(&self) -> Arc<dyn TransformStore> {
-        Arc::new(MarkVerified(HopscotchMap::with_hasher(
-            RandomState::default(),
-        )))
+        lens::default_store().expect("the WASM transform store builds")
     }
 
     async fn add(&self, config: LensConfig) -> lens::Result<TransformId> {
@@ -156,13 +156,12 @@ async fn writable_transaction_observes_its_own_migration_registration() {
     let (db, v1, v2) = verified_collection(RegolithStore::in_memory().unwrap()).await;
     let registry = db::DbTransactionRegistry::new(db.clone());
     let txn_id = registry.begin(false).await.unwrap();
-    let fetcher = registry
-        .get(&txn_id)
-        .into_result()
-        .unwrap()
-        .unwrap()
-        .doc_fetcher();
-    assert_eq!(verified(&fetcher.get_all("Probe").await.unwrap()), None);
+    let read = || {
+        crate::common::owned::in_txn(&registry, &txn_id, |context| {
+            Box::pin(async move { context.doc_fetcher().get_all("Probe").await })
+        })
+    };
+    assert_eq!(verified(&read().await.unwrap()), None);
 
     registry
         .set_migration_in_txn(&txn_id, migration(&v1, &v2), None)
@@ -171,7 +170,7 @@ async fn writable_transaction_observes_its_own_migration_registration() {
 
     // Transaction-local transforms run in a real WASM store, where the
     // placeholder module fails; the failure shows the read applied it.
-    let error = fetcher.get_all("Probe").await.unwrap_err().to_string();
+    let error = read().await.unwrap_err().to_string();
     assert!(
         error.contains("lens migration failed"),
         "the read ignored its transaction's migration: {error}"

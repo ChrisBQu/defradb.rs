@@ -58,7 +58,9 @@ pub(crate) struct BroadcastBatchMutator<S: Store, B: Blockstore, T: P2PTransport
     se_options: super::BroadcastSeOptions,
 }
 
-impl<S: Store, B: Blockstore + 'static, T: P2PTransport + 'static> BroadcastBatchMutator<S, B, T> {
+impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport + 'static>
+    BroadcastBatchMutator<S, B, T>
+{
     pub(crate) fn new(
         inner: Arc<dyn DocMutator>,
         inner_controller: Arc<dyn MutationBatchController>,

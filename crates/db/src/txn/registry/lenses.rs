@@ -2,11 +2,16 @@
 
 use super::*;
 use crate::definition::migration::committed_lenses::PreparedLens;
+use lens::{LensConfig, LensModule, TransformId};
 use storage::corekv::OnCommit;
 
 impl<S: Store + 'static> DbTransactionRegistry<S> {
     /// [`Self::add_lens_in_txn_as`] in [`RequestContext::ambient`].
-    pub async fn add_lens_in_txn(&self, txn_id: &str, config: LensConfig) -> Result<TransformId> {
+    pub async fn add_lens_in_txn(
+        &self,
+        txn_id: &str,
+        config: LensConfig,
+    ) -> Result<TransformId> {
         self.add_lens_in_txn_as(&RequestContext::ambient(), txn_id, config)
             .await
     }
@@ -19,47 +24,40 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
     pub async fn add_lens_in_txn_as(
         &self,
         context: &RequestContext,
-        txn_id: &str,
-        config: LensConfig,
-    ) -> Result<TransformId> {
-        let ctx = self
-            .get_ctx_as(context, txn_id)?
-            .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
+ txn_id: &str, config: LensConfig) -> Result<TransformId> {
         self.db
             .check_node_access_as(context, acp::nac::NodePermission::LensCreate)
             .await?;
         let lens = PreparedLens::new(config, self.db.pool()).await?;
-        let action_lock = ctx.action_lock();
-        let _action_guard = action_lock.lock().await;
-        ctx.recover_pending_statement_sync().map_err(Error::Other)?;
-
-        let shared_txn = ctx.fetcher_shared_txn();
-        let mut txn_guard = shared_txn.lock().await;
-        let txn = txn_guard.as_mut().ok_or(Error::TxnNotActive)?;
-        let txn_lens_store = ctx.lens_store();
-        if txn_lens_store.has_transform(&lens.id) {
-            return Ok(lens.id);
-        }
-
-        txn_lens_store
-            .add_with_id(lens.id.clone(), lens.config.clone())
-            .await
-            .map_err(Error::from)?;
-        lens.write(&txn.blockstore()?, &txn.systemstore()?).await?;
-
         let db = self.db.clone();
-        let transform_id = lens.id.clone();
-        let config = lens.config;
-        txn.on_commit(OnCommit::Async(Box::new(move || {
-            let db = db.clone();
-            let transform_id = transform_id.clone();
-            let config = config.clone();
+        self.in_txn(context, txn_id, move |owned| {
             Box::pin(async move {
-                db.register_committed_lens(transform_id, config).await;
-            })
-        })))?;
+                let txn_lens_store = owned.lens_store();
+                if txn_lens_store.has_transform(&lens.id) {
+                    return Ok(lens.id);
+                }
+                txn_lens_store
+                    .add_with_id(lens.id.clone(), lens.config.clone())
+                    .await
+                    .map_err(Error::from)?;
+                let txn = owned.alone()?;
+                lens.write(&txn.blockstore()?, &txn.systemstore()?).await?;
 
-        Ok(lens.id)
+                let transform_id = lens.id.clone();
+                let config = lens.config;
+                txn.on_commit(OnCommit::Async(Box::new(move || {
+                    let db = db.clone();
+                    let transform_id = transform_id.clone();
+                    let config = config.clone();
+                    Box::pin(async move {
+                        db.register_committed_lens(transform_id, config).await;
+                    })
+                })))?;
+
+                Ok(lens.id)
+            })
+        })
+        .await
     }
 
     /// [`Self::list_lenses_in_txn_as`] in [`RequestContext::ambient`].
@@ -77,16 +75,15 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         context: &RequestContext,
         txn_id: &str,
     ) -> Result<rapidhash::RapidHashMap<String, LensModule>> {
-        let ctx = self
-            .get_ctx_as(context, txn_id)?
-            .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
-        let action_lock = ctx.action_lock();
-        let _action_guard = action_lock.lock().await;
-        ctx.recover_pending_statement_sync().map_err(Error::Other)?;
-
-        ctx.lens_store()
-            .list()
-            .await
-            .map_err(|e| Error::Lens(e.to_string()))
+        self.in_txn(context, txn_id, move |owned| {
+            Box::pin(async move {
+                owned
+                    .lens_store()
+                    .list()
+                    .await
+                    .map_err(|e| Error::Lens(e.to_string()))
+            })
+        })
+        .await
     }
 }

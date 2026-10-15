@@ -101,7 +101,7 @@ impl<S: storage::corekv::Store + 'static> BlockOps for DbBlockOps<S> {
             .verified_block_signer_did_in_txn_as(
                 context,
                 transaction.as_str(),
-                self.document_acp.as_ref(),
+                self.document_acp.clone(),
                 cid,
                 &self.caller_identity,
             )

@@ -33,7 +33,7 @@ impl<S: Store> crate::database::DB<S> {
         }
 
         // Load the target collection from persistent store by version_id
-        let mut txn = self.new_txn(false).await?;
+        let txn = self.new_txn(false).await?;
 
         // Extract the target schema and perform all systemstore operations in a block
         // so the systemstore reference is dropped before calling txn.commit()
@@ -358,7 +358,7 @@ impl<S: Store> crate::database::DB<S> {
         }
 
         // Perform the actual deletion
-        let mut txn = self.new_txn(false).await?;
+        let txn = self.new_txn(false).await?;
         {
             let systemstore = txn.systemstore()?;
 

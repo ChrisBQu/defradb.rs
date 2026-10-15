@@ -1,6 +1,5 @@
 //! Document mutator for transaction-scoped mutations.
 
-use async_lock::Mutex as TokioMutex;
 use async_trait::async_trait;
 use bytes::Bytes;
 use cid::Cid;
@@ -16,7 +15,8 @@ use crate::collection::loader::{get_collection_with_index_manager, get_collectio
 use crate::collection::Collection;
 use crate::database::DB;
 use crate::event::emission::register_update_event_callback;
-use crate::txn::DbTxn;
+use crate::txn::held::Held;
+use crate::txn::{DbTxn, LentTxn};
 use crate::write::autocommit::helpers::write_branchable_collection_block;
 use defra_core::RequestContext;
 
@@ -33,18 +33,10 @@ fn document_json_value(doc: &Document) -> Option<serde_json::Value> {
 ///
 /// # Ownership Model
 ///
-/// The transaction is wrapped in `Arc<TokioMutex<Option<...>>>` because:
-/// - `Arc`: Enables the mutator to be cloned and shared across multiple mutation
-///   operations within the same transaction
-/// - `TokioMutex`: Async-safe interior mutability for concurrent access
-/// - `Option`: Enables `take_txn()` to extract the transaction for commit/rollback
-///
-/// The mutator can share its transaction with `DbDocFetcher` when created via
-/// `from_shared_txn()`, allowing both read and write operations within the same
-/// transaction context.
-///
-/// After `take_txn()` is called, all mutator operations will return an error
-/// indicating the transaction was consumed. Use `is_consumed()` to check state.
+/// The mutator holds a transaction lent to it ([`LentTxn`]): it shares the
+/// transaction through `&self`, with no lock, with the other handles of one
+/// request (a fetcher made with the same transaction, a collection
+/// provider). [`take_txn`](Self::take_txn) gives it back once they are gone.
 ///
 /// # Collection Access
 ///
@@ -64,9 +56,9 @@ fn document_json_value(doc: &Document) -> Option<serde_json::Value> {
 /// [`DocMutator::resolve_prepared_input`], records it in the memo and runs the
 /// statement again. A create keeps the short ID its first run drew, so the
 /// inputs keyed by it are found on the next run.
-pub struct DbDocMutator<S: Store> {
+pub struct DbDocMutator<S: Store + 'static> {
     db: Arc<DB<S>>,
-    txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
+    txn: Held<S>,
     broadcaster: Option<Arc<dyn crate::event::emission::TxnBroadcaster>>,
     prepared_inputs: query::prepared::PreparedInputMemo,
     /// Creates this attempt has made: the ordinal that names a create's
@@ -74,18 +66,12 @@ pub struct DbDocMutator<S: Store> {
     creates: AtomicU64,
 }
 
-impl<S: Store> DbDocMutator<S> {
+impl<S: Store + 'static> DbDocMutator<S> {
     /// Create a new transaction-scoped document mutator.
     ///
     /// Collections will be loaded lazily from the transaction's cache.
     pub fn new(db: Arc<DB<S>>, txn: DbTxn<S>) -> Self {
-        Self {
-            db,
-            txn: Arc::new(TokioMutex::new(Some(txn))),
-            broadcaster: None,
-            prepared_inputs: query::prepared::PreparedInputMemo::default(),
-            creates: AtomicU64::new(0),
-        }
+        Self::holding(db, Held::new(Arc::new(txn)), None)
     }
 
     /// Create a mutator that shares a transaction and (optionally) forwards
@@ -94,7 +80,25 @@ impl<S: Store> DbDocMutator<S> {
     /// local event bus and asks the broadcaster to push to P2P peers.
     pub fn from_shared_txn_with_broadcaster(
         db: Arc<DB<S>>,
-        txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
+        txn: LentTxn<S>,
+        broadcaster: Option<Arc<dyn crate::event::emission::TxnBroadcaster>>,
+    ) -> Self {
+        Self::holding(db, Held::new(txn), broadcaster)
+    }
+
+    /// A mutator over a transaction lent to it, which its lender keeps and
+    /// takes back: [`take_txn`](Self::take_txn) finds nothing.
+    pub(crate) fn lent_with_broadcaster(
+        db: Arc<DB<S>>,
+        txn: &LentTxn<S>,
+        broadcaster: Option<Arc<dyn crate::event::emission::TxnBroadcaster>>,
+    ) -> Self {
+        Self::holding(db, Held::borrowed(txn), broadcaster)
+    }
+
+    fn holding(
+        db: Arc<DB<S>>,
+        txn: Held<S>,
         broadcaster: Option<Arc<dyn crate::event::emission::TxnBroadcaster>>,
     ) -> Self {
         Self {
@@ -106,20 +110,22 @@ impl<S: Store> DbDocMutator<S> {
         }
     }
 
-    /// Take the transaction out of the mutator (for commit/rollback).
-    ///
-    /// After calling this, `is_consumed()` will return `true` and all
-    /// mutator operations will return an error.
+    /// Take the transaction out of the mutator (for commit/rollback). `None`
+    /// once it was taken, or while another handle still holds it.
     pub async fn take_txn(&self) -> Option<DbTxn<S>> {
-        self.txn.lock().await.take()
+        self.txn.take()
     }
 
     /// Check if the transaction has been consumed (via `take_txn()`).
-    ///
-    /// Returns `true` if `take_txn()` was called and the transaction is
-    /// no longer available for mutations.
     pub async fn is_consumed(&self) -> bool {
-        self.txn.lock().await.is_none()
+        self.txn.is_taken()
+    }
+
+    /// The transaction, for an operation or another handle to share.
+    pub(crate) fn shared_txn(&self) -> query::error::Result<LentTxn<S>> {
+        self.txn
+            .get()
+            .ok_or_else(|| query::error::QueryError::execution("transaction is no longer active"))
     }
 
     /// The storage identity of this attempt's next create. The short ID is
@@ -163,16 +169,12 @@ impl<S: Store> DbDocMutator<S> {
         collection_name: &str,
         collection: &Collection,
     ) -> query::error::Result<()> {
-        let mut txn_guard = self.txn.lock().await;
-        let txn = txn_guard.as_mut().ok_or_else(|| {
-            query::error::QueryError::execution("transaction is no longer active")
-        })?;
+        let txn = &*self.shared_txn()?;
         txn.validate_collection_for_write(collection)
             .await
             .map_err(crate::error::commit_query_error)?;
 
         let was_created_in_txn = txn.was_collection_created(collection.collection_id());
-        drop(txn_guard);
 
         if was_created_in_txn {
             return Ok(());
@@ -207,10 +209,7 @@ impl<S: Store + 'static> DbDocMutator<S> {
         collection_block: Option<(Cid, Bytes)>,
         creator_did: Option<String>,
     ) -> query::error::Result<()> {
-        let mut txn_guard = self.txn.lock().await;
-        let txn = txn_guard.as_mut().ok_or_else(|| {
-            query::error::QueryError::execution("transaction is no longer active")
-        })?;
+        let txn = &*self.shared_txn()?;
         register_update_event_callback(
             txn,
             self.db.event_bus(),
@@ -247,7 +246,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
     ) -> Option<Arc<dyn DocMutator>> {
         Some(Arc::new(Self {
             db: Arc::clone(&self.db),
-            txn: Arc::clone(&self.txn),
+            txn: self.txn.get().map_or_else(Held::none, Held::new),
             broadcaster: self.broadcaster.clone(),
             prepared_inputs: inputs,
             creates: AtomicU64::new(0),
@@ -294,10 +293,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         &self,
         callback: storage::corekv::CommitHook,
     ) -> query::error::Result<()> {
-        let mut guard = self.txn.lock().await;
-        let txn = guard.as_mut().ok_or_else(|| {
-            query::error::QueryError::execution("transaction is no longer active")
-        })?;
+        let txn = &*self.shared_txn()?;
         txn.on_commit(OnCommit::OrderedAsync(callback))
             .map_err(|error| query::error::QueryError::execution(error.to_string()))
     }
@@ -323,7 +319,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             .map_err(|e| query::error::QueryError::permission_denied(e.to_string()))?;
 
         let (collection, datastore, systemstore, index_manager) =
-            get_collection_with_index_manager(&self.txn, collection_name).await?;
+            get_collection_with_index_manager(&*self.shared_txn()?, collection_name).await?;
         self.db
             .check_node_access_in_txn(
                 context,
@@ -355,10 +351,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         // Blocks first: the public DocID is derived from the genesis composite
         // block CID (Go #4838).
         let (doc_id, doc_cid, doc_block, col_block_data) = {
-            let txn_guard = self.txn.lock().await;
-            let txn = txn_guard.as_ref().ok_or_else(|| {
-                query::error::QueryError::execution("transaction is no longer active")
-            })?;
+            let txn = &*self.shared_txn()?;
 
             let blockstore = txn.blockstore().map_err(|e| {
                 query::error::QueryError::execution(format!("failed to get blockstore: {}", e))
@@ -473,7 +466,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             .map_err(|e| query::error::QueryError::permission_denied(e.to_string()))?;
 
         let (collection, datastore, systemstore, index_manager) =
-            get_collection_with_index_manager(&self.txn, collection_name).await?;
+            get_collection_with_index_manager(&*self.shared_txn()?, collection_name).await?;
         self.db
             .check_node_access_in_txn(
                 context,
@@ -527,10 +520,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         .await?;
 
         let (doc_cid, doc_block, col_block_data) = {
-            let txn_guard = self.txn.lock().await;
-            let txn = txn_guard.as_ref().ok_or_else(|| {
-                query::error::QueryError::execution("transaction is no longer active")
-            })?;
+            let txn = &*self.shared_txn()?;
 
             let blockstore = txn.blockstore().map_err(|e| {
                 query::error::QueryError::execution(format!("failed to get blockstore: {}", e))
@@ -627,7 +617,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             .map_err(|e| query::error::QueryError::permission_denied(e.to_string()))?;
 
         let (collection, datastore, systemstore, index_manager) =
-            get_collection_with_index_manager(&self.txn, collection_name).await?;
+            get_collection_with_index_manager(&*self.shared_txn()?, collection_name).await?;
         self.db
             .check_node_access_in_txn(
                 context,
@@ -672,10 +662,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         .await?;
 
         let (doc_cid, doc_block, col_block_data) = {
-            let txn_guard = self.txn.lock().await;
-            let txn = txn_guard.as_ref().ok_or_else(|| {
-                query::error::QueryError::execution("transaction is no longer active")
-            })?;
+            let txn = &*self.shared_txn()?;
 
             let blockstore = txn.blockstore().map_err(|e| {
                 query::error::QueryError::execution(format!("failed to get blockstore: {}", e))
@@ -746,7 +733,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
 
     async fn exists(&self, collection_name: &str, doc_id: &DocID) -> query::error::Result<bool> {
         let (collection, datastore, systemstore) =
-            get_collection_with_lazy_load(&self.txn, collection_name).await?;
+            get_collection_with_lazy_load(&*self.shared_txn()?, collection_name).await?;
 
         collection
             .exists_by_doc_id(&datastore, &systemstore, doc_id)
@@ -760,7 +747,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         doc_id: &DocID,
     ) -> query::error::Result<Option<Document>> {
         let (collection, datastore, systemstore) =
-            get_collection_with_lazy_load(&self.txn, collection_name).await?;
+            get_collection_with_lazy_load(&*self.shared_txn()?, collection_name).await?;
 
         collection
             .get_by_doc_id(&datastore, &systemstore, doc_id)

@@ -41,9 +41,11 @@ mod prepare;
 mod prepare_fetcher;
 mod query;
 mod se_transport;
+mod turn;
 mod version;
 
 pub use se_transport::SeQueryTransport;
+pub use executor::within_deadline;
 
 use acp::nac::NodePermission;
 use acp::{DocumentACP, Identity as AcpIdentity};
@@ -636,15 +638,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         &self,
         handle: &crate::txn::TransactionHandle,
     ) -> Result<Arc<dyn CollectionProvider>> {
-        let context = self
-            .registry
-            .get_as(&self.context(), handle)
-            .into_result()
-            .map_err(|error| QueryError::execution(error.to_string()))?
-            .ok_or_else(|| QueryError::execution(format!("transaction '{handle}' not found")))?;
-        Ok(context
-            .collection_provider()
-            .unwrap_or_else(|| self.collection_provider.clone()))
+        Ok(Arc::new(crate::txn::TxnCollections::new(
+            Arc::clone(&self.registry),
+            self.context().into_owned(),
+            handle.clone(),
+            Arc::clone(&self.collection_provider),
+        )))
     }
 
     /// Get the names of all collections.

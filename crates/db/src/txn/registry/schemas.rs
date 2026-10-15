@@ -4,7 +4,8 @@ use super::*;
 use storage::corekv::OnCommit;
 
 impl<S: Store + 'static> DbTransactionRegistry<S> {
-    /// [`Self::set_migration_in_txn_as`] for `identity`, or for the identity acting in [`RequestContext::ambient`] when there is none.
+    /// [`Self::set_migration_in_txn_as`] for `identity`, or for the identity
+    /// acting in [`RequestContext::ambient`] when there is none.
     pub async fn set_migration_in_txn(
         &self,
         txn_id: &str,
@@ -37,63 +38,63 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         self.db
             .check_node_access_as(context, acp::nac::NodePermission::MigrationSet)
             .await?;
-        let ctx = self
-            .get_ctx_as(context, txn_id)?
-            .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
-        let action_lock = ctx.action_lock();
-        let _action_guard = action_lock.lock().await;
-        ctx.recover_pending_statement_sync().map_err(Error::Other)?;
-
-        // Get the shared transaction from the fetcher
-        let shared_txn = ctx.fetcher_shared_txn();
-        let mut txn_guard = shared_txn.lock().await;
-        let txn = txn_guard.as_mut().ok_or(Error::TxnNotActive)?;
-        let txn_lens_store = ctx.lens_store();
-
-        let outcome = self
-            .db
-            .set_migration_in_txn_with_store(txn, txn_lens_store.clone(), config.clone())
-            .await?;
-        let transform_id = outcome.transform_id.clone();
-        let updated_destination = outcome.updated_destination.clone();
-        let updated_collection =
-            Collection::load_index_actions(updated_destination.clone(), &txn.systemstore()?)
-                .await?;
-        ctx.invalidate_migration_cache();
-
         let db = self.db.clone();
-        let cache_db = db.clone();
-        let cache_destination = updated_destination;
-        let cache_collection = updated_collection.clone();
-        txn.on_commit(OnCommit::Ordered(Box::new(move || {
-            if cache_destination.name.is_empty() {
-                return;
-            }
-            cache_db.collections.rcu(|old| {
-                let mut cache = old.clone();
-                let matches_destination =
-                    cache.get(&cache_destination.name).is_some_and(|cached| {
-                        cached.schema().version_id == cache_destination.version_id
-                    });
-                if matches_destination {
-                    cache.put_named(&cache_destination.name, cache_collection.clone());
-                }
-                cache
-            });
-        })))?;
-        let transform_id_for_commit = transform_id.clone();
-        txn.on_commit(OnCommit::Async(Box::new(move || {
-            let db = db.clone();
-            let config = config.clone();
-            let transform_id = transform_id_for_commit.clone();
+        self.in_txn(context, txn_id, move |owned| {
             Box::pin(async move {
-                db.bump_migration_generation();
-                db.register_committed_lens(transform_id, config).await;
-                db.settle_owed_reindexes_after_commit().await;
-            })
-        })))?;
+                let txn_lens_store = owned.lens_store();
+                let caches = owned.caches();
+                let txn = owned.alone()?;
 
-        Ok(transform_id)
+                let outcome = db
+                    .set_migration_in_txn_with_store(txn, txn_lens_store.clone(), config.clone())
+                    .await?;
+                let transform_id = outcome.transform_id.clone();
+                let updated_destination = outcome.updated_destination.clone();
+                let updated_collection = Collection::load_index_actions(
+                    updated_destination.clone(),
+                    &txn.systemstore()?,
+                )
+                .await?;
+                // The migration changed what this transaction's fetchers
+                // derived from its schema.
+                caches.invalidate();
+
+                let db = db.clone();
+                let cache_db = db.clone();
+                let cache_destination = updated_destination;
+                let cache_collection = updated_collection.clone();
+                txn.on_commit(OnCommit::Ordered(Box::new(move || {
+                    if cache_destination.name.is_empty() {
+                        return;
+                    }
+                    cache_db.collections.rcu(|old| {
+                        let mut cache = old.clone();
+                        let matches_destination =
+                            cache.get(&cache_destination.name).is_some_and(|cached| {
+                                cached.schema().version_id == cache_destination.version_id
+                            });
+                        if matches_destination {
+                            cache.put_named(&cache_destination.name, cache_collection.clone());
+                        }
+                        cache
+                    });
+                })))?;
+                let transform_id_for_commit = transform_id.clone();
+                txn.on_commit(OnCommit::Async(Box::new(move || {
+                    let db = db.clone();
+                    let config = config.clone();
+                    let transform_id = transform_id_for_commit.clone();
+                    Box::pin(async move {
+                        db.bump_migration_generation();
+                        db.register_committed_lens(transform_id, config).await;
+                        db.settle_owed_reindexes_after_commit().await;
+                    })
+                })))?;
+
+                Ok(transform_id)
+            })
+        })
+        .await
     }
 
     /// [`Self::add_schema_in_txn_as`] in [`RequestContext::ambient`].
@@ -129,14 +130,8 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         document_acp: Option<Arc<dyn acp::DocumentACP>>,
         creator: Option<identity::Did>,
     ) -> Result<Vec<schema::CollectionVersion>> {
-        self.add_schema_in_txn_with_acp_as(
-            &RequestContext::ambient(),
-            txn_id,
-            sdl,
-            document_acp,
-            creator,
-        )
-        .await
+        self.add_schema_in_txn_with_acp_as(&RequestContext::ambient(), txn_id, sdl, document_acp, creator)
+            .await
     }
 
     /// Add a schema within an existing transaction, optionally registering
@@ -149,75 +144,75 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         document_acp: Option<Arc<dyn acp::DocumentACP>>,
         creator: Option<identity::Did>,
     ) -> Result<Vec<schema::CollectionVersion>> {
-        let ctx = self
-            .get_ctx_as(context, txn_id)?
-            .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
         self.db
             .check_node_access_as(context, acp::nac::NodePermission::CollectionPatch)
             .await?;
-        let action_lock = ctx.action_lock();
-        let _action_guard = action_lock.lock().await;
-        ctx.recover_pending_statement_sync().map_err(Error::Other)?;
-
-        let shared_txn = ctx.fetcher_shared_txn();
-        let mut txn_guard = shared_txn.lock().await;
-        let txn = txn_guard.as_mut().ok_or(Error::TxnNotActive)?;
-
-        let known_types: rapidhash::RapidHashSet<String> = self
-            .db
-            .list_collections()
-            .map_err(|e| Error::Other(format!("failed to list collections: {}", e)))?
-            .into_iter()
-            .collect();
-
-        let collections = query::parse_sdl_with_known_types(sdl, known_types)
-            .map_err(|e| Error::Other(format!("failed to parse SDL: {}", e)))?;
-
-        schema::definition_validation::validate_new_collections(&collections)
-            .map_err(|e| Error::Other(format!("failed to validate schema: {}", e)))?;
-        let existing = self.db.get_all_collection_versions_with_txn(txn).await?;
-        schema::definition_validation::validate_new_collections_with_existing(
-            &collections,
-            &existing,
-        )
-        .map_err(|e| Error::Other(format!("failed to validate schema: {}", e)))?;
-
-        let mut finalized = Vec::new();
-        for collection in collections {
-            let schema = self.db.create_collection_with_txn(txn, collection).await?;
-            finalized.push(schema);
-        }
-
-        if let (Some(document_acp), Some(creator)) = (document_acp, creator) {
-            txn.stage_collection_acp_registration(
-                context,
-                document_acp,
-                creator,
-                finalized.clone(),
-            );
-        }
-
-        // Register on_success callback to update the process-wide cache after commit
         let db = self.db.clone();
-        let schemas_for_cache = finalized.clone();
-        let mut collections_for_cache = Vec::with_capacity(finalized.len());
-        for schema in &finalized {
-            collections_for_cache
-                .push(Collection::load_index_actions(schema.clone(), &txn.systemstore()?).await?);
-        }
-        txn.on_commit(OnCommit::Ordered(Box::new(move || {
-            for schema in &schemas_for_cache {
-                let _ = db.unforbid_collection_id(&schema.collection_id);
-            }
-            db.collections.rcu(|old| {
-                let mut cache = old.clone();
-                for collection in &collections_for_cache {
-                    cache.put(collection.clone());
-                }
-                cache
-            });
-        })))?;
+        let request = context.clone();
+        let sdl = sdl.to_owned();
+        self.in_txn(context, txn_id, move |owned| {
+            Box::pin(async move {
+                let sdl = sdl.as_str();
+                let txn = owned.alone()?;
 
-        Ok(finalized)
+                let known_types: rapidhash::RapidHashSet<String> = db
+                    .list_collections()
+                    .map_err(|e| Error::Other(format!("failed to list collections: {}", e)))?
+                    .into_iter()
+                    .collect();
+
+                let collections = query::parse_sdl_with_known_types(sdl, known_types)
+                    .map_err(|e| Error::Other(format!("failed to parse SDL: {}", e)))?;
+
+                schema::definition_validation::validate_new_collections(&collections)
+                    .map_err(|e| Error::Other(format!("failed to validate schema: {}", e)))?;
+                let existing = db.get_all_collection_versions_with_txn(txn).await?;
+                schema::definition_validation::validate_new_collections_with_existing(
+                    &collections,
+                    &existing,
+                )
+                .map_err(|e| Error::Other(format!("failed to validate schema: {}", e)))?;
+
+                let mut finalized = Vec::new();
+                for collection in collections {
+                    let schema = db.create_collection_with_txn(txn, collection).await?;
+                    finalized.push(schema);
+                }
+
+                if let (Some(document_acp), Some(creator)) = (document_acp, creator) {
+                    txn.stage_collection_acp_registration(
+                        &request,
+                        document_acp,
+                        creator,
+                        finalized.clone(),
+                    );
+                }
+
+                // Register on_success callback to update the process-wide cache after commit
+                let db = db.clone();
+                let schemas_for_cache = finalized.clone();
+                let mut collections_for_cache = Vec::with_capacity(finalized.len());
+                for schema in &finalized {
+                    collections_for_cache.push(
+                        Collection::load_index_actions(schema.clone(), &txn.systemstore()?).await?,
+                    );
+                }
+                txn.on_commit(OnCommit::Ordered(Box::new(move || {
+                    for schema in &schemas_for_cache {
+                        let _ = db.unforbid_collection_id(&schema.collection_id);
+                    }
+                    db.collections.rcu(|old| {
+                        let mut cache = old.clone();
+                        for collection in &collections_for_cache {
+                            cache.put(collection.clone());
+                        }
+                        cache
+                    });
+                })))?;
+
+                Ok(finalized)
+            })
+        })
+        .await
     }
 }

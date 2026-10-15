@@ -1,35 +1,36 @@
 //! Transaction registry trait and no-op implementation.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use defra_core::RequestContext;
-use storage::corekv::MaybeSendSync;
+use storage::corekv::{MaybeSend, MaybeSendSync};
 
 use crate::error::TransactionError;
 
 use super::handle::TransactionHandle;
-use super::result::GetTransactionResult;
+use super::turn::TxnJob;
 
 /// Registry for managing active transactions.
 ///
-/// The database layer implements this to track transactions that can be
-/// used by the query executor. A transaction belongs to the identity of the
-/// context that began it, and only a request carrying that identity reaches
-/// it again.
+/// The database layer implements this. A transaction lives where the registry
+/// keeps it, and every request for it runs there, one at a time, in the
+/// order the requests arrived ([`run`](Self::run)); nothing outside the
+/// registry ever holds the transaction. A transaction belongs to the
+/// identity of the context that began it, and only a request carrying that
+/// identity reaches it again.
 ///
-/// Each operation comes twice: `*_as` takes the [`RequestContext`] of the
-/// request it serves, and the plain form runs in
-/// [`RequestContext::ambient`]. An implementation that tracks ownership
-/// overrides both forms of each. The defaults of `begin_as`, `commit_as` and
-/// `rollback_as` run the plain form inside [`RequestContext::mirror`] and
-/// `get_as` calls `get`; the implicit-read defaults compose the `*_as`
-/// calls, as the plain defaults compose the plain ones.
+/// Each call comes twice: `*_as` takes the [`RequestContext`] of the request
+/// it serves, and the plain form runs in [`RequestContext::ambient`]. An
+/// implementation that tracks ownership overrides both forms; the `*_as`
+/// defaults run the plain form inside [`RequestContext::mirror`].
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait TransactionRegistry: MaybeSendSync + 'static {
     /// Begin a new transaction.
     ///
-    /// Returns a handle that can be used with `get()`, `commit()`, and `rollback()`.
-    /// Registration and returning the handle must not be separated by an await.
+    /// Returns a handle that names it to [`run`](Self::run),
+    /// [`commit`](Self::commit) and [`rollback`](Self::rollback).
     async fn begin(
         &self,
         readonly: bool,
@@ -44,43 +45,73 @@ pub trait TransactionRegistry: MaybeSendSync + 'static {
         context.mirror(self.begin(readonly)).await
     }
 
-    /// Begin the short-lived read-only transaction used for a standalone query.
-    ///
-    /// Registries that need to defer read side effects until the snapshot has
-    /// closed can override this separately from user-managed transactions.
-    async fn begin_implicit_read(
+    /// Runs `job` on the transaction `handle` names, where it lives: after
+    /// every request for it that arrived earlier and before every one that
+    /// arrives later. A job still running after `timeout` is stopped, its
+    /// statement undone, and the call fails with an execution error. A
+    /// handle the caller does not own is not found.
+    async fn run<T>(
         &self,
-    ) -> std::result::Result<TransactionHandle, TransactionError> {
-        self.begin(true).await
+        handle: &TransactionHandle,
+        timeout: Option<Duration>,
+        job: TxnJob<T>,
+    ) -> std::result::Result<T, TransactionError>
+    where
+        T: MaybeSend + 'static,
+    {
+        let _ = (handle, timeout, job);
+        Err(TransactionError::not_supported(
+            "transactions are not supported in this configuration",
+        ))
     }
 
-    /// [`Self::begin_implicit_read`] for the request `context` serves.
-    async fn begin_implicit_read_as(
+    /// [`Self::run`] for the request `context` serves.
+    async fn run_as<T>(
         &self,
         context: &RequestContext,
-    ) -> std::result::Result<TransactionHandle, TransactionError> {
-        self.begin_as(context, true).await
-    }
-
-    /// Get an existing transaction by handle.
-    ///
-    /// Returns `Found(context)` if the transaction exists,
-    /// `NotFound` if it doesn't exist or has been committed/rolled back,
-    /// or `LockPoisoned` if the registry lock is poisoned.
-    fn get(&self, handle: &TransactionHandle) -> GetTransactionResult;
-
-    /// [`Self::get`] for the request `context` serves.
-    fn get_as(
-        &self,
-        _context: &RequestContext,
         handle: &TransactionHandle,
-    ) -> GetTransactionResult {
-        self.get(handle)
+        timeout: Option<Duration>,
+        job: TxnJob<T>,
+    ) -> std::result::Result<T, TransactionError>
+    where
+        T: MaybeSend + 'static,
+    {
+        context.mirror(self.run(handle, timeout, job)).await
     }
 
-    /// Commit a transaction.
+    /// Runs `job` against a read-only snapshot of its own, which no other
+    /// request sees and nothing registers: a standalone query's implicit
+    /// read. `timeout` stops it as [`run`](Self::run) does.
+    async fn read<T>(
+        &self,
+        timeout: Option<Duration>,
+        job: TxnJob<T>,
+    ) -> std::result::Result<T, TransactionError>
+    where
+        T: MaybeSend + 'static,
+    {
+        let _ = (timeout, job);
+        Err(TransactionError::not_supported(
+            "transactions are not supported in this configuration",
+        ))
+    }
+
+    /// [`Self::read`] for the request `context` serves.
+    async fn read_as<T>(
+        &self,
+        context: &RequestContext,
+        timeout: Option<Duration>,
+        job: TxnJob<T>,
+    ) -> std::result::Result<T, TransactionError>
+    where
+        T: MaybeSend + 'static,
+    {
+        context.mirror(self.read(timeout, job)).await
+    }
+
+    /// Commit a transaction, after every request for it that arrived earlier.
     ///
-    /// After commit, the handle is no longer valid for `get()`.
+    /// After commit, the handle names nothing.
     async fn commit(&self, handle: &TransactionHandle)
         -> std::result::Result<(), TransactionError>;
 
@@ -93,9 +124,10 @@ pub trait TransactionRegistry: MaybeSendSync + 'static {
         context.mirror(self.commit(handle)).await
     }
 
-    /// Rollback a transaction.
+    /// Rollback a transaction, after every request for it that arrived
+    /// earlier.
     ///
-    /// After rollback, the handle is no longer valid for `get()`.
+    /// After rollback, the handle names nothing.
     async fn rollback(
         &self,
         handle: &TransactionHandle,
@@ -110,33 +142,11 @@ pub trait TransactionRegistry: MaybeSendSync + 'static {
         context.mirror(self.rollback(handle)).await
     }
 
-    /// Synchronously remove an abandoned entry without committing its writes.
-    /// Must be idempotent and work without an async runtime. Existing context
-    /// borrowers may delay resource release, but cannot finalize through this handle.
+    /// Let go of a transaction without committing its writes, at once and
+    /// without waiting: no later request finds it, and it ends after the
+    /// requests already queued for it. Must be idempotent and work without
+    /// an async runtime (a guard's destructor calls it).
     fn abandon(&self, handle: &TransactionHandle);
-
-    /// Close a standalone query's implicit read transaction.
-    ///
-    /// `apply_read_effects` is false when query execution failed. The default
-    /// implementation simply rolls the snapshot back.
-    async fn finish_implicit_read(
-        &self,
-        handle: &TransactionHandle,
-        _apply_read_effects: bool,
-    ) -> std::result::Result<(), TransactionError> {
-        self.rollback(handle).await
-    }
-
-    /// [`Self::finish_implicit_read`] for the request `context` serves.
-    async fn finish_implicit_read_as(
-        &self,
-        context: &RequestContext,
-        handle: &TransactionHandle,
-        apply_read_effects: bool,
-    ) -> std::result::Result<(), TransactionError> {
-        let _ = apply_read_effects;
-        self.rollback_as(context, handle).await
-    }
 }
 
 /// A no-op transaction registry that doesn't support transactions.
@@ -157,10 +167,6 @@ impl TransactionRegistry for NoOpTransactionRegistry {
         Err(TransactionError::not_supported(
             "transactions are not supported in this configuration",
         ))
-    }
-
-    fn get(&self, _handle: &TransactionHandle) -> GetTransactionResult {
-        GetTransactionResult::NotFound
     }
 
     async fn commit(

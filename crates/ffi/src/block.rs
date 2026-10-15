@@ -160,7 +160,15 @@ pub unsafe extern "C" fn block_verify_signature_in_txn(
 
         ffi_async!(rt, {
             registry
-                .verify_block_signature_in_txn_as(&context, &txn_str, document_acp.as_ref(), &cid_str, &pub_key_str, crypto_key_type, &caller_identity)
+                .verify_block_signature_in_txn_as(
+                    &context,
+                    &txn_str,
+                    document_acp.clone(),
+                    &cid_str,
+                    &pub_key_str,
+                    crypto_key_type,
+                    &caller_identity,
+                )
                 .await
                 .map_err(|e| e.to_string())?;
 

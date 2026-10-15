@@ -187,7 +187,7 @@ async fn test_db_txn_accessor_returns_all_stores() {
 async fn test_db_txn_callbacks_executed_on_commit() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
-    let mut txn = new_txn(basic_txn);
+    let txn = new_txn(basic_txn);
 
     let success_called = Arc::new(AtomicBool::new(false));
     let success_clone = success_called.clone();
@@ -204,7 +204,7 @@ async fn test_db_txn_callbacks_executed_on_commit() {
 async fn test_db_txn_callbacks_executed_on_discard() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
-    let mut txn = new_txn(basic_txn);
+    let txn = new_txn(basic_txn);
 
     let discard_called = Arc::new(AtomicBool::new(false));
     let discard_clone = discard_called.clone();

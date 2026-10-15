@@ -22,7 +22,7 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
         cap: u64,
     ) -> query::error::Result<Option<u64>> {
         let (collection, datastore, _) =
-            get_collection_with_lazy_load(&self.txn, collection_name).await?;
+            get_collection_with_lazy_load(&*self.shared_txn()?, collection_name).await?;
         let index_manager = IndexManager::from_indexes(
             collection.resolved_root_id(),
             collection.schema(),
@@ -57,7 +57,7 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
         params: &IndexScanParams,
     ) -> query::error::Result<query::fetcher::IndexScanResult> {
         let (collection, datastore, systemstore) =
-            get_collection_with_lazy_load(&self.txn, collection_name).await?;
+            get_collection_with_lazy_load(&*self.shared_txn()?, collection_name).await?;
 
         let short_id = collection.resolved_root_id();
         let index_manager =

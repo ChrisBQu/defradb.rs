@@ -27,7 +27,7 @@
 use std::future::Future;
 
 use defra_core::thread_bounds::MaybeBoxFuture;
-use regolith::sync::SegQueue;
+use regolith::sync::{OnceCell, SegQueue};
 
 use super::errors::{Error, Result};
 use super::traits::MaybeSend;
@@ -69,6 +69,15 @@ impl OnCommit {
     /// Whether it is ordered by the commit's receipt.
     fn is_ordered(&self) -> bool {
         matches!(self, Self::Ordered(_) | Self::OrderedAsync(_))
+    }
+
+    /// Whether a transaction that is `read_only` takes it: one never gets a
+    /// commit receipt to order work by, so it refuses ordered work.
+    pub fn admitted_by(&self, read_only: bool) -> Result<()> {
+        if read_only && self.is_ordered() {
+            return Err(Error::ReadOnlyTxn);
+        }
+        Ok(())
     }
 }
 
@@ -151,9 +160,7 @@ impl TxnCallbacks {
 
     /// Register `callback` to run once if the transaction commits.
     pub fn on_commit(&mut self, callback: OnCommit) -> Result<()> {
-        if self.read_only && callback.is_ordered() {
-            return Err(Error::ReadOnlyTxn);
-        }
+        callback.admitted_by(self.read_only)?;
         self.push(Entry::Commit(callback));
         Ok(())
     }
@@ -234,6 +241,104 @@ impl TxnCallbacks {
             }
         }
         (committed, aborted)
+    }
+}
+
+/// A callback registered through a shared handle of a transaction, waiting
+/// for the transaction's own registry.
+pub enum Registration {
+    BeforeCommit(BeforeCommit),
+    Commit(OnCommit),
+    Abort(OnAbort),
+}
+
+/// Where queued registrations land: a transaction's registry, or the
+/// transaction itself.
+pub trait CallbackSink {
+    fn register(&mut self, registration: Registration) -> Result<()>;
+}
+
+/// A sink is anything with the three registrations a transaction has.
+macro_rules! callback_sink {
+    ($($sink:ty),+) => {$(
+        impl CallbackSink for $sink {
+            fn register(&mut self, registration: Registration) -> Result<()> {
+                match registration {
+                    Registration::BeforeCommit(callback) => self.before_commit(callback),
+                    Registration::Commit(callback) => self.on_commit(callback)?,
+                    Registration::Abort(callback) => self.on_abort(callback),
+                }
+                Ok(())
+            }
+        }
+    )+};
+}
+
+callback_sink!(TxnCallbacks, Box<dyn super::Txn>);
+
+/// Callbacks registered through `&self`, by the handles that share one
+/// transaction (its namespace views, the request components it is lent
+/// to), queued in registration order until the transaction's own registry
+/// takes them. Registering never waits and takes no lock; the transaction
+/// settles the queue before anything that depends on what is registered (a
+/// savepoint, a registration of its own, its commit or its discard), so the
+/// registration order holds across every handle.
+#[derive(Default)]
+pub struct QueuedCallbacks {
+    read_only: bool,
+    queue: OnceCell<Box<SegQueue<Registration>>>,
+}
+
+impl QueuedCallbacks {
+    /// A queue for a transaction that is `read_only` or not; a read-only one
+    /// refuses ordered work at once, as its registry would.
+    pub fn new(read_only: bool) -> Self {
+        Self {
+            read_only,
+            queue: OnceCell::new(),
+        }
+    }
+
+    /// Register `callback` to run once if the transaction commits.
+    pub fn on_commit(&self, callback: OnCommit) -> Result<()> {
+        callback.admitted_by(self.read_only)?;
+        self.push(Registration::Commit(callback));
+        Ok(())
+    }
+
+    /// Register `callback` to run once if the transaction ends without
+    /// committing.
+    pub fn on_abort(&self, callback: OnAbort) {
+        self.push(Registration::Abort(callback));
+    }
+
+    /// Register `callback` to run once just before the commit is attempted.
+    pub fn before_commit(&self, callback: BeforeCommit) {
+        self.push(Registration::BeforeCommit(callback));
+    }
+
+    fn push(&self, registration: Registration) {
+        self.queue.get_or_init_racy(Box::default).push(registration);
+    }
+
+    /// Hands every queued registration to `sink`, in order.
+    pub fn settle_into(&self, sink: &mut impl CallbackSink) -> Result<()> {
+        let Some(queue) = self.queue.get() else {
+            return Ok(());
+        };
+        while let Some(registration) = queue.pop() {
+            sink.register(registration)?;
+        }
+        Ok(())
+    }
+
+    /// The registrations waiting.
+    pub fn len(&self) -> usize {
+        self.queue.get().map_or(0, |queue| queue.len())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 

@@ -72,7 +72,7 @@ pub fn create_acp_merge_handler<
     AcpMergeHandler::new(inner)
 }
 
-pub fn create_broadcast_mutator<S: Store, B: Blockstore + 'static, T: P2PTransport>(
+pub fn create_broadcast_mutator<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport>(
     db: Arc<DB<S>>,
     sync: Arc<SyncCoordinator<B, T>>,
 ) -> BroadcastMutator<S, B, T> {

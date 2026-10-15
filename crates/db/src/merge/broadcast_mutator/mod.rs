@@ -100,7 +100,7 @@ pub struct BroadcastMutator<S: Store, B: Blockstore, T: P2PTransport> {
     se_options: Atom<BroadcastSeOptions>,
 }
 
-impl<S: Store, B: Blockstore + 'static, T: P2PTransport> BroadcastMutator<S, B, T> {
+impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> BroadcastMutator<S, B, T> {
     /// Create a new broadcast-enabled mutator.
     pub fn new(db: Arc<DB<S>>, sync: Arc<SyncCoordinator<B, T>>) -> Self {
         Self {

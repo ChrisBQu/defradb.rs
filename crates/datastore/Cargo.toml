@@ -18,12 +18,12 @@ bench = false
 bytes.workspace = true
 # Async runtime
 async-trait.workspace = true
-async-lock.workspace = true
 
 # Error handling
 thiserror.workspace = true
 
 # Logging
+tracing.workspace = true
 
 # IPLD
 cid.workspace = true
@@ -34,6 +34,7 @@ storage = { path = "../storage" }
 [dev-dependencies]
 # Testing
 futures.workspace = true
+regolith.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
 
 [lints]

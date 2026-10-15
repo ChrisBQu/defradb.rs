@@ -9,34 +9,28 @@
 //! query crate                          db crate
 //! ───────────                          ────────
 //! TransactionRegistry (trait)    <--   DbTransactionRegistry (impl)
+//! TxnTurn (trait)                <--   OwnedTxn (impl)
 //! TransactionContext (trait)     <--   DbTransactionContext (impl)
-//! DocFetcher (trait)             <--   DbDocFetcher (impl)
 //! ```
+//!
+//! Each explicit transaction is owned by one worker of the registry's pool
+//! for its whole life ([`crate::txn::owner`]): its ID names the worker, every
+//! request, commit, rollback and abandon for it is a message to that worker,
+//! and the worker runs them one at a time in the order they arrived. The
+//! registry is the workers' own tables, nothing shared besides.
 
-use async_trait::async_trait;
+use defra_core::thread_bounds::MaybeSend;
 use defra_core::RequestContext;
-use document::Document;
-use kovan_map::HopscotchMap;
-use kovan_queue::seg_queue::SegQueue;
-use lens::{LensConfig, LensModule, TransformId};
+use futures::future::LocalBoxFuture;
 use query::error::TransactionError;
-use query::txn::{
-    GetTransactionResult, TransactionContext, TransactionHandle, TransactionRegistry,
-};
-use rapidhash::fast::RandomState;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 use std::time::Duration;
 use storage::corekv::{IterOptions, Key, Store};
-use tracing::{error, warn};
-use web_time::Instant;
 
 use crate::collection::Collection;
 use crate::database::DB;
 use crate::error::{Error, Result};
-use crate::read::lensed::fetcher::LensedDocFetcher;
-use crate::txn::context::DbTransactionContext;
-use crate::txn::lenses::TxnLensStore;
+use crate::txn::owner::{Owners, TxnId, Unavailable};
 
 mod blocks;
 mod cleanup;
@@ -44,7 +38,10 @@ mod collections;
 mod docs;
 mod lenses;
 mod lifecycle;
+pub(crate) mod owned;
 mod schemas;
+
+use owned::OwnedTxn;
 
 /// Default max idle age for explicit HTTP transactions.
 pub const DEFAULT_TRANSACTION_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
@@ -78,58 +75,26 @@ impl CleanupResult {
 
 /// Transaction registry that manages database transactions for query execution.
 ///
-/// Implements `query::TransactionRegistry` to provide transaction lifecycle
-/// management to the query executor.
-///
-/// # Thread Safety
-///
-/// The transaction map is lock-free so lookups stay synchronous (required by
-/// the trait); the underlying transaction keeps its async mutex to support
-/// async document fetching operations.
+/// Implements `query::TransactionRegistry`. The transactions live on the
+/// workers of a [`workers::Pool`]: the one given at construction, else the
+/// database's, else the process-wide fallback pool. In a browser the page's
+/// one worker owns them all.
 pub struct DbTransactionRegistry<S: Store + 'static> {
     db: Arc<DB<S>>,
-    transactions: HopscotchMap<String, Arc<TransactionSlot<S>>, RandomState>,
-    id_counter: AtomicU64,
+    /// The workers' tables; an error when no pool could be had, which every
+    /// request then reports.
+    owners: std::result::Result<Owners<OwnedTxn<S>, Caller>, workers::Error>,
     broadcaster: Option<Arc<dyn crate::event::emission::TxnBroadcaster>>,
 }
 
-/// A registered transaction: the single owning reference plus a borrowing handle.
-///
-/// The map retires a removed entry instead of dropping it, so the owning
-/// reference lives in a queue whose `pop` hands it back by value at the
-/// removal. The context, and with it the `Arc<DB<S>>` holding the store's
-/// on-disk lock, is then released where the transaction leaves the registry
-/// rather than whenever reclamation catches up.
-struct TransactionSlot<S: Store + 'static> {
-    owner: SegQueue<Arc<DbTransactionContext<S>>>,
-    reader: Weak<DbTransactionContext<S>>,
-}
-
-impl<S: Store + 'static> TransactionSlot<S> {
-    fn new(ctx: Arc<DbTransactionContext<S>>) -> Self {
-        let reader = Arc::downgrade(&ctx);
-        let owner = SegQueue::new();
-        owner.push(ctx);
-        Self { owner, reader }
-    }
-
-    fn ctx(&self) -> Option<Arc<DbTransactionContext<S>>> {
-        self.reader.upgrade()
-    }
-}
-
 impl<S: Store + 'static> DbTransactionRegistry<S> {
-    /// Create a new transaction registry without a P2P broadcaster.
+    /// A registry whose transactions live on the database's pool.
     ///
     /// Use `with_broadcaster` when running with the P2P stack so that
     /// committed transactional writes are forwarded to peers.
     pub fn new(db: Arc<DB<S>>) -> Self {
-        Self {
-            db,
-            transactions: HopscotchMap::with_hasher(RandomState::default()),
-            id_counter: AtomicU64::new(0),
-            broadcaster: None,
-        }
+        let pool = pool_of(&db);
+        Self::on(db, pool, None)
     }
 
     /// Create a transaction registry that forwards committed writes to a
@@ -140,11 +105,29 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         db: Arc<DB<S>>,
         broadcaster: Arc<dyn crate::event::emission::TxnBroadcaster>,
     ) -> Self {
+        let pool = pool_of(&db);
+        Self::on(db, pool, Some(broadcaster))
+    }
+
+    /// A registry whose transactions live on the workers of `pool`, each
+    /// owned by the worker that began it.
+    pub fn with_pool(
+        db: Arc<DB<S>>,
+        pool: workers::Pool,
+        broadcaster: Option<Arc<dyn crate::event::emission::TxnBroadcaster>>,
+    ) -> Self {
+        Self::on(db, Ok(pool), broadcaster)
+    }
+
+    fn on(
+        db: Arc<DB<S>>,
+        pool: std::result::Result<workers::Pool, workers::Error>,
+        broadcaster: Option<Arc<dyn crate::event::emission::TxnBroadcaster>>,
+    ) -> Self {
         Self {
             db,
-            transactions: HopscotchMap::with_hasher(RandomState::default()),
-            id_counter: AtomicU64::new(0),
-            broadcaster: Some(broadcaster),
+            owners: owners_on(pool),
+            broadcaster,
         }
     }
 
@@ -169,64 +152,94 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         self.db.get_collection(name)
     }
 
-    /// [`Self::get_ctx_as`] in [`RequestContext::ambient`].
-    pub fn get_ctx(&self, txn_id: &str) -> Result<Option<Arc<DbTransactionContext<S>>>> {
-        self.get_ctx_as(&RequestContext::ambient(), txn_id)
-    }
-
-    /// Get an existing transaction by ID (for internal use).
-    ///
-    /// Returns `Ok(None)` if the transaction doesn't exist, belongs to an
-    /// identity other than the one acting in `context`, or a cleanup sweep has
-    /// already claimed it.
-    pub fn get_ctx_as(
-        &self,
-        context: &RequestContext,
-        txn_id: &str,
-    ) -> Result<Option<Arc<DbTransactionContext<S>>>> {
-        Ok(self
-            .transactions
-            .get(txn_id)
-            .and_then(|slot| slot.ctx())
-            .filter(|ctx| ctx.is_owned_by(context) && ctx.touch()))
-    }
-
     /// Get the number of active transactions in the registry.
     pub fn active_transaction_count(&self) -> Result<usize> {
-        Ok(self.transactions.len())
+        Ok(self.owners.as_ref().map_or(0, Owners::len))
     }
 
-    /// Unregister a transaction, taking ownership of releasing it.
-    fn take_registered(&self, handle: &TransactionHandle) -> Option<RemovedTransaction<S>> {
-        self.transactions
-            .remove(handle.as_str())?
-            .owner
-            .pop()
-            .map(RemovedTransaction)
+    fn owners(&self) -> std::result::Result<&Owners<OwnedTxn<S>, Caller>, Unavailable> {
+        self.owners
+            .as_ref()
+            .map_err(|error| Unavailable::Pool(error.clone()))
     }
-}
 
-/// A transaction context the registry no longer holds.
-///
-/// A caller that never reaches the commit or rollback (an abandoned handle, a
-/// cancelled finalization) would otherwise leave the transaction open and the
-/// store locked. Dropping this releases it.
-struct RemovedTransaction<S: Store + 'static>(Arc<DbTransactionContext<S>>);
-
-impl<S: Store + 'static> std::ops::Deref for RemovedTransaction<S> {
-    type Target = DbTransactionContext<S>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl<S: Store + 'static> Drop for RemovedTransaction<S> {
-    fn drop(&mut self) {
-        if let Some(txn) = self.0.try_take_txn() {
-            if let Err(error) = txn.force_discard() {
-                error!(error = %error, "Failed to discard an unfinalized transaction");
-            }
+    /// Runs `work` on transaction `txn_id`, on the worker that owns it, after
+    /// every request for it that arrived earlier, for the request `context`
+    /// serves.
+    async fn in_txn<T, W>(&self, context: &RequestContext, txn_id: &str, work: W) -> Result<T>
+    where
+        T: MaybeSend + 'static,
+        W: for<'t> FnOnce(&'t mut OwnedTxn<S>) -> LocalBoxFuture<'t, Result<T>>
+            + MaybeSend
+            + 'static,
+    {
+        let not_found = || Error::TransactionNotFound(txn_id.to_string());
+        let id = TxnId::parse(txn_id).ok_or_else(not_found)?;
+        let scope = context.clone();
+        let ran = self
+            .owners()
+            .map_err(|error| Error::Other(error.to_string()))?
+            .run(id, &caller(context), move |owned| {
+                Box::pin(async move { scope.mirror(work(owned)).await })
+            })
+            .await;
+        match ran {
+            Ok(result) => result,
+            Err(Unavailable::NotFound) => Err(not_found()),
+            Err(error) => Err(Error::Other(error.to_string())),
         }
     }
+}
+
+/// Who began a transaction, and so may use it: the request's identity.
+type Caller = Option<String>;
+
+/// The identity acting in `context`, the request calling.
+fn caller(context: &RequestContext) -> Caller {
+    context.identity().map(str::to_owned)
+}
+
+/// A registry error, as the query layer reports it.
+fn unavailable(error: Unavailable, handle: &query::txn::TransactionHandle) -> TransactionError {
+    match error {
+        Unavailable::NotFound => {
+            TransactionError::not_found(format!("transaction '{handle}' not found"))
+        }
+        other => TransactionError::execution(other.to_string()),
+    }
+}
+
+/// The pool a registry built without one runs on: the database's, else the
+/// process-wide fallback pool (a test, a one-shot tool).
+fn pool_of<S: Store>(db: &DB<S>) -> std::result::Result<workers::Pool, workers::Error> {
+    match db.pool() {
+        Some(pool) => Ok(pool.clone()),
+        None => workers::fallback().cloned(),
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn owners_on<T, K>(
+    pool: std::result::Result<workers::Pool, workers::Error>,
+) -> std::result::Result<Owners<T, K>, workers::Error>
+where
+    T: 'static,
+    K: Clone + PartialEq + Send + Sync + 'static,
+{
+    if let Err(error) = &pool {
+        tracing::error!(%error, "no worker can own transactions; every transaction request will fail");
+    }
+    pool.map(Owners::new)
+}
+
+/// The page's one worker owns every transaction, whichever pool drives it.
+#[cfg(target_family = "wasm")]
+fn owners_on<T, K>(
+    _pool: std::result::Result<workers::Pool, workers::Error>,
+) -> std::result::Result<Owners<T, K>, workers::Error>
+where
+    T: 'static,
+    K: Clone + PartialEq + Send + Sync + 'static,
+{
+    Ok(Owners::here())
 }

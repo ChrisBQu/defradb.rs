@@ -26,7 +26,6 @@ use bytes::Bytes;
 use rapidhash::RapidHashMap;
 use std::sync::Arc;
 
-use async_lock::Mutex as TokioMutex;
 use async_trait::async_trait;
 use document::Document;
 use lens::{TargetedHistoryLink, TransformStore};
@@ -34,7 +33,8 @@ use query::runner::{DocFetcher, FetchByIdsResult};
 use storage::corekv::Store;
 
 use crate::database::DB;
-use crate::txn::DbTxn;
+use crate::txn::held::Held;
+use crate::txn::{DbTxn, LentTxn};
 
 use super::generation_cache::GenerationCache;
 
@@ -44,36 +44,52 @@ type VersionFacts = (Arc<[schema::CollectionVersion]>, bool);
 /// A collection version's targeted history, by version id.
 type History = RapidHashMap<String, TargetedHistoryLink>;
 
+/// What a transaction's fetchers derive from its schema: version facts by
+/// collection id (cached for read-only transactions only, a writable one
+/// always reloads its own schema writes) and targeted histories by
+/// `"{collection_id}:{version_id}"`. Every request on the transaction shares
+/// them, and each cache has generations of its own, which a schema change in
+/// the transaction advances ([`invalidate`](Self::invalidate)).
+#[derive(Clone, Default)]
+pub(crate) struct FetcherCaches {
+    version: Arc<GenerationCache<VersionFacts>>,
+    history: Arc<GenerationCache<History>>,
+}
+
+impl FetcherCaches {
+    /// Drops every value derived so far; one computed before this call is
+    /// never cached after it.
+    pub(crate) fn invalidate(&self) {
+        self.history.invalidate();
+        self.version.invalidate();
+    }
+}
+
 /// Document fetcher that applies lens migrations to documents.
 ///
 /// When documents are fetched from older schema versions, they are
 /// transformed to the current (target) schema version using registered
 /// lens migrations.
-pub struct LensedDocFetcher<S: Store> {
+pub struct LensedDocFetcher<S: Store + 'static> {
     db: Arc<DB<S>>,
-    txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
+    txn: Held<S>,
     #[allow(dead_code)]
     lens_store: Arc<dyn TransformStore>,
-    /// Version facts by collection id, cached for read-only transactions
-    /// only: a writable one always reloads its own schema writes.
-    version_cache: Arc<GenerationCache<VersionFacts>>,
-    /// Targeted histories by `"{collection_id}:{version_id}"`.
-    ///
-    /// Both caches are shared with the fetcher's stream clones and have
-    /// generations of their own, which a schema change in the transaction
-    /// advances ([`invalidate_migration_cache`](Self::invalidate_migration_cache)).
-    history_cache: Arc<GenerationCache<History>>,
+    /// What the fetcher derived from its transaction's schema, shared with
+    /// its stream clones and with the transaction's later requests.
+    caches: FetcherCaches,
     /// Optional field projection used by mutation rebases whose dependencies
     /// are known. General query fetches leave this unset.
     projection: Option<rapidhash::RapidHashSet<String>>,
     prepared_inputs: Option<query::prepared::PreparedInputMemo>,
 }
 
-impl<S: Store> LensedDocFetcher<S> {
+impl<S: Store + 'static> LensedDocFetcher<S> {
     /// Seed the per-version history cache directly.
     pub async fn insert_history(&self, key: String, history: History) {
-        let generation = self.history_cache.generation();
-        self.history_cache
+        let generation = self.caches.history.generation();
+        self.caches
+            .history
             .publish(generation, &key, &Arc::new(history));
     }
 
@@ -85,12 +101,36 @@ impl<S: Store> LensedDocFetcher<S> {
     /// * `lens_store` - The lens transform store for applying migrations
     #[allow(dead_code)]
     pub fn new(db: Arc<DB<S>>, txn: DbTxn<S>, lens_store: Arc<dyn TransformStore>) -> Self {
+        Self::with_held(
+            db,
+            Held::new(Arc::new(txn)),
+            lens_store,
+            FetcherCaches::default(),
+        )
+    }
+
+    /// A fetcher over a transaction lent to it, with what its earlier
+    /// requests derived: whoever lent the transaction keeps it.
+    pub(crate) fn lent(
+        db: Arc<DB<S>>,
+        txn: &LentTxn<S>,
+        lens_store: Arc<dyn TransformStore>,
+        caches: FetcherCaches,
+    ) -> Self {
+        Self::with_held(db, Held::borrowed(txn), lens_store, caches)
+    }
+
+    fn with_held(
+        db: Arc<DB<S>>,
+        txn: Held<S>,
+        lens_store: Arc<dyn TransformStore>,
+        caches: FetcherCaches,
+    ) -> Self {
         Self {
             db,
-            txn: Arc::new(TokioMutex::new(Some(txn))),
+            txn,
             lens_store,
-            version_cache: Arc::default(),
-            history_cache: Arc::default(),
+            caches,
             projection: None,
             prepared_inputs: None,
         }
@@ -122,48 +162,39 @@ impl<S: Store> LensedDocFetcher<S> {
     pub(super) fn stream_clone(&self) -> Self {
         Self {
             db: self.db.clone(),
-            txn: self.txn.clone(),
+            txn: self.txn.get().map_or_else(Held::none, Held::new),
             lens_store: self.lens_store.clone(),
-            version_cache: self.version_cache.clone(),
-            history_cache: self.history_cache.clone(),
+            caches: self.caches.clone(),
             projection: self.projection.clone(),
             prepared_inputs: self.prepared_inputs.clone(),
         }
     }
 
-    /// Take the transaction out of the fetcher (for commit/rollback).
-    #[allow(dead_code)]
+    /// Take the transaction out of the fetcher (for commit/rollback). `None`
+    /// once it was taken, or while another handle (a stream it opened) still
+    /// holds it.
     pub async fn take_txn(&self) -> Option<DbTxn<S>> {
-        self.txn.lock().await.take()
-    }
-
-    /// Take the transaction without waiting. `None` when it is already taken,
-    /// or another task is holding it.
-    pub(crate) fn try_take_txn(&self) -> Option<DbTxn<S>> {
-        self.txn.try_lock()?.take()
+        self.txn.take()
     }
 
     /// Check if the transaction has been consumed.
     pub async fn is_consumed(&self) -> bool {
-        self.txn.lock().await.is_none()
+        self.txn.is_taken()
     }
 
-    /// Get the shared transaction reference.
-    #[allow(dead_code)]
-    pub(crate) fn shared_txn(&self) -> Arc<TokioMutex<Option<DbTxn<S>>>> {
-        self.txn.clone()
-    }
-
-    pub(crate) fn lens_store(&self) -> Arc<dyn TransformStore> {
-        self.lens_store.clone()
+    /// The transaction, for an operation or another handle to share.
+    pub(crate) fn shared_txn(&self) -> query::error::Result<LentTxn<S>> {
+        self.txn
+            .get()
+            .ok_or_else(|| query::error::QueryError::execution("transaction already consumed"))
     }
 
     /// Drops what the fetcher derived from its transaction's schema, after a
     /// schema change in the transaction; a value computed before this call is
     /// never cached after it.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn invalidate_migration_cache(&self) {
-        self.history_cache.invalidate();
-        self.version_cache.invalidate();
+        self.caches.invalidate();
     }
 }
 
@@ -178,10 +209,7 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
         let Some(nac) = self.db.nac_manager() else {
             return Ok(None);
         };
-        let guard = self.txn.lock().await;
-        let txn = guard.as_ref().ok_or_else(|| {
-            query::error::QueryError::execution("authorization transaction is no longer active")
-        })?;
+        let txn = &*self.shared_txn()?;
         let view = txn
             .acpstore()
             .map_err(|error| query::error::QueryError::execution(error.to_string()))?;
@@ -195,10 +223,7 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
         &self,
         provider: Arc<dyn acp::DocumentACP>,
     ) -> query::error::Result<Arc<dyn acp::DocumentACP>> {
-        let guard = self.txn.lock().await;
-        let txn = guard.as_ref().ok_or_else(|| {
-            query::error::QueryError::execution("authorization transaction is no longer active")
-        })?;
+        let txn = &*self.shared_txn()?;
         let view = txn
             .acpstore()
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
@@ -277,10 +302,7 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
         &self,
         options: &query::fetcher::DocumentArrivalOptions,
     ) -> query::error::Result<query::fetcher::DocumentArrivalPage> {
-        let mut guard = self.txn.lock().await;
-        let txn = guard
-            .as_mut()
-            .ok_or_else(|| query::error::QueryError::execution("transaction no longer active"))?;
+        let txn = &*self.shared_txn()?;
         crate::event::arrivals::read(txn, options)
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))
@@ -301,7 +323,7 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
             field_name: options.field_name.clone(),
         };
 
-        let commits_fetcher = CommitsFetcher::new(self.txn.clone());
+        let commits_fetcher = CommitsFetcher::new(self.shared_txn()?);
         commits_fetcher
             .fetch_commits(&db_options)
             .await
@@ -318,7 +340,7 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
         use crate::index::IndexManager;
 
         let (collection, datastore, systemstore) =
-            get_collection_with_lazy_load(&self.txn, collection_name).await?;
+            get_collection_with_lazy_load(&*self.shared_txn()?, collection_name).await?;
 
         let short_id = collection.resolved_root_id();
         let index_manager =
@@ -364,9 +386,11 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
     }
 
     async fn indexes_match_documents(&self, collection_name: &str) -> query::error::Result<bool> {
-        let (collection, _, _) =
-            crate::collection::loader::get_collection_with_lazy_load(&self.txn, collection_name)
-                .await?;
+        let (collection, _, _) = crate::collection::loader::get_collection_with_lazy_load(
+            &*self.shared_txn()?,
+            collection_name,
+        )
+        .await?;
         Ok(!self
             .load_versions_and_check_migrations(&collection)
             .await?
@@ -395,10 +419,12 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
         k: usize,
         effort: Option<usize>,
     ) -> query::error::Result<Vec<u64>> {
-        let (collection, datastore, _) =
-            crate::collection::loader::get_collection_with_lazy_load(&self.txn, collection_name)
-                .await?;
-        let codes = crate::collection::loader::vector_codes(&self.txn).await?;
+        let (collection, datastore, _) = crate::collection::loader::get_collection_with_lazy_load(
+            &*self.shared_txn()?,
+            collection_name,
+        )
+        .await?;
+        let codes = self.shared_txn()?.vector_codes().clone();
 
         crate::read::vector::search_vector_index(
             &collection,
@@ -424,9 +450,12 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
     ) -> query::error::Result<Document> {
         use crate::read::versioned::VersionedFetcher;
 
-        let versioned_fetcher =
-            VersionedFetcher::with_kms(self.txn.clone(), self.db.kms(), caller_identity.cloned())
-                .with_prepared_inputs(self.prepared_inputs.clone());
+        let versioned_fetcher = VersionedFetcher::with_kms(
+            Some(self.shared_txn()?),
+            self.db.kms(),
+            caller_identity.cloned(),
+        )
+        .with_prepared_inputs(self.prepared_inputs.clone());
         versioned_fetcher
             .get_document_at_cid(cid, expected_doc_id)
             .await
@@ -445,9 +474,12 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
     ) -> query::error::Result<Vec<Document>> {
         use crate::read::versioned::VersionedFetcher;
 
-        let versioned_fetcher =
-            VersionedFetcher::with_kms(self.txn.clone(), self.db.kms(), caller_identity.cloned())
-                .with_prepared_inputs(self.prepared_inputs.clone());
+        let versioned_fetcher = VersionedFetcher::with_kms(
+            Some(self.shared_txn()?),
+            self.db.kms(),
+            caller_identity.cloned(),
+        )
+        .with_prepared_inputs(self.prepared_inputs.clone());
         versioned_fetcher
             .get_documents_at_cid(cid, expected_doc_id, Some(collection_short_id))
             .await

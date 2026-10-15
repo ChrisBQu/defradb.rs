@@ -356,6 +356,8 @@ that is correct but slower is not done.
 
   not `fn apply<T: Encode + Send, S: Store>(value: T, store: &S)`.
 - Callback shapes are named traits or `type` aliases, with lifetimes that have meaningful names.
+- No `anyhow`, in library code, binaries or tests. Errors are typed: each crate has its own error enum (`thiserror`), and a
+  test returns `()` and asserts, or returns the crate's `Result`. Remove `anyhow` wherever it is found.
 
 ## Build Dependencies
 
