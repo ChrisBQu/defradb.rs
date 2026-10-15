@@ -390,6 +390,37 @@ async fn forget_and_readd_preserves_marker_generation_fencing() {
 }
 
 #[tokio::test]
+async fn live_push_admission_rejects_malformed_marker_generation() {
+    use crate::keys::peerstore::ReplicatorRetryDocIDKey;
+
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
+    let peerstore = Peerstore::new(store.clone());
+    peerstore
+        .create_replicator("peer", b"replicator")
+        .await
+        .unwrap();
+    let generation = peerstore
+        .observe_push_head_with_generation("peer", "doc", "collection")
+        .await
+        .unwrap()
+        .unwrap();
+
+    let mut txn = store.new_txn(false).await.unwrap();
+    txn.set(
+        &ReplicatorRetryDocIDKey::new("peer", "doc").bytes(),
+        b"malformed generation",
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    assert!(!peerstore
+        .admit_push_scope("peer", "doc", "collection", generation)
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
 async fn concurrent_scope_registrations_get_distinct_generations() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store.clone());

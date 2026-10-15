@@ -964,7 +964,7 @@ impl<S: Store> Peerstore<S> {
         let Some(marker) = txn.get(&marker_key).await? else {
             return Ok(false);
         };
-        Ok(decode_retry_marker_generation(&marker).unwrap_or(0) == expected_generation)
+        Ok(decode_retry_marker_generation(&marker) == Some(expected_generation))
     }
 
     /// Get all peers that have pending retries.
