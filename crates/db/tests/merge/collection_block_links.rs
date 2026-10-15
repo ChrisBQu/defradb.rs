@@ -365,3 +365,33 @@ async fn the_batch_walk_leaves_an_incomplete_ancestor_mergeable() {
     );
     assert_ancestor_superseded_by_root(&db, &root_cid, &ancestor_cid).await;
 }
+
+/// The walk loads a parent named in `heads` when it reaches it. A parent this
+/// node does not hold, or one that is not a collection block, ends that branch
+/// of the walk and never the root's merge, in either walk.
+#[tokio::test]
+async fn a_parent_that_is_not_held_or_not_a_collection_block_is_skipped() {
+    for batch in [false, true] {
+        let (db, handler, blockstore) = node().await;
+        let (absent_parent, _) = collection_block(&[]);
+        let (present, blocks) = document("current");
+        for (cid, bytes) in &blocks {
+            blockstore.put(cid, bytes).await.unwrap();
+        }
+        let (root_cid, root_bytes) = collection_block_over(&[present], &[absent_parent, present]);
+        blockstore.put(&root_cid, &root_bytes).await.unwrap();
+
+        let outcome = if batch {
+            merge_batch(&handler, &root_cid, &root_bytes).await
+        } else {
+            merge(&handler, &root_cid, &root_bytes).await
+        };
+
+        assert_eq!(outcome, MergeOutcome::Merged, "batch walk: {batch}");
+        let heads = collection_heads(&db).await;
+        assert!(
+            heads.iter().any(|key| key.contains(&root_cid.to_string())),
+            "batch walk: {batch}: the root's head must install: {heads:?}"
+        );
+    }
+}

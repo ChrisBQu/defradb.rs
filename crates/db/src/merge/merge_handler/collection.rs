@@ -4,11 +4,8 @@ use super::*;
 enum CollectionMergeFrame {
     Enter {
         cid: Cid,
-        block: Option<Block>,
-        payload: Option<defra_core::block::CollectionDeltaPayload>,
-        child_cid: Option<Cid>,
+        source: EnterSource,
         depth: usize,
-        is_root: bool,
     },
     Exit {
         cid: Cid,
@@ -17,6 +14,24 @@ enum CollectionMergeFrame {
         depth: usize,
         is_root: bool,
     },
+}
+
+/// Where an entered frame's block comes from: the root arrives decoded, and a
+/// parent named in a child's `heads` is loaded when the walk reaches it.
+enum EnterSource {
+    Root {
+        block: Block,
+        payload: defra_core::block::CollectionDeltaPayload,
+    },
+    Parent {
+        child_cid: Cid,
+    },
+}
+
+impl EnterSource {
+    fn is_root(&self) -> bool {
+        matches!(self, Self::Root { .. })
+    }
 }
 
 impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
@@ -53,6 +68,27 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         Block::from_dag_cbor(&data).ok()
     }
 
+    /// The block and payload an entered frame merges, or `None` for a parent
+    /// that is not held, does not decode, or is not a collection block: the
+    /// walk skips such a parent.
+    async fn enter_block(
+        &self,
+        cid: &Cid,
+        source: EnterSource,
+    ) -> Option<(Block, defra_core::block::CollectionDeltaPayload)> {
+        match source {
+            EnterSource::Root { block, payload } => Some((block, payload)),
+            EnterSource::Parent { child_cid } => {
+                let block = self.load_parent_collection(cid, &child_cid).await?;
+                let CrdtDelta::Collection(payload) = &block.delta else {
+                    return None;
+                };
+                let payload = payload.clone();
+                Some((block, payload))
+            }
+        }
+    }
+
     /// Process a Collection delta from a block.
     ///
     /// Collection blocks are metadata containers that link to document composite
@@ -71,23 +107,17 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     ) -> std::result::Result<MergeOutcome, MergeError> {
         let mut frames = vec![CollectionMergeFrame::Enter {
             cid: *cid,
-            block: Some(block.clone()),
-            payload: Some(payload.clone()),
-            child_cid: None,
+            source: EnterSource::Root {
+                block: block.clone(),
+                payload: payload.clone(),
+            },
             depth,
-            is_root: true,
         }];
 
         while let Some(frame) = frames.pop() {
             match frame {
-                CollectionMergeFrame::Enter {
-                    cid,
-                    block,
-                    payload,
-                    child_cid,
-                    depth,
-                    is_root,
-                } => {
+                CollectionMergeFrame::Enter { cid, source, depth } => {
+                    let is_root = source.is_root();
                     if let Err(error) = self.ensure_merge_depth(&cid, depth) {
                         if is_root {
                             return Err(error);
@@ -106,29 +136,8 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                         continue;
                     }
 
-                    let block = match block {
-                        Some(block) => block,
-                        None => {
-                            let Some(block) = self
-                                .load_parent_collection(
-                                    &cid,
-                                    &child_cid.expect("parent frame has a child CID"),
-                                )
-                                .await
-                            else {
-                                continue;
-                            };
-                            block
-                        }
-                    };
-                    let payload = match payload {
-                        Some(payload) => payload,
-                        None => {
-                            let CrdtDelta::Collection(payload) = &block.delta else {
-                                continue;
-                            };
-                            payload.clone()
-                        }
+                    let Some((block, payload)) = self.enter_block(&cid, source).await else {
+                        continue;
                     };
 
                     tracing::debug!(
@@ -152,11 +161,8 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                         for parent_cid in heads.into_iter().rev() {
                             frames.push(CollectionMergeFrame::Enter {
                                 cid: parent_cid,
-                                block: None,
-                                payload: None,
-                                child_cid: Some(cid),
+                                source: EnterSource::Parent { child_cid: cid },
                                 depth: depth + 1,
-                                is_root: false,
                             });
                         }
                     }
@@ -446,23 +452,17 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     ) -> std::result::Result<MergeOutcome, MergeError> {
         let mut frames = vec![CollectionMergeFrame::Enter {
             cid: *cid,
-            block: Some(block.clone()),
-            payload: Some(payload.clone()),
-            child_cid: None,
+            source: EnterSource::Root {
+                block: block.clone(),
+                payload: payload.clone(),
+            },
             depth,
-            is_root: true,
         }];
 
         while let Some(frame) = frames.pop() {
             match frame {
-                CollectionMergeFrame::Enter {
-                    cid,
-                    block,
-                    payload,
-                    child_cid,
-                    depth,
-                    is_root,
-                } => {
+                CollectionMergeFrame::Enter { cid, source, depth } => {
+                    let is_root = source.is_root();
                     if let Err(error) = self.ensure_merge_depth(&cid, depth) {
                         if is_root {
                             return Err(error);
@@ -489,29 +489,8 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                         continue;
                     }
 
-                    let block = match block {
-                        Some(block) => block,
-                        None => {
-                            let Some(block) = self
-                                .load_parent_collection(
-                                    &cid,
-                                    &child_cid.expect("parent frame has a child CID"),
-                                )
-                                .await
-                            else {
-                                continue;
-                            };
-                            block
-                        }
-                    };
-                    let payload = match payload {
-                        Some(payload) => payload,
-                        None => {
-                            let CrdtDelta::Collection(payload) = &block.delta else {
-                                continue;
-                            };
-                            payload.clone()
-                        }
+                    let Some((block, payload)) = self.enter_block(&cid, source).await else {
+                        continue;
                     };
 
                     tracing::debug!(
@@ -532,11 +511,8 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                         for parent_cid in heads.into_iter().rev() {
                             frames.push(CollectionMergeFrame::Enter {
                                 cid: parent_cid,
-                                block: None,
-                                payload: None,
-                                child_cid: Some(cid),
+                                source: EnterSource::Parent { child_cid: cid },
                                 depth: depth + 1,
-                                is_root: false,
                             });
                         }
                     }
