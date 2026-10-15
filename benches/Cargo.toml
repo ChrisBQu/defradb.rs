@@ -43,6 +43,7 @@ datastore = { path = "../crates/datastore" }
 db = { path = "../crates/db" }
 defra-core = { path = "../crates/defra-core" }
 defra-http = { path = "../crates/http", features = ["test-utils"] }
+edge = { path = "../crates/edge", features = ["testing"] }
 document = { path = "../crates/document" }
 query = { path = "../crates/query" }
 schema = { path = "../crates/schema" }

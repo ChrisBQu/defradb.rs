@@ -90,6 +90,7 @@ async fn p2p_shutdown_releases_persistent_store() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("data.regolith");
     let config = EmbeddedNodeConfig {
+        edge: Some(edge::testing::edge()),
         persistence: Persistence::Persistent,
         transport: TransportConfig::Libp2p(Libp2pConfig {
             listen_addr: "/ip4/127.0.0.1/tcp/0".to_string(),
@@ -114,6 +115,7 @@ async fn iroh_shutdown_releases_persistent_store() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("data.regolith");
     let config = EmbeddedNodeConfig {
+        edge: Some(edge::testing::edge()),
         persistence: Persistence::Persistent,
         transport: TransportConfig::Iroh(IrohConfig {
             bind_addr: Some(std::net::Ipv4Addr::LOCALHOST.into()),
@@ -144,6 +146,7 @@ async fn failed_p2p_setup_releases_persistent_store() -> Result<()> {
     let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
     let port = listener.local_addr()?.port();
     let config = EmbeddedNodeConfig {
+        edge: Some(edge::testing::edge()),
         persistence: Persistence::Persistent,
         transport: TransportConfig::Libp2p(Libp2pConfig {
             listen_addr: format!("/ip4/127.0.0.1/tcp/{port}"),

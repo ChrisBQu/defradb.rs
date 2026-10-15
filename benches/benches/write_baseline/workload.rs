@@ -148,7 +148,7 @@ impl Fixture {
             }
         }
         Self {
-            state: Arc::new(AppStateBuilder::new(Arc::new(runner)).build()),
+            state: Arc::new(AppStateBuilder::new(Arc::new(runner), edge::testing::edge()).build()),
             store,
             db,
             ids,

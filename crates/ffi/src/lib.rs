@@ -160,7 +160,7 @@ macro_rules! try_ffi {
 #[macro_export]
 macro_rules! ffi_async {
     ($rt:expr, $body:block) => {{
-        let result: Result<String, String> = $rt.block_on(async $body);
+        let result: Result<String, String> = $crate::helpers::block_on($rt, async $body);
         match result {
             Ok(json) => $crate::types::FfiResult::success(json),
             Err(e) => $crate::types::FfiResult::error(e),
@@ -172,7 +172,7 @@ macro_rules! ffi_async {
 #[macro_export]
 macro_rules! ffi_async_ok {
     ($rt:expr, $body:block) => {{
-        let result: Result<(), String> = $rt.block_on(async $body);
+        let result: Result<(), String> = $crate::helpers::block_on($rt, async $body);
         match result {
             Ok(()) => $crate::types::FfiResult::ok(),
             Err(e) => $crate::types::FfiResult::error(e),

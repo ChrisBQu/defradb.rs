@@ -83,6 +83,7 @@ pub(crate) async fn setup_libp2p<S>(
     config: &Libp2pConfig,
     sync_config: SyncConfig,
     peer_keyring: Option<&crate::PeerKeyring>,
+    edge: &edge::Edge,
 ) -> Result<P2PSetup>
 where
     S: storage::corekv::Store + 'static,
@@ -191,6 +192,7 @@ where
     let kms_transport = match p2p::kms::PubsubKeyTransport::new(
         kms_libp2p_transport,
         Arc::new(p2p::HandlePeerIdentityResolver::new(handle.clone())),
+        edge.clone(),
     )
     .await
     {
@@ -459,6 +461,7 @@ pub(crate) async fn setup_iroh<S>(
     document_acp: Arc<dyn acp::DocumentACP>,
     strict_replicated_doc_access: bool,
     peer_keyring: Option<&crate::PeerKeyring>,
+    edge: &edge::Edge,
 ) -> Result<P2PSetup>
 where
     S: storage::corekv::Store + 'static,
@@ -488,6 +491,7 @@ where
             allowlist: config.allowlist.clone(),
         },
         document_acp,
+        edge.clone(),
     );
     peer_config.strict_replicated_doc_access = strict_replicated_doc_access;
     peer_config.sync = sync_config;

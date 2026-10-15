@@ -63,7 +63,7 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
                 };
 
                 let version_ids = version_ids.clone();
-                rt.block_on(async move {
+                crate::helpers::block_on(rt, async move {
                     p2p.system
                         .ops()
                         .sync_collection_versions(version_ids)

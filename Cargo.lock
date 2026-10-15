@@ -1870,6 +1870,7 @@ dependencies = [
  "defra-http",
  "defra-perf",
  "document",
+ "edge",
  "events",
  "identity 0.5.0",
  "libp2p-identity",
@@ -2595,6 +2596,7 @@ dependencies = [
  "defra-version",
  "dirs",
  "document",
+ "edge",
  "events",
  "futures",
  "getrandom 0.2.17",
@@ -4102,6 +4104,7 @@ dependencies = [
  "defra-core",
  "defra-http",
  "defra-version",
+ "edge",
  "events",
  "futures",
  "hex",
@@ -4142,6 +4145,7 @@ dependencies = [
  "defra-core",
  "defra-http",
  "defra-p2p-adapter",
+ "edge",
  "events",
  "hex",
  "identity 0.5.0",
@@ -4182,6 +4186,7 @@ dependencies = [
  "defra-core",
  "defra-http",
  "document",
+ "edge",
  "events",
  "hex",
  "identity 0.5.0",
@@ -4243,6 +4248,7 @@ dependencies = [
  "defra-p2p-adapter",
  "defra-perf",
  "document",
+ "edge",
  "events",
  "futures",
  "getrandom 0.2.17",
@@ -4635,6 +4641,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "edge"
+version = "0.5.0"
+dependencies = [
+ "defra-core",
+ "n0-future",
+ "regolith",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "educe"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4713,6 +4731,7 @@ dependencies = [
  "defra-http",
  "defra-p2p-adapter",
  "document",
+ "edge",
  "events",
  "hex",
  "identity 0.5.0",
@@ -5031,6 +5050,7 @@ dependencies = [
  "defra-core",
  "defra-http",
  "document",
+ "edge",
  "embedded",
  "events",
  "hex",
@@ -5044,6 +5064,7 @@ dependencies = [
  "parking_lot 0.12.5",
  "query",
  "rapidhash",
+ "regolith",
  "schema",
  "serde",
  "serde_bytes",
@@ -9361,6 +9382,7 @@ dependencies = [
  "blst",
  "crypto",
  "defra-core",
+ "edge",
  "hex",
  "identity 0.5.0",
  "prost 0.14.3",
@@ -9440,6 +9462,7 @@ dependencies = [
  "datastore",
  "defra-core",
  "document",
+ "edge",
  "futures",
  "getrandom 0.3.4",
  "hex",
@@ -14203,6 +14226,7 @@ dependencies = [
  "cosmrs",
  "crypto",
  "defra-core",
+ "edge",
  "events",
  "futures",
  "hex",

@@ -26,6 +26,7 @@ impl Node {
         zanzibar_store: Arc<dyn acp::ZanzibarStore>,
         event_bus: Arc<dyn events::Bus>,
         nac_checker: Arc<dyn db::NodeAccessChecker>,
+        edge: &edge::Edge,
     ) -> Result<DocumentAcpSetup> {
         #[cfg(feature = "vera")]
         if config.acp.document_type == AcpDocumentType::Vera {
@@ -79,7 +80,7 @@ impl Node {
                 document_acp
             } else {
                 document_acp
-                    .with_cosmos_event_invalidation(config.acp.vera_events_ws.clone())
+                    .with_cosmos_event_invalidation(config.acp.vera_events_ws.clone(), edge)
                     .map_err(|e| Error::InvalidConfig(format!("Vera event subscriber: {}", e)))?
             };
             let document_acp = Arc::new(document_acp);

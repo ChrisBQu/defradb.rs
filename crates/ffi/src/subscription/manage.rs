@@ -169,7 +169,7 @@ pub extern "C" fn close_graphql_subscription(
         };
 
         // Abort the background event processing task
-        state.task_abort.abort();
+        state.service.stop();
 
         // Unsubscribe from the event bus
         NODES.get(state.node_handle, |node_state| {

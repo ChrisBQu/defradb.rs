@@ -180,8 +180,8 @@ pub struct SubscriptionState {
 /// State held for each GraphQL subscription (used by poll_graphql_subscription).
 ///
 /// Subscription queries are re-executed at **event time** (not poll time) to ensure
-/// the DB state matches the event. A background tokio task processes events as they
-/// arrive, executes the subscription query scoped to the changed document, and
+/// the DB state matches the event. A background network service processes events as
+/// they arrive, executes the subscription query scoped to the changed document, and
 /// buffers the full GraphQL JSON results for polling.
 pub struct GraphQLSubscriptionState {
     /// Receiver for fully-processed GraphQL result JSON strings.
@@ -190,6 +190,7 @@ pub struct GraphQLSubscriptionState {
     pub node_handle: NodeHandle,
     /// The event bus subscription ID (for cleanup/unsubscribe).
     pub event_sub_id: u64,
-    /// Abort handle for the background event processing task.
-    pub task_abort: tokio::task::AbortHandle,
+    /// The background event processing service; stopping or dropping it
+    /// stops the processing.
+    pub service: edge::Service,
 }

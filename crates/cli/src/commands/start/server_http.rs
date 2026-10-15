@@ -27,6 +27,7 @@ pub(super) struct HttpServerArgs<'a> {
     pub(super) zanzibar_store: Arc<dyn acp::ZanzibarStore>,
     pub(super) user_did: Option<&'a Did>,
     pub(super) node_identity_did: Option<String>,
+    pub(super) edge: edge::Edge,
 }
 
 impl Node {
@@ -43,6 +44,7 @@ impl Node {
             zanzibar_store,
             user_did,
             node_identity_did,
+            edge,
         } = args;
 
         let api_address: SocketAddr =
@@ -72,10 +74,13 @@ impl Node {
             query_limits,
         };
 
-        let mut server =
-            defra_http::Server::from_arc_with_config(query_setup.runner.clone(), server_config)
-                .with_rest_arc(query_setup.rest_ops.clone())
-                .with_dev_mode(config.development);
+        let mut server = defra_http::Server::from_arc_with_config(
+            query_setup.runner.clone(),
+            server_config,
+            edge.clone(),
+        )
+        .with_rest_arc(query_setup.rest_ops.clone())
+        .with_dev_mode(config.development);
 
         let remote_signer_did = defra_core::signing::find_remote_signer_did();
         let user_identity_present = user_did.is_some();
@@ -191,9 +196,10 @@ impl Node {
             crate::txn_adapter::TxnRegistryAdapter::new_arc_with_acp(
                 query_setup.registry.clone(),
                 acp_setup.document_acp.clone(),
+                edge,
             )
         } else {
-            crate::txn_adapter::TxnRegistryAdapter::new_arc(query_setup.registry.clone())
+            crate::txn_adapter::TxnRegistryAdapter::new_arc(query_setup.registry.clone(), edge)
         };
         server = server.with_txn_ops_arc(txn_adapter);
         info!("Transaction-scoped HTTP endpoints enabled");

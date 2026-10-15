@@ -119,7 +119,7 @@ mod tests {
     }
 
     async fn response(method: Method, uri: &str, body: Body) -> axum::response::Response {
-        create_router(Arc::new(MockQueryExecutor::new()))
+        create_router(Arc::new(MockQueryExecutor::new()), edge::testing::edge())
             .oneshot(
                 Request::builder()
                     .method(method)

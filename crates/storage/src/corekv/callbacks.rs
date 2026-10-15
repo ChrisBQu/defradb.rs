@@ -282,7 +282,10 @@ impl Ended {
     }
 }
 
+// Data-path work spawned on whichever runtime ended the transaction, not
+// network work: it goes when the data path runs on the worker pool.
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::disallowed_methods)]
 fn spawn_in_order(callbacks: Vec<AsyncTxnCallback>) {
     match tokio::runtime::Handle::try_current() {
         Ok(handle) => {

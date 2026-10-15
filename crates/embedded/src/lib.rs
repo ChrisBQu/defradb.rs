@@ -150,6 +150,9 @@ pub struct EmbeddedNodeConfig {
     pub peer_keyring: Option<PeerKeyring>,
     pub persistence: Persistence,
     pub transport: TransportConfig,
+    /// The network runtime the transport runs on. A node with a transport
+    /// needs one; a node without networking starts none.
+    pub edge: Option<edge::Edge>,
     pub signing: SigningConfig,
     pub document_acp: DocumentAcpConfig,
     pub query_limits: query::QueryLimits,

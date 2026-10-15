@@ -27,7 +27,7 @@ pub unsafe extern "C" fn p2p_retry_replicators(node_ptr: usize) -> FfiResult {
                     None => return Err(FfiP2PError::no_p2p_system()),
                 };
 
-                rt.block_on(async { p2p.system.retry_replicators().await })
+                crate::helpers::block_on(rt, async { p2p.system.retry_replicators().await })
                     .map_err(FfiP2PError::internal)
             })
             .ok_or_else(FfiP2PError::invalid_node_handle)

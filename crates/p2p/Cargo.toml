@@ -22,6 +22,8 @@ storage = { path = "../storage" }
 identity = { path = "../identity" }
 acp = { path = "../acp" }
 kms = { path = "../kms", optional = true }
+# The network runtime the KMS transport replays buffered requests on.
+edge = { path = "../edge", optional = true }
 
 # Lock-free shared state (see the workspace manifest).
 kovan = { workspace = true }
@@ -110,7 +112,7 @@ libp2p-transport = [
 # The KMS pubsub-RPC layer (crate::kms + crate::pubsub_rpc + the coordinator's
 # KMS transport slot). Transport-generic; implied by libp2p-transport and
 # opt-in for iroh-only builds.
-kms = ["dep:kms"]
+kms = ["dep:kms", "dep:edge"]
 iroh-transport = ["dep:iroh", "dep:iroh-gossip", "dep:iroh-tickets", "dep:noq", "dep:rand", "dep:blake3", "dep:lru"]
 # Host an iroh relay server next to the endpoint. Pulls in the relay's HTTP,
 # WebSocket, and TLS stack, so it stays out of plain iroh builds.
@@ -129,6 +131,7 @@ tokio = { workspace = true, features = ["fs"] }
 getrandom = { version = "0.3", features = ["wasm_js"] }
 
 [dev-dependencies]
+edge = { path = "../edge", features = ["testing"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
 
 [package.metadata.cargo-machete]

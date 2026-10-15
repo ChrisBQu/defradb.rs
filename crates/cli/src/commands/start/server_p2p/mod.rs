@@ -74,6 +74,7 @@ impl Node {
         node_identity: Option<Arc<identity::RawIdentity>>,
         se_key: Option<[u8; 32]>,
         document_acp: Arc<dyn acp::DocumentACP>,
+        edge: &edge::Edge,
     ) -> Result<P2PSetup> {
         if config.net.p2p_disabled {
             return Ok(Self::p2p_disabled(database));
@@ -91,6 +92,7 @@ impl Node {
                     node_identity,
                     se_key,
                     document_acp,
+                    edge,
                 )
                 .await;
             }
@@ -104,6 +106,7 @@ impl Node {
                     node_identity,
                     se_key,
                     document_acp,
+                    edge,
                 );
                 return Err(Error::InvalidTransport(
                     "iroh transport not enabled. Rebuild with --features iroh".into(),
@@ -119,6 +122,7 @@ impl Node {
             peer_keypair,
             node_identity,
             se_key,
+            edge,
         )
         .await
     }

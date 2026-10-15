@@ -91,6 +91,43 @@ allow = []
 # graph is governor's, pulled by commonware through backbone's
 # acp-light-client, and stays allowed only behind that wrapper.
 deny = [{ name = "dashmap", wrappers = ["governor"] }]
+# tokio is the network runtime's alone (plan 5.7, R20): the `edge` crate holds
+# it and the network components that take an `edge::Edge` use its types; the
+# data path names no runtime. PENDING, so commented out: the data-path crates
+# storage, datastore, db, query, lens, kms and defra-core still depend on tokio
+# directly (the storage `blocking()` bridge, `block_in_place`, the lens
+# pipeline's spawn, data-path `tokio::spawn` and `tokio::time`) until the data
+# path runs on the worker pool, and this ban fails on each of them today. Swap
+# it in for the line above once
+#   cargo tree -i tokio -e normal,build --depth 1 --workspace --target all --all-features
+# lists none of them. The third-party wrappers are every crate in that listing
+# outside this workspace, as of this commit.
+# deny = [
+#     { name = "dashmap", wrappers = ["governor"] },
+#     { name = "tokio", wrappers = [
+#         # The holder and the network components given an Edge.
+#         "edge", "cli", "defra-http", "defra-node", "defra-p2p-adapter", "embedded",
+#         "p2p", "pg-compat", "vera",
+#         # Workspace tools.
+#         "ffi-test", "integration-test", "lens-host",
+#         # Third-party crates that are themselves network or runtime code.
+#         "acp-light-client", "axum", "axum-server", "backon", "commonware-macros",
+#         "commonware-runtime", "commonware-utils", "deadqueue", "defra-harness",
+#         "fs-err", "h2", "hickory-net", "hickory-proto", "hickory-resolver",
+#         "hyper", "hyper-rustls", "hyper-timeout", "hyper-tls", "hyper-util",
+#         "if-watch", "igd-next", "iroh", "iroh-bitswap", "iroh-dns",
+#         "iroh-gossip", "iroh-metrics", "iroh-relay", "irpc",
+#         "jsonrpsee-client-transport", "jsonrpsee-core", "jsonrpsee-server",
+#         "libp2p-quic", "libp2p-swarm", "libp2p-tcp", "n0-future", "netlink-sys",
+#         "netwatch", "noq", "opentelemetry_sdk", "pgwire", "portmapper", "quinn",
+#         "reloadable-state", "reqwest", "rtnetlink", "rustls-cert-file-reader",
+#         "tendermint-rpc", "test-infra", "tokio-context", "tokio-native-tls",
+#         "tokio-rustls", "tokio-rustls-acme", "tokio-stream", "tokio-tungstenite",
+#         "tokio-util", "tokio-websockets", "tonic", "tower", "vera-backend",
+#         "vera-client", "vera-consensus", "vera-executor", "vera-harness",
+#         "vera-jsonrpc", "vera-node",
+#     ] },
+# ]
 highlight = "lowest-version"
 
 # ------------------------------------------------------------------

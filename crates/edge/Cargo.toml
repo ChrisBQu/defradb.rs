@@ -1,0 +1,34 @@
+[package]
+name = "edge"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The network runtime: one runtime for I/O and networking behind a narrow handle"
+
+[lib]
+bench = false
+
+[features]
+# `edge::testing::edge()`: one runtime a test binary's tests share.
+testing = []
+
+[dependencies]
+defra-core = { path = "../defra-core" }
+# regolith::sync: the gate's drain and closing signals, the owner's stop request.
+regolith = { workspace = true }
+# Task and timer types: tokio's natively, wasm-bindgen-futures and browser
+# timers on wasm32, with one API.
+n0-future.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# The one runtime. `net` gives it an I/O driver whatever the rest of the graph
+# enables.
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "net"] }
+
+[lints]
+workspace = true

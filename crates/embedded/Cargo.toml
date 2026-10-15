@@ -21,6 +21,8 @@ blockstore = { path = "../blockstore" }
 crypto = { path = "../crypto" }
 db = { path = "../db", default-features = false }
 defra-core = { path = "../defra-core" }
+# The network runtime a configured transport runs on.
+edge = { path = "../edge" }
 defra-http = { path = "../http" }
 defra-p2p-adapter = { workspace = true, default-features = false }
 document = { path = "../document" }
@@ -76,6 +78,7 @@ libp2p = [
 iroh = ["p2p/iroh-transport", "p2p/kms", "defra-p2p-adapter/iroh", "defra-p2p-adapter/kms"]
 
 [dev-dependencies]
+edge = { path = "../edge", features = ["testing"] }
 base64 = { workspace = true }
 tempfile = "3.17"
 tokio = { workspace = true, features = ["rt-multi-thread"] }
