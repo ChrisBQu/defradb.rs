@@ -705,6 +705,27 @@ impl<S: Store> DbTxn<S> {
         self.locally_created_collection_ids.contains(collection_id)
     }
 
+    /// Load the collection and its index-action state from this transaction's
+    /// snapshot for an engine-owned write attempt. The expected schema version
+    /// keeps a retry from applying a previously prepared document to a changed
+    /// collection definition, while index-only updates (which preserve the
+    /// version ID) use the current snapshot's write/query index sets.
+    pub(crate) async fn load_collection_for_write_attempt(
+        &mut self,
+        name: &str,
+        expected: &Collection,
+    ) -> Result<Collection> {
+        let systemstore = self.systemstore()?;
+        let collection = crate::collection::loader::load_collection_for_write_attempt(
+            &systemstore,
+            name,
+            expected,
+        )
+        .await?;
+        self.collection_cache.add(collection.clone());
+        Ok(collection)
+    }
+
     /// Validate the active collection name and immutable schema through this
     /// transaction so concurrent DDL changes conflict at commit.
     pub(crate) async fn validate_collection_for_write(

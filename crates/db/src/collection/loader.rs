@@ -114,6 +114,43 @@ pub(crate) fn same_schema(left: &CollectionVersion, right: &CollectionVersion) -
             .all(|(left, right)| left.clone().normalized() == right.clone().normalized())
 }
 
+/// Load a collection for an engine-owned write attempt from that attempt's
+/// snapshot. Index definitions are allowed to have changed since preparation,
+/// because index creation currently preserves the collection version ID; the
+/// collection fields and other schema content must still match. The active
+/// mapping, definition, and action statuses are all read through this snapshot.
+pub(crate) async fn load_collection_for_write_attempt(
+    systemstore: &NamespaceView,
+    name: &str,
+    expected: &Collection,
+) -> crate::error::Result<Collection> {
+    let collection = load_collection_from_systemstore(systemstore, name)
+        .await
+        .map_err(|error| crate::error::Error::Other(error.to_string()))?
+        .ok_or_else(|| crate::error::Error::CollectionNotFound(name.to_string()))?;
+    if collection.version_id() != expected.version_id() {
+        return Err(crate::error::Error::CollectionNotFound(name.to_string()));
+    }
+    let mut expected_schema = expected.schema().clone();
+    let mut current_schema = collection.schema().clone();
+    expected_schema.indexes.clear();
+    current_schema.indexes.clear();
+    if expected_schema != current_schema {
+        return Err(crate::error::Error::Other(format!(
+            "collection schema changed during write preparation for '{}'",
+            collection.name()
+        )));
+    }
+    collection
+        .validate_write_definition(
+            &systemstore.sibling(storage::namespace::Namespace::Datastore),
+            true,
+        )
+        .await?;
+    Ok(collection)
+}
+}
+
 /// Load a collection from the systemstore by name.
 ///
 /// This is a standalone async function that doesn't hold any locks,

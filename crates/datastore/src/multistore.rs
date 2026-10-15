@@ -139,7 +139,6 @@ impl SharedTxn {
         Ok(Box::new(NamespacedIterator { iter, namespace }))
     }
 
-
     /// Get from rootstore (no namespace prefix).
     pub async fn root_get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         let txn = self.txn.read().await;
@@ -288,7 +287,6 @@ impl Reader for NamespaceView {
     async fn iterator(&self, opts: IterOptions) -> Result<Box<dyn Iterator>> {
         self.txn.iterator(self.namespace, opts).await
     }
-
 }
 
 /// Implement Writer trait for NamespaceView to enable index operations.

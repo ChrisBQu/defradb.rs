@@ -195,7 +195,8 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .map_err(|error| crate::error::commit_query_error(error.into()))?;
         let basic_txn = datastore::BasicTxn::from_retry_attempt_io(io, 0);
         let mut txn = self.db.new_db_txn(basic_txn);
-        txn.validate_collection_for_write(&attempt.collection)
+        let collection = txn
+            .load_collection_for_write_attempt(&attempt.collection_name, &attempt.collection)
             .await
             .map_err(crate::error::commit_query_error)?;
 
@@ -219,8 +220,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             query::error::QueryError::execution(format!("failed to get headstore: {error}"))
         })?;
         let result: query::error::Result<(DocID, Option<CommitArtifacts>, Option<u64>)> = async {
-            let Some((doc_short_id, canonical_doc_id)) = attempt
-                .collection
+            let Some((doc_short_id, canonical_doc_id)) = collection
                 .resolve_doc_identity(&systemstore, &attempt.doc_id)
                 .await
                 .map_err(|error| query::error::QueryError::execution(error.to_string()))?
@@ -228,17 +228,16 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 return Ok((attempt.doc_id.clone(), None, None));
             };
             let index_manager = IndexManager::from_indexes(
-                attempt.collection.resolved_root_id(),
-                attempt.collection.schema(),
-                attempt.collection.write_indexes(),
+                collection.resolved_root_id(),
+                collection.schema(),
+                collection.write_indexes(),
             )
             .map_err(|error| {
                 query::error::QueryError::execution(format!(
                     "failed to create index manager: {error}"
                 ))
             })?;
-            let existed = attempt
-                .collection
+            let existed = collection
                 .delete_with_indexes(&datastore, &canonical_doc_id, doc_short_id, &index_manager)
                 .await
                 .map_err(|error| {
@@ -250,7 +249,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             crate::write::autocommit::helpers::unregister_deleted_doc(
                 self.db.document_acp(),
                 &systemstore,
-                &attempt.collection,
+                &collection,
                 &canonical_doc_id,
             )
             .await?;
@@ -260,7 +259,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 &headstore,
                 &doc_id_string,
                 doc_short_id,
-                attempt.collection.version_id(),
+                collection.version_id(),
                 attempt.signing_config.as_ref(),
                 attempt.prepared_inputs.as_ref(),
             )
@@ -283,7 +282,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             let col_data = write_branchable_collection_block(
                 &self.db,
                 &attempt.collection_name,
-                &attempt.collection,
+                &collection,
                 &blockstore,
                 &headstore,
                 block_result.cid,
@@ -315,11 +314,11 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         if let Some((cid, block, col_data)) = &artifacts {
             self.register_deleted_doc_with_acp(
                 &mut txn,
-                &attempt.collection,
+                &collection,
                 canonical_doc_id.to_string(),
             )?;
             if let Some(bus) = self.db.event_bus().cloned() {
-                let collection = attempt.collection.clone();
+                let collection = collection.clone();
                 let doc_id = canonical_doc_id.to_string();
                 let cid = *cid;
                 let block = block.clone();
@@ -427,7 +426,8 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .map_err(|error| crate::error::commit_query_error(error.into()))?;
         let basic_txn = datastore::BasicTxn::from_retry_attempt_io(io, 0);
         let mut txn = self.db.new_db_txn(basic_txn);
-        txn.validate_collection_for_write(&attempt.collection)
+        let collection = txn
+            .load_collection_for_write_attempt(&attempt.collection_name, &attempt.collection)
             .await
             .map_err(crate::error::commit_query_error)?;
 
@@ -452,17 +452,16 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         })?;
         let result: query::error::Result<Vec<DeleteAttemptResult>> = async {
             let index_manager = IndexManager::from_indexes(
-                attempt.collection.resolved_root_id(),
-                attempt.collection.schema(),
-                attempt.collection.write_indexes(),
+                collection.resolved_root_id(),
+                collection.schema(),
+                collection.write_indexes(),
             )
             .map_err(|e| {
                 query::error::QueryError::execution(format!("failed to create index manager: {e}"))
             })?;
             let mut results = Vec::with_capacity(attempt.doc_ids.len());
             for requested_id in &attempt.doc_ids {
-                let Some((doc_short_id, canonical_id)) = attempt
-                    .collection
+                let Some((doc_short_id, canonical_id)) = collection
                     .resolve_doc_identity(&systemstore, requested_id)
                     .await
                     .map_err(|e| {
@@ -474,8 +473,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     results.push((requested_id.clone(), false, None, None));
                     continue;
                 };
-                let existed = attempt
-                    .collection
+                let existed = collection
                     .delete_with_indexes(&datastore, &canonical_id, doc_short_id, &index_manager)
                     .await
                     .map_err(|e| {
@@ -488,7 +486,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 crate::write::autocommit::helpers::unregister_deleted_doc(
                     self.db.document_acp(),
                     &systemstore,
-                    &attempt.collection,
+                    &collection,
                     &canonical_id,
                 )
                 .await?;
@@ -497,7 +495,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     &headstore,
                     &canonical_id.to_string(),
                     doc_short_id,
-                    attempt.collection.version_id(),
+                    collection.version_id(),
                     attempt.signing_config.as_ref(),
                     attempt.prepared_inputs.as_ref(),
                 )
@@ -520,7 +518,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 let col_data = write_branchable_collection_block(
                     &self.db,
                     &attempt.collection_name,
-                    &attempt.collection,
+                    &collection,
                     &blockstore,
                     &headstore,
                     block_result.cid,
@@ -552,11 +550,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         };
         for (doc_id, _, artifacts, _) in &results {
             if artifacts.is_some() {
-                self.register_deleted_doc_with_acp(
-                    &mut txn,
-                    &attempt.collection,
-                    doc_id.to_string(),
-                )?;
+                self.register_deleted_doc_with_acp(&mut txn, &collection, doc_id.to_string())?;
             }
         }
         if let Some(bus) = self.db.event_bus().cloned() {
@@ -565,7 +559,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     continue;
                 };
                 let bus = Arc::clone(&bus);
-                let collection = attempt.collection.clone();
+                let collection = collection.clone();
                 let doc_id = doc_id.to_string();
                 let cid = *cid;
                 let block = block.clone();

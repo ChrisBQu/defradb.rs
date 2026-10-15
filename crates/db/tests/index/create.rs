@@ -226,6 +226,57 @@ async fn create_index_commits_schema_and_publishes_cache() {
 /// batches have not reached yet and of ones they have, deletes. Afterwards
 /// every live document has exactly one entry, for its current value, and
 /// no other entry exists.
+#[tokio::test]
+async fn autocommit_writes_refresh_index_state_from_the_attempt_snapshot() {
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
+    let stale_db = Arc::new(DB::from_arc(store.clone()).unwrap());
+    stale_db
+        .create_collection(users_schema("Racing", "racing-v1", "col-index-racing"))
+        .await
+        .unwrap();
+    let mutator = AutoCommitMutator::new(stale_db.clone());
+    let updated_id = create_user(&mutator, "Racing", "before-update").await;
+    let deleted_id = create_user(&mutator, "Racing", "before-delete").await;
+
+    // This second DB handle commits the new index without publishing its cache
+    // into `stale_db`. The autocommit mutator therefore keeps the pre-index
+    // Collection while each engine attempt sees the post-index snapshot.
+    let index_db = Arc::new(DB::open_from_arc(store).await.unwrap());
+    let (fields, kind) = by_name();
+    let index = index_db
+        .create_index("Racing", Some("by_name"), fields, kind)
+        .await
+        .unwrap();
+
+    create_user(&mutator, "Racing", "created-after-index").await;
+    let mut update = Document::new();
+    update.set_id(updated_id);
+    update.set(
+        "name",
+        NormalValue::String("updated-after-index".to_string()),
+    );
+    mutator
+        .update(
+            "Racing",
+            update,
+            RapidHashSet::from_iter(["name".to_string()]),
+        )
+        .await
+        .unwrap();
+    mutator.delete("Racing", &deleted_id).await.unwrap();
+
+    assert_eq!(index_entries(&index_db, "Racing", index.id).await, 2);
+    assert_eq!(
+        entries_for(&index_db, "Racing", "created-after-index").await,
+        1
+    );
+    assert_eq!(
+        entries_for(&index_db, "Racing", "updated-after-index").await,
+        1
+    );
+    assert_eq!(entries_for(&index_db, "Racing", "before-delete").await, 0);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn create_index_keeps_pace_with_concurrent_writers() {
     let existing = 3 * BACKFILL_BATCH_DOCS;

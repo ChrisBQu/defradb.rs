@@ -200,7 +200,8 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .map_err(|error| crate::error::commit_query_error(error.into()))?;
         let basic_txn = datastore::BasicTxn::from_retry_attempt_io(io, 0);
         let mut txn = self.db.new_db_txn(basic_txn);
-        txn.validate_collection_for_write(&attempt.collection)
+        let collection = txn
+            .load_collection_for_write_attempt(&attempt.collection_name, &attempt.collection)
             .await
             .map_err(crate::error::commit_query_error)?;
         self.db
@@ -216,7 +217,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         // decision against the next engine snapshot.
         let fetcher = if attempt.expected.is_none() {
             let mut dependencies = attempt.modified_fields.clone();
-            for index in attempt.collection.write_indexes() {
+            for index in collection.write_indexes() {
                 if index
                     .fields
                     .iter()
@@ -225,7 +226,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     dependencies.extend(index.fields.iter().map(|field| field.name.clone()));
                 }
             }
-            for embedding in &attempt.collection.schema().vector_embeddings {
+            for embedding in &collection.schema().vector_embeddings {
                 if embedding
                     .fields
                     .iter()
@@ -299,8 +300,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             query::error::QueryError::execution(format!("failed to get headstore: {error}"))
         })?;
 
-        let (doc_short_id, canonical_doc_id) = attempt
-            .collection
+        let (doc_short_id, canonical_doc_id) = collection
             .require_doc_identity(&systemstore, &attempt.input_doc_id)
             .await
             .map_err(|error| match error {
@@ -313,9 +313,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         let mut modified_fields = attempt.modified_fields.clone();
         let embedding_config = self.db.options().embedding_config();
         let index_manager = IndexManager::from_indexes(
-            attempt.collection.resolved_root_id(),
-            attempt.collection.schema(),
-            attempt.collection.write_indexes(),
+            collection.resolved_root_id(),
+            collection.schema(),
+            collection.write_indexes(),
         )
         .map_err(|error| {
             query::error::QueryError::execution(format!("failed to create index manager: {error}"))
@@ -326,7 +326,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     .validate_downsample_write(
                         &datastore,
                         &systemstore,
-                        attempt.collection.schema(),
+                        collection.schema(),
                         &current_doc,
                         Some(&modified_fields),
                     )
@@ -334,7 +334,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     .map_err(|error| query::error::QueryError::execution(error.to_string()))?;
                 write_local_update(
                     &datastore,
-                    &attempt.collection,
+                    &collection,
                     &mut current_doc,
                     doc_short_id,
                     &index_manager,
@@ -347,8 +347,8 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     &blockstore,
                     &headstore,
                     &current_doc,
-                    attempt.collection.version_id(),
-                    DocStorageIdentity::new(attempt.collection.resolved_root_id(), doc_short_id),
+                    collection.version_id(),
+                    DocStorageIdentity::new(collection.resolved_root_id(), doc_short_id),
                     Some(&modified_fields),
                     attempt.encryption_config.as_ref(),
                     attempt.signing_config.as_ref(),
@@ -373,7 +373,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 let col_data = write_branchable_collection_block(
                     &self.db,
                     &attempt.collection_name,
-                    &attempt.collection,
+                    &collection,
                     &blockstore,
                     &headstore,
                     block_result.cid,
@@ -406,7 +406,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             }
         };
         if let Some(bus) = self.db.event_bus().cloned() {
-            let collection = attempt.collection.clone();
+            let collection = collection.clone();
             let doc_id = canonical_doc_id.to_string();
             let block = block.clone();
             let col_data = col_data.clone();

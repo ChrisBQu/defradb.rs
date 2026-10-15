@@ -384,7 +384,8 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .map_err(|error| crate::error::commit_query_error(error.into()))?;
         let basic_txn = datastore::BasicTxn::from_retry_attempt_io(io, 0);
         let mut txn = self.db.new_db_txn(basic_txn);
-        txn.validate_collection_for_write(&attempt.collection)
+        let collection = txn
+            .load_collection_for_write_attempt(&attempt.collection_name, &attempt.collection)
             .await
             .map_err(crate::error::commit_query_error)?;
         self.db
@@ -411,9 +412,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         let mut doc = attempt.doc.clone();
         let result: query::error::Result<(DocID, Cid, Bytes, Option<(Cid, Bytes)>)> = async {
             let index_manager = IndexManager::from_indexes(
-                attempt.collection.resolved_root_id(),
-                attempt.collection.schema(),
-                attempt.collection.write_indexes(),
+                collection.resolved_root_id(),
+                collection.schema(),
+                collection.write_indexes(),
             )
             .map_err(|error| {
                 query::error::QueryError::execution(format!(
@@ -426,7 +427,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 .validate_downsample_write(
                     &datastore,
                     &systemstore,
-                    attempt.collection.schema(),
+                    collection.schema(),
                     &doc,
                     None,
                 )
@@ -446,7 +447,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 self.db.document_acp(),
                 &systemstore,
                 &datastore,
-                &attempt.collection,
+                &collection,
                 attempt.doc_short_id,
                 block_result,
             )
@@ -454,7 +455,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             doc.set_id(doc_id.clone());
             write_local_create(
                 &datastore,
-                &attempt.collection,
+                &collection,
                 &doc,
                 attempt.doc_short_id,
                 &index_manager,
@@ -464,7 +465,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             let col_block_data = write_branchable_collection_block(
                 &self.db,
                 &attempt.collection_name,
-                &attempt.collection,
+                &collection,
                 &blockstore,
                 &headstore,
                 block_result.cid,
@@ -507,7 +508,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .map_err(crate::error::commit_query_error)?;
         }
         if let Some(bus) = self.db.event_bus().cloned() {
-            let collection = attempt.collection.clone();
+            let collection = collection.clone();
             let doc_id = doc_id.to_string();
             let block = block.clone();
             let col_data = col_data.clone();
@@ -795,7 +796,8 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .map_err(|error| crate::error::commit_query_error(error.into()))?;
         let basic_txn = datastore::BasicTxn::from_retry_attempt_io(io, 0);
         let mut txn = self.db.new_db_txn(basic_txn);
-        txn.validate_collection_for_write(&attempt.collection)
+        let collection = txn
+            .load_collection_for_write_attempt(&attempt.collection_name, &attempt.collection)
             .await
             .map_err(crate::error::commit_query_error)?;
         self.db
@@ -820,9 +822,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         let result: query::error::Result<Vec<(DocID, Document, Cid, Bytes, Option<(Cid, Bytes)>)>> =
             async {
                 let index_manager = IndexManager::from_indexes(
-                    attempt.collection.resolved_root_id(),
-                    attempt.collection.schema(),
-                    attempt.collection.write_indexes(),
+                    collection.resolved_root_id(),
+                    collection.schema(),
+                    collection.write_indexes(),
                 )
                 .map_err(|error| {
                     query::error::QueryError::execution(format!(
@@ -841,7 +843,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                         .validate_downsample_write(
                             &datastore,
                             &systemstore,
-                            attempt.collection.schema(),
+                            collection.schema(),
                             &doc,
                             None,
                         )
@@ -858,7 +860,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                         self.db.document_acp(),
                         &systemstore,
                         &datastore,
-                        &attempt.collection,
+                        &collection,
                         identity.doc_short_id,
                         &computed.block_result,
                     )
@@ -866,7 +868,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     doc.set_id(doc_id.clone());
                     write_local_create(
                         &datastore,
-                        &attempt.collection,
+                        &collection,
                         &doc,
                         identity.doc_short_id,
                         &index_manager,
@@ -875,7 +877,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     let col_data = write_branchable_collection_block(
                         &self.db,
                         &attempt.collection_name,
-                        &attempt.collection,
+                        &collection,
                         &blockstore,
                         &headstore,
                         computed.block_result.cid,
@@ -921,7 +923,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 .map_err(crate::error::commit_query_error)?;
             }
             if let Some(bus) = self.db.event_bus().cloned() {
-                let collection = attempt.collection.clone();
+                let collection = collection.clone();
                 let doc_id = doc_id.to_string();
                 let cid = *cid;
                 let block = block.clone();

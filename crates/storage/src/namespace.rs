@@ -356,7 +356,6 @@ impl crate::corekv::private::Sealed for NamespacedTxn {}
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Reader for NamespacedTxn {
-
     async fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         let prefixed = self.namespace.prefix_key(key);
         self.txn.get(&prefixed).await

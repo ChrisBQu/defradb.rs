@@ -313,13 +313,18 @@ impl storage::corekv::RetryAttemptFn for FinishIndexAttempt {
             let io = retry.begin_attempt_io()?;
             let txn = datastore::BasicTxn::from_retry_attempt_io(io, 0);
             let datastore = txn.datastore();
+            let systemstore = txn.systemstore();
             let built: Result<()> = async move {
-                self.collection
-                    .validate_write_definition(&datastore, true)
-                    .await?;
+                let collection = crate::collection::loader::load_collection_for_write_attempt(
+                    &systemstore,
+                    self.collection.name(),
+                    &self.collection,
+                )
+                .await?;
+                ensure_backfill_index_unchanged(&self.collection, &collection, &self.index_name)?;
                 let manager = IndexManager::from_collection(
-                    self.collection.schema().resolved_root_id(),
-                    self.collection.schema(),
+                    collection.schema().resolved_root_id(),
+                    collection.schema(),
                 )?;
                 manager.build_index(&datastore, &self.index_name).await?;
                 Ok(())
@@ -371,10 +376,13 @@ impl BackfillRetryAttempt {
         datastore: NamespaceView,
         systemstore: NamespaceView,
     ) -> Result<BatchIndexResult> {
-        let collection = &self.collection;
-        collection
-            .validate_write_definition(&datastore, true)
-            .await?;
+        let collection = crate::collection::loader::load_collection_for_write_attempt(
+            &systemstore,
+            self.collection.name(),
+            &self.collection,
+        )
+        .await?;
+        ensure_backfill_index_unchanged(&self.collection, &collection, &self.plan.index_name)?;
         let versions =
             get_collections_by_collection_id(&systemstore, &self.plan.collection_id).await?;
         let history = build_collection_history(&versions, collection.version_id())
@@ -395,7 +403,7 @@ impl BackfillRetryAttempt {
             history,
         };
         let batch = index_batch(
-            collection,
+            &collection,
             &datastore,
             &systemstore,
             &self.plan,
@@ -405,6 +413,25 @@ impl BackfillRetryAttempt {
         .await?;
         Ok(batch)
     }
+}
+
+fn ensure_backfill_index_unchanged(
+    expected: &Collection,
+    current: &Collection,
+    index_name: &str,
+) -> Result<()> {
+    let expected_index = expected
+        .get_index(index_name)
+        .ok_or_else(|| Error::Other(format!("index '{index_name}' disappeared during backfill")))?;
+    let current_index = current
+        .get_index(index_name)
+        .ok_or_else(|| Error::Other(format!("index '{index_name}' changed during backfill")))?;
+    if expected_index != current_index {
+        return Err(Error::Other(format!(
+            "index '{index_name}' changed during backfill"
+        )));
+    }
+    Ok(())
 }
 
 /// The raw documents below the fence, each one at an older schema version

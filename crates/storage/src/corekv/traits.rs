@@ -644,8 +644,6 @@ pub trait Reader: MaybeSendSync + private::Sealed {
     ///
     /// The caller is responsible for closing the iterator when done.
     async fn iterator(&self, opts: IterOptions) -> Result<Box<dyn Iterator>>;
-
-
 }
 
 /// Writer trait for write operations.
@@ -1021,7 +1019,6 @@ impl Reader for Box<dyn Txn> {
     async fn iterator(&self, opts: IterOptions) -> Result<Box<dyn Iterator>> {
         (**self).iterator(opts).await
     }
-
 }
 
 /// Blanket implementation of Writer for Box<dyn Txn>.
