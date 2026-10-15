@@ -71,7 +71,7 @@ pub struct LensedDocFetcher<S: Store> {
 
 impl<S: Store> LensedDocFetcher<S> {
     /// Seed the per-version history cache directly.
-    pub fn insert_history(&self, key: String, history: History) {
+    pub async fn insert_history(&self, key: String, history: History) {
         let generation = self.history_cache.generation();
         self.history_cache
             .publish(generation, &key, &Arc::new(history));

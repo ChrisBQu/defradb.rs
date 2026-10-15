@@ -44,7 +44,9 @@ async fn fetcher() -> LensedDocFetcher<RegolithStore> {
 #[tokio::test]
 async fn a_stream_clone_serves_the_history_its_fetcher_cached() {
     let fetcher = fetcher().await;
-    fetcher.insert_history(KEY.to_string(), seeded_history());
+    fetcher
+        .insert_history(KEY.to_string(), seeded_history())
+        .await;
 
     let clone = fetcher.stream_clone();
     let served = clone.load_collection_history(&users_v2()).await.unwrap();
@@ -57,7 +59,9 @@ async fn a_stream_clone_serves_the_history_its_fetcher_cached() {
 #[tokio::test]
 async fn a_schema_change_drops_the_history_for_the_fetcher_and_its_clones() {
     let fetcher = fetcher().await;
-    fetcher.insert_history(KEY.to_string(), seeded_history());
+    fetcher
+        .insert_history(KEY.to_string(), seeded_history())
+        .await;
     let clone = fetcher.stream_clone();
     assert!(clone.load_collection_history(&users_v2()).await.is_ok());
 

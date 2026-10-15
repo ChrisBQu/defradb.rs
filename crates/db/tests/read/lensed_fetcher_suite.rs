@@ -49,7 +49,9 @@ async fn unknown_document_version_passes_through() {
                 .with_previous("v1"),
         ),
     ]);
-    fetcher.insert_history("users-collection:v2".to_string(), history);
+    fetcher
+        .insert_history("users-collection:v2".to_string(), history)
+        .await;
 
     let mut doc = Document::new();
     doc.set("name", "Alice");

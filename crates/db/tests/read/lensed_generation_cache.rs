@@ -13,7 +13,7 @@ fn value(tag: u32) -> Arc<u32> {
 fn snapshot(cache: &GenerationCache<u32>) -> (u64, usize) {
     cache
         .snapshot
-        .peek(|snapshot| (snapshot.generation, snapshot.values.len()))
+        .peek(|snapshot| (snapshot.generation, snapshot.contexts.len()))
 }
 
 #[test]
@@ -42,8 +42,8 @@ fn a_value_is_published_only_at_its_generation_or_after_an_older_one() {
 fn a_published_snapshot_never_changes() {
     let one = Snapshot::default().with(1, "a", &value(1)).unwrap();
     let both = one.with(1, "b", &value(2)).unwrap();
-    assert_eq!(one.values.len(), 1);
-    assert_eq!(both.values.len(), 2);
+    assert_eq!(one.contexts.len(), 1);
+    assert_eq!(both.contexts.len(), 2);
     assert!(both.with(0, "c", &value(3)).is_none());
 }
 

@@ -5,13 +5,12 @@
 
 mod fetch;
 pub mod migration;
+mod migration_cache;
 mod scan;
 pub mod stream;
 mod vector;
 
 use bytes::Bytes;
-use lens::TargetedHistoryLink;
-use rapidhash::RapidHashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -23,11 +22,7 @@ use storage::corekv::Store;
 
 use crate::database::DB;
 
-use super::generation_cache::GenerationCache;
-
-/// Whether a collection version has lens migrations, and its targeted
-/// history when it has.
-type MigrationContext = (bool, Option<RapidHashMap<String, TargetedHistoryLink>>);
+use migration_cache::MigrationCache;
 
 /// Document fetcher that auto-commits and applies lens migrations.
 ///
@@ -37,7 +32,7 @@ pub struct LensedAutoCommitFetcher<S: Store> {
     db: Arc<DB<S>>,
     /// Migration contexts keyed by `"{collection_id}:{version_id}"`, as one
     /// snapshot per committed migration-graph generation.
-    migration_cache: GenerationCache<MigrationContext>,
+    migration_cache: MigrationCache,
 }
 
 impl<S: Store> LensedAutoCommitFetcher<S> {
@@ -45,7 +40,7 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
     pub fn new(db: Arc<DB<S>>) -> Self {
         Self {
             db,
-            migration_cache: GenerationCache::default(),
+            migration_cache: MigrationCache::default(),
         }
     }
 
@@ -56,7 +51,7 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
     pub(super) fn clone_for_stream(&self) -> Self {
         Self {
             db: self.db.clone(),
-            migration_cache: GenerationCache::default(),
+            migration_cache: MigrationCache::default(),
         }
     }
 }

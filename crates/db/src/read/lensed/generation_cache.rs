@@ -25,7 +25,7 @@ pub(crate) struct GenerationCache<V>
 where
     V: Send + Sync + 'static,
 {
-    snapshot: Atom<Snapshot<V>>,
+    pub(super) snapshot: Atom<Snapshot<V>>,
 }
 
 impl<V> Default for GenerationCache<V>
@@ -72,22 +72,23 @@ where
     pub(crate) fn invalidate(&self) {
         self.snapshot.rcu(|snapshot| Snapshot {
             generation: snapshot.generation + 1,
-            values: RapidHashMap::new(),
+            contexts: RapidHashMap::new(),
         });
     }
 }
 
-/// The values computed at one generation, never changed once published.
-struct Snapshot<V> {
-    generation: u64,
-    values: RapidHashMap<String, Arc<V>>,
+/// The values computed at one generation, by key, never changed once
+/// published.
+pub(super) struct Snapshot<V> {
+    pub(super) generation: u64,
+    pub(super) contexts: RapidHashMap<String, Arc<V>>,
 }
 
 impl<V> Default for Snapshot<V> {
     fn default() -> Self {
         Self {
             generation: 0,
-            values: RapidHashMap::new(),
+            contexts: RapidHashMap::new(),
         }
     }
 }
@@ -96,7 +97,7 @@ impl<V> Clone for Snapshot<V> {
     fn clone(&self) -> Self {
         Self {
             generation: self.generation,
-            values: self.values.clone(),
+            contexts: self.contexts.clone(),
         }
     }
 }
@@ -106,23 +107,26 @@ impl<V> Snapshot<V> {
         if self.generation != generation {
             return None;
         }
-        self.values.get(key).map(Arc::clone)
+        self.contexts.get(key).map(Arc::clone)
     }
 
     /// This snapshot with `value` added at `generation`, or `None` when this
     /// snapshot is of a newer generation. The values of an older one are
     /// dropped whole.
-    fn with(&self, generation: u64, key: &str, value: &Arc<V>) -> Option<Self> {
+    pub(super) fn with(&self, generation: u64, key: &str, value: &Arc<V>) -> Option<Self> {
         if self.generation > generation {
             return None;
         }
-        let mut values = if self.generation == generation {
-            self.values.clone()
+        let mut contexts = if self.generation == generation {
+            self.contexts.clone()
         } else {
             RapidHashMap::with_capacity(1)
         };
-        values.insert(key.to_owned(), Arc::clone(value));
-        Some(Self { generation, values })
+        contexts.insert(key.to_owned(), Arc::clone(value));
+        Some(Self {
+            generation,
+            contexts,
+        })
     }
 }
 
