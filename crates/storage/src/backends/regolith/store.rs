@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use regolith::{OptimisticTransactionDb, StreamOptions, TxnOptions};
+use regolith::{OptimisticTransactionDb, TxnOptions};
 
 use super::background_errors::{BackgroundErrorListener, ConflictListener};
 use super::config::RegolithStoreOptions;
@@ -190,15 +190,6 @@ impl RegolithStore {
     /// Where the database lives.
     pub fn path(&self) -> &Path {
         &self.inner.path
-    }
-
-    /// A writer that bounds its own memory rather than the caller's
-    /// input, for a bulk load whose size the caller does not control.
-    ///
-    /// Each flush is atomic; the stream as a whole is not. Work that must
-    /// land all-or-nothing belongs in a transaction.
-    pub fn streaming_writer(&self, opts: StreamOptions) -> regolith::StreamingWriter<'_> {
-        super::blocking(|| self.inner.db.db().streaming_writer(opts))
     }
 
     /// Wait for in-flight transactions to finish, up to the configured
