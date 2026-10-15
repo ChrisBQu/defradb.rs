@@ -361,3 +361,27 @@ fn test_compute_signature_passes_signing_authorization_to_remote_signer() {
         signer.signing_authorization
     );
 }
+
+/// A block-write failure becomes a query error naming the write, and a missing
+/// input stays a request for it, so the statement can fetch it and run again.
+#[test]
+fn a_build_error_keeps_a_missing_input_and_names_the_write() {
+    use db::block::builder::BuildError;
+    let request = query::prepared::PreparedInputRequest::new(
+        query::prepared::PreparedInputKind::Signature,
+        b"block".as_slice(),
+    );
+    match BuildError::NeedsInput(request.clone()).into_query_error_in("failed to write") {
+        query::error::QueryError::NeedsInput(asked) => assert_eq!(asked, request),
+        other => panic!("expected an input request, got {other:?}"),
+    }
+    let error = BuildError::Message("disk full".to_string()).into_query_error_in("failed to write");
+    assert!(
+        !matches!(error, query::error::QueryError::NeedsInput(_)),
+        "{error:?}"
+    );
+    assert!(
+        error.to_string().contains("failed to write: disk full"),
+        "{error}"
+    );
+}

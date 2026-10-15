@@ -32,15 +32,7 @@ pub(crate) async fn write_branchable_collection_block<S: storage::corekv::Store 
     )
     .await
     .map(Some)
-    .map_err(|error| match error {
-        crate::block::builder::BuildError::NeedsInput(request) => {
-            query::error::QueryError::NeedsInput(request)
-        }
-        error => query::error::QueryError::execution(format!(
-            "failed to write collection block for branchable mutation on collection {}: {}",
-            collection_name, error
-        )),
-    })?;
+    .map_err(|error| error.into_query_error_in(&format!("failed to write collection block for branchable mutation on collection {collection_name}")))?;
 
     Ok(written)
 }

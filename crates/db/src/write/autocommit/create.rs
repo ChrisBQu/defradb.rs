@@ -287,14 +287,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     self.prepared_inputs.as_ref(),
                 )
             })
-            .map_err(|error| match error {
-                crate::block::builder::BuildError::NeedsInput(request) => {
-                    query::error::QueryError::NeedsInput(request)
-                }
-                error => query::error::QueryError::execution(format!(
-                    "failed to compute document blocks: {error}"
-                )),
-            })?;
+            .map_err(|error| error.into_query_error_in("failed to compute document blocks"))?;
 
         let doc = Arc::new(doc);
 
@@ -667,14 +660,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     sign_config.as_ref(),
                     self.prepared_inputs.as_ref(),
                 )
-                .map_err(|error| match error {
-                    crate::block::builder::BuildError::NeedsInput(request) => {
-                        query::error::QueryError::NeedsInput(request)
-                    }
-                    other => query::error::QueryError::execution(format!(
-                        "failed to compute document blocks: {other}"
-                    )),
-                })?;
+                .map_err(|error| error.into_query_error_in("failed to compute document blocks"))?;
                 computed.push(blocks);
             }
             computed

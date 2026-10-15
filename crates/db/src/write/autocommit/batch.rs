@@ -417,14 +417,10 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 None,
             )
             .await
-            .map_err(|error| match error {
-                crate::block::builder::BuildError::NeedsInput(request) => {
-                    query::error::QueryError::NeedsInput(request)
-                }
-                error => query::error::QueryError::execution(format!(
-                    "failed to write document blocks for create on collection {}: {}",
-                    collection_name, error
-                )),
+            .map_err(|error| {
+                error.into_query_error_in(&format!(
+                    "failed to write document blocks for create on collection {collection_name}"
+                ))
             })?;
 
             let doc_id = register_created_doc(
@@ -576,14 +572,10 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 Some(&heads),
             )
             .await
-            .map_err(|error| match error {
-                crate::block::builder::BuildError::NeedsInput(request) => {
-                    query::error::QueryError::NeedsInput(request)
-                }
-                error => query::error::QueryError::execution(format!(
-                    "failed to write document blocks for update on collection {}: {}",
-                    collection_name, error
-                )),
+            .map_err(|error| {
+                error.into_query_error_in(&format!(
+                    "failed to write document blocks for update on collection {collection_name}"
+                ))
             })?;
 
             register_block_doc_id_mappings(
@@ -691,14 +683,10 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 self.prepared_inputs.as_ref(),
             )
             .await
-            .map_err(|error| match error {
-                crate::block::builder::BuildError::NeedsInput(request) => {
-                    query::error::QueryError::NeedsInput(request)
-                }
-                error => query::error::QueryError::execution(format!(
-                    "failed to write delete block for collection {}: {}",
-                    collection_name, error
-                )),
+            .map_err(|error| {
+                error.into_query_error_in(&format!(
+                    "failed to write delete block for collection {collection_name}"
+                ))
             })?;
 
             let composite_cid = block_result.cid;
