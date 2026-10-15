@@ -761,12 +761,21 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     ) -> usize {
         // The sweep's transaction rebuilds the view of what is durable from
         // the records it read, in commit-receipt order, so it neither undoes
-        // a later registration nor revives a later removal.
+        // a later registration nor revives a later removal. A record that
+        // comes or goes during the sweep makes it run again; when a busy
+        // store keeps it from committing, the records of one snapshot are
+        // still re-driven and the view is rebuilt by a later sweep.
         let records = match store.sweep(&self.persisted).await {
             Ok(records) => records,
             Err(error) => {
-                tracing::warn!(error = %error, "Failed to load persisted pending DAG records");
-                return 0;
+                tracing::debug!(error = %error, "Pending DAG sweep did not commit; re-driving a snapshot");
+                match store.load_all().await {
+                    Ok(records) => records,
+                    Err(error) => {
+                        tracing::warn!(error = %error, "Failed to load persisted pending DAG records");
+                        return 0;
+                    }
+                }
             }
         };
         if records.is_empty() {
