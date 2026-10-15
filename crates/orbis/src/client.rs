@@ -6,6 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use crypto::{Key, PublicKey};
 use defra_core::signing::{RemoteSigner, SigningAuthorization};
+use edge::Edge;
 use identity::{FullIdentity, Identity};
 use sha2::{Digest, Sha256};
 use tonic::transport::Channel;
@@ -17,6 +18,9 @@ use crate::proto::{sign_service_client::SignServiceClient, StartSignRequest};
 pub struct OrbisClientError(String);
 
 /// Signs with a registered derivation and verifies against a provisioned BLS key.
+///
+/// The gRPC connection and every signing call run on the network runtime the
+/// client is given.
 pub struct OrbisClient {
     channel: Channel,
     derivation_id: String,
@@ -24,7 +28,7 @@ pub struct OrbisClient {
     public_key_hex: String,
     signer_did: String,
     service_identity: Arc<identity::RawIdentity>,
-    runtime: Option<tokio::runtime::Runtime>,
+    edge: Edge,
 }
 
 impl OrbisClient {
@@ -34,6 +38,7 @@ impl OrbisClient {
         derivation_id: String,
         public_key_bytes: Vec<u8>,
         service_identity: Arc<identity::RawIdentity>,
+        edge: Edge,
     ) -> Result<Self, OrbisClientError> {
         if derivation_id.len() != 64
             || !derivation_id
@@ -57,23 +62,11 @@ impl OrbisClient {
             .map_err(error)?
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(60));
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .build()
-            .map_err(error)?;
-        let connection = runtime
+        let channel = edge
             .spawn(async move { endpoint.connect().await })
             .await
-            .map_err(error)
-            .and_then(|result| result.map_err(error));
-        let channel = match connection {
-            Ok(channel) => channel,
-            Err(error) => {
-                runtime.shutdown_background();
-                return Err(error);
-            }
-        };
+            .map_err(error)?
+            .map_err(error)?;
         Ok(Self {
             channel,
             derivation_id,
@@ -81,7 +74,7 @@ impl OrbisClient {
             public_key_hex,
             signer_did,
             service_identity,
-            runtime: Some(runtime),
+            edge,
         })
     }
 
@@ -157,28 +150,10 @@ impl RemoteSigner for OrbisClient {
         if authorization.is_some() {
             return Err("Orbis authorization is bound to the registered derivation; per-request overrides are unsupported".into());
         }
-        let runtime = self.runtime.as_ref().ok_or("Orbis runtime is stopped")?;
-        if tokio::runtime::Handle::try_current().is_ok() {
-            std::thread::scope(|scope| {
-                scope
-                    .spawn(|| runtime.block_on(self.sign_async(data)))
-                    .join()
-            })
-            .map_err(|_| "Orbis signing worker panicked".to_owned())?
+        self.edge
+            .block_on(self.sign_async(data))
+            .map_err(|e| e.to_string())?
             .map_err(|e| e.to_string())
-        } else {
-            runtime
-                .block_on(self.sign_async(data))
-                .map_err(|e| e.to_string())
-        }
-    }
-}
-
-impl Drop for OrbisClient {
-    fn drop(&mut self) {
-        if let Some(runtime) = self.runtime.take() {
-            runtime.shutdown_background();
-        }
     }
 }
 

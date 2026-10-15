@@ -9370,6 +9370,7 @@ dependencies = [
  "blst",
  "crypto",
  "defra-core",
+ "edge",
  "hex",
  "identity 0.5.0",
  "prost 0.14.3",
