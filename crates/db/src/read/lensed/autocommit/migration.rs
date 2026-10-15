@@ -34,10 +34,7 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
         let cache_key = format!("{}:{}", collection_id, target_version_id);
         loop {
             let generation = self.db.migration_generation();
-            let cached = self
-                .migration_cache
-                .peek(|cache| cache.get(generation, &cache_key));
-            if let Some(context) = cached {
+            if let Some(context) = self.migration_cache.get(generation, &cache_key) {
                 return Ok((generation, context.0, context.1.clone()));
             }
 
@@ -54,13 +51,7 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
             if self.db.migration_generation() != generation {
                 continue;
             }
-            let mut published = false;
-            self.migration_cache.rcu(|cache| {
-                let next = cache.with(generation, &cache_key, &context);
-                published = next.is_some();
-                next.unwrap_or_else(|| cache.clone())
-            });
-            if !published {
+            if !self.migration_cache.publish(generation, &cache_key, &context) {
                 continue;
             }
 
@@ -331,7 +322,3 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
         })
     }
 }
-
-#[cfg(test)]
-#[path = "../../../../tests/read/lensed_migration_cache.rs"]
-mod tests;

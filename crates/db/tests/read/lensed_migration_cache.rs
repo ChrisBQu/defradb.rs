@@ -3,7 +3,8 @@
 
 use std::sync::Arc;
 
-use super::super::{LensedAutoCommitFetcher, MigrationCache, MigrationContext};
+use super::super::LensedAutoCommitFetcher;
+use super::{MigrationCache, MigrationContext, Snapshot};
 use crate::collection::Collection;
 use crate::DB;
 use storage::RegolithStore;
@@ -27,20 +28,14 @@ fn fetcher() -> (Arc<DB<RegolithStore>>, LensedAutoCommitFetcher<RegolithStore>)
     (db, fetcher)
 }
 
-fn snapshot(fetcher: &LensedAutoCommitFetcher<RegolithStore>) -> (u64, usize) {
-    fetcher
-        .migration_cache
-        .peek(|cache| (cache.generation, cache.contexts.len()))
+fn snapshot(cache: &MigrationCache) -> (u64, usize) {
+    cache
+        .snapshot
+        .peek(|snapshot| (snapshot.generation, snapshot.contexts.len()))
 }
 
-fn cached(
-    fetcher: &LensedAutoCommitFetcher<RegolithStore>,
-    generation: u64,
-    key: &str,
-) -> Option<Arc<MigrationContext>> {
-    fetcher
-        .migration_cache
-        .peek(|cache| cache.get(generation, key))
+fn context() -> Arc<MigrationContext> {
+    Arc::new((false, None))
 }
 
 #[tokio::test]
@@ -52,11 +47,17 @@ async fn a_hit_is_served_from_the_snapshot_of_its_generation() {
         fetcher.load_migration_context(&collection).await.unwrap();
     assert!(!has_migrations);
     assert!(history.is_none());
-    assert_eq!(snapshot(&fetcher), (generation, 1));
-    let first = cached(&fetcher, generation, "users-collection:v1").unwrap();
+    assert_eq!(snapshot(&fetcher.migration_cache), (generation, 1));
+    let first = fetcher
+        .migration_cache
+        .get(generation, "users-collection:v1")
+        .unwrap();
 
     fetcher.load_migration_context(&collection).await.unwrap();
-    let second = cached(&fetcher, generation, "users-collection:v1").unwrap();
+    let second = fetcher
+        .migration_cache
+        .get(generation, "users-collection:v1")
+        .unwrap();
     assert!(
         Arc::ptr_eq(&first, &second),
         "a hit reads the published context, it does not compute it again"
@@ -66,35 +67,45 @@ async fn a_hit_is_served_from_the_snapshot_of_its_generation() {
     let (next, _, _) = fetcher.load_migration_context(&collection).await.unwrap();
     assert_eq!(next, generation + 1);
     assert_eq!(
-        snapshot(&fetcher),
+        snapshot(&fetcher.migration_cache),
         (next, 1),
         "a new generation starts from an empty snapshot"
     );
-    assert!(cached(&fetcher, generation, "users-collection:v1").is_none());
+    assert!(fetcher
+        .migration_cache
+        .get(generation, "users-collection:v1")
+        .is_none());
 }
 
 #[test]
 fn a_context_is_published_only_at_its_generation_or_after_an_older_one() {
-    let context: Arc<MigrationContext> = Arc::new((false, None));
-    let at_one = MigrationCache::default().with(1, "a", &context).unwrap();
-    assert_eq!((at_one.generation, at_one.contexts.len()), (1, 1));
+    let cache = MigrationCache::default();
+    assert!(cache.publish(1, "a", &context()));
+    assert!(cache.publish(1, "b", &context()));
+    assert_eq!(snapshot(&cache), (1, 2));
 
-    let both = at_one.with(1, "b", &context).unwrap();
-    assert_eq!(both.contexts.len(), 2);
-    assert_eq!(at_one.contexts.len(), 1, "a published snapshot never changes");
-
-    let at_two = both.with(2, "c", &context).unwrap();
+    assert!(cache.publish(2, "c", &context()));
     assert_eq!(
-        (at_two.generation, at_two.contexts.len()),
+        snapshot(&cache),
         (2, 1),
         "the contexts of an older generation are dropped whole"
     );
     assert!(
-        at_two.with(1, "a", &context).is_none(),
+        !cache.publish(1, "a", &context()),
         "a context computed under an older generation is never published"
     );
-    assert!(at_two.get(1, "c").is_none());
-    assert!(at_two.get(2, "c").is_some());
+    assert_eq!(snapshot(&cache), (2, 1));
+    assert!(cache.get(1, "c").is_none());
+    assert!(cache.get(2, "c").is_some());
+}
+
+#[test]
+fn a_published_snapshot_never_changes() {
+    let one = Snapshot::default().with(1, "a", &context()).unwrap();
+    let both = one.with(1, "b", &context()).unwrap();
+    assert_eq!(one.contexts.len(), 1);
+    assert_eq!(both.contexts.len(), 2);
+    assert!(both.with(0, "c", &context()).is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -112,5 +123,5 @@ async fn concurrent_loads_publish_every_context_into_one_snapshot() {
     for task in tasks {
         assert_eq!(task.await.unwrap(), 0);
     }
-    assert_eq!(snapshot(&fetcher), (0, 8));
+    assert_eq!(snapshot(&fetcher.migration_cache), (0, 8));
 }

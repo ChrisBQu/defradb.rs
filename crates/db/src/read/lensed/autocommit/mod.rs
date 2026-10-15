@@ -5,18 +5,16 @@
 
 mod fetch;
 pub mod migration;
+mod migration_cache;
 mod scan;
 pub mod stream;
 mod vector;
 
 use bytes::Bytes;
-use rapidhash::{HashMapExt, RapidHashMap};
-use regolith::sync::Atom;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use document::Document;
-use lens::TargetedHistoryLink;
 use query::fetcher::CommitsQueryOptions;
 use query::planner::index_selection::IndexScanParams;
 use query::runner::{DocFetcher, FetchByIdsResult};
@@ -24,47 +22,7 @@ use storage::corekv::Store;
 
 use crate::database::DB;
 
-/// Cached migration context for a collection.
-type MigrationContext = (bool, Option<RapidHashMap<String, TargetedHistoryLink>>);
-
-/// The migration contexts computed at one committed migration-graph
-/// generation. Published whole: readers load it without waiting, and a
-/// context is added by publishing a copy that holds it.
-#[derive(Clone, Default)]
-struct MigrationCache {
-    generation: u64,
-    contexts: RapidHashMap<String, Arc<MigrationContext>>,
-}
-
-impl MigrationCache {
-    /// The context cached for `key` at `generation`.
-    fn get(&self, generation: u64, key: &str) -> Option<Arc<MigrationContext>> {
-        if self.generation != generation {
-            return None;
-        }
-        self.contexts.get(key).map(Arc::clone)
-    }
-
-    /// The snapshot to publish once `context` was computed at `generation`,
-    /// or `None` when this snapshot is of a newer generation, under which the
-    /// context may be stale. A snapshot of an older generation is dropped
-    /// whole.
-    fn with(&self, generation: u64, key: &str, context: &Arc<MigrationContext>) -> Option<Self> {
-        if self.generation > generation {
-            return None;
-        }
-        let mut contexts = if self.generation == generation {
-            self.contexts.clone()
-        } else {
-            RapidHashMap::with_capacity(1)
-        };
-        contexts.insert(key.to_owned(), Arc::clone(context));
-        Some(Self {
-            generation,
-            contexts,
-        })
-    }
-}
+use migration_cache::MigrationCache;
 
 /// Document fetcher that auto-commits and applies lens migrations.
 ///
@@ -74,7 +32,7 @@ pub struct LensedAutoCommitFetcher<S: Store> {
     db: Arc<DB<S>>,
     /// Migration contexts keyed by `"{collection_id}:{version_id}"`, as one
     /// snapshot per committed migration-graph generation.
-    migration_cache: Atom<MigrationCache>,
+    migration_cache: MigrationCache,
 }
 
 impl<S: Store> LensedAutoCommitFetcher<S> {
@@ -82,7 +40,7 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
     pub fn new(db: Arc<DB<S>>) -> Self {
         Self {
             db,
-            migration_cache: Atom::new(MigrationCache::default()),
+            migration_cache: MigrationCache::default(),
         }
     }
 
@@ -93,7 +51,7 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
     pub(super) fn clone_for_stream(&self) -> Self {
         Self {
             db: self.db.clone(),
-            migration_cache: Atom::new(MigrationCache::default()),
+            migration_cache: MigrationCache::default(),
         }
     }
 }
