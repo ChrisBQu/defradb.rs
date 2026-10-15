@@ -2,7 +2,7 @@
 
 These compressed raw logs record validation at `887502472c23f547eef75354decc2d44dfaf0c1f`.
 The boundary-repaired `051fd5fc3d794844d083feba219c8d5e2b0eb710` has the identical Git tree;
-subsequent handoff documentation does not change runtime code. `manifest.json` records
+Subsequent changes to handoff documentation and two schema test fixtures do not change runtime code. `manifest.json` records
 source provenance and checksums for both compressed and original logs.
 
 All commands in `run-validation.py` completed successfully. The script preserves the
