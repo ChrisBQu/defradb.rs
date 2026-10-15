@@ -116,6 +116,7 @@ pub(crate) fn set_embedding_from_inputs(
     inputs: &query::prepared::PreparedInputMemo,
 ) -> query::error::Result<Vec<String>> {
     let mut generated = Vec::new();
+    let mut first_miss = None;
     for embedding in embeddings {
         if is_create
             && doc
@@ -136,16 +137,22 @@ pub(crate) fn set_embedding_from_inputs(
         }
         let request = prepared_embedding_request(embedding, doc, config)
             .map_err(query::error::QueryError::execution)?;
-        let response = inputs
-            .get(&request)
-            .ok_or_else(|| query::error::QueryError::NeedsInput(request.clone()))?;
+        // A miss is noted and the other fields go on: every embedding the
+        // document lacks is asked for in one wave.
+        let Some(response) = inputs.get_or_want(&request) else {
+            first_miss.get_or_insert(request);
+            continue;
+        };
         let vector: Vec<f64> = serde_json::from_slice(&response).map_err(|error| {
             query::error::QueryError::execution(format!("invalid prepared embedding: {error}"))
         })?;
         doc.set(&embedding.field_name, NormalValue::Float64Array(vector));
         generated.push(embedding.field_name.clone());
     }
-    Ok(generated)
+    match first_miss {
+        Some(request) => Err(query::error::QueryError::NeedsInput(request)),
+        None => Ok(generated),
+    }
 }
 
 /// Exact provider request needed to resolve an embedding after an attempt
@@ -191,19 +198,51 @@ pub(crate) fn prepared_embedding_request(
     ))
 }
 
+/// One prepared embedding request, straight to the provider: the path the
+/// prepared-input test drives. A database resolves through its embedding
+/// service instead.
+#[cfg(test)]
 pub(crate) async fn resolve_prepared_embedding_request(request: &[u8]) -> Result<Vec<u8>, String> {
-    let request: PreparedEmbeddingRequest =
-        serde_json::from_slice(request).map_err(|error| error.to_string())?;
-    let embedding = call_embedding(
-        &request.provider,
-        &request.url,
-        &request.model,
-        &request.api_key,
-        &request.text,
-    )
-    .await
-    .map_err(|error| error.to_string())?;
+    let request = EmbeddingInput::decode(request)?;
+    let embedding = request.call().await.map_err(|error| error.to_string())?;
     serde_json::to_vec(&embedding).map_err(|error| error.to_string())
+}
+
+/// One embedding to make, as a prepared request carries it.
+#[derive(Clone, Debug)]
+pub(crate) struct EmbeddingInput {
+    pub provider: String,
+    pub url: String,
+    pub model: String,
+    pub api_key: String,
+    pub text: String,
+}
+
+impl EmbeddingInput {
+    /// The input a prepared embedding request names.
+    pub(crate) fn decode(request: &[u8]) -> Result<Self, String> {
+        let request: PreparedEmbeddingRequest =
+            serde_json::from_slice(request).map_err(|error| error.to_string())?;
+        Ok(Self {
+            provider: request.provider,
+            url: request.url,
+            model: request.model,
+            api_key: request.api_key,
+            text: request.text,
+        })
+    }
+
+    /// One request to the provider.
+    pub(crate) async fn call(&self) -> Result<Vec<f64>, EmbeddingCallError> {
+        call_embedding(
+            &self.provider,
+            &self.url,
+            &self.model,
+            &self.api_key,
+            &self.text,
+        )
+        .await
+    }
 }
 
 /// Embed free-form text using DefraDB's v1 embedding contract.
@@ -309,13 +348,41 @@ pub(crate) fn normalized_embedding_url(url: &str) -> &str {
     url.trim().trim_end_matches('/')
 }
 
+/// How long one embedding request may take, on every target.
+const EMBEDDING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Why an embedding request failed, and whether sending it again may
+/// succeed: a timeout, a transport error, 429 or 5xx.
+#[derive(Clone, Debug)]
+pub(crate) struct EmbeddingCallError {
+    pub message: String,
+    pub retryable: bool,
+}
+
+impl EmbeddingCallError {
+    fn final_error(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            retryable: false,
+        }
+    }
+}
+
+impl std::fmt::Display for EmbeddingCallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for EmbeddingCallError {}
+
 async fn call_embedding(
     provider: &str,
     url: &str,
     model: &str,
     api_key: &str,
     text: &str,
-) -> Result<Vec<f64>, EmbeddingError> {
+) -> Result<Vec<f64>, EmbeddingCallError> {
     let endpoint = format!("{}/embeddings", normalized_embedding_url(url));
     let (body, response_pointer) = match provider {
         "ollama" => (
@@ -326,36 +393,53 @@ async fn call_embedding(
             serde_json::json!({ "model": model, "input": text }),
             "/data/0/embedding",
         ),
-        _ => return Err(format!("unsupported embedding provider: {provider}").into()),
+        _ => {
+            return Err(EmbeddingCallError::final_error(format!(
+                "unsupported embedding provider: {provider}"
+            )))
+        }
     };
 
     let mut request = embedding_client().post(&endpoint);
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        request = request.timeout(std::time::Duration::from_secs(30));
-    }
     if provider == "openai" && !api_key.is_empty() {
         request = request.bearer_auth(api_key);
     }
 
-    let resp = request.json(&body).send().await?;
-
-    let status = resp.status();
-    if !status.is_success() {
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("embedding provider returned {}: {}", status, text).into());
-    }
-
-    let result: serde_json::Value = resp.json().await?;
+    let transport = |error: reqwest::Error| EmbeddingCallError {
+        message: error.to_string(),
+        retryable: true,
+    };
+    let exchange = async {
+        let resp = request.json(&body).send().await.map_err(transport)?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(EmbeddingCallError {
+                message: format!("embedding provider returned {}: {}", status, text),
+                retryable: status.as_u16() == 429 || status.is_server_error(),
+            });
+        }
+        resp.json::<serde_json::Value>().await.map_err(transport)
+    };
+    let result = n0_future::time::timeout(EMBEDDING_TIMEOUT, exchange)
+        .await
+        .map_err(|_| EmbeddingCallError {
+            message: format!("embedding provider gave no answer within {EMBEDDING_TIMEOUT:?}"),
+            retryable: true,
+        })??;
     let embedding = result
         .pointer(response_pointer)
         .and_then(|v| v.as_array())
-        .ok_or_else(|| format!("embedding response missing {response_pointer}"))?;
+        .ok_or_else(|| {
+            EmbeddingCallError::final_error(format!(
+                "embedding response missing {response_pointer}"
+            ))
+        })?;
 
-    let mut vec =
-        parse_embedding_vector(embedding).map_err(|err| -> EmbeddingError { err.into() })?;
+    let mut vec = parse_embedding_vector(embedding).map_err(EmbeddingCallError::final_error)?;
     if provider == "ollama" {
-        normalize_embedding(&mut vec)?;
+        normalize_embedding(&mut vec)
+            .map_err(|error| EmbeddingCallError::final_error(error.to_string()))?;
     }
 
     Ok(vec)

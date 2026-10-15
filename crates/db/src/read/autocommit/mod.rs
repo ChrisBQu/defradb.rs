@@ -169,16 +169,16 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
             query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
         })?;
 
-        Ok(Box::new(AutoCommitDocStream {
-            inner: Some(Box::new(crate::collection::stream::ShortIdDocStream::new(
+        Ok(Box::new(AutoCommitDocStream::new(
+            Box::new(crate::collection::stream::ShortIdDocStream::new(
                 collection,
                 datastore,
                 systemstore,
                 doc_short_ids.to_vec(),
                 show_deleted,
-            ))),
-            txn: std::sync::Mutex::new(Some(txn)),
-        }))
+            )),
+            txn,
+        )))
     }
 
     async fn stream_all_with_deleted(
@@ -227,10 +227,7 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
             show_deleted,
         );
 
-        Ok(Box::new(AutoCommitDocStream {
-            inner: Some(Box::new(inner)),
-            txn: std::sync::Mutex::new(Some(txn)),
-        }))
+        Ok(Box::new(AutoCommitDocStream::new(Box::new(inner), txn)))
     }
 
     async fn get_by_ids(
@@ -454,14 +451,10 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
 ///
 /// `release_read_txn` drops the inner stream first so its `NamespaceView`s
 /// give up their `Arc<SharedTxn>` clones, then discards the transaction -
-/// `BasicTxn::discard` requires sole ownership of that Arc. `txn` is wrapped
-/// in a `std::sync::Mutex` purely so `DbTxn`'s non-`Sync` callback storage
-/// doesn't stop this struct satisfying `DocStream`'s `MaybeSendSync` bound;
-/// every access goes through `&mut self` via `get_mut`, so it never actually
-/// locks.
+/// `BasicTxn::discard` requires sole ownership of that Arc.
 pub struct AutoCommitDocStream<S: Store + 'static> {
     inner: Option<Box<dyn DocStream>>,
-    txn: std::sync::Mutex<Option<DbTxn<S>>>,
+    txn: Option<DbTxn<S>>,
 }
 
 impl<S: Store + 'static> AutoCommitDocStream<S> {
@@ -469,7 +462,7 @@ impl<S: Store + 'static> AutoCommitDocStream<S> {
     pub fn new(inner: Box<dyn DocStream>, txn: DbTxn<S>) -> Self {
         Self {
             inner: Some(inner),
-            txn: std::sync::Mutex::new(Some(txn)),
+            txn: Some(txn),
         }
     }
 
@@ -477,25 +470,18 @@ impl<S: Store + 'static> AutoCommitDocStream<S> {
     pub fn without_txn(inner: Box<dyn DocStream>) -> Self {
         Self {
             inner: Some(inner),
-            txn: std::sync::Mutex::new(None),
+            txn: None,
         }
     }
 
     /// True once the read transaction has been released.
     pub fn txn_released(&self) -> bool {
-        self.txn
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .is_none()
+        self.txn.is_none()
     }
 
     fn release_read_txn(&mut self) {
         self.inner = None;
-        let slot = self
-            .txn
-            .get_mut()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(txn) = slot.take() {
+        if let Some(txn) = self.txn.take() {
             if let Err(e) = txn.discard() {
                 warn!(error = %e, "failed to discard auto-commit stream transaction");
             }

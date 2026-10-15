@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 #[non_exhaustive]
 pub enum Error {
     /// Returned when a requested DEK cannot be found in any local KeyStore or
@@ -43,6 +43,11 @@ pub enum Error {
     /// An internal invariant was violated. Indicates a bug in the KMS itself.
     #[error("internal invariant violated: {0}")]
     Internal(String),
+
+    /// A request to peers ended without an answer: its deadline passed, the
+    /// network runtime stopped, or it failed in a way no retry fixes.
+    #[error("key request to peers failed: {0}")]
+    Remote(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

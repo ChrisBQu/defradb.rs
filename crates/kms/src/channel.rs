@@ -59,23 +59,3 @@ pub fn bounded<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
 
     (Sender { inner: sender }, Receiver { inner: receiver })
 }
-
-pub async fn recv_until_closed<T, U>(receiver: &mut Receiver<T>, sender: &Sender<U>) -> Option<T> {
-    #[cfg(not(target_arch = "wasm32"))]
-    return tokio::select! {
-        _ = sender.inner.closed() => None,
-        value = receiver.inner.recv() => value,
-    };
-
-    #[cfg(target_arch = "wasm32")]
-    {
-        use futures::future::{select, Either};
-
-        let receive = Box::pin(receiver.inner.recv());
-        let closed = Box::pin(sender.inner.closed());
-        match select(receive, closed).await {
-            Either::Left((Ok(value), _)) => Some(value),
-            Either::Left((Err(_), _)) | Either::Right(_) => None,
-        }
-    }
-}

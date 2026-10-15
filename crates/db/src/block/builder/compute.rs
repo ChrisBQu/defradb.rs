@@ -65,6 +65,9 @@ pub(crate) fn compute_document_blocks_with_inputs(
     let mut encryption_cids: Vec<Cid> = Vec::new();
 
     let priority: u64 = 1; // Always 1 for creates
+                           // The first input this pass is missing. The pass goes on past it, so
+                           // every field's missing input is asked for in one wave.
+    let mut first_miss = None;
 
     for (field_name, field_value) in doc.values() {
         if field_name == "_docID" {
@@ -115,8 +118,9 @@ pub(crate) fn compute_document_blocks_with_inputs(
                                 field: key_field_name.map(str::to_owned),
                             },
                         );
-                        let Some(response) = inputs.get(&request) else {
-                            return Err(BuildError::NeedsInput(request));
+                        let Some(response) = inputs.get_or_want(&request) else {
+                            first_miss.get_or_insert(request);
+                            continue;
                         };
                         let response: crate::write::prepare::PreparedKmsResponse =
                             serde_json::from_slice(&response).map_err(|error| {
@@ -206,11 +210,19 @@ pub(crate) fn compute_document_blocks_with_inputs(
         let mut field_block = Block::new_with_options(delta, vec![], vec![], encryption_cid, None);
 
         if let Some(signer) = signing_config {
-            if let Some((sig_cid, sig_cbor)) =
-                compute_signature_prepared(&field_block, signer, prepared_inputs)?
-            {
-                blockstore_entries.push((sig_cid.to_bytes(), sig_cbor));
-                field_block.signature = Some(sig_cid);
+            match compute_signature_prepared(&field_block, signer, prepared_inputs) {
+                Ok(Some((sig_cid, sig_cbor))) => {
+                    blockstore_entries.push((sig_cid.to_bytes(), sig_cbor));
+                    field_block.signature = Some(sig_cid);
+                }
+                Ok(None) => {}
+                // The field waits for its signature; the other fields' go
+                // out in the same wave.
+                Err(BuildError::NeedsInput(request)) => {
+                    first_miss.get_or_insert(request);
+                    continue;
+                }
+                Err(error) => return Err(error),
             }
         }
 
@@ -237,6 +249,11 @@ pub(crate) fn compute_document_blocks_with_inputs(
 
         field_links.push(DAGLink::new(field_name.clone(), field_cid));
         field_cids.push(field_cid);
+    }
+
+    // The composite links every field block, so it waits for all of them.
+    if let Some(request) = first_miss {
+        return Err(BuildError::NeedsInput(request));
     }
 
     // Composite encryption CID for doc-level encryption

@@ -327,30 +327,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         };
         prepared
             .inputs
-            .answer_miss(input, || async {
-                match input.kind() {
-                    crate::prepared::PreparedInputKind::AcpDecision => {
-                        self.resolve_acp_decision_input(input).await
-                    }
-                    crate::prepared::PreparedInputKind::WriteValidation => {
-                        self.resolve_write_validation_input(input).await
-                    }
-                    crate::prepared::PreparedInputKind::ReadValidation => {
-                        self.resolve_read_validation_input(input).await
-                    }
-                    crate::prepared::PreparedInputKind::EncryptedSearch => {
-                        self.resolve_encrypted_search_input(input).await
-                    }
-                    _ => {
-                        let mutator = self.mutator.as_ref().ok_or_else(|| {
-                            crate::error::QueryError::execution(
-                                "retry input has no document mutator",
-                            )
-                        })?;
-                        mutator.resolve_prepared_input(input).await
-                    }
-                }
-            })
+            .answer_wave(input, |wave| self.resolve_wave(wave))
             .await?;
         Ok(Some(prepared))
     }
@@ -443,6 +420,73 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
 }
 
 impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
+    /// One wave of a request's external inputs, each by the resolver of its
+    /// kind: the runner's own concurrently, the mutator's as one batch.
+    async fn resolve_wave(
+        &self,
+        wave: Vec<crate::prepared::PreparedInputRequest>,
+    ) -> Result<Vec<std::sync::Arc<[u8]>>> {
+        let (own, delegated): (Vec<_>, Vec<_>) =
+            wave.iter().enumerate().partition(|(_, request)| {
+                matches!(
+                    request.kind(),
+                    crate::prepared::PreparedInputKind::AcpDecision
+                        | crate::prepared::PreparedInputKind::WriteValidation
+                        | crate::prepared::PreparedInputKind::ReadValidation
+                        | crate::prepared::PreparedInputKind::EncryptedSearch
+                )
+            });
+        let own_answers =
+            futures::future::try_join_all(own.iter().map(|(_, request)| async move {
+                match request.kind() {
+                    crate::prepared::PreparedInputKind::AcpDecision => {
+                        self.resolve_acp_decision_input(request).await
+                    }
+                    crate::prepared::PreparedInputKind::WriteValidation => {
+                        self.resolve_write_validation_input(request).await
+                    }
+                    crate::prepared::PreparedInputKind::ReadValidation => {
+                        self.resolve_read_validation_input(request).await
+                    }
+                    _ => self.resolve_encrypted_search_input(request).await,
+                }
+            }));
+        let delegated_answers = async {
+            if delegated.is_empty() {
+                return Ok(Vec::new());
+            }
+            let mutator = self.mutator.as_ref().ok_or_else(|| {
+                crate::error::QueryError::execution("retry input has no document mutator")
+            })?;
+            mutator
+                .resolve_prepared_inputs(
+                    delegated
+                        .iter()
+                        .map(|(_, request)| (*request).clone())
+                        .collect(),
+                )
+                .await
+        };
+        let (own_answers, delegated_answers) =
+            futures::future::try_join(own_answers, delegated_answers).await?;
+        let mut answers: Vec<Option<std::sync::Arc<[u8]>>> = vec![None; wave.len()];
+        for ((index, _), answer) in own
+            .iter()
+            .chain(delegated.iter())
+            .zip(own_answers.into_iter().chain(delegated_answers))
+        {
+            answers[*index] = Some(answer);
+        }
+        answers
+            .into_iter()
+            .map(|answer| {
+                answer.ok_or_else(|| {
+                    crate::error::QueryError::execution("an external input went unanswered")
+                })
+            })
+            .collect()
+    }
+
     async fn resolve_write_validation_input(
         &self,
         input: &crate::prepared::PreparedInputRequest,

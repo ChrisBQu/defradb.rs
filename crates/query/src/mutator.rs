@@ -499,6 +499,22 @@ pub trait DocMutator: MaybeSendSync {
         ))
     }
 
+    /// Resolve a wave of exact external requests at once, one answer per
+    /// request in order. The default resolves each with
+    /// [`resolve_prepared_input`](Self::resolve_prepared_input),
+    /// concurrently; a mutator whose inputs batch overrides it.
+    async fn resolve_prepared_inputs(
+        &self,
+        requests: Vec<crate::prepared::PreparedInputRequest>,
+    ) -> Result<Vec<Arc<[u8]>>> {
+        futures::future::try_join_all(
+            requests
+                .iter()
+                .map(|request| self.resolve_prepared_input(request)),
+        )
+        .await
+    }
+
     /// Build the exact remote request for a regenerated embedding using the
     /// current attempt's source values. This method is pure local work.
     async fn prepared_embedding_request(

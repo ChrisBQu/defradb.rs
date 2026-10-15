@@ -1203,45 +1203,110 @@ mod error_paths {
     }
 }
 
-/// The block cache must hold its own copy, not the engine's bytes.
+/// Bytes a reader holds never change, whatever the store does after the read.
 ///
-/// `Reader::get` hands back `Bytes` over a regolith `DbSlice`, which is a
-/// refcount on whatever owns those bytes: an SSTable block, or a memtable
-/// arena. Caching that slice keeps its owner resident for as long as the entry
-/// lives, so a million-entry LRU could pin an unbounded amount of engine memory
-/// and a small value would hold a whole block down.
-///
-/// Pointer identity is what distinguishes the two: a cache holding the engine's
-/// `Bytes` hands back a clone addressing the same memory, while a cache holding
-/// its own copy addresses a different allocation.
+/// A read is zero-copy: it hands back `Bytes` over a regolith `DbSlice`, a
+/// refcount on whatever owns those bytes, a memtable arena or an SSTable
+/// block. Holding the slice keeps that owner alive, so a block a caller holds
+/// (a DAG fetch queue, a merge batch) reads the same when the block is
+/// deleted, when other blocks are written, and when the memtable it came from
+/// is flushed and the tables it went to are compacted away.
 mod cache_ownership {
     use super::*;
 
+    /// A store whose 16 KiB memtable and two-table L0 trigger make [`churn`]
+    /// flush the memtable many times over and compact the tables it flushes.
+    fn small_memtable_store() -> Arc<RegolithStore> {
+        let mut options = storage::RegolithStoreOptions::memory();
+        options.engine = options
+            .engine
+            .write_buffer_size(16 * 1024)
+            .l0_compaction_trigger(2);
+        Arc::new(RegolithStore::open_with_options("regolith-memory", options).unwrap())
+    }
+
+    /// Writes 512 distinct 1 KiB blocks tagged by `round`, in batches.
+    async fn churn(blockstore: &DefraBlockstore<RegolithStore>, round: u8) {
+        for batch in 0..16u32 {
+            let payloads: Vec<Vec<u8>> = (0..32u32)
+                .map(|index| {
+                    let mut payload = vec![round; 1024];
+                    payload[..4].copy_from_slice(&(batch * 32 + index).to_be_bytes());
+                    payload
+                })
+                .collect();
+            let cids: Vec<Cid> = payloads
+                .iter()
+                .map(|payload| cid_from_data(payload))
+                .collect();
+            let blocks: Vec<(&Cid, &[u8])> = cids
+                .iter()
+                .zip(&payloads)
+                .map(|(cid, payload)| (cid, payload.as_slice()))
+                .collect();
+            blockstore.put_many(&blocks).await.unwrap();
+        }
+    }
+
     #[tokio::test]
-    async fn a_cached_block_does_not_alias_the_engine_s_bytes() {
+    async fn bytes_a_reader_holds_never_change_when_the_block_is_deleted() {
         let store = Arc::new(RegolithStore::in_memory().unwrap());
-        let blockstore = DefraBlockstore::new(Arc::clone(&store), false);
+        let writer = DefraBlockstore::new(Arc::clone(&store), false);
+        let reader = DefraBlockstore::new(Arc::clone(&store), false);
         let cid = test_cid();
         let data = Bytes::from(vec![0xAB; 4096]);
+        writer.put(&cid, &data).await.unwrap();
 
+        let first = reader.get(&cid).await.unwrap().expect("block present");
+        let second = reader.get(&cid).await.unwrap().expect("block present");
+        writer.delete(&cid).await.unwrap();
+
+        assert_eq!(reader.get(&cid).await.unwrap(), None);
+        assert_eq!(first, data, "a held read changed after the delete");
+        assert_eq!(second, data, "a held read changed after the delete");
+    }
+
+    #[tokio::test]
+    async fn bytes_a_reader_holds_never_change_when_the_store_is_written() {
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
+        let blockstore = DefraBlockstore::new(store, false);
+        let cid = test_cid();
+        let data = Bytes::from(vec![0xCD; 4096]);
         blockstore.put(&cid, &data).await.unwrap();
 
-        // A second handle over the same store starts with a cold cache, which
-        // is what puts the first read on the miss path. Reading through the
-        // writing handle would only ever hit its write-through entry.
-        let reader = DefraBlockstore::new(Arc::clone(&store), false);
-        // Misses, so this is the engine's own bytes.
-        let from_engine = reader.get(&cid).await.unwrap().expect("block present");
-        // Hits, so this is whatever the cache decided to keep.
-        let from_cache = reader.get(&cid).await.unwrap().expect("block present");
+        let held = blockstore.get(&cid).await.unwrap().expect("block present");
+        blockstore.put(&cid, &data).await.unwrap();
+        churn(&blockstore, 1).await;
 
-        assert_eq!(from_engine, data, "first read returned the wrong bytes");
-        assert_eq!(from_cache, data, "cached read returned the wrong bytes");
-        assert_ne!(
-            from_engine.as_ptr(),
-            from_cache.as_ptr(),
-            "the cache is holding the engine's slice, which pins its owner"
-        );
+        assert_eq!(held, data, "a held read changed after later writes");
+        assert_eq!(blockstore.get(&cid).await.unwrap(), Some(data));
+    }
+
+    #[tokio::test]
+    async fn bytes_a_reader_holds_never_change_when_the_store_flushes_and_compacts() {
+        let blockstore = DefraBlockstore::new(small_memtable_store(), false);
+        let cid = test_cid();
+        let data: Bytes = (0..4096u32)
+            .map(|i| (i % 251) as u8)
+            .collect::<Vec<_>>()
+            .into();
+        blockstore.put(&cid, &data).await.unwrap();
+
+        // Read while the block is in the memtable, then flush and compact it.
+        let from_memtable = blockstore.get(&cid).await.unwrap().expect("block present");
+        churn(&blockstore, 1).await;
+        assert_eq!(from_memtable, data, "a held read changed after a flush");
+
+        // Read it again from the tables, then delete it and compact the
+        // tables that held it.
+        let from_tables = blockstore.get(&cid).await.unwrap().expect("block present");
+        blockstore.delete(&cid).await.unwrap();
+        churn(&blockstore, 2).await;
+        churn(&blockstore, 3).await;
+
+        assert_eq!(blockstore.get(&cid).await.unwrap(), None);
+        assert_eq!(from_memtable, data, "a held read changed after compaction");
+        assert_eq!(from_tables, data, "a held read changed after compaction");
     }
 
     /// The copy is a copy of the value, not of a truncated or shared view of
@@ -1263,5 +1328,91 @@ mod cache_ownership {
 
         assert_eq!(cached.len(), data.len());
         assert_eq!(cached, data);
+    }
+}
+
+/// The blockstore keeps no cache of its own, so every handle over one store
+/// sees what the store holds. A handle-local cache answered from what that
+/// handle saw last: a block deleted through another handle was still served,
+/// a put of it was skipped as already stored, and its merge mark outlived it.
+mod one_view_of_the_store {
+    use super::*;
+
+    fn two_handles(
+        is_p2p: bool,
+    ) -> (
+        DefraBlockstore<RegolithStore>,
+        DefraBlockstore<RegolithStore>,
+    ) {
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
+        (
+            DefraBlockstore::new(Arc::clone(&store), is_p2p),
+            DefraBlockstore::new(store, is_p2p),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_block_deleted_through_one_handle_is_gone_through_another() {
+        let (writer, reader) = two_handles(false);
+        let cid = test_cid();
+        writer.put(&cid, b"block").await.unwrap();
+        assert!(reader.get(&cid).await.unwrap().is_some());
+        assert!(reader.has(&cid).await.unwrap());
+
+        writer.delete(&cid).await.unwrap();
+
+        assert_eq!(reader.get(&cid).await.unwrap(), None);
+        assert!(!reader.has(&cid).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_put_after_a_delete_through_another_handle_stores_the_block() {
+        let (writer, reader) = two_handles(false);
+        let cid = test_cid();
+        reader.put(&cid, b"block").await.unwrap();
+        writer.delete(&cid).await.unwrap();
+
+        reader.put(&cid, b"block").await.unwrap();
+
+        assert_eq!(
+            writer.get(&cid).await.unwrap(),
+            Some(Bytes::from_static(b"block"))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_batch_put_after_a_delete_through_another_handle_stores_the_blocks() {
+        let (writer, reader) = two_handles(false);
+        let (first, second) = (test_cid(), test_cid2());
+        let blocks = [
+            (&first, b"first".as_slice()),
+            (&second, b"second".as_slice()),
+        ];
+        reader.put_many(&blocks).await.unwrap();
+        writer.delete(&first).await.unwrap();
+
+        reader.put_many(&blocks).await.unwrap();
+
+        assert_eq!(
+            writer.get(&first).await.unwrap(),
+            Some(Bytes::from_static(b"first"))
+        );
+        assert_eq!(
+            writer.get(&second).await.unwrap(),
+            Some(Bytes::from_static(b"second"))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_merge_mark_does_not_outlive_a_delete_through_another_handle() {
+        let (writer, reader) = two_handles(true);
+        let cid = test_cid();
+        reader.put(&cid, b"block").await.unwrap();
+        reader.mark_as_merged(&cid).await.unwrap();
+        assert!(reader.is_merged(&cid).await.unwrap());
+
+        writer.delete(&cid).await.unwrap();
+
+        assert!(!reader.is_merged(&cid).await.unwrap());
     }
 }

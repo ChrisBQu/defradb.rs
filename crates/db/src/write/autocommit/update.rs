@@ -85,7 +85,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             {
                 Err(query::error::QueryError::NeedsInput(request)) => {
                     inputs
-                        .answer_miss(&request, || self.resolve_prepared_input(&request))
+                        .answer_wave(&request, |wave| self.resolve_prepared_inputs(wave))
                         .await?;
                 }
                 result => return result,

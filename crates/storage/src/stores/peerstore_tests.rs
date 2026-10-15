@@ -216,11 +216,13 @@ impl crate::corekv::RetryAttemptFn for ScopedRetryIoAttempt {
     }
 }
 
-/// A store whose engine-owned transactions fail with an I/O error a given
-/// number of times, or lose a conflict a given number of times, before they
-/// reach the real store. Plain transactions pass straight through.
+/// A store whose engine-owned transactions fail with an error (an I/O error
+/// unless told otherwise) a given number of times, or lose a conflict a given
+/// number of times, before they reach the real store. Plain transactions pass
+/// straight through.
 struct FaultyTransactStore {
     inner: Arc<RegolithStore>,
+    failure: crate::corekv::Error,
     io_failures: AtomicUsize,
     conflicts: AtomicUsize,
     attempts: Arc<AtomicUsize>,
@@ -228,9 +230,26 @@ struct FaultyTransactStore {
 
 impl FaultyTransactStore {
     fn new(io_failures: usize, conflicts: usize) -> Arc<Self> {
+        Self::over(
+            Arc::new(RegolithStore::in_memory().unwrap()),
+            crate::corekv::Error::Io("injected marker write failure".into()),
+            io_failures,
+            conflicts,
+        )
+    }
+
+    /// Over `inner`, failing the next `failures` engine transactions with
+    /// `failure`.
+    fn over(
+        inner: Arc<RegolithStore>,
+        failure: crate::corekv::Error,
+        failures: usize,
+        conflicts: usize,
+    ) -> Arc<Self> {
         Arc::new(Self {
-            inner: Arc::new(RegolithStore::in_memory().unwrap()),
-            io_failures: AtomicUsize::new(io_failures),
+            inner,
+            failure,
+            io_failures: AtomicUsize::new(failures),
             conflicts: AtomicUsize::new(conflicts),
             attempts: Arc::new(AtomicUsize::new(0)),
         })
@@ -265,7 +284,7 @@ impl Store for FaultyTransactStore {
     {
         if Self::take(&self.io_failures) {
             return Err(crate::corekv::RetryAttemptError::Storage(
-                crate::corekv::Error::Io("injected marker write failure".into()),
+                self.failure.clone(),
             ));
         }
         let conflicts = Self::take(&self.conflicts).then(|| Arc::clone(&self.inner));
@@ -343,6 +362,56 @@ async fn marker_write_io_failure_is_returned_not_slept_on() {
         .unwrap();
     assert_eq!(markers.len(), 1);
     assert_eq!(markers[0].doc_id, "doc");
+}
+
+/// A marker write that fails transiently, with an I/O or a backend error, is
+/// returned to its caller rather than retried here; the caller's next write
+/// lands, and both scopes, a document and a collection commit, are durable
+/// across a restart together with the peer's retry schedule.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transient_marker_io_failure_recovers_durable_scopes() {
+    let backing = Arc::new(RegolithStore::in_memory().unwrap());
+    Peerstore::new(backing.clone())
+        .create_replicator("peer", b"replicator")
+        .await
+        .unwrap();
+    let retry_info = super::super::RetryInfo::new_initial().to_bytes().unwrap();
+
+    for (doc_id, failure) in [
+        (
+            "doc",
+            crate::corekv::Error::Io("injected transient marker failure".to_string()),
+        ),
+        (
+            "",
+            crate::corekv::Error::Backend("injected transient marker failure".to_string()),
+        ),
+    ] {
+        let peerstore =
+            Peerstore::new(FaultyTransactStore::over(backing.clone(), failure, 1, 0));
+        let error = peerstore
+            .record_push_failure("peer", doc_id, "collection", &retry_info)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                crate::corekv::Error::Io(_) | crate::corekv::Error::Backend(_)
+            ),
+            "{error:?}"
+        );
+        peerstore
+            .record_push_failure("peer", doc_id, "collection", &retry_info)
+            .await
+            .unwrap();
+    }
+
+    let restarted = Peerstore::new(backing);
+    assert!(restarted.get_retry_info("peer").await.unwrap().is_some());
+    let markers = restarted.get_retry_documents("peer").await.unwrap();
+    assert_eq!(markers.len(), 2);
+    assert!(markers.iter().any(|marker| marker.doc_id == "doc"));
+    assert!(markers.iter().any(|marker| marker.is_collection_commit()));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -23,7 +23,7 @@ mod scan;
 pub mod stream;
 
 use bytes::Bytes;
-use rapidhash::{HashMapExt, RapidHashMap};
+use rapidhash::RapidHashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -36,10 +36,34 @@ use crate::database::DB;
 use crate::txn::held::Held;
 use crate::txn::{DbTxn, LentTxn};
 
-type VersionCache = RapidHashMap<String, (Arc<[schema::CollectionVersion]>, bool)>;
+use super::generation_cache::GenerationCache;
 
-/// The version facts a transaction's fetchers share across its requests.
-pub(crate) type SharedVersionCache = Arc<async_lock::RwLock<VersionCache>>;
+/// A collection's versions and whether any of them has a migration.
+type VersionFacts = (Arc<[schema::CollectionVersion]>, bool);
+
+/// A collection version's targeted history, by version id.
+type History = RapidHashMap<String, TargetedHistoryLink>;
+
+/// What a transaction's fetchers derive from its schema: version facts by
+/// collection id (cached for read-only transactions only, a writable one
+/// always reloads its own schema writes) and targeted histories by
+/// `"{collection_id}:{version_id}"`. Every request on the transaction shares
+/// them, and each cache has generations of its own, which a schema change in
+/// the transaction advances ([`invalidate`](Self::invalidate)).
+#[derive(Clone, Default)]
+pub(crate) struct FetcherCaches {
+    version: Arc<GenerationCache<VersionFacts>>,
+    history: Arc<GenerationCache<History>>,
+}
+
+impl FetcherCaches {
+    /// Drops every value derived so far; one computed before this call is
+    /// never cached after it.
+    pub(crate) fn invalidate(&self) {
+        self.history.invalidate();
+        self.version.invalidate();
+    }
+}
 
 /// Document fetcher that applies lens migrations to documents.
 ///
@@ -51,11 +75,9 @@ pub struct LensedDocFetcher<S: Store + 'static> {
     txn: Held<S>,
     #[allow(dead_code)]
     lens_store: Arc<dyn TransformStore>,
-    /// Read-only snapshot facts; writable transactions always reload their own schema writes.
-    version_cache: SharedVersionCache,
-    /// Cache of collection version histories keyed by collection name.
-    pub history_cache:
-        async_lock::RwLock<RapidHashMap<String, RapidHashMap<String, TargetedHistoryLink>>>,
+    /// What the fetcher derived from its transaction's schema, shared with
+    /// its stream clones and with the transaction's later requests.
+    caches: FetcherCaches,
     /// Optional field projection used by mutation rebases whose dependencies
     /// are known. General query fetches leave this unset.
     projection: Option<rapidhash::RapidHashSet<String>>,
@@ -64,12 +86,11 @@ pub struct LensedDocFetcher<S: Store + 'static> {
 
 impl<S: Store + 'static> LensedDocFetcher<S> {
     /// Seed the per-version history cache directly.
-    pub async fn insert_history(
-        &self,
-        key: String,
-        history: RapidHashMap<String, TargetedHistoryLink>,
-    ) {
-        self.history_cache.write().await.insert(key, history);
+    pub async fn insert_history(&self, key: String, history: History) {
+        let generation = self.caches.history.generation();
+        self.caches
+            .history
+            .publish(generation, &key, &Arc::new(history));
     }
 
     /// Create a new lensed document fetcher.
@@ -84,33 +105,32 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
             db,
             Held::new(Arc::new(txn)),
             lens_store,
-            SharedVersionCache::default(),
+            FetcherCaches::default(),
         )
     }
 
-    /// A fetcher over a transaction lent to it, with the version facts its
-    /// earlier requests found: whoever lent the transaction keeps it.
+    /// A fetcher over a transaction lent to it, with what its earlier
+    /// requests derived: whoever lent the transaction keeps it.
     pub(crate) fn lent(
         db: Arc<DB<S>>,
         txn: &LentTxn<S>,
         lens_store: Arc<dyn TransformStore>,
-        version_cache: SharedVersionCache,
+        caches: FetcherCaches,
     ) -> Self {
-        Self::with_held(db, Held::borrowed(txn), lens_store, version_cache)
+        Self::with_held(db, Held::borrowed(txn), lens_store, caches)
     }
 
     fn with_held(
         db: Arc<DB<S>>,
         txn: Held<S>,
         lens_store: Arc<dyn TransformStore>,
-        version_cache: SharedVersionCache,
+        caches: FetcherCaches,
     ) -> Self {
         Self {
             db,
             txn,
             lens_store,
-            version_cache,
-            history_cache: async_lock::RwLock::new(RapidHashMap::new()),
+            caches,
             projection: None,
             prepared_inputs: None,
         }
@@ -137,16 +157,14 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
         fetcher
     }
 
-    /// Build a lightweight fetcher sharing this one's transaction, for use by a `DocStream` that outlives a single
-    /// `&self` call. `history_cache` starts fresh rather than shared: it is
-    /// pure memoization, so recomputing it costs nothing correctness-wise.
+    /// Build a lightweight fetcher sharing this one's transaction and caches,
+    /// for use by a `DocStream` that outlives a single `&self` call.
     pub(super) fn stream_clone(&self) -> Self {
         Self {
             db: self.db.clone(),
             txn: self.txn.get().map_or_else(Held::none, Held::new),
             lens_store: self.lens_store.clone(),
-            version_cache: self.version_cache.clone(),
-            history_cache: async_lock::RwLock::new(RapidHashMap::new()),
+            caches: self.caches.clone(),
             projection: self.projection.clone(),
             prepared_inputs: self.prepared_inputs.clone(),
         }
@@ -169,6 +187,14 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
         self.txn
             .get()
             .ok_or_else(|| query::error::QueryError::execution("transaction already consumed"))
+    }
+
+    /// Drops what the fetcher derived from its transaction's schema, after a
+    /// schema change in the transaction; a value computed before this call is
+    /// never cached after it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn invalidate_migration_cache(&self) {
+        self.caches.invalidate();
     }
 }
 

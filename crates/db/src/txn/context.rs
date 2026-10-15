@@ -20,7 +20,7 @@ use storage::corekv::Store;
 use crate::collection::provider::TxnCollectionProvider;
 use crate::database::DB;
 use crate::event::emission::TxnBroadcaster;
-use crate::read::lensed::fetcher::{LensedDocFetcher, SharedVersionCache};
+use crate::read::lensed::fetcher::{FetcherCaches, LensedDocFetcher};
 use crate::txn::{DbTxn, LentTxn};
 use crate::write::doc::DbDocMutator;
 
@@ -41,15 +41,10 @@ impl<S: Store + 'static> DbTransactionContext<S> {
         readonly: bool,
         txn: &LentTxn<S>,
         lens_store: Arc<dyn lens::TransformStore>,
-        version_cache: SharedVersionCache,
+        caches: FetcherCaches,
         broadcaster: Option<Arc<dyn TxnBroadcaster>>,
     ) -> Self {
-        let fetcher = Arc::new(LensedDocFetcher::lent(
-            db.clone(),
-            txn,
-            lens_store,
-            version_cache,
-        ));
+        let fetcher = Arc::new(LensedDocFetcher::lent(db.clone(), txn, lens_store, caches));
         Self {
             db,
             id,

@@ -182,6 +182,8 @@ pub struct DB<S: Store> {
     /// Set once at node startup via [`DB::set_kms`].
     document_acp: std::sync::OnceLock<Arc<dyn acp::DocumentACP>>,
     kms: std::sync::OnceLock<std::sync::Arc<dyn kms::KmsService>>,
+    /// Remote signatures and embeddings, each behind its own service.
+    remote_inputs: crate::remote_inputs::RemoteInputs,
     /// Owning handle to the KMS durable blockstore. The KMS adapter
     /// (`DbEncBlockStore`) references this weakly to avoid the
     /// DB→KMS→`KeyStore`→adapter→blockstore→store Arc cycle that would pin the
@@ -250,6 +252,7 @@ impl<S: Store> DB<S> {
             forbidden_collection_ids: HopscotchMap::with_hasher(RandomState::default()),
             document_acp: std::sync::OnceLock::new(),
             kms: std::sync::OnceLock::new(),
+            remote_inputs: Default::default(),
             kms_blockstore: std::sync::OnceLock::new(),
             nac_manager: std::sync::OnceLock::new(),
             merge_governance: std::sync::OnceLock::new(),
@@ -316,6 +319,7 @@ impl<S: Store> DB<S> {
             forbidden_collection_ids: HopscotchMap::with_hasher(RandomState::default()),
             document_acp: std::sync::OnceLock::new(),
             kms: std::sync::OnceLock::new(),
+            remote_inputs: Default::default(),
             kms_blockstore: std::sync::OnceLock::new(),
             nac_manager: std::sync::OnceLock::new(),
             merge_governance: std::sync::OnceLock::new(),
@@ -483,6 +487,19 @@ impl<S: Store> DB<S> {
     /// Get the KMS service, if one has been installed.
     pub fn kms(&self) -> Option<std::sync::Arc<dyn kms::KmsService>> {
         self.kms.get().cloned()
+    }
+
+    /// Runs the database's remote inputs (signatures, embeddings) on the
+    /// node's network runtime. Set once at startup, before the first write
+    /// that needs one; without it they run on the caller's async runtime.
+    pub fn set_network(&self, edge: edge::Edge) {
+        if !self.remote_inputs.set_runtime(inputs::Runtime::edge(edge)) {
+            tracing::warn!("the database's network runtime was already set; keeping the first");
+        }
+    }
+
+    pub(crate) fn remote_inputs(&self) -> &crate::remote_inputs::RemoteInputs {
+        &self.remote_inputs
     }
 
     /// Install the NAC manager. First call wins (OnceLock); subsequent calls

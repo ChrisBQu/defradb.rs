@@ -86,7 +86,7 @@ where
                 )));
             };
             if let Err(error) = inputs
-                .answer_miss(&input, || resolver.resolve_prepared_input(&input))
+                .answer_wave(&input, |wave| resolver.resolve_prepared_inputs(wave))
                 .await
             {
                 return Ok(QueryResponse::error(QueryResponseError::from_query_error(

@@ -19,7 +19,7 @@ use tracing::{error, warn};
 use crate::database::DB;
 use crate::error::{Error, Result};
 use crate::event::emission::TxnBroadcaster;
-use crate::read::lensed::fetcher::SharedVersionCache;
+use crate::read::lensed::fetcher::FetcherCaches;
 use crate::txn::context::DbTransactionContext;
 use crate::txn::lenses::TxnLensStore;
 use crate::txn::owner::TxnId;
@@ -44,7 +44,7 @@ where
     txn: Lending<S>,
     db: Arc<DB<S>>,
     lens_store: Arc<TxnLensStore>,
-    version_cache: SharedVersionCache,
+    caches: FetcherCaches,
     broadcaster: Option<Arc<dyn TxnBroadcaster>>,
     /// A request opened a statement it has not closed yet.
     statement_open: bool,
@@ -67,7 +67,7 @@ where
             lens_store: Arc::new(TxnLensStore::new(db.lens_store().clone())),
             txn: Lending::Held(txn),
             db,
-            version_cache: SharedVersionCache::default(),
+            caches: FetcherCaches::default(),
             broadcaster,
             statement_open: false,
         })
@@ -119,9 +119,9 @@ where
         self.lens_store.clone()
     }
 
-    /// The lens version facts its requests found.
-    pub(crate) fn version_cache(&self) -> SharedVersionCache {
-        self.version_cache.clone()
+    /// What its requests' fetchers derived from its schema.
+    pub(crate) fn caches(&self) -> FetcherCaches {
+        self.caches.clone()
     }
 
     /// After a request: a statement it opened and never closed (it failed,
@@ -173,7 +173,7 @@ where
             self.readonly,
             &txn,
             self.lens_store(),
-            self.version_cache.clone(),
+            self.caches(),
             self.broadcaster.clone(),
         )))
     }

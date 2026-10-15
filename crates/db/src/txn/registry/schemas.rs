@@ -30,7 +30,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         self.in_txn(txn_id, move |owned| {
             Box::pin(async move {
                 let txn_lens_store = owned.lens_store();
-                let version_facts = owned.version_cache();
+                let caches = owned.caches();
                 let txn = owned.alone()?;
 
                 let outcome = db
@@ -43,9 +43,9 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
                     &txn.systemstore()?,
                 )
                 .await?;
-                // The migration changed the version facts this transaction's
-                // fetchers found.
-                version_facts.write().await.clear();
+                // The migration changed what this transaction's fetchers
+                // derived from its schema.
+                caches.invalidate();
 
                 let db = db.clone();
                 let cache_db = db.clone();
