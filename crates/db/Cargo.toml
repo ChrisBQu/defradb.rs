@@ -24,7 +24,6 @@ bench = false
 web-time.workspace = true
 # Async runtime
 async-trait.workspace = true
-async-lock.workspace = true
 n0-future.workspace = true
 futures.workspace = true
 
