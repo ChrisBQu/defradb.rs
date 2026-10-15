@@ -1,35 +1,48 @@
-//! One wasmtime engine with its sandbox and epoch clock, shared by its clones.
+//! One wasmtime engine with its sandbox, its linker, its call permits and its
+//! epoch ticks, shared by its clones.
 
 use std::sync::Arc;
 
-use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
+use futures::Stream;
+use regolith::sync::{OwnedSemaphorePermit, Semaphore};
+use serde::Serialize;
+use wasmtime::{Config, Engine, InstancePre, Linker, Module};
 
-use super::clock::EpochClock;
+use super::call::{self, CallData, CallStream, Pipeline};
+use super::clock::{EpochTick, TickSource};
 use super::sandbox::WasmSandboxConfig;
 use crate::{Error, Result};
 
-/// A wasmtime engine, the sandbox its calls run under, and the clock that
-/// advances its epoch. Clones share all three; the clock stops when the last
-/// clone is dropped.
+/// A wasmtime engine, the sandbox its calls run under, the one linker every
+/// module links against, the permits that bound calls run to completion, and
+/// the ticks that advance its epoch. Clones share all of them; the ticks stop
+/// when the last clone is dropped.
+///
+/// The engine is built with fuel and epoch interruption as the sandbox asks,
+/// and with wasmtime's `async` support, so a call runs on a fiber its caller
+/// polls. wasmtime is built without parallel compilation, so it starts no
+/// thread of its own.
 #[derive(Clone)]
 pub(crate) struct LensEngine {
     engine: Engine,
     sandbox: Option<WasmSandboxConfig>,
-    /// Held, never read: the clock runs while any clone holds it.
-    _clock: Option<Arc<EpochClock>>,
+    linker: Arc<Linker<CallData>>,
+    calls: Option<Calls>,
+    /// Held, never read: the ticks run while any clone holds them.
+    _ticks: Option<Arc<dyn Send + Sync>>,
 }
 
-/// What one call's wasmtime store holds: the host's state, and the memory
-/// limit the sandbox puts on the call.
-pub(crate) struct Sandboxed<T> {
-    pub(crate) host: T,
-    limits: StoreLimits,
+/// The permits of calls run to completion, and how many there are.
+#[derive(Clone)]
+struct Calls {
+    permits: Arc<Semaphore>,
+    max: usize,
 }
 
 impl LensEngine {
-    /// Build an engine. Without a sandbox, calls run without limits and no
-    /// clock runs.
-    pub(crate) fn new(sandbox: Option<WasmSandboxConfig>) -> Result<Self> {
+    /// Build an engine whose epoch `ticks` advances. Without a sandbox, calls
+    /// run without limits and nothing ticks.
+    pub(crate) fn new(sandbox: Option<WasmSandboxConfig>, ticks: &dyn TickSource) -> Result<Self> {
         let mut config = Config::new();
         #[cfg(target_os = "macos")]
         {
@@ -47,10 +60,16 @@ impl LensEngine {
         }
         let engine = Engine::new(&config)
             .map_err(|e| Error::WasmLoad(format!("failed to create WASM engine: {}", e)))?;
-        let clock = match sandbox.as_ref() {
+        let ticks = match sandbox.as_ref() {
             Some(sb) => match (sb.epoch_deadline_ticks, sb.epoch_tick_period) {
+                (Some(_), Some(period)) if period.is_zero() => {
+                    return Err(Error::InvalidConfig(
+                        "WASM epoch tick period must be greater than zero".into(),
+                    ));
+                }
                 (Some(_), Some(period)) => {
-                    Some(Arc::new(EpochClock::start(engine.clone(), period)?))
+                    let guard = ticks.start(EpochTick(engine.clone()), period)?;
+                    Some(Arc::from(guard))
                 }
                 (Some(_), None) => {
                     return Err(Error::InvalidConfig(
@@ -61,53 +80,82 @@ impl LensEngine {
             },
             None => None,
         };
+        let calls = match sandbox.as_ref().and_then(|sb| sb.max_concurrent_calls) {
+            Some(max) if max == 0 || max > Semaphore::MAX_PERMITS => {
+                return Err(Error::InvalidConfig(format!(
+                    "max_concurrent_calls must be between 1 and {}",
+                    Semaphore::MAX_PERMITS
+                )));
+            }
+            Some(max) => Some(Calls {
+                permits: Arc::new(Semaphore::new(max)),
+                max,
+            }),
+            None => None,
+        };
+        let linker = Arc::new(call::linker(&engine)?);
 
         Ok(Self {
             engine,
             sandbox,
-            _clock: clock,
+            linker,
+            calls,
+            _ticks: ticks,
         })
     }
 
-    /// The wasmtime engine, to compile modules and build linkers on.
+    /// The wasmtime engine, to compile modules on.
     pub(crate) fn engine(&self) -> &Engine {
         &self.engine
     }
 
-    /// A store for one call, under the sandbox: its memory limit, its fuel and
-    /// its epoch deadline. The engine turns fuel and epoch interruption on
-    /// exactly when the sandbox sets them, so the two always agree.
-    pub(crate) fn store<T>(&self, host: T) -> Result<Store<Sandboxed<T>>>
-    where
-        T: 'static,
-    {
-        let limits = self
-            .sandbox
-            .as_ref()
-            .and_then(|sb| sb.max_memory_bytes)
-            .map_or_else(
-                || StoreLimitsBuilder::new().build(),
-                |max| StoreLimitsBuilder::new().memory_size(max).build(),
-            );
-        let mut store = Store::new(&self.engine, Sandboxed { host, limits });
-        store.limiter(|state| &mut state.limits);
-        if let Some(ref sb) = self.sandbox {
-            if let Some(fuel) = sb.fuel_budget {
-                store
-                    .set_fuel(fuel)
-                    .map_err(|e| Error::WasmExecution(format!("failed to set fuel: {}", e)))?;
-            }
-            if let Some(ticks) = sb.epoch_deadline_ticks {
-                store.set_epoch_deadline(ticks);
-            }
-        }
-        Ok(store)
+    /// The limits every call runs under.
+    pub(crate) fn sandbox(&self) -> Option<&WasmSandboxConfig> {
+        self.sandbox.as_ref()
     }
 
-    /// A handle that shows whether the clock still runs, for tests of its
+    /// Links `module` against the engine's linker, once, when it is
+    /// registered: every call instantiates from what this returns.
+    pub(crate) fn prepare(&self, module: &Module) -> Result<InstancePre<CallData>> {
+        self.linker
+            .instantiate_pre(module)
+            .map_err(|e| Error::WasmLoad(format!("failed to link WASM module: {}", e)))
+    }
+
+    /// Waits for the permits of a call run to completion over a pipeline of
+    /// `modules` modules: one per module, taken all at once, so no call holds
+    /// some while it waits for the rest. A pipeline longer than the bound
+    /// takes every permit and runs alone. `None` when calls are unbounded.
+    pub(crate) async fn permit(&self, modules: usize) -> Option<OwnedSemaphorePermit> {
+        let calls = self.calls.as_ref()?;
+        Some(
+            calls
+                .permits
+                .acquire_owned(modules.clamp(1, calls.max))
+                .await,
+        )
+    }
+
+    /// Starts a call of `pipeline` over `input`, backwards when `inverse`,
+    /// holding `permit` until it ends.
+    pub(crate) fn call<S>(
+        &self,
+        pipeline: Pipeline,
+        input: S,
+        inverse: bool,
+        permit: Option<OwnedSemaphorePermit>,
+    ) -> CallStream
+    where
+        S: Stream + Send + 'static,
+        S::Item: Serialize + Send,
+    {
+        call::start(self, pipeline, input, inverse, permit)
+    }
+
+    /// A handle that shows whether the ticks still run, for tests of their
     /// lifetime.
     #[cfg(test)]
-    pub(crate) fn clock_handle(&self) -> Option<std::sync::Weak<EpochClock>> {
-        self._clock.as_ref().map(Arc::downgrade)
+    pub(crate) fn ticks_handle(&self) -> Option<std::sync::Weak<dyn Send + Sync>> {
+        self._ticks.as_ref().map(Arc::downgrade)
     }
 }

@@ -125,6 +125,38 @@ async fn an_added_lens_is_returned_when_its_registration_fails() {
     assert_owed_until_used(&db, &store, &id).await;
 }
 
+/// A use of one document, the call every lensed read and migration makes,
+/// also registers an owed lens first, and reports why while it cannot.
+#[tokio::test]
+async fn a_one_document_use_registers_an_owed_lens() {
+    let (db, store) = node().await;
+    let id = db
+        .add_lens(config("", ""))
+        .await
+        .expect("the lens is committed, so adding it succeeds");
+    let mut doc = LensDoc::new();
+    doc.insert("name".to_string(), serde_json::json!("Ada"));
+
+    let error = db
+        .lens_store()
+        .transform_doc(&id, doc.clone(), false)
+        .await
+        .expect_err("a use while registration fails reports why");
+    assert!(
+        error.to_string().contains("registration refused"),
+        "{error}"
+    );
+
+    store.allow();
+    let migrated = db
+        .lens_store()
+        .transform_doc(&id, doc.clone(), false)
+        .await
+        .expect("the owed lens registers when it is used");
+    assert_eq!(migrated, doc);
+    assert!(store.inner.has_transform(&id));
+}
+
 /// A lens added in a transaction is written into it: its config and blocks are
 /// durable with the commit, and nothing reads its module path afterwards.
 #[tokio::test]

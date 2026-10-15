@@ -3,7 +3,7 @@ use regolith::sync::OnceCell;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use lens::{LensConfig, LensDocResultStream, LensDocStream, TransformId, TransformStore};
+use lens::{LensConfig, LensDoc, LensDocResultStream, LensDocStream, TransformId, TransformStore};
 
 /// Transaction-local transform store overlay.
 ///
@@ -75,6 +75,15 @@ impl TransformStore for TxnLensStore {
         self.holder(id).inverse(id, docs)
     }
 
+    async fn transform_doc(
+        &self,
+        id: &TransformId,
+        doc: LensDoc,
+        inverse: bool,
+    ) -> lens::Result<LensDoc> {
+        self.holder(id).transform_doc(id, doc, inverse).await
+    }
+
     fn has_transform(&self, id: &TransformId) -> bool {
         self.initialized_local()
             .is_some_and(|local| local.has_transform(id))
@@ -142,6 +151,27 @@ mod tests {
         assert!(store.inverse(&local, no_docs()).is_ok());
         assert!(store.inverse(&committed, no_docs()).is_ok());
         assert!(!base.has_transform(&local));
+
+        let mut doc = LensDoc::new();
+        doc.insert("name".to_string(), serde_json::json!("Ada"));
+        assert_eq!(
+            store
+                .transform_doc(&local, doc.clone(), false)
+                .await
+                .unwrap(),
+            doc
+        );
+        assert_eq!(
+            store
+                .transform_doc(&committed, doc.clone(), true)
+                .await
+                .unwrap(),
+            doc
+        );
+        assert!(matches!(
+            store.transform_doc(&missing, doc, false).await,
+            Err(lens::Error::TransformNotFound(_))
+        ));
 
         store.remove(&local).await.unwrap();
         assert!(!store.has_transform(&local));
