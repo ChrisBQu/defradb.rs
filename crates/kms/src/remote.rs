@@ -257,3 +257,7 @@ impl RemoteKeys {
         Ok(key)
     }
 }
+
+#[cfg(test)]
+#[path = "remote_tests.rs"]
+mod tests;
