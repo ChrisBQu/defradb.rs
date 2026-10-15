@@ -209,7 +209,7 @@ pub struct DB<S: Store> {
     /// Schema definition headstore: tracks latest CID and height per collection.
     /// Emulates Go's persistent headstore for CID computation during patching.
     /// Key: collection name, Value: (sorted heads as CIDs, max height)
-    pub(crate) schema_heads: HopscotchMap<String, (Vec<Cid>, u64), RandomState>,
+    pub(crate) schema_heads: Arc<HopscotchMap<String, (Vec<Cid>, u64), RandomState>>,
     /// Collection IDs whose last local version has been deleted.
     ///
     /// Go's collection repository forbids these immediately, including for
@@ -292,7 +292,7 @@ impl<S: Store> DB<S> {
             event_bus: None,
             lens_store,
             pending_migrations: HopscotchMap::with_hasher(RandomState::default()),
-            schema_heads: HopscotchMap::with_hasher(RandomState::default()),
+            schema_heads: Arc::new(HopscotchMap::with_hasher(RandomState::default())),
             forbidden_collection_ids: HopscotchMap::with_hasher(RandomState::default()),
             document_acp: std::sync::OnceLock::new(),
             kms: std::sync::OnceLock::new(),
@@ -361,7 +361,7 @@ impl<S: Store> DB<S> {
             event_bus: None,
             lens_store,
             pending_migrations: HopscotchMap::with_hasher(RandomState::default()),
-            schema_heads: HopscotchMap::with_hasher(RandomState::default()),
+            schema_heads: Arc::new(HopscotchMap::with_hasher(RandomState::default())),
             forbidden_collection_ids: HopscotchMap::with_hasher(RandomState::default()),
             document_acp: std::sync::OnceLock::new(),
             kms: std::sync::OnceLock::new(),

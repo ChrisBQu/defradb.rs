@@ -240,7 +240,28 @@ impl<S: Store> crate::database::DB<S> {
             }
 
             // Run cross-collection validators to catch issues like multiple active versions
-            let all_existing = self.get_all_collection_versions().await?;
+            // against the same snapshot that will store the in-place update.
+            let mut txn = self.new_txn(false).await?;
+            let all_existing = self.get_all_collection_versions_with_txn(&mut txn).await?;
+            let Some(persisted_old_schema) = all_existing.iter().find(|version| {
+                version.collection_id == collection_id && version.version_id == old_version_id
+            }) else {
+                return Err(Error::CollectionVersionNotFound(old_version_id.clone()));
+            };
+            if persisted_old_schema != &old_schema {
+                return Err(Error::Storage(storage::Error::TxnConflict));
+            }
+            let name_key = CollectionNameKey::new(&actual_name);
+            let persisted_name_version = txn
+                .systemstore()?
+                .get(&name_key.bytes())
+                .await
+                .map_err(Error::Storage)?;
+            if old_schema.is_active
+                && persisted_name_version.as_deref() != Some(old_version_id.as_bytes())
+            {
+                return Err(Error::Storage(storage::Error::TxnConflict));
+            }
             let new_collections: Vec<CollectionVersion> = all_existing
                 .iter()
                 .filter(|c| c.version_id != old_version_id)
@@ -254,7 +275,6 @@ impl<S: Store> crate::database::DB<S> {
             .map_err(Error::InvalidPatch)?;
 
             // Store the updated version
-            let txn = self.new_txn(false).await?;
             {
                 let systemstore = txn.systemstore()?;
                 let key = CollectionKey::new(&old_version_id);

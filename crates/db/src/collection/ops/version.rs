@@ -191,13 +191,23 @@ impl<S: Store> crate::database::DB<S> {
     /// This scans `/collection/id/` prefix to load ALL versions, matching
     /// Go's behavior of loading all versions for cross-collection validation.
     pub async fn get_all_collection_versions(&self) -> Result<Vec<CollectionVersion>> {
-        let txn = self.new_txn(true).await?;
+        let mut txn = self.new_txn(true).await?;
+        let versions = self.get_all_collection_versions_with_txn(&mut txn).await?;
+        let _ = txn.discard();
+        Ok(versions)
+    }
+
+    /// Get all collection versions visible in a transaction snapshot.
+    pub(crate) async fn get_all_collection_versions_with_txn(
+        &self,
+        txn: &mut DbTxn<S>,
+    ) -> Result<Vec<CollectionVersion>> {
         let mut versions = Vec::new();
         let prefix = CollectionKey::collection_prefix();
 
         {
             let systemstore = txn.systemstore()?;
-            let opts = IterOptions::new().with_prefix(prefix);
+            let opts = IterOptions::new().with_prefix(prefix).with_validation(true);
             let mut iter = systemstore.iterator(opts).await.map_err(Error::Storage)?;
 
             while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
@@ -219,7 +229,6 @@ impl<S: Store> crate::database::DB<S> {
             iter.close().await.map_err(Error::Storage)?;
         }
 
-        let _ = txn.discard();
         Ok(versions)
     }
 
@@ -536,5 +545,34 @@ impl<S: Store> crate::database::DB<S> {
         };
         let _ = txn.discard();
         Ok(has_data)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn validated_collection_version_scan_detects_phantom_create() {
+        let db = crate::DB::new(storage::RegolithStore::in_memory().unwrap()).unwrap();
+        let mut initial = query::parse_sdl("type ExistingSchemaProbe { value: String }").unwrap();
+        db.create_collection(initial.remove(0)).await.unwrap();
+
+        let mut schema_txn = db.new_txn(false).await.unwrap();
+        db.get_all_collection_versions_with_txn(&mut schema_txn)
+            .await
+            .unwrap();
+        let mut staged = query::parse_sdl("type StagedSchemaProbe { value: String }").unwrap();
+        db.create_collection_with_txn(&mut schema_txn, staged.remove(0))
+            .await
+            .unwrap();
+
+        let mut concurrent =
+            query::parse_sdl("type ConcurrentSchemaProbe { value: String }").unwrap();
+        db.create_collection(concurrent.remove(0)).await.unwrap();
+
+        let result = schema_txn.commit().await;
+        assert!(
+            result.as_ref().is_err_and(|error| error.is_txn_conflict()),
+            "expected stale collection scan to conflict, got {result:?}"
+        );
     }
 }

@@ -249,9 +249,13 @@ impl<S: Store> crate::database::DB<S> {
             .await
             .map_err(Error::Storage)?;
 
-        // Update schema_heads: new collection starts at height=1
+        // Publish the process-wide head only after this transaction commits.
         if let Ok(cid) = cid::Cid::try_from(version_id.as_str()) {
-            self.schema_heads.insert(name.clone(), (vec![cid], 1));
+            let schema_heads = std::sync::Arc::clone(&self.schema_heads);
+            let head_name = name.clone();
+            txn.on_success(Box::new(move || {
+                schema_heads.insert(head_name, (vec![cid], 1));
+            }))?;
         }
 
         // Add to transaction's cache
@@ -302,14 +306,13 @@ impl<S: Store> crate::database::DB<S> {
     ) -> Result<CollectionVersion> {
         self.check_node_access(None, acp::nac::NodePermission::CollectionPatch)
             .await?;
-        let existing = self.get_all_collection_versions().await?;
+        let mut txn = self.new_txn(false).await?;
+        let existing = self.get_all_collection_versions_with_txn(&mut txn).await?;
         schema::definition_validation::validate_new_collections_with_existing(
             std::slice::from_ref(&schema),
             &existing,
         )
         .map_err(Error::Other)?;
-
-        let mut txn = self.new_txn(false).await?;
 
         let finalized_schema = self.create_collection_with_txn(&mut txn, schema).await?;
 
@@ -371,7 +374,8 @@ impl<S: Store> crate::database::DB<S> {
     ) -> Result<Vec<CollectionVersion>> {
         self.check_node_access(None, acp::nac::NodePermission::CollectionPatch)
             .await?;
-        let existing = self.get_all_collection_versions().await?;
+        let mut txn = self.new_txn(false).await?;
+        let existing = self.get_all_collection_versions_with_txn(&mut txn).await?;
         schema::definition_validation::validate_new_collections_with_existing(&schemas, &existing)
             .map_err(Error::Other)?;
 
@@ -384,7 +388,6 @@ impl<S: Store> crate::database::DB<S> {
             .map(|s| (s.name.clone(), s.collection_id.clone()))
             .collect();
 
-        let mut txn = self.new_txn(false).await?;
         let mut finalized_schemas = Vec::with_capacity(schemas.len());
 
         for schema in schemas {

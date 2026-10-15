@@ -20,6 +20,10 @@ impl<S: Store> crate::database::DB<S> {
         is_active_explicitly_set: bool,
         migration: Option<lens::LensConfig>,
     ) -> Result<CollectionVersion> {
+        // Start the write transaction before loading schema metadata so all
+        // version/head decisions use the snapshot that will be committed.
+        let mut txn = self.new_txn(false).await?;
+
         // Go compatibility: default new fields with CType::None to CType::LwwRegister.
         // Go's patchCollection does this in collection_define.go for new fields that
         // don't have an explicit CRDT type. This must happen before CID generation.
@@ -39,7 +43,26 @@ impl<S: Store> crate::database::DB<S> {
         // Run Go-compatible cross-collection validators (before schema validate() which
         // uses different error messages). These validators cover duplicate fields,
         // CRDT/kind compatibility, and all Go-specific patch constraints.
-        let all_existing = self.get_all_collection_versions().await?;
+        let all_existing = self.get_all_collection_versions_with_txn(&mut txn).await?;
+        let Some(persisted_old_schema) = all_existing.iter().find(|version| {
+            version.collection_id == collection_id && version.version_id == old_version_id
+        }) else {
+            return Err(Error::CollectionVersionNotFound(old_version_id.to_string()));
+        };
+        if persisted_old_schema != old_schema {
+            return Err(Error::Storage(storage::Error::TxnConflict));
+        }
+        let old_name_key = CollectionNameKey::new(actual_name);
+        let persisted_name_version = txn
+            .systemstore()?
+            .get(&old_name_key.bytes())
+            .await
+            .map_err(Error::Storage)?;
+        if old_schema.is_active
+            && persisted_name_version.as_deref() != Some(old_version_id.as_bytes())
+        {
+            return Err(Error::Storage(storage::Error::TxnConflict));
+        }
         let new_collections: Vec<CollectionVersion> = all_existing
             .iter()
             .filter(|c| c.version_id != old_version_id)
@@ -131,8 +154,24 @@ impl<S: Store> crate::database::DB<S> {
         // Read current heads from schema_heads (emulates Go's persistent headstore).
         // For branching patches (v1→v2 then v1→v3), the headstore tracks the latest
         // CID after v2, so v3 gets heads=[v2_cid] and priority=3, matching Go.
+        let persisted_version_count = all_existing
+            .iter()
+            .filter(|version| version.collection_id == collection_id && !version.is_placeholder)
+            .count() as u64;
         let (collection_heads, collection_priority) = {
-            match self.schema_heads.get(actual_name) {
+            match self
+                .schema_heads
+                .get(actual_name)
+                .filter(|(heads, height)| {
+                    *height == persisted_version_count
+                        && !heads.is_empty()
+                        && heads.iter().all(|head| {
+                            all_existing.iter().any(|version| {
+                                version.collection_id == collection_id
+                                    && version.version_id == head.to_string()
+                            })
+                        })
+                }) {
                 Some((heads, h)) => (heads, h + 1),
                 None => {
                     // Fallback: compute from version chain (for databases loaded from storage)
@@ -184,8 +223,7 @@ impl<S: Store> crate::database::DB<S> {
         // with previous_version.transform set. We need to copy that transform to preserve
         // the migration link.
         let placeholder_transform = {
-            let read_txn = self.new_txn(true).await?;
-            let systemstore = read_txn.systemstore()?;
+            let systemstore = txn.systemstore()?;
             let placeholder_key = CollectionKey::new(&new_version_id);
             match systemstore
                 .get(&placeholder_key.bytes())
@@ -285,9 +323,6 @@ impl<S: Store> crate::database::DB<S> {
             field_count = new_schema.fields.len(),
             "Creating new schema version"
         );
-
-        // Begin transaction to store all version data
-        let txn = self.new_txn(false).await?;
 
         // Prepare serialized data before getting systemstore reference
         let old_version_key = CollectionKey::new(old_version_id);
@@ -459,6 +494,14 @@ impl<S: Store> crate::database::DB<S> {
             }
         }
 
+        if let Ok(new_cid) = cid::Cid::try_from(new_version_id.as_str()) {
+            let schema_heads = std::sync::Arc::clone(&self.schema_heads);
+            let head_name = actual_name.to_string();
+            txn.on_success(Box::new(move || {
+                schema_heads.insert(head_name, (vec![new_cid], collection_priority));
+            }))?;
+        }
+
         txn.commit().await?;
 
         if let Some((transform_id, config)) = committed_migration {
@@ -474,14 +517,6 @@ impl<S: Store> crate::database::DB<S> {
                     "failed to promote collection patch migration lens"
                 );
             }
-        }
-
-        // Publish the new head only after all durable patch writes succeed.
-        if let Ok(new_cid) = cid::Cid::try_from(new_version_id.as_str()) {
-            self.schema_heads.insert(
-                actual_name.to_string(),
-                (vec![new_cid], collection_priority),
-            );
         }
 
         // Clean up any pending migration that was linked to this version
