@@ -362,7 +362,10 @@ impl<S: Store> DB<S> {
         // collections written before part IDs existed.
         self.maybe_migrate_counter_accumulators().await?;
         self.migrate_index_format().await?;
-        self.resume_index_backfills().await
+        self.resume_index_backfills().await?;
+        // Reindexes owed by schema changes a crash or a failure left unsettled.
+        self.settle_owed_reindexes_after_commit().await;
+        Ok(())
     }
 
     /// Set the event bus for subscription notifications.

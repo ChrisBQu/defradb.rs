@@ -83,6 +83,7 @@ impl<S: Store> crate::database::DB<S> {
                 .set(&name_key.bytes(), version_id.as_bytes())
                 .await
                 .map_err(Error::Storage)?;
+            crate::definition::migration::owe_reindex(&systemstore, &collection_id, None).await?;
 
             // Find and deactivate other versions with the same collection_id
             let version_prefix = CollectionVersionKey::collection_prefix(&collection_id);
@@ -140,9 +141,8 @@ impl<S: Store> crate::database::DB<S> {
             "Set active collection version"
         );
 
-        // After switching the active version, rebuild indexes with migrated values
-        // if the new version's history chain contains any migrations.
-        self.reindex_collection_with_migrations(&name).await?;
+        // After switching the active version, rebuild the indexes the switch owes.
+        self.settle_owed_reindexes_after_commit().await;
 
         Ok(())
     }

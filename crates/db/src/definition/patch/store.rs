@@ -374,6 +374,8 @@ impl<S: Store> crate::database::DB<S> {
                     .set(&name_key.bytes(), new_version_id.as_bytes())
                     .await
                     .map_err(Error::Storage)?;
+                crate::definition::migration::owe_reindex(&systemstore, collection_id, None)
+                    .await?;
             }
 
             // 4. Add version index at /collection/version/{collection_id}/{new_version_id}
@@ -544,15 +546,9 @@ impl<S: Store> crate::database::DB<S> {
                 .await?;
         }
 
-        // After switching active versions, reindex if the new version's history has migrations
+        // After switching active versions, rebuild the indexes the switch owes.
         if new_schema.is_active {
-            if let Err(e) = self.maybe_reindex_on_version_switch(actual_name).await {
-                tracing::warn!(
-                    error = %e,
-                    collection = %actual_name,
-                    "Failed to reindex after version switch"
-                );
-            }
+            self.settle_owed_reindexes_after_commit().await;
         }
 
         Ok(new_schema)

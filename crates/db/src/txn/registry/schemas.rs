@@ -51,7 +51,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
 
         let db = self.db.clone();
         let cache_db = db.clone();
-        let cache_destination = updated_destination.clone();
+        let cache_destination = updated_destination;
         let cache_collection = updated_collection.clone();
         txn.on_success_ordered(Arc::new(move || {
             if cache_destination.name.is_empty() {
@@ -74,27 +74,10 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
             let db = db.clone();
             let config = config.clone();
             let transform_id = transform_id_for_commit.clone();
-            let updated_destination = updated_destination.clone();
             Box::pin(async move {
                 db.bump_migration_generation();
                 db.register_committed_lens(transform_id, config).await;
-
-                if !updated_destination.name.is_empty() {
-                    if let Err(error) = db
-                        .maybe_reindex_after_migration(
-                            &updated_destination.name,
-                            &updated_destination.version_id,
-                        )
-                        .await
-                    {
-                        tracing::warn!(
-                            collection = %updated_destination.name,
-                            version_id = %updated_destination.version_id,
-                            error = %error,
-                            "failed to reindex committed transaction migration"
-                        );
-                    }
-                }
+                db.settle_owed_reindexes_after_commit().await;
             })
         }))?;
 

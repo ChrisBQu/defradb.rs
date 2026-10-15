@@ -2,7 +2,7 @@
 
 use rapidhash::HashMapExt;
 use storage::corekv::Store;
-use tracing::{instrument, warn};
+use tracing::warn;
 
 use super::helpers::{cache_document_version, cache_migrated_document, lens_doc_to_document};
 use crate::definition::loader::get_collections_by_collection_id;
@@ -11,70 +11,48 @@ use crate::index::IndexManager;
 use crate::DB;
 
 impl<S: Store> DB<S> {
-    /// Rebuild secondary indexes for a collection after a migration is registered.
-    ///
-    /// Checks if the destination version is in the active version's history chain
-    /// (not just an exact match). This handles cases where migrations are registered
-    /// for ancestor versions that affect the active version's data.
-    #[instrument(skip(self), fields(collection = %collection_name, dest_version = %dest_version_id))]
-    pub(crate) async fn maybe_reindex_after_migration(
+    /// Whether a schema change leaves `collection`'s secondary indexes to
+    /// rebuild: it has indexes and, for a migration (`migration_destination`),
+    /// the active version's history contains the migration's destination, an
+    /// ancestor version included. A version switch always needs it.
+    pub(super) async fn reindex_needed(
         &self,
-        collection_name: &str,
-        dest_version_id: &str,
-    ) -> Result<()> {
-        let collection = match self.get_collection(collection_name)? {
-            Some(c) => c,
-            None => {
-                return Ok(());
-            }
-        };
-
+        collection: &crate::collection::Collection,
+        migration_destination: Option<&str>,
+    ) -> Result<bool> {
         if collection.get_indexes().is_empty() {
-            return Ok(());
+            return Ok(false);
         }
-
-        let collection_id = collection.collection_id().to_string();
-        let target_version_id = collection.version_id().to_string();
-
+        let Some(destination) = migration_destination else {
+            return Ok(true);
+        };
         let read_txn = self.new_txn(true).await?;
-        let systemstore = read_txn.systemstore()?;
-        let versions = get_collections_by_collection_id(&systemstore, &collection_id).await?;
+        let versions = {
+            let systemstore = read_txn.systemstore()?;
+            get_collections_by_collection_id(&systemstore, collection.collection_id()).await?
+        };
         let _ = read_txn.discard();
-
-        let history =
-            crate::definition::lens::build_collection_history(&versions, &target_version_id);
-        let in_history = history
-            .as_ref()
-            .is_some_and(|h| h.contains_key(dest_version_id));
-
-        if !in_history {
-            return Ok(());
-        }
-
-        self.reindex_collection_with_migrations(collection_name)
-            .await
+        Ok(
+            crate::definition::lens::build_collection_history(&versions, collection.version_id())
+                .is_some_and(|history| history.contains_key(destination)),
+        )
     }
 
-    /// Reindex a collection after the active version changes (e.g., via patch).
-    ///
-    /// Version switches can preserve index definitions while changing the active
-    /// schema. Rebuild entries for the active schema, applying lens migrations
-    /// where the history contains transforms.
-    pub(crate) async fn maybe_reindex_on_version_switch(
+    /// Rebuild a collection's indexes, clearing the reindex owed to
+    /// `collection_id` under `token` in the transaction that rebuilds them.
+    pub(super) async fn rebuild_settling(
         &self,
         collection_name: &str,
+        collection_id: &str,
+        token: u64,
     ) -> Result<()> {
-        let collection = match self.get_collection(collection_name)? {
-            Some(c) => c,
-            None => return Ok(()),
-        };
-
-        if collection.get_indexes().is_empty() {
-            return Ok(());
-        }
-
-        self.reindex_collection_with_migrations(collection_name)
-            .await
+        self.materialize_collection_inner(
+            collection_name,
+            false,
+            Some((collection_id.to_string(), token)),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Rebuild secondary indexes for a collection using lens-migrated documents.
@@ -85,7 +63,7 @@ impl<S: Store> DB<S> {
         if self.get_collection(collection_name)?.is_none() {
             return Ok(());
         }
-        self.materialize_collection_inner(collection_name, false)
+        self.materialize_collection_inner(collection_name, false, None)
             .await
             .map(|_| ())
     }
@@ -99,14 +77,17 @@ impl<S: Store> DB<S> {
     pub async fn materialize_collection(&self, collection_name: &str) -> Result<usize> {
         self.check_node_access(None, acp::nac::NodePermission::CollectionPatch)
             .await?;
-        self.materialize_collection_inner(collection_name, true)
+        self.materialize_collection_inner(collection_name, true, None)
             .await
     }
 
+    /// `settles` names a reindex owed to a collection, by its ID and token,
+    /// that the rebuild clears in its own transaction.
     async fn materialize_collection_inner(
         &self,
         collection_name: &str,
         materialize_identity_paths: bool,
+        settles: Option<(String, u64)>,
     ) -> Result<usize> {
         let collection = self
             .get_collection(collection_name)?
@@ -116,6 +97,7 @@ impl<S: Store> DB<S> {
             collection_name: collection_name.to_owned(),
             materialize_identity_paths,
             lens_store: self.lens_store.clone(),
+            settles,
         };
         match self
             .store()
@@ -139,6 +121,7 @@ struct MaterializeAttempt {
     collection_name: String,
     materialize_identity_paths: bool,
     lens_store: std::sync::Arc<dyn lens::TransformStore>,
+    settles: Option<(String, u64)>,
 }
 
 impl storage::corekv::RetryAttemptFn for MaterializeAttempt {
@@ -305,6 +288,11 @@ impl MaterializeAttempt {
                         )
                         .await?;
                 }
+            }
+
+            if let Some((collection_id, token)) = &self.settles {
+                super::owed_reindex::clear_owed_reindex(&txn_systemstore, collection_id, *token)
+                    .await?;
             }
 
             tracing::debug!(

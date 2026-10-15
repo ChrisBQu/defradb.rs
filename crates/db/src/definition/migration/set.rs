@@ -220,6 +220,10 @@ impl<S: Store> DB<S> {
                 &config_for_persistence,
             )
             .await?;
+            if !dst_col.name.is_empty() {
+                super::owe_reindex(&systemstore, &dst_col.collection_id, Some(&dest_version_id))
+                    .await?;
+            }
         }
         if !collection_name.is_empty() {
             let cached_collection = crate::collection::Collection::load_index_actions(
@@ -245,19 +249,7 @@ impl<S: Store> DB<S> {
         }
         txn.commit().await?;
         self.bump_migration_generation();
-
-        if !collection_name.is_empty() {
-            if let Err(e) = self
-                .maybe_reindex_after_migration(&collection_name, &dest_version_id)
-                .await
-            {
-                tracing::warn!(
-                    error = %e,
-                    collection = %collection_name,
-                    "Failed to reindex after migration"
-                );
-            }
-        }
+        self.settle_owed_reindexes_after_commit().await;
 
         Ok(transform_id)
     }
@@ -469,6 +461,10 @@ impl<S: Store> DB<S> {
                 &config_for_persistence,
             )
             .await?;
+            if !dst_col.name.is_empty() {
+                super::owe_reindex(&systemstore, &dst_col.collection_id, Some(&dest_version_id))
+                    .await?;
+            }
         }
 
         Ok(SetMigrationInTxnOutcome {
