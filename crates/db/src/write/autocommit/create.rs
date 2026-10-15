@@ -18,7 +18,13 @@ struct CreateRetryAttempt<S: Store> {
     computed_blocks: ComputedBlocks,
     doc_short_id: u64,
     sign_config: Option<defra_core::signing::SigningConfig>,
-    acp_registration: Option<(Arc<dyn acp::DocumentACP>, identity::Did, String, String)>,
+    acp_registration: Option<(
+        Arc<dyn acp::DocumentACP>,
+        identity::Did,
+        String,
+        String,
+        Option<String>,
+    )>,
     prepared_inputs: Option<query::prepared::PreparedInputMemo>,
 }
 
@@ -48,8 +54,48 @@ struct CreateManyRetryAttempt<S: Store> {
     identities: Vec<DocStorageIdentity>,
     computed: Vec<ComputedBlocks>,
     signing_config: Option<defra_core::signing::SigningConfig>,
-    acp_registration: Option<(Arc<dyn acp::DocumentACP>, identity::Did, String, String)>,
+    acp_registration: Option<(
+        Arc<dyn acp::DocumentACP>,
+        identity::Did,
+        String,
+        String,
+        Option<String>,
+    )>,
     prepared_inputs: Option<query::prepared::PreparedInputMemo>,
+}
+
+pub(super) fn acp_registration_retry_callback(
+    acp: Arc<dyn acp::DocumentACP>,
+    creator: identity::Did,
+    policy_id: String,
+    resource_name: String,
+    doc_id: String,
+    bearer_token: Option<String>,
+) -> storage::corekv::AsyncOrderedRetryCallback {
+    Box::new(move || {
+        let acp = Arc::clone(&acp);
+        let creator = creator.clone();
+        let policy_id = policy_id.clone();
+        let resource_name = resource_name.clone();
+        let doc_id = doc_id.clone();
+        let bearer_token = bearer_token.clone();
+        Box::pin(defra_core::signing::scope_request_bearer_token(
+            Some(creator.to_string()),
+            bearer_token,
+            async move {
+                if !acp
+                    .is_doc_registered(&policy_id, &resource_name, &doc_id)
+                    .await
+                    .map_err(|error| error.to_string())?
+                {
+                    acp.register_doc_object(&creator, &policy_id, &resource_name, &doc_id)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                }
+                Ok(())
+            },
+        ))
+    })
 }
 
 impl<S: Store + 'static> storage::corekv::RetryAttemptFn for CreateManyRetryAttempt<S> {
@@ -252,11 +298,14 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                         "invalid mutation creator DID: {error}"
                     ))
                 })?;
+                let request_bearer_token =
+                    defra_core::signing::get_request_bearer_token(creator.as_str());
                 Some((
                     acp,
                     creator,
                     policy.id.clone(),
                     policy.resource_name.clone(),
+                    request_bearer_token,
                 ))
             }
             _ => None,
@@ -458,26 +507,17 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 return Err(error);
             }
         };
-        if let Some((acp, creator, policy_id, resource_name)) = attempt.acp_registration.as_ref() {
-            let acp = Arc::clone(acp);
-            let creator = creator.clone();
-            let policy_id = policy_id.clone();
-            let resource_name = resource_name.clone();
-            let doc_id = doc_id.to_string();
-            txn.on_retry_success_ordered_async(Box::new(move || {
-                Box::pin(async move {
-                    if !acp
-                        .is_doc_registered(&policy_id, &resource_name, &doc_id)
-                        .await
-                        .map_err(|error| error.to_string())?
-                    {
-                        acp.register_doc_object(&creator, &policy_id, &resource_name, &doc_id)
-                            .await
-                            .map_err(|error| error.to_string())?;
-                    }
-                    Ok(())
-                })
-            }))
+        if let Some((acp, creator, policy_id, resource_name, bearer_token)) =
+            attempt.acp_registration.as_ref()
+        {
+            txn.on_retry_success_ordered_async(acp_registration_retry_callback(
+                Arc::clone(acp),
+                creator.clone(),
+                policy_id.clone(),
+                resource_name.clone(),
+                doc_id.to_string(),
+                bearer_token.clone(),
+            ))
             .map_err(crate::error::commit_query_error)?;
         }
         if let Some(bus) = self.db.event_bus().cloned() {
@@ -703,11 +743,14 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                         "invalid mutation creator DID: {error}"
                     ))
                 })?;
+                let request_bearer_token =
+                    defra_core::signing::get_request_bearer_token(creator.as_str());
                 Some((
                     acp,
                     creator,
                     policy.id.clone(),
                     policy.resource_name.clone(),
+                    request_bearer_token,
                 ))
             }
             _ => None,
@@ -882,28 +925,17 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             }
         };
         for (doc_id, _, cid, block, col_data) in &results {
-            if let Some((acp, creator, policy_id, resource_name)) =
+            if let Some((acp, creator, policy_id, resource_name, bearer_token)) =
                 attempt.acp_registration.as_ref()
             {
-                let acp = Arc::clone(acp);
-                let creator = creator.clone();
-                let policy_id = policy_id.clone();
-                let resource_name = resource_name.clone();
-                let doc_id = doc_id.to_string();
-                txn.on_retry_success_ordered_async(Box::new(move || {
-                    Box::pin(async move {
-                        if !acp
-                            .is_doc_registered(&policy_id, &resource_name, &doc_id)
-                            .await
-                            .map_err(|error| error.to_string())?
-                        {
-                            acp.register_doc_object(&creator, &policy_id, &resource_name, &doc_id)
-                                .await
-                                .map_err(|error| error.to_string())?;
-                        }
-                        Ok(())
-                    })
-                }))
+                txn.on_retry_success_ordered_async(acp_registration_retry_callback(
+                    Arc::clone(acp),
+                    creator.clone(),
+                    policy_id.clone(),
+                    resource_name.clone(),
+                    doc_id.to_string(),
+                    bearer_token.clone(),
+                ))
                 .map_err(crate::error::commit_query_error)?;
             }
             if let Some(bus) = self.db.event_bus().cloned() {

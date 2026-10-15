@@ -131,3 +131,26 @@ async fn deferred_registration_hook_uses_bearer_captured_before_commit() {
     );
     assert_eq!(defra_core::signing::get_request_bearer_token(DID), None);
 }
+
+#[tokio::test]
+async fn create_retry_callback_uses_bearer_captured_before_commit() {
+    let observer = Arc::new(TokenObserver::default());
+    let creator = Did::new(DID).unwrap();
+    let callback = super::create::acp_registration_retry_callback(
+        observer.clone(),
+        creator,
+        "policy".into(),
+        "resource".into(),
+        "doc-2".into(),
+        Some(TOKEN.to_string()),
+    );
+
+    assert_eq!(defra_core::signing::get_request_bearer_token(DID), None);
+    callback().await.unwrap();
+    assert_eq!(defra_core::signing::get_request_bearer_token(DID), None);
+    let observed = observer.0.lock().unwrap().clone();
+    assert_eq!(
+        observed,
+        vec![Some(TOKEN.to_string()), Some(TOKEN.to_string())]
+    );
+}
