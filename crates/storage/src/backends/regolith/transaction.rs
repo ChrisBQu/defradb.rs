@@ -45,6 +45,8 @@ pub struct RegolithTxn {
     ordered_async_callbacks: Vec<AsyncOrderedTxnCallback>,
     savepoints: Vec<SavepointState>,
     has_writes: bool,
+    scoped_attempt: bool,
+    owns_active_slot: bool,
 }
 
 #[derive(Clone)]
@@ -54,8 +56,6 @@ struct SavepointState {
     ordered_events: usize,
     ordered_async_callbacks: usize,
     has_writes: bool,
-    scoped_attempt: bool,
-    owns_active_slot: bool,
 }
 
 impl RegolithTxn {
@@ -152,6 +152,7 @@ impl RegolithTxn {
             has_writes: false,
             scoped_attempt: true,
             owns_active_slot: false,
+            savepoints: Vec::new(),
         }
     }
 
