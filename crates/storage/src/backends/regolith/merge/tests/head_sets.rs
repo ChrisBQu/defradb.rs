@@ -130,7 +130,13 @@ fn every_head_set_operand_touches_every_part() {
 fn an_add_makes_a_head_and_a_supersede_ends_it() {
     let set = fold(None, &[&adds(&[(b"a", 3), (b"b", 5)])]);
     assert_eq!(live(&set), [(b"a".to_vec(), 3), (b"b".to_vec(), 5)]);
-    let set = fold(None, &[&adds(&[(b"a", 3), (b"b", 5)]), &block(&[b"a"], &[], (b"c", 6))]);
+    let set = fold(
+        None,
+        &[
+            &adds(&[(b"a", 3), (b"b", 5)]),
+            &block(&[b"a"], &[], (b"c", 6)),
+        ],
+    );
     assert_eq!(live(&set), [(b"b".to_vec(), 5), (b"c".to_vec(), 6)]);
     assert_eq!(set.ahead().count(), 0);
 }
@@ -156,12 +162,25 @@ fn a_child_before_its_parent_leaves_the_child_live_and_no_ahead_name() {
     assert!(!set.is_live(b"p"));
 }
 
+/// A writer supersedes ahead only while the parent is unpublished in its
+/// validated read, so children that arrive before the parent supersede ahead
+/// and children written after it supersede.
 #[test]
 fn two_children_of_one_parent_leave_both_live_after_the_parent() {
-    let first = block(&[], &[b"p"], (b"c1", 2));
-    let second = block(&[], &[b"p"], (b"c2", 2));
     let parent = adds(&[(b"p", 1)]);
-    for order in [[&first, &second, &parent], [&parent, &first, &second]] {
+    let early = [
+        block(&[], &[b"p"], (b"c1", 2)),
+        block(&[], &[b"p"], (b"c2", 2)),
+    ];
+    let late = [
+        block(&[b"p"], &[], (b"c1", 2)),
+        block(&[b"p"], &[], (b"c2", 2)),
+    ];
+    for order in [
+        [&early[0], &early[1], &parent],
+        [&parent, &late[0], &late[1]],
+        [&early[0], &parent, &late[1]],
+    ] {
         let set = fold(None, &order);
         let heads: Vec<_> = live(&set).into_iter().map(|(name, _)| name).collect();
         assert_eq!(heads, [b"c1".to_vec(), b"c2".to_vec()]);
@@ -212,12 +231,16 @@ fn malformed_bytes_fail_with_none() {
     }
     let mut longer = operand.clone();
     longer.push(0);
-    assert!(DefraMergeOperator.full_merge(b"set", None, &[&longer]).is_none());
+    assert!(DefraMergeOperator
+        .full_merge(b"set", None, &[&longer])
+        .is_none());
     let value = DefraMergeOperator
         .full_merge(b"set", None, &[&operand])
         .unwrap();
     // A value is no operand and an operand is no value.
-    assert!(DefraMergeOperator.full_merge(b"set", None, &[&value]).is_none());
+    assert!(DefraMergeOperator
+        .full_merge(b"set", None, &[&value])
+        .is_none());
     assert!(DefraMergeOperator
         .full_merge(b"set", Some(&operand), &[&operand])
         .is_none());
@@ -225,7 +248,9 @@ fn malformed_bytes_fail_with_none() {
     for end in 0..value.len() {
         assert!(Set::read(&value[..end]).is_none(), "a value cut at {end}");
     }
-    assert!(DefraMergeOperator.partial_merge(b"set", &operand, &value).is_none());
+    assert!(DefraMergeOperator
+        .partial_merge(b"set", &operand, &value)
+        .is_none());
     // Names must ascend and never repeat.
     let mut duplicate = Vec::new();
     for _ in 0..2 {
@@ -233,7 +258,9 @@ fn malformed_bytes_fail_with_none() {
     }
     let body = [&[2u8][..], &duplicate].concat();
     let forged = [b"DM\x01\x08".as_slice(), &body].concat();
-    assert!(DefraMergeOperator.full_merge(b"set", None, &[&forged]).is_none());
+    assert!(DefraMergeOperator
+        .full_merge(b"set", None, &[&forged])
+        .is_none());
 }
 
 #[test]

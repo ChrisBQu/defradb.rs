@@ -325,14 +325,18 @@ async fn concurrent_updates_of_one_document_both_commit() {
         .await
         .unwrap()
         .doc_id;
+    // Read outside the writers: `get_for_update` validates every field, which
+    // would make the writers conflict on the document value, not on the heads.
+    let reader = db::DbDocMutator::new(db.clone(), db.new_txn(true).await.unwrap());
+    let current = reader
+        .get_for_update("Pair", &doc_id)
+        .await
+        .unwrap()
+        .unwrap();
     let mut writers = Vec::new();
     for (field, value) in [("left", 1), ("right", 2)] {
         let writer = db::DbDocMutator::new(db.clone(), db.new_txn(false).await.unwrap());
-        let mut doc = writer
-            .get_for_update("Pair", &doc_id)
-            .await
-            .unwrap()
-            .unwrap();
+        let mut doc = current.clone();
         doc.set(field, document::NormalValue::Int(value));
         writer
             .update(
