@@ -11,15 +11,19 @@ use super::{RetryAttempt, RetryAttemptFn, RetryAttemptFuture, RetryAttemptIO, Re
 use crate::corekv::callbacks::RetryCallbacks;
 use crate::corekv::errors::{Result, TransactionConflict};
 use crate::corekv::iterator::Iterator;
-use crate::corekv::traits::{private, Reader, Writer};
+use crate::corekv::traits::{private, MaybeSendSync, Reader, Writer};
 use crate::corekv::types::{AppendLog, IterOptions};
 
-/// Intercepts a write staged by an engine-owned attempt. `value` is `None` for
-/// deletes. The interceptor runs before the underlying write is staged.
-#[cfg(not(target_arch = "wasm32"))]
-pub type RetryWriteInterceptor = Arc<dyn Fn(&[u8], Option<&[u8]>) -> Result<()> + Send + Sync>;
-#[cfg(target_arch = "wasm32")]
-pub type RetryWriteInterceptor = Arc<dyn Fn(&[u8], Option<&[u8]>) -> Result<()>>;
+/// Sees a write an engine-owned attempt stages, its key and its value (`None`
+/// for a delete), before it is staged; an error refuses the write. `Send` and
+/// `Sync` on native targets ([`MaybeSendSync`]).
+pub trait InterceptWrite: Fn(&[u8], Option<&[u8]>) -> Result<()> + MaybeSendSync {}
+
+impl<F> InterceptWrite for F where F: Fn(&[u8], Option<&[u8]>) -> Result<()> + MaybeSendSync {}
+
+/// Intercepts a write staged by an engine-owned attempt. The interceptor runs
+/// before the underlying write is staged.
+pub type RetryWriteInterceptor = Arc<dyn InterceptWrite>;
 
 /// Wrap a retry attempt with a safe write interceptor while preserving the
 /// backend-owned attempt IO and commit lifecycle. Useful for decorators that
@@ -41,20 +45,6 @@ struct InterceptingRetryAttempt {
 
 impl private::Sealed for InterceptingRetryAttempt {}
 
-#[cfg(not(target_arch = "wasm32"))]
-impl RetryAttemptFn for InterceptingRetryAttempt {
-    fn run<'a>(&'a mut self, txn: &'a mut dyn RetryTxn) -> RetryAttemptFuture<'a> {
-        Box::pin(async move {
-            let mut wrapped = InterceptingRetryTxn {
-                inner: txn,
-                interceptor: Arc::clone(&self.interceptor),
-            };
-            self.inner.run(&mut wrapped).await
-        })
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
 impl RetryAttemptFn for InterceptingRetryAttempt {
     fn run<'a>(&'a mut self, txn: &'a mut dyn RetryTxn) -> RetryAttemptFuture<'a> {
         Box::pin(async move {
@@ -163,17 +153,6 @@ impl Writer for InterceptingRetryAttemptIO {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-impl RetryAttemptIO for InterceptingRetryAttemptIO {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-    fn into_any(self: Box<Self>) -> Box<dyn Any> {
-        self.inner.into_any()
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
 impl RetryAttemptIO for InterceptingRetryAttemptIO {
     fn as_any(&self) -> &dyn Any {
         self

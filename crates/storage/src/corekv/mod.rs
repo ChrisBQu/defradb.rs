@@ -75,15 +75,16 @@ pub mod types;
 pub(crate) use callbacks::truncate_queue;
 pub use callbacks::{
     make_async_callback, make_callback, AsyncOrderedRetryCallback, AsyncOrderedTxnCallback,
-    AsyncTxnCallback, OrderedRetryCallback, OrderedTxnCallback, OrderedTxnCallbacks,
+    AsyncTxnCallback, CallOnce, OrderedRetryCallback, OrderedTxnCallback, OrderedTxnCallbacks,
     RetryCallbackCounts, RetryCallbackParts, RetryCallbacks, TxnCallback,
 };
 pub use errors::{Error, Result, TransactionConflict, UNIQUE_CONSTRAINT_VIOLATION_MESSAGE};
 pub use iterator::{Iterator, KvPair};
 pub use retry::policy::{engine_retry_options, DEFAULT_MAX_TXN_RETRIES};
 pub use retry::{
-    intercept_retry_writes, RetryAttempt, RetryAttemptError, RetryAttemptFn, RetryAttemptFuture,
-    RetryAttemptIO, RetryAttemptValue, RetryOptions, RetryTxn, RetryWriteInterceptor,
+    intercept_retry_writes, InterceptWrite, RetryAttempt, RetryAttemptError, RetryAttemptFn,
+    RetryAttemptFuture, RetryAttemptIO, RetryAttemptValue, RetryOptions, RetryTxn,
+    RetryWriteInterceptor,
 };
 pub use traits::private;
 pub use traits::{

@@ -5,20 +5,19 @@
 //! and can be wrapped to see every write it stages ([`intercept_retry_writes`]).
 
 use std::any::Any;
-use std::future::Future;
-use std::pin::Pin;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use defra_core::thread_bounds::MaybeBoxFuture;
 
 use super::callbacks::RetryCallbacks;
 use super::errors::Result;
-use super::traits::{private, MaybeSendSync, ReaderWriter};
+use super::traits::{private, MaybeSend, MaybeSendSync, ReaderWriter};
 
 mod intercept;
 pub mod policy;
 
-pub use intercept::{intercept_retry_writes, RetryWriteInterceptor};
+pub use intercept::{intercept_retry_writes, InterceptWrite, RetryWriteInterceptor};
 
 /// A retry attempt's restricted transaction view. It deliberately has no
 /// commit, discard, iterator, or callback methods: the store owns the attempt
@@ -74,6 +73,9 @@ pub trait RetryAttemptIO: ReaderWriter + private::Sealed {
     fn into_any(self: Box<Self>) -> Box<dyn Any>;
 }
 
+/// What an attempt returns, or the domain error it aborts with.
+// The one shape named per target: a trait object over `MaybeSend` would lose
+// the `downcast` that `Box<dyn Any + Send>` has.
 #[cfg(not(target_arch = "wasm32"))]
 pub type RetryAttemptValue = Box<dyn Any + Send>;
 #[cfg(target_arch = "wasm32")]
@@ -84,10 +86,7 @@ pub type RetryAttemptValue = Box<dyn Any>;
 pub enum RetryAttemptError {
     Storage(super::errors::Error),
     Exhausted(super::errors::TransactionConflict),
-    #[cfg(not(target_arch = "wasm32"))]
-    Abort(Box<dyn Any + Send>),
-    #[cfg(target_arch = "wasm32")]
-    Abort(Box<dyn Any>),
+    Abort(RetryAttemptValue),
 }
 
 impl std::fmt::Debug for RetryAttemptError {
@@ -119,19 +118,10 @@ impl RetryAttemptError {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn downcast_abort<T: Any + Send>(self) -> std::result::Result<T, Self> {
-        match self {
-            Self::Abort(error) => match error.downcast::<T>() {
-                Ok(value) => Ok(*value),
-                Err(error) => Err(Self::Abort(error)),
-            },
-            storage => Err(storage),
-        }
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    pub fn downcast_abort<T: Any>(self) -> std::result::Result<T, Self> {
+    pub fn downcast_abort<T>(self) -> std::result::Result<T, Self>
+    where
+        T: Any,
+    {
         match self {
             Self::Abort(error) => match error.downcast::<T>() {
                 Ok(value) => Ok(*value),
@@ -142,41 +132,20 @@ impl RetryAttemptError {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-pub type RetryAttemptFuture<'a> = Pin<
-    Box<dyn Future<Output = std::result::Result<RetryAttemptValue, RetryAttemptError>> + Send + 'a>,
->;
-#[cfg(target_arch = "wasm32")]
+/// One run of an attempt.
 pub type RetryAttemptFuture<'a> =
-    Pin<Box<dyn Future<Output = std::result::Result<RetryAttemptValue, RetryAttemptError>> + 'a>>;
-#[cfg(not(target_arch = "wasm32"))]
-pub trait RetryAttemptFn: Send {
-    fn run<'a>(&'a mut self, txn: &'a mut dyn RetryTxn) -> RetryAttemptFuture<'a>;
-}
-#[cfg(target_arch = "wasm32")]
-pub trait RetryAttemptFn {
+    MaybeBoxFuture<'a, std::result::Result<RetryAttemptValue, RetryAttemptError>>;
+
+/// An attempt, run once per try against that try's view.
+pub trait RetryAttemptFn: MaybeSend {
     fn run<'a>(&'a mut self, txn: &'a mut dyn RetryTxn) -> RetryAttemptFuture<'a>;
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-pub type RetryAttempt = Box<dyn RetryAttemptFn>;
-#[cfg(target_arch = "wasm32")]
 pub type RetryAttempt = Box<dyn RetryAttemptFn>;
 
-#[cfg(not(target_arch = "wasm32"))]
 impl<F> RetryAttemptFn for F
 where
-    F: Send + for<'a> FnMut(&'a mut dyn RetryTxn) -> RetryAttemptFuture<'a>,
-{
-    fn run<'a>(&'a mut self, txn: &'a mut dyn RetryTxn) -> RetryAttemptFuture<'a> {
-        self(txn)
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-impl<F> RetryAttemptFn for F
-where
-    F: for<'a> FnMut(&'a mut dyn RetryTxn) -> RetryAttemptFuture<'a>,
+    F: MaybeSend + for<'a> FnMut(&'a mut dyn RetryTxn) -> RetryAttemptFuture<'a>,
 {
     fn run<'a>(&'a mut self, txn: &'a mut dyn RetryTxn) -> RetryAttemptFuture<'a> {
         self(txn)

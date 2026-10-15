@@ -5,21 +5,20 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use defra_core::thread_bounds::MaybeBoxFuture;
 use regolith::sync::SegQueue;
 
-// Conditional Send bounds for callbacks based on target architecture
-#[cfg(not(target_arch = "wasm32"))]
-/// Callback function type for transaction lifecycle events.
-///
-/// These callbacks are executed synchronously when transaction events occur.
-pub type TxnCallback = Box<dyn FnOnce() + Send + 'static>;
+use super::traits::MaybeSend;
 
-#[cfg(target_arch = "wasm32")]
-/// Callback function type for transaction lifecycle events (WASM version).
-///
-/// These callbacks are executed synchronously when transaction events occur.
-/// Lifecycle callbacks do not require `Send` in the single-threaded WASM environment.
-pub type TxnCallback = Box<dyn FnOnce() + 'static>;
+/// A callback that runs once and returns `T`: `Send` on native targets, not
+/// required to be in the single-threaded browser ([`MaybeSend`]). Each
+/// callback type below is one shape of it, declared once for every target.
+pub trait CallOnce<T>: FnOnce() -> T + MaybeSend + 'static {}
+
+impl<F, T> CallOnce<T> for F where F: FnOnce() -> T + MaybeSend + 'static {}
+
+/// A callback run synchronously when a transaction ends.
+pub type TxnCallback = Box<dyn CallOnce<()>>;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub type OrderedTxnCallback = std::sync::Arc<dyn Fn() + Send + Sync + 'static>;
@@ -71,19 +70,8 @@ pub type AsyncOrderedTxnCallback = std::sync::Arc<
     dyn Fn() -> Pin<Box<dyn Future<Output = std::result::Result<(), String>>>> + 'static,
 >;
 
-#[cfg(not(target_arch = "wasm32"))]
-/// Asynchronous callback function type for transaction lifecycle events.
-///
-/// These callbacks are executed asynchronously when transaction events occur.
-pub type AsyncTxnCallback =
-    Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + 'static>;
-
-#[cfg(target_arch = "wasm32")]
-/// Asynchronous callback function type for transaction lifecycle events (WASM version).
-///
-/// These callbacks are executed asynchronously when transaction events occur.
-/// No Send bound required in single-threaded WASM environment.
-pub type AsyncTxnCallback = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()>>> + 'static>;
+/// A callback awaited when a transaction ends.
+pub type AsyncTxnCallback = Box<dyn CallOnce<MaybeBoxFuture<'static, ()>>>;
 
 /// Success callbacks collected by datastore's attempt facade. The store runs
 /// them only after the winning native commit has produced its receipt.
@@ -123,19 +111,14 @@ pub struct RetryCallbackCounts {
     ordered_async: usize,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-pub type OrderedRetryCallback = Box<dyn FnOnce() + Send + 'static>;
-#[cfg(target_arch = "wasm32")]
-pub type OrderedRetryCallback = Box<dyn FnOnce() + 'static>;
-#[cfg(not(target_arch = "wasm32"))]
-pub type AsyncOrderedRetryCallback = Box<
-    dyn FnOnce() -> Pin<Box<dyn Future<Output = std::result::Result<(), String>> + Send>>
-        + Send
-        + 'static,
->;
-#[cfg(target_arch = "wasm32")]
+/// An event a retry attempt registers, dispatched once in commit-receipt
+/// order.
+pub type OrderedRetryCallback = TxnCallback;
+
+/// A hook a retry attempt registers, awaited once its commit is durable and
+/// before its events go out; its error is reported, never returned.
 pub type AsyncOrderedRetryCallback =
-    Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = std::result::Result<(), String>>>> + 'static>;
+    Box<dyn CallOnce<MaybeBoxFuture<'static, std::result::Result<(), String>>>>;
 
 /// Keep the first `keep` entries of `queue`, in order, and drop the rest.
 pub(crate) fn truncate_queue<T>(queue: &SegQueue<T>, keep: usize)
@@ -266,19 +249,9 @@ impl RetryCallbacks {
 /// ```ignore
 /// txn.on_success(make_callback(|| println!("Success!")));
 /// ```
-#[cfg(not(target_arch = "wasm32"))]
 pub fn make_callback<F>(f: F) -> TxnCallback
 where
-    F: FnOnce() + Send + 'static,
-{
-    Box::new(f)
-}
-
-/// Helper function to create a simple sync callback from a closure (WASM version).
-#[cfg(target_arch = "wasm32")]
-pub fn make_callback<F>(f: F) -> TxnCallback
-where
-    F: FnOnce() + 'static,
+    F: FnOnce() + MaybeSend + 'static,
 {
     Box::new(f)
 }
@@ -292,21 +265,10 @@ where
 ///     println!("Async success!");
 /// }));
 /// ```
-#[cfg(not(target_arch = "wasm32"))]
 pub fn make_async_callback<F, Fut>(f: F) -> AsyncTxnCallback
 where
-    F: FnOnce() -> Fut + Send + 'static,
-    Fut: Future<Output = ()> + Send + 'static,
-{
-    Box::new(move || Box::pin(f()))
-}
-
-/// Helper function to create an async callback from a closure (WASM version).
-#[cfg(target_arch = "wasm32")]
-pub fn make_async_callback<F, Fut>(f: F) -> AsyncTxnCallback
-where
-    F: FnOnce() -> Fut + 'static,
-    Fut: Future<Output = ()> + 'static,
+    F: FnOnce() -> Fut + MaybeSend + 'static,
+    Fut: Future<Output = ()> + MaybeSend + 'static,
 {
     Box::new(move || Box::pin(f()))
 }

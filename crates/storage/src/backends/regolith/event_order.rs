@@ -41,10 +41,7 @@ use regolith::Transaction;
 use telemetry::StorageEvent;
 
 /// An event, dispatched once, in receipt order.
-#[cfg(not(target_arch = "wasm32"))]
-pub(super) type Event = Box<dyn FnOnce() + Send + 'static>;
-#[cfg(target_arch = "wasm32")]
-pub(super) type Event = Box<dyn FnOnce() + 'static>;
+pub(super) use crate::corekv::TxnCallback as Event;
 
 /// A commit's life as regolith reports it. Numbers only, so the regolith
 /// callbacks that queue it are `Send` on every target.

@@ -8,8 +8,6 @@ use crate::multistore::{NamespaceView, RootView, SharedTxn};
 /// - Lifecycle callbacks (on_success, on_error, on_discard)
 use async_trait::async_trait;
 use bytes::Bytes;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use storage::corekv::{
     AsyncOrderedRetryCallback, AsyncTxnCallback, IterOptions, Iterator, OrderedRetryCallback,
@@ -20,10 +18,7 @@ use storage::corekv::{
 use storage::namespace::Namespace;
 
 /// Asynchronous callback for transaction events.
-#[cfg(not(target_arch = "wasm32"))]
-pub type AsyncCallback = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
-#[cfg(target_arch = "wasm32")]
-pub type AsyncCallback = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()>>>>;
+pub use storage::corekv::AsyncTxnCallback as AsyncCallback;
 
 /// Transaction state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
