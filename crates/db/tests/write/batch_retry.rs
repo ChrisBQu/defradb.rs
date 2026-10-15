@@ -166,3 +166,68 @@ async fn implicit_batch_replays_atomically_inside_engine_attempt() {
         .unwrap();
     assert_eq!(docs.len(), 2, "the whole batch commits atomically");
 }
+
+#[tokio::test]
+async fn direct_mutation_api_replays_atomically_inside_engine_attempt() {
+    let inner = RegolithStore::in_memory().unwrap();
+    let store = ConflictStore {
+        inner: inner.clone(),
+        attempts: Arc::new(AtomicUsize::new(0)),
+        raced: Arc::new(AtomicBool::new(false)),
+        attempt_ids: Arc::new(Mutex::new(Vec::new())),
+    };
+    let bus: Arc<dyn Bus> = Arc::new(ChannelBus::new());
+    let mut db = DB::new(store.clone()).unwrap();
+    db.set_event_bus(bus.clone());
+    let db = Arc::new(db);
+    db.create_collection(test_collection()).await.unwrap();
+
+    let runner = query::QueryRunner::with_provider(
+        LensedAutoCommitFetcher::new(db.clone()),
+        DbCollectionProvider::new_arc(db.clone()),
+    )
+    .with_mutator(Arc::new(db::write::autocommit::AutoCommitMutator::new(
+        db.clone(),
+    )));
+    let mut events = bus.subscribe(&[EventName::Update]);
+    let response = runner
+        .execute_mutation_with_identity_and_vars(
+            r#"mutation {
+                first: add_TestDoc(input: {x: 1}) { _docID }
+                second: add_TestDoc(input: {x: 2}) { _docID }
+            }"#,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(response.is_object());
+    assert_eq!(store.attempts.load(Ordering::SeqCst), 2);
+    let attempt_ids = store.attempt_ids.lock().unwrap();
+    assert_eq!(attempt_ids.len(), 2);
+    assert_eq!(attempt_ids[0], attempt_ids[1]);
+    let mut returned = attempt_ids[1].clone();
+    assert_eq!(returned.len(), 2);
+    drop(attempt_ids);
+    let mut doc_events = Vec::new();
+    for _ in 0..2 {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+            .await
+            .expect("winner event arrives")
+            .expect("subscription remains open");
+        doc_events.push(event.as_update().unwrap().doc_id.clone());
+    }
+    doc_events.sort();
+    returned.sort();
+    assert_eq!(doc_events, returned);
+    assert!(
+        events.try_recv().is_err(),
+        "losing attempt must publish no events"
+    );
+
+    let docs = LensedAutoCommitFetcher::new(db)
+        .get_all("TestDoc")
+        .await
+        .unwrap();
+    assert_eq!(docs.len(), 2, "the direct API batch commits atomically");
+}
