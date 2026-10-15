@@ -39,7 +39,11 @@ The stack has the intended 11 PRs. All eleven PRs remain drafts while the prep o
 
 ### Immediate blockers
 
-The final §2.4 audit identified three prep omissions now being addressed: the lens epoch timer, database-shared lens engine with a lazy transaction-local transform map, and statement savepoints for failed/cancelled explicit-transaction mutations. Existing correctness passes do not cover these missing behaviors.
+The §2.4 fixes are implemented locally and are being restacked before publication. The combined candidate `c0255f9e0` passes 2,370 core tests (33 ignored), 358 HTTP/embedded tests (5 ignored), five benchmark-accounting tests, native all-target Clippy, WASM Clippy, and fresh CLI external basic 56, ACP 204 (16 ignored), encryption 25, counter 9 (8 ignored), and write-skew protection. Logs are `/tmp/defra-final-surface-c0255f9e0-*.log`; these are candidate results, not validation of the eventual published heads.
+
+The shared Wasmtime engine owns an independent parked epoch-clock thread so synchronous WASM cannot starve its clock. Transaction-local transform maps initialize lazily. The 100 ms default still awaits measurement. Statement savepoints belong in step 2 after the API bump supplies releasable savepoints; ordered queues are added to their snapshots at step 4, retry bundles at step 5, and ACP projection state at step 6. Failed, timed-out, and cancelled explicit GraphQL mutation statements roll back their staged writes and effects while retaining prior successful statements. Direct registry DDL calls recover pending GraphQL cleanup but do not receive independent operation savepoints. Finalization may consume the registry entry when cleanup fails; it cannot successfully commit partial statement writes.
+
+Schema decision scans use the same write transaction with validation enabled; schema-head caches publish after successful commit. Legacy index representations are compared after normalization, while other schema fields remain checked. The stale-scan regression stages a write and checks the typed transaction conflict.
 
 1. Inspect current-head CI after the upper-stack restack. The final query-projection native/external validation passes. All four lower-checkpoint basic/ACP/encryption/full-counter gates now pass independently.
 2. Complete §5.3 timing and allocation gates on a quiet host. All nine removal checkpoints build; frozen final endpoints are built. No performance gate is waived. Creates remain about 4.6% above main in the latest allocation pair.
@@ -60,7 +64,7 @@ Step 6 now supports projected GraphQL updates for unconditional explicit documen
 | Earlier combined `9afeb8447` | Storage 257, P2P 395 and adapter 94 pass; external ACP 204 pass/16 ignored, basic 56, encryption 25; counter 9 pass/8 ignored; real point-read write-skew passes | Predates final retry-surface cleanup; exact Go pin `53f0e76a32d1761e3396a88ce607ebc3e37baa5a` |
 | Lower checkpoints `7fc488f2`, `f39db77d`, `5ed6e2fa`, `82047ca2` | At each: fresh CLI build; basic 56, ACP 204 (16 ignored), encryption 25 and full counter 9 (8 ignored) pass | Exact Go pin `53f0e76a32d1761e3396a88ce607ebc3e37baa5a`; see binary hashes below |
 | Remote CI inspection | #1922 and #1953 have 28 passing checks; #1955 has passing live checks; lower four active checks pass with explicit scope skips | New upper-stack CI remains required; cancelled prior attempts are excluded |
-| Step 8 current proof suite | All 162 configured TLC cases have expected verdicts verified across full-suite and focused runs; five library/registry and two Lean contract checks pass | Finite boundary models, not Rust verification |
+| Step 8 current proof suite | All 167 configured TLC cases have expected verdicts verified across full-suite and focused runs (including five new statement-atomicity cases); five library/registry and two Lean contract checks pass | Finite boundary models, not Rust verification |
 | Repaired step-6 removal history | All nine checkpoint benchmark builds pass; queue benchmark removal and dependency cleanup moved to their removal boundaries | Fresh timing measurements pending |
 
 Lower-checkpoint CLI SHA-256 values (the first checkpoint's integration run was serial; later runs used four test threads):
@@ -79,6 +83,8 @@ P2P validation covers admission backoff, exact marker generations, registration 
 Earlier mixed Go/Rust parity failures passed all three local controls and ten mixed repeats; fresh step-5 Go compatibility CI also passed before this final restack. Use current-head runs, not cancelled or superseded rollups.
 
 ## Performance gates: not passed
+
+The [frozen clean-host main evidence](benchmarks/regolith-main-532aac3f/README.md) includes all 36 workload samples, eight guarded command runs, five allocation samples (median **2989.575 allocations/create**), four Criterion estimates, executable hashes and checksums. Structural/provenance validation passes. This baseline does not establish candidate non-regression; the lower-stack fixes require refreshed candidate binaries and measurements.
 
 The historical head-cache comparison is retained in [the raw artifact](benchmarks/regolith-head-cache-2026-10-14.json), before `c29a923b` and after `14e7264a`. Each run has 36 samples: creates/shared updates/counters+indexes, 1/4/16/64 writers, 256 operations per writer, three repetitions, release-fast and on-disk Immediate durability. Ambient host load contaminated timing. Creates had zero conflicts but did not scale consistently; four-writer shared/mixed conflicts increased, and 16-writer mixed exhaustion rose from zero to four. Higher-contention improvements do not waive these failures.
 
