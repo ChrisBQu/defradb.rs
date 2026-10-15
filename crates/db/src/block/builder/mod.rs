@@ -73,6 +73,18 @@ impl BuildError {
             Self::Message(message) => query::error::QueryError::execution(message),
         }
     }
+
+    /// [`into_query_error`](Self::into_query_error) with `context`, naming the
+    /// write, before a failure's message. A missing input stays a request for
+    /// it, so the caller can fetch it and run the write again.
+    pub fn into_query_error_in(self, context: &str) -> query::error::QueryError {
+        match self {
+            Self::NeedsInput(request) => query::error::QueryError::NeedsInput(request),
+            Self::Message(message) => {
+                query::error::QueryError::execution(format!("{context}: {message}"))
+            }
+        }
+    }
 }
 
 /// Node-local storage identity of a document.

@@ -54,6 +54,9 @@ pub enum PreparedInputKind {
     NodePermission,
     ReadValidation,
     EncryptedSearch,
+    /// A value an attempt drew locally (a created document's short ID) that
+    /// every later attempt of the request reuses. Never asked for as a miss.
+    Allocation,
 }
 
 /// Exact-request memo shared by all attempts of one logical request.
