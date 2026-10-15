@@ -158,16 +158,28 @@ impl<S: Store> AutoCommitMutator<S> {
 
         let policy_id = policy.id.clone();
         let resource_name = policy.resource_name.clone();
+        let creator = defra_core::signing::get_broadcast_creator_did();
+        let request_bearer_token = creator
+            .as_deref()
+            .and_then(defra_core::signing::get_request_bearer_token);
         txn.on_success_ordered_async(Arc::new(move || {
             let acp = Arc::clone(&acp);
             let policy_id = policy_id.clone();
             let resource_name = resource_name.clone();
             let doc_id = doc_id.clone();
-            Box::pin(async move {
-                acp.unregister_doc_object(&policy_id, &resource_name, &doc_id)
-                    .await
-                    .map_err(|error| format!("failed to unregister ACP document {doc_id}: {error}"))
-            })
+            let creator = creator.clone();
+            let request_bearer_token = request_bearer_token.clone();
+            Box::pin(defra_core::signing::scope_request_bearer_token(
+                creator,
+                request_bearer_token,
+                async move {
+                    acp.unregister_doc_object(&policy_id, &resource_name, &doc_id)
+                        .await
+                        .map_err(|error| {
+                            format!("failed to unregister ACP document {doc_id}: {error}")
+                        })
+                },
+            ))
         }))
         .map_err(|error| query::error::QueryError::execution(error.to_string()))
     }
