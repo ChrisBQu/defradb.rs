@@ -452,6 +452,14 @@ impl DocumentACP for VeraDocumentACP {
         resource_name: &str,
         doc_id: &str,
     ) -> Result<()> {
+        // Shared native ACP objects outlive a local replica's tombstone. The
+        // replicated delete can still be rejected elsewhere, so do not revoke
+        // shared grants as a side effect of this local document operation.
+        // Operators can still archive explicitly through the provider API.
+        if !self.provider.archive_object_on_document_delete() {
+            return Ok(());
+        }
+
         let (_is_registered, owner_did) = self
             .provider
             .query_object_owner(policy_id, resource_name, doc_id)

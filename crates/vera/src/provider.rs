@@ -52,6 +52,18 @@ pub trait VeraProvider: MaybeSendSync {
         false
     }
 
+    /// Whether deleting a DefraDB document should archive the corresponding
+    /// object in the provider's shared authorization state.
+    ///
+    /// The default preserves the existing archive-on-delete behavior.
+    /// Providers with shared, replicated authorization state may
+    /// return `false`: a local tombstone can still be rejected by another
+    /// replica, so archiving here could revoke access before that decision.
+    /// Explicit provider archive operations remain available independently.
+    fn archive_object_on_document_delete(&self) -> bool {
+        true
+    }
+
     fn authorized_account(&self) -> String;
 
     async fn create_bearer_token(&self, did: &str) -> Result<String, ProviderError>;

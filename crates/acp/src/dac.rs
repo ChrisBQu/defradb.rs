@@ -275,10 +275,13 @@ pub trait DocumentACP: MaybeSendSync {
         .await
     }
 
-    /// Unregister a document, removing all ACP tuples.
+    /// Remove provider-local registration state when a document is deleted.
     ///
-    /// This should be called when a document is deleted to clean up
-    /// all associated relation tuples (owner, reader, updater, etc.).
+    /// Providers backed by shared authorization state may keep the object
+    /// registered after a local document tombstone: a replica's delete can be
+    /// rejected elsewhere, and removing shared grants early would affect
+    /// documents that remain live there. Global object archival is a separate
+    /// lifecycle operation for those providers.
     ///
     /// # Arguments
     /// * `policy_id` - The policy ID from the collection

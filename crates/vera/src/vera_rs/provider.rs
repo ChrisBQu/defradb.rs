@@ -205,6 +205,13 @@ impl VeraProvider for VeraRsProvider {
         self.worker_did.clone()
     }
 
+    fn archive_object_on_document_delete(&self) -> bool {
+        // A local document tombstone may still be rejected by another
+        // replica. Archiving the shared ACP object here would revoke grants
+        // before the replicated delete has been authorized.
+        false
+    }
+
     async fn create_bearer_token(&self, did: &str) -> Result<String, ProviderError> {
         if Some(did.to_string()) == self.self_did() {
             return bearer::create_bearer_token(
