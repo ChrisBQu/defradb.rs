@@ -100,6 +100,26 @@ fn test_add_relation_id_fields_skips_existing() {
 }
 
 #[test]
+fn test_doc_relation_does_not_replace_builtin_doc_id() {
+    let fields = vec![
+        FieldDescription::new("0", "_docID", FieldKind::doc_id()),
+        FieldDescription::new("1", "doc", FieldKind::relation("target", false))
+            .with_relation_name("___")
+            .as_primary(),
+    ];
+    let mut coll = CollectionVersion::new("test", "v1", "coll-test", fields);
+
+    coll.add_relation_id_fields(|| "generated-id".to_string())
+        .unwrap();
+
+    let doc_id = coll.field_by_name("_docID").unwrap();
+    assert_eq!(coll.fields.len(), 2);
+    assert_eq!(doc_id.id, "0");
+    assert_eq!(doc_id.relation_name, None);
+    assert!(!doc_id.is_primary);
+}
+
+#[test]
 fn test_has_relation_id_field() {
     let fields = vec![
         FieldDescription::new("1", "_docID", FieldKind::doc_id()),

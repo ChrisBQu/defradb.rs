@@ -477,7 +477,7 @@ proptest! {
     /// Property: _id fields inherit is_primary from relation field
     #[test]
     fn id_fields_inherit_primary_status(
-        field_name in "[a-z]{1,15}",
+        field_name in "[a-z]{1,15}".prop_filter("avoid _docID collision", |n| n != "doc"),
         is_primary in any::<bool>(),
     ) {
         let mut rel_field = FieldDescription::new("1", &field_name, FieldKind::relation("target", false))
@@ -548,7 +548,7 @@ proptest! {
     /// Property: _id fields inherit relation_name from relation field
     #[test]
     fn id_fields_inherit_relation_name(
-        field_name in "[a-z]{1,15}",
+        field_name in "[a-z]{1,15}".prop_filter("avoid _docID collision", |n| n != "doc"),
         relation_name in "[a-z_]{3,20}",
     ) {
         let fields = vec![
