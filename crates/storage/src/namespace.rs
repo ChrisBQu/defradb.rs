@@ -393,7 +393,9 @@ impl Writer for NamespacedTxn {
     ) -> Result<()> {
         let log = log.prefixed(&[self.namespace.prefix()]);
         let once_key = once_key.map(|key| self.namespace.prefix_key(key));
-        self.txn.append_shared(&log, entry, once_key.as_deref()).await
+        self.txn
+            .append_shared(&log, entry, once_key.as_deref())
+            .await
     }
 
     async fn set_shared(&self, key: &[u8], value: &[u8]) -> Result<()> {

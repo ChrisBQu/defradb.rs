@@ -68,11 +68,16 @@ async fn transaction_ownership_preserves_implicit_reads_and_idle_cleanup() {
         let served = registry
             .read(
                 None,
-                txn_job(|turn| Box::pin(async move { turn.context().map(|ctx| ctx.is_readonly()) })),
+                txn_job(|turn| {
+                    Box::pin(async move { turn.context().map(|ctx| ctx.is_readonly()) })
+                }),
             )
             .await
             .unwrap();
-        assert!(served.unwrap(), "an implicit read is served from a snapshot");
+        assert!(
+            served.unwrap(),
+            "an implicit read is served from a snapshot"
+        );
         assert_eq!(
             registry.active_transaction_count().unwrap(),
             0,
