@@ -88,6 +88,9 @@ pub struct IterOptions {
     keys_only: bool,
     /// Validate consumed ranges, including absent keys, in a writing transaction.
     validated: bool,
+    /// Validate a key the transaction later merges into inside the scanned
+    /// range over these value parts only.
+    parts: Option<Box<[u32]>>,
 }
 
 impl IterOptions {
@@ -135,6 +138,34 @@ impl IterOptions {
 
     pub fn validated(&self) -> bool {
         self.validated
+    }
+
+    /// Scan for a decision that used only these parts of the values it reads
+    /// (sorted part IDs of the value's merge operator): a key the transaction
+    /// later merges into inside the scanned range is validated over these
+    /// parts only, and one it puts or deletes there in whole. With no parts
+    /// the scan validates nothing. A validated scan ignores this.
+    pub fn with_parts(mut self, parts: Option<Box<[u32]>>) -> Self {
+        self.parts = parts;
+        self
+    }
+
+    /// The parts a scan's decision used, if it named them.
+    pub fn parts(&self) -> Option<&[u32]> {
+        self.parts.as_deref()
+    }
+
+    /// These options with each bound (prefix, start and end) passed through
+    /// `map` and every other option kept: how a view scopes a scan to its
+    /// keyspace.
+    pub fn map_keys<F>(mut self, map: F) -> Self
+    where
+        F: Fn(&[u8]) -> Vec<u8>,
+    {
+        self.prefix = self.prefix.as_deref().map(&map);
+        self.start = self.start.as_deref().map(&map);
+        self.end = self.end.as_deref().map(&map);
+        self
     }
 
     /// Get the prefix filter, if set.
