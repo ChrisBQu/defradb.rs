@@ -17,14 +17,16 @@ pub(crate) const MAX_PRIVATE_KEY_LEN: usize = 128;
 #[no_mangle]
 pub extern "C" fn new_node(options: NodeInitOptions) -> NewNodeResult {
     ffi_entry! {
-        let rt = match crate::runtime::RUNTIME.get() {
+        let rt = match crate::runtime::edge() {
             Some(rt) => rt,
-            None => return NewNodeResult::error("runtime not initialized - call defra_init() first"),
+            None => return NewNodeResult::error(crate::helpers::ERR_RUNTIME_NOT_INITIALIZED),
         };
 
-        let result = rt
-            .block_on(async { build_node_state(options, embedded::TransportConfig::None).await })
-            .map(|state| NODES.insert(state));
+        let result = crate::helpers::block_on(
+            rt,
+            build_node_state(options, embedded::TransportConfig::None, rt.clone()),
+        )
+        .map(|state| NODES.insert(state));
 
         match result {
             Ok(handle) => NewNodeResult::success(handle),
@@ -33,13 +35,16 @@ pub extern "C" fn new_node(options: NodeInitOptions) -> NewNodeResult {
     }
 }
 
+/// Builds a node whose network work, P2P included, runs on `edge`.
 pub(crate) async fn build_node_state(
     options: NodeInitOptions,
     transport: embedded::TransportConfig,
+    edge: edge::Edge,
 ) -> Result<NodeState, String> {
     let (store, persistence, db_path_opt) = resolve_store(&options)?;
     let mut config = resolve_embedded_config(&options, persistence)?;
     config.transport = with_derived_iroh_key_path(transport, &db_path_opt);
+    config.edge = Some(edge);
 
     let node = embedded::build_with_store(store, config)
         .await
@@ -274,7 +279,7 @@ pub extern "C" fn node_close(node_ptr: usize) -> FfiResult {
 
         let removed_gql_subs = GRAPHQL_SUBSCRIPTIONS.remove_for_node(node_ptr);
         for sub_state in removed_gql_subs {
-            sub_state.task_abort.abort();
+            sub_state.service.stop();
             NODES.get(node_ptr, |state| {
                 state.event_bus.unsubscribe(sub_state.event_sub_id);
             });
@@ -285,19 +290,23 @@ pub extern "C" fn node_close(node_ptr: usize) -> FfiResult {
             None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
         };
 
-        rt.block_on(state.background_tasks.shutdown());
-
-        if let Some(p2p) = state.p2p.as_ref() {
-            rt.block_on(async { p2p.system.shutdown().await });
-        }
-
-        state.event_bus.close();
-        let result = rt.block_on(async { state.database.close().await });
+        let result = crate::helpers::block_on(rt, async {
+            state.background_tasks.shutdown().await;
+            if let Some(p2p) = state.p2p.as_ref() {
+                p2p.system.shutdown().await;
+            }
+            state.event_bus.close();
+            state
+                .database
+                .close()
+                .await
+                .map_err(|error| format!("failed to close database: {}", error))
+        });
         drop(state);
 
         match result {
             Ok(()) => FfiResult::ok(),
-            Err(error) => FfiResult::error(format!("failed to close database: {}", error)),
+            Err(error) => FfiResult::error(error),
         }
     }
 }

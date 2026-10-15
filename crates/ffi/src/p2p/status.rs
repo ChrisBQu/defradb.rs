@@ -40,7 +40,7 @@ pub unsafe extern "C" fn p2p_sync_status(
             .ok_or_else(FfiP2PError::invalid_node_handle)
             .and_then(|p2p| p2p.ok_or_else(FfiP2PError::no_p2p_system))
             .and_then(|p2p| {
-                rt.block_on(async {
+                crate::helpers::block_on(rt, async {
                     let status = p2p
                         .system
                         .ops()

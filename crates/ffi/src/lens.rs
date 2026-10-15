@@ -72,7 +72,7 @@ pub unsafe extern "C" fn lens_add(
                     None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
                 };
 
-                let result = rt.block_on(async {
+                let result = crate::helpers::block_on(rt, async {
                     let transform_id = database
                         .set_migration(full_config, None)
                         .await
@@ -93,7 +93,7 @@ pub unsafe extern "C" fn lens_add(
             None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
         };
 
-        let result = rt.block_on(async {
+        let result = crate::helpers::block_on(rt, async {
             // Try parsing as Go's model.Lens format ({"Lenses": [...]}) first,
             // then fall back to single LensModule
             let modules: Vec<LensModule> =
@@ -175,7 +175,7 @@ pub unsafe extern "C" fn lens_add_in_txn(
             crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
         );
 
-        let result = rt.block_on(async {
+        let result = crate::helpers::block_on(rt, async {
             let modules: Vec<LensModule> =
                 if let Ok(lens_obj) = serde_json::from_str::<serde_json::Value>(&lens_str) {
                     if let Some(lenses_arr) = lens_obj.get("Lenses").and_then(|v| v.as_array()) {

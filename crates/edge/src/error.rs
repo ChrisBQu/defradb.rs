@@ -27,3 +27,10 @@ pub enum EdgeError {
     #[error("cannot start the network runtime: {0}")]
     Start(String),
 }
+
+/// For callers whose errors are text: the error's message.
+impl From<EdgeError> for String {
+    fn from(error: EdgeError) -> Self {
+        error.to_string()
+    }
+}
