@@ -35,6 +35,17 @@ impl<S: Store> BatchMutator<S> {
         Self::new_with_prepared_inputs(db, txn, None)
     }
 
+    pub(crate) fn new_retry_controller(
+        db: Arc<DB<S>>,
+        prepared_inputs: Option<query::prepared::PreparedInputMemo>,
+    ) -> Self {
+        Self {
+            db,
+            prepared_inputs,
+            txn: Arc::new(TokioMutex::new(None)),
+        }
+    }
+
     pub(crate) fn new_with_prepared_inputs(
         db: Arc<DB<S>>,
         txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
