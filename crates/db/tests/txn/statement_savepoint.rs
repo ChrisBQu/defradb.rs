@@ -26,6 +26,10 @@ impl Sealed for PauseAfterSetStore {}
 
 #[async_trait]
 impl Store for PauseAfterSetStore {
+    async fn allocate(&self, key: &[u8], count: u64) -> StorageResult<std::ops::Range<u64>> {
+        self.inner.allocate(key, count).await
+    }
+
     async fn new_txn(&self, readonly: bool) -> StorageResult<Box<dyn Txn>> {
         Ok(Box::new(PauseAfterSetTxn {
             inner: self.inner.new_txn(readonly).await?,
