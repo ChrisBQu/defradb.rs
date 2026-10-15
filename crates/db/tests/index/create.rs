@@ -2,8 +2,12 @@
 //! validation path, while backfill remains restartable and exact.
 
 use rapidhash::RapidHashSet;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
+use async_trait::async_trait;
 use db::index::backfill::{encode_progress, BACKFILL_BATCH_DOCS};
 use db::{AutoCommitMutator, BackfillSource, Collection, IndexManager, DB};
 use document::{DocID, Document, NormalValue};
@@ -12,7 +16,10 @@ use schema::{
     CollectionVersion, FieldDescription, FieldKind, IndexKind, IndexedFieldDescription,
     OrderedIndexDescription,
 };
-use storage::corekv::{IterOptions, Iterator, Key};
+use storage::corekv::{
+    AsyncTxnCallback, IterOptions, Iterator, Key, Reader, Result as StorageResult, Store, Txn,
+    TxnCallback, Writer,
+};
 use storage::index::IndexIterator;
 use storage::keys::datastore::IndexDataStoreKey;
 use storage::keys::systemstore::{ActionProgressKey, CollectionKey, CollectionNameKey};
@@ -53,8 +60,8 @@ async fn open_with_collection(
     (store, db)
 }
 
-async fn create_user(
-    mutator: &AutoCommitMutator<RegolithStore>,
+async fn create_user<S: Store + 'static>(
+    mutator: &AutoCommitMutator<S>,
     collection: &str,
     name: &str,
 ) -> DocID {
@@ -82,7 +89,7 @@ where
     }
 }
 
-async fn index_entries(db: &DB<RegolithStore>, collection: &str, index_id: u32) -> usize {
+async fn index_entries<S: Store + 'static>(db: &DB<S>, collection: &str, index_id: u32) -> usize {
     let short_id = db
         .require_collection(collection)
         .unwrap()
@@ -103,7 +110,7 @@ async fn index_entries(db: &DB<RegolithStore>, collection: &str, index_id: u32) 
     count
 }
 
-async fn entries_for(db: &DB<RegolithStore>, collection: &str, name: &str) -> usize {
+async fn entries_for<S: Store + 'static>(db: &DB<S>, collection: &str, name: &str) -> usize {
     let collection = db.require_collection(collection).unwrap();
     let manager =
         IndexManager::from_collection(collection.schema().resolved_root_id(), collection.schema())
@@ -370,7 +377,11 @@ async fn create_index_keeps_pace_with_concurrent_writers() {
         );
     }
     for i in created.clone() {
-        assert_eq!(entries_for(&db, "Racing", &format!("new-{i}")).await, 1);
+        assert_eq!(
+            entries_for(&db, "Racing", &format!("new-{i}")).await,
+            1,
+            "new-{i}"
+        );
     }
     assert_eq!(
         index_entries(&db, "Racing", index.id).await,
@@ -381,6 +392,212 @@ async fn create_index_keeps_pace_with_concurrent_writers() {
         .await
         .unwrap()
         .contains_key(&index.id));
+}
+
+#[tokio::test]
+async fn create_index_fence_includes_old_schema_writes_before_definition_commit() {
+    let inner = Arc::new(RegolithStore::in_memory().unwrap());
+    let gate = Arc::new(DefinitionCommitGate::default());
+    let store = Arc::new(PauseDefinitionCommitStore {
+        inner,
+        gate: Arc::clone(&gate),
+    });
+    let db = Arc::new(DB::from_arc(store).unwrap());
+    db.create_collection(users_schema("Racing", "racing-v1", "col-index-gate"))
+        .await
+        .unwrap();
+    let mutator = Arc::new(AutoCommitMutator::new(db.clone()));
+    create_user(&mutator, "Racing", "before").await;
+
+    gate.armed.store(true, Ordering::SeqCst);
+    let creator = db.clone();
+    let index_task = tokio::spawn(async move {
+        let (fields, kind) = by_name();
+        creator
+            .create_index("Racing", Some("by_name"), fields, kind)
+            .await
+    });
+
+    // The index definition has been staged, but its transaction has not
+    // published the new collection version or backfill action yet.
+    gate.entered.notified().await;
+    create_user(&mutator, "Racing", "during-definition-commit").await;
+    gate.release.notify_one();
+
+    let index = index_task.await.unwrap().unwrap();
+    assert_eq!(
+        entries_for(&db, "Racing", "during-definition-commit").await,
+        1,
+        "a pre-publication write above the fence must be included in backfill"
+    );
+    assert_eq!(index_entries(&db, "Racing", index.id).await, 2);
+}
+
+#[derive(Default)]
+struct DefinitionCommitGate {
+    armed: AtomicBool,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+struct PauseDefinitionCommitStore {
+    inner: Arc<RegolithStore>,
+    gate: Arc<DefinitionCommitGate>,
+}
+
+impl storage::corekv::private::Sealed for PauseDefinitionCommitStore {}
+
+#[async_trait]
+impl Store for PauseDefinitionCommitStore {
+    async fn allocate(&self, key: &[u8], count: u64) -> StorageResult<std::ops::Range<u64>> {
+        self.inner.allocate(key, count).await
+    }
+
+    async fn new_txn(&self, readonly: bool) -> StorageResult<Box<dyn Txn>> {
+        Ok(Box::new(PauseDefinitionCommitTxn {
+            inner: self.inner.new_txn(readonly).await?,
+            gate: Arc::clone(&self.gate),
+        }))
+    }
+
+    async fn transact_retry(
+        &self,
+        options: storage::corekv::RetryOptions,
+        attempt: storage::corekv::RetryAttempt,
+    ) -> std::result::Result<storage::corekv::RetryAttemptValue, storage::corekv::RetryAttemptError>
+    {
+        self.inner.transact_retry(options, attempt).await
+    }
+
+    async fn close(&self) -> StorageResult<()> {
+        self.inner.close().await
+    }
+}
+
+struct PauseDefinitionCommitTxn {
+    inner: Box<dyn Txn>,
+    gate: Arc<DefinitionCommitGate>,
+}
+
+impl storage::corekv::private::Sealed for PauseDefinitionCommitTxn {}
+
+#[async_trait]
+impl Reader for PauseDefinitionCommitTxn {
+    async fn get(&self, key: &[u8]) -> StorageResult<Option<bytes::Bytes>> {
+        self.inner.get(key).await
+    }
+
+    async fn get_parts(&self, key: &[u8], parts: &[u32]) -> StorageResult<Option<bytes::Bytes>> {
+        self.inner.get_parts(key, parts).await
+    }
+
+    async fn has(&self, key: &[u8]) -> StorageResult<bool> {
+        self.inner.has(key).await
+    }
+
+    async fn get_size(&self, key: &[u8]) -> StorageResult<Option<usize>> {
+        self.inner.get_size(key).await
+    }
+
+    async fn iterator(
+        &self,
+        opts: IterOptions,
+    ) -> StorageResult<Box<dyn storage::corekv::Iterator>> {
+        self.inner.iterator(opts).await
+    }
+}
+
+#[async_trait]
+impl Writer for PauseDefinitionCommitTxn {
+    async fn merge(&mut self, key: &[u8], operand: &[u8]) -> StorageResult<()> {
+        self.inner.merge(key, operand).await
+    }
+
+    async fn append(
+        &mut self,
+        log: &storage::corekv::AppendLog,
+        entry: &[u8],
+        once_key: Option<&[u8]>,
+    ) -> StorageResult<()> {
+        self.inner.append(log, entry, once_key).await
+    }
+
+    async fn set(&mut self, key: &[u8], value: &[u8]) -> StorageResult<()> {
+        self.inner.set(key, value).await
+    }
+
+    async fn delete(&mut self, key: &[u8]) -> StorageResult<()> {
+        self.inner.delete(key).await
+    }
+}
+
+#[async_trait]
+impl Txn for PauseDefinitionCommitTxn {
+    async fn commit(self: Box<Self>) -> StorageResult<()> {
+        if !self.inner.is_readonly() && self.gate.armed.swap(false, Ordering::SeqCst) {
+            self.gate.entered.notify_one();
+            self.gate.release.notified().await;
+        }
+        self.inner.commit().await
+    }
+
+    fn discard(self: Box<Self>) {
+        self.inner.discard()
+    }
+
+    fn on_success(&mut self, callback: TxnCallback) {
+        self.inner.on_success(callback)
+    }
+
+    fn on_success_ordered(
+        &mut self,
+        callback: storage::corekv::OrderedTxnCallback,
+    ) -> StorageResult<()> {
+        self.inner.on_success_ordered(callback)
+    }
+
+    fn on_success_ordered_async(
+        &mut self,
+        callback: storage::corekv::AsyncOrderedTxnCallback,
+    ) -> StorageResult<()> {
+        self.inner.on_success_ordered_async(callback)
+    }
+
+    fn on_success_async(&mut self, callback: AsyncTxnCallback) {
+        self.inner.on_success_async(callback)
+    }
+
+    fn on_error(&mut self, callback: TxnCallback) {
+        self.inner.on_error(callback)
+    }
+
+    fn on_error_async(&mut self, callback: AsyncTxnCallback) {
+        self.inner.on_error_async(callback)
+    }
+
+    fn on_discard(&mut self, callback: TxnCallback) {
+        self.inner.on_discard(callback)
+    }
+
+    fn on_discard_async(&mut self, callback: AsyncTxnCallback) {
+        self.inner.on_discard_async(callback)
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn is_readonly(&self) -> bool {
+        self.inner.is_readonly()
+    }
+
+    fn callback_count(&self) -> usize {
+        self.inner.callback_count()
+    }
 }
 
 /// The batch scanned the document and observed it, so the commit sees the
