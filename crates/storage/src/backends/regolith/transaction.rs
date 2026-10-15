@@ -489,16 +489,3 @@ impl Txn for RegolithTxn {
         self.callbacks.total()
     }
 }
-
-impl regolith::LogLayout for crate::corekv::AppendLog {
-    fn head_key(&self) -> &[u8] {
-        &self.head_key
-    }
-    fn entry_key(&self, position: u64, out: &mut Vec<u8>) {
-        out.extend_from_slice(&self.entry_prefix);
-        out.extend_from_slice(format!("{position:020}").as_bytes());
-    }
-    fn max_entry_key_len(&self) -> usize {
-        self.entry_prefix.len() + 20
-    }
-}

@@ -8,6 +8,7 @@ mod handle;
 mod hooks;
 pub(crate) mod iterator;
 mod listener;
+mod log_layout;
 pub mod merge;
 mod post_commit;
 mod slots;
