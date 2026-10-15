@@ -1,130 +1,147 @@
-//! Persistent storage for P2P collection subscriptions.
+//! The durable set of P2P collection subscriptions: the desired state the
+//! live collection topics converge to.
 //!
-//! Mirrors Go DefraDB's systemstore `/p2p/collection/` key structure
-//! for storing which collections are subscribed for P2P sync.
+//! Mirrors Go DefraDB's systemstore `/p2p/collection/` key structure. Each
+//! change to the set is one engine transaction under the engine retry, so a
+//! subscribe and an unsubscribe of one collection that race settle in the
+//! engine, the later commit winning, with no lock around them.
 
 use crate::error::{Error, Result};
 use async_trait::async_trait;
 use defra_core::thread_bounds::MaybeSendSync;
+use kovan_map::HopscotchMap;
+use rapidhash::fast::RandomState;
 use std::sync::Arc;
-use storage::corekv::{IterOptions, Key, Reader, Store};
+use datastore::BasicTxn;
+use storage::corekv::{
+    IterOptions, Key, Reader, RetryAttemptError, RetryAttemptValue, RetryOptions, Store,
+};
 use storage::keys::systemstore::P2PCollectionKey;
 use storage::stores::Systemstore;
 
 /// Marker byte for collection subscription (matches Go's marker = byte(0xff))
 const COLLECTION_MARKER: u8 = 0xff;
 
-/// Trait for P2P collection storage operations.
+/// The subscribed set of collections, as desired state.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait P2PCollectionStorage: MaybeSendSync {
-    /// Add a collection subscription to persistent storage.
-    async fn add_collection(&self, collection_id: &str) -> Result<()>;
+    /// Subscribe every collection not subscribed yet, atomically, and return
+    /// how many that was.
+    async fn add_collections(&self, collection_ids: &[String]) -> Result<usize>;
 
-    /// Add multiple collection subscriptions atomically.
-    async fn add_collections(&self, collection_ids: &[String]) -> Result<()>;
-
-    /// Remove a collection subscription from persistent storage.
-    async fn remove_collection(&self, collection_id: &str) -> Result<()>;
-
-    /// Remove multiple collection subscriptions atomically.
+    /// Unsubscribe every collection, atomically.
     async fn remove_collections(&self, collection_ids: &[String]) -> Result<()>;
 
-    /// Get all subscribed collection IDs from persistent storage.
+    /// Every subscribed collection ID.
     async fn get_all_collections(&self) -> Result<Vec<String>>;
 
-    /// Check if a collection is subscribed.
+    /// Whether a collection is subscribed.
     async fn is_subscribed(&self, collection_id: &str) -> Result<bool>;
 }
 
-/// Implementation of P2P collection storage backed by a key-value store.
+/// The subscribed set in the systemstore.
 pub struct P2PCollectionStore<S: Store> {
+    store: Arc<S>,
     systemstore: Systemstore<S>,
+    retry: RetryOptions,
 }
 
 impl<S: Store> P2PCollectionStore<S> {
     /// Create a new P2P collection store.
     pub fn new(store: Arc<S>) -> Self {
         Self {
-            systemstore: Systemstore::new(store),
+            systemstore: Systemstore::new(Arc::clone(&store)),
+            store,
+            retry: storage::corekv::engine_retry_options(storage::corekv::DEFAULT_MAX_TXN_RETRIES),
         }
+    }
+
+    /// Re-run a conflicting change up to `max_txn_retries` times, the node's
+    /// `datastore.max_txn_retries`.
+    pub fn with_max_txn_retries(mut self, max_txn_retries: u32) -> Self {
+        self.retry = storage::corekv::engine_retry_options(max_txn_retries);
+        self
+    }
+
+    /// Runs `change` as one engine transaction and returns how many
+    /// collections it subscribed.
+    async fn change(&self, change: SubscriptionChange) -> Result<usize> {
+        datastore::transact(&*self.store, self.retry, move |txn| {
+            Box::pin(change.clone().apply(txn))
+        })
+        .await
+        .map_err(|error| Error::Storage(error.into_storage().to_string()))
+    }
+}
+
+/// One change to the subscribed set.
+#[derive(Clone)]
+enum SubscriptionChange {
+    /// Marks the keys not marked yet: each is read, so a concurrent
+    /// unsubscribe of the same collection makes the attempt run again.
+    Add(Vec<Vec<u8>>),
+    /// Deletes the keys' marks.
+    Remove(Vec<Vec<u8>>),
+}
+
+impl SubscriptionChange {
+    fn keys(collection_ids: &[String]) -> Vec<Vec<u8>> {
+        collection_ids
+            .iter()
+            .map(|collection_id| P2PCollectionKey::new(collection_id).bytes())
+            .collect()
+    }
+
+    /// Applies the change in one attempt; its value is how many collections
+    /// it subscribed.
+    async fn apply(
+        self,
+        txn: &mut BasicTxn,
+    ) -> std::result::Result<RetryAttemptValue, RetryAttemptError> {
+        let systemstore = txn.systemstore();
+        let mut added = 0usize;
+        match self {
+            Self::Add(keys) => {
+                for key in &keys {
+                    if systemstore.get(key).await?.is_none() {
+                        systemstore.set(key, &[COLLECTION_MARKER]).await?;
+                        added += 1;
+                    }
+                }
+            }
+            Self::Remove(keys) => {
+                for key in &keys {
+                    systemstore.delete(key).await?;
+                }
+            }
+        }
+        Ok(Box::new(added) as RetryAttemptValue)
     }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store + 'static> P2PCollectionStorage for P2PCollectionStore<S> {
-    async fn add_collection(&self, collection_id: &str) -> Result<()> {
-        let key = P2PCollectionKey::new(collection_id);
-        let mut txn = self
-            .systemstore
-            .new_txn(false)
-            .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
-
-        txn.set(&key.bytes(), &[COLLECTION_MARKER])
-            .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
-
-        txn.commit()
-            .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
-
-        Ok(())
-    }
-
-    async fn add_collections(&self, collection_ids: &[String]) -> Result<()> {
+    async fn add_collections(&self, collection_ids: &[String]) -> Result<usize> {
         if collection_ids.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
-
-        let mut txn = self
-            .systemstore
-            .new_txn(false)
-            .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
-
-        for collection_id in collection_ids {
-            let key = P2PCollectionKey::new(collection_id);
-            txn.set(&key.bytes(), &[COLLECTION_MARKER])
-                .await
-                .map_err(|e| Error::Storage(e.to_string()))?;
-        }
-
-        txn.commit()
-            .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
-
-        Ok(())
-    }
-
-    async fn remove_collection(&self, collection_id: &str) -> Result<()> {
-        self.remove_collections(&[collection_id.to_string()]).await
+        self.change(SubscriptionChange::Add(SubscriptionChange::keys(
+            collection_ids,
+        )))
+        .await
     }
 
     async fn remove_collections(&self, collection_ids: &[String]) -> Result<()> {
         if collection_ids.is_empty() {
             return Ok(());
         }
-
-        let mut txn = self
-            .systemstore
-            .new_txn(false)
-            .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
-
-        for collection_id in collection_ids {
-            let key = P2PCollectionKey::new(collection_id);
-            txn.delete(&key.bytes())
-                .await
-                .map_err(|e| Error::Storage(e.to_string()))?;
-        }
-
-        txn.commit()
-            .await
-            .map_err(|e| Error::Storage(e.to_string()))?;
-
-        Ok(())
+        self.change(SubscriptionChange::Remove(SubscriptionChange::keys(
+            collection_ids,
+        )))
+        .await
+        .map(|_| ())
     }
 
     async fn get_all_collections(&self) -> Result<Vec<String>> {
@@ -184,34 +201,47 @@ fn parse_collection_id(key: &[u8]) -> Option<String> {
         .filter(|id| !id.is_empty())
 }
 
-/// No-op implementation for when persistent storage is not available.
-pub struct NoOpCollectionStorage;
+/// The subscribed set kept in process memory, for a node with no store:
+/// nothing outlives the process.
+pub struct MemoryCollectionStorage {
+    collections: HopscotchMap<String, (), RandomState>,
+}
+
+impl Default for MemoryCollectionStorage {
+    fn default() -> Self {
+        Self {
+            collections: HopscotchMap::with_hasher(RandomState::default()),
+        }
+    }
+}
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl P2PCollectionStorage for NoOpCollectionStorage {
-    async fn add_collection(&self, _collection_id: &str) -> Result<()> {
-        Ok(())
+impl P2PCollectionStorage for MemoryCollectionStorage {
+    async fn add_collections(&self, collection_ids: &[String]) -> Result<usize> {
+        Ok(collection_ids
+            .iter()
+            .filter(|collection_id| {
+                self.collections
+                    .insert_if_absent((*collection_id).clone(), ())
+                    .is_none()
+            })
+            .count())
     }
 
-    async fn add_collections(&self, _collection_ids: &[String]) -> Result<()> {
-        Ok(())
-    }
-
-    async fn remove_collection(&self, _collection_id: &str) -> Result<()> {
-        Ok(())
-    }
-
-    async fn remove_collections(&self, _collection_ids: &[String]) -> Result<()> {
+    async fn remove_collections(&self, collection_ids: &[String]) -> Result<()> {
+        for collection_id in collection_ids {
+            self.collections.remove(collection_id);
+        }
         Ok(())
     }
 
     async fn get_all_collections(&self) -> Result<Vec<String>> {
-        Ok(Vec::new())
+        Ok(self.collections.keys().collect())
     }
 
-    async fn is_subscribed(&self, _collection_id: &str) -> Result<bool> {
-        Ok(false)
+    async fn is_subscribed(&self, collection_id: &str) -> Result<bool> {
+        Ok(self.collections.contains_key(collection_id))
     }
 }
 
@@ -219,6 +249,11 @@ impl P2PCollectionStorage for NoOpCollectionStorage {
 mod tests {
     use super::*;
     use bytes::Bytes;
+    use storage::RegolithStore;
+
+    fn collections(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|id| (*id).to_string()).collect()
+    }
 
     #[test]
     fn test_p2p_collection_key() {
@@ -238,12 +273,16 @@ mod tests {
 
     #[tokio::test]
     async fn stores_collection_state_in_systemstore_namespace() {
-        use storage::RegolithStore;
-
         let store = Arc::new(RegolithStore::in_memory().unwrap());
         let p2p_store = P2PCollectionStore::new(store.clone());
 
-        p2p_store.add_collection("users").await.unwrap();
+        assert_eq!(
+            p2p_store
+                .add_collections(&collections(&["users"]))
+                .await
+                .unwrap(),
+            1
+        );
 
         let systemstore = Systemstore::new(store.clone());
         let system_txn = systemstore.new_txn(true).await.unwrap();
@@ -268,17 +307,11 @@ mod tests {
 
     #[tokio::test]
     async fn stores_collection_batch_in_systemstore_namespace() {
-        use storage::RegolithStore;
-
         let store = Arc::new(RegolithStore::in_memory().unwrap());
         let p2p_store = P2PCollectionStore::new(store);
-        let collections = vec![
-            "users".to_string(),
-            "messages".to_string(),
-            "sessions".to_string(),
-        ];
+        let collections = collections(&["users", "messages", "sessions"]);
 
-        p2p_store.add_collections(&collections).await.unwrap();
+        assert_eq!(p2p_store.add_collections(&collections).await.unwrap(), 3);
 
         let stored = p2p_store
             .get_all_collections()
@@ -290,16 +323,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn removes_collection_batch_from_systemstore_namespace() {
-        use storage::RegolithStore;
-
+    async fn adding_counts_only_the_collections_not_subscribed_yet() {
         let store = Arc::new(RegolithStore::in_memory().unwrap());
         let p2p_store = P2PCollectionStore::new(store);
-        let collections = vec![
-            "users".to_string(),
-            "messages".to_string(),
-            "sessions".to_string(),
-        ];
+
+        assert_eq!(
+            p2p_store
+                .add_collections(&collections(&["users"]))
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            p2p_store
+                .add_collections(&collections(&["users", "messages"]))
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            p2p_store
+                .add_collections(&collections(&["users", "messages"]))
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(p2p_store.add_collections(&[]).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn removes_collection_batch_from_systemstore_namespace() {
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
+        let p2p_store = P2PCollectionStore::new(store);
+        let collections = collections(&["users", "messages", "sessions"]);
         p2p_store.add_collections(&collections).await.unwrap();
 
         p2p_store
@@ -311,12 +367,48 @@ mod tests {
             p2p_store.get_all_collections().await.unwrap(),
             vec!["sessions".to_string()]
         );
+        p2p_store
+            .remove_collections(&collections[..2])
+            .await
+            .expect("removing collections already gone is a no-op");
+    }
+
+    /// The change is one engine transaction: concurrent subscribes and
+    /// unsubscribes of the same collections all commit, through the engine
+    /// retry where they race, and leave the state of the last one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn racing_subscribes_and_unsubscribes_all_commit() {
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
+        let p2p_store = Arc::new(P2PCollectionStore::new(store).with_max_txn_retries(64));
+        let collections = collections(&["users", "messages"]);
+        let mut tasks = Vec::new();
+        for index in 0..16 {
+            let p2p_store = Arc::clone(&p2p_store);
+            let collections = collections.clone();
+            tasks.push(tokio::spawn(async move {
+                if index % 2 == 0 {
+                    p2p_store.add_collections(&collections).await.map(|_| ())
+                } else {
+                    p2p_store.remove_collections(&collections).await
+                }
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap().unwrap();
+        }
+
+        p2p_store.add_collections(&collections).await.unwrap();
+        let stored = p2p_store
+            .get_all_collections()
+            .await
+            .unwrap()
+            .into_iter()
+            .collect::<rapidhash::RapidHashSet<_>>();
+        assert_eq!(stored, collections.into_iter().collect());
     }
 
     #[tokio::test]
     async fn loads_collection_state_written_like_go_systemstore() {
-        use storage::RegolithStore;
-
         let store = Arc::new(RegolithStore::in_memory().unwrap());
         let systemstore = Systemstore::new(store.clone());
         let mut system_txn = systemstore.new_txn(false).await.unwrap();
@@ -336,5 +428,27 @@ mod tests {
             p2p_store.get_all_collections().await.unwrap(),
             vec!["users".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn memory_storage_keeps_the_subscribed_set_in_process() {
+        let storage = MemoryCollectionStorage::default();
+        assert_eq!(
+            storage
+                .add_collections(&collections(&["users", "users"]))
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(storage.is_subscribed("users").await.unwrap());
+        assert_eq!(
+            storage.get_all_collections().await.unwrap(),
+            vec!["users".to_string()]
+        );
+        storage
+            .remove_collections(&collections(&["users"]))
+            .await
+            .unwrap();
+        assert!(!storage.is_subscribed("users").await.unwrap());
     }
 }

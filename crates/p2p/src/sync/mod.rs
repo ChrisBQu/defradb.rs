@@ -30,7 +30,7 @@ pub(crate) mod rate_limiter;
 mod replication;
 
 pub use broadcaster::{BroadcastResult, Broadcaster};
-pub use collection_store::{NoOpCollectionStorage, P2PCollectionStorage, P2PCollectionStore};
+pub use collection_store::{MemoryCollectionStorage, P2PCollectionStorage, P2PCollectionStore};
 #[cfg(feature = "iroh-transport")]
 pub use coordinator::IrohSyncCoordinator;
 #[cfg(feature = "libp2p-transport")]

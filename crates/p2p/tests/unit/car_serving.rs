@@ -98,7 +98,7 @@ async fn ungranted_oversized_candidates_authorize_without_payload_reads() {
         SyncConfig::default(),
         AccessMode::Controlled,
         Arc::new(ReplicatorRegistry::new()),
-        Arc::new(NoOpCollectionStorage),
+        Arc::new(MemoryCollectionStorage::default()),
         Arc::new(crate::replicator::EqOnlyFilterMatcher),
         Arc::new(StaticDataClassifier {
             collection_id: "collection1".to_owned(),
@@ -154,7 +154,7 @@ async fn indexed_metadata_serves_a_replicators_oversized_notice_without_payload_
         SyncConfig::default(),
         AccessMode::Controlled,
         replicators,
-        Arc::new(NoOpCollectionStorage),
+        Arc::new(MemoryCollectionStorage::default()),
         Arc::new(crate::replicator::EqOnlyFilterMatcher),
         Arc::new(StaticDataClassifier {
             collection_id: "collection1".to_owned(),
@@ -207,7 +207,7 @@ async fn oversized_notice_fails_closed_without_indexed_metadata() {
         SyncConfig::default(),
         AccessMode::Controlled,
         replicators,
-        Arc::new(NoOpCollectionStorage),
+        Arc::new(MemoryCollectionStorage::default()),
         Arc::new(crate::replicator::EqOnlyFilterMatcher),
         Arc::new(PayloadOnlyClassifier {
             collection_id: "collection1".to_owned(),
@@ -259,7 +259,7 @@ async fn filtered_root_grant_covers_payloads_and_only_related_size_notices() {
         SyncConfig::default(),
         AccessMode::Controlled,
         filtered_replicator_registry(&peer, "collection1"),
-        Arc::new(NoOpCollectionStorage),
+        Arc::new(MemoryCollectionStorage::default()),
         Arc::new(crate::replicator::EqOnlyFilterMatcher),
         Arc::new(StaticDataClassifier {
             collection_id: "collection1".to_owned(),
@@ -322,7 +322,7 @@ async fn oversized_car_block_keeps_sibling_and_accurate_presence_counts() {
             SyncConfig::default(),
             AccessMode::Controlled,
             replicators,
-            Arc::new(NoOpCollectionStorage),
+            Arc::new(MemoryCollectionStorage::default()),
             Arc::new(crate::replicator::EqOnlyFilterMatcher),
             Arc::new(StaticDataClassifier {
                 collection_id: "collection1".to_owned(),
@@ -481,7 +481,7 @@ async fn unattributable_small_root_keeps_authority_through_its_payload() {
         SyncConfig::default(),
         AccessMode::Controlled,
         filtered_replicator_registry(&peer, "collection1"),
-        Arc::new(NoOpCollectionStorage),
+        Arc::new(MemoryCollectionStorage::default()),
         Arc::new(crate::replicator::EqOnlyFilterMatcher),
         Arc::new(PayloadOnlyClassifier {
             collection_id: "collection1".to_owned(),
@@ -544,7 +544,7 @@ async fn oversized_notice_follows_the_acp_read_gate() {
             SyncConfig::default(),
             AccessMode::Controlled,
             Arc::new(ReplicatorRegistry::new()),
-            Arc::new(NoOpCollectionStorage),
+            Arc::new(MemoryCollectionStorage::default()),
             Arc::new(crate::replicator::EqOnlyFilterMatcher),
             Arc::new(StaticDataClassifier {
                 collection_id: "collection1".to_owned(),

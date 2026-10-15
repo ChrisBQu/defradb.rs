@@ -19,7 +19,7 @@ use crate::bitswap::{
 use crate::error::Result;
 use crate::replicator::{EqOnlyFilterMatcher, ReplicationFilterMatcher};
 use crate::sync::broadcaster::Broadcaster;
-use crate::sync::collection_store::{NoOpCollectionStorage, P2PCollectionStorage};
+use crate::sync::collection_store::{MemoryCollectionStorage, P2PCollectionStorage};
 use crate::sync::head_provider::{DocumentHeadProvider, NoOpHeadProvider};
 use crate::sync::manager::{
     SyncConfig, SyncEvent, SyncManager, DEFAULT_MAX_DOC_SYNC_REQUEST_DOC_IDS,
@@ -44,7 +44,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
             config,
             AccessMode::Open,
             Arc::new(ReplicatorRegistry::new()),
-            Arc::new(NoOpCollectionStorage),
+            Arc::new(MemoryCollectionStorage::default()),
             Arc::new(EqOnlyFilterMatcher),
         )
         .await
@@ -216,6 +216,11 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         let failure_tx: Arc<kovan::AtomOption<mpsc::Sender<super::PushFailure>>> =
             Arc::new(kovan::AtomOption::none());
         let shutdown = super::SyncShutdownHandle::new(max_dag_fetches);
+        let collections = super::subscriptions::CollectionSubscriptions::new(
+            collection_store,
+            broadcaster.clone(),
+            shutdown.clone(),
+        );
         super::push_worker::spawn_push_workers(
             Arc::new(super::push_worker::PushWorkerContext {
                 transport: transport.clone(),
@@ -260,11 +265,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     gossip_direction_filtered: AtomicU64::new(0),
                 },
                 subscriptions: SyncSubscriptionState {
-                    mutation: Arc::new(tokio::sync::Mutex::new(())),
-                    subscribed_collections: super::collection_set(),
-                    retrying_subscribes: super::collection_set(),
-                    retrying_unsubscribes: super::collection_set(),
-                    collection_store,
+                    collections,
                     head_provider,
                 },
                 authorizer,
