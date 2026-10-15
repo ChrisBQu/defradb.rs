@@ -40,8 +40,8 @@ The stack has the intended 11 PRs. Prep #1922 is already marked ready; the ten a
 ### Immediate blockers
 
 1. Complete basic/ACP/encryption/counter checks on the four lower checkpoints whose draft CI skips those suites. Fresh combined-stack CLI checks all pass.
-2. Inspect current-head CI after publishing this restack. The previous step-6 CI failures (obsolete document-queue benchmark and unused dependencies) are fixed at their removal boundaries; native lint now includes all benchmarks and the CLI.
-3. Complete §5.3 timing and allocation gates. Nine removal checkpoints build; revised frozen executables are being prepared for measurements. No performance gate is waived. The key-buffer capacity optimization passed its exact-byte-layout tests and reduces allocations, but creates remain above main.
+2. Re-run browser CI after the step-5 identity fix, and inspect current-head CI after publishing this restack. The previous step-5 browser run passed 70 tests but failed three signed-create tests: WASM request identity scopes were no-ops. A per-poll scope now preserves the caller without leaking identity across suspended tasks; all six native identity tests pass, including interleaved signed/anonymous polls. Browser runtime confirmation remains pending. The previous step-6 CI failures (obsolete document-queue benchmark and unused dependencies) are fixed at their removal boundaries; native lint now includes all benchmarks and the CLI.
+3. Complete §5.3 timing and allocation gates. Storage and direct DB-mutator tests prove disjoint-part commits; GraphQL still validates the complete document, so the end-to-end disjoint-update target remains open. A conservative explicit-ID projection is being developed separately. Nine removal checkpoints build; revised frozen executables are being prepared for measurements. No performance gate is waived. The key-buffer capacity optimization passed its exact-byte-layout tests and reduces allocations, but creates remain above main.
 
 ## Validation evidence
 
