@@ -110,6 +110,15 @@ struct RegisterScopeMarkerAttempt {
     generation: u64,
 }
 
+struct RefreshPushFailureAttempt {
+    peer_id: String,
+    doc_id: String,
+    collection_id: String,
+    retry_info_bytes: Vec<u8>,
+    expected_generation: u64,
+    new_generation: u64,
+}
+
 enum PeerstoreRetryAttempt {
     DeleteReplicator {
         peer_id: String,
@@ -426,6 +435,58 @@ impl RetryAttemptFn for RegisterScopeMarkerAttempt {
     }
 }
 
+impl RetryAttemptFn for RefreshPushFailureAttempt {
+    fn run<'a>(&'a mut self, txn: &'a mut dyn RetryTxn) -> RetryAttemptFuture<'a> {
+        Box::pin(async move {
+            if txn
+                .get(&ReplicatorKey::new(&self.peer_id).bytes())
+                .await?
+                .is_none()
+            {
+                return Ok(Box::new(None::<u64>) as crate::corekv::RetryAttemptValue);
+            }
+
+            let marker = if self.doc_id.is_empty() {
+                ReplicatorRetryCollectionKey::new(&self.peer_id, &self.collection_id).bytes()
+            } else {
+                ReplicatorRetryDocIDKey::new(&self.peer_id, &self.doc_id).bytes()
+            };
+            let Some(marker_bytes) = txn.get(&marker).await? else {
+                return Ok(Box::new(None::<u64>) as crate::corekv::RetryAttemptValue);
+            };
+            if decode_retry_marker_generation(&marker_bytes) != Some(self.expected_generation) {
+                return Ok(Box::new(None::<u64>) as crate::corekv::RetryAttemptValue);
+            }
+
+            let retry_info_key = ReplicatorRetryIDKey::new(&self.peer_id);
+            let Some(existing_bytes) = txn.get(&retry_info_key.bytes()).await? else {
+                return Ok(Box::new(None::<u64>) as crate::corekv::RetryAttemptValue);
+            };
+            let mut info = super::RetryInfo::from_bytes(&existing_bytes)
+                .map_err(crate::corekv::Error::Other)?;
+            let requested = super::RetryInfo::from_bytes(&self.retry_info_bytes)
+                .map_err(crate::corekv::Error::Other)?;
+            if requested.not_before_unix > info.not_before_unix {
+                info.not_before_unix = requested.not_before_unix;
+                info.deferred_at_unix = requested.deferred_at_unix;
+                info.next_retry_unix = info.not_before_unix;
+                txn.set(
+                    &retry_info_key.bytes(),
+                    &info.to_bytes().map_err(crate::corekv::Error::Other)?,
+                )
+                .await?;
+            }
+
+            txn.set(
+                &marker,
+                &encode_retry_marker_generation(self.new_generation),
+            )
+            .await?;
+            Ok(Box::new(Some(self.new_generation)) as crate::corekv::RetryAttemptValue)
+        })
+    }
+}
+
 impl<S: Store> Peerstore<S> {
     async fn transact_conflicts<T: Send + 'static>(
         &self,
@@ -736,6 +797,40 @@ impl<S: Store> Peerstore<S> {
         }
         self.register_scope_marker(peer_id, doc_id, collection_id, retry_info_bytes)
             .await
+    }
+
+    /// Refresh an admitted push failure only while it still owns the exact
+    /// marker generation it was admitted with. A late failure cannot recreate
+    /// a forgotten marker or overwrite a newer head's retry obligation.
+    pub async fn refresh_push_failure_with_generation(
+        &self,
+        peer_id: &str,
+        doc_id: &str,
+        collection_id: &str,
+        expected_generation: u64,
+        retry_info_bytes: &[u8],
+    ) -> Result<Option<u64>> {
+        if doc_id.is_empty() && collection_id.is_empty() {
+            return Ok(None);
+        }
+        let peer_id = peer_id.to_owned();
+        let doc_id = doc_id.to_owned();
+        let collection_id = collection_id.to_owned();
+        let retry_info_bytes = retry_info_bytes.to_vec();
+        let new_generation = self
+            .store
+            .allocate(b"/rep/retry/marker-generation", 1)
+            .await?
+            .end;
+        self.transact_conflicts(Box::new(RefreshPushFailureAttempt {
+            peer_id,
+            doc_id,
+            collection_id,
+            retry_info_bytes,
+            expected_generation,
+            new_generation,
+        }))
+        .await
     }
 
     /// Register the dirty scope before a live head announcement.

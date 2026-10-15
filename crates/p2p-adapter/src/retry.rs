@@ -117,14 +117,33 @@ pub fn spawn_failure_recorder<S: storage::corekv::Store + 'static>(
                         continue;
                     }
                 };
-                peerstore
-                    .record_push_failure_with_generation(
-                        &failure.peer_id,
-                        &failure.doc_id,
-                        &failure.collection_id,
-                        &info_bytes,
-                    )
-                    .await
+                match failure.marker_generation {
+                    Some(expected_generation) => {
+                        peerstore
+                            .refresh_push_failure_with_generation(
+                                &failure.peer_id,
+                                &failure.doc_id,
+                                &failure.collection_id,
+                                expected_generation,
+                                &info_bytes,
+                            )
+                            .await
+                    }
+                    // SE-artifact failures have no admitted PushJob or head
+                    // marker. They intentionally create the initial retry
+                    // obligation; terminal PushJob failures always carry the
+                    // generation returned by the admission handshake.
+                    None => {
+                        peerstore
+                            .record_push_failure_with_generation(
+                                &failure.peer_id,
+                                &failure.doc_id,
+                                &failure.collection_id,
+                                &info_bytes,
+                            )
+                            .await
+                    }
+                }
             } else {
                 peerstore
                     .observe_push_head_with_generation(
@@ -148,7 +167,7 @@ pub fn spawn_failure_recorder<S: storage::corekv::Store + 'static>(
                 if marker_generation.is_some() {
                     let _ = peerstore.clear_retry_peer(&failure.peer_id).await;
                 }
-            } else if failure.create_retry {
+            } else if failure.create_retry && marker_generation.is_some() {
                 if let Err(error) = crate::set_persisted_replicator_status(
                     &peerstore,
                     &failure.peer_id,
@@ -1190,6 +1209,21 @@ mod tests {
         durable_rx.await.unwrap()
     }
 
+    async fn record_terminal_failure(
+        tx: &tokio::sync::mpsc::Sender<p2p::sync::PushFailure>,
+        marker_generation: u64,
+        retry_after: Option<Duration>,
+    ) -> Option<u64> {
+        let (durable_tx, durable_rx) = tokio::sync::oneshot::channel();
+        let mut failed = failure(false);
+        failed.create_retry = true;
+        failed.marker_generation = Some(marker_generation);
+        failed.retry_after = retry_after;
+        failed.durable_tx = Some(durable_tx);
+        tx.send(failed).await.unwrap();
+        durable_rx.await.unwrap()
+    }
+
     #[tokio::test]
     async fn shared_failure_recorder_registers_then_clears_current_scope() {
         let store = Arc::new(storage::backends::RegolithStore::in_memory().unwrap());
@@ -1274,11 +1308,8 @@ mod tests {
     async fn live_admission_requires_current_peer_scope_generation_and_elapsed_deadline() {
         let store = Arc::new(storage::backends::RegolithStore::in_memory().unwrap());
         let peerstore = storage::stores::Peerstore::new(store.clone());
-        let replicator = p2p::ReplicatorInfo::from_raw(
-            "peer-a".into(),
-            vec!["collection-a".into()],
-            Vec::new(),
-        );
+        let replicator =
+            p2p::ReplicatorInfo::from_raw("peer-a".into(), vec!["collection-a".into()], Vec::new());
         peerstore
             .create_replicator("peer-a", &replicator.to_bytes().unwrap())
             .await
@@ -1293,7 +1324,10 @@ mod tests {
         let recorder = spawn_failure_recorder(storage::stores::Peerstore::new(store.clone()), rx);
 
         // A normal first push is admitted only while its exact marker is live.
-        assert_eq!(check_live_admission(&tx, old_generation).await, Some(old_generation));
+        assert_eq!(
+            check_live_admission(&tx, old_generation).await,
+            Some(old_generation)
+        );
 
         // A live marker does not bypass the durable peer backoff deadline.
         peerstore
@@ -1320,7 +1354,74 @@ mod tests {
             .unwrap();
         assert!(new_generation > old_generation);
         assert_eq!(check_live_admission(&tx, old_generation).await, None);
-        assert_eq!(check_live_admission(&tx, new_generation).await, Some(new_generation));
+        assert_eq!(
+            check_live_admission(&tx, new_generation).await,
+            Some(new_generation)
+        );
+
+        drop(tx);
+        recorder.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn terminal_failure_refresh_is_cas_fenced_by_source_generation() {
+        let store = Arc::new(storage::backends::RegolithStore::in_memory().unwrap());
+        let peerstore = storage::stores::Peerstore::new(store.clone());
+        let replicator =
+            p2p::ReplicatorInfo::from_raw("peer-a".into(), vec!["collection-a".into()], Vec::new());
+        peerstore
+            .create_replicator("peer-a", &replicator.to_bytes().unwrap())
+            .await
+            .unwrap();
+        let admitted_generation = peerstore
+            .observe_push_head_with_generation("peer-a", "doc-a", "collection-a")
+            .await
+            .unwrap()
+            .unwrap();
+
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        let recorder = spawn_failure_recorder(storage::stores::Peerstore::new(store.clone()), rx);
+
+        // A failure for the admitted generation refreshes the retry obligation
+        // and rotates its token, retiring duplicate queued jobs from that run.
+        let refreshed_generation =
+            record_terminal_failure(&tx, admitted_generation, Some(Duration::from_secs(45)))
+                .await
+                .expect("current admitted failure should refresh the marker");
+        assert!(refreshed_generation > admitted_generation);
+        let retry_info = peerstore.get_retry_info("peer-a").await.unwrap().unwrap();
+        let retry_info = storage::stores::RetryInfo::from_bytes(&retry_info).unwrap();
+        assert!(retry_info.not_before_unix > 0);
+
+        // A newer head supersedes the retry token. A late failure from the old
+        // run must not replace that newer obligation.
+        let newest_generation = peerstore
+            .observe_push_head_with_generation("peer-a", "doc-a", "collection-a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(newest_generation > refreshed_generation);
+        assert_eq!(
+            record_terminal_failure(&tx, refreshed_generation, None).await,
+            None
+        );
+        let markers = peerstore.get_retry_documents("peer-a").await.unwrap();
+        assert_eq!(markers.len(), 1);
+        assert_eq!(markers[0].generation, newest_generation);
+
+        // An already-admitted I/O can finish after forget, but its late error
+        // cannot recreate the forgotten peer's marker or retry schedule.
+        peerstore.delete_replicator("peer-a").await.unwrap();
+        assert_eq!(
+            record_terminal_failure(&tx, newest_generation, None).await,
+            None
+        );
+        assert!(peerstore
+            .get_retry_documents("peer-a")
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(peerstore.get_retry_info("peer-a").await.unwrap().is_none());
 
         drop(tx);
         recorder.await.unwrap();
