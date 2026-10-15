@@ -14,6 +14,115 @@ use storage::{RegolithStore, Result, Store, Txn};
 
 const ACP_PERMISSION_KEY: &[u8] = b"batch-retry-acp-permission";
 
+/// A remote-provider stand-in: it delegates storage to local ACP memory but
+/// deliberately disables transaction binding so registrations only happen in
+/// the post-commit ordered hook.
+struct RemoteRegistrationAcp {
+    inner: Arc<acp::LocalDocumentACP>,
+    registrations: AtomicUsize,
+}
+
+#[async_trait]
+impl DocumentACP for RemoteRegistrationAcp {
+    fn supports_transactions(&self) -> bool {
+        false
+    }
+
+    async fn register_doc_object(
+        &self,
+        identity: &identity::Did,
+        policy_id: &str,
+        resource_name: &str,
+        doc_id: &str,
+    ) -> acp::Result<()> {
+        self.registrations.fetch_add(1, Ordering::SeqCst);
+        self.inner
+            .register_doc_object(identity, policy_id, resource_name, doc_id)
+            .await
+    }
+
+    async fn is_doc_registered(
+        &self,
+        policy_id: &str,
+        resource_name: &str,
+        doc_id: &str,
+    ) -> acp::Result<bool> {
+        self.inner
+            .is_doc_registered(policy_id, resource_name, doc_id)
+            .await
+    }
+
+    async fn check_doc_access(
+        &self,
+        identity: &Identity,
+        permission: acp::DocumentPermission,
+        policy_id: &str,
+        resource_name: &str,
+        doc_id: &str,
+    ) -> acp::Result<bool> {
+        self.inner
+            .check_doc_access(identity, permission, policy_id, resource_name, doc_id)
+            .await
+    }
+
+    async fn add_actor_relationship(
+        &self,
+        requestor: &identity::Did,
+        target: &identity::Did,
+        policy_id: &str,
+        collection_id: &str,
+        doc_id: &str,
+        relation: &str,
+        managing_relations: &[String],
+    ) -> acp::Result<bool> {
+        self.inner
+            .add_actor_relationship(
+                requestor,
+                target,
+                policy_id,
+                collection_id,
+                doc_id,
+                relation,
+                managing_relations,
+            )
+            .await
+    }
+
+    async fn delete_actor_relationship(
+        &self,
+        requestor: &identity::Did,
+        target: &identity::Did,
+        policy_id: &str,
+        collection_id: &str,
+        doc_id: &str,
+        relation: &str,
+        managing_relations: &[String],
+    ) -> acp::Result<bool> {
+        self.inner
+            .delete_actor_relationship(
+                requestor,
+                target,
+                policy_id,
+                collection_id,
+                doc_id,
+                relation,
+                managing_relations,
+            )
+            .await
+    }
+
+    async fn unregister_doc_object(
+        &self,
+        policy_id: &str,
+        resource_name: &str,
+        doc_id: &str,
+    ) -> acp::Result<()> {
+        self.inner
+            .unregister_doc_object(policy_id, resource_name, doc_id)
+            .await
+    }
+}
+
 struct RevokeAfterAttemptRead {
     store: Arc<RegolithStore>,
     view: Option<datastore::NamespaceView>,
@@ -586,9 +695,12 @@ async fn remote_acp_batch_replays_with_attempt_local_registration_projection() {
     )
     .await
     .unwrap();
-    let acp = Arc::new(acp::LocalDocumentACP::new(Arc::new(
-        acp::MemoryAcpStore::new(),
-    )));
+    let acp = Arc::new(RemoteRegistrationAcp {
+        inner: Arc::new(acp::LocalDocumentACP::new(Arc::new(
+            acp::MemoryAcpStore::new(),
+        ))),
+        registrations: AtomicUsize::new(0),
+    });
     db.set_document_acp(acp.clone());
     let db = Arc::new(db);
 
@@ -629,11 +741,12 @@ async fn remote_acp_batch_replays_with_attempt_local_registration_projection() {
         .await;
     assert!(!response.has_errors(), "{:?}", response.errors);
     assert_eq!(store.attempts.load(Ordering::SeqCst), 2);
-    let attempt_ids = store.attempt_ids.lock().unwrap();
-    assert_eq!(attempt_ids.len(), 2);
-    assert_eq!(attempt_ids[0], attempt_ids[1]);
-    let winner_ids = attempt_ids[1].clone();
-    drop(attempt_ids);
+    let winner_ids = {
+        let attempt_ids = store.attempt_ids.lock().unwrap();
+        assert_eq!(attempt_ids.len(), 2);
+        assert_eq!(attempt_ids[0], attempt_ids[1]);
+        attempt_ids[1].clone()
+    };
 
     for id in winner_ids {
         assert!(
@@ -643,4 +756,9 @@ async fn remote_acp_batch_replays_with_attempt_local_registration_projection() {
             "only committed batch documents should be registered"
         );
     }
+    assert_eq!(
+        acp.registrations.load(Ordering::SeqCst),
+        2,
+        "only the winning commit's two registration hooks should run"
+    );
 }
