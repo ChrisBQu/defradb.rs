@@ -29,7 +29,10 @@ pub(super) fn request_target(request: &QueryRequest) -> workers::Target {
 }
 
 /// The routing key of document `doc_id` of `collection`: the same for every
-/// write to it, whichever boundary it came through.
+/// write that names the collection the same way. GraphQL and REST name it by
+/// its name, a P2P merge by its ID, so a merge may run on another worker than
+/// a local write to the same document; the storage engine validates each
+/// commit wherever it runs.
 pub fn document_key(collection: &str, doc_id: &str) -> u64 {
     hash_parts(&[collection.as_bytes(), doc_id.as_bytes()])
 }

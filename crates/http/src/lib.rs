@@ -108,6 +108,8 @@ pub mod identity_extractor;
 #[cfg(feature = "server")]
 pub mod nac_guard;
 #[cfg(feature = "server")]
+pub mod pool_layer;
+#[cfg(feature = "server")]
 pub mod query_context;
 #[cfg(feature = "server")]
 pub mod route_permissions;

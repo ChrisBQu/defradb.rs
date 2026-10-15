@@ -34,7 +34,7 @@ use std::time::Duration;
 use regolith::sync::{Latch, LatchWait};
 
 pub use deadline::{delay, timeout};
-pub use detached::{fallback, spawn, spawn_detached};
+pub use detached::{fallback, run_on, spawn, spawn_detached};
 pub use driven::Driver;
 pub use env::PlacedEnv;
 pub use background::{spawn_background, Background};

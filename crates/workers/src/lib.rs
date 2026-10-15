@@ -33,7 +33,7 @@ pub use error::Error;
 pub use hook::{Hook, HookFactory, HookProgress};
 pub use os::{ContextSwitches, Outcome};
 pub use pool::{
-    delay, fallback, spawn, spawn_background, spawn_detached, timeout, Background, Driver, Monitor, MonitorDriver, PlacedEnv, Pool, Report, Stats,
+    delay, fallback, run_on, spawn, spawn_background, spawn_detached, timeout, Background, Driver, Monitor, MonitorDriver, PlacedEnv, Pool, Report, Stats,
     Submit, Target, ThreadPlacement, TopologySummary, WorkerReport,
 };
 pub use worker::{

@@ -43,15 +43,19 @@ impl PooledExecutor {
 
     /// `inner` as the boundary holds it: on `pool` when the database has one,
     /// as it is otherwise (a test, a one-shot tool).
-    pub fn wrap(inner: Arc<dyn QueryExecutor>, pool: Option<&workers::Pool>) -> Arc<dyn QueryExecutor> {
+    pub fn wrap(
+        inner: Arc<dyn QueryExecutor>,
+        pool: Option<&workers::Pool>,
+    ) -> Arc<dyn QueryExecutor> {
         match pool {
             Some(pool) => Arc::new(Self::new(inner, pool.clone())),
             None => inner,
         }
     }
 
-    /// Runs `call` on `inner` on the worker `target` names, and hands its
-    /// output back; why it has none when the pool could not run it.
+    /// Runs `call` on `inner` on the worker `target` names (in place when
+    /// already on a worker), and hands its output back; why it has none when
+    /// the pool could not run it.
     async fn on_pool<T, F, Fut>(&self, target: workers::Target, call: F) -> Result<T>
     where
         F: FnOnce(Arc<dyn QueryExecutor>) -> Fut + Send + 'static,
@@ -59,13 +63,30 @@ impl PooledExecutor {
         T: Send + 'static,
     {
         let inner = Arc::clone(&self.inner);
-        let done = self
-            .pool
-            .submit(target, move || call(inner))
+        workers::run_on(Some(&self.pool), target, move || call(inner))
             .await
-            .map_err(unavailable)?;
-        done.await.map_err(unavailable)
+            .map_err(unavailable)
     }
+}
+
+/// Runs the data-path call `make` builds on `pool` ([`workers::run_on`])
+/// acting as `identity` there: the acting identity of the caller crosses into
+/// the pool with its call, the way a caller off the pool would have read it.
+pub async fn run_as<F, Fut>(
+    pool: Option<&workers::Pool>,
+    target: workers::Target,
+    identity: Option<String>,
+    make: F,
+) -> std::result::Result<Fut::Output, workers::Error>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future + 'static,
+    Fut::Output: Send + 'static,
+{
+    workers::run_on(pool, target, move || {
+        defra_core::current_identity::with_scoped_identity(identity, make())
+    })
+    .await
 }
 
 /// A request the pool could not run: it was shutting down, or the task
@@ -109,9 +130,12 @@ impl QueryExecutor for PooledExecutor {
 
     async fn execute(&self, request: QueryRequest) -> QueryResponse {
         let target = route::request_target(&request);
-        self.on_pool(target, move |inner| async move { inner.execute(request).await })
-            .await
-            .unwrap_or_else(|error| QueryResponse::error(error.to_string()))
+        self.on_pool(
+            target,
+            move |inner| async move { inner.execute(request).await },
+        )
+        .await
+        .unwrap_or_else(|error| QueryResponse::error(error.to_string()))
     }
 
     async fn execute_in_txn(

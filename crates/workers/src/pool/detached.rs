@@ -51,6 +51,35 @@ where
     submit_now(pool, Target::LeastLoaded, options, make)
 }
 
+/// Runs the future `make` builds on the pool and hands its output back: in
+/// place when the caller is already a worker (no hop from worker to worker),
+/// on the worker `target` names otherwise (one crossing there, one back), and
+/// in place when there is no pool (a test, a one-shot tool). What a boundary
+/// wraps a data-path call in.
+///
+/// ```no_run
+/// # async fn demo(pool: Option<&workers::Pool>) -> Result<(), workers::Error> {
+/// let rows = workers::run_on(pool, workers::Target::LeastLoaded, || async { 3 }).await?;
+/// assert_eq!(rows, 3);
+/// # Ok(())
+/// # }
+/// ```
+pub async fn run_on<F, Fut>(
+    pool: Option<&Pool>,
+    target: Target,
+    make: F,
+) -> Result<Fut::Output, Error>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future + 'static,
+    Fut::Output: Send + 'static,
+{
+    match pool {
+        Some(pool) if !crate::worker::on_worker() => pool.submit(target, make).await?.await,
+        _ => Ok(make().await),
+    }
+}
+
 /// [`spawn`] for work nobody awaits (a periodic job, a backfill, the
 /// callbacks of a transaction dropped where nothing can await).
 ///

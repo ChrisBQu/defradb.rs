@@ -1,7 +1,7 @@
 //! The boundary between the P2P layer and the worker pool for merges: a
 //! [`MergeHandler`] that runs each merge on the worker of the document it
-//! merges, where every write to that document runs, one task per document
-//! at a time (`query::pooled::document_key`). The P2P layer receives blocks
+//! merges, keyed by the collection's ID, one task per document at a time
+//! (`query::pooled::document_key`). The P2P layer receives blocks
 //! on the network edge; the merge itself, a storage transaction, never runs
 //! there.
 //!
@@ -121,8 +121,7 @@ where
         T: Send + 'static,
     {
         let inner = Arc::clone(&self.inner);
-        let done = pool.submit(target, move || merge(inner)).await?;
-        done.await?
+        workers::run_on(Some(pool), target, move || merge(inner)).await?
     }
 }
 
@@ -203,13 +202,9 @@ where
         let count = blocks.len();
         let blocks = blocks.to_vec();
         let inner = Arc::clone(&self.inner);
-        let ran = async {
-            pool.submit(target, move || async move {
-                inner.handle_block_batch(&blocks).await
-            })
-            .await?
-            .await
-        };
+        let ran = workers::run_on(Some(pool), target, move || async move {
+            inner.handle_block_batch(&blocks).await
+        });
         match ran.await {
             Ok(outcomes) => outcomes,
             // The pool could not run the batch: every block of it failed for
