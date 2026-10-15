@@ -243,9 +243,10 @@ Disjoint parts of one document never conflict. A read that validates more than i
 
 ### Hash maps: rapidhash, fast
 
-- Every hash map and hash set is `rapidhash::fast::RapidHashMap` or `rapidhash::fast::RapidHashSet`, built with
-  `default()` or `with_capacity` (`rapidhash::HashMapExt`, `HashSetExt`). Never `std::collections::HashMap` or
-  `HashSet` with the standard hasher, and never the `rapidhash::quality` variant.
+- Every hash map and hash set is `rapidhash::RapidHashMap` or `rapidhash::RapidHashSet`, the fast hasher
+  (`rapidhash::fast::RandomState`; the `rapidhash::fast::RapidHashMap` path is a deprecated alias of the same type),
+  built with `new()`, `default()` or `with_capacity` (`rapidhash::HashMapExt`, `HashSetExt`). Never
+  `std::collections::HashMap` or `HashSet` with the standard hasher, and never the `rapidhash::quality` variant.
 - A map shared between threads is kovan's `HopscotchMap` (re-exported as `regolith::sync::HopscotchMap`) built with
   `rapidhash::fast::RandomState` (`HopscotchMap::with_hasher`), not with its default hasher.
 - This holds for every line of the workspace, tests and tools included: the final code has no
