@@ -22,7 +22,7 @@ Merge from the bottom upward, retargeting the next PR after each merge. The bran
 | 10 | 7 engine telemetry | [#1960](https://github.com/sourcenetwork/defradb.rs/pull/1960) | `defralevel/07-engine-telemetry` | `defralevel/06-lock-removal` |
 | 11 | 8 proof alignment | [#1961](https://github.com/sourcenetwork/defradb.rs/pull/1961) | `defralevel/08-proof-alignment` | `defralevel/07-engine-telemetry` |
 
-The stack has the intended 11 PRs. Prep #1922 is already marked ready; the ten adoption PRs remain drafts. No auto-merge is enabled on #1922. Split into two stacks if further necessary splits exceed 11. Do not merge superseded generated implementations (#1897/#1899/#1911); their closure remains pending completion of this adoption.
+The stack has the intended 11 PRs. All eleven PRs remain drafts while the prep omissions and adoption gates are completed. No auto-merge is enabled on #1922. Split into two stacks if further necessary splits exceed 11. Do not merge superseded generated implementations (#1897/#1899/#1911); their closure remains pending completion of this adoption.
 
 ## Current implementation and remaining work
 
@@ -38,6 +38,8 @@ The stack has the intended 11 PRs. Prep #1922 is already marked ready; the ten a
 | 8 | Obsolete cache/counter/queue proofs retired; HeadSet retained; pinned arrival proof and new adapter boundary models | Revalidate after lower-stack restack; models do not verify Rust or remote authorization |
 
 ### Immediate blockers
+
+The final §2.4 audit identified three prep omissions now being addressed: the lens epoch timer, database-shared lens engine with a lazy transaction-local transform map, and statement savepoints for failed/cancelled explicit-transaction mutations. Existing correctness passes do not cover these missing behaviors.
 
 1. Inspect current-head CI after the upper-stack restack. The final query-projection native/external validation passes. All four lower-checkpoint basic/ACP/encryption/full-counter gates now pass independently.
 2. Complete §5.3 timing and allocation gates on a quiet host. All nine removal checkpoints build; frozen final endpoints are built. No performance gate is waived. Creates remain about 4.6% above main in the latest allocation pair.
