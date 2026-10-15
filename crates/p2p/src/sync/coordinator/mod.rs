@@ -1244,32 +1244,38 @@ mod shutdown_tests {
         }
     }
 
+    /// Its first sweep, at install, finds nothing; every later one waits.
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     impl crate::sync::pending_store::PendingDagStorage for BlockingResyncStore {
-        async fn put(
+        async fn register(
+            &self,
+            _registration: crate::sync::pending_store::Registration<'_>,
+            _view: &Arc<crate::sync::pending_store::PersistedView>,
+        ) -> crate::Result<crate::sync::pending_store::Admission> {
+            unreachable!()
+        }
+
+        async fn remove(
             &self,
             _root_cid: &Cid,
-            _record: &crate::sync::pending_store::PersistedPendingDag,
-        ) -> crate::Result<()> {
+            _view: &Arc<crate::sync::pending_store::PersistedView>,
+        ) -> crate::Result<bool> {
             unreachable!()
         }
 
-        async fn replace_scope_head(
+        async fn quarantine(
             &self,
-            _superseded_root: Option<&Cid>,
             _root_cid: &Cid,
-            _record: &crate::sync::pending_store::PersistedPendingDag,
-        ) -> crate::Result<()> {
+            _entry: &crate::sync::pending_store::PersistedQuarantinedDag,
+            _view: &Arc<crate::sync::pending_store::PersistedView>,
+        ) -> crate::Result<bool> {
             unreachable!()
         }
 
-        async fn remove(&self, _root_cid: &Cid) -> crate::Result<()> {
-            unreachable!()
-        }
-
-        async fn load_all(
+        async fn sweep(
             &self,
+            _view: &Arc<crate::sync::pending_store::PersistedView>,
         ) -> crate::Result<Vec<(Cid, crate::sync::pending_store::PersistedPendingDag)>> {
             if self.load_calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 return Ok(Vec::new());
@@ -1278,11 +1284,17 @@ mod shutdown_tests {
             std::future::pending().await
         }
 
-        async fn quarantine(
+        async fn put(
             &self,
             _root_cid: &Cid,
-            _entry: &crate::sync::pending_store::PersistedQuarantinedDag,
+            _record: &crate::sync::pending_store::PersistedPendingDag,
         ) -> crate::Result<()> {
+            unreachable!()
+        }
+
+        async fn load_all(
+            &self,
+        ) -> crate::Result<Vec<(Cid, crate::sync::pending_store::PersistedPendingDag)>> {
             unreachable!()
         }
 

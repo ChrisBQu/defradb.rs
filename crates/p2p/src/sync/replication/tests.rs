@@ -1399,7 +1399,7 @@ async fn coordinator_with_live_pending_dag(
         .await
         .expect("persist live pending dag record");
 
-    // install_pending_dag_store hydrates persisted_roots from the store
+    // install_pending_dag_store loads the persisted view from the store
     // at install time, so the record must already be `put` above.
     coordinator
         .manager()

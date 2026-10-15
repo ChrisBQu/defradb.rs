@@ -9,6 +9,7 @@ use web_time::Instant;
 use cid::Cid;
 use kovan::Atom;
 
+use crate::sync::head_scope::{HeadVersion, Scope, ScopeDecision};
 use crate::ExplicitReplayAuthorization;
 
 /// Time-to-live for a pending DAG entry.
@@ -59,7 +60,7 @@ pub struct PendingDag {
     pub last_fetch_error: Option<String>,
     /// Earliest instant a fetch dispatch may be claimed for this root.
     /// Every dispatch site must win `try_claim_pending_dag_dispatch`,
-    /// which advances this by `retry_backoff(dispatches)` — the receiver's
+    /// which advances this by `retry_backoff(dispatches)`, the receiver's
     /// re-arm pacing (#1112 inbound half, #1116 stage 2).
     pub next_retry_at: n0_future::time::Instant,
     /// Fetch dispatches claimed for this root (drives the backoff rung).
@@ -78,28 +79,7 @@ pub(super) struct PendingDagRegistry {
     roots: RapidHashMap<Cid, Arc<PendingDag>>,
     waiters: RapidHashMap<Cid, Arc<RapidHashSet<Cid>>>,
     roots_by_source: RapidHashMap<Arc<str>, usize>,
-    current_by_source_scope: RapidHashMap<Arc<PendingScopeKey>, (HeadVersion, Cid)>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct PendingScopeKey {
-    source_peer: String,
-    collection_id: String,
-    doc_id: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct HeadVersion {
-    priority: u64,
-    cid: Cid,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ScopeHeadDecision {
-    Independent,
-    Current,
-    CoveredByCurrent,
-    Supersedes(Cid),
+    current_by_source_scope: RapidHashMap<Arc<Scope>, HeadVersion>,
 }
 
 impl Deref for PendingDagRegistry {
@@ -111,6 +91,11 @@ impl Deref for PendingDagRegistry {
 }
 
 impl PendingDagRegistry {
+    /// The current head of `scope` among the pending roots.
+    fn current(&self, scope: &Scope) -> Option<HeadVersion> {
+        self.current_by_source_scope.get(scope).copied()
+    }
+
     pub(super) fn scope_head_is_refresh_or_newer(
         &self,
         root_cid: Cid,
@@ -119,21 +104,11 @@ impl PendingDagRegistry {
         doc_id: &str,
         head_priority: Option<u64>,
     ) -> bool {
-        let (Some(source_peer), Some(priority)) = (source_peer, head_priority) else {
-            return false;
-        };
-        let key = PendingScopeKey {
-            source_peer: source_peer.to_owned(),
-            collection_id: collection_id.to_owned(),
-            doc_id: doc_id.to_owned(),
-        };
-        let version = HeadVersion {
-            priority,
-            cid: root_cid,
-        };
-        self.current_by_source_scope
-            .get(&key)
-            .is_some_and(|(current, current_root)| *current_root == root_cid || version > *current)
+        Scope::of(root_cid, source_peer, collection_id, doc_id, head_priority).is_some_and(
+            |(scope, version)| {
+                ScopeDecision::refreshes_or_supersedes(version, self.current(&scope))
+            },
+        )
     }
 
     /// True when a newer head for the same sender scope is the current
@@ -147,52 +122,24 @@ impl PendingDagRegistry {
         doc_id: &str,
         head_priority: Option<u64>,
     ) -> bool {
-        let (Some(source_peer), Some(priority)) = (source_peer, head_priority) else {
-            return false;
-        };
-        let key = PendingScopeKey {
-            source_peer: source_peer.to_owned(),
-            collection_id: collection_id.to_owned(),
-            doc_id: doc_id.to_owned(),
-        };
-        let version = HeadVersion {
-            priority,
-            cid: root_cid,
-        };
-        self.current_by_source_scope
-            .get(&key)
-            .is_some_and(|(current, current_root)| *current_root != root_cid && version <= *current)
+        Scope::of(root_cid, source_peer, collection_id, doc_id, head_priority)
+            .is_some_and(|(scope, version)| ScopeDecision::covered(version, self.current(&scope)))
     }
 
-    fn scope_key(dag: &PendingDag) -> Option<PendingScopeKey> {
-        let source_peer = dag.source_peer.as_ref()?;
-        dag.head_priority?;
-        Some(PendingScopeKey {
-            source_peer: source_peer.clone(),
-            collection_id: dag.collection_id.clone(),
-            doc_id: dag.doc_id.clone(),
-        })
+    fn scope_of(root_cid: Cid, dag: &PendingDag) -> Option<(Scope, HeadVersion)> {
+        Scope::of(
+            root_cid,
+            dag.source_peer.as_deref(),
+            &dag.collection_id,
+            &dag.doc_id,
+            dag.head_priority,
+        )
     }
 
-    fn head_version(root_cid: Cid, dag: &PendingDag) -> Option<HeadVersion> {
-        Some(HeadVersion {
-            priority: dag.head_priority?,
-            cid: root_cid,
-        })
-    }
-
-    pub(super) fn scope_head_decision(&self, root_cid: Cid, dag: &PendingDag) -> ScopeHeadDecision {
-        let (Some(key), Some(version)) = (Self::scope_key(dag), Self::head_version(root_cid, dag))
-        else {
-            return ScopeHeadDecision::Independent;
-        };
-        match self.current_by_source_scope.get(&key) {
-            None => ScopeHeadDecision::Current,
-            Some((current, current_root)) if *current_root == root_cid => {
-                ScopeHeadDecision::Current
-            }
-            Some((current, _)) if version <= *current => ScopeHeadDecision::CoveredByCurrent,
-            Some((_, current_root)) => ScopeHeadDecision::Supersedes(*current_root),
+    pub(super) fn scope_head_decision(&self, root_cid: Cid, dag: &PendingDag) -> ScopeDecision {
+        match Self::scope_of(root_cid, dag) {
+            None => ScopeDecision::Independent,
+            Some((scope, version)) => ScopeDecision::of(version, self.current(&scope)),
         }
     }
 
@@ -225,11 +172,9 @@ impl PendingDagRegistry {
                 }
             }
         }
-        if let (Some(key), Some(version)) =
-            (Self::scope_key(&dag), Self::head_version(root_cid, &dag))
-        {
+        if let Some((scope, version)) = Self::scope_of(root_cid, &dag) {
             self.current_by_source_scope
-                .insert(Arc::new(key), (version, root_cid));
+                .insert(Arc::new(scope), version);
         }
         self.roots.insert(root_cid, Arc::new(dag));
         previous
@@ -253,13 +198,12 @@ impl PendingDagRegistry {
                 self.roots_by_source.remove(source_peer.as_str());
             }
         }
-        if let Some(key) = Self::scope_key(&dag) {
+        if let Some((scope, _)) = Self::scope_of(*root_cid, &dag) {
             if self
-                .current_by_source_scope
-                .get(&key)
-                .is_some_and(|(_, current_root)| current_root == root_cid)
+                .current(&scope)
+                .is_some_and(|current| current.cid == *root_cid)
             {
-                self.current_by_source_scope.remove(&key);
+                self.current_by_source_scope.remove(&scope);
             }
         }
         Some(Arc::try_unwrap(dag).unwrap_or_else(|shared| PendingDag::clone(&shared)))

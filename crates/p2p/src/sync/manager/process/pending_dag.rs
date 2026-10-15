@@ -12,7 +12,7 @@ use crate::error::{Error, Result};
 use crate::sync::manager::events::SyncEvent;
 use crate::sync::manager::links::{extract_ipld_links, find_all_missing_links};
 use crate::sync::manager::pending::{PendingDag, PENDING_DAG_TTL};
-use crate::sync::pending_store::{PersistedPendingDag, PersistedQuarantinedDag};
+use crate::sync::pending_store::{PersistedPendingDag, PersistedQuarantinedDag, Registration};
 
 use super::SyncManager;
 
@@ -274,7 +274,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     /// pending root waiting on it: drop it from `missing`, add the block's
     /// own absent links to the frontier, and run the full verification walk
     /// (`retry_pending_dag`) ONLY for roots whose frontier emptied. The full
-    /// walk per arriving block was O(DAG) per root per block — the #1112
+    /// walk per arriving block was O(DAG) per root per block, the #1112
     /// inbound storm; the clock's periodic retry self-heals any frontier
     /// drift this incremental pass might accumulate.
     ///
@@ -289,7 +289,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         // The arriving block's own links that are still absent become the
         // new frontier for every waiting root. Computed once per block.
         // Uses `extract_ipld_links` (not `defra_core::collect_block_links`
-        // directly) so the `encryption` link stays excluded here too — Go
+        // directly) so the `encryption` link stays excluded here too, Go
         // never serves that block over Bitswap (#976), so treating it as
         // "absent" would strand the frontier on a CID that never arrives.
         let mut absent_links: Vec<Cid> = Vec::new();
@@ -343,7 +343,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         root_cid: Cid,
         dag: PendingDag,
     ) -> PendingDagAdmission {
-        use crate::sync::manager::pending::ScopeHeadDecision;
+        use crate::sync::head_scope::ScopeDecision;
 
         let max_per_peer = self.max_pending_dags_per_peer();
         let registered = dag.is_recovery_registered;
@@ -351,11 +351,11 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             evict_expired_pending_dags(pending, Instant::now());
 
             let scope_decision = pending.scope_head_decision(root_cid, &dag);
-            if matches!(scope_decision, ScopeHeadDecision::CoveredByCurrent) {
+            if matches!(scope_decision, ScopeDecision::CoveredByCurrent) {
                 return (PendingDagAdmission::CoveredByCurrent, None);
             }
             let superseded_root = match scope_decision {
-                ScopeHeadDecision::Supersedes(root) => Some(root),
+                ScopeDecision::Supersedes(root) => Some(root),
                 _ => None,
             };
 
@@ -721,7 +721,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         };
         // Cheap steady-state exit: nothing to reconcile while every durable
         // root still has a live, unexpired in-memory entry. An expired entry
-        // must not mask its record — eviction is lazy, and the record is the
+        // must not mask its record, eviction is lazy, and the record is the
         // only remaining owner of the recovery obligation. Every Nth sweep is
         // forced past this exit so an orphan record (present in the store but
         // absent from the accounting set after a rare reserve/put race) is
@@ -731,7 +731,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             .is_multiple_of(super::PENDING_RESYNC_FORCED_TICK);
         if !forced {
-            let roots: Vec<Cid> = self.persisted_roots.keys().collect();
+            let roots: Vec<Cid> = self.persisted.roots();
             let now = Instant::now();
             let all_live = !roots.is_empty()
                 && self.pending_dags.read(|pending| {
@@ -759,53 +759,15 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         &self,
         store: Arc<dyn crate::sync::pending_store::PendingDagStorage>,
     ) -> usize {
-        // Registration, terminal removal, quarantine, and this authoritative
-        // snapshot all use the same writer.  Without it, a sweep can load a
-        // record, a terminal path can delete it and clear the accounting set,
-        // and the stale snapshot can then re-add the root.  Keeping a live
-        // in-memory pending entry is not evidence of durable ownership: only
-        // the store is authoritative for this accounting and its hard cap.
-        let records = {
-            let _metadata_writer = self.pending_metadata_writer.lock().await;
-            let records = match store.load_all().await {
-                Ok(records) => records,
-                Err(error) => {
-                    tracing::warn!(error = %error, "Failed to load persisted pending DAG records");
-                    return 0;
-                }
-            };
-            let record_roots: rapidhash::RapidHashSet<Cid> =
-                records.iter().map(|(cid, _)| *cid).collect();
-            let stale_roots: Vec<Cid> = self
-                .persisted_roots
-                .keys()
-                .filter(|root| !record_roots.contains(root))
-                .collect();
-            for root in stale_roots {
-                self.persisted_roots.remove(&root);
+        // The sweep's transaction rebuilds the view of what is durable from
+        // the records it read, in commit-receipt order, so it neither undoes
+        // a later registration nor revives a later removal.
+        let records = match store.sweep(&self.persisted).await {
+            Ok(records) => records,
+            Err(error) => {
+                tracing::warn!(error = %error, "Failed to load persisted pending DAG records");
+                return 0;
             }
-            for root in &record_roots {
-                self.persisted_roots.insert_if_absent(*root, ());
-            }
-            let stale_scopes: Vec<_> = self
-                .persisted_scope_heads
-                .iter()
-                .filter(|(_, version)| !record_roots.contains(&version.cid))
-                .map(|(key, _)| key)
-                .collect();
-            for key in stale_scopes {
-                self.persisted_scope_heads.remove(&key);
-            }
-            for (root_cid, record) in &records {
-                self.remember_persisted_scope_head(
-                    *root_cid,
-                    record.source_peer.as_deref(),
-                    &record.collection_id,
-                    &record.doc_id,
-                    record.head_priority,
-                );
-            }
-            records
         };
         if records.is_empty() {
             return 0;
@@ -874,20 +836,17 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             // retire obsolete heads without retaining payload/CID ledgers.
             if record.head_priority.is_none() && head_priority.is_some() {
                 record.head_priority = head_priority;
-                let _metadata_writer = self.pending_metadata_writer.lock().await;
-                match store.put(&root_cid, &record).await {
-                    Ok(()) => self.remember_persisted_scope_head(
-                        root_cid,
-                        record.source_peer.as_deref(),
-                        &record.collection_id,
-                        &record.doc_id,
-                        head_priority,
-                    ),
-                    Err(error) => tracing::warn!(
+                let upgrade = Registration {
+                    root: root_cid,
+                    record: &record,
+                    capacity: self.persisted_pending_capacity(),
+                };
+                if let Err(error) = store.register(upgrade, &self.persisted).await {
+                    tracing::warn!(
                         root_cid = %root_cid,
                         error = %error,
                         "Failed to upgrade legacy pending DAG scope metadata; obligation remains independently replayable"
-                    ),
+                    );
                 }
             }
 
@@ -977,76 +936,39 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     /// `MergeOutcome::Rejected` means the merge failed on the block's
     /// *content* (e.g. a unique-index violation) rather than transiently:
     /// replaying it will fail identically every time. Unlike a successful
-    /// merge, the block is deliberately left unmerged — a remote re-push can
-    /// still retry (sender-paced) and re-quarantine on repeat rejection —
+    /// merge, the block is deliberately left unmerged, a remote re-push can
+    /// still retry (sender-paced) and re-quarantine on repeat rejection,
     /// but local re-drive (retry clock, resync sweep) must stop.
     ///
-    /// Sequencing is load-bearing: the quarantine record is written to the
-    /// durable store BEFORE the live `/p2p/pending_dag/` record is deleted.
-    /// A crash in the window between the two leaves BOTH records on disk
-    /// rather than losing the live one; Task 4's resync sweep consults
-    /// `is_quarantined` before re-registering a leftover live record, so the
-    /// crash window self-heals instead of re-driving (or silently losing) a
-    /// merge that is now known to fail forever.
+    /// The quarantine record and the deletion of the live `/p2p/pending_dag/`
+    /// record commit together. A store written by an earlier build, which
+    /// wrote them one after the other, may hold both after a crash; the
+    /// resync sweep consults `is_quarantined` before re-registering such a
+    /// leftover, so it is deleted instead of re-driving a merge that is
+    /// known to fail forever.
     pub async fn quarantine_pending_dag(&self, root_cid: &Cid, reason: &str) {
         let entry = self.build_quarantine_entry(root_cid, reason).await;
 
-        // Registration, successful-merge cleanup, and quarantine are all
-        // transitions of the same durable obligation. Keep their storage
-        // transactions behind one manager-local writer so duplicate terminal
-        // observations cannot exhaust OCC retries against the same keys.
-        let _metadata_writer = self.pending_metadata_writer.lock().await;
-
-        // Checked BEFORE the write: a remote re-push of an already-rejected
-        // root re-runs this function (repeat rejection is the expected,
-        // sender-paced retry — not a bug), and the gauge below counts
-        // distinct quarantined *roots*, not quarantine *occurrences*.
-        // Without this check a repeat rejection would drift the gauge above
-        // the true record count until the next restart's
-        // `install_pending_dag_store` hydration silently corrects it. The
-        // occurrence-level diagnostic counter
-        // (`pending_dag_terminal_quarantined`, below) is deliberately NOT
-        // deduped the same way — it exists to count every rejection event
-        // for alerting, gauge or no.
-        let mut already_quarantined = false;
-
-        if let Some(store) = self.pending_store() {
-            already_quarantined = matches!(store.is_quarantined(root_cid).await, Ok(true));
-
-            if let Err(error) = store.quarantine(root_cid, &entry).await {
-                tracing::error!(
-                    root_cid = %root_cid,
-                    error = %error,
-                    "Failed to write quarantine record; leaving the live pending-DAG registration in place for retry"
-                );
-                return;
+        // The quarantine record, the deletion of the live record and its
+        // slot, and the gauge's count move in one transaction; a repeat
+        // rejection of a root already quarantined does not count again.
+        match self.pending_store() {
+            Some(store) => {
+                if let Err(error) = store.quarantine(root_cid, &entry, &self.persisted).await {
+                    tracing::error!(
+                        root_cid = %root_cid,
+                        error = %error,
+                        "Failed to write quarantine record; leaving the live pending-DAG registration in place for retry"
+                    );
+                    return;
+                }
             }
-
-            if let Err(error) = store.remove(root_cid).await {
-                tracing::warn!(
-                    root_cid = %root_cid,
-                    error = %error,
-                    "Failed to delete live pending-DAG record after quarantine; the next resync sweep will self-heal"
-                );
-            }
-            // Unconditional, unlike `remove_persisted_pending`'s only-on-Ok
-            // drop: the quarantine write above (not the live-record delete)
-            // is this root's discharge point, so it must stop counting
-            // against the durable admission cap even if `store.remove` just
-            // failed above. The live record may still be on disk, but the
-            // resync sweep's `is_quarantined` check (Task 4) cleans up that
-            // leftover independently of this in-memory set.
-            self.persisted_roots.remove(root_cid);
-            self.forget_persisted_scope_root(root_cid);
+            None => self.persisted.count_quarantined(),
         }
 
         self.pending_dags.update(|pending| {
             pending.remove(root_cid);
         });
-        if !already_quarantined {
-            self.quarantined_pending_count
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
         self.diagnostics.record_pending_dag_terminal_quarantined();
 
         tracing::warn!(
@@ -1107,10 +1029,10 @@ impl<B: Blockstore + 'static> SyncManager<B> {
 
     /// Look up the live durable record for `root_cid`, if any. The store has
     /// no by-CID lookup (only `load_all`/prefix scan), so this pays an O(n)
-    /// scan of the live keyspace — acceptable because quarantine only fires
+    /// scan of the live keyspace, acceptable because quarantine only fires
     /// on a deterministic content rejection, not the hot merge path.
     async fn load_live_durable_record(&self, root_cid: &Cid) -> Option<PersistedPendingDag> {
-        if !self.persisted_roots.contains_key(root_cid) {
+        if !self.persisted.contains(root_cid) {
             return None;
         }
         let store = self.pending_store()?;
