@@ -28,10 +28,10 @@ struct MarkVerified(HopscotchMap<TransformId, (), RandomState>);
 
 #[async_trait]
 impl TransformStore for MarkVerified {
+    // A transaction's own registrations run in a real WASM store, as they did
+    // when this double had no isolated store of its own.
     fn new_isolated_store(&self) -> Arc<dyn TransformStore> {
-        Arc::new(MarkVerified(HopscotchMap::with_hasher(
-            RandomState::default(),
-        )))
+        lens::default_store().expect("the WASM transform store builds")
     }
 
     async fn add(&self, config: LensConfig) -> lens::Result<TransformId> {

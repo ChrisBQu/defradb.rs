@@ -173,12 +173,16 @@ impl IndexDescription {
         }
     }
 
-    /// A copy whose kind and legacy `unique` flag agree.
+    /// A copy in its stored form: kind and legacy `unique` flag agree, and
+    /// `auto_generated`, which is never stored, is cleared.
     ///
     /// Two descriptions that mean the same thing but were built in different
     /// styles, one setting only `unique` and one setting only `kind`, compare
-    /// unequal until both are normalized. Mirrors Go's `Normalize`.
+    /// unequal until both are normalized, as does a relation index the schema
+    /// builder marked against the same index read back from storage. Mirrors
+    /// Go's `Normalize`.
     pub fn normalized(mut self) -> Self {
+        self.auto_generated = false;
         let kind = self
             .kind
             .unwrap_or(IndexKind::Ordered(OrderedIndexDescription {
