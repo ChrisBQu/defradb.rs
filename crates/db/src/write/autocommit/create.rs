@@ -69,12 +69,6 @@ pub(super) fn acp_registration_retry_callback(
     bearer_token: Option<String>,
 ) -> storage::corekv::AsyncOrderedRetryCallback {
     Box::new(move || {
-        let acp = Arc::clone(&acp);
-        let creator = creator.clone();
-        let policy_id = policy_id.clone();
-        let resource_name = resource_name.clone();
-        let doc_id = doc_id.clone();
-        let bearer_token = bearer_token.clone();
         Box::pin(defra_core::signing::scope_request_bearer_token(
             Some(creator.to_string()),
             bearer_token,
