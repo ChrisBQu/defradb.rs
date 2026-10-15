@@ -427,6 +427,10 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> BroadcastMuta
 impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
     for BroadcastMutator<S, B, T>
 {
+    fn engine_retries_batches(&self) -> bool {
+        true
+    }
+
     fn requires_write_preparation(&self) -> bool {
         self.inner.requires_write_preparation()
     }
@@ -448,7 +452,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
     }
 
     async fn begin_batch(&self) -> query::error::Result<Option<MutationBatch>> {
-        let (inner_batch, fetcher) = self.inner.new_batch_components().await?;
+        let inner_batch = self.inner.new_retryable_batch_controller();
         let inner_controller: Arc<dyn MutationBatchController> = inner_batch.clone();
         let broadcast_batch = Arc::new(BroadcastBatchMutator::new(
             inner_batch,
@@ -457,9 +461,8 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             self.db.clone(),
             self.load_se_options(),
         ));
-        let mutator: Arc<dyn DocMutator> = broadcast_batch.clone();
         let controller: Arc<dyn MutationBatchController> = broadcast_batch;
-        Ok(Some(MutationBatch::new(mutator, fetcher, controller)))
+        Ok(Some(MutationBatch::new_retryable(controller)))
     }
 
     async fn create(

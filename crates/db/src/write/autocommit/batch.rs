@@ -22,6 +22,7 @@ use crate::collection::loader::{get_collection_with_index_manager, get_collectio
 use crate::database::DB;
 use crate::event::emission::register_update_event_callback;
 use crate::txn::DbTxn;
+use datastore::BasicTxn;
 use defra_core::encryption::get_encryption_config;
 use defra_core::signing::get_signing_config;
 
@@ -53,6 +54,19 @@ impl<S: Store> BatchMutator<S> {
             db,
             txn,
             prepared_inputs,
+            doc_guards: PlMutex::new(BTreeMap::new()),
+            batch_gate: PlMutex::new(None),
+        }
+    }
+
+    pub(crate) fn new_retry_controller(
+        db: Arc<DB<S>>,
+        prepared_inputs: Option<query::prepared::PreparedInputMemo>,
+    ) -> Self {
+        Self {
+            db,
+            prepared_inputs,
+            txn: Arc::new(TokioMutex::new(None)),
             doc_guards: PlMutex::new(BTreeMap::new()),
             batch_gate: PlMutex::new(None),
         }
@@ -122,6 +136,42 @@ impl<S: Store> BatchMutator<S> {
 }
 
 impl<S: Store + 'static> BatchMutator<S> {
+    async fn check_attempt_node_access(
+        &self,
+        permission: acp::nac::NodePermission,
+    ) -> query::error::Result<()> {
+        let Some(inputs) = &self.prepared_inputs else {
+            return self
+                .db
+                .check_node_access(None, permission)
+                .await
+                .map_err(|error| query::error::QueryError::permission_denied(error.to_string()));
+        };
+        let identity = defra_core::current_identity::get_effective_identity()
+            .and_then(|value| identity::Did::new(value).ok())
+            .unwrap_or_else(identity::Did::wildcard);
+        let exact_request = serde_json::to_vec(&(identity.to_string(), permission.as_str()))
+            .map_err(|error| query::error::QueryError::execution(error.to_string()))?;
+        let request = query::prepared::PreparedInputRequest::new(
+            query::prepared::PreparedInputKind::NodePermission,
+            exact_request,
+        );
+        let Some(bytes) = inputs.get(&request) else {
+            return Err(query::error::QueryError::NeedsInput(request));
+        };
+        let allowed: bool = serde_json::from_slice(&bytes).map_err(|_| {
+            query::error::QueryError::execution("invalid prepared node permission response")
+        })?;
+        if allowed {
+            Ok(())
+        } else {
+            Err(query::error::QueryError::permission_denied(format!(
+                "not authorized for node permission {}",
+                permission.as_str()
+            )))
+        }
+    }
+
     async fn register_created_doc_with_acp(
         &self,
         collection: &crate::collection::Collection,
@@ -177,6 +227,35 @@ impl<S: Store + 'static> BatchMutator<S> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store + 'static> MutationBatchController for BatchMutator<S> {
+    async fn run(
+        &self,
+        operation: query::mutator::MutationBatchOperation,
+        _mutator: Option<Arc<dyn DocMutator>>,
+        _fetcher: Option<Arc<dyn query::fetcher::DocFetcher>>,
+    ) -> query::error::Result<serde_json::Value> {
+        let attempt = BatchRetryAttempt {
+            db: self.db.clone(),
+            prepared_inputs: self.prepared_inputs.clone(),
+            operation,
+        };
+        match self
+            .db
+            .store()
+            .transact_retry(storage::corekv::RetryOptions::new(4), Box::new(attempt))
+            .await
+        {
+            Ok(value) => value.downcast::<serde_json::Value>().map(|value| *value).map_err(|_| {
+                query::error::QueryError::execution("invalid mutation batch retry result")
+            }),
+            Err(error) => match error.downcast_abort::<query::error::QueryError>() {
+                Ok(error) => Err(error),
+                Err(error) => Err(crate::error::commit_query_error(
+                    crate::error::Error::Storage(error.into_storage()),
+                )),
+            },
+        }
+    }
+
     async fn commit(&self) -> query::error::Result<()> {
         let txn = self.take_txn().await?;
         let result = txn.commit().await.map_err(crate::error::commit_query_error);
@@ -195,6 +274,72 @@ impl<S: Store + 'static> MutationBatchController for BatchMutator<S> {
     }
 }
 
+struct BatchRetryAttempt<S: Store> {
+    db: Arc<DB<S>>,
+    prepared_inputs: Option<query::prepared::PreparedInputMemo>,
+    operation: query::mutator::MutationBatchOperation,
+}
+
+impl<S: Store + 'static> storage::corekv::RetryAttemptFn for BatchRetryAttempt<S> {
+    fn run<'a>(
+        &'a mut self,
+        retry: &'a mut dyn storage::corekv::RetryTxn,
+    ) -> storage::corekv::RetryAttemptFuture<'a> {
+        Box::pin(async move {
+            let io = retry
+                .begin_attempt_io()
+                .map_err(storage::corekv::RetryAttemptError::Storage)?;
+            let basic_txn = BasicTxn::from_retry_attempt_io(io, 0);
+            let txn = DbTxn::<S>::new(basic_txn);
+            let fetcher = Arc::new(crate::LensedDocFetcher::new(
+                self.db.clone(),
+                txn,
+                self.db.lens_store.clone(),
+            ));
+            let batch = Arc::new(BatchMutator::new_with_prepared_inputs(
+                self.db.clone(),
+                fetcher.shared_txn(),
+                self.prepared_inputs.clone(),
+            ));
+            let mutator: Arc<dyn DocMutator> = batch.clone();
+            let fetcher_dyn: Arc<dyn query::fetcher::DocFetcher> = fetcher.clone();
+            let outcome = (self.operation)(mutator, fetcher_dyn).await;
+            drop(fetcher);
+
+            let value = match outcome {
+                Ok(value) => value,
+                Err(error) => {
+                    if let Ok(txn) = batch.take_txn().await {
+                        let _ = txn.discard();
+                    }
+                    batch.release_doc_guards();
+                    return Err(storage::corekv::RetryAttemptError::Abort(Box::new(error)));
+                }
+            };
+
+            let txn = batch
+                .take_txn()
+                .await
+                .map_err(|error| storage::corekv::RetryAttemptError::Abort(Box::new(error)))?;
+            let (io, mut callbacks) = txn
+                .into_retry_attempt()
+                .map_err(|error| storage::corekv::RetryAttemptError::Storage(error.into()))?;
+            let mut guards = batch.doc_guards.lock();
+            let doc_guards = std::mem::take(&mut *guards);
+            drop(guards);
+            let batch_gate = batch.batch_gate.lock().take();
+            if !doc_guards.is_empty() || batch_gate.is_some() {
+                callbacks.push_sync(Box::new(move || drop((doc_guards, batch_gate))));
+            }
+            drop(batch);
+            retry
+                .finish_attempt_io(io, callbacks)
+                .map_err(storage::corekv::RetryAttemptError::Storage)?;
+            Ok(Box::new(value) as storage::corekv::RetryAttemptValue)
+        })
+    }
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store + 'static> DocMutator for BatchMutator<S> {
@@ -207,10 +352,8 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         collection_name: &str,
         mut doc: Document,
     ) -> query::error::Result<CreateResult> {
-        self.db
-            .check_node_access(None, acp::nac::NodePermission::DocumentUpdate)
-            .await
-            .map_err(|e| query::error::QueryError::permission_denied(e.to_string()))?;
+        self.check_attempt_node_access(acp::nac::NodePermission::DocumentUpdate)
+            .await?;
 
         let (collection, datastore, systemstore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;
@@ -225,15 +368,15 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         ensure_collection_is_active(&self.db, collection_name, &collection)?;
         let embedding_config = self.db.options().embedding_config();
 
-        crate::search::set_embedding(
+        let prepared_inputs = self.prepared_inputs.clone().unwrap_or_default();
+        crate::search::embedding::set_embedding_from_inputs(
             &collection.schema().vector_embeddings,
             &mut doc,
             true,
-            None,
+            &RapidHashSet::default(),
             &embedding_config,
-        )
-        .await
-        .map_err(|e| query::error::QueryError::execution(format!("embedding error: {}", e)))?;
+            &prepared_inputs,
+        )?;
 
         // No per-doc write guard for creates: the DocID is derived from the
         // genesis block inside the txn; the mapping duplicate check is the gate.
@@ -355,10 +498,8 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         mut doc: Document,
         mut modified_fields: RapidHashSet<String>,
     ) -> query::error::Result<UpdateResult> {
-        self.db
-            .check_node_access(None, acp::nac::NodePermission::DocumentUpdate)
-            .await
-            .map_err(|e| query::error::QueryError::permission_denied(e.to_string()))?;
+        self.check_attempt_node_access(acp::nac::NodePermission::DocumentUpdate)
+            .await?;
 
         let (collection, datastore, systemstore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;
@@ -373,15 +514,15 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         ensure_collection_is_active(&self.db, collection_name, &collection)?;
         let embedding_config = self.db.options().embedding_config();
 
-        let generated = crate::search::set_embedding(
+        let prepared_inputs = self.prepared_inputs.clone().unwrap_or_default();
+        let generated = crate::search::embedding::set_embedding_from_inputs(
             &collection.schema().vector_embeddings,
             &mut doc,
             false,
-            Some(&modified_fields),
+            &modified_fields,
             &embedding_config,
-        )
-        .await
-        .map_err(|e| query::error::QueryError::execution(format!("embedding error: {}", e)))?;
+            &prepared_inputs,
+        )?;
 
         for field in generated {
             modified_fields.insert(field);
@@ -524,10 +665,8 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         collection_name: &str,
         doc_id: &DocID,
     ) -> query::error::Result<DeleteResult> {
-        self.db
-            .check_node_access(None, acp::nac::NodePermission::DocumentDelete)
-            .await
-            .map_err(|e| query::error::QueryError::permission_denied(e.to_string()))?;
+        self.check_attempt_node_access(acp::nac::NodePermission::DocumentDelete)
+            .await?;
 
         let (collection, datastore, systemstore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;

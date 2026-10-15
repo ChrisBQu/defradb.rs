@@ -9,8 +9,10 @@ use cid::Cid;
 use document::{DocID, Document};
 use identity::Did;
 use rapidhash::RapidHashSet;
+use serde_json::Value as JsonValue;
 use std::sync::Arc;
 use storage::corekv::MaybeSendSync;
+use std::{future::Future, pin::Pin};
 
 use crate::error::Result;
 use crate::Filter;
@@ -295,6 +297,36 @@ impl DeleteResult {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait MutationBatchController: MaybeSendSync {
+    /// Execute the complete implicit request operation against one batch attempt.
+    /// Implementations with engine-owned retries override this method and call
+    /// `operation` once per fresh attempt. The default preserves the ordinary
+    /// single-transaction behavior.
+    async fn run(
+        &self,
+        operation: MutationBatchOperation,
+        mutator: Option<Arc<dyn DocMutator>>,
+        fetcher: Option<Arc<dyn crate::fetcher::DocFetcher>>,
+    ) -> Result<JsonValue> {
+        let mutator = mutator.ok_or_else(|| {
+            crate::error::QueryError::execution("mutation batch has no mutator")
+        })?;
+        let fetcher = fetcher.ok_or_else(|| {
+            crate::error::QueryError::execution("mutation batch has no fetcher")
+        })?;
+        match operation(mutator, fetcher).await {
+            Ok(value) => {
+                self.commit().await?;
+                Ok(value)
+            }
+            Err(error) => {
+                if let Err(rollback_error) = self.rollback().await {
+                    tracing::warn!(error = %rollback_error, "Failed to rollback implicit mutation batch");
+                }
+                Err(error)
+            }
+        }
+    }
+
     /// Commit the shared transaction backing this batch.
     async fn commit(&self) -> Result<()>;
 
@@ -302,10 +334,30 @@ pub trait MutationBatchController: MaybeSendSync {
     async fn rollback(&self) -> Result<()>;
 }
 
+/// One execution of the parsed mutation sequence with an attempt-local mutator
+/// and fetcher. The operation must rebuild all per-attempt result state each time
+/// it is called; request preparation remains captured and reusable.
+#[cfg(not(target_arch = "wasm32"))]
+pub type MutationBatchOperation = Arc<
+    dyn Fn(Arc<dyn DocMutator>, Arc<dyn crate::fetcher::DocFetcher>) -> MutationBatchFuture
+        + Send
+        + Sync,
+>;
+#[cfg(target_arch = "wasm32")]
+pub type MutationBatchOperation = Arc<
+    dyn Fn(Arc<dyn DocMutator>, Arc<dyn crate::fetcher::DocFetcher>) -> MutationBatchFuture,
+>;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub type MutationBatchFuture =
+    Pin<Box<dyn Future<Output = Result<JsonValue>> + Send + 'static>>;
+#[cfg(target_arch = "wasm32")]
+pub type MutationBatchFuture = Pin<Box<dyn Future<Output = Result<JsonValue>> + 'static>>;
+
 /// A request-scoped mutation batch with a shared mutator and fetcher.
 pub struct MutationBatch {
-    mutator: Arc<dyn DocMutator>,
-    fetcher: Arc<dyn crate::fetcher::DocFetcher>,
+    mutator: Option<Arc<dyn DocMutator>>,
+    fetcher: Option<Arc<dyn crate::fetcher::DocFetcher>>,
     controller: Arc<dyn MutationBatchController>,
 }
 
@@ -317,20 +369,37 @@ impl MutationBatch {
         controller: Arc<dyn MutationBatchController>,
     ) -> Self {
         Self {
-            mutator,
-            fetcher,
+            mutator: Some(mutator),
+            fetcher: Some(fetcher),
+            controller,
+        }
+    }
+
+    /// Create a batch whose controller creates fresh mutator/fetcher views for
+    /// each attempt.
+    pub fn new_retryable(controller: Arc<dyn MutationBatchController>) -> Self {
+        Self {
+            mutator: None,
+            fetcher: None,
             controller,
         }
     }
 
     /// Get the shared mutator for this batch.
     pub fn mutator(&self) -> Arc<dyn DocMutator> {
-        self.mutator.clone()
+        self.mutator.clone().expect("retryable batches run an operation")
     }
 
     /// Get the shared fetcher for this batch.
     pub fn fetcher(&self) -> Arc<dyn crate::fetcher::DocFetcher> {
-        self.fetcher.clone()
+        self.fetcher.clone().expect("retryable batches run an operation")
+    }
+
+    /// Run a complete top-level mutation request through the batch controller.
+    pub async fn run(&self, operation: MutationBatchOperation) -> Result<JsonValue> {
+        self.controller
+            .run(operation, self.mutator.clone(), self.fetcher.clone())
+            .await
     }
 
     /// Commit the batch transaction.
@@ -371,6 +440,12 @@ impl MutationBatch {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait DocMutator: MaybeSendSync {
+    /// Whether conflicts from mutation batches returned by this mutator are
+    /// retried by the storage attempt driver.
+    fn engine_retries_batches(&self) -> bool {
+        false
+    }
+
     /// Return a request-bound mutator that can see prepared external inputs
     /// while executing this request. Implementations must return an isolated
     /// clone/context; this must not mutate shared mutator state.

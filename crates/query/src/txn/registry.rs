@@ -14,7 +14,7 @@ use super::result::GetTransactionResult;
 /// used by the query executor.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-pub trait TransactionRegistry: MaybeSendSync {
+pub trait TransactionRegistry: MaybeSendSync + 'static {
     /// Begin a new transaction.
     ///
     /// Returns a handle that can be used with `get()`, `commit()`, and `rollback()`.

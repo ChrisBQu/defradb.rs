@@ -806,6 +806,13 @@ async fn execute_prepared_request_with_retry_loop(
                 }
             }
         }
+        if is_transaction_conflict_response(&response)
+            && prepared
+                .as_ref()
+                .is_some_and(|prepared| prepared.engine_managed_retry)
+        {
+            return response;
+        }
         if !is_transaction_conflict_response(&response) {
             if retry_count > 0 {
                 telemetry::record_retry_success(telemetry::RetryLayer::EmbeddedExecute);

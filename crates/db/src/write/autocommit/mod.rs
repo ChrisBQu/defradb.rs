@@ -137,11 +137,22 @@ impl<S: Store> AutoCommitMutator<S> {
         ));
         Ok((batch, fetcher))
     }
+
+    pub(crate) fn new_retryable_batch_controller(&self) -> Arc<BatchMutator<S>> {
+        Arc::new(BatchMutator::new_retry_controller(
+            self.db.clone(),
+            self.prepared_inputs.clone(),
+        ))
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
+    fn engine_retries_batches(&self) -> bool {
+        true
+    }
+
     fn with_prepared_inputs(
         &self,
         inputs: query::prepared::PreparedInputMemo,
@@ -251,6 +262,36 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                 .map_err(|error| query::error::QueryError::execution(error.to_string()))?;
                 Ok(std::sync::Arc::from(response))
             }
+            query::prepared::PreparedInputKind::NodePermission => {
+                let (identity, permission): (String, String) =
+                    serde_json::from_slice(request.exact_request()).map_err(|_| {
+                        query::error::QueryError::execution(
+                            "invalid prepared node permission request",
+                        )
+                    })?;
+                let identity = identity::Did::new(identity).map_err(|_| {
+                    query::error::QueryError::execution(
+                        "invalid identity in node permission request",
+                    )
+                })?;
+                let permission = match permission.as_str() {
+                    "update-document" => acp::nac::NodePermission::DocumentUpdate,
+                    "delete-document" => acp::nac::NodePermission::DocumentDelete,
+                    "truncate-collection" => acp::nac::NodePermission::CollectionTruncate,
+                    _ => {
+                        return Err(query::error::QueryError::execution(
+                            "invalid prepared node permission",
+                        ))
+                    }
+                };
+                self.db
+                    .check_node_access(Some(&identity), permission)
+                    .await
+                    .map_err(|error| {
+                        query::error::QueryError::permission_denied(error.to_string())
+                    })?;
+                Ok(std::sync::Arc::from(b"true".as_slice()))
+            }
             kind => Err(query::error::QueryError::execution(format!(
                 "prepared {kind:?} input resolution is not available"
             ))),
@@ -297,10 +338,9 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
     }
 
     async fn begin_batch(&self) -> query::error::Result<Option<MutationBatch>> {
-        let (batch, fetcher) = self.new_batch_components().await?;
-        let mutator: Arc<dyn DocMutator> = batch.clone();
+        let batch = self.new_retryable_batch_controller();
         let controller: Arc<dyn query::mutator::MutationBatchController> = batch;
-        Ok(Some(MutationBatch::new(mutator, fetcher, controller)))
+        Ok(Some(MutationBatch::new_retryable(controller)))
     }
 
     async fn create(

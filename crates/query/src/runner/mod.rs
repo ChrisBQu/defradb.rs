@@ -405,6 +405,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         }
     }
 
+
     pub fn with_acp(mut self, acp: Arc<dyn DocumentACP>) -> Self {
         if let Some(mutator) = &self.mutator {
             mutator.set_document_acp(acp.clone());

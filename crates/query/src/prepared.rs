@@ -46,6 +46,8 @@ pub enum PreparedInputKind {
     Signature,
     Encryption,
     AcpDecision,
+    WriteValidation,
+    NodePermission,
 }
 
 const MAX_PREPARED_INPUTS: usize = 64;
@@ -147,6 +149,8 @@ pub struct PreparedMutations {
     pub request_time: DateTime<FixedOffset>,
     pub mutations: RapidHashMap<String, PreparedMutation>,
     pub inputs: PreparedInputMemo,
+    /// The selected implicit batch controller owns commit-conflict retries.
+    pub engine_managed_retry: bool,
 }
 
 impl Default for PreparedMutations {
@@ -155,6 +159,7 @@ impl Default for PreparedMutations {
             request_time: chrono::Utc::now().fixed_offset(),
             mutations: RapidHashMap::default(),
             inputs: PreparedInputMemo::default(),
+            engine_managed_retry: false,
         }
     }
 }

@@ -2,9 +2,10 @@ use std::sync::Arc;
 
 use chrono::{FixedOffset, Utc};
 use defra_core::encryption::EncryptionConfig;
+use identity::Did;
 use rapidhash::{HashMapExt, RapidHashMap};
 
-use crate::error::Result;
+use crate::error::{QueryError, Result};
 use crate::executor::QueryRequest;
 use crate::mapper::MutationType;
 use crate::prepared::{PreparedMutation, PreparedMutations};
@@ -52,7 +53,22 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
             has_embeddings
         };
-        if !mutator.requires_write_preparation() && !schema_has_embeddings {
+        let mut has_policy_backed_mutation = false;
+        if mutations.len() > 1 && !self.acp.supports_transactions() {
+            let provider = self.effective_provider();
+            for mutation in mutations {
+                if provider
+                    .get_collection(&mutation.collection_name)
+                    .await?
+                    .is_some_and(|collection| collection.policy.is_some())
+                {
+                    has_policy_backed_mutation = true;
+                    break;
+                }
+            }
+        }
+        let request_batch = mutations.len() > 1 || self.acp.supports_transactions();
+        if !mutator.requires_write_preparation() && !schema_has_embeddings && !request_batch {
             return Ok(None);
         }
         validate_parsed_operation(&parsed, self.effective_provider().as_ref()).await?;
@@ -68,7 +84,52 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             request_time,
             mutations: RapidHashMap::new(),
             inputs: crate::prepared::PreparedInputMemo::default(),
+            engine_managed_retry: !mutations
+                .iter()
+                .any(|mutation| mutation.mutation_type == MutationType::Truncate)
+                && (self.acp.supports_transactions()
+                    || (mutations.len() > 1 && !has_policy_backed_mutation))
+                && mutator.engine_retries_batches(),
         };
+        if prepared.engine_managed_retry {
+            let effective_identity = defra_core::current_identity::get_effective_identity()
+                .and_then(|value| Did::new(value).ok())
+                .unwrap_or_else(Did::wildcard);
+            let mut permissions = rapidhash::RapidHashSet::default();
+            for mutation in mutations {
+                match mutation.mutation_type {
+                    MutationType::Create | MutationType::Update | MutationType::Upsert => {
+                        permissions.insert(acp::nac::NodePermission::DocumentUpdate);
+                    }
+                    MutationType::Delete => {
+                        permissions.insert(acp::nac::NodePermission::DocumentDelete);
+                    }
+                    MutationType::Truncate => {
+                        permissions.insert(acp::nac::NodePermission::CollectionTruncate);
+                    }
+                }
+            }
+            for permission in permissions {
+                let allowed = self.nac.check_permission(&effective_identity, permission).await;
+                let exact_request = serde_json::to_vec(&(
+                    effective_identity.to_string(),
+                    permission.as_str(),
+                ))
+                .map_err(|error| QueryError::execution(error.to_string()))?;
+                let request = crate::prepared::PreparedInputRequest::new(
+                    crate::prepared::PreparedInputKind::NodePermission,
+                    exact_request,
+                );
+                let response = serde_json::to_vec(&allowed)
+                    .map_err(|error| QueryError::execution(error.to_string()))?;
+                if !prepared
+                    .inputs
+                    .insert(request, Arc::<[u8]>::from(response))
+                {
+                    return Err(QueryError::execution("prepared input memo budget exceeded"));
+                }
+            }
+        }
         let mut documents = Vec::new();
         let mut projected_ids = rapidhash::RapidHashSet::default();
         for mutation in mutations {
@@ -92,6 +153,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     &fetcher,
                     Some(&projected_ids),
                     Some(&prepared.inputs),
+                    false,
                 )
                 .await?;
             let collection = &authorized.collection;

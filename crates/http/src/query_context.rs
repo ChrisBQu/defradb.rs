@@ -121,6 +121,13 @@ async fn execute_prepared_request_with_retry_loop(
                 }
             }
         }
+        if response.is_transaction_conflict()
+            && prepared
+                .as_ref()
+                .is_some_and(|prepared| prepared.engine_managed_retry)
+        {
+            return response;
+        }
         if !response.is_transaction_conflict() {
             if retry_count > 0 {
                 telemetry::record_retry_success(telemetry::RetryLayer::HttpAutoCommit);
@@ -265,6 +272,11 @@ mod tests {
     use super::*;
     use crate::router::AppStateBuilder;
 
+    // Retry telemetry counters are process-global. These tests take snapshots
+    // around their own HTTP retry sequences, so serialize the two cases that
+    // record this layer's counters.
+    static RETRY_METRICS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[derive(Default)]
     struct ConflictExecutor {
         preparations: AtomicUsize,
@@ -272,6 +284,7 @@ mod tests {
         explicit_txn_attempts: AtomicUsize,
         input_on_second: bool,
         input_resolutions: AtomicUsize,
+        engine_managed_retry: bool,
     }
 
     #[async_trait]
@@ -281,9 +294,10 @@ mod tests {
             _request: &QueryRequest,
         ) -> Result<Option<Arc<query::prepared::PreparedMutations>>> {
             self.preparations.fetch_add(1, Ordering::SeqCst);
-            Ok(Some(
-                Arc::new(query::prepared::PreparedMutations::default()),
-            ))
+            Ok(Some(Arc::new(query::prepared::PreparedMutations {
+                engine_managed_retry: self.engine_managed_retry,
+                ..Default::default()
+            })))
         }
 
         fn abandon_txn(&self, _handle: &TransactionHandle) {}
@@ -364,6 +378,7 @@ mod tests {
 
     #[tokio::test]
     async fn auto_commit_execution_retries_typed_conflicts() {
+        let _metrics_guard = RETRY_METRICS_TEST_LOCK.lock().unwrap();
         let metrics_before = telemetry::conflict_metrics_snapshot().http_auto_commit;
         let executor = Arc::new(ConflictExecutor::default());
         let state = AppStateBuilder::new(executor.clone())
@@ -386,7 +401,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn engine_managed_batch_conflict_is_not_replayed_by_http() {
+        let executor = Arc::new(ConflictExecutor {
+            engine_managed_retry: true,
+            ..Default::default()
+        });
+        let state = AppStateBuilder::new(executor.clone())
+            .with_max_txn_retries(3)
+            .build();
+
+        let response = execute_with_context(
+            &state,
+            &ExtractIdentity::anonymous(),
+            QueryRequest::new("mutation { first: create_User(input: {}) { _docID } second: create_User(input: {}) { _docID } }"),
+        )
+        .await;
+
+        assert!(response.is_transaction_conflict());
+        assert_eq!(executor.preparations.load(Ordering::SeqCst), 1);
+        assert_eq!(executor.auto_commit_attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn auto_commit_resolves_input_outside_attempt_and_preserves_it_across_conflict() {
+        let _metrics_guard = RETRY_METRICS_TEST_LOCK.lock().unwrap();
         let executor = Arc::new(ConflictExecutor {
             input_on_second: true,
             ..Default::default()

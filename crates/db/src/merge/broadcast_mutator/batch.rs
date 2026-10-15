@@ -11,12 +11,12 @@ use query::mutator::{
 };
 use rapidhash::RapidHashSet;
 use std::sync::Arc;
+use parking_lot::Mutex as StdMutex;
 use storage::corekv::Store;
 use tracing::{error, warn};
 
 use crate::block::builder::BlockResult;
 use crate::database::DB;
-use crate::write::autocommit::BatchMutator;
 
 fn document_json_value(doc: &Document) -> Option<serde_json::Value> {
     Some(serde_json::Value::Object(
@@ -49,7 +49,7 @@ struct BroadcastCapture<'a> {
 }
 
 pub(crate) struct BroadcastBatchMutator<S: Store, B: Blockstore, T: P2PTransport> {
-    inner: Arc<BatchMutator<S>>,
+    inner: Arc<dyn DocMutator>,
     sync: Arc<SyncCoordinator<B, T>>,
     db: Arc<DB<S>>,
     pending_broadcasts: SegQueue<PendingBroadcast>,
@@ -59,7 +59,7 @@ pub(crate) struct BroadcastBatchMutator<S: Store, B: Blockstore, T: P2PTransport
 
 impl<S: Store, B: Blockstore + 'static, T: P2PTransport + 'static> BroadcastBatchMutator<S, B, T> {
     pub(crate) fn new(
-        inner: Arc<BatchMutator<S>>,
+        inner: Arc<dyn DocMutator>,
         inner_controller: Arc<dyn MutationBatchController>,
         sync: Arc<SyncCoordinator<B, T>>,
         db: Arc<DB<S>>,
@@ -393,6 +393,71 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
 impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> MutationBatchController
     for BroadcastBatchMutator<S, B, T>
 {
+    async fn run(
+        &self,
+        operation: query::mutator::MutationBatchOperation,
+        mutator: Option<Arc<dyn DocMutator>>,
+        fetcher: Option<Arc<dyn query::fetcher::DocFetcher>>,
+    ) -> query::error::Result<serde_json::Value> {
+        let committed = Arc::new(StdMutex::new(None));
+        let committed_for_attempt = committed.clone();
+        let inner_controller = self.inner_controller.clone();
+        let sync = self.sync.clone();
+        let db = self.db.clone();
+        let se_options = self.se_options.clone();
+        let wrapped_operation: query::mutator::MutationBatchOperation = Arc::new(
+            move |attempt_mutator, attempt_fetcher| {
+                let wrapper = Arc::new(BroadcastBatchMutator::new(
+                    attempt_mutator,
+                    inner_controller.clone(),
+                    sync.clone(),
+                    db.clone(),
+                    se_options.clone(),
+                ));
+                let wrapper_mutator: Arc<dyn DocMutator> = wrapper.clone();
+                let operation = operation.clone();
+                let committed = committed_for_attempt.clone();
+                Box::pin(async move {
+                    let result = operation(wrapper_mutator, attempt_fetcher).await;
+                    if result.is_ok() {
+                        *committed.lock() = Some(wrapper.drain_pending_broadcasts());
+                    }
+                    result
+                })
+            },
+        );
+
+        let result = self
+            .inner_controller
+            .run(wrapped_operation, mutator, fetcher)
+            .await?;
+        let pending_broadcasts = committed.lock().take().unwrap_or_default();
+        if !pending_broadcasts.is_empty() {
+            let mut marker_errors = Vec::new();
+            for pending in &pending_broadcasts {
+                if let Err(error) = Self::register_pending_static(&self.sync, pending).await {
+                    marker_errors.push(error.to_string());
+                }
+            }
+            let sync = self.sync.clone();
+            self.sync.spawn_non_authoritative_broadcast_task(
+                "broadcast_mutation_batch",
+                async move {
+                    for pending in pending_broadcasts {
+                        Self::broadcast_pending_static(&sync, pending).await;
+                    }
+                },
+            );
+            if !marker_errors.is_empty() {
+                return Err(query::error::QueryError::execution(format!(
+                    "committed batch has undurable P2P head markers: {}",
+                    marker_errors.join("; ")
+                )));
+            }
+        }
+        Ok(result)
+    }
+
     /// Commit the inner mutation batch, then durably register its outbound P2P
     /// markers. An error reporting `undurable P2P head markers` is post-commit:
     /// callers must not interpret it as a rolled-back mutation and retry the

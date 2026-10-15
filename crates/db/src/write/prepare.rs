@@ -226,6 +226,22 @@ impl<S: Store + 'static> crate::AutoCommitMutator<S> {
         let prepare_create = modified_fields.is_none()
             && (!generated_embeddings.is_empty() || signing_config.is_some());
         if self.db.kms().is_none() && !prepare_create {
+            if modified_fields.is_none() && crate::write::prepare::prepared_identity(&doc).is_none()
+            {
+                let identity = DocStorageIdentity::new(
+                    collection.resolved_root_id(),
+                    self.db
+                        .next_doc_short_id()
+                        .await
+                        .map_err(|error| query::error::QueryError::execution(error.to_string()))?,
+                );
+                let mut preparation = document::WritePreparation::new(
+                    identity.collection_short_id,
+                    identity.doc_short_id,
+                );
+                preparation.set_requires_kms_keys(false);
+                doc.set_write_preparation(Arc::new(preparation));
+            }
             return Ok(doc);
         }
         let prior = doc.write_preparation().cloned();

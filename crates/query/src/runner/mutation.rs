@@ -47,7 +47,7 @@ impl Drop for EncryptionConfigGuard {
     }
 }
 
-impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
+impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R> {
     /// Execute a GraphQL mutation and return JSON results.
     ///
     /// Requires a mutator to be configured via `with_mutator()`.
@@ -222,46 +222,48 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 || (mutations.len() > 1 && !has_policy_backed_mutation))
         {
             if let Some(batch) = mutator.begin_batch().await? {
-                let batch_mutator = batch.mutator();
-                batch_mutator.set_document_acp(self.acp.clone());
-                let batch_fetcher = batch.fetcher();
-                let batch_runner =
-                    self.scoped_runner(batch_fetcher.scoped_acp(self.acp.clone()).await?);
-                let mut results = Map::new();
+                let runner = Arc::new(self.scoped_runner(self.acp.clone()));
+                let mutations = Arc::new(mutations);
+                let caller_identity = caller_identity.clone();
+                let prepared = prepared.cloned();
+                let acp = self.acp.clone();
+                let operation: crate::mutator::MutationBatchOperation = Arc::new(
+                    move |batch_mutator, batch_fetcher| {
+                        let runner = runner.clone();
+                        let mutations = mutations.clone();
+                        let caller_identity = caller_identity.clone();
+                        let prepared = prepared.clone();
+                        let acp = acp.clone();
+                        Box::pin(async move {
+                            batch_mutator.set_document_acp(acp.clone());
+                            let attempt_acp = batch_fetcher.scoped_acp(acp.clone()).await?;
+                            let batch_runner = runner.scoped_runner(attempt_acp);
+                            let mut created_ids = RapidHashMap::default();
+                            let mut results = Map::new();
 
-                for mutation in mutations {
-                    let result = match batch_runner
-                        .execute_single_mutation(
-                            &mutation,
-                            batch_mutator.clone(),
-                            caller_identity.clone(),
-                            request_time,
-                            Some(batch_fetcher.clone()),
-                            prepared.and_then(|p| p.mutations.get(&mutation.output_name())),
-                            prepared.map(|p| p.inputs.clone()),
-                            &mut created_ids,
-                        )
-                        .await
-                    {
-                        Ok(result) => result,
-                        Err(err) => {
-                            drop(batch_runner);
-                            if let Err(rollback_err) = batch.rollback().await {
-                                tracing::warn!(
-                                    error = %rollback_err,
-                                    "Failed to rollback implicit mutation batch"
-                                );
+                            for mutation in mutations.iter() {
+                                let result = batch_runner
+                                    .execute_single_mutation(
+                                        mutation,
+                                        batch_mutator.clone(),
+                                        caller_identity.clone(),
+                                        request_time,
+                                        Some(batch_fetcher.clone()),
+                                        prepared.as_ref().and_then(|p| {
+                                            p.mutations.get(&mutation.output_name())
+                                        }),
+                                        prepared.as_ref().map(|p| p.inputs.clone()),
+                                        &mut created_ids,
+                                        true,
+                                    )
+                                    .await?;
+                                results.insert(mutation.output_name(), result);
                             }
-                            return Err(err);
-                        }
-                    };
-
-                    results.insert(mutation.output_name(), result);
-                }
-
-                drop(batch_runner);
-                batch.commit().await?;
-                return Ok(JsonValue::Object(results));
+                            Ok(JsonValue::Object(results))
+                        })
+                    },
+                );
+                return batch.run(operation).await;
             }
         }
 
@@ -278,6 +280,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     prepared.and_then(|p| p.mutations.get(&mutation.output_name())),
                     prepared.map(|p| p.inputs.clone()),
                     &mut created_ids,
+                    false,
                 )
                 .await?;
             // Use alias if provided, otherwise full mutation name (e.g., "add_Users")
@@ -296,11 +299,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         resource_name: &str,
         doc_id: &str,
         prepared_inputs: Option<&crate::prepared::PreparedInputMemo>,
+        strict_attempt: bool,
     ) -> Result<bool> {
         // The overlay can change as preceding mutations register/unregister
         // objects. Keep those checks live; memoize only the remote provider
         // answer when no request-local projection can affect it.
-        if crate::txn::current_deferred_acp_mutations().is_some() || prepared_inputs.is_none() {
+        if !strict_attempt
+            && (crate::txn::current_deferred_acp_mutations().is_some()
+                || prepared_inputs.is_none())
+        {
             return crate::txn::check_doc_access_with_overlay(
                 self.acp.as_ref(),
                 identity,
@@ -338,6 +345,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 QueryError::execution(format!("cached ACP response is invalid: {error}"))
             });
         }
+        if strict_attempt {
+            return Err(QueryError::NeedsInput(request));
+        }
         let allowed = self
             .acp
             .check_doc_access(identity, permission, policy_id, resource_name, doc_id)
@@ -358,6 +368,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         fetcher: &dyn crate::fetcher::DocFetcher,
         projected_ids: Option<&rapidhash::RapidHashSet<String>>,
         prepared_inputs: Option<&crate::prepared::PreparedInputMemo>,
+        strict_attempt: bool,
     ) -> Result<AuthorizedMutation> {
         // Validate collection exists - resolve on-demand from provider
         let collection = self.get_collection(&mutation.collection_name).await?;
@@ -418,10 +429,34 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 create_input: &mutation.create_input,
                 update_input: &mutation.update_input,
             };
-            validator
-                .validate_write(&request)
-                .await
-                .map_err(QueryError::execution)?;
+            if strict_attempt {
+                let exact_request = serde_json::to_vec(&(
+                    Arc::as_ptr(validator) as *const () as usize,
+                    caller_identity.as_ref().map(ToString::to_string),
+                    &collection.name,
+                    &collection.version_id,
+                    mutation.mutation_type.as_prefix(),
+                    &validation_ids,
+                    &mutation.create_input,
+                    &mutation.update_input,
+                ))
+                .map_err(|error| QueryError::execution(error.to_string()))?;
+                let prepared_request = crate::prepared::PreparedInputRequest::new(
+                    crate::prepared::PreparedInputKind::WriteValidation,
+                    exact_request,
+                );
+                let inputs = prepared_inputs.ok_or_else(|| {
+                    QueryError::execution("write validation attempt has no request memo")
+                })?;
+                if inputs.get(&prepared_request).is_none() {
+                    return Err(QueryError::NeedsInput(prepared_request));
+                }
+            } else {
+                validator
+                    .validate_write(&request)
+                    .await
+                    .map_err(QueryError::execution)?;
+            }
         }
 
         let mut acp_filtered_doc_ids: Option<Vec<String>> = None;
@@ -447,6 +482,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                     &policy.resource_name,
                                     doc_id,
                                     prepared_inputs,
+                                    strict_attempt,
                                 )
                                 .await
                                 .unwrap_or(false);
@@ -465,6 +501,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                     &policy.resource_name,
                                     doc_id,
                                     prepared_inputs,
+                                    strict_attempt,
                                 )
                                 .await
                                 .map_err(|e| QueryError::acp_check_failed("update", doc_id, e))?;
@@ -499,6 +536,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                     &policy.resource_name,
                                     doc_id,
                                     prepared_inputs,
+                                    strict_attempt,
                                 )
                                 .await
                                 .unwrap_or(false);
@@ -517,6 +555,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                     &policy.resource_name,
                                     doc_id,
                                     prepared_inputs,
+                                    strict_attempt,
                                 )
                                 .await
                                 .map_err(|e| QueryError::acp_check_failed("delete", doc_id, e))?;
@@ -559,6 +598,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         prepared: Option<&crate::prepared::PreparedMutation>,
         prepared_inputs: Option<crate::prepared::PreparedInputMemo>,
         created_ids: &mut RapidHashMap<String, String>,
+        strict_attempt: bool,
     ) -> Result<JsonValue> {
         struct SigningConfigReset(Option<defra_core::signing::SigningConfig>);
 
@@ -591,6 +631,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         fetcher.as_ref(),
                         None,
                         prepared_inputs.as_ref(),
+                        strict_attempt,
                     )
                     .await?;
                 let matching = current
@@ -630,6 +671,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     fetcher.as_ref(),
                     None,
                     prepared_inputs.as_ref(),
+                    strict_attempt,
                 )
                 .await?
             }
@@ -697,6 +739,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                 ))
                             })?
                         } else {
+                            if strict_attempt {
+                                return Err(QueryError::NeedsInput(request));
+                            }
                             let decision_id = self
                                 .acp
                                 .create_access_decision(
