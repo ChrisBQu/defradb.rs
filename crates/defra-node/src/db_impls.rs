@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use defra_core::RequestContext;
 use identity::Did;
 use lens::{LensConfig, TransformId};
 use schema::CollectionVersion;
@@ -92,11 +93,13 @@ impl<S: storage::corekv::Store + 'static> BlockOps for DbBlockOps<S> {
 
     async fn verified_signer_did_in_txn(
         &self,
+        context: &RequestContext,
         cid: &str,
         transaction: &query::TransactionHandle,
     ) -> anyhow::Result<String> {
         self.transaction_registry
-            .verified_block_signer_did_in_txn(
+            .verified_block_signer_did_in_txn_as(
+                context,
                 transaction.as_str(),
                 self.document_acp.as_ref(),
                 cid,
@@ -144,15 +147,15 @@ impl<S: storage::corekv::Store + 'static> DbSchemaOps<S> {
         Ok(())
     }
 
-    /// Resolve the ambient identity into a creator DID. Returns `Ok(None)` when
-    /// no identity is present (collection stays public), but fails closed when an
-    /// identity string is present yet malformed, so a permissioned collection is
-    /// never silently created unregistered.
-    fn current_identity() -> anyhow::Result<Option<Did>> {
-        match defra_core::current_identity::get_effective_identity() {
+    /// Resolve the identity acting in `context` into a creator DID. Returns
+    /// `Ok(None)` when no identity is present (collection stays public), but
+    /// fails closed when an identity string is present yet malformed, so a
+    /// permissioned collection is never silently created unregistered.
+    fn creator(context: &RequestContext) -> anyhow::Result<Option<Did>> {
+        match context.identity() {
             Some(raw) => {
                 Ok(Some(Did::new(raw).map_err(|e| {
-                    anyhow::anyhow!("malformed ambient identity: {}", e)
+                    anyhow::anyhow!("malformed acting identity: {}", e)
                 })?))
             }
             None => Ok(None),
@@ -162,10 +165,14 @@ impl<S: storage::corekv::Store + 'static> DbSchemaOps<S> {
 
 #[async_trait::async_trait]
 impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
-    async fn add_schema(&self, sdl: &str) -> anyhow::Result<Vec<CollectionVersion>> {
-        let creator = Self::current_identity()?;
+    async fn add_schema(
+        &self,
+        context: &RequestContext,
+        sdl: &str,
+    ) -> anyhow::Result<Vec<CollectionVersion>> {
+        let creator = Self::creator(context)?;
         self.database
-            .check_node_access(None, acp::nac::NodePermission::CollectionPatch)
+            .check_node_access_as(context, acp::nac::NodePermission::CollectionPatch)
             .await
             .map_err(anyhow::Error::new)?;
 
@@ -179,7 +186,8 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
 
         let created = self
             .database
-            .create_collections_atomic_with_acp_registration(
+            .create_collections_atomic_with_acp_registration_as(
+                context,
                 collections,
                 self.document_acp.clone(),
                 creator,
@@ -189,9 +197,14 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
         Ok(created)
     }
 
-    async fn add_view(&self, source_query: &str, target_sdl: &str) -> anyhow::Result<()> {
+    async fn add_view(
+        &self,
+        context: &RequestContext,
+        source_query: &str,
+        target_sdl: &str,
+    ) -> anyhow::Result<()> {
         self.database
-            .check_node_access(None, acp::nac::NodePermission::ViewAdd)
+            .check_node_access_as(context, acp::nac::NodePermission::ViewAdd)
             .await
             .map_err(anyhow::Error::new)?;
 
@@ -239,9 +252,10 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
 
         self.validate_policies(&collections).await?;
 
-        let creator = Self::current_identity()?;
+        let creator = Self::creator(context)?;
         self.database
-            .create_collections_atomic_with_acp_registration(
+            .create_collections_atomic_with_acp_registration_as(
+                context,
                 collections,
                 self.document_acp.clone(),
                 creator,
@@ -258,7 +272,7 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
 
         if !downsample_names.is_empty() {
             self.database
-                .bootstrap_downsamples(Some(&downsample_names))
+                .bootstrap_downsamples_as(context, Some(&downsample_names))
                 .await
                 .map_err(|e| anyhow::anyhow!("bootstrap downsample collections error: {}", e))?;
         }
@@ -268,33 +282,46 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
 
     async fn patch_collection(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         patch: &str,
     ) -> anyhow::Result<CollectionVersion> {
-        db::DB::patch_collection(&self.database, collection_name, patch, None)
+        db::DB::patch_collection_as(&self.database, context, collection_name, patch)
             .await
             .map_err(anyhow::Error::new)
     }
 
-    async fn set_active_collection_version(&self, version_id: &str) -> anyhow::Result<()> {
+    async fn set_active_collection_version(
+        &self,
+        context: &RequestContext,
+        version_id: &str,
+    ) -> anyhow::Result<()> {
         self.database
-            .check_node_access(None, acp::nac::NodePermission::CollectionPatch)
+            .check_node_access_as(context, acp::nac::NodePermission::CollectionPatch)
             .await
             .map_err(anyhow::Error::new)?;
 
-        db::DB::set_active_collection_version(&self.database, version_id)
+        db::DB::set_active_collection_version_as(&self.database, context, version_id)
             .await
             .map_err(anyhow::Error::new)
     }
 
-    async fn set_migration(&self, config: LensConfig) -> anyhow::Result<TransformId> {
-        db::DB::set_migration(&self.database, config, None)
+    async fn set_migration(
+        &self,
+        context: &RequestContext,
+        config: LensConfig,
+    ) -> anyhow::Result<TransformId> {
+        db::DB::set_migration_as(&self.database, context, config)
             .await
             .map_err(anyhow::Error::new)
     }
 
-    async fn materialize_collection(&self, collection_name: &str) -> anyhow::Result<usize> {
-        db::DB::materialize_collection(&self.database, collection_name)
+    async fn materialize_collection(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+    ) -> anyhow::Result<usize> {
+        db::DB::materialize_collection_as(&self.database, context, collection_name)
             .await
             .map_err(anyhow::Error::new)
     }

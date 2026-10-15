@@ -44,6 +44,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use defra_core::signing::SigningConfig;
+use defra_core::RequestContext;
 use identity::{Identity as _, IdentityKeyType, RawIdentity};
 
 /// Re-exported so callers can name `Arc<dyn DocumentACP>` (the type
@@ -78,16 +79,38 @@ use signed_query::{execute_with_signing_context, unavailable_node_signer_respons
 /// Type-erased schema operations so we can store DB<S> without leaking the Store generic.
 #[async_trait::async_trait]
 trait SchemaOps: Send + Sync {
-    async fn add_schema(&self, sdl: &str) -> anyhow::Result<Vec<CollectionVersion>>;
-    async fn add_view(&self, source_query: &str, target_sdl: &str) -> anyhow::Result<()>;
+    async fn add_schema(
+        &self,
+        context: &RequestContext,
+        sdl: &str,
+    ) -> anyhow::Result<Vec<CollectionVersion>>;
+    async fn add_view(
+        &self,
+        context: &RequestContext,
+        source_query: &str,
+        target_sdl: &str,
+    ) -> anyhow::Result<()>;
     async fn patch_collection(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         patch: &str,
     ) -> anyhow::Result<CollectionVersion>;
-    async fn set_active_collection_version(&self, version_id: &str) -> anyhow::Result<()>;
-    async fn set_migration(&self, config: LensConfig) -> anyhow::Result<TransformId>;
-    async fn materialize_collection(&self, collection_name: &str) -> anyhow::Result<usize>;
+    async fn set_active_collection_version(
+        &self,
+        context: &RequestContext,
+        version_id: &str,
+    ) -> anyhow::Result<()>;
+    async fn set_migration(
+        &self,
+        context: &RequestContext,
+        config: LensConfig,
+    ) -> anyhow::Result<TransformId>;
+    async fn materialize_collection(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+    ) -> anyhow::Result<usize>;
     fn list_collections(&self) -> anyhow::Result<Vec<String>>;
     fn get_collection(&self, name: &str) -> anyhow::Result<Option<CollectionVersion>>;
     async fn get_collection_by_version_id(
@@ -100,14 +123,29 @@ trait SchemaOps: Send + Sync {
 #[cfg(feature = "http")]
 struct HttpSchemaOps {
     schema_ops: Arc<dyn SchemaOps>,
+    /// The request these operations serve, for ones bound to it.
+    context: Option<RequestContext>,
 }
 
 #[cfg(feature = "http")]
 #[async_trait::async_trait]
 impl defra_http::router::SchemaOperations for HttpSchemaOps {
+    fn bind_request(
+        &self,
+        context: &RequestContext,
+    ) -> Option<Arc<dyn defra_http::router::SchemaOperations>> {
+        Some(Arc::new(Self {
+            schema_ops: Arc::clone(&self.schema_ops),
+            context: Some(context.clone()),
+        }))
+    }
+
     async fn add_schema(&self, sdl: &str) -> Result<Vec<CollectionVersion>, String> {
         self.schema_ops
-            .add_schema(sdl)
+            .add_schema(
+                &RequestContext::bound_or_ambient(self.context.as_ref()),
+                sdl,
+            )
             .await
             .map_err(|error| error.to_string())
     }
@@ -123,6 +161,7 @@ trait BlockOps: Send + Sync {
     async fn verified_signer_did(&self, cid: &str) -> anyhow::Result<String>;
     async fn verified_signer_did_in_txn(
         &self,
+        context: &RequestContext,
         cid: &str,
         transaction: &TransactionHandle,
     ) -> anyhow::Result<String>;
@@ -265,20 +304,14 @@ impl EmbeddedNode {
         request
     }
 
-    /// Run `op` with the node's own identity installed as the ambient acting
-    /// identity for the duration of the future, so DB-layer NAC checks resolve
-    /// to the node itself (which holds full access). No-op when no node identity
-    /// is configured. Uses the task_local so it survives `.await` on the
-    /// direct-async schema paths.
-    async fn as_node_identity<F, T>(&self, op: F) -> T
-    where
-        F: std::future::Future<Output = T>,
-    {
-        if self.node_identity_did.is_some() {
-            defra_core::current_identity::with_scoped_identity(self.node_identity_did.clone(), op)
-                .await
-        } else {
-            op.await
+    /// The context the node's own operations run in: the node's identity acts
+    /// in it, so DB-layer NAC checks resolve to the node itself (which holds
+    /// full access). Without a node identity it is [`RequestContext::ambient`].
+    fn node_context(&self) -> RequestContext {
+        let context = RequestContext::ambient();
+        match &self.node_identity_did {
+            Some(did) => context.with_identity(Some(did.clone())),
+            None => context,
         }
     }
 
@@ -316,14 +349,17 @@ impl EmbeddedNode {
         cid: &str,
         transaction: &TransactionHandle,
     ) -> anyhow::Result<String> {
-        self.as_node_identity(self.block_ops.verified_signer_did_in_txn(cid, transaction))
+        self.block_ops
+            .verified_signer_did_in_txn(&self.node_context(), cid, transaction)
             .await
     }
 
     /// Add a schema from a GraphQL SDL type definition.
     pub async fn add_schema(&self, sdl: &str) -> anyhow::Result<()> {
-        self.as_node_identity(async { self.schema_ops.add_schema(sdl).await.map(|_| ()) })
+        self.schema_ops
+            .add_schema(&self.node_context(), sdl)
             .await
+            .map(|_| ())
     }
 
     /// Create a materialized view from a source query and target SDL.
@@ -332,7 +368,8 @@ impl EmbeddedNode {
     /// `target_sdl` is the SDL for the view collection (may include directives
     /// like `@downsample` that are forward-declared for future defradb.rs support).
     pub async fn add_view(&self, source_query: &str, target_sdl: &str) -> anyhow::Result<()> {
-        self.as_node_identity(self.schema_ops.add_view(source_query, target_sdl))
+        self.schema_ops
+            .add_view(&self.node_context(), source_query, target_sdl)
             .await
     }
 
@@ -349,7 +386,8 @@ impl EmbeddedNode {
         collection_name: &str,
         patch: &str,
     ) -> anyhow::Result<CollectionVersion> {
-        self.as_node_identity(self.schema_ops.patch_collection(collection_name, patch))
+        self.schema_ops
+            .patch_collection(&self.node_context(), collection_name, patch)
             .await
     }
 
@@ -359,7 +397,8 @@ impl EmbeddedNode {
     /// collection-name pointer to resolve to this version. If migrations are
     /// registered, documents are reindexed through them.
     pub async fn set_active_collection_version(&self, version_id: &str) -> anyhow::Result<()> {
-        self.as_node_identity(self.schema_ops.set_active_collection_version(version_id))
+        self.schema_ops
+            .set_active_collection_version(&self.node_context(), version_id)
             .await
     }
 
@@ -372,7 +411,8 @@ impl EmbeddedNode {
     /// Requires the `wasmtime-runtime` feature (on by default). Without it this
     /// returns an explicit error instead of registering a no-op transform.
     pub async fn set_migration(&self, config: LensConfig) -> anyhow::Result<TransformId> {
-        self.as_node_identity(self.schema_ops.set_migration(config))
+        self.schema_ops
+            .set_migration(&self.node_context(), config)
             .await
     }
 
@@ -381,7 +421,8 @@ impl EmbeddedNode {
     /// Returns the number of documents advanced to the active version. This is a
     /// datastore-only operation and does not create or broadcast document commits.
     pub async fn materialize_collection(&self, collection_name: &str) -> anyhow::Result<usize> {
-        self.as_node_identity(self.schema_ops.materialize_collection(collection_name))
+        self.schema_ops
+            .materialize_collection(&self.node_context(), collection_name)
             .await
     }
 
@@ -436,7 +477,9 @@ impl EmbeddedNode {
         &self,
         readonly: bool,
     ) -> Result<TransactionHandle, query::TransactionError> {
-        self.as_node_identity(self.runner.begin_txn(readonly)).await
+        self.runner
+            .begin_txn_as(&self.node_context(), readonly)
+            .await
     }
 
     /// Commit a transaction owned by this embedded node.
@@ -444,7 +487,8 @@ impl EmbeddedNode {
         &self,
         transaction: &TransactionHandle,
     ) -> Result<(), query::TransactionError> {
-        self.as_node_identity(self.runner.commit_txn(transaction))
+        self.runner
+            .commit_txn_as(&self.node_context(), transaction)
             .await
     }
 
@@ -453,7 +497,8 @@ impl EmbeddedNode {
         &self,
         transaction: &TransactionHandle,
     ) -> Result<(), query::TransactionError> {
-        self.as_node_identity(self.runner.rollback_txn(transaction))
+        self.runner
+            .rollback_txn_as(&self.node_context(), transaction)
             .await
     }
 
@@ -1272,6 +1317,7 @@ impl NodeBuilder {
             .with_event_bus_arc(node.event_bus.clone())
             .with_schema_arc(Arc::new(HttpSchemaOps {
                 schema_ops: Arc::clone(&node.schema_ops),
+                context: None,
             }))
             .with_collection_versions_arc(Arc::clone(&node.collection_version_ops));
 
