@@ -147,7 +147,7 @@ unsafe fn register_hex(
             callback,
         )
     })();
-    into_result(result)
+    FfiResult::from(result)
 }
 
 /// The registration of an identity whose public key is raw bytes.
@@ -192,14 +192,7 @@ unsafe fn register_bytes(
             callback,
         )
     })();
-    into_result(result)
-}
-
-fn into_result(result: Result<String, String>) -> FfiResult {
-    match result {
-        Ok(json) => FfiResult::success(json),
-        Err(error) => FfiResult::error(error),
-    }
+    FfiResult::from(result)
 }
 
 /// Stores `did`'s signing configuration, which signs through the host's
