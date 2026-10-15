@@ -584,6 +584,43 @@ fn json_value_type(value: &serde_json::Value) -> &'static str {
 mod tests {
     use super::*;
 
+    const IDENTITY_PASSTHROUGH_WASM: &[u8] = &[
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // header
+        0x01, 0x0a, 0x02, 0x60, 0x00, 0x01, 0x7f, 0x60, 0x01, 0x7f, 0x01, 0x7f, // types
+        0x02, 0x0d, 0x01, 0x04, b'l', b'e', b'n', b's', 0x04, b'n', b'e', b'x', b't', 0x00,
+        0x00, // import lens.next
+        0x03, 0x03, 0x02, 0x01, 0x00, // alloc and transform functions
+        0x05, 0x03, 0x01, 0x00, 0x01, // one-page memory
+        0x07, 0x1e, 0x03, 0x06, b'm', b'e', b'm', b'o', b'r', b'y', 0x02, 0x00, 0x05, b'a', b'l',
+        b'l', b'o', b'c', 0x00, 0x01, 0x09, b't', b'r', b'a', b'n', b's', b'f', b'o', b'r', b'm',
+        0x00, 0x02, // exports
+        0x0a, 0x0c, 0x02, 0x05, 0x00, 0x41, 0x80, 0x08, 0x0b, 0x04, 0x00, 0x10, 0x00,
+        0x0b,
+        // alloc returns the same in-bounds scratch offset; transform returns the next input
+        // record. This exercises the real host JSON marshalling and result decoding path.
+    ];
+
+    const INFINITE_LOOP_WASM: &[u8] = &[
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // header
+        0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type () -> ()
+        0x03, 0x02, 0x01, 0x00, // one function of type 0
+        0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x00, // export run
+        0x0a, 0x09, 0x01, 0x07, 0x00, 0x03, 0x40, 0x0c, 0x00, 0x0b, 0x0b, // loop { br 0 }
+    ];
+
+    fn env_usize(name: &str, default: usize) -> usize {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(default)
+    }
+
+    fn percentile(sorted: &[f64], quantile: f64) -> f64 {
+        let index = ((sorted.len() - 1) as f64 * quantile).round() as usize;
+        sorted[index]
+    }
+
     #[test]
     fn test_wasm_store_creation() {
         let store = WasmTransformStore::new();
@@ -599,14 +636,6 @@ mod tests {
     #[test]
     fn shared_engine_epoch_ticker_interrupts_an_infinite_call() {
         // A module with one exported function whose body loops forever.
-        const INFINITE_LOOP_WASM: &[u8] = &[
-            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // header
-            0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type () -> ()
-            0x03, 0x02, 0x01, 0x00, // one function of type 0
-            0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x00, // export run
-            0x0a, 0x09, 0x01, 0x07, 0x00, 0x03, 0x40, 0x0c, 0x00, 0x0b, 0x0b, // loop { br 0 }
-        ];
-
         let mut sandbox = WasmSandboxConfig::restrictive();
         // Fuel is a final bound if epoch ticking regresses; the expected trap
         // is specifically the epoch interrupt.
@@ -651,6 +680,127 @@ mod tests {
             ticker.upgrade().is_none(),
             "last local store stops the ticker"
         );
+    }
+
+    /// Manual performance probe for choosing the epoch ticker period. Run with:
+    /// `cargo test -p lens measure_epoch_ticker_periods -- --ignored --nocapture`.
+    /// `DEFRA_LENS_TICKER_SAMPLES` and `DEFRA_LENS_TICKER_BATCHES` shorten or
+    /// lengthen the run. It reports wall latency only; portable Rust does not
+    /// expose reliable thread CPU-time or context-switch counters here.
+    #[test]
+    #[ignore = "manual epoch ticker timing probe; run on an otherwise idle host"]
+    fn measure_epoch_ticker_periods() {
+        let samples = env_usize("DEFRA_LENS_TICKER_SAMPLES", 20);
+        let batches = env_usize("DEFRA_LENS_TICKER_BATCHES", 50);
+        let docs_per_batch = 16;
+        let periods_ms = [10, 25, 50, 100, 250];
+        let input_docs = vec![
+            serde_json::json!({"id": "doc-1", "name": "Ada", "count": 7}),
+            serde_json::json!({"id": "doc-2", "name": "Grace", "count": 11}),
+        ];
+        let module_bytes = IDENTITY_PASSTHROUGH_WASM;
+
+        println!("epoch ticker probe: samples={samples}, batches/sample={batches}, docs/batch={docs_per_batch}");
+        println!("period_ms,light_median_ns_per_doc,light_p95_ns_per_doc,trap_median_ms,trap_p95_ms,trap_min_ms,trap_max_ms");
+        println!("CPU time/context switches: not measured by this portable harness; optionally wrap the test process in platform-specific perf tooling.");
+
+        for period_ms in periods_ms {
+            let period = Duration::from_millis(period_ms);
+            let mut sandbox = WasmSandboxConfig::restrictive();
+            sandbox.fuel_budget = Some(50_000_000);
+            // The light-call probe compares periodic wake overhead without
+            // allowing the deliberately tiny 10 ms setting to interrupt a
+            // batch under a loaded machine. The trap probe below uses the
+            // actual restrictive deadline of two ticks.
+            sandbox.epoch_deadline_ticks = Some(10_000);
+            sandbox.epoch_tick_period = Some(period);
+            let wasm_store = WasmTransformStore::with_sandbox(Some(sandbox.clone())).unwrap();
+            let module = Module::new(&wasm_store.engine, module_bytes).unwrap();
+
+            // Warm module instantiation, host marshalling, and the timer before sampling.
+            for _ in 0..5 {
+                let result = execute_batch_transform(
+                    &wasm_store.engine,
+                    &module,
+                    input_docs.clone(),
+                    None,
+                    false,
+                    store_limits(&Some(sandbox.clone())),
+                    &Some(sandbox.clone()),
+                )
+                .unwrap();
+                assert_eq!(result, input_docs);
+            }
+
+            let mut light_ns_per_doc = Vec::with_capacity(samples);
+            for _ in 0..samples {
+                let started = std::time::Instant::now();
+                let mut doc_count = 0usize;
+                for _ in 0..batches {
+                    let docs = (0..docs_per_batch)
+                        .map(|index| input_docs[index % input_docs.len()].clone())
+                        .collect();
+                    let result = execute_batch_transform(
+                        &wasm_store.engine,
+                        &module,
+                        docs,
+                        None,
+                        false,
+                        store_limits(&Some(sandbox.clone())),
+                        &Some(sandbox.clone()),
+                    )
+                    .unwrap();
+                    doc_count += result.len();
+                }
+                light_ns_per_doc.push(started.elapsed().as_nanos() as f64 / doc_count as f64);
+            }
+            light_ns_per_doc.sort_by(f64::total_cmp);
+
+            let module = Module::new(&wasm_store.engine, INFINITE_LOOP_WASM).unwrap();
+            let mut trap_ms = Vec::with_capacity(samples);
+            for _ in 0..samples {
+                let engine = wasm_store.engine.clone();
+                let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+                std::thread::spawn(move || {
+                    let mut store = wasmtime::Store::new(&engine, ());
+                    store.set_fuel(50_000_000).unwrap();
+                    store.set_epoch_deadline(2);
+                    let instance = wasmtime::Instance::new(&mut store, &module, &[])
+                        .expect("infinite loop module instantiates");
+                    let function = instance
+                        .get_func(&mut store, "run")
+                        .expect("infinite loop module exports run");
+                    let started = std::time::Instant::now();
+                    let result = function.call(&mut store, &[], &mut []);
+                    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+                    let epoch_interrupt = result.err().is_some_and(|error| {
+                        error
+                            .downcast_ref::<wasmtime::Trap>()
+                            .is_some_and(|trap| *trap == wasmtime::Trap::Interrupt)
+                    });
+                    let _ = sender.send((elapsed_ms, epoch_interrupt));
+                });
+                let completed = receiver
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("infinite transform must trap within the safety timeout");
+                assert!(
+                    completed.1,
+                    "epoch deadline should interrupt before fuel fallback"
+                );
+                trap_ms.push(completed.0);
+            }
+            trap_ms.sort_by(f64::total_cmp);
+
+            println!(
+                "{period_ms},{:.1},{:.1},{:.3},{:.3},{:.3},{:.3}",
+                percentile(&light_ns_per_doc, 0.50),
+                percentile(&light_ns_per_doc, 0.95),
+                percentile(&trap_ms, 0.50),
+                percentile(&trap_ms, 0.95),
+                trap_ms[0],
+                trap_ms[trap_ms.len() - 1],
+            );
+        }
     }
 
     #[test]
