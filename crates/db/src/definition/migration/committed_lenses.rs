@@ -195,9 +195,10 @@ pub(crate) struct PreparedLens {
 
 impl PreparedLens {
     /// Builds the blocks of `config`'s first module, read from its bytes or
-    /// its path. A path is read here, once: committing the lens later never
+    /// its path. A path is read here, once, on a blocking thread of `pool`
+    /// (the fallback pool's without one): committing the lens later never
     /// reads it again.
-    pub(crate) async fn new(config: LensConfig) -> Result<Self> {
+    pub(crate) async fn new(config: LensConfig, pool: Option<&workers::Pool>) -> Result<Self> {
         let first_lens = config
             .lens()
             .ok_or_else(|| Error::Lens("lens config has no modules".into()))?;
@@ -207,13 +208,24 @@ impl PreparedLens {
         } else if let Some(ref path) = first_lens.path {
             #[cfg(not(target_arch = "wasm32"))]
             {
-                let clean_path = path.strip_prefix("file://").unwrap_or(path);
-                tokio::fs::read(clean_path)
+                let clean_path = path.strip_prefix("file://").unwrap_or(path).to_owned();
+                let unread = |e: &dyn std::fmt::Display| {
+                    Error::Lens(format!("failed to read WASM from {}: {}", path, e))
+                };
+                let pool = match pool {
+                    Some(pool) => pool,
+                    None => workers::fallback().map_err(|e| unread(&e))?,
+                };
+                pool.spawn_blocking(move || std::fs::read(clean_path))
                     .await
-                    .map_err(|e| Error::Lens(format!("failed to read WASM from {}: {}", path, e)))?
+                    .map_err(|e| unread(&e))?
+                    .await
+                    .map_err(|e| unread(&e))?
+                    .map_err(|e| unread(&e))?
             }
             #[cfg(target_arch = "wasm32")]
             {
+                let _ = pool;
                 return Err(Error::Lens(format!(
                     "path-based lens modules not supported on wasm32 (path: {}); pass bytes instead",
                     path
@@ -284,7 +296,7 @@ where
     /// Add a lens, building its IPLD blocks and storing them in the blockstore
     /// for P2P sync, with its config, in one transaction.
     pub async fn add_lens(&self, config: LensConfig) -> Result<TransformId> {
-        let lens = PreparedLens::new(config).await?;
+        let lens = PreparedLens::new(config, self.pool()).await?;
         let txn = self.new_txn(false).await?;
         lens.write(&txn.blockstore()?, &txn.systemstore()?).await?;
         txn.commit().await?;

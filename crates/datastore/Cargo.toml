@@ -31,9 +31,6 @@ cid.workspace = true
 # Internal crates
 storage = { path = "../storage" }
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = { workspace = true, features = ["rt"] }
-
 [dev-dependencies]
 # Testing
 futures.workspace = true

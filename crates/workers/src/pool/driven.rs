@@ -99,9 +99,12 @@ fn drive(config: Config, parker: Parker, parks: bool) -> Result<(Pool, Driver), 
     let worker = Worker::new(
         worker_shared,
         clock,
-        PoolShared::tuning(&config, false),
+        PoolShared::tuning(&config, config.monitor.is_some()),
         hook,
     )?;
+    if let Some(driver) = &config.monitor {
+        driver(super::monitor::Monitor::of(&shared));
+    }
     let caller = |what: &str| Outcome {
         asked: what.to_owned(),
         granted: what.to_owned(),

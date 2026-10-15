@@ -17,7 +17,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         self.db
             .check_node_access(None, acp::nac::NodePermission::LensCreate)
             .await?;
-        let lens = PreparedLens::new(config).await?;
+        let lens = PreparedLens::new(config, self.db.pool()).await?;
         let action_lock = ctx.action_lock();
         let _action_guard = action_lock.lock().await;
         ctx.recover_pending_statement_sync().map_err(Error::Other)?;

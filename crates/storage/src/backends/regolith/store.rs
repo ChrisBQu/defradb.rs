@@ -199,6 +199,12 @@ impl RegolithStore {
         &self.inner.db
     }
 
+    /// The engine as the store holds it, for tests of what is keyed by it.
+    #[cfg(test)]
+    pub(super) fn engine_arc(&self) -> &Arc<OptimisticTransactionDb> {
+        &self.inner.db
+    }
+
     fn ensure_open(&self) -> Result<()> {
         if self.inner.slots.is_closing() {
             return Err(Error::DBClosed);
@@ -214,8 +220,14 @@ impl crate::corekv::private::Sealed for RegolithStore {}
 impl Store for RegolithStore {
     async fn allocate(&self, key: &[u8], count: u64) -> Result<std::ops::Range<u64>> {
         self.ensure_open()?;
-        super::blocking(|| self.inner.db.db().allocate(key, count))
-            .map_err(|error| Error::Backend(error.to_string()))
+        let db = self.inner.db.db();
+        // On a worker the reservation never reads the device on the thread:
+        // what it waits for is recorded on the worker's queue.
+        match super::worker_io::queue_for(&self.inner.db) {
+            Some(queue) => super::worker_io::settle(|| db.allocate_nowait(queue, key, count)).await,
+            None => db.allocate(key, count),
+        }
+        .map_err(|error| Error::Backend(error.to_string()))
     }
 
     fn transaction_stats_handle(&self) -> Option<TransactionStatsHandle> {
@@ -277,13 +289,11 @@ impl Store for RegolithStore {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Dropable for RegolithStore {
     async fn drop_all(&self) -> Result<()> {
-        super::blocking(|| {
-            self.ensure_open()?;
-            self.inner
-                .db
-                .db()
-                .drop_all()
-                .map_err(|error| Error::Backend(format!("drop_all failed: {error}")))
-        })
+        self.ensure_open()?;
+        self.inner
+            .db
+            .db()
+            .drop_all()
+            .map_err(|error| Error::Backend(format!("drop_all failed: {error}")))
     }
 }

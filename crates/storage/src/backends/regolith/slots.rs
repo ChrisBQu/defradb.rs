@@ -76,16 +76,18 @@ impl TxnSlots {
         if self.open.load(Ordering::SeqCst) == 0 {
             return Ok(());
         }
-        // vertexia: the deadline uses the edge runtime's timer through
-        // n0_future; the worker pool's deadline queue replaces it (step 9).
-        n0_future::time::timeout(timeout, self.idle.wait())
-            .await
-            .map_err(|_| {
-                Error::Backend(format!(
-                    "closed with {} transaction(s) still in flight",
-                    self.open.load(Ordering::SeqCst)
-                ))
-            })
+        // The deadline is a timer on the pool's deadline queue: the calling
+        // worker's, or the fallback pool's off the pool.
+        match workers::timeout(timeout, self.idle.wait()).await {
+            Ok(()) => Ok(()),
+            Err(workers::Error::TimedOut) => Err(Error::Backend(format!(
+                "closed with {} transaction(s) still in flight",
+                self.open.load(Ordering::SeqCst)
+            ))),
+            Err(error) => Err(Error::Backend(format!(
+                "close could not wait for its transactions: {error}"
+            ))),
+        }
     }
 }
 

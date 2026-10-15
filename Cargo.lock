@@ -2637,6 +2637,7 @@ dependencies = [
  "url",
  "urlencoding",
  "vera",
+ "workers",
  "zeroize",
 ]
 
@@ -3994,8 +3995,8 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "wasm-bindgen-futures",
  "web-time",
+ "workers",
  "zeroize",
 ]
 
@@ -4167,6 +4168,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber 0.3.23",
  "vera",
+ "workers",
 ]
 
 [[package]]
@@ -4270,6 +4272,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
  "web-sys",
+ "workers",
  "zeroize",
 ]
 
@@ -4649,6 +4652,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "workers",
 ]
 
 [[package]]
@@ -4755,6 +4759,7 @@ dependencies = [
  "tokio",
  "tracing",
  "vera",
+ "workers",
  "zeroize",
  "zstd",
 ]
@@ -5079,6 +5084,7 @@ dependencies = [
  "tracing-chrome",
  "tracing-subscriber 0.3.23",
  "vera",
+ "workers",
  "zeroize",
 ]
 
@@ -7448,6 +7454,7 @@ dependencies = [
  "tokio",
  "tracing",
  "wasmtime",
+ "workers",
 ]
 
 [[package]]
@@ -10635,6 +10642,7 @@ dependencies = [
  "tokio",
  "tracing",
  "web-time",
+ "workers",
 ]
 
 [[package]]
@@ -12864,7 +12872,6 @@ dependencies = [
  "futures",
  "getrandom 0.2.17",
  "hex",
- "n0-future",
  "proptest",
  "rapidhash",
  "regolith",
@@ -12872,6 +12879,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "storage",
  "telemetry",
  "tempfile",
  "thiserror 2.0.18",
@@ -12879,6 +12887,7 @@ dependencies = [
  "tracing",
  "uuid",
  "web-time",
+ "workers",
  "zeroize",
 ]
 

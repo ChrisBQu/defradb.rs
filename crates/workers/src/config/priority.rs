@@ -104,6 +104,17 @@ pub struct Priorities {
 }
 
 impl Priorities {
+    /// Every class left at the priority its thread starts with.
+    pub const fn inherited() -> Self {
+        Priorities {
+            workers: Priority::Inherit,
+            edge: Priority::Inherit,
+            periodic: Priority::Inherit,
+            compaction: Priority::Inherit,
+            blocking: Priority::Inherit,
+        }
+    }
+
     /// The priority for `class`.
     pub fn of(&self, class: ThreadClass) -> Priority {
         match class {
@@ -144,13 +155,7 @@ impl Default for Priorities {
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     fn default() -> Self {
-        Priorities {
-            workers: Priority::Inherit,
-            edge: Priority::Inherit,
-            periodic: Priority::Inherit,
-            compaction: Priority::Inherit,
-            blocking: Priority::Inherit,
-        }
+        Priorities::inherited()
     }
 }
 
