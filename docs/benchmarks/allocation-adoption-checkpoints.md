@@ -6,14 +6,14 @@ The benchmark reports whole-process allocations per operation. Document-create c
 
 | Checkpoint | Source revision | `allocs` binary SHA-256 | Document create allocations/op (median; range) | Get by ID allocations/op |
 |---|---|---|---:|---:|
-| main-532aac3f | `532aac3fd06a61c319c2d5fbde84da42aab67f0d` | `a1b68c22e10f4cb75f8e0f091bc35636b2d02fc2bd0ba0a7a05bd0ed807f99ed` | 2991.10 (2984.6–3005.3) | 165 |
-| step0-199daa57 | `199daa577c6750165571d256a16c6625c42af057` | `a9a74abc7c04bd4766bcd5f2f51edb71c7e96e862102653c791e5194cd9cf90c` | 3001.35 (2989.1–3009.4) | 165 |
-| step1-5ed6e2fa | `5ed6e2fa8034b42faa586c913d5d77dcfb3d41b4` | `ffd7d21cc17207354c0aa7c0c239153b98e1fa18f68a218e566811e1a16afc83` | 3024.90 (3019.9–3036.8) | 165 |
-| step2-82047ca2 | `82047ca26fd714bb1f213ec652679234e265d639` | `78c5e15ca2d4c65244157ad90cbb7fc238da42f0686164dfe31ff7808e53df11` | 3048.15 (3033.7–3058.5) | 169 |
-| step3-230c36c1 | `230c36c1d9c95833f8c24109aa1d8675a24ce1b1` | `616942fef9d5fc2e328b1e81d38d36978fdefd761a609e2a7c8527f5980f7298` | 3620.50 (3617.3–3646.1) | 269 |
-| step4-3c8bed28 | `3c8bed2824e305b4d5c02da47ade8169d490c6fa` | `d2c45850fe9161e26b39da87eb576d6a21108c4a592cef54467524fbb55681c1` | 3621.45 (3609.8–3640.4) | 269 |
+| main-532aac3f | `532aac3fd06a61c319c2d5fbde84da42aab67f0d` | `a1b68c22e10f4cb75f8e0f091bc35636b2d02fc2bd0ba0a7a05bd0ed807f99ed` | 2991.5 (2984.6–3005.3) | 165 |
+| step0-199daa57 | `199daa577c6750165571d256a16c6625c42af057` | `a9a74abc7c04bd4766bcd5f2f51edb71c7e96e862102653c791e5194cd9cf90c` | 3002.3 (2989.1–3009.4) | 165 |
+| step1-5ed6e2fa | `5ed6e2fa8034b42faa586c913d5d77dcfb3d41b4` | `ffd7d21cc17207354c0aa7c0c239153b98e1fa18f68a218e566811e1a16afc83` | 3025.0 (3019.9–3036.8) | 165 |
+| step2-82047ca2 | `82047ca26fd714bb1f213ec652679234e265d639` | `78c5e15ca2d4c65244157ad90cbb7fc238da42f0686164dfe31ff7808e53df11` | 3049.7 (3033.7–3058.5) | 169 |
+| step3-230c36c1 | `230c36c1d9c95833f8c24109aa1d8675a24ce1b1` | `616942fef9d5fc2e328b1e81d38d36978fdefd761a609e2a7c8527f5980f7298` | 3622.3 (3617.3–3646.1) | 269 |
+| step4-3c8bed28 | `3c8bed2824e305b4d5c02da47ade8169d490c6fa` | `d2c45850fe9161e26b39da87eb576d6a21108c4a592cef54467524fbb55681c1` | 3624.3 (3609.8–3640.4) | 269 |
 
-The first large step change is between step2 and step3: median create rises by about 572 allocations/op and get-by-ID rises from 169 to 269. Step4 changes the create median by about one allocation/op relative to step3. These are count results only, not throughput claims.
+The first large step change is between step2 and step3: median create rises by about 573 allocations/op and get-by-ID rises from 169 to 269. Step4 changes the create median by about two allocations/op relative to step3. These are count results only, not throughput claims.
 
 Build command for all executables:
 ```sh
