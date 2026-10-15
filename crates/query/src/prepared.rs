@@ -171,6 +171,30 @@ pub struct PreparedMutation {
     pub doc_ids: Option<Vec<String>>,
 }
 
+impl PreparedMutation {
+    /// Rebind what preparation recorded for documents this request created to
+    /// the IDs their creates returned. `created` maps the ID preparation saw a
+    /// created document under to its actual ID.
+    ///
+    /// A document the request created is a known target of its later
+    /// mutations, whether preparation found it under its projected ID or the
+    /// mutation names it by the ID its create returned, which preparation
+    /// could not see. Inputs nobody prepared for it arrive as input misses
+    /// when the mutation runs.
+    pub(crate) fn bind_created(&mut self, created: &RapidHashMap<String, String>) {
+        for (projected, actual) in created {
+            self.update_targets.remove(projected);
+            self.update_targets.insert(actual.clone());
+            if let Some(write) = self.updates.remove(projected) {
+                self.updates.insert(actual.clone(), write);
+            }
+            if let Some(embeddings) = self.embeddings.remove(projected) {
+                self.embeddings.insert(actual.clone(), embeddings);
+            }
+        }
+    }
+}
+
 /// An embedding computed during request preparation together with the exact
 /// source values it consumed. Attempts reuse the vector only while these
 /// dependencies still match their current document.
@@ -276,6 +300,36 @@ mod tests {
             b"first"
         );
         assert_eq!(memo.get(&request).as_deref(), Some(b"first".as_slice()));
+    }
+
+    #[test]
+    fn a_created_document_is_a_known_target_under_its_actual_id() {
+        let mut mutation = PreparedMutation::default();
+        let write = Arc::new(WritePreparation::new(1, 7));
+        mutation.update_targets.insert("projected-a".to_string());
+        mutation
+            .updates
+            .insert("projected-a".to_string(), Arc::clone(&write));
+        mutation.update_targets.insert("existing".to_string());
+
+        let mut created = RapidHashMap::default();
+        created.insert("projected-a".to_string(), "actual-a".to_string());
+        // Preparation never saw this one: a later mutation named it by the ID
+        // its create returned.
+        created.insert("projected-b".to_string(), "actual-b".to_string());
+        mutation.bind_created(&created);
+
+        assert!(mutation.update_targets.contains("actual-a"));
+        assert!(mutation.update_targets.contains("actual-b"));
+        assert!(mutation.update_targets.contains("existing"));
+        assert!(!mutation.update_targets.contains("projected-a"));
+        assert!(!mutation.update_targets.contains("projected-b"));
+        assert!(mutation
+            .updates
+            .get("actual-a")
+            .is_some_and(|bound| Arc::ptr_eq(bound, &write)));
+        assert!(!mutation.updates.contains_key("projected-a"));
+        assert!(!mutation.updates.contains_key("actual-b"));
     }
 
     #[tokio::test]
