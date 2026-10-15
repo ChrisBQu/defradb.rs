@@ -32,15 +32,15 @@ The stack now has the intended 11 draft PRs. Split into two stacks if further ne
 | 2 | Transactional decision reads, local ACP, relationship/NAC/downsample decisions | Preserve these fences through batch integration |
 | 3 | Arrival append, ID allocation, field/counter/vector/full-text operators, head markers, read-only lenses and known-field write projections | General query/output and conditional reads remain conservative; no blanket zero-conflict claim |
 | 4 | Receipt-ordered events and fallible ordered ACP hooks | Preserve winner-only hooks and suppress events on hook failure in whole-batch retries |
-| 5 | Engine retries for individual/many writes, merges, lenses, backfill and pending DAG writes; bounded prepared inputs | Whole implicit GraphQL batch conversion is integrated locally, not yet published. Finish provider audit and combined tests |
-| 6 | Requested locks/cache/forced-read APIs removed; snapshot metadata, collection OCC, immutable ACP projections and peer generation fences replace them | Integrate final batch projection, cross-handle backfill fence and reviewed allocation changes; publish buildable intermediate history |
+| 5 | Engine retries for individual/many writes, merges, lenses, backfill and pending DAG writes; bounded prepared inputs | Whole implicit GraphQL batch conversion and request bearer propagation published at `d761f2fe`; fix CI-discovered plain-update preparation mismatch and finish combined tests |
+| 6 | Requested locks/cache/forced-read APIs removed; snapshot metadata, collection OCC, immutable ACP projections and peer generation fences replace them | Final batch projection, global backfill fence and safe allocation changes integrated locally at `0dc247b6c`; final combined validation and publication pending |
 | 7 | Native commit/policy tickers and bounded conflict reasons; caller instrumentation retained | Revalidate after lower-stack restack |
 | 8 | Obsolete cache/counter/queue proofs retired; HeadSet retained; pinned arrival proof and new adapter boundary models | Revalidate after lower-stack restack; models do not verify Rust or remote authorization |
 
 ### Immediate blockers
 
-1. Finish whole-batch retry integration. Real backend-conflict regressions pass through QueryExecutor and the direct mutation API, checking stable IDs, atomic writes and winner-only events. Remote policy-backed batches still need the integrated attempt-local registration projection and forced-conflict regression. The commit-history authorization path remains under audit.
-2. Publish the cross-handle backfill fence repair. Published `ed653d0f` moves the cutoff after index definition publication and leaves initial progress absent for crash-safe recapture. Local `81e46176` additionally reserves the cutoff through the namespaced global allocator: a DB handle's reserved ID range is not a global high-water mark. Both deterministic race regressions and all 61 index tests pass on that candidate.
+1. Fix the CI-discovered preparation mismatch on plain update/upsert. Empty prepared key maps are incorrectly interpreted as missing mutation targets. Datetime feature tests and browser relay tests exposed this; a fix and focused regressions are in progress. Whole-batch QueryExecutor/direct API/local ACP revocation regressions pass. The step-6 remote-provider regression now uses a nontransactional adapter and proves only winning registration hooks run.
+2. Publish the combined step-6 repair at `0dc247b6c`. This includes the namespaced global allocator backfill cutoff, snapshot metadata reload, safe read/decode allocation changes, batch ACP projection and captured bearer contexts. Native all-target and WASM lint pass; exact deferred-ACP-removal boundary `e6d44f8f1` compiles. Steps 7/8 have been restacked locally.
 3. Run final combined native/WASM, external interoperability, counter conformance and fresh CI after restacking. Checkpoint passes below are not final-tip passes.
 4. Complete §5.3 performance and allocation gates. Existing measurements show regressions; none is waived. Prepare isolated benchmark binaries, then measure with a fresh load guard and no concurrent builds/tests.
 
@@ -49,9 +49,10 @@ The stack now has the intended 11 draft PRs. Split into two stacks if further ne
 | Revision / scope | Result | Limit |
 |---|---|---|
 | Published step 3 `230c36c1`, prep `199daa57` | All reported CI checks pass at latest inspection | Does not cover later PRs |
-| Published step 4 `3c8bed28` | No reported failures; ACP consumer still running at inspection | Check live CI |
+| Published step 4 `3c8bed28` | All reported CI checks pass at inspection | Check live CI |
 | Step 5 before new whole-batch work | Native DB/storage/P2P and WASM Clippy pass; read/search/transaction/vector/view/write and merge checkpoints pass | Needs final combined rerun |
-| Whole-batch candidate | Real-conflict QueryExecutor and direct-API tests pass; historical KMS, read-validator, encrypted-search and ACP-plan typed-miss regressions pass | Final remote-policy projection/provider integration pending |
+| Step 5 `d761f2fe` | Native all-target and WASM Clippy pass; preceding DB/core/query library checkpoint passes 717 tests and all three batch conflicts pass | External tests running; CI plain-update mismatch remains open |
+| Step 6 `0dc247b6c` | Native all-target and WASM Clippy pass; remote ACP winner-only conflict regression and three bearer-hook tests pass | Full combined tests running |
 | Independent query provider-boundary candidate | 744 query tests pass | Predates final combined batch/projection changes |
 | Step 6 before latest repairs | 679 DB tail tests pass (14 ignored); 1275 query/storage/authorization tests pass | Later race repairs and batch changes require rerun |
 | Step 6 external CLI | 204 ACP pass (16 ignored), 55 basic pass, 25 encryption pass; version-JSON smoke passes with clean DEFRA_ROOTDIR | Uses exact Go pin `53f0e76a32d1761e3396a88ce607ebc3e37baa5a`; predates final batch changes |
@@ -67,17 +68,19 @@ Step-5 CI exposed an unused telemetry dependency (removed locally at `0f219851`,
 
 The historical head-cache comparison is retained in [the raw artifact](benchmarks/regolith-head-cache-2026-10-14.json), before `c29a923b` and after `14e7264a`. Each run has 36 samples: creates/shared updates/counters+indexes, 1/4/16/64 writers, 256 operations per writer, three repetitions, release-fast and on-disk Immediate durability. Ambient host load contaminated timing. Creates had zero conflicts but did not scale consistently; four-writer shared/mixed conflicts increased, and 16-writer mixed exhaustion rose from zero to four. Higher-contention improvements do not waive these failures.
 
-Comparable allocation measurements (allocations per operation):
+Five-run allocation counts and binary hashes are in [the checkpoint artifact](benchmarks/allocation-adoption-checkpoints.md). True medians (allocations per operation):
 
 | Checkpoint | Create | Get by ID |
 |---|---:|---:|
-| Current main `532aac3f` | 2985.7 | 165 |
-| Step 4 `3c8bed28` | 3622.0 | 269 |
-| Step 5 `e0f9c9b9` | 4062.7 | 269 |
-| Step 6 peer candidate `97e2a3a3` | 4242.0 | 269 |
-| Latest fence-fixed allocation candidate | 4270.5 | 198 |
+| Main `532aac3f` | 2991.5 | 165 |
+| Step 0 `199daa57` | 3002.3 | 165 |
+| Step 1 `5ed6e2fa` | 3025.0 | 165 |
+| Step 2 `82047ca2` | 3049.7 | 169 |
+| Step 3 `230c36c1` | 3622.3 | 269 |
+| Step 4 `3c8bed28` | 3624.3 | 269 |
+| Step 6 measured candidate `3bd4fdcd` | 4234.4 | 198 |
 
-The last candidate saves about 55 create allocations against its paired fence-fixed baseline (4325.3), but remains substantially above main. Read-only fetching and one-pass decoding improvements preserve writable field-validation dependencies. Map encoding/JSON decoding harness values remain 36/76. No fresh per-step or per-removal throughput gate is claimed.
+The largest early increase is at step 3. Safe read-only fetching and one-pass decoding reduce read allocations while preserving writable field-validation dependencies. These counts do not establish throughput. No fresh per-step or per-removal throughput gate is claimed.
 
 Required timing evidence: before/after each step and lock-removal checkpoint, all writer counts/workloads/repetitions, commits/s, conflicts/commit, retries by layer, p50/p99, create benchmarks at 4/16 fields, branchable create at 14, and cold startup at 10 collections. Use `tools/perf-site/loadguard.py`, record its result and source revision, and do not treat a failed/missing guard as clean-host evidence.
 
