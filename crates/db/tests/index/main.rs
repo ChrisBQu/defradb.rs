@@ -5,5 +5,6 @@ mod common;
 mod backfill;
 mod bulk;
 mod create;
+mod fence;
 mod manager;
 mod manager_value_extraction;

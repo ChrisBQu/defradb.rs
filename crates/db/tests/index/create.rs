@@ -25,7 +25,7 @@ use storage::keys::datastore::IndexDataStoreKey;
 use storage::keys::systemstore::{ActionProgressKey, CollectionKey, CollectionNameKey};
 use storage::RegolithStore;
 
-fn users_schema(name: &str, version_id: &str, collection_id: &str) -> CollectionVersion {
+pub(super) fn users_schema(name: &str, version_id: &str, collection_id: &str) -> CollectionVersion {
     CollectionVersion::new(
         name,
         version_id,
@@ -37,7 +37,7 @@ fn users_schema(name: &str, version_id: &str, collection_id: &str) -> Collection
     )
 }
 
-fn by_name() -> (Vec<IndexedFieldDescription>, IndexKind) {
+pub(super) fn by_name() -> (Vec<IndexedFieldDescription>, IndexKind) {
     (
         vec![IndexedFieldDescription {
             name: "name".to_string(),
@@ -47,7 +47,7 @@ fn by_name() -> (Vec<IndexedFieldDescription>, IndexKind) {
     )
 }
 
-async fn open_with_collection(
+pub(super) async fn open_with_collection(
     name: &str,
     version_id: &str,
     collection_id: &str,
@@ -60,11 +60,14 @@ async fn open_with_collection(
     (store, db)
 }
 
-async fn create_user<S: Store + 'static>(
+pub(super) async fn create_user<S>(
     mutator: &AutoCommitMutator<S>,
     collection: &str,
     name: &str,
-) -> DocID {
+) -> DocID
+where
+    S: Store + 'static,
+{
     let mut doc = Document::new();
     doc.set("name", NormalValue::String(name.to_owned()));
     mutator.create(collection, doc).await.unwrap().doc_id
@@ -89,7 +92,10 @@ where
     }
 }
 
-async fn index_entries<S: Store + 'static>(db: &DB<S>, collection: &str, index_id: u32) -> usize {
+pub(super) async fn index_entries<S>(db: &DB<S>, collection: &str, index_id: u32) -> usize
+where
+    S: Store + 'static,
+{
     let short_id = db
         .require_collection(collection)
         .unwrap()
@@ -110,7 +116,10 @@ async fn index_entries<S: Store + 'static>(db: &DB<S>, collection: &str, index_i
     count
 }
 
-async fn entries_for<S: Store + 'static>(db: &DB<S>, collection: &str, name: &str) -> usize {
+pub(super) async fn entries_for<S>(db: &DB<S>, collection: &str, name: &str) -> usize
+where
+    S: Store + 'static,
+{
     let collection = db.require_collection(collection).unwrap();
     let manager =
         IndexManager::from_collection(collection.schema().resolved_root_id(), collection.schema())
