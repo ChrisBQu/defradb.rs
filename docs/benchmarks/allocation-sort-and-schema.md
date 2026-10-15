@@ -23,3 +23,12 @@ Each listed executable was built with `cargo bench -p benches --bench allocs --p
 For the paired canonical-base comparison, the five-sample create medians are 3612.3 without Arc schema sharing and 3346.4 with it, a reduction of 265.9 allocations/op. Get-by-ID drops by 38 allocations/op. The other reported counters are unchanged.
 
 These are observations from one host and five runs, not confidence bounds. Allocation counts are reported without timing claims.
+
+## Downsample-plan snapshot filtering
+
+A follow-up compares the same combined candidate at `05fa4d004` with the downsample-plan filter change at `fc7800ad7`. Both were built with `cargo bench -p benches --bench allocs --profile release-fast --no-run`; each executable was run five times. This is a paired allocation-count comparison, with no timing claims.
+
+- Base `05fa4d004`: `/tmp/defra-step6-cid-arc/release-fast/deps/allocs-8978f3dd8ac8be84`; SHA-256 `a37c156a1f3babf0e3e01fdf546ca242f64dc18068e4c2bdf4d3bf5fdc6fd9cd`.
+- Downsample filter candidate `fc7800ad7`: `/tmp/defra-downsample-alloc/release-fast/deps/allocs-8978f3dd8ac8be84`; SHA-256 `30dba1727df0e09e031a05379049ed36e991ae3067729677cebdcb4f07c58d78`.
+
+Raw document-create samples were 3346.4, 3346.4, 3346.4, 3346.5, 3346.3 on the base, and 3307.4, 3307.5, 3307.3, 3307.4, 3307.4 on the candidate. The five-sample medians are 3346.4 and 3307.4, a reduction of 39 allocations/op. Get-by-ID remained 160 allocations/op; document-to-map remained 36; document-from-JSON remained 76.
