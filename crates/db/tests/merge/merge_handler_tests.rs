@@ -1071,18 +1071,20 @@ async fn interactive_counter_increment_and_concurrent_same_doc_merge_both_commit
 
     // (1) Seed the doc with score = 10.
     let handle = registry.begin(false).await.expect("begin seed");
-    let ctx = registry.get(&handle).into_result().unwrap().unwrap();
-    let mutator = ctx.doc_mutator().expect("mutator");
-    let created = mutator
-        .create(
-            "Counters",
-            Document::from_json_str(r#"{"score": 10}"#).unwrap(),
-        )
-        .await
-        .expect("create seed");
+    let created = crate::common::owned::in_txn(&registry, &handle, |ctx| {
+        Box::pin(async move {
+            let mutator = ctx.doc_mutator().expect("mutator");
+            mutator
+                .create(
+                    "Counters",
+                    Document::from_json_str(r#"{"score": 10}"#).unwrap(),
+                )
+                .await
+                .expect("create seed")
+        })
+    })
+    .await;
     let doc_id = created.doc_id.to_string();
-    drop(mutator);
-    drop(ctx);
     registry.commit(&handle).await.expect("commit seed");
     assert_eq!(
         read_counter_value(&db, &doc_id, "score").await,
@@ -1093,19 +1095,21 @@ async fn interactive_counter_increment_and_concurrent_same_doc_merge_both_commit
     // (2) Begin an EXPLICIT txn and increment +3 through the interactive
     // mutator. Its operand and document update belong to the open snapshot.
     let handle = registry.begin(false).await.expect("begin interactive");
-    let ctx = registry.get(&handle).into_result().unwrap().unwrap();
-    let mutator = ctx.doc_mutator().expect("mutator");
     let mut update_doc = Document::from_json_str(r#"{"score": 13}"#).unwrap();
     update_doc.set_id(document::DocID::from_string(&doc_id).unwrap());
     update_doc.set_counter_delta("score".to_string(), NormalValue::Int(3));
     let mut modified = rapidhash::RapidHashSet::new();
     modified.insert("score".to_string());
-    mutator
-        .update("Counters", update_doc, modified)
-        .await
-        .expect("interactive update +3");
-    drop(mutator);
-    drop(ctx);
+    crate::common::owned::in_txn(&registry, &handle, |ctx| {
+        Box::pin(async move {
+            let mutator = ctx.doc_mutator().expect("mutator");
+            mutator
+                .update("Counters", update_doc, modified)
+                .await
+                .expect("interactive update +3");
+        })
+    })
+    .await;
     // NOTE: NOT committed yet.
 
     // (3) BEFORE committing, apply a concurrent same-doc merge of +5 through the

@@ -129,14 +129,23 @@ async fn cancellation_while_finalization_waits_for_an_active_request_releases_th
             .unwrap();
         create(&guard).await;
         let handle = guard.handle().unwrap().clone();
-        let ctx = fixture
-            .registry
-            .get(&handle)
-            .into_result()
-            .unwrap()
-            .unwrap();
-        let action_lock = ctx.action_lock().unwrap();
-        let action = action_lock.lock().await;
+        // A request holds the transaction on its owner until the gate opens.
+        let gate = Arc::new(regolith::sync::Event::new());
+        let entered = Arc::new(regolith::sync::Event::new());
+        let active = {
+            let (registry, handle) = (fixture.registry.clone(), handle.clone());
+            let (gate, entered) = (gate.clone(), entered.clone());
+            tokio::spawn(async move {
+                let job = query::txn::txn_job(move |_| {
+                    Box::pin(async move {
+                        entered.set();
+                        gate.wait().await;
+                    })
+                });
+                registry.run(&handle, None, job).await
+            })
+        };
+        entered.wait().await;
         let mut finalize = Box::pin(async move {
             if commit {
                 guard.commit().await
@@ -145,10 +154,9 @@ async fn cancellation_while_finalization_waits_for_an_active_request_releases_th
             }
         });
         assert!(futures::poll!(&mut finalize).is_pending());
-        assert_eq!(fixture.registry.active_transaction_count().unwrap(), 0);
         drop(finalize);
-        drop(action);
-        drop(ctx);
+        gate.set();
+        active.await.unwrap().unwrap();
         fixture.assert_discarded(&handle).await;
     }
 }

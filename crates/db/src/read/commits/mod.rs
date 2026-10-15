@@ -36,18 +36,25 @@ pub struct CommitsQueryOptions {
 
 /// Fetcher for commit history from the merkle DAG
 pub struct CommitsFetcher<S: Store> {
-    txn: LentTxn<S>,
+    /// The transaction it reads; a detached fetcher has none and only orders
+    /// commits it is given.
+    txn: Option<LentTxn<S>>,
 }
 
 impl<S: Store> CommitsFetcher<S> {
     /// Create a new commits fetcher with a shared transaction
     pub fn new(txn: LentTxn<S>) -> Self {
-        Self { txn }
+        Self { txn: Some(txn) }
+    }
+
+    /// A fetcher with no transaction, for ordering commits it is given.
+    pub fn detached() -> Self {
+        Self { txn: None }
     }
 
     /// Fetch all commits matching the given options
     pub async fn fetch_commits(&self, options: &CommitsQueryOptions) -> Result<Vec<Document>> {
-        let txn = &*self.txn;
+        let txn = self.txn.as_deref().ok_or(Error::TxnNotActive)?;
 
         if let Some(ref cid_str) = options.cid {
             return self.fetch_commit_by_cid(txn, cid_str, options).await;

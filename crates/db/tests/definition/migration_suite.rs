@@ -11,7 +11,6 @@ use lens::LensDocStream;
 use lens::LensModule;
 use lens::TransformId;
 use lens::TransformStore;
-use query::txn::GetTransactionResult;
 use query::txn::TransactionRegistry;
 use query::DocFetcher;
 use query::DocMutator;
@@ -793,16 +792,18 @@ async fn implicit_query_leaves_storage_unchanged_after_snapshot_closes() {
 
     // A user-managed read-only transaction remains side-effect free.
     let explicit = registry.begin(true).await.unwrap();
-    let explicit_ctx = match registry.get(&explicit) {
-        GetTransactionResult::Found(context) => context,
-        other => panic!("expected explicit transaction context, got {other:?}"),
-    };
-    let explicit_docs = explicit_ctx
-        .doc_fetcher()
-        .get_by_ids("Users", &[doc_id.to_string()])
-        .await
-        .unwrap()
-        .into_docs();
+    let ids = [doc_id.to_string()];
+    let explicit_docs = crate::common::owned::in_txn(&registry, &explicit, move |context| {
+        Box::pin(async move {
+            context
+                .doc_fetcher()
+                .get_by_ids("Users", &ids)
+                .await
+                .unwrap()
+                .into_docs()
+        })
+    })
+    .await;
     assert_eq!(
         explicit_docs[0].get("verified"),
         Some(&document::NormalValue::Bool(true))
