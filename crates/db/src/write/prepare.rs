@@ -424,8 +424,14 @@ where
                 })
         })
         .collect::<query::error::Result<Vec<_>>>()?;
-    db.remote_inputs()
-        .embeddings()
+    // Natively an embedding is a request on the network runtime, which a
+    // database built without one does not have.
+    let embeddings = db.remote_inputs().embeddings().ok_or_else(|| {
+        query::error::QueryError::execution(
+            "embedding error: no network runtime to reach the embedding provider; run the node with its network runtime",
+        )
+    })?;
+    embeddings
         .get_many(keys)
         .await
         .into_iter()

@@ -1,6 +1,7 @@
 //! The service against a counting fake with injected latency. Time is
-//! tokio's paused clock, which the ambient runtime's timers and clock both
-//! read, so latencies are exact and the tests take no wall time.
+//! tokio's paused clock, which the test network's timers and the runtime
+//! clock both read, so latencies are exact and the tests take no wall time.
+//! The inline tests run with no runtime at all.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -63,7 +64,9 @@ impl Source for Fake {
             self.keys.fetch_add(keys.len(), Ordering::SeqCst);
             let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
             self.most_in_flight.fetch_max(now, Ordering::SeqCst);
-            tokio::time::sleep(self.latency).await;
+            if !self.latency.is_zero() {
+                tokio::time::sleep(self.latency).await;
+            }
             self.in_flight.fetch_sub(1, Ordering::SeqCst);
             if keys.contains(&666) {
                 panic!("the fake panics on 666");
@@ -91,8 +94,26 @@ impl Source for Fake {
     }
 }
 
+/// Round trips as tasks of the test's own tokio runtime, whose time the
+/// test pauses: the network a node's edge is, without its threads.
+struct TestNetwork;
+
+impl crate::Network for TestNetwork {
+    fn spawn(&self, work: MaybeBoxFuture<'static, ()>) {
+        drop(tokio::spawn(work));
+    }
+
+    fn sleep(&self, duration: Duration) -> MaybeBoxFuture<'static, ()> {
+        Box::pin(tokio::time::sleep(duration))
+    }
+}
+
 fn service(fake: Fake, config: Config) -> Service<Fake> {
-    Service::new(fake, config, Runtime::ambient())
+    let runtime = Runtime::new(
+        std::sync::Arc::new(TestNetwork),
+        std::sync::Arc::new(crate::RuntimeClock::new()),
+    );
+    Service::new(fake, config, runtime)
 }
 
 fn cached(config: Config) -> Config {
@@ -442,4 +463,48 @@ async fn a_caller_is_woken_once_per_round_trip_not_once_per_key() {
         2,
         "polled once to start and once when the batch settled"
     );
+}
+
+fn inline(fake: Fake, config: Config) -> Service<Fake> {
+    Service::new(fake, config, Runtime::inline())
+}
+
+/// No runtime exists here: an inline service spawns nothing and reads no
+/// timer, so it runs on any executor, a worker's included.
+#[test]
+fn an_inline_service_runs_in_the_callers_task_with_no_runtime() {
+    let service = inline(
+        Fake::with_latency(Duration::ZERO),
+        cached(Config::default()),
+    );
+    let answers = n0_future::future::block_on(service.get_many(vec![1, 2, 3, 2, 1001]));
+    assert_eq!(answers, vec![Ok(2), Ok(4), Ok(6), Ok(4), Ok(2002)]);
+    assert_eq!(
+        service.source().round_trips(),
+        2,
+        "one round trip per group, a repeated key asked once"
+    );
+    assert_eq!(n0_future::future::block_on(service.get(3)), Ok(6));
+    assert_eq!(service.source().round_trips(), 2, "the cache answers");
+}
+
+#[test]
+fn an_inline_retry_follows_its_failure_at_once() {
+    let fake = Fake::with_latency(Duration::ZERO);
+    fake.fail_next.store(2, Ordering::SeqCst);
+    let service = inline(fake, Config::default());
+    assert_eq!(n0_future::future::block_on(service.get(4)), Ok(8));
+    assert_eq!(service.source().round_trips(), 3);
+}
+
+#[test]
+fn an_inline_prefetch_leaves_the_fetch_to_the_call() {
+    let service = inline(
+        Fake::with_latency(Duration::ZERO),
+        cached(Config::default()),
+    );
+    service.prefetch(vec![5]);
+    assert_eq!(service.source().round_trips(), 0);
+    assert_eq!(n0_future::future::block_on(service.get(5)), Ok(10));
+    assert_eq!(service.source().round_trips(), 1);
 }
