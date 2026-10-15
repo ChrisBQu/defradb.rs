@@ -196,8 +196,8 @@ impl<S: Store + 'static> DbTransactionContext<S> {
         self.fetcher.lens_store()
     }
 
-    pub(crate) async fn invalidate_migration_cache(&self) {
-        self.fetcher.invalidate_migration_cache().await;
+    pub(crate) fn invalidate_migration_cache(&self) {
+        self.fetcher.invalidate_migration_cache();
     }
 
     pub(crate) fn action_lock(&self) -> Arc<async_lock::Mutex<()>> {

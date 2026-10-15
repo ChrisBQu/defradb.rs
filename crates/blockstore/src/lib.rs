@@ -49,11 +49,8 @@ pub use verify::verify_block_cid;
 use async_trait::async_trait;
 use bytes::Bytes;
 use cid::Cid;
-use lru::LruCache;
 use multihash_codetable::Code;
-use parking_lot::Mutex;
 use std::fmt;
-use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use storage::corekv::{IterOptions, Key, RetryOptions, Store};
@@ -63,33 +60,20 @@ use storage::stores::BlockWrite;
 use storage::stores::Blockstore as InternalBlockstore;
 use tracing::instrument;
 
-/// Default number of entries in the block cache (matches Go's 1M entry LRU).
-const DEFAULT_BLOCK_CACHE_SIZE: usize = 1_000_000;
-
-/// Number of entries in the merged CID cache.
-///
-/// Tracks CIDs that have been merged so `is_merged()` can skip storage reads
-/// during P2P DAG sync hot loops. Sized smaller than the block cache since
-/// only merged CIDs are tracked (not full block data).
-const DEFAULT_MERGED_CACHE_SIZE: usize = 100_000;
-
 /// DefraDB blockstore implementation
 ///
 /// Wraps the internal storage::stores::Blockstore with a clean public API.
 /// Supports both P2P mode (with merge tracking) and local mode (no tracking).
 ///
-/// Includes a process-wide LRU cache for recently accessed blocks, reducing
-/// storage reads during merge, query, and P2P sync operations.
+/// It keeps no cache of its own: every read goes to the engine, whose block
+/// cache serves a repeated read, so every handle over one store sees the same
+/// blocks and merge marks. A read is zero-copy: the `Bytes` it returns hold
+/// the engine's own bytes, which stay unchanged for as long as they are held,
+/// whatever the store does after.
 pub struct DefraBlockstore<S: Store> {
     store: InternalBlockstore<S>,
     /// Whether to verify hash on read
     rehash: AtomicBool,
-    /// LRU cache for recently accessed blocks (CID → block bytes).
-    /// Uses `Bytes` for O(1) clone on cache hits instead of O(n) `Vec<u8>::clone`.
-    cache: Mutex<LruCache<Cid, Bytes>>,
-    /// LRU cache for merged CIDs — fast path for `is_merged()` checks
-    /// during P2P DAG sync. Only positive results are cached (merged = true).
-    merged_cache: Mutex<LruCache<Cid, ()>>,
     /// The engine retry policy every block write runs under.
     retry: RetryOptions,
 }
@@ -115,12 +99,6 @@ impl<S: Store + 'static> DefraBlockstore<S> {
         Self {
             store: InternalBlockstore::new(store, is_p2p),
             rehash: AtomicBool::new(false),
-            cache: Mutex::new(LruCache::new(
-                NonZeroUsize::new(DEFAULT_BLOCK_CACHE_SIZE).unwrap(),
-            )),
-            merged_cache: Mutex::new(LruCache::new(
-                NonZeroUsize::new(DEFAULT_MERGED_CACHE_SIZE).unwrap(),
-            )),
             retry: storage::corekv::engine_retry_options(storage::corekv::DEFAULT_MAX_TXN_RETRIES),
         }
     }
@@ -191,15 +169,6 @@ impl<S: Store + 'static> DefraBlockstore<S> {
 impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
     #[instrument(level = "trace", skip(self))]
     async fn get(&self, cid: &Cid) -> Result<Option<Bytes>> {
-        // Check LRU cache first (skip cache when hash verification is enabled,
-        // since cached data may not have been verified yet)
-        if !self.rehash.load(Ordering::Acquire) {
-            let mut cache = self.cache.lock();
-            if let Some(data) = cache.get(cid) {
-                return Ok(Some(data.clone()));
-            }
-        }
-
         let txn = self.store.new_txn(true).await?;
         let bs_txn = txn
             .as_any()
@@ -207,91 +176,45 @@ impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
             .ok_or_else(|| Error::Internal("Failed to downcast transaction".to_string()))?;
         let result = bs_txn.get_block(cid).await?;
 
-        // If hash_on_read is enabled and we got data, verify the hash
         if self.rehash.load(Ordering::Acquire) {
             if let Some(ref data) = result {
                 self.verify_hash(cid, data)?;
             }
         }
 
-        if let Some(data) = result {
-            // The cache gets its own copy, not the engine's.
-            //
-            // A read hands back `Bytes` over a regolith `DbSlice`, which is a
-            // refcount on whatever owns those bytes: a 16 KiB SSTable block, or
-            // a memtable arena. Holding one keeps that owner resident even
-            // after the block cache evicts it, so caching the slice itself
-            // would let a million-entry LRU pin an unbounded amount of engine
-            // memory, and a 200-byte value would hold a whole block down.
-            // regolith's own guidance is to copy when the value outlives the
-            // read, which is exactly what a cache does.
-            self.cache.lock().put(*cid, Bytes::from(data.to_vec()));
-            return Ok(Some(data));
-        }
-
-        Ok(None)
+        Ok(result)
     }
 
     #[instrument(level = "trace", skip(self))]
     async fn put(&self, cid: &Cid, data: &[u8]) -> Result<()> {
-        // Check cache for existence (avoids storage read for recently-written blocks)
-        if self.cache.lock().contains(cid) {
-            return Ok(());
-        }
-
-        let data = Bytes::copy_from_slice(data);
-        let written = self
-            .store
+        self.store
             .write_blocks(
                 self.retry,
                 vec![BlockWrite::Put {
                     cid: *cid,
-                    data: data.clone(),
+                    data: Bytes::copy_from_slice(data),
                 }],
             )
             .await?;
-        if written.first() == Some(&true) {
-            self.cache.lock().put(*cid, data);
-        }
         Ok(())
     }
 
     async fn put_many(&self, blocks: &[(&Cid, &[u8])]) -> Result<()> {
-        let to_write: Vec<(Cid, Bytes)> = {
-            let cache = self.cache.lock();
-            blocks
-                .iter()
-                .filter(|(cid, _)| !cache.contains(cid))
-                .map(|(cid, data)| (**cid, Bytes::copy_from_slice(data)))
-                .collect()
-        };
-        if to_write.is_empty() {
+        if blocks.is_empty() {
             return Ok(());
         }
-
-        let writes = to_write
+        let writes = blocks
             .iter()
             .map(|(cid, data)| BlockWrite::Put {
-                cid: *cid,
-                data: data.clone(),
+                cid: **cid,
+                data: Bytes::copy_from_slice(data),
             })
             .collect();
-        let written = self.store.write_blocks(self.retry, writes).await?;
-        let mut cache = self.cache.lock();
-        for ((cid, data), written) in to_write.into_iter().zip(written) {
-            if written {
-                cache.put(cid, data);
-            }
-        }
+        self.store.write_blocks(self.retry, writes).await?;
         Ok(())
     }
 
     async fn has(&self, cid: &Cid) -> Result<bool> {
-        // Check cache first
-        if self.cache.lock().contains(cid) {
-            return Ok(true);
-        }
-
         let txn = self.store.new_txn(true).await?;
         let bs_txn = txn
             .as_any()
@@ -302,10 +225,6 @@ impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
     }
 
     async fn delete(&self, cid: &Cid) -> Result<()> {
-        // Evict from both caches
-        self.cache.lock().pop(cid);
-        self.merged_cache.lock().pop(cid);
-
         self.store
             .write_blocks(self.retry, vec![BlockWrite::Delete(*cid)])
             .await?;
@@ -355,12 +274,6 @@ impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
     }
 
     async fn is_merged(&self, cid: &Cid) -> Result<bool> {
-        // Fast path: check merged cache
-        if self.merged_cache.lock().contains(cid) {
-            return Ok(true);
-        }
-
-        // Slow path: check storage
         let txn = self.store.new_txn(true).await?;
         let bs_txn = txn
             .as_any()
@@ -372,24 +285,13 @@ impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
             return Ok(false);
         }
 
-        let result = bs_txn.is_merged(cid).await?;
-
-        // Cache positive results
-        if result {
-            self.merged_cache.lock().put(*cid, ());
-        }
-
-        Ok(result)
+        Ok(bs_txn.is_merged(cid).await?)
     }
 
     async fn mark_as_merged(&self, cid: &Cid) -> Result<()> {
-        let stored = self
-            .store
+        self.store
             .write_blocks(self.retry, vec![BlockWrite::MarkMerged(*cid)])
             .await?;
-        if stored.first() == Some(&true) {
-            self.merged_cache.lock().put(*cid, ());
-        }
         Ok(())
     }
 
@@ -399,10 +301,6 @@ impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
         }
         let writes = cids.iter().copied().map(BlockWrite::MarkMerged).collect();
         self.store.write_blocks(self.retry, writes).await?;
-        let mut cache = self.merged_cache.lock();
-        for cid in cids {
-            cache.put(*cid, ());
-        }
         Ok(())
     }
 
