@@ -255,8 +255,8 @@ impl<S: Store> crate::database::DB<S> {
         if let Ok(cid) = cid::Cid::try_from(version_id.as_str()) {
             let schema_heads = std::sync::Arc::clone(&self.schema_heads);
             let head_name = name.clone();
-            txn.on_success(Box::new(move || {
-                schema_heads.insert(head_name, (vec![cid], 1));
+            txn.on_success_ordered(std::sync::Arc::new(move || {
+                schema_heads.insert(head_name.clone(), (vec![cid], 1));
             }))?;
         }
 

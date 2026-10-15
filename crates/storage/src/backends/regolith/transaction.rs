@@ -430,6 +430,7 @@ impl Txn for RegolithTxn {
             head_changes: self.head_changes.clone(),
             ordered_events: self.ordered_events.len(),
             ordered_async_callbacks: self.ordered_async_callbacks.len(),
+            has_writes: self.has_writes,
         };
         self.writable_mut()?.set_savepoint();
         self.savepoints.push(state);
@@ -451,6 +452,7 @@ impl Txn for RegolithTxn {
         self.ordered_events.truncate(state.ordered_events);
         self.ordered_async_callbacks
             .truncate(state.ordered_async_callbacks);
+        self.has_writes = state.has_writes;
         Ok(())
     }
 
