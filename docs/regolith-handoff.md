@@ -2,7 +2,7 @@
 
 [PR #1953](https://github.com/sourcenetwork/defradb.rs/pull/1953) is Theo's permanent review entry point. **The actual top of the stack is [#1961](https://github.com/sourcenetwork/defradb.rs/pull/1961). All eight adoption steps are represented by 11 PRs, but implementation and validation gates remain open. No PR has been merged.**
 
-Scope: §5.2 steps 1–8 plus preparatory step 0 from Theo's bundle. New installations only; Jack waived migrations and compatibility with existing encrypted/value layouts. Step 9's worker-pool redesign is excluded. Main base: `532aac3f`. Regolith pin: `d1e36aa747913f6b1ecc14c821f4e5e6314674cf`.
+Scope: §5.2 steps 1–8 plus preparatory step 0 from Theo's bundle. New installations only; Jack waived migrations and compatibility with existing encrypted/value layouts. Step 9's worker-pool redesign is excluded. Main base: `8a38e96f2` (includes the resident DiskANN code-cache and MSRV changes). Regolith pin: `d1e36aa747913f6b1ecc14c821f4e5e6314674cf`.
 
 ## Stack and merge order
 
@@ -37,9 +37,13 @@ The stack has the intended 11 PRs. All eleven PRs remain drafts while adoption g
 | 7 | Native commit/policy tickers and bounded conflict reasons; caller instrumentation retained | Current-head remote CI and performance gates |
 | 8 | Obsolete cache/counter/queue proofs retired; HeadSet retained; pinned arrival proof and new adapter boundary models | Revalidate after lower-stack restack; models do not verify Rust or remote authorization |
 
-### Immediate blockers
+### Latest validation and remaining gates
 
-The §2.4 fixes are now placed at their proper stack boundaries. The restacked runtime at `cb5abaf99` passes **2,371 core tests (33 ignored), 358 HTTP/embedded tests (5 ignored), five benchmark-accounting tests, native all-target Clippy, WASM Clippy, and fresh CLI basic 56, ACP 204 (16 ignored), encryption 25, counter 9 (8 ignored), and write-skew protection**. Logs are `/tmp/defra-final-surface-cb5abaf99-*.log`. A subsequent history-only rebase changes no source. The later test-only change at `7efaf2f2c` strengthens physical-blob rollback assertions; all three statement-savepoint tests pass. These local results do not substitute for new-head remote CI.
+The stack has been rebased onto main `8a38e96f2`. GitHub's native stack reported a conflict against newer main even though each PR's immediate branch base was an ancestor; the real conflict was resolved by retaining both the new DiskANN cache and statement-savepoint state. Collection caches retain their step-6 OCC ownership.
+
+The main-integrated runtime at `d221fcd43` passes **2,376 core tests (33 ignored), 358 HTTP/embedded tests (5 ignored), 182 schema tests, five benchmark-accounting tests, native all-target Clippy, WASM Clippy, and fresh CLI basic 56, ACP 204 (16 ignored), encryption 25, counter 9 (8 ignored), and write-skew protection**. Logs: `/tmp/defra-final-surface-d221fcd43-*.log`, `/tmp/defra-main-d221-schema.log`, `/tmp/defra-main-d221-wasm-clippy.log`.
+
+Two subsequent changes enter at step 5: retry-created transactions now share the database's resident DiskANN code cache, and the benchmark reports actual **engine replay executions** separately from conflict outcomes and exhaustion. The new replay test verifies zero replays without a conflict, one replay before success, and two replays for three exhausted attempts. Final validation of these additions and fresh-head remote CI are in progress. The earlier full run is not presented as an exact-head pass for these additions.
 
 The shared Wasmtime engine owns an independent parked epoch-clock thread so synchronous WASM cannot starve its clock. Transaction-local transform maps initialize lazily. The provisional **100 ms** period now has a [bounded measurement report](benchmarks/lens-epoch-period/measurement.md): no light-workload traps across the measured periods; the 100 ms setting gives approximately 213 ms median / 220 ms p95 interruption with two ticks. This is not an optimality claim or a complex-lens latency guarantee.
 
@@ -47,14 +51,14 @@ Statement savepoints enter at step 2 after the API bump supplies releasable save
 
 Schema decision scans use the same write transaction with validation enabled; schema-head caches publish after successful commit. Legacy index representations are compared after normalization, while other schema fields remain checked. The stale-scan regression stages a write and checks the typed transaction conflict.
 
-1. Inspect new-head CI after publication. Fresh CLI validation of all eight lower PR checkpoints is running independently: prep `921824bfa` and API `75238ac25` pass; remaining checkpoints are still being checked. Older lower-checkpoint results below are historical.
-2. Complete §5.3 timing and allocation gates on a quiet host. The main baseline is complete; refreshed candidate and removal-checkpoint binaries are being built. No performance gate is waived. The historical allocation pair was about 4.6% above its main baseline; it is not a measurement of this restack.
+1. Inspect new-head CI after publication. Independent CLI validation of the new-main checkpoints is running: prep `d6f58d624`, API `3162318e2`, and encryption `1cf6a0b23` pass; classifier through telemetry are still being checked. Earlier checkpoint results below are historical.
+2. Complete §5.3 timing and allocation gates on a quiet host. Frozen binaries for the new main and adoption/removal checkpoints are being rebuilt. The `532aac3f` baseline remains historical evidence; it does not substitute for the new-main baseline. No performance gate is waived.
 
 The browser identity regression is fixed at step 5: identity is scoped per future poll and restored before suspension. CI at `1fb3ebed0` passes 73 browser library tests, two browser integration tests and four relay tests; six native identity tests also pass.
 
 Step 6 now supports projected GraphQL updates for unconditional explicit document IDs, scalar patches and `_docID`-only output. Full documents are materialized, with only relevant field dependencies validated. Filters, other returned fields, migrations, downsample and unsupported shapes retain conservative reads. Preparation uses the same dependency set, preserves found-target membership and invokes preparation hooks; custom mutators default to full validation. Eight real GraphQL regressions pass, including disjoint commits with required untouched fields, same-field/predicate/output/index conflicts and later full reads. A custom-mutator regression confirms hooks run and missing IDs stay excluded. Query 599, DB library 29, write 64 and index 61 tests pass. At `b4a2552f7`, the full core run passes 2,365 tests (33 ignored), HTTP/embedded passes 358 (5 ignored), and benchmark accounting passes five. After an unused-import cleanup, `888e2da4c` passes broad native all-target Clippy, WASM Clippy, formatting, and a fresh CLI run: ACP 204 (16 ignored), basic 56, encryption 25, counter 9 (8 ignored), and write-skew one. The cleanup changes no runtime behavior. Current-head remote CI remains pending.
 
-## Validation evidence
+## Earlier validation evidence (see latest results above)
 
 | Revision / scope | Result | Limit |
 |---|---|---|
@@ -86,7 +90,7 @@ Earlier mixed Go/Rust parity failures passed all three local controls and ten mi
 
 ## Performance gates: not passed
 
-The [frozen clean-host main evidence](benchmarks/regolith-main-532aac3f/README.md) includes all 36 workload samples, eight guarded command runs, five allocation samples (median **2989.575 allocations/create**), four Criterion estimates, executable hashes and checksums. Structural/provenance validation passes. This baseline does not establish candidate non-regression; the lower-stack fixes require refreshed candidate binaries and measurements.
+The historical [frozen clean-host main evidence](benchmarks/regolith-main-532aac3f/README.md) includes all 36 workload samples, eight guarded command runs, five allocation samples (median **2989.575 allocations/create**), four Criterion estimates, executable hashes and checksums. Structural/provenance validation passes. This historical baseline does not establish current-main or candidate non-regression; new-main baseline and candidate measurements are pending.
 
 The historical head-cache comparison is retained in [the raw artifact](benchmarks/regolith-head-cache-2026-10-14.json), before `c29a923b` and after `14e7264a`. Each run has 36 samples: creates/shared updates/counters+indexes, 1/4/16/64 writers, 256 operations per writer, three repetitions, release-fast and on-disk Immediate durability. Ambient host load contaminated timing. Creates had zero conflicts but did not scale consistently; four-writer shared/mixed conflicts increased, and 16-writer mixed exhaustion rose from zero to four. Higher-contention improvements do not waive these failures.
 
