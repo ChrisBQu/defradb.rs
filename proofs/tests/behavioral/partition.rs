@@ -614,15 +614,12 @@ async fn poll_mixed_dags_full_mesh(
 /// `hits=0` document over a live bidirectional connection; each increments by 45,
 /// concurrently; both must converge to 90.
 ///
-/// REGRESSION: the twin of the LWW priority bug above. A counter's value lives in
-/// two places — the materialized document blob (advanced by BOTH local increments
-/// and merges) and the CRDT accumulation store (`value_key`, advanced ONLY by
-/// merges). A *local* increment updates only the blob; the node that received the
-/// document by replication first already has an initialized accumulation store, so
-/// a remote delta re-materializes the blob from that stale store and silently
-/// drops the node's own increment — converging to 45 instead of 90. Fixed in
-/// `crates/db/src/merge/merge_handler/counter.rs` by reconciling the store up to
-/// the committed blob before every merge (`Counter::reconcile_int64`). Verified:
+/// REGRESSION: the twin of the LWW priority bug above. A counter once kept two
+/// copies, the document value and a separate accumulator, and a remote delta
+/// rebuilt one from the other and dropped the node's own increment (45, not 90).
+/// The counter's only copy is now its part of the document value, and local and
+/// replicated increments are both operands on it
+/// (`crates/db/src/merge/merge_handler/counter.rs`), so both land. Verified:
 /// rust<->rust, go<->go, and rust<->go all converge to 90.
 #[tokio::test]
 async fn convergence_concurrent_counter_increments_sum() {
