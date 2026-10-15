@@ -3,9 +3,12 @@
 
 use db::database::DB;
 use db::txn::registry::DbTransactionRegistry;
+use db::{AutoCommitMutator, DbCollectionProvider, LensedAutoCommitFetcher};
 use defra_core::RequestContext;
+use identity::Did;
 use query::error::TransactionError;
 use query::txn::{txn_job, TransactionHandle, TransactionRegistry};
+use query::{QueryExecutor, QueryRequest, QueryRunner, RestOperations, RestOperationsImpl};
 use std::sync::Arc;
 use storage::RegolithStore;
 
@@ -55,4 +58,66 @@ async fn only_the_context_that_began_a_transaction_reaches_it() {
     assert!(reaches(&registry, &alice, &handle).await);
     registry.commit_as(&alice, &handle).await.unwrap();
     assert_eq!(registry.active_transaction_count().unwrap(), 0);
+}
+
+/// REST operations serve the request they are bound to: in a transaction that
+/// request began they read and write it, and bound to any other caller they
+/// find no transaction.
+#[tokio::test]
+async fn rest_operations_reach_the_transaction_of_the_request_they_serve() {
+    let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
+    for schema in query::parse_sdl("type Users { name: String }").unwrap() {
+        db.create_collection(schema).await.unwrap();
+    }
+    let registry = Arc::new(DbTransactionRegistry::new(Arc::clone(&db)));
+    let runner = Arc::new(
+        QueryRunner::with_arc_registry_and_provider(
+            LensedAutoCommitFetcher::new(Arc::clone(&db)),
+            DbCollectionProvider::new_arc(Arc::clone(&db)),
+            Arc::clone(&registry),
+        )
+        .with_mutator(Arc::new(AutoCommitMutator::new(Arc::clone(&db)))),
+    );
+    let rest = RestOperationsImpl::new(Arc::clone(&runner));
+    let alice_did = Did::new("did:key:alice").unwrap();
+    let alice = acting(Some(alice_did.as_str()));
+    let handle = registry.begin_as(&alice, false).await.unwrap();
+
+    for stranger in [acting(None), acting(Some("did:key:bob"))] {
+        let foreign = rest
+            .bind_request(&stranger)
+            .unwrap()
+            .with_transaction(handle.clone())
+            .unwrap();
+        assert!(foreign.list_collections().await.is_err());
+        assert!(foreign
+            .create_document("Users", serde_json::json!({ "name": "stranger" }), None)
+            .await
+            .is_err());
+    }
+
+    let owner = rest
+        .bind_request(&alice)
+        .unwrap()
+        .with_transaction(handle.clone())
+        .unwrap();
+    assert_eq!(owner.list_collections().await.unwrap(), vec!["Users"]);
+    owner
+        .create_document(
+            "Users",
+            serde_json::json!({ "name": "alice" }),
+            Some(&alice_did),
+        )
+        .await
+        .unwrap();
+    registry.commit_as(&alice, &handle).await.unwrap();
+
+    let read = runner
+        .execute(QueryRequest::new("{ Users { name } }"))
+        .await;
+    assert!(read.errors.is_empty(), "{:?}", read.errors);
+    assert_eq!(
+        read.data.unwrap()["Users"],
+        serde_json::json!([{ "name": "alice" }])
+    );
 }

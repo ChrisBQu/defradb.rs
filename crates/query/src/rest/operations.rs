@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use defra_core::RequestContext;
 use identity::Did;
 use serde_json::Value as JsonValue;
 
@@ -59,7 +60,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> RestOperationsImpl<F, R> {
             let response = self
                 .runner
                 .execute_in_txn(
-                    QueryRequest::new(query).with_identity(identity.cloned()),
+                    QueryRequest::new(query)
+                        .with_identity(identity.cloned())
+                        .with_context(self.runner.context().into_owned()),
                     handle,
                 )
                 .await;
@@ -242,6 +245,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> RestOperationsImpl<F, R> {
 impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> RestOperations
     for RestOperationsImpl<F, R>
 {
+    fn bind_request(&self, context: &RequestContext) -> Option<Arc<dyn RestOperations>> {
+        Some(Arc::new(Self {
+            runner: Arc::new(self.runner.for_request(context.clone())),
+            transaction: self.transaction.clone(),
+        }))
+    }
+
     fn with_transaction(&self, handle: TransactionHandle) -> RestResult<Arc<dyn RestOperations>> {
         let provider = self.runner.transaction_collection_provider(&handle)?;
         Ok(Arc::new(Self {

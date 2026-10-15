@@ -168,7 +168,7 @@ pub async fn get_collection_doc_ids(
     require_permission(&state, &identity, NodePermission::CollectionGet).await?;
 
     let pagination = parse_collection_doc_ids_pagination(&params)?;
-    let rest = rest_for_request(&state, &headers)?;
+    let rest = rest_for_request(&state, &identity, &headers)?;
 
     match rest
         .get_collection_doc_ids_page(&name, pagination, identity.did())

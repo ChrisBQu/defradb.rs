@@ -13,6 +13,7 @@ use std::sync::Arc;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use defra_core::RequestContext;
+use query::rest::RestOperations;
 
 use crate::router::{
     AcpOperations, BackupOperations, BlockOperations, CollectionManagementOperations,
@@ -71,6 +72,7 @@ for_request!(
     IndexOperations,
     LensOperations,
     P2POperations,
+    RestOperations,
     SchemaOperations,
     TransactionOperations,
     ViewOperations,
