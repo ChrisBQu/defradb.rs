@@ -90,7 +90,14 @@ async fn filtered_truncate_includes_soft_deleted_documents() {
         .create(&defra_core::RequestContext::default(), "Users", doc)
         .await
         .unwrap();
-    mutator.delete("Users", &created.doc_id).await.unwrap();
+    mutator
+        .delete(
+            &defra_core::RequestContext::default(),
+            "Users",
+            &created.doc_id,
+        )
+        .await
+        .unwrap();
 
     db.truncate_collection_with_filter("Users", age_filter(30), None)
         .await

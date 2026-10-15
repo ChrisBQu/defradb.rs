@@ -175,6 +175,7 @@ pub(crate) async fn prepare_keys_with_stores<S: Store + 'static>(
 /// node permissions.
 pub(crate) async fn resolve_input<S>(
     db: &DB<S>,
+    context: &defra_core::RequestContext,
     request: &query::prepared::PreparedInputRequest,
 ) -> query::error::Result<Arc<[u8]>>
 where
@@ -194,13 +195,13 @@ where
         query::prepared::PreparedInputKind::Signature => {
             let input = defra_core::signing::RemoteSignatureInput::decode(request.exact_request())
                 .map_err(query::error::QueryError::execution)?;
-            let signer = defra_core::signing::get_signing_config().ok_or_else(|| {
+            let signer = context.signing().ok_or_else(|| {
                 query::error::QueryError::execution(
                     "remote signature input has no configured signer",
                 )
             })?;
             let response = input
-                .resolve(&signer)
+                .resolve(signer)
                 .map_err(query::error::QueryError::execution)?;
             Ok(std::sync::Arc::from(response))
         }
@@ -368,7 +369,7 @@ impl<S: Store + 'static> crate::AutoCommitMutator<S> {
                 query::error::QueryError::execution(format!("embedding error: {error}"))
             })?
         };
-        let signing_config = defra_core::signing::get_signing_config();
+        let signing_config = context.signing();
         let prepare_create = modified_fields.is_none()
             && (!generated_embeddings.is_empty() || signing_config.is_some());
         if self.db.kms().is_none() && !prepare_create {
@@ -449,7 +450,7 @@ impl<S: Store + 'static> crate::AutoCommitMutator<S> {
             }
         };
         if modified_fields.is_none() {
-            if let Some(signing_config) = signing_config.as_ref() {
+            if let Some(signing_config) = signing_config {
                 let blocks = crate::block::builder::compute_document_blocks(
                     &doc,
                     collection.version_id(),

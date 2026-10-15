@@ -112,6 +112,31 @@ struct CountingRemoteSigner {
     calls: AtomicUsize,
 }
 
+/// A remote signer over a fresh Ed25519 key that counts its calls, and the
+/// signing configuration that delegates to it.
+fn remote_signer() -> (
+    Arc<CountingRemoteSigner>,
+    defra_core::signing::SigningConfig,
+) {
+    let key = crypto::generate_ed25519().unwrap();
+    let public = key.public_key();
+    let public_key_bytes = public.raw_owned();
+    let public_key_hex = hex::encode(public.raw());
+    let signer = Arc::new(CountingRemoteSigner {
+        key,
+        calls: AtomicUsize::new(0),
+    });
+    let signing = defra_core::signing::SigningConfig {
+        key_type: defra_core::signing::SigningKeyType::Ed25519,
+        private_key_bytes: Vec::new(),
+        public_key_bytes,
+        public_key_hex,
+        remote_signer: Some(signer.clone()),
+        signing_authorization: None,
+    };
+    (signer, signing)
+}
+
 impl defra_core::signing::RemoteSigner for CountingRemoteSigner {
     fn sign_sync(
         &self,
@@ -128,27 +153,15 @@ impl defra_core::signing::RemoteSigner for CountingRemoteSigner {
 #[tokio::test]
 async fn direct_create_resolves_kms_and_signature_inputs_once() {
     let fixture = fixture().await;
-    let key = crypto::generate_ed25519().unwrap();
-    let public = key.public_key();
-    let public_key_bytes = public.raw_owned();
-    let public_key_hex = hex::encode(public.raw());
-    let signer = Arc::new(CountingRemoteSigner {
-        key,
-        calls: AtomicUsize::new(0),
-    });
-    defra_core::signing::set_signing_config(Some(defra_core::signing::SigningConfig {
-        key_type: defra_core::signing::SigningKeyType::Ed25519,
-        private_key_bytes: Vec::new(),
-        public_key_bytes,
-        public_key_hex,
-        remote_signer: Some(signer.clone()),
-        signing_authorization: None,
-    }));
+    let (signer, signing) = remote_signer();
 
     let result = AutoCommitMutator::new(Arc::clone(&fixture.db))
-        .create(&encrypted(), "Secrets", document("direct"))
+        .create(
+            &encrypted().with_signing(Some(signing)),
+            "Secrets",
+            document("direct"),
+        )
         .await;
-    defra_core::signing::set_signing_config(None);
     result.unwrap();
 
     assert_eq!(fixture.kms.0.load(Ordering::SeqCst), 2);
@@ -175,27 +188,15 @@ async fn direct_delete_many_resolves_each_signature_once() {
         )
         .await
         .unwrap();
-    let key = crypto::generate_ed25519().unwrap();
-    let public = key.public_key();
-    let public_key_bytes = public.raw_owned();
-    let public_key_hex = hex::encode(public.raw());
-    let signer = Arc::new(CountingRemoteSigner {
-        key,
-        calls: AtomicUsize::new(0),
-    });
-    defra_core::signing::set_signing_config(Some(defra_core::signing::SigningConfig {
-        key_type: defra_core::signing::SigningKeyType::Ed25519,
-        private_key_bytes: Vec::new(),
-        public_key_bytes,
-        public_key_hex,
-        remote_signer: Some(signer.clone()),
-        signing_authorization: None,
-    }));
+    let (signer, signing) = remote_signer();
 
     let result = mutator
-        .delete_many_impl("Secrets", &[first.doc_id, second.doc_id])
+        .delete_many_impl(
+            &RequestContext::default().with_signing(Some(signing)),
+            "Secrets",
+            &[first.doc_id, second.doc_id],
+        )
         .await;
-    defra_core::signing::set_signing_config(None);
     let results = result.unwrap();
     assert!(results.iter().all(|result| result.existed));
     assert_eq!(signer.calls.load(Ordering::SeqCst), 2);
@@ -363,34 +364,18 @@ async fn signed_encrypted_counter_update_preserves_prepared_randomness() {
         encrypt_doc: false,
         encrypt_fields: vec!["count".into()],
     }));
-    let key = crypto::generate_ed25519().unwrap();
-    let public = key.public_key();
-    let public_key_bytes = public.raw_owned();
-    let public_key_hex = hex::encode(public.raw());
-    let signer = Arc::new(CountingRemoteSigner {
-        key,
-        calls: AtomicUsize::new(0),
-    });
-    defra_core::signing::set_signing_config(Some(defra_core::signing::SigningConfig {
-        key_type: defra_core::signing::SigningKeyType::Ed25519,
-        private_key_bytes: Vec::new(),
-        public_key_bytes,
-        public_key_hex,
-        remote_signer: Some(signer.clone()),
-        signing_authorization: None,
-    }));
+    let (signer, signing) = remote_signer();
     let mut update = Document::new();
     update.set_id(created.doc_id);
     update.set_counter_delta("count".into(), document::NormalValue::Int(3));
     let result = mutator
         .update(
-            &encrypted_count,
+            &encrypted_count.with_signing(Some(signing)),
             "Counters",
             update,
             ["count".to_owned()].into_iter().collect(),
         )
         .await;
-    defra_core::signing::set_signing_config(None);
     let updated = result.unwrap();
     assert_eq!(
         updated.document.get("count"),
@@ -418,28 +403,12 @@ async fn signed_document_encryption_without_kms_reuses_local_keys() {
         encrypt_doc: true,
         encrypt_fields: vec![],
     }));
-    let key = crypto::generate_ed25519().unwrap();
-    let public = key.public_key();
-    let public_key_bytes = public.raw_owned();
-    let public_key_hex = hex::encode(public.raw());
-    let signer = Arc::new(CountingRemoteSigner {
-        key,
-        calls: AtomicUsize::new(0),
-    });
-    defra_core::signing::set_signing_config(Some(defra_core::signing::SigningConfig {
-        key_type: defra_core::signing::SigningKeyType::Ed25519,
-        private_key_bytes: Vec::new(),
-        public_key_bytes,
-        public_key_hex,
-        remote_signer: Some(signer.clone()),
-        signing_authorization: None,
-    }));
+    let (signer, signing) = remote_signer();
     let mut doc = Document::new();
     doc.set("value", "encrypted");
     let result = AutoCommitMutator::new(db)
-        .create(&whole_document, "Local", doc)
+        .create(&whole_document.with_signing(Some(signing)), "Local", doc)
         .await;
-    defra_core::signing::set_signing_config(None);
     result.unwrap();
     assert_eq!(signer.calls.load(Ordering::SeqCst), 2);
 }
@@ -456,6 +425,7 @@ async fn explicit_txn_create_generates_its_kms_keys_outside_the_transaction() {
         fixture.db.new_txn(false).await.unwrap(),
     );
     let inputs = query::prepared::PreparedInputMemo::default();
+    let context = encrypted();
     let mut misses = 0;
     let mut created = None;
     for _ in 0..8 {
@@ -463,7 +433,7 @@ async fn explicit_txn_create_generates_its_kms_keys_outside_the_transaction() {
         match mutator
             .with_prepared_inputs(inputs.clone())
             .unwrap()
-            .create(&encrypted(), "Secrets", document("txn"))
+            .create(&context, "Secrets", document("txn"))
             .await
         {
             Err(query::error::QueryError::NeedsInput(request)) => {
@@ -474,7 +444,9 @@ async fn explicit_txn_create_generates_its_kms_keys_outside_the_transaction() {
                 );
                 misses += 1;
                 inputs
-                    .answer_miss(&request, || mutator.resolve_prepared_input(&request))
+                    .answer_miss(&request, || {
+                        mutator.resolve_prepared_input(&context, &request)
+                    })
                     .await
                     .unwrap();
             }

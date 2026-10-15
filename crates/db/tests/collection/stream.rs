@@ -46,7 +46,14 @@ async fn delete_nth_document(db: &Arc<DB<RegolithStore>>, collection_name: &str,
 
     let txn = db.new_txn(false).await.unwrap();
     let mutator = DbDocMutator::new(db.clone(), txn);
-    mutator.delete(collection_name, &doc_id).await.unwrap();
+    mutator
+        .delete(
+            &defra_core::RequestContext::default(),
+            collection_name,
+            &doc_id,
+        )
+        .await
+        .unwrap();
     let txn = mutator.take_txn().await.unwrap();
     txn.commit().await.unwrap();
 }

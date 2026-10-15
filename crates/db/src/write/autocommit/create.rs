@@ -127,7 +127,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             {
                 Err(query::error::QueryError::NeedsInput(request)) => {
                     inputs
-                        .answer_miss(&request, || self.resolve_prepared_input(&request))
+                        .answer_miss(&request, || self.resolve_prepared_input(context, &request))
                         .await?;
                 }
                 result => return result,
@@ -160,7 +160,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             {
                 Err(query::error::QueryError::NeedsInput(request)) => {
                     inputs
-                        .answer_miss(&request, || self.resolve_prepared_input(&request))
+                        .answer_miss(&request, || self.resolve_prepared_input(context, &request))
                         .await?;
                 }
                 result => return result,
@@ -254,7 +254,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
         let schema_version_id = collection.version_id().to_string();
         let enc_config = context.encryption();
-        let sign_config = get_signing_config();
+        let sign_config = context.signing().cloned();
         let acp_registration = match (
             collection.schema().policy.as_ref(),
             defra_core::signing::get_broadcast_creator_did(),
@@ -540,7 +540,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
         let short_id = collection.resolved_root_id();
         let schema_version_id = collection.version_id().to_string();
-        let sign_config = get_signing_config();
+        let sign_config = context.signing().cloned();
         let enc_config = context.encryption().cloned();
 
         // === Phase 1: Prepare documents (sequential — embeddings are async/external) ===

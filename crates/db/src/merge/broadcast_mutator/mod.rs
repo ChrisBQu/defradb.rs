@@ -464,9 +464,10 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
 
     async fn resolve_prepared_input(
         &self,
+        context: &RequestContext,
         request: &query::prepared::PreparedInputRequest,
     ) -> query::error::Result<Arc<[u8]>> {
-        self.inner.resolve_prepared_input(request).await
+        self.inner.resolve_prepared_input(context, request).await
     }
 
     async fn prepared_embedding_request(
@@ -484,8 +485,8 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         true
     }
 
-    fn requires_write_preparation(&self) -> bool {
-        self.inner.requires_write_preparation()
+    fn requires_write_preparation(&self, context: &RequestContext) -> bool {
+        self.inner.requires_write_preparation(context)
     }
 
     async fn prepare_write(
@@ -933,6 +934,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
 
     async fn delete(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         doc_id: &DocID,
     ) -> query::error::Result<DeleteResult> {
@@ -957,7 +959,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         };
 
         // Execute the delete mutation
-        let result = self.inner.delete(collection_name, doc_id).await?;
+        let result = self.inner.delete(context, collection_name, doc_id).await?;
 
         // No-op delete (missing doc): the inner mutator wrote nothing, so
         // there's no tombstone block to read or broadcast. Returning here

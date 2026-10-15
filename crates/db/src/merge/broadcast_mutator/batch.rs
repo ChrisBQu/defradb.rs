@@ -292,8 +292,8 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         self.inner.acp_registration_projection()
     }
 
-    fn requires_write_preparation(&self) -> bool {
-        self.inner.requires_write_preparation()
+    fn requires_write_preparation(&self, context: &RequestContext) -> bool {
+        self.inner.requires_write_preparation(context)
     }
 
     fn supports_projected_updates(&self) -> bool {
@@ -314,9 +314,10 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
 
     async fn resolve_prepared_input(
         &self,
+        context: &RequestContext,
         request: &query::prepared::PreparedInputRequest,
     ) -> query::error::Result<Arc<[u8]>> {
-        self.inner.resolve_prepared_input(request).await
+        self.inner.resolve_prepared_input(context, request).await
     }
 
     async fn prepared_embedding_request(
@@ -425,6 +426,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
 
     async fn delete(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         doc_id: &DocID,
     ) -> query::error::Result<DeleteResult> {
@@ -433,7 +435,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             .get_for_update(collection_name, doc_id)
             .await?
             .and_then(|doc| document_json_value(&doc));
-        let result = self.inner.delete(collection_name, doc_id).await?;
+        let result = self.inner.delete(context, collection_name, doc_id).await?;
         let doc_id = result.doc_id.to_string();
         // Pass through the branchable collection block so it gets broadcast
         // alongside the composite delete (matches the non-batch BroadcastMutator

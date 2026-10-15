@@ -18,7 +18,6 @@ use crate::database::DB;
 use crate::event::emission::register_update_event_callback;
 use crate::txn::DbTxn;
 use crate::write::autocommit::helpers::write_branchable_collection_block;
-use defra_core::signing::get_signing_config;
 use defra_core::RequestContext;
 
 fn document_json_value(doc: &Document) -> Option<serde_json::Value> {
@@ -257,9 +256,10 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
 
     async fn resolve_prepared_input(
         &self,
+        context: &RequestContext,
         request: &query::prepared::PreparedInputRequest,
     ) -> query::error::Result<Arc<[u8]>> {
-        crate::write::prepare::resolve_input(&self.db, request).await
+        crate::write::prepare::resolve_input(&self.db, context, request).await
     }
 
     fn set_document_acp(&self, provider: Arc<dyn acp::DocumentACP>) {
@@ -335,7 +335,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
 
             let schema_version_id = collection.version_id();
             let enc_config = context.encryption();
-            let sign_config = get_signing_config();
+            let sign_config = context.signing();
             let kms = self.db.kms();
 
             let block_result = write_document_blocks_with_inputs(
@@ -346,7 +346,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 identity,
                 None,
                 enc_config,
-                sign_config.as_ref(),
+                sign_config,
                 kms.as_ref(),
                 Some(&self.prepared_inputs),
                 None,
@@ -377,7 +377,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 &headstore,
                 block_result.cid,
                 doc_short_id,
-                sign_config.as_ref(),
+                sign_config,
                 Some(&self.prepared_inputs),
             )
             .await?;
@@ -488,7 +488,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
 
             let schema_version_id = collection.version_id();
             let enc_config = context.encryption();
-            let sign_config = get_signing_config();
+            let sign_config = context.signing();
             let kms = self.db.kms();
 
             let block_result = write_document_blocks_with_inputs(
@@ -499,7 +499,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 DocStorageIdentity::new(collection.resolved_root_id(), doc_short_id),
                 Some(&modified_fields),
                 enc_config,
-                sign_config.as_ref(),
+                sign_config,
                 kms.as_ref(),
                 Some(&self.prepared_inputs),
                 Some(&heads),
@@ -526,7 +526,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 &headstore,
                 block_result.cid,
                 doc_short_id,
-                sign_config.as_ref(),
+                sign_config,
                 Some(&self.prepared_inputs),
             )
             .await?;
@@ -553,6 +553,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
 
     async fn delete(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         doc_id: &DocID,
     ) -> query::error::Result<DeleteResult> {
@@ -619,7 +620,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             })?;
 
             let schema_version_id = collection.version_id();
-            let sign_config = get_signing_config();
+            let sign_config = context.signing();
 
             let block_result = write_delete_block_with_inputs(
                 &blockstore,
@@ -627,7 +628,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 &canonical_doc_id.to_string(),
                 doc_short_id,
                 schema_version_id,
-                sign_config.as_ref(),
+                sign_config,
                 Some(&self.prepared_inputs),
             )
             .await
@@ -653,7 +654,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 &headstore,
                 block_result.cid,
                 doc_short_id,
-                sign_config.as_ref(),
+                sign_config,
                 Some(&self.prepared_inputs),
             )
             .await?;

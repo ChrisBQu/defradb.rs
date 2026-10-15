@@ -136,7 +136,10 @@ async fn explicit_txn_create_generates_embedding() {
     let inputs = query::prepared::PreparedInputMemo::default();
     inputs.insert(
         request.clone(),
-        mutator.resolve_prepared_input(&request).await.unwrap(),
+        mutator
+            .resolve_prepared_input(&defra_core::RequestContext::default(), &request)
+            .await
+            .unwrap(),
     );
     let created = mutator
         .with_prepared_inputs(inputs)
@@ -205,7 +208,10 @@ async fn explicit_txn_update_regenerates_embedding() {
     let inputs = query::prepared::PreparedInputMemo::default();
     inputs.insert(
         request.clone(),
-        mutator.resolve_prepared_input(&request).await.unwrap(),
+        mutator
+            .resolve_prepared_input(&defra_core::RequestContext::default(), &request)
+            .await
+            .unwrap(),
     );
     assert_eq!(fixture.calls(), calls_before + 1);
     let updated = mutator

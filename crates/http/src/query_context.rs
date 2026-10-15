@@ -1,10 +1,10 @@
-//! Query execution with thread-local signing and DAC bypass context.
+//! Query execution with the request's context.
 //!
-//! HTTP handlers must set `signing_config` and `dac_bypass` thread-locals
-//! before executing queries to match FFI behavior. Because tokio's
-//! work-stealing scheduler can move tasks between OS threads at `.await`
-//! points, we pin execution to a single thread using `spawn_blocking` +
-//! `Handle::block_on` — the same pattern the FFI uses with `rt.block_on()`.
+//! The signing config and the DAC bypass travel in the request's
+//! `RequestContext`. The acting identity and the batch signing session are
+//! still thread-locals, and because tokio's work-stealing scheduler can move
+//! tasks between OS threads at `.await` points, execution that needs them is
+//! pinned to a single thread using `spawn_blocking` + `Handle::block_on`.
 
 use std::sync::Arc;
 
@@ -21,20 +21,21 @@ pub async fn execute_with_context(
     mut request: QueryRequest,
 ) -> QueryResponse {
     let signing_config = resolve_signing_config(state, identity);
+    let batch_session_key = signing_config.as_ref().map(|s| s.public_key_hex.clone());
 
     request.context = request
         .context
-        .with_dac_bypass(resolve_dac_bypass(state, identity).await);
+        .with_dac_bypass(resolve_dac_bypass(state, identity).await)
+        .with_signing(signing_config);
 
     // Fast path: when there is nothing to put on the thread-locals, skip
     // spawn_blocking entirely.
-    if signing_config.is_none() && state.nac.is_none() {
+    if batch_session_key.is_none() && state.nac.is_none() {
         return execute_prepared_request(state, request).await;
     }
     let executor = state.executor.clone();
     let handle = tokio::runtime::Handle::current();
 
-    let batch_session_key = signing_config.as_ref().map(|s| s.public_key_hex.clone());
     let acting_did = identity.did().map(|d| d.as_str().to_string());
 
     let bearer = acting_did
@@ -43,7 +44,6 @@ pub async fn execute_with_context(
     match tokio::task::spawn_blocking(move || {
         let _identity_guard =
             defra_core::current_identity::scoped_current_identity(acting_did.clone());
-        defra_core::signing::set_signing_config(signing_config);
         defra_core::batch_signing::set_batch_session_key(batch_session_key);
         handle.block_on(defra_core::signing::scope_request_bearer_token(
             acting_did,
@@ -119,20 +119,21 @@ pub async fn execute_in_txn_with_context(
     txn_handle: TransactionHandle,
 ) -> QueryResponse {
     let signing_config = resolve_signing_config(state, identity);
+    let batch_session_key = signing_config.as_ref().map(|s| s.public_key_hex.clone());
 
     request.context = request
         .context
-        .with_dac_bypass(resolve_dac_bypass(state, identity).await);
+        .with_dac_bypass(resolve_dac_bypass(state, identity).await)
+        .with_signing(signing_config);
 
     // Fast path: see the note in `execute_with_context`.
-    if signing_config.is_none() && state.nac.is_none() {
+    if batch_session_key.is_none() && state.nac.is_none() {
         return state.executor.execute_in_txn(request, &txn_handle).await;
     }
 
     let executor = state.executor.clone();
     let handle = tokio::runtime::Handle::current();
 
-    let batch_session_key = signing_config.as_ref().map(|s| s.public_key_hex.clone());
     let acting_did = identity.did().map(|d| d.as_str().to_string());
 
     let bearer = acting_did
@@ -141,7 +142,6 @@ pub async fn execute_in_txn_with_context(
     match tokio::task::spawn_blocking(move || {
         let _identity_guard =
             defra_core::current_identity::scoped_current_identity(acting_did.clone());
-        defra_core::signing::set_signing_config(signing_config);
         defra_core::batch_signing::set_batch_session_key(batch_session_key);
         handle.block_on(defra_core::signing::scope_request_bearer_token(
             acting_did,
@@ -168,9 +168,11 @@ pub async fn execute_with_resolved_context(
     acting_did: Option<String>,
 ) -> QueryResponse {
     let handle = tokio::runtime::Handle::current();
-    request.context = request.context.with_dac_bypass(dac_bypass);
-
     let batch_session_key = signing_config.as_ref().map(|s| s.public_key_hex.clone());
+    request.context = request
+        .context
+        .with_dac_bypass(dac_bypass)
+        .with_signing(signing_config);
 
     let bearer = acting_did
         .as_deref()
@@ -178,7 +180,6 @@ pub async fn execute_with_resolved_context(
     match tokio::task::spawn_blocking(move || {
         let _identity_guard =
             defra_core::current_identity::scoped_current_identity(acting_did.clone());
-        defra_core::signing::set_signing_config(signing_config);
         defra_core::batch_signing::set_batch_session_key(batch_session_key);
         handle.block_on(defra_core::signing::scope_request_bearer_token(
             acting_did,

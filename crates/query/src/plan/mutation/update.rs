@@ -726,7 +726,12 @@ mod prepared_target_tests {
             Ok(UpdateResult::new(doc, fields.len()))
         }
 
-        async fn delete(&self, _collection: &str, id: &DocID) -> Result<DeleteResult> {
+        async fn delete(
+            &self,
+            _context: &RequestContext,
+            _collection: &str,
+            id: &DocID,
+        ) -> Result<DeleteResult> {
             Ok(DeleteResult::new(id.clone(), false))
         }
 

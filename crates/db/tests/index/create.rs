@@ -283,7 +283,14 @@ async fn autocommit_writes_refresh_index_state_from_the_attempt_snapshot() {
         )
         .await
         .unwrap();
-    mutator.delete("Racing", &deleted_id).await.unwrap();
+    mutator
+        .delete(
+            &defra_core::RequestContext::default(),
+            "Racing",
+            &deleted_id,
+        )
+        .await
+        .unwrap();
 
     assert_eq!(index_entries(&index_db, "Racing", index.id).await, 2);
     assert_eq!(
@@ -345,8 +352,9 @@ async fn create_index_keeps_pace_with_concurrent_writers() {
         let ids = ids.clone();
         let deleted = deleted.clone();
         tokio::spawn(async move {
+            let context = defra_core::RequestContext::default();
             for i in deleted {
-                retrying(|| mutator.delete("Racing", &ids[i])).await;
+                retrying(|| mutator.delete(&context, "Racing", &ids[i])).await;
             }
         })
     };

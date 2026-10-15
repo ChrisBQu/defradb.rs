@@ -21,7 +21,6 @@ use crate::database::DB;
 use crate::event::emission::register_update_event_callback;
 use crate::txn::DbTxn;
 use datastore::BasicTxn;
-use defra_core::signing::get_signing_config;
 use defra_core::RequestContext;
 
 pub struct BatchMutator<S: Store> {
@@ -374,7 +373,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         let short_id = collection.resolved_root_id();
         let schema_version_id = collection.version_id();
         let enc_config = context.encryption();
-        let sign_config = get_signing_config();
+        let sign_config = context.signing();
 
         let identity = match crate::write::prepare::prepared_identity(&doc) {
             Some(identity) => identity,
@@ -412,7 +411,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 identity,
                 None,
                 enc_config,
-                sign_config.as_ref(),
+                sign_config,
                 self.db.kms().as_ref(),
                 self.prepared_inputs.as_ref(),
                 None,
@@ -447,7 +446,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 &headstore,
                 block_result.cid,
                 doc_short_id,
-                sign_config.as_ref(),
+                sign_config,
                 self.prepared_inputs.as_ref(),
             )
             .await?;
@@ -541,7 +540,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         let short_id = collection.resolved_root_id();
         let schema_version_id = collection.version_id();
         let enc_config = context.encryption();
-        let sign_config = get_signing_config();
+        let sign_config = context.signing();
 
         {
             let (blockstore, headstore) = self.block_and_head_stores().await?;
@@ -568,7 +567,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 DocStorageIdentity::new(short_id, doc_short_id),
                 Some(&modified_fields),
                 enc_config,
-                sign_config.as_ref(),
+                sign_config,
                 self.db.kms().as_ref(),
                 self.prepared_inputs.as_ref(),
                 Some(&heads),
@@ -595,7 +594,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 &headstore,
                 block_result.cid,
                 doc_short_id,
-                sign_config.as_ref(),
+                sign_config,
                 self.prepared_inputs.as_ref(),
             )
             .await?;
@@ -627,6 +626,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
 
     async fn delete(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         doc_id: &DocID,
     ) -> query::error::Result<DeleteResult> {
@@ -670,7 +670,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         .await?;
 
         let schema_version_id = collection.version_id();
-        let sign_config = get_signing_config();
+        let sign_config = context.signing();
 
         let (doc_cid, doc_block, col_block_data) = {
             let (blockstore, headstore) = self.block_and_head_stores().await?;
@@ -681,7 +681,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 &canonical_doc_id.to_string(),
                 doc_short_id,
                 schema_version_id,
-                sign_config.as_ref(),
+                sign_config,
                 self.prepared_inputs.as_ref(),
             )
             .await
@@ -709,7 +709,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 &headstore,
                 composite_cid,
                 doc_short_id,
-                sign_config.as_ref(),
+                sign_config,
                 self.prepared_inputs.as_ref(),
             )
             .await?;

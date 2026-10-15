@@ -66,7 +66,7 @@ async fn live_scan_accounts_for_every_byte_without_exposing_values() {
 #[tokio::test]
 async fn signed_branchable_documents_classify_collection_and_signature_blocks() {
     use crypto::{Key, PrivateKey};
-    use defra_core::signing::{set_signing_config, SigningConfig, SigningKeyType};
+    use defra_core::signing::{SigningConfig, SigningKeyType};
 
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     db.create_collection(crate::common::schema::test_schema().as_branchable())
@@ -74,7 +74,7 @@ async fn signed_branchable_documents_classify_collection_and_signature_blocks() 
         .unwrap();
     let key = crypto::generate_ed25519().unwrap();
     let public_key = key.public_key();
-    set_signing_config(Some(SigningConfig {
+    let signed = defra_core::RequestContext::default().with_signing(Some(SigningConfig {
         key_type: SigningKeyType::Ed25519,
         private_key_bytes: key.raw_owned(),
         public_key_bytes: public_key.raw_owned(),
@@ -82,15 +82,14 @@ async fn signed_branchable_documents_classify_collection_and_signature_blocks() 
         remote_signer: None,
         signing_authorization: None,
     }));
-    let created = db::AutoCommitMutator::new(db.clone())
+    db::AutoCommitMutator::new(db.clone())
         .create(
-            &defra_core::RequestContext::default(),
+            &signed,
             "Users",
             Document::from_json_str(r#"{"name":"private name"}"#).unwrap(),
         )
-        .await;
-    set_signing_config(None);
-    created.unwrap();
+        .await
+        .unwrap();
 
     let stats = db.storage_stats(false).await.unwrap();
     assert_eq!(stats.block_kinds["collection"].keys, 1);

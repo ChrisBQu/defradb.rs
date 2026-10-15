@@ -188,6 +188,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     let mut node = crate::plan::DeleteNode::new(
                         &mutation.collection_name,
                         mutator.clone(),
+                        self.context.clone(),
                         fetcher,
                         mapping.clone(),
                     );

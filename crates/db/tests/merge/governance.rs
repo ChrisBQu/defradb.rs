@@ -259,7 +259,11 @@ impl Node {
     /// Delete a document the way a client mutation does, index cleanup included.
     async fn delete_locally(&self, collection: &str, doc_id: &str) {
         AutoCommitMutator::new(self.db.clone())
-            .delete(collection, &doc_id.parse().unwrap())
+            .delete(
+                &defra_core::RequestContext::default(),
+                collection,
+                &doc_id.parse().unwrap(),
+            )
             .await
             .unwrap();
     }

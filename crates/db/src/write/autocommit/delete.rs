@@ -62,11 +62,12 @@ impl<S: Store + 'static> storage::corekv::RetryAttemptFn for DeleteRetryAttempt<
 impl<S: Store + 'static> AutoCommitMutator<S> {
     pub(super) async fn delete_with_resolved_inputs(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         doc_id: &DocID,
     ) -> query::error::Result<DeleteResult> {
         if self.prepared_inputs.is_some() {
-            return self.delete_impl(collection_name, doc_id).await;
+            return self.delete_impl(context, collection_name, doc_id).await;
         }
         let inputs = query::prepared::PreparedInputMemo::default();
         let mutator = Self {
@@ -74,10 +75,10 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             prepared_inputs: Some(inputs.clone()),
         };
         loop {
-            match mutator.delete_impl(collection_name, doc_id).await {
+            match mutator.delete_impl(context, collection_name, doc_id).await {
                 Err(query::error::QueryError::NeedsInput(request)) => {
                     inputs
-                        .answer_miss(&request, || self.resolve_prepared_input(&request))
+                        .answer_miss(&request, || self.resolve_prepared_input(context, &request))
                         .await?;
                 }
                 result => return result,
@@ -87,11 +88,14 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
     pub async fn delete_many_impl(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         doc_ids: &[DocID],
     ) -> query::error::Result<Vec<DeleteResult>> {
         if self.prepared_inputs.is_some() {
-            return self.delete_many_once_impl(collection_name, doc_ids).await;
+            return self
+                .delete_many_once_impl(context, collection_name, doc_ids)
+                .await;
         }
         let inputs = query::prepared::PreparedInputMemo::default();
         let mutator = Self {
@@ -100,12 +104,12 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         };
         loop {
             match mutator
-                .delete_many_once_impl(collection_name, doc_ids)
+                .delete_many_once_impl(context, collection_name, doc_ids)
                 .await
             {
                 Err(query::error::QueryError::NeedsInput(request)) => {
                     inputs
-                        .answer_miss(&request, || self.resolve_prepared_input(&request))
+                        .answer_miss(&request, || self.resolve_prepared_input(context, &request))
                         .await?;
                 }
                 result => return result,
@@ -115,6 +119,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
     pub(super) async fn delete_impl(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         doc_id: &DocID,
     ) -> query::error::Result<DeleteResult> {
@@ -130,7 +135,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             collection_name: collection_name.to_string(),
             collection: collection.clone(),
             doc_id: doc_id.clone(),
-            signing_config: get_signing_config(),
+            signing_config: context.signing().cloned(),
             prepared_inputs: Some(self.prepared_inputs.clone().unwrap_or_default()),
         };
         let result = self
@@ -333,6 +338,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
     /// with per-document transactions).
     async fn delete_many_once_impl(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         doc_ids: &[DocID],
     ) -> query::error::Result<Vec<DeleteResult>> {
@@ -342,7 +348,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
         if doc_ids.len() == 1 {
             return self
-                .delete_impl(collection_name, &doc_ids[0])
+                .delete_impl(context, collection_name, &doc_ids[0])
                 .await
                 .map(|r| vec![r]);
         }
@@ -353,7 +359,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             collection_name: collection_name.to_string(),
             collection: collection.clone(),
             doc_ids: doc_ids.to_vec(),
-            signing_config: get_signing_config(),
+            signing_config: context.signing().cloned(),
             prepared_inputs: Some(self.prepared_inputs.clone().unwrap_or_default()),
         };
         let result = self

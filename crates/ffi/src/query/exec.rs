@@ -96,9 +96,9 @@ pub unsafe extern "C" fn exec_request_with_signing(
             _ => None,
         };
 
-        // Set up thread-local signer for block signing during mutations.
-        // Matches Go's behavior: if signing is enabled and no explicit identity,
-        // fall back to node identity for block signing.
+        // The signer for block signing during mutations. Matches Go's
+        // behavior: if signing is enabled and no explicit identity, fall back
+        // to node identity for block signing.
         let (node_did, node_signing_enabled) = NODES
             .get(node_ptr, |state| (state.identity_did(), state.signing_enabled))
             .unwrap_or((None, false));
@@ -116,7 +116,6 @@ pub unsafe extern "C" fn exec_request_with_signing(
         // Use caller-provided session ID if available; otherwise fall back to public key.
         let session_key = batch_session.or_else(|| signing.as_ref().map(|s| s.public_key_hex.clone()));
         defra_core::batch_signing::set_batch_session_key(session_key);
-        defra_core::signing::set_signing_config(signing);
 
         // Set the ambient acting identity so DB-layer NAC checks can resolve
         // the caller. The guard clears it on scope exit so it never leaks into
@@ -127,7 +126,8 @@ pub unsafe extern "C" fn exec_request_with_signing(
 
         // NAC admin/owner can read all documents.
         let context = defra_core::RequestContext::default()
-            .with_dac_bypass(resolve_dac_bypass(rt, node_ptr, identity_did));
+            .with_dac_bypass(resolve_dac_bypass(rt, node_ptr, identity_did))
+            .with_signing(signing);
 
         // Check if this is a subscription query - handle it separately from regular queries/mutations.
         // Subscriptions return status=2 with a handle that the Go side polls via poll_graphql_subscription.
@@ -176,10 +176,9 @@ pub unsafe extern "C" fn exec_request_with_signing(
             // Create result channel for buffering processed subscription results
             let (result_tx, result_rx) = kovan_channel::bounded::<String>(256);
 
-            // Capture signing config and DAC bypass before spawning.
-            // The thread-locals were set on this thread (lines 63-116) but the
-            // spawned task runs on a different tokio thread.
-            let sub_signing_config = defra_core::signing::get_signing_config();
+            // Capture the acting identity before spawning: it is a thread-local
+            // set on this thread, but the spawned task runs on a different
+            // tokio thread.
             let sub_acting_did = defra_core::current_identity::get_current_identity();
 
             // Spawn background task that processes events and executes queries at event time.
@@ -225,13 +224,11 @@ pub unsafe extern "C" fn exec_request_with_signing(
                         // Execute inside spawn_blocking to pin thread-locals, matching
                         // HTTP's execute_with_resolved_context pattern.
                         let runner = query_runner.clone();
-                        let config = sub_signing_config.clone();
                         let acting_did = sub_acting_did.clone();
                         let handle = tokio::runtime::Handle::current();
                         let response = match tokio::task::spawn_blocking(move || {
                             let _identity_guard =
                                 defra_core::current_identity::scoped_current_identity(acting_did);
-                            defra_core::signing::set_signing_config(config);
                             handle.block_on(async { runner.execute(request).await })
                         })
                         .await

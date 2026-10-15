@@ -606,14 +606,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
         created_ids: &mut RapidHashMap<String, String>,
         strict_attempt: bool,
     ) -> Result<JsonValue> {
-        struct SigningConfigReset(Option<defra_core::signing::SigningConfig>);
-
-        impl Drop for SigningConfigReset {
-            fn drop(&mut self) {
-                defra_core::signing::set_signing_config(self.0.clone());
-            }
-        }
-
         let fetcher: Arc<dyn crate::fetcher::DocFetcher> =
             fetcher_override.unwrap_or_else(|| self.fetcher.clone());
         let mut selected_mutation = mutation.clone();
@@ -683,12 +675,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
             }
         };
 
-        // This mutation's own encryption, so it never reaches another one.
-        let context = self.context.clone().with_encryption(mutation.encryption());
+        // This mutation's own encryption and, for a remote signer, the access
+        // decision its creates are signed under, so neither reaches another one.
+        let mut context = self.context.clone().with_encryption(mutation.encryption());
 
-        let _signing_config_reset = if matches!(mutation.mutation_type, MutationType::Create) {
-            let current_signing_config = defra_core::signing::get_signing_config();
-            match current_signing_config.clone() {
+        if matches!(mutation.mutation_type, MutationType::Create) {
+            match context.signing().cloned() {
                 Some(mut config) if config.remote_signer.is_some() => {
                     tracing::info!(
                         collection = %mutation.collection_name,
@@ -781,14 +773,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                                 Some(defra_core::signing::SigningAuthorization::Decision {
                                     decision_id,
                                 });
-                            defra_core::signing::set_signing_config(Some(config));
-                            Some(SigningConfigReset(current_signing_config))
+                            context = context.with_signing(Some(config));
                         } else {
                             tracing::warn!(
                                 collection = %mutation.collection_name,
                                 "create mutation received no access decision for remote signer"
                             );
-                            None
                         }
                     } else {
                         tracing::warn!(
@@ -798,7 +788,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                             has_policy = collection.policy.is_some(),
                             "create mutation skipped remote signer authorization due to missing prerequisites"
                         );
-                        None
                     }
                 }
                 Some(_) => {
@@ -806,7 +795,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                         collection = %mutation.collection_name,
                         "create mutation using local signer; remote signer authorization skipped"
                     );
-                    None
                 }
                 None => {
                     // No signing config is the normal case for nodes that don't
@@ -818,12 +806,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                         collection = %mutation.collection_name,
                         "create mutation has no signing config; remote signer authorization skipped"
                     );
-                    None
                 }
             }
-        } else {
-            None
-        };
+        }
 
         let bound_prepared = prepared.map(|prepared| {
             let mut prepared = prepared.clone();
@@ -891,6 +876,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                 let mut node = DeleteNode::new(
                     &mutation.collection_name,
                     mutator.clone(),
+                    context.clone(),
                     fetcher.clone(),
                     mapping.clone(),
                 );
@@ -1332,6 +1318,7 @@ mod tests {
         created_docs: SegQueue<Document>,
         broadcast_creators: SegQueue<Option<String>>,
         encryptions: SegQueue<Option<defra_core::encryption::EncryptionConfig>>,
+        authorizations: SegQueue<Option<defra_core::signing::SigningAuthorization>>,
         prepared_writes: AtomicUsize,
     }
 
@@ -1365,6 +1352,7 @@ mod tests {
                 created_docs: SegQueue::new(),
                 broadcast_creators: SegQueue::new(),
                 encryptions: SegQueue::new(),
+                authorizations: SegQueue::new(),
                 prepared_writes: AtomicUsize::new(0),
             }
         }
@@ -1466,6 +1454,11 @@ mod tests {
             self.broadcast_creators
                 .push(defra_core::signing::get_broadcast_creator_did());
             self.encryptions.push(context.encryption().cloned());
+            self.authorizations.push(
+                context
+                    .signing()
+                    .and_then(|signing| signing.signing_authorization.clone()),
+            );
             if doc.id().is_none() {
                 // Stand in for the genesis-CID identity a real create would
                 // derive: seed a valid DocID from the capture order.
@@ -1488,7 +1481,12 @@ mod tests {
             Ok(UpdateResult::new(doc, modified_fields.len()))
         }
 
-        async fn delete(&self, _collection_name: &str, doc_id: &DocID) -> Result<DeleteResult> {
+        async fn delete(
+            &self,
+            _context: &defra_core::RequestContext,
+            _collection_name: &str,
+            doc_id: &DocID,
+        ) -> Result<DeleteResult> {
             Ok(DeleteResult::new(doc_id.clone(), true))
         }
 
@@ -1525,7 +1523,7 @@ mod tests {
         let mutator = Arc::new(CapturingMutator::new());
         // This custom mutator has the trait defaults: it does not require
         // external write preparation and does not opt in to projected reads.
-        assert!(!mutator.requires_write_preparation());
+        assert!(!mutator.requires_write_preparation(&defra_core::RequestContext::default()));
         assert!(!mutator.supports_projected_updates());
         let runner = QueryRunner::new(fetcher, vec![collection]).with_mutator(mutator.clone());
         let request = QueryRequest::new(format!(
@@ -1573,6 +1571,146 @@ mod tests {
         );
         assert_eq!(mutator.broadcast_creators(), vec![Some(did.to_string())]);
         assert_eq!(defra_core::signing::get_broadcast_creator_did(), None);
+    }
+
+    /// Grants every create an access decision a remote signer signs under.
+    struct DecidingAcp;
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    impl acp::DocumentACP for DecidingAcp {
+        async fn register_doc_object(
+            &self,
+            _identity: &Did,
+            _policy_id: &str,
+            _resource_name: &str,
+            _doc_id: &str,
+        ) -> acp::Result<()> {
+            Ok(())
+        }
+
+        async fn is_doc_registered(
+            &self,
+            _policy_id: &str,
+            _resource_name: &str,
+            _doc_id: &str,
+        ) -> acp::Result<bool> {
+            Ok(false)
+        }
+
+        async fn check_doc_access(
+            &self,
+            _identity: &Identity,
+            _permission: DocumentPermission,
+            _policy_id: &str,
+            _resource_name: &str,
+            _doc_id: &str,
+        ) -> acp::Result<bool> {
+            Ok(true)
+        }
+
+        async fn create_access_decision(
+            &self,
+            _identity: &Identity,
+            _policy_id: &str,
+            _resource_name: &str,
+            _object_id: &str,
+            _permission: &str,
+        ) -> acp::Result<Option<String>> {
+            Ok(Some("decision-1".to_string()))
+        }
+
+        async fn add_actor_relationship(
+            &self,
+            _requestor: &Did,
+            _target: &Did,
+            _policy_id: &str,
+            _collection_id: &str,
+            _doc_id: &str,
+            _relation: &str,
+            _managing_relations: &[String],
+        ) -> acp::Result<bool> {
+            Ok(false)
+        }
+
+        async fn delete_actor_relationship(
+            &self,
+            _requestor: &Did,
+            _target: &Did,
+            _policy_id: &str,
+            _collection_id: &str,
+            _doc_id: &str,
+            _relation: &str,
+            _managing_relations: &[String],
+        ) -> acp::Result<bool> {
+            Ok(false)
+        }
+
+        async fn unregister_doc_object(
+            &self,
+            _policy_id: &str,
+            _resource_name: &str,
+            _doc_id: &str,
+        ) -> acp::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct UnusedSigner;
+
+    impl defra_core::signing::RemoteSigner for UnusedSigner {
+        fn sign_sync(
+            &self,
+            _data: &[u8],
+            _authorization: Option<&defra_core::signing::SigningAuthorization>,
+        ) -> std::result::Result<Vec<u8>, String> {
+            Err("the capturing mutator signs nothing".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_remote_signed_create_carries_its_access_decision_in_its_context() {
+        let mut collection = CollectionVersion::new(
+            "Note",
+            "v1",
+            "coll-note",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "body", FieldKind::string()),
+            ],
+        );
+        collection.policy = Some(schema::PolicyDescription::new("policy", "notes"));
+        let mutator = Arc::new(CapturingMutator::new());
+        let runner = QueryRunner::new(MockFetcher::new(), vec![collection])
+            .with_mutator(mutator.clone())
+            .with_acp(Arc::new(DecidingAcp));
+        let signing = defra_core::signing::SigningConfig {
+            key_type: defra_core::signing::SigningKeyType::Ed25519,
+            private_key_bytes: Vec::new(),
+            public_key_bytes: Vec::new(),
+            public_key_hex: "remote".to_string(),
+            remote_signer: Some(Arc::new(UnusedSigner)),
+            signing_authorization: None,
+        };
+        let caller = Did::new("did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw").unwrap();
+
+        let response = runner
+            .execute(
+                QueryRequest::new(r#"mutation { add_Note(input: { body: "a" }) { _docID } }"#)
+                    .with_identity(Some(caller))
+                    .with_context(
+                        defra_core::RequestContext::default().with_signing(Some(signing)),
+                    ),
+            )
+            .await;
+
+        assert!(!response.has_errors(), "{:?}", response.errors);
+        assert_eq!(
+            drain(&mutator.authorizations),
+            vec![Some(defra_core::signing::SigningAuthorization::Decision {
+                decision_id: "decision-1".to_string(),
+            })]
+        );
     }
 
     #[tokio::test]

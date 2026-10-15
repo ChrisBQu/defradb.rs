@@ -374,7 +374,11 @@ async fn conditional_update_of_concurrently_deleted_document_returns_conflict() 
     patched.set("right", NormalValue::Int(1));
 
     mutator
-        .delete("Patch", &created.doc_id)
+        .delete(
+            &defra_core::RequestContext::default(),
+            "Patch",
+            &created.doc_id,
+        )
         .await
         .expect("concurrent delete");
 

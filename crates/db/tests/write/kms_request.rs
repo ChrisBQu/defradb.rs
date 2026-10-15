@@ -21,7 +21,7 @@ struct ConflictOnce {
 
 #[async_trait]
 impl DocMutator for ConflictOnce {
-    fn requires_write_preparation(&self) -> bool {
+    fn requires_write_preparation(&self, _context: &RequestContext) -> bool {
         true
     }
 
@@ -66,8 +66,13 @@ impl DocMutator for ConflictOnce {
         self.inner.update(context, collection, doc, fields).await
     }
 
-    async fn delete(&self, collection: &str, id: &DocID) -> query::error::Result<DeleteResult> {
-        self.inner.delete(collection, id).await
+    async fn delete(
+        &self,
+        context: &RequestContext,
+        collection: &str,
+        id: &DocID,
+    ) -> query::error::Result<DeleteResult> {
+        self.inner.delete(context, collection, id).await
     }
 
     async fn exists(&self, collection: &str, id: &DocID) -> query::error::Result<bool> {

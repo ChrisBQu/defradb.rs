@@ -15,9 +15,10 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::encryption::EncryptionConfig;
+use crate::signing::SigningConfig;
 
 /// What one request carries: who acts, with which privileges, and how its
-/// writes are encrypted.
+/// writes are encrypted and signed.
 ///
 /// The default context is an anonymous request with nothing granted.
 #[derive(Clone, Default)]
@@ -27,6 +28,7 @@ pub struct RequestContext(Arc<Fields>);
 struct Fields {
     dac_bypass: bool,
     encryption: Option<EncryptionConfig>,
+    signing: Option<SigningConfig>,
 }
 
 impl RequestContext {
@@ -58,6 +60,19 @@ impl RequestContext {
         Arc::make_mut(&mut self.0).encryption = encryption;
         self
     }
+
+    /// The key this request signs the blocks it writes with; unsigned blocks
+    /// without one.
+    pub fn signing(&self) -> Option<&SigningConfig> {
+        self.0.signing.as_ref()
+    }
+
+    /// This context with the signing set to `signing`.
+    #[must_use]
+    pub fn with_signing(mut self, signing: Option<SigningConfig>) -> Self {
+        Arc::make_mut(&mut self.0).signing = signing;
+        self
+    }
 }
 
 impl fmt::Debug for RequestContext {
@@ -65,6 +80,10 @@ impl fmt::Debug for RequestContext {
         f.debug_struct("RequestContext")
             .field("dac_bypass", &self.0.dac_bypass)
             .field("encryption", &self.0.encryption)
+            .field(
+                "signing",
+                &self.0.signing.as_ref().map(|signing| signing.key_type),
+            )
             .finish()
     }
 }
@@ -78,6 +97,22 @@ mod tests {
         let context = RequestContext::default();
         assert!(!context.dac_bypass());
         assert!(context.encryption().is_none());
+        assert!(context.signing().is_none());
+    }
+
+    #[test]
+    fn debug_never_shows_the_signing_key() {
+        let context = RequestContext::default().with_signing(Some(SigningConfig {
+            key_type: crate::signing::SigningKeyType::Ed25519,
+            private_key_bytes: vec![0xAB; 32],
+            public_key_bytes: Vec::new(),
+            public_key_hex: "public".to_string(),
+            remote_signer: None,
+            signing_authorization: None,
+        }));
+        let shown = format!("{context:?}");
+        assert!(shown.contains("Ed25519"));
+        assert!(!shown.contains("171"), "{shown}");
     }
 
     #[test]

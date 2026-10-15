@@ -57,15 +57,16 @@ impl defra_core::signing::RemoteSigner for FailingCollectionSigner {
     }
 }
 
-fn failing_collection_signing_config() -> defra_core::signing::SigningConfig {
-    defra_core::signing::SigningConfig {
+/// A request signing through a remote signer that fails on collection blocks.
+fn failing_collection_signing() -> defra_core::RequestContext {
+    defra_core::RequestContext::default().with_signing(Some(defra_core::signing::SigningConfig {
         key_type: defra_core::signing::SigningKeyType::Ed25519,
         private_key_bytes: Vec::new(),
         public_key_bytes: Vec::new(),
         public_key_hex: "test".to_string(),
         remote_signer: Some(Arc::new(FailingCollectionSigner)),
         signing_authorization: None,
-    }
+    }))
 }
 
 #[tokio::test]
@@ -74,15 +75,13 @@ async fn branchable_create_rolls_back_when_collection_block_fails() {
     db.create_collection(branchable_collection()).await.unwrap();
     let mutator = db::AutoCommitMutator::new(Arc::clone(&db));
 
-    defra_core::signing::set_signing_config(Some(failing_collection_signing_config()));
     let result = mutator
         .create(
-            &defra_core::RequestContext::default(),
+            &failing_collection_signing(),
             "Branchable",
             Document::from_json_str(r#"{"x": 1}"#).unwrap(),
         )
         .await;
-    defra_core::signing::set_signing_config(None);
 
     let error = result.expect_err("collection block failure must fail create");
     assert!(error
@@ -113,16 +112,14 @@ async fn branchable_update_rolls_back_when_collection_block_fails() {
         .unwrap();
     doc.set("x", NormalValue::Int(2));
 
-    defra_core::signing::set_signing_config(Some(failing_collection_signing_config()));
     let result = mutator
         .update(
-            &defra_core::RequestContext::default(),
+            &failing_collection_signing(),
             "Branchable",
             doc,
             std::iter::once("x".to_string()).collect(),
         )
         .await;
-    defra_core::signing::set_signing_config(None);
 
     let error = result.expect_err("collection block failure must fail update");
     assert!(error
@@ -274,7 +271,10 @@ async fn alias_reads_and_mutations_use_the_canonical_doc_id() {
         .unwrap();
     assert_eq!(updated.document.id(), Some(&canonical_doc_id));
 
-    let deleted = mutator.delete("TestDoc", &alias).await.unwrap();
+    let deleted = mutator
+        .delete(&defra_core::RequestContext::default(), "TestDoc", &alias)
+        .await
+        .unwrap();
     assert!(deleted.existed);
     assert_eq!(deleted.doc_id, canonical_doc_id);
     let txn = db.new_txn(true).await.unwrap();
@@ -1113,7 +1113,11 @@ async fn delete_missing_doc_publishes_no_event_and_writes_no_block() {
     let missing_doc_id = document::DocID::new_v0_from_seed("missing-doc");
 
     let result = mutator
-        .delete("TestDoc", &missing_doc_id)
+        .delete(
+            &defra_core::RequestContext::default(),
+            "TestDoc",
+            &missing_doc_id,
+        )
         .await
         .expect("delete should succeed even on missing doc");
     assert!(!result.existed, "doc should not have existed");

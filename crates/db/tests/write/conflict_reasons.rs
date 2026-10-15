@@ -197,8 +197,16 @@ async fn a_delete_that_loses_to_a_delete_is_a_no_op() {
     let paused_id = id.clone();
     let (loser, winner) = fixture
         .race(
-            |mutator| async move { mutator.delete("Patch", &paused_id).await },
-            |mutator| async move { mutator.delete("Patch", &id).await },
+            |mutator| async move {
+                mutator
+                    .delete(&defra_core::RequestContext::default(), "Patch", &paused_id)
+                    .await
+            },
+            |mutator| async move {
+                mutator
+                    .delete(&defra_core::RequestContext::default(), "Patch", &id)
+                    .await
+            },
         )
         .await;
 
@@ -227,7 +235,11 @@ async fn an_update_that_loses_to_a_delete_reports_not_found() {
                     )
                     .await
             },
-            |mutator| async move { mutator.delete("Patch", &id).await },
+            |mutator| async move {
+                mutator
+                    .delete(&defra_core::RequestContext::default(), "Patch", &id)
+                    .await
+            },
         )
         .await;
 

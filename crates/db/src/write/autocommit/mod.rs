@@ -34,7 +34,6 @@ use crate::txn::DbTxn;
 /// Captured per-mutation commit data: the document block (cid + bytes) plus,
 /// for branchable collections, the collection block (cid + bytes).
 pub(super) type CommitArtifacts = (Cid, Bytes, Option<(Cid, Bytes)>);
-use defra_core::signing::get_signing_config;
 use defra_core::RequestContext;
 
 pub use batch::BatchMutator;
@@ -230,19 +229,20 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
         }))
     }
 
-    fn requires_write_preparation(&self) -> bool {
+    fn requires_write_preparation(&self, context: &RequestContext) -> bool {
         let embedding = self.db.options().embedding_config();
         self.db.kms().is_some()
             || !embedding.url.is_empty()
             || !embedding.model.is_empty()
-            || get_signing_config().is_some()
+            || context.signing().is_some()
     }
 
     async fn resolve_prepared_input(
         &self,
+        context: &RequestContext,
         request: &query::prepared::PreparedInputRequest,
     ) -> query::error::Result<std::sync::Arc<[u8]>> {
-        crate::write::prepare::resolve_input(&self.db, request).await
+        crate::write::prepare::resolve_input(&self.db, context, request).await
     }
 
     async fn prepared_embedding_request(
@@ -365,10 +365,11 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
 
     async fn delete(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         doc_id: &DocID,
     ) -> query::error::Result<DeleteResult> {
-        self.delete_with_resolved_inputs(collection_name, doc_id)
+        self.delete_with_resolved_inputs(context, collection_name, doc_id)
             .await
     }
 

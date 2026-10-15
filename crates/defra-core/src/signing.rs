@@ -1,8 +1,8 @@
 //! Block signing configuration for CRDT block signing.
 //!
-//! Provides the SigningConfig type and thread-local storage for passing
-//! signing config from the FFI/query layer to the block builder layer.
-//! Mirrors the pattern used by encryption.rs for EncryptionConfig.
+//! Provides the SigningConfig type, which a request's
+//! [`RequestContext`](crate::RequestContext) carries from the boundary to the
+//! block builder layer.
 
 use std::cell::RefCell;
 use std::fmt;
@@ -270,22 +270,6 @@ impl SigningConfig {
     pub fn has_remote_signer(&self) -> bool {
         self.remote_signer.is_some()
     }
-}
-
-thread_local! {
-    static CURRENT_SIGNING_CONFIG: RefCell<Option<SigningConfig>> = const { RefCell::new(None) };
-}
-
-/// Set the signing config for the current thread.
-pub fn set_signing_config(config: Option<SigningConfig>) {
-    CURRENT_SIGNING_CONFIG.with(|c| {
-        *c.borrow_mut() = config;
-    });
-}
-
-/// Get the current signing config for this thread.
-pub fn get_signing_config() -> Option<SigningConfig> {
-    CURRENT_SIGNING_CONFIG.with(|c| c.borrow().clone())
 }
 
 /// Global identity store mapping DID → SigningConfig.

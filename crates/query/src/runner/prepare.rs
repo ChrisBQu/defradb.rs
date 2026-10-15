@@ -36,7 +36,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         else {
             return Ok(None);
         };
-        let schema_has_embeddings = if mutator.requires_write_preparation() {
+        let schema_has_embeddings = if mutator.requires_write_preparation(&self.context) {
             false
         } else {
             let provider = self.effective_provider();
@@ -57,7 +57,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             .any(|mutation| mutation.mutation_type == MutationType::Truncate);
         let request_batch =
             mutations.len() > 1 || self.acp.supports_transactions() || !contains_truncate;
-        if !mutator.requires_write_preparation() && !schema_has_embeddings && !request_batch {
+        if !mutator.requires_write_preparation(&self.context)
+            && !schema_has_embeddings
+            && !request_batch
+        {
             return Ok(None);
         }
         validate_parsed_operation(&parsed, self.effective_provider().as_ref()).await?;
@@ -204,7 +207,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     && mutation.filter.is_none()
                     && mutation.encrypt_fields.is_empty()
                     && !mutation.encrypt_doc
-                    && !mutator.requires_write_preparation()
+                    && !mutator.requires_write_preparation(&self.context)
                     && collection.vector_embeddings.is_empty()
                     && mutator.supports_projected_updates()
                 {

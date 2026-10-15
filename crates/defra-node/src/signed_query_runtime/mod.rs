@@ -11,7 +11,7 @@ mod tests;
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_with_signing_context(
     executor: Arc<dyn QueryExecutor>,
-    request: QueryRequest,
+    mut request: QueryRequest,
     txn_handle: Option<TransactionHandle>,
     signing_config: SigningConfig,
     node_did: String,
@@ -20,10 +20,11 @@ pub(super) async fn execute_with_signing_context(
 ) -> QueryResponse {
     let spawn_handle = runtime_handle.clone();
     let batch_session_key = Some(signing_config.public_key_hex.clone());
+    request.context = request.context.with_signing(Some(signing_config));
 
     let run_query = move || {
         let _signed_query_permit = signed_query_permit;
-        let _signing_guard = ThreadSigningContextGuard::install(signing_config, batch_session_key);
+        let _signing_guard = ThreadSigningContextGuard::install(batch_session_key);
         let _id_guard = defra_core::current_identity::scoped_current_identity(Some(node_did));
         runtime_handle.block_on(async {
             match txn_handle {
@@ -50,18 +51,14 @@ pub(super) fn unavailable_node_signer_response(node_did: &str) -> QueryResponse 
 }
 
 struct ThreadSigningContextGuard {
-    previous_signing_config: Option<SigningConfig>,
     previous_batch_session_key: Option<String>,
 }
 
 impl ThreadSigningContextGuard {
-    fn install(signing_config: SigningConfig, batch_session_key: Option<String>) -> Self {
-        let previous_signing_config = defra_core::signing::get_signing_config();
+    fn install(batch_session_key: Option<String>) -> Self {
         let previous_batch_session_key = defra_core::batch_signing::get_batch_session_key();
-        defra_core::signing::set_signing_config(Some(signing_config));
         defra_core::batch_signing::set_batch_session_key(batch_session_key);
         Self {
-            previous_signing_config,
             previous_batch_session_key,
         }
     }
@@ -69,7 +66,6 @@ impl ThreadSigningContextGuard {
 
 impl Drop for ThreadSigningContextGuard {
     fn drop(&mut self) {
-        defra_core::signing::set_signing_config(self.previous_signing_config.take());
         defra_core::batch_signing::set_batch_session_key(self.previous_batch_session_key.take());
     }
 }

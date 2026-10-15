@@ -128,7 +128,11 @@ async fn batch_delete_missing_doc_publishes_no_event_and_writes_no_block() {
     let missing_doc_id = document::DocID::new_v0_from_seed("missing-doc");
 
     let result = mutator
-        .delete("TestDoc", &missing_doc_id)
+        .delete(
+            &defra_core::RequestContext::default(),
+            "TestDoc",
+            &missing_doc_id,
+        )
         .await
         .expect("delete should succeed even on missing doc");
     assert!(!result.existed, "doc should not have existed");
@@ -169,7 +173,11 @@ async fn batch_delete_branchable_surfaces_collection_block_for_broadcast() {
     let doc_id = create_result.doc_id.clone();
 
     let delete_result = mutator
-        .delete("TestBranchable", &doc_id)
+        .delete(
+            &defra_core::RequestContext::default(),
+            "TestBranchable",
+            &doc_id,
+        )
         .await
         .expect("delete");
 

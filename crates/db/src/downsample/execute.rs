@@ -342,13 +342,17 @@ impl<S: Store + 'static> crate::database::DB<S> {
                 Box::pin(async move { window.write(mutator.as_ref()).await })
             });
         let inputs = query::prepared::PreparedInputMemo::default();
+        // A downsample window is written by the node, for no request.
+        let context = RequestContext::default();
         let mutator = crate::write::autocommit::AutoCommitMutator::new(Arc::clone(self))
             .with_prepared_inputs_value(inputs.clone());
         let controller = mutator.new_retryable_batch_controller();
         let written = loop {
             match controller.run(Arc::clone(&operation), None, None).await {
                 Err(query::error::QueryError::NeedsInput(request)) => inputs
-                    .answer_miss(&request, || mutator.resolve_prepared_input(&request))
+                    .answer_miss(&request, || {
+                        mutator.resolve_prepared_input(&context, &request)
+                    })
                     .await
                     .map_err(Error::Query)?,
                 result => break result.map_err(Error::Query)?,

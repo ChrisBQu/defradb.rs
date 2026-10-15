@@ -467,7 +467,7 @@ pub trait DocMutator: MaybeSendSync {
     }
 
     /// Whether this mutator resolves persistent inputs before request retries.
-    fn requires_write_preparation(&self) -> bool {
+    fn requires_write_preparation(&self, _context: &RequestContext) -> bool {
         false
     }
 
@@ -497,6 +497,7 @@ pub trait DocMutator: MaybeSendSync {
     /// the provider response bytes for per-request memoization.
     async fn resolve_prepared_input(
         &self,
+        _context: &RequestContext,
         _request: &crate::prepared::PreparedInputRequest,
     ) -> Result<Arc<[u8]>> {
         Err(crate::error::QueryError::execution(
@@ -674,7 +675,12 @@ pub trait DocMutator: MaybeSendSync {
     /// Returns an error if:
     /// - The collection does not exist
     /// - A storage error occurs
-    async fn delete(&self, collection_name: &str, doc_id: &DocID) -> Result<DeleteResult>;
+    async fn delete(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        doc_id: &DocID,
+    ) -> Result<DeleteResult>;
 
     /// Check if a document exists.
     ///

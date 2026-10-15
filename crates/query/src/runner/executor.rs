@@ -188,7 +188,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                                 "retry input has no document mutator",
                             )
                         })?;
-                        mutator.resolve_prepared_input(input).await
+                        mutator.resolve_prepared_input(&runner.context, input).await
                     }
                 }
             })
@@ -708,7 +708,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                         .map_err(crate::error::QueryError::execution)?;
                                     inputs
                                         .answer_miss(&input, || {
-                                            mutator.resolve_prepared_input(&input)
+                                            mutator.resolve_prepared_input(&self.context, &input)
                                         })
                                         .await?;
                                     txn_ctx

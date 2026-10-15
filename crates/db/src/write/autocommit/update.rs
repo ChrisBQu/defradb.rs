@@ -102,7 +102,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             {
                 Err(query::error::QueryError::NeedsInput(request)) => {
                     inputs
-                        .answer_miss(&request, || self.resolve_prepared_input(&request))
+                        .answer_miss(&request, || self.resolve_prepared_input(context, &request))
                         .await?;
                 }
                 result => return result,
@@ -177,7 +177,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             modified_fields,
             input_doc_id,
             canonical_doc_id,
-            signing_config: get_signing_config(),
+            signing_config: context.signing().cloned(),
             encryption_config: context.encryption().cloned(),
             prepared_inputs: Some(self.prepared_inputs.clone().unwrap_or_default()),
         };
