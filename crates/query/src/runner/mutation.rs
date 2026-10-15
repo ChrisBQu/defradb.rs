@@ -142,12 +142,51 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
             QueryError::execution("mutations require a mutator; call with_mutator() first")
         })?;
 
-        self.execute_mutation_internal_with_vars(
-            mutation_str,
-            mutator.clone(),
-            caller_identity,
-            variables,
-            None,
+        let mutations = parse_mutations_with_limits(mutation_str, variables, self.query_limits)?;
+        let mut request = crate::executor::QueryRequest::new(mutation_str);
+        request.identity = caller_identity.clone();
+        request.variables = variables.map(|values| {
+            JsonValue::Object(
+                values
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect(),
+            )
+        });
+        let caller_did = caller_identity.as_ref().map(ToString::to_string);
+        let acting_identity = caller_did
+            .clone()
+            .or_else(defra_core::current_identity::get_effective_identity);
+        let execution = Box::pin(async {
+            let mut prepared = self.prepare_mutations(&request).await?;
+            loop {
+                let attempt_mutator = prepared
+                    .as_ref()
+                    .and_then(|prepared| mutator.with_prepared_inputs(prepared.inputs.clone()))
+                    .unwrap_or_else(|| mutator.clone());
+                match self
+                    .execute_parsed_mutations(
+                        mutations.clone(),
+                        attempt_mutator,
+                        caller_identity.clone(),
+                        None,
+                        prepared.as_deref(),
+                    )
+                    .await
+                {
+                    Err(QueryError::NeedsInput(input)) => {
+                        prepared = crate::executor::QueryExecutor::resolve_retry_input(
+                            self, &request, prepared, &input,
+                        )
+                        .await?;
+                    }
+                    result => return result,
+                }
+            }
+        });
+        defra_core::current_identity::with_scoped_identity(
+            acting_identity,
+            defra_core::signing::scope_broadcast_creator_did(caller_did, execution),
         )
         .await
     }
