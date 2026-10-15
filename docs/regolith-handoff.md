@@ -33,22 +33,24 @@ The stack has the intended 11 PRs. Prep #1922 is already marked ready; the ten a
 | 3 | Arrival append, ID allocation, field/counter/vector/full-text operators, head markers, read-only lenses and known-field write projections | General query/output and conditional reads remain conservative; no blanket zero-conflict claim |
 | 4 | Receipt-ordered events and fallible ordered ACP hooks | Final CI/performance gates; winner-only hooks and suppression on hook failure are covered |
 | 5 | Engine retries for individual/many writes, merges, lenses, backfill and pending DAG writes; bounded prepared inputs | Generic HTTP/embedded business-conflict replay removed; eligible single mutations now rerun selection inside engine batches. Final CI and performance gates remain |
-| 6 | Requested locks/cache/forced-read APIs removed; snapshot metadata, collection OCC, immutable ACP projections and peer generation fences replace them | Generation/incarnation admission, registration, failure, ACK and status fences validated; lock-free ACP projection and exact-wire schema reuse validated. Performance gates remain |
-| 7 | Native commit/policy tickers and bounded conflict reasons; caller instrumentation retained | Revalidate after lower-stack restack |
+| 6 | Requested locks/cache/forced-read APIs removed; snapshot metadata, collection OCC, immutable ACP projections and peer generation fences replace them | Generation/incarnation admission, registration, failure, ACK and status fences validated; lock-free ACP projection, exact-wire schema reuse and key-buffer sizing validated. Performance gates remain |
+| 7 | Native commit/policy tickers and bounded conflict reasons; caller instrumentation retained | Current-head remote CI and performance gates |
 | 8 | Obsolete cache/counter/queue proofs retired; HeadSet retained; pinned arrival proof and new adapter boundary models | Revalidate after lower-stack restack; models do not verify Rust or remote authorization |
 
 ### Immediate blockers
 
-1. Complete fresh CLI interoperability/counter checks on the combined stack, and basic/ACP/encryption/counter checks on the four lower checkpoints whose draft CI skips those suites.
+1. Complete basic/ACP/encryption/counter checks on the four lower checkpoints whose draft CI skips those suites. Fresh combined-stack CLI checks all pass.
 2. Inspect current-head CI after publishing this restack. The previous step-6 CI failures (obsolete document-queue benchmark and unused dependencies) are fixed at their removal boundaries; native lint now includes all benchmarks and the CLI.
-3. Complete §5.3 timing and allocation gates. Nine removal checkpoints build; revised frozen executables are being prepared for measurements. No performance gate is waived. A small key-buffer capacity optimization is being evaluated separately.
+3. Complete §5.3 timing and allocation gates. Nine removal checkpoints build; revised frozen executables are being prepared for measurements. No performance gate is waived. The key-buffer capacity optimization passed its exact-byte-layout tests and reduces allocations, but creates remain above main.
 
 ## Validation evidence
 
 | Revision / scope | Result | Limit |
 |---|---|---|
-| Combined `f0d3fd4d5` | 2,364 DB/query/authorization/data tests pass, 33 ignored; HTTP/embedded tests 358 pass, 5 ignored; benchmark accounting tests 5 pass | Fresh CLI external checks running |
+| Combined `f0d3fd4d5` | 2,364 DB/query/authorization/data tests pass, 33 ignored; HTTP/embedded tests 358 pass, 5 ignored; benchmark accounting tests 5 pass | Fresh CLI: ACP 204 pass/16 ignored, basic 56 pass, encryption 25 pass, counter 9 pass/8 ignored and write-skew 1 pass |
 | Combined `f0d3fd4d5` | Broad native all-target Clippy includes CLI and benchmarks; WASM Clippy, cargo-machete, formatting and diff checks pass | Fresh remote CI remains required |
+| Key capacity `2bb8dd9f5` | All 8 key-layout tests and storage all-target Clippy pass | Only buffer allocation changes after the full combined validation |
+| Engine telemetry on combined stack | All 3 integration tests pass | Local native validation |
 | Step 5 alone `427da1b4e` | Batch retry tests 4/4, HTTP context tests 7/7, DB/query/HTTP all-target Clippy pass after workspace-cache cleanup | Does not include step-6 remote projection |
 | Earlier combined `9afeb8447` | Storage 257, P2P 395 and adapter 94 pass; external ACP 204 pass/16 ignored, basic 56, encryption 25; counter 9 pass/8 ignored; real point-read write-skew passes | Predates final retry-surface cleanup; exact Go pin `53f0e76a32d1761e3396a88ce607ebc3e37baa5a` |
 | Lower-stack CI inspection | Prep #1922 passes all 28 checks. Active checks pass on #1949/#1920/#1951/#1952; current completed checks pass on #1953/#1955/#1956 | Some lower draft suites are skipped; native ACP/macOS jobs were still pending on middle PRs |
@@ -84,6 +86,8 @@ The largest early increase is at step 3. Safe read-only fetching and one-pass de
 Fresh frozen step-3/4/5 binaries yield create medians **2980.7 / 2982.8 / 3411.4**, respectively (get-by-ID 269 at all three). The first two are slightly below the measured main create median; the step-5 increase remains under investigation. Exact raw samples, revisions and executable hashes are in the paired allocation artifact. All nine repaired lock-removal checkpoint binaries have built successfully; timing awaits a quiet-host window.
 
 [Sharing immutable create inputs](benchmarks/create-retry-sharing.md) reduces the next exact paired create median from 3296.4 to **3231.3**, with get-by-ID unchanged at **160**. This remains about 8% above main for creates. The [schema-byte reuse pair](benchmarks/schema-wire-reuse.md) reduces its own five-run median from 3231.4 to 3189.3, with reads unchanged. That pair uses the default release profile; final release-fast gate measurements remain pending.
+
+[The release-fast key-buffer pair](benchmarks/doc-id-index-key-capacity.md) confirms a baseline create median of 3189.3 and reduces it to **3130.4**, with get-by-ID falling from **160 to 157**. The new create count is still about **4.6% above main**; the allocation gate remains open. Exact key bytes are unchanged, with all eight layout tests and storage all-target Clippy passing.
 
 Required timing evidence: before/after each step and lock-removal checkpoint, all writer counts/workloads/repetitions, commits/s, conflicts/commit, retries by layer, p50/p99, create benchmarks at 4/16 fields, branchable create at 14, and cold startup at 10 collections. Use `tools/perf-site/loadguard.py`, record its result and source revision, and do not treat a failed/missing guard as clean-host evidence.
 
