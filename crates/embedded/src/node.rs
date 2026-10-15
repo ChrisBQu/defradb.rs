@@ -608,7 +608,13 @@ where
     };
 
     let acp_setup =
-        create_document_acp(store.clone(), config.persistence, &config.document_acp).await?;
+        create_document_acp(
+            store.clone(),
+            config.persistence,
+            &config.document_acp,
+            config.edge.as_ref(),
+        )
+        .await?;
     let document_acp = acp_setup.document_acp;
     let local_zanzibar_store = acp_setup.local_zanzibar_store;
     #[cfg(feature = "vera")]

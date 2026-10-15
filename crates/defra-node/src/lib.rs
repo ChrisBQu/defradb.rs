@@ -1472,7 +1472,13 @@ impl NodeBuilder {
         }
 
         let acp_setup =
-            node_acp::create_document_acp(store.clone(), persistence, &document_acp_config).await?;
+            node_acp::create_document_acp(
+                store.clone(),
+                persistence,
+                &document_acp_config,
+                network.as_ref().map(NodeEdge::edge),
+            )
+            .await?;
         let document_acp = acp_setup.document_acp.clone();
         #[cfg(feature = "vera")]
         let _strict_replicated_doc_access = acp_setup.vera_acp.is_some();

@@ -67,6 +67,21 @@ impl VeraDocumentACP {
         )
     }
 
+    /// A cached ACP as `tuning` sets it, its remote decisions on the network
+    /// runtime `network` when the node has one.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn tuned(
+        provider: Arc<dyn VeraProvider>,
+        tuning: &crate::AcpTuning,
+        network: Option<&edge::Edge>,
+    ) -> Self {
+        let acp = Self::new(provider, tuning.cache_ttl);
+        match network {
+            Some(edge) => acp.on_network(edge, tuning.request_timeout),
+            None => acp,
+        }
+    }
+
     /// Remote decisions run on the network runtime `edge`, each within twice
     /// `request_timeout` (one retry).
     #[cfg(not(target_arch = "wasm32"))]
