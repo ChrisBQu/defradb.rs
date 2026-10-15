@@ -59,6 +59,9 @@ pub use transaction::RegolithTxn;
 /// commit would allow cancellation to release its caller's serialization guard
 /// before native commit finishes. Other executors retain
 /// the synchronous backend contract.
+// The data path's own bridge to whichever runtime calls it, not network work:
+// it goes when the data path runs on the worker pool.
+#[allow(clippy::disallowed_methods)]
 fn blocking<T>(operation: impl FnOnce() -> T) -> T {
     #[cfg(not(target_arch = "wasm32"))]
     if tokio::runtime::Handle::try_current()

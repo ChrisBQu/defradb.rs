@@ -62,9 +62,9 @@ impl Rt {
 /// thread first; on a single-threaded executor nothing else could run its
 /// tasks, so the wait is refused. A panic inside `wait` comes back as the
 /// inner error.
+// The edge is the one place that may ask which runtime the caller is on.
+#[allow(clippy::disallowed_methods)]
 pub(crate) fn wait_here<T>(wait: impl FnOnce() -> T) -> Result<thread::Result<T>, EdgeError> {
-    // The edge is the one place that may ask which runtime the caller is on.
-    #[allow(clippy::disallowed_methods)]
     let flavor = Handle::try_current()
         .ok()
         .map(|current| current.runtime_flavor());
