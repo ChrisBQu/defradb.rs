@@ -459,6 +459,24 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
             .await
     }
 
+    async fn update_if_fields_unchanged(
+        &self,
+        collection_name: &str,
+        expected: Document,
+        expected_fields: rapidhash::RapidHashSet<String>,
+        doc: Document,
+        modified_fields: rapidhash::RapidHashSet<String>,
+    ) -> query::error::Result<UpdateResult> {
+        self.update_with_projected_resolved_inputs(
+            collection_name,
+            Some(expected),
+            Some(expected_fields),
+            doc,
+            modified_fields,
+        )
+        .await
+    }
+
     async fn delete(
         &self,
         collection_name: &str,

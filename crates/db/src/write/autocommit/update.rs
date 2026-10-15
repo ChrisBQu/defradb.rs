@@ -12,6 +12,7 @@ struct UpdateRetryAttempt<S: Store> {
     collection_name: String,
     collection: Collection,
     expected: Option<Document>,
+    expected_fields: Option<rapidhash::RapidHashSet<String>>,
     input: Document,
     modified_fields: rapidhash::RapidHashSet<String>,
     input_doc_id: DocID,
@@ -48,9 +49,21 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         doc: Document,
         fields: rapidhash::RapidHashSet<String>,
     ) -> query::error::Result<UpdateResult> {
+        self.update_with_projected_resolved_inputs(collection_name, expected, None, doc, fields)
+            .await
+    }
+
+    pub(super) async fn update_with_projected_resolved_inputs(
+        &self,
+        collection_name: &str,
+        expected: Option<Document>,
+        expected_fields: Option<rapidhash::RapidHashSet<String>>,
+        doc: Document,
+        fields: rapidhash::RapidHashSet<String>,
+    ) -> query::error::Result<UpdateResult> {
         if self.prepared_inputs.is_some() {
             return self
-                .update_impl(collection_name, expected, doc, fields)
+                .update_impl(collection_name, expected, expected_fields, doc, fields)
                 .await;
         }
         let inputs = query::prepared::PreparedInputMemo::default();
@@ -63,6 +76,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 .update_impl(
                     collection_name,
                     expected.clone(),
+                    expected_fields.clone(),
                     doc.clone(),
                     fields.clone(),
                 )
@@ -90,6 +104,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         &self,
         collection_name: &str,
         expected: Option<Document>,
+        expected_fields: Option<rapidhash::RapidHashSet<String>>,
         mut doc: Document,
         modified_fields: rapidhash::RapidHashSet<String>,
     ) -> query::error::Result<UpdateResult> {
@@ -146,6 +161,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             collection_name: collection_name.to_string(),
             collection: collection.clone(),
             expected,
+            expected_fields,
             input: doc,
             modified_fields,
             input_doc_id,
@@ -215,8 +231,12 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         // The fresh read, stale-plan comparison, rebase, and writes all belong
         // to this attempt. A storage conflict therefore repeats the complete
         // decision against the next engine snapshot.
-        let fetcher = if attempt.expected.is_none() {
-            let mut dependencies = attempt.modified_fields.clone();
+        let mut dependencies = attempt
+            .expected_fields
+            .clone()
+            .unwrap_or_else(|| attempt.modified_fields.clone());
+        dependencies.extend(attempt.modified_fields.iter().cloned());
+        let fetcher = if attempt.expected.is_none() || attempt.expected_fields.is_some() {
             for index in collection.write_indexes() {
                 if index
                     .fields
@@ -239,7 +259,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 Arc::clone(&self.db),
                 txn,
                 self.db.lens_store.clone(),
-                dependencies,
+                dependencies.clone(),
             )
         } else {
             LensedDocFetcher::new(Arc::clone(&self.db), txn, self.db.lens_store.clone())
@@ -258,11 +278,17 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             });
         };
         if let Some(expected) = &attempt.expected {
-            let unchanged = expected.values().len() == current_doc.values().len()
-                && expected
-                    .values()
+            let unchanged = if attempt.expected_fields.is_some() {
+                dependencies
                     .iter()
-                    .all(|(name, value)| current_doc.get(name) == Some(value.value()));
+                    .all(|field| expected.get(field) == current_doc.get(field))
+            } else {
+                expected.values().len() == current_doc.values().len()
+                    && expected
+                        .values()
+                        .iter()
+                        .all(|(name, value)| current_doc.get(name) == Some(value.value()))
+            };
             if expected.id() != current_doc.id()
                 || expected.is_deleted() != current_doc.is_deleted()
                 || !unchanged

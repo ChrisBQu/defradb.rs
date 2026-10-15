@@ -205,6 +205,20 @@ pub trait DocFetcher: MaybeSendSync {
         doc_ids: &[String],
     ) -> Result<FetchByIdsResult>;
 
+    /// Get documents by ID while validating only the named document fields.
+    ///
+    /// Implementations that cannot provide an exact projected read return
+    /// `None`; callers must then use [`Self::get_by_ids`] and retain full-read
+    /// validation. The returned documents may still contain the full value.
+    async fn get_by_ids_projected(
+        &self,
+        _collection_name: &str,
+        _doc_ids: &[String],
+        _fields: &rapidhash::RapidHashSet<String>,
+    ) -> Result<Option<FetchByIdsResult>> {
+        Ok(None)
+    }
+
     /// Get documents by a field value (for FK lookups).
     ///
     /// This method is optimized for type joins - it looks up documents where

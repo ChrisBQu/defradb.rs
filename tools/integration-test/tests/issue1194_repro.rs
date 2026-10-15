@@ -229,12 +229,11 @@ async fn issue1194_same_doc_txn_pair_still_conflicts() {
     );
 }
 
-/// Regression control for the same-document case when the concurrent updates
-/// touch different fields. The document body is a single stored value, so both
-/// mutations still write from overlapping snapshots and the second commit must
-/// abort instead of silently replacing the first update.
+/// Unconditional ID updates whose output is only `_docID` depend on the
+/// patched fields (and any index/embedding dependencies), not the whole
+/// document. Disjoint changes to one document can therefore both commit.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn issue1194_same_doc_disjoint_field_txn_pair_still_conflicts() {
+async fn issue1194_same_doc_disjoint_field_txn_pair_commits() {
     let cluster = build_cluster().await;
     let node = cluster.client(0);
 
@@ -265,12 +264,157 @@ async fn issue1194_same_doc_disjoint_field_txn_pair_still_conflicts() {
     .expect("tx2 update status");
 
     node.tx_commit(&tx1).expect("tx1 commit");
+    node.tx_commit(&tx2)
+        .expect("disjoint projected field dependencies should commit");
+
+    let final_doc = node
+        .query(&format!(
+            r#"query {{ Snap(docID: "{id}") {{ status content }} }}"#
+        ))
+        .expect("read merged document");
+    assert_eq!(final_doc["Snap"][0]["content"], json!("first"));
+    assert_eq!(final_doc["Snap"][0]["status"], json!("claimed"));
+}
+
+/// A predicate read remains part of the transaction's dependency set, even if
+/// the mutation returns only `_docID`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn issue1194_filtered_update_still_conflicts_on_predicate_field() {
+    let cluster = build_cluster().await;
+    let node = cluster.client(0);
+    node.schema_add("type Snap { status: String  content: String }")
+        .expect("schema add");
+    let data = node
+        .query(r#"mutation { add_Snap(input: {status: "streaming", content: "init"}) { _docID } }"#)
+        .expect("create doc");
+    let id = data["add_Snap"][0]["_docID"].as_str().unwrap().to_string();
+    let tx1 = node.tx_create().expect("tx1 create");
+    let tx2 = node.tx_create().expect("tx2 create");
+
+    node.query_with_tx(
+        &format!(r#"mutation {{ update_Snap(filter: {{_docID: {{_eq: "{id}"}}, status: {{_eq: "streaming"}}}}, input: {{content: "first"}}) {{ _docID }} }}"#),
+        &tx1,
+    )
+    .expect("filtered tx1 update");
+    node.query_with_tx(
+        &format!(r#"mutation {{ update_Snap(docID: "{id}", input: {{status: "claimed"}}) {{ _docID }} }}"#),
+        &tx2,
+    )
+    .expect("tx2 update predicate field");
+
+    node.tx_commit(&tx2).expect("tx2 commit");
+    let err = node
+        .tx_commit(&tx1)
+        .expect_err("predicate change must conflict");
+    assert!(format!("{err:#}").contains("transaction conflict"));
+}
+
+/// Selecting a field in the mutation response makes it a read dependency; the
+/// projected fast path is limited to `_docID`-only results.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn issue1194_selected_output_field_still_conflicts() {
+    let cluster = build_cluster().await;
+    let node = cluster.client(0);
+    node.schema_add("type Snap { status: String  content: String }")
+        .expect("schema add");
+    let data = node
+        .query(r#"mutation { add_Snap(input: {status: "streaming", content: "init"}) { _docID } }"#)
+        .expect("create doc");
+    let id = data["add_Snap"][0]["_docID"].as_str().unwrap().to_string();
+    let tx1 = node.tx_create().expect("tx1 create");
+    let tx2 = node.tx_create().expect("tx2 create");
+
+    node.query_with_tx(
+        &format!(r#"mutation {{ update_Snap(docID: "{id}", input: {{status: "claimed"}}) {{ content }} }}"#),
+        &tx1,
+    )
+    .expect("tx1 update with selected content");
+    node.query_with_tx(
+        &format!(r#"mutation {{ update_Snap(docID: "{id}", input: {{content: "changed"}}) {{ _docID }} }}"#),
+        &tx2,
+    )
+    .expect("tx2 update selected field");
+
+    node.tx_commit(&tx2).expect("tx2 commit");
+    let err = node
+        .tx_commit(&tx1)
+        .expect_err("selected output change must conflict");
+    assert!(format!("{err:#}").contains("transaction conflict"));
+}
+
+/// Composite index maintenance depends on every indexed component, including
+/// components the mutation did not patch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn issue1194_composite_index_component_still_conflicts() {
+    let cluster = build_cluster().await;
+    let node = cluster.client(0);
+    node.schema_add(
+        r#"type Snap @index(includes: [{field: "status", direction: ASC}, {field: "content", direction: ASC}]) { status: String content: String }"#,
+    )
+    .expect("schema add");
+    let data = node
+        .query(r#"mutation { add_Snap(input: {status: "streaming", content: "init"}) { _docID } }"#)
+        .expect("create doc");
+    let id = data["add_Snap"][0]["_docID"].as_str().unwrap().to_string();
+    let tx1 = node.tx_create().expect("tx1 create");
+    let tx2 = node.tx_create().expect("tx2 create");
+
+    node.query_with_tx(
+        &format!(
+            r#"mutation {{ update_Snap(docID: "{id}", input: {{content: "first"}}) {{ _docID }} }}"#
+        ),
+        &tx1,
+    )
+    .expect("tx1 update composite component");
+    node.query_with_tx(
+        &format!(r#"mutation {{ update_Snap(docID: "{id}", input: {{status: "claimed"}}) {{ _docID }} }}"#),
+        &tx2,
+    )
+    .expect("tx2 update other composite component");
+
+    node.tx_commit(&tx1).expect("tx1 commit");
     let err = node
         .tx_commit(&tx2)
-        .expect_err("tx2 commit must conflict: same document, overlapping snapshots");
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("transaction conflict"),
-        "expected a transaction conflict, got: {msg}"
-    );
+        .expect_err("changed composite index dependency must conflict");
+    assert!(format!("{err:#}").contains("transaction conflict"));
+}
+
+/// Projection is local to the supported mutation read. A normal query later in
+/// that same explicit transaction must still register its full read set.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn issue1194_later_full_read_still_conflicts() {
+    let cluster = build_cluster().await;
+    let node = cluster.client(0);
+    node.schema_add("type Snap { status: String  content: String }")
+        .expect("schema add");
+    let data = node
+        .query(r#"mutation { add_Snap(input: {status: "streaming", content: "init"}) { _docID } }"#)
+        .expect("create doc");
+    let id = data["add_Snap"][0]["_docID"].as_str().unwrap().to_string();
+    let tx1 = node.tx_create().expect("tx1 create");
+    let tx2 = node.tx_create().expect("tx2 create");
+
+    node.query_with_tx(
+        &format!(
+            r#"mutation {{ update_Snap(docID: "{id}", input: {{content: "first"}}) {{ _docID }} }}"#
+        ),
+        &tx1,
+    )
+    .expect("projected tx1 update");
+    node.query_with_tx(
+        &format!(r#"query {{ Snap(docID: "{id}") {{ status }} }}"#),
+        &tx1,
+    )
+    .expect("ordinary tx1 read");
+    node.query_with_tx(
+        &format!(r#"mutation {{ update_Snap(docID: "{id}", input: {{status: "claimed"}}) {{ _docID }} }}"#),
+        &tx2,
+    )
+    .expect("tx2 update");
+
+    node.tx_commit(&tx2).expect("tx2 commit");
+    let err = node
+        .tx_commit(&tx1)
+        .expect_err("later full read must still conflict");
+    assert!(format!("{err:#}").contains("transaction conflict"));
 }

@@ -350,6 +350,75 @@ impl UpdateNode {
 
         Ok(doc)
     }
+
+    /// Return the fields that make an unconditional, ID-targeted update safe
+    /// to revalidate as a projected read. Query predicates and returned fields
+    /// outside `_docID` need the full query snapshot and stay conservative.
+    fn projected_update_fields(&self) -> Option<RapidHashSet<String>> {
+        if self.doc_ids.is_none() || self.filter.is_some() {
+            return None;
+        }
+        let rendered_doc_id_only = self.document_mapping.render_keys.len() == 1
+            && self.document_mapping.render_keys[0].key == "_docID"
+            && self.document_mapping.render_keys[0].index == 0
+            && self
+                .document_mapping
+                .indexes_by_name_iter()
+                .all(|(name, indexes)| name == "_docID" && indexes == [0])
+            && self
+                .document_mapping
+                .child_mappings
+                .iter()
+                .all(Option::is_none);
+        if !rendered_doc_id_only {
+            return None;
+        }
+
+        let collection = self.collection.as_deref()?;
+        // A projected fetch cannot safely perform a schema migration or a
+        // query-backed view transformation.
+        if collection.previous_version.is_some() || collection.query.is_some() {
+            return None;
+        }
+
+        // The dependency set below models top-level scalar patches. Relation,
+        // object, and other structural input forms keep the full read until
+        // their nested mutation dependencies can be enumerated here.
+        if self.input.fields.keys().any(|name| {
+            collection
+                .fields
+                .iter()
+                .find(|field| field.name == *name)
+                .is_none_or(|field| !field.kind.is_scalar() || field.relation_name.is_some())
+        }) {
+            return None;
+        }
+
+        let mut fields: RapidHashSet<String> = self.input.fields.keys().cloned().collect();
+        // Index maintenance reads every component of an index touched by this
+        // patch. Including schema indexes that are currently inactive is a
+        // harmless conservative superset.
+        for index in &collection.indexes {
+            if index
+                .fields
+                .iter()
+                .any(|field| self.input.fields.contains_key(&field.name))
+            {
+                fields.extend(index.fields.iter().map(|field| field.name.clone()));
+            }
+        }
+        // Embedding generation may depend on fields beyond the patch itself.
+        for embedding in &collection.vector_embeddings {
+            if embedding
+                .fields
+                .iter()
+                .any(|field| self.input.fields.contains_key(field))
+            {
+                fields.extend(embedding.fields.iter().cloned());
+            }
+        }
+        (!fields.is_empty()).then_some(fields)
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -420,10 +489,27 @@ impl PlanNode for UpdateNode {
                 // the lensedFetcher migrates documents on read, ensuring migrated
                 // field values (e.g., SetDefault) are present before the update
                 // patch is applied and the result is returned.
-                let fetch_result = self
-                    .fetcher
-                    .get_by_ids(&self.collection_name, std::slice::from_ref(&doc_id_str))
-                    .await?;
+                let projected_fields = self.projected_update_fields();
+                let projected_result = if let Some(fields) = &projected_fields {
+                    self.fetcher
+                        .get_by_ids_projected(
+                            &self.collection_name,
+                            std::slice::from_ref(&doc_id_str),
+                            fields,
+                        )
+                        .await?
+                } else {
+                    None
+                };
+                let (fetch_result, projected_fields) = match projected_result {
+                    Some(result) => (result, projected_fields),
+                    None => (
+                        self.fetcher
+                            .get_by_ids(&self.collection_name, std::slice::from_ref(&doc_id_str))
+                            .await?,
+                        None,
+                    ),
+                };
                 let doc_opt = fetch_result.into_docs().into_iter().next();
 
                 if let Some(mut doc) = doc_opt {
@@ -520,10 +606,26 @@ impl PlanNode for UpdateNode {
                     }
 
                     // Persist update with modified field tracking
-                    let result = self
-                        .mutator
-                        .update_if_unchanged(&self.collection_name, expected, doc, modified_fields)
-                        .await?;
+                    let result = if let Some(expected_fields) = projected_fields {
+                        self.mutator
+                            .update_if_fields_unchanged(
+                                &self.collection_name,
+                                expected,
+                                expected_fields,
+                                doc,
+                                modified_fields,
+                            )
+                            .await?
+                    } else {
+                        self.mutator
+                            .update_if_unchanged(
+                                &self.collection_name,
+                                expected,
+                                doc,
+                                modified_fields,
+                            )
+                            .await?
+                    };
 
                     // Convert to plan Doc
                     let plan_doc = self.update_result_to_doc(&result)?;

@@ -235,6 +235,16 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
         self.get_by_ids_impl(collection_name, doc_ids).await
     }
 
+    async fn get_by_ids_projected(
+        &self,
+        collection_name: &str,
+        doc_ids: &[String],
+        fields: &rapidhash::RapidHashSet<String>,
+    ) -> query::error::Result<Option<FetchByIdsResult>> {
+        self.get_by_ids_projected_impl(collection_name, doc_ids, fields)
+            .await
+    }
+
     async fn get_by_field_value(
         &self,
         collection_name: &str,

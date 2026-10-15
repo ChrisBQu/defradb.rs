@@ -617,6 +617,22 @@ pub trait DocMutator: MaybeSendSync {
         self.update(collection_name, doc, modified_fields).await
     }
 
+    /// Update only if the named fields in the previously selected document
+    /// still match. Implementations without projected-write support retain
+    /// the conservative full-document check.
+    async fn update_if_fields_unchanged(
+        &self,
+        collection_name: &str,
+        expected: Document,
+        expected_fields: RapidHashSet<String>,
+        doc: Document,
+        modified_fields: RapidHashSet<String>,
+    ) -> Result<UpdateResult> {
+        let _ = expected_fields;
+        self.update_if_unchanged(collection_name, expected, doc, modified_fields)
+            .await
+    }
+
     /// Delete a document by ID.
     ///
     /// # Arguments

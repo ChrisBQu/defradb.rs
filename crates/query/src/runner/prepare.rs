@@ -201,6 +201,27 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         .collect(),
                 };
                 entry.doc_ids = Some(ids.clone());
+                // A single unconditional ID update with no external write
+                // inputs does not need a preparation-time document snapshot:
+                // UpdateNode will fetch and validate the exact read set that
+                // the mutation/output selection needs. Avoiding this eager
+                // full read is required for its projected `_docID`-only path
+                // to narrow the transaction's initial dependencies. Multi-
+                // mutation requests retain the overlay read below because
+                // later statements may depend on earlier writes.
+                if mutation.mutation_type == MutationType::Update
+                    && mutations.len() == 1
+                    && mutation.doc_ids.is_some()
+                    && mutation.filter.is_none()
+                    && mutation.encrypt_fields.is_empty()
+                    && !mutation.encrypt_doc
+                    && !mutator.requires_write_preparation()
+                    && collection.vector_embeddings.is_empty()
+                {
+                    entry.update_targets.extend(ids);
+                    prepared.mutations.insert(mutation.output_name(), entry);
+                    continue;
+                }
                 let mut docs = fetcher
                     .get_by_ids(&mutation.collection_name, &ids)
                     .await?
