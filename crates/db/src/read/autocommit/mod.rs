@@ -279,7 +279,7 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
             };
 
             match collection
-                .get_by_doc_id(&datastore, &systemstore, &doc_id)
+                .get_by_doc_id_read_only(&datastore, &systemstore, &doc_id)
                 .await
                 .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?
             {

@@ -11,7 +11,7 @@ impl Collection {
         datastore: &NamespaceView,
         doc_short_id: u64,
     ) -> Result<Option<bytes::Bytes>> {
-        self.read_document_blob_and_version(datastore, doc_short_id)
+        self.read_document_blob_and_version(datastore, doc_short_id, false)
             .await
             .map(|(data, _)| data)
     }
@@ -20,25 +20,35 @@ impl Collection {
         &self,
         datastore: &NamespaceView,
         doc_short_id: u64,
+        full_value_read: bool,
     ) -> Result<(Option<bytes::Bytes>, Option<String>)> {
         let key = self.doc_key(doc_short_id);
-        // A schema transition replaces the whole value. Until that happens,
-        // old-version blobs require a whole-value dependency: their local IDs
-        // belong to the old definition, not this collection's projection.
+        // Writable callers retain the all-declared-fields projection so the
+        // engine validates schema part identities. A read-only full-document
+        // fetch can use the whole key directly because it needs every field
+        // and does not commit a dependency set. A schema transition replaces
+        // the whole value, but a full read works for current and historical
+        // versions.
         let version = self.load_version(datastore, doc_short_id).await?;
-        let ids = self.part_ids(datastore).await?;
-        let parts = ids.as_ref().and_then(|ids| {
-            self.def
-                .fields
-                .iter()
-                .map(|field| ids.get(&field.name).copied())
-                .collect::<Option<Vec<_>>>()
-        });
-        let data = match parts {
-            Some(parts) if !parts.is_empty() && version.as_deref() == Some(self.version_id()) => {
-                datastore.get_parts(&key, &parts).await
+        let data = if full_value_read {
+            datastore.get(&key).await
+        } else {
+            let ids = self.part_ids(datastore).await?;
+            let parts = ids.as_ref().and_then(|ids| {
+                self.def
+                    .fields
+                    .iter()
+                    .map(|field| ids.get(&field.name).copied())
+                    .collect::<Option<Vec<_>>>()
+            });
+            match parts {
+                Some(parts)
+                    if !parts.is_empty() && version.as_deref() == Some(self.version_id()) =>
+                {
+                    datastore.get_parts(&key, &parts).await
+                }
+                _ => datastore.get(&key).await,
             }
-            _ => datastore.get(&key).await,
         }
         .map_err(Error::Storage)?;
         Ok((data, version))
@@ -114,6 +124,24 @@ impl Collection {
             .await
     }
 
+    /// Get a complete document on a read-only snapshot without loading the
+    /// field-part map used by projected reads. Writable callers keep using
+    /// `get_by_doc_id`, which validates the declared field parts separately.
+    pub(crate) async fn get_by_doc_id_read_only(
+        &self,
+        datastore: &NamespaceView,
+        systemstore: &NamespaceView,
+        doc_id: &DocID,
+    ) -> Result<Option<Document>> {
+        let Some((doc_short_id, canonical_doc_id)) =
+            self.resolve_doc_identity(systemstore, doc_id).await?
+        else {
+            return Ok(None);
+        };
+        self.get_with_datastore_full_value(datastore, doc_short_id, &canonical_doc_id)
+            .await
+    }
+
     /// Check whether a document exists (and is not deleted) by its public
     /// DocID, resolving the short ID through the systemstore mapping.
     pub async fn exists_by_doc_id(
@@ -161,8 +189,37 @@ impl Collection {
         doc_id: &DocID,
         check_deleted: bool,
     ) -> Result<Option<(Document, bool)>> {
+        self.get_with_datastore_include_deleted_impl(
+            datastore,
+            doc_short_id,
+            doc_id,
+            check_deleted,
+            false,
+        )
+        .await
+    }
+
+    async fn get_with_datastore_full_value(
+        &self,
+        datastore: &NamespaceView,
+        doc_short_id: u64,
+        doc_id: &DocID,
+    ) -> Result<Option<Document>> {
+        self.get_with_datastore_include_deleted_impl(datastore, doc_short_id, doc_id, false, true)
+            .await
+            .map(|result| result.map(|(doc, _)| doc))
+    }
+
+    async fn get_with_datastore_include_deleted_impl(
+        &self,
+        datastore: &NamespaceView,
+        doc_short_id: u64,
+        doc_id: &DocID,
+        check_deleted: bool,
+        full_value_read: bool,
+    ) -> Result<Option<(Document, bool)>> {
         let (data, version) = self
-            .read_document_blob_and_version(datastore, doc_short_id)
+            .read_document_blob_and_version(datastore, doc_short_id, full_value_read)
             .await?;
 
         match data {
