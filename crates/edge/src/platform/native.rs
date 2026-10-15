@@ -64,7 +64,10 @@ impl Rt {
 /// inner error.
 // The edge is the one place that may ask which runtime the caller is on.
 #[allow(clippy::disallowed_methods)]
-pub(crate) fn wait_here<T>(wait: impl FnOnce() -> T) -> Result<thread::Result<T>, EdgeError> {
+pub(crate) fn wait_here<T, W>(wait: W) -> Result<thread::Result<T>, EdgeError>
+where
+    W: FnOnce() -> T,
+{
     let flavor = Handle::try_current()
         .ok()
         .map(|current| current.runtime_flavor());
