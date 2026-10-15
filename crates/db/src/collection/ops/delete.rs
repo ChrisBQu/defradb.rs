@@ -258,7 +258,7 @@ impl<S: Store> crate::database::DB<S> {
 
     /// Delete data for a chunk of doc short IDs within a single write transaction.
     async fn truncate_chunk(&self, collection: &Collection, doc_short_ids: &[u64]) -> Result<()> {
-        use storage::keys::{HeadstoreDocKey, HeadstorePriorityKey};
+        use storage::keys::HeadstorePriorityKey;
 
         let txn = self.new_txn(false).await?;
         let datastore = txn.datastore()?;
@@ -281,31 +281,19 @@ impl<S: Store> crate::database::DB<S> {
                     .await
                     .map_err(Error::Storage)?;
 
-                let head_prefix = HeadstoreDocKey::document_prefix(doc_short_id);
-                let mut block_cids = Vec::new();
-                {
-                    let opts = IterOptions::new().with_prefix(head_prefix.clone());
-                    let mut iter = headstore.iterator(opts).await.map_err(Error::Storage)?;
-                    while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
-                        if let Some(cid_str) = extract_last_path_segment_str(&pair.key) {
-                            if let Ok(cid) = cid::Cid::try_from(cid_str.as_str()) {
-                                block_cids.push(cid);
-                            }
-                        }
-                    }
-                    iter.close().await.map_err(Error::Storage)?;
-                }
-                delete_prefix(
-                    &headstore,
-                    crate::block::heads::document::document_markers(doc_short_id),
-                )
-                .await?;
+                let heads = crate::block::heads::document::load(&headstore, doc_short_id)
+                    .await
+                    .map_err(Error::Storage)?;
+                let block_cids = crate::block::heads::document::live_cids(&heads);
+                headstore
+                    .delete(&crate::block::heads::document::set_key(doc_short_id))
+                    .await
+                    .map_err(Error::Storage)?;
                 delete_prefix(
                     &headstore,
                     crate::block::heads::document::document_publications(doc_short_id),
                 )
                 .await?;
-                delete_prefix(&headstore, head_prefix).await?;
                 delete_prefix(
                     &headstore,
                     HeadstorePriorityKey::document_prefix(doc_short_id),
@@ -361,8 +349,7 @@ impl<S: Store> crate::database::DB<S> {
 
     /// Delete collection-level metadata: index entries and collection heads.
     async fn truncate_collection_metadata(&self, collection_id: &str, short_id: u32) -> Result<()> {
-        use storage::keys::headstore::HeadstoreColSuperseded;
-        use storage::keys::{HeadstoreColKey, IndexDataStoreKey};
+        use storage::keys::{HeadstoreColPublishedKey, HeadstoreColSetKey, IndexDataStoreKey};
 
         let txn = self.new_txn(false).await?;
         let datastore = txn.datastore()?;
@@ -375,30 +362,18 @@ impl<S: Store> crate::database::DB<S> {
             let idx_prefix = IndexDataStoreKey::collection_prefix(short_id);
             delete_prefix(&datastore, idx_prefix).await?;
 
-            // Collect block CIDs from collection heads, then delete
-            let col_head_prefix = HeadstoreColKey::collection_prefix(short_id);
-            let mut block_cids = Vec::new();
-            {
-                let opts = IterOptions::new().with_prefix(col_head_prefix.clone());
-                let mut iter = headstore.iterator(opts).await.map_err(Error::Storage)?;
-                while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
-                    if let Some(cid_str) = extract_last_path_segment_str(&pair.key) {
-                        if let Ok(cid) = cid::Cid::try_from(cid_str.as_str()) {
-                            block_cids.push(cid);
-                        }
-                    }
-                }
-                iter.close().await.map_err(Error::Storage)?;
-            }
-            delete_prefix(&headstore, col_head_prefix).await?;
-            // Supersede markers must go with the heads they name. A marker
-            // left behind would supersede a block that a later write recreates
-            // under the same content-addressed CID.
-            delete_prefix(
-                &headstore,
-                HeadstoreColSuperseded::collection_prefix(short_id),
-            )
-            .await?;
+            // Collect block CIDs from the collection's heads, then delete them
+            // with the guards that record their publication.
+            let block_cids = crate::block::heads::live_collection_heads(&headstore, short_id)
+                .await
+                .map_err(Error::Storage)?
+                .live;
+            headstore
+                .delete(&HeadstoreColSetKey::new(short_id).bytes())
+                .await
+                .map_err(Error::Storage)?;
+            delete_prefix(&headstore, HeadstoreColPublishedKey::collection_prefix(short_id))
+                .await?;
 
             crate::block::cleanup::delete_owned_dag(&blockstore, &systemstore, &block_cids, "")
                 .await?;

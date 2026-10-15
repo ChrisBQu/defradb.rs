@@ -91,8 +91,6 @@ mod shared_owner_tests {
         Block, CrdtDelta, LwwDeltaPayload, Signature, SignatureHeader, SignatureType,
     };
     use document::{DocID, NormalValue};
-    use storage::corekv::Key;
-    use storage::keys::headstore::{HeadstoreColKey, HeadstoreColSuperseded};
 
     use db::read::commits::{CommitsFetcher, CommitsQueryOptions};
     use db::{VersionedFetcher, DB};
@@ -132,21 +130,19 @@ mod shared_owner_tests {
                 .set(&child_cid.to_bytes(), &child.to_dag_cbor().unwrap())
                 .await
                 .unwrap();
-            headstore
-                .set(&HeadstoreColKey::new(1, parent_cid).bytes(), &[])
-                .await
-                .unwrap();
-            headstore
-                .set(&HeadstoreColKey::new(1, child_cid).bytes(), &[])
-                .await
-                .unwrap();
-            headstore
-                .set(
-                    &HeadstoreColSuperseded::new(1, parent_cid, child_cid).bytes(),
-                    &[],
+            for (cid, priority, parents) in [
+                (parent_cid, 1, vec![]),
+                (child_cid, 2, vec![parent_cid]),
+            ] {
+                let set = db::block::heads::collection_set(&headstore, 1)
+                    .await
+                    .unwrap();
+                db::block::heads::publish_collection_block(
+                    &headstore, 1, &set, cid, priority, &parents,
                 )
                 .await
                 .unwrap();
+            }
         }
         txn.commit().await.unwrap();
 

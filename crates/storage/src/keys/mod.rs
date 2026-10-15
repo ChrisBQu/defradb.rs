@@ -63,9 +63,9 @@ pub use doc_id_index::{
 pub use document::{deleted_doc_key, doc_key, DELETED_KEY_PREFIX, DOC_KEY_PREFIX};
 pub use encstore::EncstoreKey;
 pub use headstore::{
-    HeadstoreColKey, HeadstoreColSuperseded, HeadstoreCollectionDefinition,
-    HeadstoreCollectionSetDefinition, HeadstoreDocKey, HeadstoreFieldDefinition,
-    HeadstorePriorityKey,
+    HeadstoreColPublishedKey, HeadstoreColSetKey, HeadstoreCollectionDefinition,
+    HeadstoreCollectionSetDefinition, HeadstoreDocKey, HeadstoreDocSetKey,
+    HeadstoreFieldDefinition, HeadstorePriorityKey,
 };
 pub use peerstore::{
     PeerstoreSERetry, ReplicatorKey, ReplicatorRetryDocIDKey, ReplicatorRetryIDKey,
@@ -105,7 +105,7 @@ mod tests {
         // Headstore keys
         let cid = test_cid();
         let _: Box<dyn Key> = Box::new(HeadstoreDocKey::new(42, "field", cid));
-        let _: Box<dyn Key> = Box::new(HeadstoreColKey::new(1, cid));
+        let _: Box<dyn Key> = Box::new(HeadstoreColSetKey::new(1));
         let _: Box<dyn Key> = Box::new(HeadstoreFieldDefinition::new("col", "field", cid));
         let _: Box<dyn Key> = Box::new(HeadstoreCollectionDefinition::new("col", cid));
         let _: Box<dyn Key> = Box::new(HeadstoreCollectionSetDefinition::new("col", cid));
@@ -157,7 +157,7 @@ mod tests {
         // Headstore: 6 keys
         let cid = test_cid();
         let _h1 = HeadstoreDocKey::new(42, "f", cid);
-        let _h2 = HeadstoreColKey::new(1, cid);
+        let _h2 = HeadstoreColSetKey::new(1);
         let _h3 = HeadstoreFieldDefinition::new("c", "f", cid);
         let _h4 = HeadstoreCollectionDefinition::new("c", cid);
         let _h5 = HeadstoreCollectionSetDefinition::new("c", cid);

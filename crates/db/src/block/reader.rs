@@ -1,6 +1,6 @@
 //! Reading committed blocks and their deltas through `DB` / `DbTxn`.
 
-use crate::block::builder::{get_all_field_heads, BlockResult};
+use crate::block::builder::{BlockResult, DocHeadsSnapshot};
 use document::{DocID, Document};
 
 /// Read a committed document by ID from a collection, in a `Send`-safe way.
@@ -109,11 +109,11 @@ pub async fn read_latest_composite_block<S: storage::corekv::Store>(
         .map(|doc_ref| doc_ref.doc_short_id)
         .ok_or_else(|| format!("No doc-ID mapping found for doc {}", doc_id))?;
 
-    let composite_heads = get_all_field_heads(&headstore, doc_short_id, "C").await?;
-
-    let composite_cid = composite_heads
+    let composite_cid = DocHeadsSnapshot::load(&headstore, doc_short_id)
+        .await?
+        .field_heads("C")
         .first()
-        .map(|entry| entry.cid)
+        .copied()
         .ok_or_else(|| format!("No composite head found for doc {}", doc_id))?;
 
     let blockstore = txn

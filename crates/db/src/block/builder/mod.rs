@@ -41,7 +41,7 @@ use defra_core::signing::SigningConfig;
 use document::{DocID, Document, NormalValue};
 use storage::corekv::Key;
 use storage::keys::doc_id_index::DocRef;
-use storage::keys::headstore::{HeadstoreColKey, HeadstoreDocKey, HeadstorePriorityKey};
+use storage::keys::headstore::{HeadstoreDocKey, HeadstorePriorityKey};
 
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
@@ -544,128 +544,43 @@ pub(crate) fn priority_index_key(doc_short_id: u64, priority: u64, cid: Cid) -> 
     HeadstorePriorityKey::new(doc_short_id, priority, cid).bytes()
 }
 
-/// A single head entry for a document field.
-#[derive(Clone)]
-pub struct FieldHeadEntry {
-    /// The CID of the head
-    pub cid: Cid,
-    /// The full key (for deletion when replacing)
-    pub key: Vec<u8>,
-}
-
-/// Get all existing heads for a specific field of a document.
-///
-/// During concurrent P2P updates, a field can have multiple heads (branches).
-/// Returns all current head CIDs for the field, sorted by CID string
-/// representation to match Go's deterministic head ordering.
-pub async fn get_all_field_heads(
-    headstore: &NamespaceView,
-    doc_short_id: u64,
-    field_id: &str,
-) -> Result<Vec<FieldHeadEntry>, String> {
-    use storage::corekv::IterOptions;
-
-    let prefix = HeadstoreDocKey::field_prefix(doc_short_id, field_id);
-    let prefix_len = prefix.len();
-    let opts = IterOptions::new().with_prefix(prefix);
-
-    let mut iter = crate::block::heads::document::iterator(headstore, opts)
-        .await
-        .map_err(|e| format!("Failed to create headstore iterator: {}", e))?;
-
-    let mut entries = Vec::new();
-    while let Some(kv_pair) = iter
-        .next()
-        .await
-        .map_err(|e| format!("Failed to iterate headstore: {}", e))?
-    {
-        // Key: /d/{doc_short_id}/{field_id}/{cid}: the CID is the suffix
-        // after the scanned prefix (the short ID segment is binary, so the
-        // key cannot be split on '/').
-        let cid_str = String::from_utf8_lossy(&kv_pair.key[prefix_len..]);
-        if let Ok(cid) = cid_str.parse::<Cid>() {
-            entries.push(FieldHeadEntry {
-                cid,
-                key: kv_pair.key.clone(),
-            });
-        }
-    }
-
-    // Sort by CID string representation to match Go's Block.New() sorting.
-    entries.sort_by_cached_key(|a| a.cid.to_string());
-    Ok(entries)
-}
-
-/// Snapshot of all head entries for a single document, loaded in one scan.
-///
-/// Replaces multiple overlapping headstore scans with a single prefix scan
-/// of `/d/{doc_id}/`.
+/// A document's live heads, read with one point read of its head set.
 pub struct DocHeadsSnapshot {
     max_priority: u64,
     max_priority_by_field: RapidHashMap<String, u64>,
-    entries_by_field: RapidHashMap<String, Vec<FieldHeadEntry>>,
-    reclaimable: crate::block::heads::document::Reclaimable,
+    heads_by_field: RapidHashMap<String, Vec<Cid>>,
 }
 
 impl DocHeadsSnapshot {
-    /// Load all heads for a document in a single headstore scan, gathering
-    /// on the way what the write that loads them will reclaim.
+    /// Load all heads for a document: one point read, validated by nothing.
     pub async fn load(headstore: &NamespaceView, doc_short_id: u64) -> Result<Self, String> {
-        let prefix_len = HeadstoreDocKey::document_prefix(doc_short_id).len();
-        let mut max_priority: u64 = 0;
-        let mut max_priority_by_field: RapidHashMap<String, u64> = RapidHashMap::new();
-        let mut entries_by_field: RapidHashMap<String, Vec<FieldHeadEntry>> = RapidHashMap::new();
-
-        let reclaimable = crate::block::heads::document::load(headstore, doc_short_id, |kv_pair| {
-            let priority = decode_priority_varint(&kv_pair.value);
-            max_priority = max_priority.max(priority);
-
-            // Key: /d/{doc_short_id}/{field_id}/{cid}: parse the suffix
-            // after the scanned prefix (the short ID segment is binary).
-            let suffix = String::from_utf8_lossy(&kv_pair.key[prefix_len..]);
-            if let Some((field_id, cid_str)) = suffix.split_once('/') {
-                if let Ok(cid) = cid_str.parse::<Cid>() {
-                    max_priority_by_field
-                        .entry(field_id.to_string())
-                        .and_modify(|max| *max = (*max).max(priority))
-                        .or_insert(priority);
-                    entries_by_field
-                        .entry(field_id.to_string())
-                        .or_default()
-                        .push(FieldHeadEntry {
-                            cid,
-                            key: kv_pair.key.clone(),
-                        });
-                }
-            }
-        })
-        .await
-        .map_err(|e| format!("Failed to iterate headstore: {}", e))?;
-
-        // Sort each field's entries by CID string to match Go's deterministic ordering.
-        for entries in entries_by_field.values_mut() {
-            entries.sort_by_cached_key(|a| a.cid.to_string());
-        }
-
-        Ok(Self {
-            max_priority,
-            max_priority_by_field,
-            entries_by_field,
-            reclaimable,
-        })
-    }
-
-    /// Reclaim, in the writer's transaction, the superseded heads this load
-    /// found and the ones `writes` superseded since, without a second scan.
-    pub async fn reclaim(
-        self,
-        headstore: &NamespaceView,
-        writes: crate::block::heads::document::HeadWrites,
-    ) -> Result<crate::block::heads::PruneOutcome, String> {
-        self.reclaimable
-            .reclaim(headstore, writes)
+        let set = crate::block::heads::document::load(headstore, doc_short_id)
             .await
-            .map_err(|e| format!("Failed to reclaim superseded document heads: {e}"))
+            .map_err(|e| format!("Failed to read document heads: {}", e))?;
+        let mut snapshot = Self {
+            max_priority: 0,
+            max_priority_by_field: RapidHashMap::new(),
+            heads_by_field: RapidHashMap::new(),
+        };
+        // A name is `{field}/{cid}`; names ascend, so each field's heads are
+        // already in CID text order, as Go's Block.New() sorts them.
+        for (name, priority) in set.live() {
+            let Some((field, cid)) = crate::block::heads::document::parse_name(name) else {
+                continue;
+            };
+            snapshot.max_priority = snapshot.max_priority.max(priority);
+            let max = snapshot
+                .max_priority_by_field
+                .entry(field.to_string())
+                .or_default();
+            *max = (*max).max(priority);
+            snapshot
+                .heads_by_field
+                .entry(field.to_string())
+                .or_default()
+                .push(cid);
+        }
+        Ok(snapshot)
     }
 
     pub fn max_priority(&self) -> u64 {
@@ -679,9 +594,9 @@ impl DocHeadsSnapshot {
             .unwrap_or_default()
     }
 
-    /// Get heads for a specific field (returns empty vec if none).
-    pub fn field_heads(&self, field_id: &str) -> Vec<FieldHeadEntry> {
-        self.entries_by_field
+    /// Heads for a specific field (empty if none).
+    pub fn field_heads(&self, field_id: &str) -> Vec<Cid> {
+        self.heads_by_field
             .get(field_id)
             .cloned()
             .unwrap_or_default()

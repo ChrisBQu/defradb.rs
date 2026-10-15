@@ -2,10 +2,9 @@
 //! only the tables that hold that entity.
 //!
 //! Every table regolith writes keeps a bloom filter of the entity prefixes
-//! its keys carry, as `families` cuts them: one document's heads, its
-//! markers, its commit priority index and its head publications; one
-//! collection's heads and markers, its document values, deletion markers and
-//! versions; one index's entries; one ACP object's tuples. A read-only scan
+//! its keys carry, as `families` cuts them: one document's commit priority
+//! index and head publications; one collection's document values, deletion
+//! markers and versions; one index's entries; one ACP object's tuples. A read-only scan
 //! of exactly a prefix seeks it as a prefix (`iterator`), and regolith passes
 //! over every table whose filter lacks the entity the prefix names. A
 //! transaction's scans are read through its cursor, which regolith positions
@@ -33,7 +32,7 @@ impl PrefixExtractor for DefraPrefixExtractor {
     /// takes a new name, so tables built under the old cuts are read without
     /// their prefix filter until a compaction rewrites them.
     fn name(&self) -> &'static str {
-        "defradb-entities-v1"
+        "defradb-entities-v2"
     }
 }
 

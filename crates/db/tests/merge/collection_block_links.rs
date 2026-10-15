@@ -20,7 +20,6 @@ use defra_core::block::{
 use defra_core::merge::{BlockMetadata, MergeBlock, MergeHandler, MergeOutcome};
 use document::NormalValue;
 use schema::{CollectionVersion, FieldDescription, FieldKind};
-use storage::corekv::IterOptions;
 use storage::RegolithStore;
 
 const COLLECTION_ID: &str = "col-ledger";
@@ -119,28 +118,19 @@ async fn merge(handler: &Handler, cid: &Cid, bytes: &[u8]) -> MergeOutcome {
         .unwrap()
 }
 
-/// The collection's head keys, read through the headstore's own prefix rather
-/// than by matching text across every namespace in the store.
+/// The collection's live heads, as CID text.
 async fn collection_heads(db: &Arc<DB<RegolithStore>>) -> Vec<String> {
     let collection = db.get_collection("Ledger").unwrap().unwrap();
-    let prefix =
-        storage::keys::headstore::HeadstoreColKey::collection_prefix(collection.resolved_root_id());
     let txn = db.new_txn(true).await.unwrap();
-    let keys = {
-        let headstore = txn.headstore().unwrap();
-        let mut iter = headstore
-            .iterator(IterOptions::new().with_prefix(prefix).with_keys_only(true))
-            .await
-            .unwrap();
-        let mut keys = Vec::new();
-        while let Some(pair) = iter.next().await.unwrap() {
-            keys.push(String::from_utf8_lossy(&pair.key).into_owned());
-        }
-        iter.close().await.unwrap();
-        keys
-    };
+    let heads = db::block::heads::live_collection_heads(
+        &txn.headstore().unwrap(),
+        collection.resolved_root_id(),
+    )
+    .await
+    .unwrap()
+    .live;
     let _ = txn.discard();
-    keys
+    heads.iter().map(ToString::to_string).collect()
 }
 
 #[tokio::test]
@@ -295,7 +285,6 @@ async fn assert_ancestor_superseded_by_root(
     .unwrap();
     let _ = txn.discard();
     assert_eq!(live.live, vec![*root]);
-    assert_eq!(live.superseded, 0);
     let heads = collection_heads(db).await;
     assert!(
         !heads.iter().any(|key| key.contains(&ancestor.to_string())),

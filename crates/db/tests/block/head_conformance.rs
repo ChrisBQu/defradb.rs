@@ -7,12 +7,11 @@ use std::sync::Arc;
 
 use cid::Cid;
 use datastore::{NamespaceView, SharedTxn};
-use db::block::heads::{live_collection_heads, prune_superseded_heads, record_supersedes};
+use db::block::heads::{collection_set, live_collection_heads, publish_collection_block};
 use defra_core::block::generate_cid_from_bytes;
 use serde::Serialize;
 use serde_json::{json, Value};
-use storage::corekv::{Key, Store};
-use storage::keys::headstore::HeadstoreColKey;
+use storage::corekv::Store;
 use storage::namespace::Namespace;
 use storage::RegolithStore;
 
@@ -203,7 +202,13 @@ async fn head_queries_match_executable_lean() {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let expected: Vec<Value> = serde_json::from_slice(&output.stdout).unwrap();
+        let mut expected: Vec<Value> = serde_json::from_slice(&output.stdout).unwrap();
+        // The oracle also counts the markers a head set no longer keeps.
+        for read in &mut expected {
+            if let Some(read) = read.as_object_mut() {
+                read.remove("superseded");
+            }
+        }
         let store = RegolithStore::in_memory().unwrap();
         let mut txns: BTreeMap<u32, Arc<SharedTxn>> = BTreeMap::new();
         let mut actual = vec![];
@@ -228,19 +233,20 @@ async fn head_queries_match_executable_lean() {
                     match a.op {
                         "append" => {
                             let parents: Vec<_> = a.parents.into_iter().map(cid).collect();
-                            record_supersedes(&view, 3, &parents, cid(a.block))
-                                .await
-                                .unwrap();
-                            view.set(
-                                &HeadstoreColKey::new(3, cid(a.block)).bytes(),
-                                &[(a.block + 1) as u8],
+                            let set = collection_set(&view, 3).await.unwrap();
+                            publish_collection_block(
+                                &view,
+                                3,
+                                &set,
+                                cid(a.block),
+                                u64::from(a.block) + 1,
+                                &parents,
                             )
                             .await
                             .unwrap();
                         }
-                        "prune" => {
-                            prune_superseded_heads(&view, 3, usize::MAX).await.unwrap();
-                        }
+                        // Nothing is reclaimed: a head set holds no garbage.
+                        "prune" => {}
                         "read" => {
                             let found = live_collection_heads(&view, 3).await.unwrap();
                             let mut heads: Vec<_> = found
@@ -249,7 +255,7 @@ async fn head_queries_match_executable_lean() {
                                 .map(|head| (0..64).find(|b| cid(*b) == *head).unwrap())
                                 .collect();
                             heads.sort_unstable();
-                            actual.push(json!({"heads": heads, "superseded": found.superseded, "max_priority": found.max_priority}));
+                            actual.push(json!({"heads": heads, "max_priority": found.max_priority}));
                         }
                         _ => unreachable!(),
                     }

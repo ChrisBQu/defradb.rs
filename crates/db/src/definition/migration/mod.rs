@@ -6,6 +6,7 @@
 
 pub(crate) mod committed_lenses;
 mod counters;
+mod head_sets;
 pub mod document_parts;
 pub mod format;
 pub mod helpers;
@@ -31,6 +32,7 @@ impl<S: Store> DB<S> {
     /// documents or persisted lens configurations.
     pub(crate) async fn initialize_migrations(&self) -> Result<()> {
         self.maybe_migrate_v015_document_storage().await?;
+        self.maybe_migrate_head_sets().await?;
         self.maybe_backfill_commit_priority_index().await?;
         self.reload_lens_configs().await
     }

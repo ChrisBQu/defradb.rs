@@ -1,17 +1,16 @@
-//! The derived collection head set and the reclamation that bounds it.
+//! The collection head set: live exactly when nothing supersedes it, whatever
+//! the order the blocks arrive in, and written only by blind merges.
 //!
-//! Modeled in `proofs/tla/HeadSet.tla` and `proofs/lean/HeadSet/Core.lean`.
-//! The properties asserted here are the ones stated there: a head is live
-//! exactly when nothing supersedes it, reclaiming a superseded head does not
-//! change the answer, and two writers never write the same key.
+//! The properties asserted are the ones stated in `proofs/tla/HeadSet.tla`
+//! and `proofs/lean/HeadSet/Core.lean`: a head is live exactly when nothing
+//! supersedes it, and two writers never conflict.
 
 use cid::Cid;
 use datastore::{NamespaceView, SharedTxn};
-use db::block::heads::{live_collection_heads, prune_superseded_heads};
+use db::block::heads::{collection_set, live_collection_heads, publish_collection_block};
 use defra_core::block::generate_cid_from_bytes;
 use std::sync::Arc;
-use storage::corekv::{Key, Store};
-use storage::keys::headstore::{HeadstoreColKey, HeadstoreColSuperseded};
+use storage::corekv::Store;
 use storage::namespace::Namespace;
 use storage::RegolithStore;
 
@@ -35,309 +34,151 @@ async fn commit(shared: Arc<SharedTxn>) {
         .unwrap();
 }
 
-/// Write head keys and markers directly, so a case can be built that the
-/// writer would take many appends to reach.
-async fn seed(store: &RegolithStore, heads: &[(Cid, u64)], markers: &[(Cid, Cid)]) {
+/// Publish `cid` over `parents` in a transaction opened as `shared`.
+async fn publish_in(shared: &Arc<SharedTxn>, cid: Cid, priority: u64, parents: &[Cid]) {
+    let view = headstore(shared);
+    let set = collection_set(&view, COLLECTION).await.unwrap();
+    publish_collection_block(&view, COLLECTION, &set, cid, priority, parents)
+        .await
+        .unwrap();
+}
+
+async fn publish(store: &RegolithStore, cid: Cid, priority: u64, parents: &[Cid]) {
     let shared = SharedTxn::new(store.new_txn(false).await.unwrap());
-    let view = headstore(&shared);
-    for (cid, priority) in heads {
-        view.set(
-            &Key::bytes(&HeadstoreColKey::new(COLLECTION, *cid)),
-            &[*priority as u8],
-        )
-        .await
-        .unwrap();
-    }
-    for (parent, child) in markers {
-        view.set(
-            &Key::bytes(&HeadstoreColSuperseded::new(COLLECTION, *parent, *child)),
-            &[],
-        )
-        .await
-        .unwrap();
-    }
-    drop(view);
+    publish_in(&shared, cid, priority, parents).await;
     commit(shared).await;
 }
 
 async fn live(store: &RegolithStore) -> (Vec<Cid>, usize) {
     let shared = SharedTxn::new(store.new_txn(true).await.unwrap());
     let view = headstore(&shared);
-    let found = live_collection_heads(&view, COLLECTION).await.unwrap();
-    let mut cids = found.live;
+    let mut cids = live_collection_heads(&view, COLLECTION).await.unwrap().live;
     cids.sort_by_cached_key(Cid::to_string);
-    (cids, found.superseded)
+    let ahead = collection_set(&view, COLLECTION).await.unwrap().ahead().count();
+    (cids, ahead)
 }
 
-async fn stored_keys(store: &RegolithStore, prefix: Vec<u8>) -> Vec<String> {
-    let shared = SharedTxn::new(store.new_txn(true).await.unwrap());
-    let view = headstore(&shared);
-    let mut iter = view
-        .iterator(storage::corekv::IterOptions::new().with_prefix(prefix))
-        .await
-        .unwrap();
-    let mut keys = Vec::new();
-    while let Some(pair) = iter.next().await.unwrap() {
-        keys.push(String::from_utf8(pair.key).unwrap());
-    }
-    iter.close().await.unwrap();
-    keys.sort();
-    keys
-}
-
-async fn prune(store: &RegolithStore, max_keys: usize) -> db::block::heads::PruneOutcome {
-    let shared = SharedTxn::new(store.new_txn(false).await.unwrap());
-    let view = headstore(&shared);
-    let outcome = prune_superseded_heads(&view, COLLECTION, max_keys)
-        .await
-        .unwrap();
-    drop(view);
-    commit(shared).await;
-    outcome
-}
-
-/// `HeadSet.derivedHeads`: a stored head key is live exactly when no marker
-/// names it.
+/// A head is live exactly when no block supersedes it.
 #[tokio::test]
 async fn superseded_heads_are_not_live() {
     let store = RegolithStore::in_memory().unwrap();
     let (a, b, c) = (cid_of(b"a"), cid_of(b"b"), cid_of(b"c"));
-    seed(&store, &[(a, 1), (b, 2), (c, 3)], &[(a, c)]).await;
+    publish(&store, a, 1, &[]).await;
+    publish(&store, b, 2, &[]).await;
+    publish(&store, c, 3, &[a]).await;
 
-    let (heads, superseded) = live(&store).await;
     let mut expected = vec![b, c];
     expected.sort_by_cached_key(Cid::to_string);
-    assert_eq!(heads, expected);
-    assert_eq!(superseded, 1);
+    assert_eq!(live(&store).await, (expected, 0));
 }
 
-/// The merge join has to survive every ordering of the two prefixes, not just
-/// the one a small example happens to produce.
+/// Every pattern of superseded heads gives the heads nothing superseded.
 #[tokio::test]
-async fn merge_join_holds_for_every_supersede_pattern() {
+async fn the_live_set_holds_for_every_supersede_pattern() {
     let all: Vec<Cid> = (0..6u8).map(|i| cid_of(&[i])).collect();
     let superseder = cid_of(b"superseder");
 
     for pattern in 0u32..(1 << 6) {
         let store = RegolithStore::in_memory().unwrap();
-        let heads: Vec<(Cid, u64)> = all.iter().map(|cid| (*cid, 1)).collect();
-        let markers: Vec<(Cid, Cid)> = all
+        for cid in &all {
+            publish(&store, *cid, 1, &[]).await;
+        }
+        let superseded: Vec<Cid> = all
             .iter()
             .enumerate()
             .filter(|(index, _)| pattern & (1 << index) != 0)
-            .map(|(_, cid)| (*cid, superseder))
+            .map(|(_, cid)| *cid)
             .collect();
-        seed(&store, &heads, &markers).await;
+        publish(&store, superseder, 2, &superseded).await;
 
         let mut expected: Vec<Cid> = all
             .iter()
             .enumerate()
             .filter(|(index, _)| pattern & (1 << index) == 0)
             .map(|(_, cid)| *cid)
+            .chain([superseder])
             .collect();
         expected.sort_by_cached_key(Cid::to_string);
-
-        let (heads, superseded) = live(&store).await;
-        assert_eq!(heads, expected, "pattern {pattern:#08b}");
-        assert_eq!(superseded, markers.len(), "pattern {pattern:#08b}");
+        assert_eq!(live(&store).await, (expected, 0), "pattern {pattern:#08b}");
     }
 }
 
 /// Several blocks superseding one head is the state two concurrent appends
-/// leave behind. The head is superseded once, not once per marker.
+/// leave behind. The head is superseded once, not once per block.
 #[tokio::test]
-async fn a_head_superseded_by_siblings_is_counted_once() {
+async fn a_head_superseded_by_siblings_is_superseded_once() {
     let store = RegolithStore::in_memory().unwrap();
-    let (seed_cid, first, second) = (cid_of(b"seed"), cid_of(b"first"), cid_of(b"second"));
-    seed(
-        &store,
-        &[(seed_cid, 1), (first, 2), (second, 2)],
-        &[(seed_cid, first), (seed_cid, second)],
-    )
-    .await;
+    let (seed, first, second) = (cid_of(b"seed"), cid_of(b"first"), cid_of(b"second"));
+    publish(&store, seed, 1, &[]).await;
+    publish(&store, first, 2, &[seed]).await;
+    publish(&store, second, 2, &[seed]).await;
 
-    let (heads, superseded) = live(&store).await;
     let mut expected = vec![first, second];
     expected.sort_by_cached_key(Cid::to_string);
-    assert_eq!(heads, expected);
-    assert_eq!(superseded, 1);
+    assert_eq!(live(&store).await, (expected, 0));
 }
 
-/// Reclaiming is invisible: it removes keys the query already ignored, so the
-/// answer before and after is the same set.
+/// A block replicated ahead of its parent holds the parent ahead, and the
+/// parent, when it arrives, is superseded on sight and leaves nothing.
 #[tokio::test]
-async fn pruning_does_not_change_the_head_set() {
-    let store = RegolithStore::in_memory().unwrap();
-    let (seed_cid, first, second) = (cid_of(b"seed"), cid_of(b"first"), cid_of(b"second"));
-    seed(
-        &store,
-        &[(seed_cid, 1), (first, 2), (second, 2)],
-        &[(seed_cid, first), (seed_cid, second)],
-    )
-    .await;
-
-    let before = live(&store).await;
-    let outcome = prune(&store, 512).await;
-    assert_eq!(outcome.heads_removed, 1);
-    assert_eq!(outcome.markers_removed, 2);
-    assert!(!outcome.more_remaining);
-
-    let after = live(&store).await;
-    assert_eq!(before.0, after.0);
-    assert_eq!(after.1, 0, "nothing left to reclaim");
-
-    // The head key and both markers left together: a head key removed while a
-    // marker survived would be fine, but a marker removed while the head key
-    // survived would resurrect a superseded head.
-    assert!(stored_keys(
-        &store,
-        HeadstoreColSuperseded::collection_prefix(COLLECTION)
-    )
-    .await
-    .is_empty());
-    assert_eq!(
-        stored_keys(&store, HeadstoreColKey::collection_prefix(COLLECTION))
-            .await
-            .len(),
-        2
-    );
-}
-
-/// A second pass over a clean collection finds nothing, so the caller can tell
-/// a no-op from work done and skip the commit.
-#[tokio::test]
-async fn pruning_a_clean_collection_is_a_no_op() {
-    let store = RegolithStore::in_memory().unwrap();
-    seed(&store, &[(cid_of(b"only"), 1)], &[]).await;
-    assert_eq!(prune(&store, 512).await, Default::default());
-}
-
-/// A marker whose parent has no head key is not garbage: a block replicated
-/// ahead of its parent records the marker first, and deleting it would leave
-/// the parent live forever once it arrives.
-#[tokio::test]
-async fn a_marker_without_its_parent_survives_pruning() {
+async fn a_child_before_its_parent_supersedes_it_on_arrival() {
     let store = RegolithStore::in_memory().unwrap();
     let (absent, child, live_head) = (cid_of(b"absent"), cid_of(b"child"), cid_of(b"live"));
-    seed(&store, &[(live_head, 1)], &[(absent, child)]).await;
+    publish(&store, live_head, 1, &[]).await;
+    publish(&store, child, 2, &[absent]).await;
+    let (heads, ahead) = live(&store).await;
+    assert_eq!(heads.len(), 2);
+    assert_eq!(ahead, 1);
 
-    assert_eq!(prune(&store, 512).await, Default::default());
-    assert_eq!(
-        stored_keys(
-            &store,
-            HeadstoreColSuperseded::collection_prefix(COLLECTION)
-        )
-        .await
-        .len(),
-        1
-    );
-
-    // The parent arrives late and is correctly superseded on sight.
-    seed(&store, &[(absent, 2)], &[]).await;
-    let (heads, superseded) = live(&store).await;
-    assert_eq!(heads, vec![live_head]);
-    assert_eq!(superseded, 1);
-}
-
-/// A head with more markers than the whole budget still leaves, otherwise every
-/// later pass would stop in the same place and it would never be reclaimed.
-#[tokio::test]
-async fn a_group_wider_than_the_budget_still_leaves() {
-    let store = RegolithStore::in_memory().unwrap();
-    let doomed = cid_of(b"doomed");
-    let children: Vec<Cid> = (0..5u8).map(|i| cid_of(&[i, b'c'])).collect();
-    let mut heads = vec![(doomed, 1)];
-    heads.extend(children.iter().map(|cid| (*cid, 2)));
-    let markers: Vec<(Cid, Cid)> = children.iter().map(|cid| (doomed, *cid)).collect();
-    seed(&store, &heads, &markers).await;
-
-    // A budget of two cannot hold the head key plus its five markers.
-    let outcome = prune(&store, 2).await;
-    assert_eq!(outcome.heads_removed, 1, "the pass must make progress");
-    assert_eq!(outcome.markers_removed, 5);
-
-    let (heads, superseded) = live(&store).await;
-    assert_eq!(superseded, 0);
-    let mut expected = children;
+    publish(&store, absent, 1, &[]).await;
+    let mut expected = vec![live_head, child];
     expected.sort_by_cached_key(Cid::to_string);
-    assert_eq!(heads, expected);
+    assert_eq!(live(&store).await, (expected, 0));
 }
 
-/// A pass that stops on its key budget says so rather than reading as clean,
-/// and repeating it converges.
+/// A block is published once: replaying it after it was superseded does not
+/// bring it back.
 #[tokio::test]
-async fn a_bounded_pass_reports_what_it_left() {
-    let store = RegolithStore::in_memory().unwrap();
-    let superseder = cid_of(b"superseder");
-    let doomed: Vec<Cid> = (0..8u8).map(|i| cid_of(&[i, b'x'])).collect();
-    let heads: Vec<(Cid, u64)> = doomed
-        .iter()
-        .chain(std::iter::once(&superseder))
-        .map(|cid| (*cid, 1))
-        .collect();
-    let markers: Vec<(Cid, Cid)> = doomed.iter().map(|cid| (*cid, superseder)).collect();
-    seed(&store, &heads, &markers).await;
-
-    // Four keys is two head-and-marker groups.
-    let first = prune(&store, 4).await;
-    assert_eq!(first.heads_removed, 2);
-    assert_eq!(first.markers_removed, 2);
-    assert!(
-        first.more_remaining,
-        "a bounded pass must not read as clean"
-    );
-
-    let mut passes = 1;
-    while prune(&store, 4).await.more_remaining {
-        passes += 1;
-        assert!(passes < 16, "reclamation is not converging");
-    }
-    let (heads, superseded) = live(&store).await;
-    assert_eq!(heads, vec![superseder]);
-    assert_eq!(superseded, 0);
-}
-
-/// The point of the whole design: reclamation runs in its own transaction, and
-/// an append that overlaps it still commits.
-#[tokio::test]
-async fn reclamation_does_not_abort_a_concurrent_append() {
+async fn a_replayed_block_stays_superseded() {
     let store = RegolithStore::in_memory().unwrap();
     let (old, current) = (cid_of(b"old"), cid_of(b"current"));
-    seed(&store, &[(old, 1), (current, 2)], &[(old, current)]).await;
-
-    // The appending transaction opens first and reads the head set.
-    let append_txn = SharedTxn::new(store.new_txn(false).await.unwrap());
-    let append_view = headstore(&append_txn);
-    let found = live_collection_heads(&append_view, COLLECTION)
-        .await
-        .unwrap();
-    assert_eq!(found.live, vec![current]);
-
-    // Reclamation commits underneath it.
-    let outcome = prune(&store, 512).await;
-    assert_eq!(outcome.heads_removed, 1);
-
-    // The append writes its own keys and commits regardless.
-    let appended = cid_of(b"appended");
-    db::block::heads::record_supersedes(&append_view, COLLECTION, &found.live, appended)
-        .await
-        .unwrap();
-    append_view
-        .set(
-            &Key::bytes(&HeadstoreColKey::new(COLLECTION, appended)),
-            &[3],
-        )
-        .await
-        .unwrap();
-    drop(append_view);
-    commit(append_txn).await;
-
-    let (heads, _) = live(&store).await;
-    assert_eq!(heads, vec![appended]);
+    publish(&store, old, 1, &[]).await;
+    publish(&store, current, 2, &[old]).await;
+    publish(&store, old, 1, &[]).await;
+    assert_eq!(live(&store).await, (vec![current], 0));
 }
 
-/// Appends through the database reclaim what they supersede in their own
-/// transaction: after any number of appends only the live head is stored.
+/// The point of the whole design: an append that overlaps another still
+/// commits, and the live set is the union.
+#[tokio::test]
+async fn overlapping_appends_both_commit() {
+    let store = RegolithStore::in_memory().unwrap();
+    let (old, current) = (cid_of(b"old"), cid_of(b"current"));
+    publish(&store, old, 1, &[]).await;
+    publish(&store, current, 2, &[old]).await;
+
+    let mut appends = Vec::new();
+    for name in [b"first".as_slice(), b"second"] {
+        let shared = SharedTxn::new(store.new_txn(false).await.unwrap());
+        let found = live_collection_heads(&headstore(&shared), COLLECTION)
+            .await
+            .unwrap();
+        assert_eq!(found.live, vec![current]);
+        let appended = cid_of(name);
+        publish_in(&shared, appended, 3, &found.live).await;
+        appends.push((shared, appended));
+    }
+    let mut expected = Vec::new();
+    for (shared, appended) in appends {
+        commit(shared).await;
+        expected.push(appended);
+    }
+    expected.sort_by_cached_key(Cid::to_string);
+    assert_eq!(live(&store).await, (expected, 0));
+}
+
+/// Appends through the database keep only the live head: after any number of
+/// appends the set holds one name.
 #[tokio::test]
 async fn appends_through_the_db_store_only_the_live_head() {
     const APPENDS: usize = 64;
@@ -376,62 +217,10 @@ async fn appends_through_the_db_store_only_the_live_head() {
         txn.discard().unwrap();
         id
     };
-    assert_eq!(
-        stored_keys(&store, HeadstoreColKey::collection_prefix(collection_id))
-            .await
-            .len(),
-        1
-    );
-    assert!(stored_keys(
-        &store,
-        HeadstoreColSuperseded::collection_prefix(collection_id)
-    )
-    .await
-    .is_empty());
-}
-
-/// Two appends that both reclaim the same superseded group in their own
-/// transactions both commit: the deletes are blind, and the second one meets
-/// a key the first already deleted.
-#[tokio::test]
-async fn appends_reclaiming_the_same_group_both_commit() {
-    let store = RegolithStore::in_memory().unwrap();
-    let (old, current) = (cid_of(b"old"), cid_of(b"current"));
-    seed(&store, &[(old, 1), (current, 2)], &[(old, current)]).await;
-
-    let mut appends = Vec::new();
-    for name in [b"first".as_slice(), b"second"] {
-        let txn = SharedTxn::new(store.new_txn(false).await.unwrap());
-        let view = headstore(&txn);
-        let found = live_collection_heads(&view, COLLECTION).await.unwrap();
-        assert_eq!(found.live, vec![current]);
-        let appended = cid_of(name);
-        db::block::heads::record_supersedes(&view, COLLECTION, &found.live, appended)
-            .await
-            .unwrap();
-        view.set(
-            &Key::bytes(&HeadstoreColKey::new(COLLECTION, appended)),
-            &[3],
-        )
+    let shared = SharedTxn::new(store.new_txn(true).await.unwrap());
+    let set = collection_set(&headstore(&shared), collection_id)
         .await
         .unwrap();
-        let outcome = prune_superseded_heads(&view, COLLECTION, 512)
-            .await
-            .unwrap();
-        assert_eq!(
-            outcome.heads_removed, 2,
-            "the old group and the one just superseded"
-        );
-        drop(view);
-        appends.push((txn, appended));
-    }
-    let mut expected = Vec::new();
-    for (txn, appended) in appends {
-        commit(txn).await;
-        expected.push(appended);
-    }
-    expected.sort_by_cached_key(Cid::to_string);
-    let (heads, superseded) = live(&store).await;
-    assert_eq!(heads, expected);
-    assert_eq!(superseded, 0);
+    assert_eq!(set.live().count(), 1);
+    assert_eq!(set.ahead().count(), 0);
 }

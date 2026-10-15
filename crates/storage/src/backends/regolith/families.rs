@@ -1,21 +1,19 @@
 //! The families of the store's keys that regolith is told about, declared
 //! once.
 //!
-//! A family is the bytes its keys start with (`h/d/` for document heads),
-//! the parts after them that name the one entity a key belongs to (the
-//! document's short ID), each ended by a separator, and the class regolith
-//! validates the family's keys by. The key classifier (`classifier`) takes
-//! the class from here, and a commutative set's length from the entity; the
-//! prefix extractor (`prefix`) builds its prefix filters from the entity.
-//! Both read this one table, so they cannot disagree on what one head set,
-//! one document or one collection is.
+//! A family is the bytes its keys start with (`h/p/` for the priority
+//! index), the parts after them that name the one entity a key belongs to
+//! (the document's short ID), each ended by a separator, and the class
+//! regolith validates the family's keys by. The key classifier (`classifier`)
+//! takes the class from here; the prefix extractor (`prefix`) builds its
+//! prefix filters from the entity. Both read this one table, so they cannot
+//! disagree on what one document or one collection is.
 //!
 //! Where an entity ends is decided by the bytes before its end, and the end
 //! is a separator, so every key that starts with an entity's prefix has that
-//! same entity. Both readers rely on it: a commutative set of `len` bytes
-//! holds every key that shares them, and a prefix seek may pass over a table
-//! whose filter lacks the entity its prefix names. A key cut short, or
-//! malformed, has no entity.
+//! same entity. The prefix extractor relies on it: a prefix seek may pass
+//! over a table whose filter lacks the entity its prefix names. A key cut
+//! short, or malformed, has no entity.
 
 use crate::keys::doc_id_index::doc_short_id_len;
 use crate::keys::utils::{uvarint_len, SEPARATOR};
@@ -25,9 +23,6 @@ use crate::keys::utils::{uvarint_len, SEPARATOR};
 pub(super) enum Class {
     /// As any key is validated.
     Ordinary,
-    /// One entity's keys are one set whose concurrent writers leave the
-    /// union: a head set, or the markers against one.
-    CommutativeSet,
     /// The rest of the key is the content identifier of its value.
     ContentAddressed,
     /// Written only by the commit-ordered append of the arrival journal.
@@ -41,8 +36,6 @@ enum Part {
     DocShortId,
     /// Any ordered uvarint: a collection's or an index's short ID.
     Uvarint,
-    /// A number in decimal text: a collection's short ID in a head key.
-    Digits,
     /// Any text but a separator, at least one byte.
     Text,
     /// These bytes exactly.
@@ -56,9 +49,6 @@ impl Part {
         match self {
             Self::DocShortId => doc_short_id_len(rest),
             Self::Uvarint => uvarint_len(rest),
-            Self::Digits => {
-                text_len(rest).filter(|&len| rest[..len].iter().all(u8::is_ascii_digit))
-            }
             Self::Text => text_len(rest),
             Self::Exactly(bytes) => rest.starts_with(bytes).then_some(bytes.len()),
         }
@@ -126,21 +116,21 @@ const fn family(start: &'static [u8], entity: &'static [Part], class: Class) -> 
 /// stable as a key grows: a key still shorter than one of the longer starts
 /// falls to the shorter family, which names no entity in so few bytes (`b`
 /// names none, and `d/` needs six).
-static FAMILIES: [Family; 15] = [
+static FAMILIES: [Family; 14] = [
     // Block merge markers: decision keys, not blocks.
     family(b"bm", &[], Class::Ordinary),
     // Blocks, keyed by the CID of their bytes (`keys::BlockstoreKey`).
     family(b"b", &[], Class::ContentAddressed),
     // The arrival journal: one collection's head, rows and once keys.
     family(b"s/arrival/", &[], Class::Log),
-    // A document's head keys (`keys::HeadstoreDocKey`), and the markers
-    // against them (`db::block::heads::document`).
-    family(b"h/d/", &[Part::DocShortId], Class::CommutativeSet),
-    family(b"h/ds/", &[Part::DocShortId], Class::CommutativeSet),
-    // A collection's head keys, and the markers against them
-    // (`keys::HeadstoreColKey`, `keys::HeadstoreColSuperseded`).
-    family(b"h/c/", &[Part::Digits], Class::CommutativeSet),
-    family(b"h/cs/", &[Part::Digits], Class::CommutativeSet),
+    // A document's and a collection's head sets, one key each, written only
+    // by blind merges (`keys::HeadstoreDocSetKey`, `keys::HeadstoreColSetKey`,
+    // `db::block::heads`), and the guards that record a collection block's
+    // publication (`keys::HeadstoreColPublishedKey`). Ordinary: a merge is
+    // blind at every class, and the set is read without parts.
+    family(b"h/hd/", &[], Class::Ordinary),
+    family(b"h/hc/", &[], Class::Ordinary),
+    family(b"h/rc/", &[], Class::Ordinary),
     // A document's commit priority index (`keys::HeadstorePriorityKey`), and
     // the guards that record its heads' publication.
     family(b"h/p/", &[Part::DocShortId], Class::Ordinary),
