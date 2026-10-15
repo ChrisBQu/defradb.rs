@@ -45,7 +45,10 @@ impl Default for Fake {
 impl Fake {
     fn gate(&self, call: &'static str) -> io::Result<()> {
         if self.unsupported.contains(&call) {
-            return Err(io::Error::new(io::ErrorKind::Unsupported, format!("{call} unsupported")));
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("{call} unsupported"),
+            ));
         }
         if self.refused.contains(&call) {
             return Err(io::Error::from(io::ErrorKind::PermissionDenied));
@@ -57,7 +60,10 @@ impl Fake {
 impl Os for Fake {
     fn thread_affinity(&self) -> io::Result<CpuSet> {
         self.gate("affinity")?;
-        Ok(self.reads_back.clone().unwrap_or_else(|| self.affinity.borrow().clone()))
+        Ok(self
+            .reads_back
+            .clone()
+            .unwrap_or_else(|| self.affinity.borrow().clone()))
     }
 
     fn set_thread_affinity(&self, cpus: &CpuSet) -> io::Result<()> {
@@ -78,7 +84,10 @@ impl Os for Fake {
 
     fn set_realtime(&self, policy: RealTimePolicy, priority: u8) -> io::Result<()> {
         self.gate("realtime")?;
-        self.scheduling.set(Scheduling::RealTime { policy, priority: priority.into() });
+        self.scheduling.set(Scheduling::RealTime {
+            policy,
+            priority: priority.into(),
+        });
         Ok(())
     }
 
@@ -142,7 +151,10 @@ impl Os for Fake {
     }
 }
 
-const RR_50: Priority = Priority::RealTime { policy: RealTimePolicy::RoundRobin, priority: 50 };
+const RR_50: Priority = Priority::RealTime {
+    policy: RealTimePolicy::RoundRobin,
+    priority: 50,
+};
 
 #[test]
 fn real_time_is_granted_when_allowed() {
@@ -154,7 +166,11 @@ fn real_time_is_granted_when_allowed() {
 
 #[test]
 fn refused_real_time_falls_back_to_nice_minus_20() {
-    let os = Fake { refused: vec!["realtime"], unsupported: vec!["qos"], ..Fake::default() };
+    let os = Fake {
+        refused: vec!["realtime"],
+        unsupported: vec!["qos"],
+        ..Fake::default()
+    };
     let outcome = prioritize(&os, RR_50);
     assert_eq!(outcome.asked, "SCHED_RR 50");
     assert_eq!(outcome.granted, "nice -20");
@@ -184,94 +200,185 @@ fn with_nothing_allowed_the_current_priority_stays() {
     };
     let outcome = prioritize(&os, RR_50);
     assert_eq!(outcome.granted, "nice 3");
-    assert_eq!(outcome.fell_back.unwrap().split("; ").count(), 4, "every step was tried");
+    assert_eq!(
+        outcome.fell_back.unwrap().split("; ").count(),
+        4,
+        "every step was tried"
+    );
 }
 
 #[test]
 fn macos_turns_real_time_into_user_interactive_qos() {
-    let os = Fake { unsupported: vec!["realtime", "nice"], floor: None, ..Fake::default() };
+    let os = Fake {
+        unsupported: vec!["realtime", "nice"],
+        floor: None,
+        ..Fake::default()
+    };
     assert_eq!(prioritize(&os, RR_50).granted, "QoS UserInteractive");
 }
 
 #[test]
 fn a_lower_nice_needs_no_privilege_and_inherit_changes_nothing() {
-    let os = Fake { refused: vec!["realtime"], ..Fake::default() };
+    let os = Fake {
+        refused: vec!["realtime"],
+        ..Fake::default()
+    };
     assert_eq!(prioritize(&os, Priority::Nice(10)).granted, "nice 10");
     let outcome = prioritize(&os, Priority::Inherit);
-    assert_eq!((outcome.asked.as_str(), outcome.granted.as_str()), ("nice 10", "nice 10"));
+    assert_eq!(
+        (outcome.asked.as_str(), outcome.granted.as_str()),
+        ("nice 10", "nice 10")
+    );
 }
 
 #[test]
 fn a_pin_that_reads_back_is_granted() {
     let os = Fake::default();
-    let pinned = pin(&os, &CpuSet::parse("3").unwrap(), &CpuSet::parse("0-7").unwrap(), 4);
+    let pinned = pin(
+        &os,
+        &CpuSet::parse("3").unwrap(),
+        &CpuSet::parse("0-7").unwrap(),
+        4,
+    );
     assert_eq!(pinned.cpus.unwrap().to_string(), "3");
     assert_eq!(pinned.outcome.granted, "CPUs 3");
 }
 
 #[test]
 fn a_pin_that_reads_back_wrong_goes_back_to_the_allowed_set() {
-    let os = Fake { reads_back: Some(CpuSet::parse("0-1").unwrap()), ..Fake::default() };
-    let pinned = pin(&os, &CpuSet::parse("3").unwrap(), &CpuSet::parse("0-7").unwrap(), 4);
+    let os = Fake {
+        reads_back: Some(CpuSet::parse("0-1").unwrap()),
+        ..Fake::default()
+    };
+    let pinned = pin(
+        &os,
+        &CpuSet::parse("3").unwrap(),
+        &CpuSet::parse("0-7").unwrap(),
+        4,
+    );
     assert!(pinned.cpus.is_none());
     assert_eq!(pinned.outcome.granted, "unpinned");
-    assert_eq!(os.affinity.borrow().to_string(), "0-7", "restored to the process's set");
+    assert_eq!(
+        os.affinity.borrow().to_string(),
+        "0-7",
+        "restored to the process's set"
+    );
 }
 
 #[test]
 fn a_thread_running_outside_its_set_fails_the_check() {
-    let os = Fake { runs_on: Some(6), ..Fake::default() };
-    let pinned = pin(&os, &CpuSet::parse("3").unwrap(), &CpuSet::parse("0-7").unwrap(), 4);
+    let os = Fake {
+        runs_on: Some(6),
+        ..Fake::default()
+    };
+    let pinned = pin(
+        &os,
+        &CpuSet::parse("3").unwrap(),
+        &CpuSet::parse("0-7").unwrap(),
+        4,
+    );
     assert!(pinned.outcome.fell_back.unwrap().contains("CPU 6"));
 }
 
 #[test]
 fn a_refused_pin_runs_unpinned_and_an_unsupported_one_leaves_a_hint() {
-    let refused = Fake { refused: vec!["affinity"], ..Fake::default() };
+    let refused = Fake {
+        refused: vec!["affinity"],
+        ..Fake::default()
+    };
     let pinned = pin(&refused, &CpuSet::parse("3").unwrap(), &CpuSet::new(), 4);
     assert_eq!(pinned.outcome.granted, "unpinned");
 
-    let mac = Fake { unsupported: vec!["affinity"], ..Fake::default() };
+    let mac = Fake {
+        unsupported: vec!["affinity"],
+        ..Fake::default()
+    };
     let pinned = pin(&mac, &CpuSet::parse("3").unwrap(), &CpuSet::new(), 4);
     assert_eq!(pinned.outcome.granted, "unpinned, affinity tag 4 as a hint");
     assert_eq!(mac.tag.get(), Some(4));
 
-    let silicon = Fake { unsupported: vec!["affinity", "tag"], ..Fake::default() };
-    assert_eq!(pin(&silicon, &CpuSet::parse("3").unwrap(), &CpuSet::new(), 4).outcome.granted, "unpinned");
+    let silicon = Fake {
+        unsupported: vec!["affinity", "tag"],
+        ..Fake::default()
+    };
+    assert_eq!(
+        pin(&silicon, &CpuSet::parse("3").unwrap(), &CpuSet::new(), 4)
+            .outcome
+            .granted,
+        "unpinned"
+    );
 }
 
 #[test]
 fn bind_falls_back_to_local_and_local_to_first_touch() {
-    let os = Fake { refused: vec!["bind"], ..Fake::default() };
+    let os = Fake {
+        refused: vec!["bind"],
+        ..Fake::default()
+    };
     let outcome = set_memory_policy(&os, &MemoryPolicy::Bind(vec![1]));
     assert_eq!(outcome.granted, "local");
-    let os = Fake { refused: vec!["local"], ..Fake::default() };
-    assert_eq!(set_memory_policy(&os, &MemoryPolicy::Local).granted, "first touch");
+    let os = Fake {
+        refused: vec!["local"],
+        ..Fake::default()
+    };
+    assert_eq!(
+        set_memory_policy(&os, &MemoryPolicy::Local).granted,
+        "first touch"
+    );
 }
 
 #[test]
 fn future_locking_needs_a_limit_that_holds_the_footprint() {
-    let lock = |footprint| MemoryLock::Lock { future: true, on_fault: true, footprint };
+    let lock = |footprint| MemoryLock::Lock {
+        future: true,
+        on_fault: true,
+        footprint,
+    };
     let unlimited = Fake::default();
-    assert_eq!(lock_memory(&unlimited, &lock(None)).granted, "current and future, on fault");
+    assert_eq!(
+        lock_memory(&unlimited, &lock(None)).granted,
+        "current and future, on fault"
+    );
 
-    let small = Fake { limit: Some(64 << 10), ..Fake::default() };
+    let small = Fake {
+        limit: Some(64 << 10),
+        ..Fake::default()
+    };
     let outcome = lock_memory(&small, &lock(Some(1 << 30)));
     assert_eq!(outcome.granted, "current, on fault");
     assert!(outcome.fell_back.unwrap().contains("RLIMIT_MEMLOCK"));
     assert_eq!(small.locked.get(), Some((false, true)));
 
-    let unknown = Fake { limit: Some(1 << 40), ..Fake::default() };
-    assert_eq!(lock_memory(&unknown, &lock(None)).granted, "current, on fault");
-    assert_eq!(lock_memory(&unknown, &lock(Some(1 << 30))).granted, "current and future, on fault");
+    let unknown = Fake {
+        limit: Some(1 << 40),
+        ..Fake::default()
+    };
+    assert_eq!(
+        lock_memory(&unknown, &lock(None)).granted,
+        "current, on fault"
+    );
+    assert_eq!(
+        lock_memory(&unknown, &lock(Some(1 << 30))).granted,
+        "current and future, on fault"
+    );
 }
 
 #[test]
 fn locking_falls_back_past_on_fault_to_nothing() {
-    let lock = MemoryLock::Lock { future: true, on_fault: true, footprint: None };
-    let mac = Fake { unsupported: vec!["on-fault"], ..Fake::default() };
+    let lock = MemoryLock::Lock {
+        future: true,
+        on_fault: true,
+        footprint: None,
+    };
+    let mac = Fake {
+        unsupported: vec!["on-fault"],
+        ..Fake::default()
+    };
     assert_eq!(lock_memory(&mac, &lock).granted, "current and future");
-    let refused = Fake { refused: vec!["lock"], ..Fake::default() };
+    let refused = Fake {
+        refused: vec!["lock"],
+        ..Fake::default()
+    };
     assert_eq!(lock_memory(&refused, &lock).granted, "off");
     assert_eq!(lock_memory(&refused, &MemoryLock::Off).fell_back, None);
 }

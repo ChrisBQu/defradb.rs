@@ -88,7 +88,13 @@ pub(crate) struct PoolShared {
 impl PoolShared {
     /// The shared state of a pool with one worker per seat of `placer`'s
     /// plan, each woken through its parker.
-    fn new(config: &Config, topology: &Topology, placer: Arc<Placer>, clock: Arc<dyn Clock>, parkers: Vec<Parker>) -> PoolShared {
+    fn new(
+        config: &Config,
+        topology: &Topology,
+        placer: Arc<Placer>,
+        clock: Arc<dyn Clock>,
+        parkers: Vec<Parker>,
+    ) -> PoolShared {
         let seats = &placer.plan.seats;
         let workers: Box<[Arc<WorkerShared>]> = seats
             .iter()
@@ -96,8 +102,16 @@ impl PoolShared {
             .enumerate()
             .map(|(index, (seat, parker))| {
                 let signal = Arc::new(Signal::new(parker));
-                let id = WorkerId { index, node: seat.node };
-                Arc::new(WorkerShared::new(id, signal, config.inbox_items, config.inbox_bytes))
+                let id = WorkerId {
+                    index,
+                    node: seat.node,
+                };
+                Arc::new(WorkerShared::new(
+                    id,
+                    signal,
+                    config.inbox_items,
+                    config.inbox_bytes,
+                ))
             })
             .collect();
         let mut nodes: Vec<(usize, Vec<usize>)> = Vec::new();
@@ -218,7 +232,12 @@ impl Pool {
 
     /// The NUMA nodes that hold a worker, by id.
     pub fn nodes(&self) -> Vec<usize> {
-        self.handle.shared.nodes.iter().map(|(node, _)| *node).collect()
+        self.handle
+            .shared
+            .nodes
+            .iter()
+            .map(|(node, _)| *node)
+            .collect()
     }
 
     /// What the pool asked the OS for at start and what it was granted.
@@ -230,7 +249,10 @@ impl Pool {
     pub fn stats(&self) -> Stats {
         let shared = &self.handle.shared;
         #[cfg(not(target_family = "wasm"))]
-        let blocking_queued = shared.blocking.as_ref().map_or(0, |blocking| blocking.queued());
+        let blocking_queued = shared
+            .blocking
+            .as_ref()
+            .map_or(0, |blocking| blocking.queued());
         #[cfg(target_family = "wasm")]
         let blocking_queued = 0;
         Stats {
@@ -255,7 +277,11 @@ impl Pool {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn submit<F, Fut>(&self, target: Target, make: F) -> Result<Completion<Fut::Output>, Error>
+    pub async fn submit<F, Fut>(
+        &self,
+        target: Target,
+        make: F,
+    ) -> Result<Completion<Fut::Output>, Error>
     where
         F: FnOnce() -> Fut + Send + 'static,
         Fut: Future + 'static,
@@ -282,7 +308,10 @@ impl Pool {
         }
         let bytes = options.bytes.unwrap_or(std::mem::size_of::<F>());
         let routed = shared.route(target)?;
-        let admitted = match routed.try_admit(bytes).or_else(|| shared.admit_anywhere(target, bytes)) {
+        let admitted = match routed
+            .try_admit(bytes)
+            .or_else(|| shared.admit_anywhere(target, bytes))
+        {
             Some(admitted) => admitted,
             None => routed.admit(bytes).await,
         };
@@ -292,7 +321,13 @@ impl Pool {
         };
         let worker = admitted.worker().clone();
         let name = options.name.unwrap_or(std::any::type_name::<F>());
-        let (job, completion) = Job::new(make, name, key, matches!(target, Target::Worker(_)), admitted);
+        let (job, completion) = Job::new(
+            make,
+            name,
+            key,
+            matches!(target, Target::Worker(_)),
+            admitted,
+        );
         worker.push(job);
         Ok(completion)
     }
@@ -325,8 +360,15 @@ impl Pool {
             return blocking.spawn(f).await;
         }
         let name = std::any::type_name::<F>();
-        self.submit_with(Target::Worker(0), Submit { name: Some(name), bytes: None }, move || async move { f() })
-            .await
+        self.submit_with(
+            Target::Worker(0),
+            Submit {
+                name: Some(name),
+                bytes: None,
+            },
+            move || async move { f() },
+        )
+        .await
     }
 
     /// Places the calling thread, one the pool did not start (a network
@@ -367,7 +409,10 @@ impl Pool {
     #[cfg(not(target_family = "wasm"))]
     pub fn shutdown_blocking(&self) -> Result<(), Error> {
         self.shutdown();
-        let result = match crate::completion::block_on_timeout(self.stopped(), self.handle.shutdown_deadline) {
+        let result = match crate::completion::block_on_timeout(
+            self.stopped(),
+            self.handle.shutdown_deadline,
+        ) {
             Ok(()) => Ok(()),
             Err(Error::TimedOut) => {
                 self.abandon();
@@ -402,6 +447,8 @@ impl Pool {
 
 impl std::fmt::Debug for Pool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Pool").field("workers", &self.workers()).finish_non_exhaustive()
+        f.debug_struct("Pool")
+            .field("workers", &self.workers())
+            .finish_non_exhaustive()
     }
 }

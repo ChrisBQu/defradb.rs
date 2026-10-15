@@ -34,7 +34,10 @@ pub(super) fn read(sys: &Path, allowed: &CpuSet) -> Option<Vec<Node>> {
     let node_cpus = node_map(sys, allowed);
     let mut nodes: Vec<Node> = node_cpus
         .iter()
-        .map(|(id, _)| Node { id: *id, cores: Vec::new() })
+        .map(|(id, _)| Node {
+            id: *id,
+            cores: Vec::new(),
+        })
         .collect();
     let mut seen = CpuSet::new();
     for cpu in allowed.iter() {
@@ -56,10 +59,17 @@ pub(super) fn read(sys: &Path, allowed: &CpuSet) -> Option<Vec<Node>> {
             .iter()
             .position(|(_, set)| set.contains(cpu))
             .unwrap_or(0);
-        nodes[node].cores.push(Core { package, l3, kind: CoreKind::Unknown, cpus });
+        nodes[node].cores.push(Core {
+            package,
+            l3,
+            kind: CoreKind::Unknown,
+            cpus,
+        });
     }
     nodes.retain(|node| !node.cores.is_empty());
-    nodes.iter_mut().for_each(|node| node.cores.sort_by_key(|core| core.cpus.first()));
+    nodes
+        .iter_mut()
+        .for_each(|node| node.cores.sort_by_key(|core| core.cpus.first()));
     Some(nodes)
 }
 
@@ -73,7 +83,10 @@ fn node_map(sys: &Path, allowed: &CpuSet) -> Vec<(usize, CpuSet)> {
         .filter_map(|entry| {
             let name = entry.file_name();
             let id = name.to_str()?.strip_prefix("node")?.parse().ok()?;
-            Some((id, read_list(&entry.path().join("cpulist"))?.intersection(allowed)))
+            Some((
+                id,
+                read_list(&entry.path().join("cpulist"))?.intersection(allowed),
+            ))
         })
         .collect();
     nodes.sort_by_key(|(id, _)| *id);
@@ -89,7 +102,12 @@ fn l3_domain(cache: &Path) -> Option<usize> {
     fs::read_dir(cache)
         .ok()?
         .flatten()
-        .filter(|entry| entry.file_name().to_str().is_some_and(|n| n.starts_with("index")))
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|n| n.starts_with("index"))
+        })
         .find(|entry| read_number(&entry.path().join("level")) == Some(3))
         .and_then(|entry| read_list(&entry.path().join("shared_cpu_list")))
         .and_then(|cpus| cpus.first())
@@ -116,13 +134,18 @@ pub(super) fn cgroup_quota(proc_cgroup: &Path, root: &Path) -> Option<usize> {
     };
     for line in membership.lines() {
         let mut fields = line.splitn(3, ':');
-        let (Some(_), Some(controllers), Some(path)) = (fields.next(), fields.next(), fields.next())
+        let (Some(_), Some(controllers), Some(path)) =
+            (fields.next(), fields.next(), fields.next())
         else {
             continue;
         };
         if controllers.is_empty() {
             for dir in ancestors(root, path) {
-                tighten(fs::read_to_string(dir.join("cpu.max")).ok().and_then(|t| parse_cpu_max(&t)));
+                tighten(
+                    fs::read_to_string(dir.join("cpu.max"))
+                        .ok()
+                        .and_then(|t| parse_cpu_max(&t)),
+                );
             }
         } else if controllers.split(',').any(|c| c == "cpu") {
             let Some(mount) = ["cpu,cpuacct", "cpu", "cpuacct,cpu"]
@@ -169,7 +192,9 @@ fn parse_quota(quota: &str, period: &str) -> Option<usize> {
     if quota <= 0 || period <= 0 {
         return None;
     }
-    usize::try_from((quota + period - 1) / period).ok().map(|cpus| cpus.max(1))
+    usize::try_from((quota + period - 1) / period)
+        .ok()
+        .map(|cpus| cpus.max(1))
 }
 
 #[cfg(test)]
@@ -216,11 +241,17 @@ mod tests {
             let core = cpu % 4;
             let node = core / 2;
             let topo = format!("devices/system/cpu/cpu{cpu}/topology");
-            sys.write(&format!("{topo}/core_cpus_list"), &format!("{core},{}\n", core + 4));
+            sys.write(
+                &format!("{topo}/core_cpus_list"),
+                &format!("{core},{}\n", core + 4),
+            );
             sys.write(&format!("{topo}/physical_package_id"), &format!("{node}\n"));
             let cache = format!("devices/system/cpu/cpu{cpu}/cache");
             sys.write(&format!("{cache}/index0/level"), "1\n");
-            sys.write(&format!("{cache}/index0/shared_cpu_list"), &format!("{core},{}\n", core + 4));
+            sys.write(
+                &format!("{cache}/index0/shared_cpu_list"),
+                &format!("{core},{}\n", core + 4),
+            );
             sys.write(&format!("{cache}/index3/level"), "3\n");
             let l3 = if node == 0 { "0-1,4-5" } else { "2-3,6-7" };
             sys.write(&format!("{cache}/index3/shared_cpu_list"), l3);
@@ -271,7 +302,11 @@ mod tests {
             .iter()
             .flat_map(|n| n.cores.iter().map(|c| c.cpus.to_string()))
             .collect();
-        assert_eq!(cpus, vec!["0,4", "1,5", "2,6"], "core 3 (cpus 3 and 7) is offline");
+        assert_eq!(
+            cpus,
+            vec!["0,4", "1,5", "2,6"],
+            "core 3 (cpus 3 and 7) is offline"
+        );
     }
 
     #[test]
@@ -306,13 +341,19 @@ mod tests {
         root.write("fs/cpu.max", "max 100000\n");
         root.write("fs/a/cpu.max", "300000 100000\n");
         root.write("fs/a/b/cpu.max", "max 100000\n");
-        assert_eq!(cgroup_quota(&root.0.join("proc_cgroup_v2"), &root.0.join("fs")), Some(3));
+        assert_eq!(
+            cgroup_quota(&root.0.join("proc_cgroup_v2"), &root.0.join("fs")),
+            Some(3)
+        );
 
         root.write("proc_cgroup_v1", "4:cpu,cpuacct:/svc\n3:memory:/svc\n");
         root.write("v1/cpu,cpuacct/cpu.cfs_quota_us", "-1\n");
         root.write("v1/cpu,cpuacct/cpu.cfs_period_us", "100000\n");
         root.write("v1/cpu,cpuacct/svc/cpu.cfs_quota_us", "50000\n");
         root.write("v1/cpu,cpuacct/svc/cpu.cfs_period_us", "100000\n");
-        assert_eq!(cgroup_quota(&root.0.join("proc_cgroup_v1"), &root.0.join("v1")), Some(1));
+        assert_eq!(
+            cgroup_quota(&root.0.join("proc_cgroup_v1"), &root.0.join("v1")),
+            Some(1)
+        );
     }
 }

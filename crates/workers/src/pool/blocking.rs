@@ -33,7 +33,12 @@ pub(crate) struct Blocking {
 
 impl Blocking {
     /// Starts `threads` threads with `queue` job slots.
-    pub(crate) fn start(threads: usize, queue: usize, name: &str, placer: Arc<Placer>) -> Result<Arc<Blocking>, Error> {
+    pub(crate) fn start(
+        threads: usize,
+        queue: usize,
+        name: &str,
+        placer: Arc<Placer>,
+    ) -> Result<Arc<Blocking>, Error> {
         let blocking = Arc::new(Blocking {
             jobs: ArrayQueue::new(queue),
             room: Semaphore::new(queue),
@@ -86,7 +91,10 @@ impl Blocking {
             Ok(value) => sender.send(value),
             Err(payload) => {
                 let message = crate::worker::panic_message(payload.as_ref());
-                fail.fail(Error::Panicked { task: std::any::type_name::<F>(), message });
+                fail.fail(Error::Panicked {
+                    task: std::any::type_name::<F>(),
+                    message,
+                });
             }
         });
         if self.jobs.push(job).is_err() {

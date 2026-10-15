@@ -12,7 +12,8 @@ pub(super) fn detect() -> Option<Topology> {
         (0..levels)
             .filter_map(|level| {
                 let physical = sysctl(&format!("hw.perflevel{level}.physicalcpu"))?;
-                let logical = sysctl(&format!("hw.perflevel{level}.logicalcpu")).unwrap_or(physical);
+                let logical =
+                    sysctl(&format!("hw.perflevel{level}.logicalcpu")).unwrap_or(physical);
                 let kind = match (levels, level) {
                     (1, _) => CoreKind::Unknown,
                     (_, 0) => CoreKind::Performance,
@@ -23,10 +24,17 @@ pub(super) fn detect() -> Option<Topology> {
             .collect()
     } else {
         let physical = sysctl("hw.physicalcpu")?;
-        vec![(CoreKind::Unknown, physical, sysctl("hw.logicalcpu").unwrap_or(physical))]
+        vec![(
+            CoreKind::Unknown,
+            physical,
+            sysctl("hw.logicalcpu").unwrap_or(physical),
+        )]
     };
     Some(Topology {
-        nodes: vec![Node { id: 0, cores: number(&groups) }],
+        nodes: vec![Node {
+            id: 0,
+            cores: number(&groups),
+        }],
         source: Source::Sysctl,
         cpu_quota: None,
     })
@@ -43,7 +51,12 @@ pub(super) fn number(groups: &[(CoreKind, usize, usize)]) -> Vec<Core> {
         for _ in 0..physical {
             let cpus: CpuSet = (next..next + per_core).collect();
             next += per_core;
-            cores.push(Core { package: 0, l3: 0, kind, cpus });
+            cores.push(Core {
+                package: 0,
+                l3: 0,
+                kind,
+                cpus,
+            });
         }
     }
     cores

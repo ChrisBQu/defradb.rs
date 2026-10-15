@@ -29,7 +29,12 @@ fn tuning(monitored: bool) -> Tuning {
 
 fn shared() -> Arc<WorkerShared> {
     let signal = Arc::new(Signal::new(Parker::Waker(Waker::noop().clone())));
-    Arc::new(WorkerShared::new(WorkerId { index: 0, node: 0 }, signal, 4, 1 << 20))
+    Arc::new(WorkerShared::new(
+        WorkerId { index: 0, node: 0 },
+        signal,
+        4,
+        1 << 20,
+    ))
 }
 
 fn worker_with(clock: Arc<ManualClock>, monitored: bool) -> (Worker, Arc<WorkerShared>) {
@@ -87,11 +92,18 @@ fn a_local_task_runs_to_its_completion_on_this_thread() {
 fn a_blocking_wait_on_a_worker_is_an_error_not_a_deadlock() {
     let (worker, _) = worker();
     let (sender, completion) = crate::completion::channel::<u8>();
-    assert_eq!(crate::completion::block_on(async { 1 }), Err(Error::OnWorker));
+    assert_eq!(
+        crate::completion::block_on(async { 1 }),
+        Err(Error::OnWorker)
+    );
     assert_eq!(completion.wait(), Err(Error::OnWorker));
     drop(sender);
     drop(worker);
-    assert_eq!(crate::completion::block_on(async { 1 }), Ok(1), "a plain thread again");
+    assert_eq!(
+        crate::completion::block_on(async { 1 }),
+        Ok(1),
+        "a plain thread again"
+    );
 }
 
 #[test]
@@ -121,7 +133,10 @@ fn a_panicking_task_fails_only_its_own_completion() {
         other => panic!("{other:?}"),
     }
     assert_eq!(ready(&mut fine), Some(Ok(7)));
-    assert!(matches!(ready(&mut submitted), Some(Err(Error::Panicked { .. }))));
+    assert!(matches!(
+        ready(&mut submitted),
+        Some(Err(Error::Panicked { .. }))
+    ));
     assert_eq!(shared.stats().panics, 2);
     assert_eq!(shared.load(), 0, "the panicked job gave its admission back");
 }
@@ -137,11 +152,16 @@ fn one_task_per_key_runs_and_the_next_starts_when_it_finishes() {
     };
     let second = {
         let started = second_started.clone();
-        job(&shared, Some(9), move || async move { started.store(true, Ordering::SeqCst) })
+        job(&shared, Some(9), move || async move {
+            started.store(true, Ordering::SeqCst)
+        })
     };
     let mut other_key = job(&shared, Some(10), || async { 3 });
     settle(&mut worker);
-    assert!(!second_started.load(Ordering::SeqCst), "waits behind key 9's running task");
+    assert!(
+        !second_started.load(Ordering::SeqCst),
+        "waits behind key 9's running task"
+    );
     assert_eq!(ready(&mut other_key), Some(Ok(3)));
     gate.set();
     settle(&mut worker);
@@ -236,7 +256,11 @@ fn stopping_fails_unfinished_work_and_gives_admission_back() {
     assert_eq!(ready(&mut behind), Some(Err(Error::ShutDown)));
     assert_eq!(shared.load(), 0);
     let mut late = job(&shared, None, || async {});
-    assert_eq!(ready(&mut late), Some(Err(Error::ShutDown)), "a push after exit is failed at once");
+    assert_eq!(
+        ready(&mut late),
+        Some(Err(Error::ShutDown)),
+        "a push after exit is failed at once"
+    );
     assert_eq!(shared.load(), 0);
 }
 
@@ -263,7 +287,11 @@ impl Future for Blocks {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        let reported = self.shared.heartbeat.read().is_some_and(|beat| beat.task & REPORTED != 0);
+        let reported = self
+            .shared
+            .heartbeat
+            .read()
+            .is_some_and(|beat| beat.task & REPORTED != 0);
         self.seen_reported.borrow_mut().push(reported);
         self.clock.advance(20_000);
         self.polls += 1;
@@ -280,10 +308,19 @@ fn an_unwatched_worker_measures_its_own_long_polls_and_reports_a_task_once() {
     let clock = Arc::new(ManualClock::default());
     let (mut worker, shared) = worker_with(clock.clone(), false);
     let seen = Rc::new(RefCell::new(Vec::new()));
-    let _done = spawn_local(Blocks { clock, shared: shared.clone(), polls: 0, seen_reported: seen.clone() });
+    let _done = spawn_local(Blocks {
+        clock,
+        shared: shared.clone(),
+        polls: 0,
+        seen_reported: seen.clone(),
+    });
     settle(&mut worker);
     assert_eq!(shared.stats().long_polls, 2);
-    assert_eq!(*seen.borrow(), vec![false, true], "the second poll carries the reported mark");
+    assert_eq!(
+        *seen.borrow(),
+        vec![false, true],
+        "the second poll carries the reported mark"
+    );
 }
 
 #[test]

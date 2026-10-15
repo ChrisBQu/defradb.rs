@@ -22,7 +22,9 @@ pub struct StdClock {
 impl StdClock {
     /// A clock whose origin is now.
     pub fn new() -> StdClock {
-        StdClock { origin: std::time::Instant::now() }
+        StdClock {
+            origin: std::time::Instant::now(),
+        }
     }
 }
 
@@ -81,7 +83,8 @@ pub(crate) struct ManualClock(std::sync::atomic::AtomicU64);
 #[cfg(test)]
 impl ManualClock {
     pub(crate) fn advance(&self, micros: u64) {
-        self.0.fetch_add(micros, std::sync::atomic::Ordering::SeqCst);
+        self.0
+            .fetch_add(micros, std::sync::atomic::Ordering::SeqCst);
     }
 }
 

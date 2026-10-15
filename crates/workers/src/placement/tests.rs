@@ -20,14 +20,25 @@ fn machine(nodes: usize, domains: usize, cores: usize, smt: usize) -> Topology {
                     next += 1;
                 }
             }
-            Node { id: node, cores: list }
+            Node {
+                id: node,
+                cores: list,
+            }
         })
         .collect();
-    Topology { nodes, source: Source::Fallback, cpu_quota: None }
+    Topology {
+        nodes,
+        source: Source::Fallback,
+        cpu_quota: None,
+    }
 }
 
 fn config(workers: Workers, placement: Placement) -> Config {
-    Config { workers, placement, ..Config::default() }
+    Config {
+        workers,
+        placement,
+        ..Config::default()
+    }
 }
 
 fn cpus(plan: &Plan) -> Vec<String> {
@@ -47,43 +58,77 @@ fn distinct(plan: &Plan) -> bool {
 
 #[test]
 fn spread_alternates_nodes_then_l3_domains_on_first_siblings() {
-    let plan = plan(&machine(2, 2, 2, 2), &config(Workers::Count(4), Placement::Spread));
+    let plan = plan(
+        &machine(2, 2, 2, 2),
+        &config(Workers::Count(4), Placement::Spread),
+    );
     assert_eq!(cpus(&plan), vec!["0", "4", "2", "6"]);
     assert_eq!(nodes(&plan), vec![0, 1, 0, 1]);
     assert!(!plan.oversubscribed);
-    let background: Vec<(usize, String)> = plan.background.iter().map(|(n, c)| (*n, c.to_string())).collect();
-    assert_eq!(background, vec![(0, "1,3,9,11".into()), (1, "5,7,13,15".into())]);
+    let background: Vec<(usize, String)> = plan
+        .background
+        .iter()
+        .map(|(n, c)| (*n, c.to_string()))
+        .collect();
+    assert_eq!(
+        background,
+        vec![(0, "1,3,9,11".into()), (1, "5,7,13,15".into())]
+    );
 }
 
 #[test]
 fn pack_fills_one_node_before_the_next() {
-    let plan = plan(&machine(2, 2, 2, 2), &config(Workers::Count(4), Placement::Pack));
+    let plan = plan(
+        &machine(2, 2, 2, 2),
+        &config(Workers::Count(4), Placement::Pack),
+    );
     assert_eq!(cpus(&plan), vec!["0", "1", "2", "3"]);
     assert_eq!(nodes(&plan), vec![0, 0, 0, 0]);
-    let background: Vec<(usize, String)> = plan.background.iter().map(|(n, c)| (*n, c.to_string())).collect();
+    let background: Vec<(usize, String)> = plan
+        .background
+        .iter()
+        .map(|(n, c)| (*n, c.to_string()))
+        .collect();
     assert_eq!(background, vec![(1, "4-7,12-15".into())]);
 }
 
 #[test]
 fn siblings_are_used_only_after_every_core_has_a_worker() {
-    let plan = plan(&machine(2, 2, 2, 2), &config(Workers::Count(10), Placement::Spread));
+    let plan = plan(
+        &machine(2, 2, 2, 2),
+        &config(Workers::Count(10), Placement::Spread),
+    );
     assert_eq!(&cpus(&plan)[8..], ["8", "12"]);
     assert!(distinct(&plan));
     assert!(!plan.oversubscribed);
-    let background: Vec<(usize, String)> = plan.background.iter().map(|(n, c)| (*n, c.to_string())).collect();
-    assert_eq!(background, vec![(0, "9-11".into()), (1, "13-15".into())], "no spare core: spare siblings");
+    let background: Vec<(usize, String)> = plan
+        .background
+        .iter()
+        .map(|(n, c)| (*n, c.to_string()))
+        .collect();
+    assert_eq!(
+        background,
+        vec![(0, "9-11".into()), (1, "13-15".into())],
+        "no spare core: spare siblings"
+    );
 }
 
 #[test]
 fn smt_off_machines_place_one_worker_per_cpu() {
-    let plan = plan(&machine(1, 1, 4, 1), &config(Workers::Count(4), Placement::Spread));
+    let plan = plan(
+        &machine(1, 1, 4, 1),
+        &config(Workers::Count(4), Placement::Spread),
+    );
     assert_eq!(cpus(&plan), vec!["0", "1", "2", "3"]);
     assert!(plan.background.is_empty());
 }
 
 #[test]
 fn more_workers_than_cpus_share_cpus_and_say_so() {
-    let plan = plan(&machine(2, 2, 2, 2), &config(Workers::Count(20), Placement::Spread));
+    let plan = plan(
+        &machine(2, 2, 2, 2),
+        &config(Workers::Count(20), Placement::Spread),
+    );
     assert_eq!(plan.seats.len(), 20);
     assert!(plan.oversubscribed);
     assert!(plan.notes.iter().any(|n| n.contains("20 workers on 16")));
@@ -91,7 +136,11 @@ fn more_workers_than_cpus_share_cpus_and_say_so() {
     let mut unique = first.clone();
     unique.sort();
     unique.dedup();
-    assert_eq!(unique.len(), 16, "every CPU is used once before any is shared");
+    assert_eq!(
+        unique.len(),
+        16,
+        "every CPU is used once before any is shared"
+    );
 }
 
 #[test]
@@ -102,7 +151,10 @@ fn a_restricted_cpuset_is_all_the_plan_uses() {
     let plan = plan(&topology, &config(Workers::Count(3), Placement::Spread));
     assert_eq!(cpus(&plan), vec!["0", "1", "2"]);
     let allowed = topology.allowed();
-    assert!(plan.seats.iter().all(|s| s.cpus.iter().all(|c| allowed.contains(c))));
+    assert!(plan
+        .seats
+        .iter()
+        .all(|s| s.cpus.iter().all(|c| allowed.contains(c))));
     assert_eq!(plan.background, vec![(0, CpuSet::parse("4").unwrap())]);
 }
 
@@ -110,20 +162,38 @@ fn a_restricted_cpuset_is_all_the_plan_uses() {
 fn auto_is_cores_minus_the_edge_and_compaction_within_the_quota() {
     let topology = machine(2, 2, 2, 2);
     assert_eq!(worker_count(&topology, &Config::default()), 8 - 2 - 1);
-    let all = Config { smt: Smt::All, ..Config::default() };
+    let all = Config {
+        smt: Smt::All,
+        ..Config::default()
+    };
     assert_eq!(worker_count(&topology, &all), 16 - 2 - 1);
-    let none_kept = Config { edge_threads: Some(0), compaction_threads: 0, ..Config::default() };
+    let none_kept = Config {
+        edge_threads: Some(0),
+        compaction_threads: 0,
+        ..Config::default()
+    };
     assert_eq!(worker_count(&topology, &none_kept), 8);
-    let quota = Topology { cpu_quota: Some(4), ..topology.clone() };
+    let quota = Topology {
+        cpu_quota: Some(4),
+        ..topology.clone()
+    };
     assert_eq!(worker_count(&quota, &Config::default()), 1);
-    assert_eq!(worker_count(&Topology::single(1), &Config::default()), 1, "never zero");
+    assert_eq!(
+        worker_count(&Topology::single(1), &Config::default()),
+        1,
+        "never zero"
+    );
 }
 
 #[test]
 fn auto_on_a_heterogeneous_chip_is_its_performance_cores() {
     let mut topology = Topology::single(8);
     for (i, core) in topology.nodes[0].cores.iter_mut().enumerate() {
-        core.kind = if i < 6 { CoreKind::Performance } else { CoreKind::Efficiency };
+        core.kind = if i < 6 {
+            CoreKind::Performance
+        } else {
+            CoreKind::Efficiency
+        };
     }
     assert_eq!(worker_count(&topology, &Config::default()), 6);
 }
@@ -131,7 +201,11 @@ fn auto_on_a_heterogeneous_chip_is_its_performance_cores() {
 #[test]
 fn custom_sets_are_kept_restricted_to_allowed_cpus() {
     let topology = machine(2, 1, 2, 1);
-    let sets = vec![CpuSet::parse("0-1").unwrap(), CpuSet::parse("3,9").unwrap(), CpuSet::parse("40").unwrap()];
+    let sets = vec![
+        CpuSet::parse("0-1").unwrap(),
+        CpuSet::parse("3,9").unwrap(),
+        CpuSet::parse("40").unwrap(),
+    ];
     let plan = plan(&topology, &config(Workers::Auto, Placement::Custom(sets)));
     assert_eq!(cpus(&plan), vec!["0-1", "3", ""]);
     assert_eq!(nodes(&plan), vec![0, 1, 0]);
@@ -140,7 +214,10 @@ fn custom_sets_are_kept_restricted_to_allowed_cpus() {
 
 #[test]
 fn unpinned_workers_have_no_cpus_and_leave_no_background() {
-    let plan = plan(&machine(2, 1, 2, 2), &config(Workers::Count(3), Placement::Unpinned));
+    let plan = plan(
+        &machine(2, 1, 2, 2),
+        &config(Workers::Count(3), Placement::Unpinned),
+    );
     assert!(plan.seats.iter().all(|s| s.cpus.is_empty()));
     assert!(plan.background.is_empty());
     assert_eq!(plan.background_for(5), (0, CpuSet::new()));
@@ -148,7 +225,10 @@ fn unpinned_workers_have_no_cpus_and_leave_no_background() {
 
 #[test]
 fn background_threads_take_nodes_in_turn() {
-    let plan = plan(&machine(2, 2, 2, 2), &config(Workers::Count(4), Placement::Spread));
+    let plan = plan(
+        &machine(2, 2, 2, 2),
+        &config(Workers::Count(4), Placement::Spread),
+    );
     assert_eq!(plan.background_for(0).0, 0);
     assert_eq!(plan.background_for(1).0, 1);
     assert_eq!(plan.background_for(2).0, 0);

@@ -47,11 +47,19 @@ pub(crate) struct Placer {
 }
 
 fn slot(class: ThreadClass) -> usize {
-    ThreadClass::ALL.iter().position(|c| *c == class).unwrap_or(0)
+    ThreadClass::ALL
+        .iter()
+        .position(|c| *c == class)
+        .unwrap_or(0)
 }
 
 impl Placer {
-    pub(crate) fn new(plan: Plan, allowed: CpuSet, priorities: Priorities, memory_policy: MemoryPolicy) -> Placer {
+    pub(crate) fn new(
+        plan: Plan,
+        allowed: CpuSet,
+        priorities: Priorities,
+        memory_policy: MemoryPolicy,
+    ) -> Placer {
         Placer {
             plan,
             allowed,
@@ -64,7 +72,12 @@ impl Placer {
 
     /// Places the calling thread as worker `index`.
     pub(crate) fn place_worker(&self, index: usize) -> Placed {
-        let cpus = self.plan.seats.get(index).map(|seat| seat.cpus.clone()).unwrap_or_default();
+        let cpus = self
+            .plan
+            .seats
+            .get(index)
+            .map(|seat| seat.cpus.clone())
+            .unwrap_or_default();
         self.apply(os::system(), &cpus, index + 1, ThreadClass::Worker)
     }
 
@@ -99,7 +112,11 @@ impl Placer {
         let memory_policy = os::set_memory_policy(os, &self.memory_policy);
         let priority = os::prioritize(os, self.priorities.of(class));
         Placed {
-            report: ThreadPlacement { pinning: pinned.outcome, memory_policy, priority },
+            report: ThreadPlacement {
+                pinning: pinned.outcome,
+                memory_policy,
+                priority,
+            },
             cpus: pinned.cpus,
             scheduling: os.scheduling().ok(),
             tag,

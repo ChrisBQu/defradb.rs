@@ -12,7 +12,7 @@ use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use super::slab::{Key, Slab};
-use super::Local;
+use super::{micros, Local};
 use crate::Error;
 
 /// Rebuild the heap only past this many stale entries.
@@ -26,7 +26,11 @@ pub(crate) struct Timers {
 
 impl Timers {
     pub(crate) fn new() -> Timers {
-        Timers { heap: BinaryHeap::new(), wakers: Slab::new(), stale: 0 }
+        Timers {
+            heap: BinaryHeap::new(),
+            wakers: Slab::new(),
+            stale: 0,
+        }
     }
 
     pub(crate) fn add(&mut self, due: u64, waker: Waker) -> Key {
@@ -55,7 +59,8 @@ impl Timers {
         self.stale += 1;
         if self.stale > COMPACT_AFTER && self.stale * 2 > self.heap.len() {
             let wakers = &self.wakers;
-            self.heap.retain(|Reverse((_, bits))| wakers.contains(Key::from_bits(*bits)));
+            self.heap
+                .retain(|Reverse((_, bits))| wakers.contains(Key::from_bits(*bits)));
             self.stale = 0;
         }
     }
@@ -102,16 +107,16 @@ impl Timers {
     }
 }
 
-fn micros(duration: Duration) -> u64 {
-    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
-}
-
 /// Completes once `duration` has passed on the pool's clock. Only on a worker
 /// thread: the timer lives in that worker's deadline queue.
 pub fn sleep(duration: Duration) -> Result<Sleep, Error> {
     let local = super::current().ok_or(Error::NotOnWorker)?;
     let due = local.now().saturating_add(micros(duration));
-    Ok(Sleep { local, due, key: None })
+    Ok(Sleep {
+        local,
+        due,
+        key: None,
+    })
 }
 
 /// The future [`sleep`] returns.
@@ -223,7 +228,11 @@ mod tests {
             let key = timers.add(due, waker.clone());
             timers.cancel(key);
         }
-        assert!(timers.heap_len() <= 2 * COMPACT_AFTER + 2, "heap {}", timers.heap_len());
+        assert!(
+            timers.heap_len() <= 2 * COMPACT_AFTER + 2,
+            "heap {}",
+            timers.heap_len()
+        );
         assert!(timers.update(keep, &waker));
     }
 }

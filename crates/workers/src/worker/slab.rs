@@ -46,7 +46,11 @@ pub(crate) struct Slab<T> {
 
 impl<T> Slab<T> {
     pub(crate) fn new() -> Slab<T> {
-        Slab { slots: Vec::new(), free: Vec::new(), len: 0 }
+        Slab {
+            slots: Vec::new(),
+            free: Vec::new(),
+            len: 0,
+        }
     }
 
     /// The key the next [`insert`](Self::insert) will return.
@@ -66,7 +70,10 @@ impl<T> Slab<T> {
                 Key::new(index, slot.generation)
             }
             None => {
-                self.slots.push(Slot { generation: 0, value: Some(value) });
+                self.slots.push(Slot {
+                    generation: 0,
+                    value: Some(value),
+                });
                 Key::new(self.slots.len() - 1, 0)
             }
         }

@@ -10,7 +10,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use super::PoolShared;
-use crate::worker::{report_long_poll, REPORTED};
+use crate::worker::{micros, report_long_poll, REPORTED};
 
 /// How many workers run the scan.
 pub(crate) const WATCHERS: usize = 2;
@@ -22,10 +22,12 @@ pub(crate) fn period(limit: Duration) -> Duration {
 
 /// Scans every worker's heartbeat at `now`; returns how many are stuck.
 pub(crate) fn scan(pool: &PoolShared, now: u64) -> usize {
-    let limit = u64::try_from(pool.stuck_after.as_micros()).unwrap_or(u64::MAX);
+    let limit = micros(pool.stuck_after);
     let mut stuck = 0;
     for worker in pool.workers.iter() {
-        let Some(beat) = worker.heartbeat.read() else { continue };
+        let Some(beat) = worker.heartbeat.read() else {
+            continue;
+        };
         let elapsed = now.saturating_sub(beat.start);
         if elapsed <= limit {
             continue;

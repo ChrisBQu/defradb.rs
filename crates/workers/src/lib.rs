@@ -19,21 +19,22 @@ mod pool;
 pub mod topology;
 mod worker;
 
-pub use clock::{Clock, EnvClock};
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub use clock::StdClock;
+pub use clock::{Clock, EnvClock};
 pub use completion::Completion;
 #[cfg(not(target_family = "wasm"))]
 pub use completion::{block_on, block_on_timeout};
 pub use config::{
-    Config, MemoryLock, MemoryPolicy, Placement, Priorities, Priority, QosClass, RealTimePolicy, Smt,
-    ThreadClass, Workers,
+    Config, MemoryLock, MemoryPolicy, Placement, Priorities, Priority, QosClass, RealTimePolicy,
+    Smt, ThreadClass, Workers,
 };
 pub use error::Error;
 pub use hook::{Hook, HookFactory, HookProgress};
 pub use os::Outcome;
 pub use pool::{
-    Driver, PlacedEnv, Pool, Report, Stats, Submit, Target, ThreadPlacement, TopologySummary, WorkerReport,
+    Driver, PlacedEnv, Pool, Report, Stats, Submit, Target, ThreadPlacement, TopologySummary,
+    WorkerReport,
 };
 pub use worker::{
     current_worker, every, on_worker, sleep, spawn_daemon, spawn_local, yield_now, Budget, Sleep,

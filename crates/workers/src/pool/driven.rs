@@ -59,14 +59,28 @@ fn drive(config: Config, parker: Parker, parks: bool) -> Result<(Pool, Driver), 
         .ok_or_else(|| Error::Config("this target has no clock; set Config::clock".into()))?;
     let topology = Topology::detect();
     let plan = Plan {
-        seats: vec![Seat { node: 0, cpus: CpuSet::new() }],
+        seats: vec![Seat {
+            node: 0,
+            cpus: CpuSet::new(),
+        }],
         background: Vec::new(),
         oversubscribed: false,
         notes: vec!["one worker, driven by the caller's thread".to_owned()],
     };
-    let placer = Arc::new(Placer::new(plan, CpuSet::new(), config.priorities.clone(), MemoryPolicy::Off));
+    let placer = Arc::new(Placer::new(
+        plan,
+        CpuSet::new(),
+        config.priorities.clone(),
+        MemoryPolicy::Off,
+    ));
     #[cfg_attr(target_family = "wasm", allow(unused_mut))]
-    let mut shared = PoolShared::new(&config, &topology, placer.clone(), clock.clone(), vec![parker]);
+    let mut shared = PoolShared::new(
+        &config,
+        &topology,
+        placer.clone(),
+        clock.clone(),
+        vec![parker],
+    );
     #[cfg(not(target_family = "wasm"))]
     {
         shared.blocking = Some(super::blocking::Blocking::start(
@@ -82,8 +96,17 @@ fn drive(config: Config, parker: Parker, parks: bool) -> Result<(Pool, Driver), 
     worker_shared.signal.bind_current_thread();
     let id = worker_shared.id;
     let hook = config.hook.as_ref().map(|factory| factory(id));
-    let worker = Worker::new(worker_shared, clock, PoolShared::tuning(&config, false), hook)?;
-    let caller = |what: &str| Outcome { asked: what.to_owned(), granted: what.to_owned(), fell_back: None };
+    let worker = Worker::new(
+        worker_shared,
+        clock,
+        PoolShared::tuning(&config, false),
+        hook,
+    )?;
+    let caller = |what: &str| Outcome {
+        asked: what.to_owned(),
+        granted: what.to_owned(),
+        fell_back: None,
+    };
     let placement = ThreadPlacement {
         pinning: caller("the caller's thread"),
         memory_policy: caller("the caller's"),
@@ -102,7 +125,14 @@ fn drive(config: Config, parker: Parker, parks: bool) -> Result<(Pool, Driver), 
         #[cfg(not(target_family = "wasm"))]
         Vec::new(),
     );
-    Ok((pool, Driver { worker: Some(worker), shared, parks }))
+    Ok((
+        pool,
+        Driver {
+            worker: Some(worker),
+            shared,
+            parks,
+        },
+    ))
 }
 
 impl Driver {
@@ -110,7 +140,9 @@ impl Driver {
     /// and its due timers. Returns how much it did; 0 means idle, and the
     /// pool's waker fires when there is more.
     pub fn turn(&mut self) -> usize {
-        let Some(worker) = self.worker.as_mut() else { return 0 };
+        let Some(worker) = self.worker.as_mut() else {
+            return 0;
+        };
         worker.shared().signal.running();
         let done = worker.turn();
         if done == 0 && !worker.finished() {
@@ -144,7 +176,9 @@ impl Driver {
         use std::task::{Context, Poll};
 
         if !self.parks {
-            return Err(Error::Config("block_on needs a driver from Pool::driven_here".into()));
+            return Err(Error::Config(
+                "block_on needs a driver from Pool::driven_here".into(),
+            ));
         }
         let worker = self.worker.as_mut().ok_or(Error::ShutDown)?;
         let mut done: crate::Completion<F::Output> = worker.spawn(future)?;
@@ -171,6 +205,8 @@ impl Drop for Driver {
 
 impl std::fmt::Debug for Driver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Driver").field("finished", &self.finished()).finish()
+        f.debug_struct("Driver")
+            .field("finished", &self.finished())
+            .finish()
     }
 }

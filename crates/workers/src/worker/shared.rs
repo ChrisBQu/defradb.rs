@@ -58,7 +58,17 @@ impl Job {
         let (sender, completion) = completion::channel();
         let fail: Arc<dyn Fail + Send + Sync> = sender.shared();
         let start: Start = Box::new(move || Box::pin(async move { sender.send(make().await) }));
-        (Job { start, fail, name, key, bound, admitted }, completion)
+        (
+            Job {
+                start,
+                fail,
+                name,
+                key,
+                bound,
+                admitted,
+            },
+            completion,
+        )
     }
 }
 
@@ -155,7 +165,12 @@ pub(crate) struct WorkerShared {
 }
 
 impl WorkerShared {
-    pub(crate) fn new(id: WorkerId, signal: Arc<Signal>, items: usize, bytes: usize) -> WorkerShared {
+    pub(crate) fn new(
+        id: WorkerId,
+        signal: Arc<Signal>,
+        items: usize,
+        bytes: usize,
+    ) -> WorkerShared {
         WorkerShared {
             id,
             signal,
@@ -184,7 +199,10 @@ impl WorkerShared {
         let room = self.bytes.acquire(bytes).await;
         item.forget();
         room.forget();
-        Admitted { worker: self.clone(), bytes }
+        Admitted {
+            worker: self.clone(),
+            bytes,
+        }
     }
 
     /// Room for one job of `bytes` if there is some now.
@@ -194,12 +212,16 @@ impl WorkerShared {
         let room = self.bytes.try_acquire(bytes)?;
         item.forget();
         room.forget();
-        Some(Admitted { worker: self.clone(), bytes })
+        Some(Admitted {
+            worker: self.clone(),
+            bytes,
+        })
     }
 
     /// Submissions admitted and not finished.
     pub(crate) fn load(&self) -> usize {
-        self.items_cap.saturating_sub(self.items.available_permits())
+        self.items_cap
+            .saturating_sub(self.items.available_permits())
     }
 
     /// Queues an admitted job and wakes the worker if it parks. The job's

@@ -83,8 +83,15 @@ where
         }
     }
     let asked = outcomes.first().map_or("", |o| o.asked.as_str());
-    let asked = if asked.starts_with("CPUs") { "pinned" } else { asked };
-    let granted: Vec<String> = groups.iter().map(|(g, n)| format!("{g} on {n}/{total}")).collect();
+    let asked = if asked.starts_with("CPUs") {
+        "pinned"
+    } else {
+        asked
+    };
+    let granted: Vec<String> = groups
+        .iter()
+        .map(|(g, n)| format!("{g} on {n}/{total}"))
+        .collect();
     let reason = outcomes.iter().find_map(|o| o.fell_back.clone());
     (format!("{asked}: {}", granted.join(", ")), reason)
 }
@@ -95,7 +102,11 @@ impl Report {
         let pinning = tally(workers.iter().map(|w| &w.placement.pinning));
         let memory = tally(workers.iter().map(|w| &w.placement.memory_policy));
         let priority = tally(workers.iter().map(|w| &w.placement.priority));
-        [("pinning", pinning.0, pinning.1), ("memory policy", memory.0, memory.1), ("priority", priority.0, priority.1)]
+        [
+            ("pinning", pinning.0, pinning.1),
+            ("memory policy", memory.0, memory.1),
+            ("priority", priority.0, priority.1),
+        ]
     }
 
     /// Logs the report: one info line, and one warning per setting that fell
@@ -116,7 +127,12 @@ impl Report {
         );
         for (setting, granted, reason) in [pinning, memory, priority] {
             if let Some(reason) = reason {
-                tracing::warn!(setting, granted = granted.as_str(), reason = reason.as_str(), "a worker setting fell back to a weaker one");
+                tracing::warn!(
+                    setting,
+                    granted = granted.as_str(),
+                    reason = reason.as_str(),
+                    "a worker setting fell back to a weaker one"
+                );
             }
         }
         if let Some(reason) = &self.memory_lock.fell_back {
@@ -155,7 +171,11 @@ mod tests {
     use super::*;
 
     fn outcome(asked: &str, granted: &str, fell_back: Option<&str>) -> Outcome {
-        Outcome { asked: asked.into(), granted: granted.into(), fell_back: fell_back.map(Into::into) }
+        Outcome {
+            asked: asked.into(),
+            granted: granted.into(),
+            fell_back: fell_back.map(Into::into),
+        }
     }
 
     #[test]
@@ -169,7 +189,13 @@ mod tests {
         assert_eq!(line, "SCHED_RR 50: nice -20 on 2/3, SCHED_RR 50 on 1/3");
         assert_eq!(reason.as_deref(), Some("SCHED_RR 50: denied"));
 
-        let pins = [outcome("CPUs 0", "CPUs 0", None), outcome("CPUs 1", "unpinned", Some("EPERM"))];
-        assert_eq!(tally(pins.iter()).0, "pinned: pinned on 1/2, unpinned on 1/2");
+        let pins = [
+            outcome("CPUs 0", "CPUs 0", None),
+            outcome("CPUs 1", "unpinned", Some("EPERM")),
+        ];
+        assert_eq!(
+            tally(pins.iter()).0,
+            "pinned: pinned on 1/2, unpinned on 1/2"
+        );
     }
 }

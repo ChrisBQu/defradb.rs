@@ -108,7 +108,9 @@ impl Topology {
 
     /// Every core, node by node.
     pub fn cores(&self) -> impl Iterator<Item = (&Node, &Core)> + '_ {
-        self.nodes.iter().flat_map(|node| node.cores.iter().map(move |core| (node, core)))
+        self.nodes
+            .iter()
+            .flat_map(|node| node.cores.iter().map(move |core| (node, core)))
     }
 
     /// How many physical cores the process may use.
@@ -134,13 +136,16 @@ impl Topology {
     /// Every allowed CPU.
     pub fn allowed(&self) -> CpuSet {
         let mut all = CpuSet::new();
-        self.cores().for_each(|(_, core)| all.union_with(&core.cpus));
+        self.cores()
+            .for_each(|(_, core)| all.union_with(&core.cpus));
         all
     }
 
     /// The node `cpu` belongs to, if it is allowed.
     pub fn node_of(&self, cpu: usize) -> Option<usize> {
-        self.cores().find(|(_, core)| core.cpus.contains(cpu)).map(|(node, _)| node.id)
+        self.cores()
+            .find(|(_, core)| core.cpus.contains(cpu))
+            .map(|(node, _)| node.id)
     }
 
     fn distinct<F>(&self, key: F) -> usize

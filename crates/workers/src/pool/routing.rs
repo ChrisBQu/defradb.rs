@@ -67,10 +67,10 @@ impl PoolShared {
     /// The worker `target` names now.
     pub(crate) fn route(&self, target: Target) -> Result<&Arc<WorkerShared>, Error> {
         match target {
-            Target::Worker(index) => self
-                .workers
-                .get(index)
-                .ok_or(Error::NoSuchWorker { index, workers: self.workers.len() }),
+            Target::Worker(index) => self.workers.get(index).ok_or(Error::NoSuchWorker {
+                index,
+                workers: self.workers.len(),
+            }),
             Target::Key(hash) => Ok(self.key_worker(hash)),
             Target::LeastLoaded => Ok(self.least_loaded(self.caller_candidates())),
             Target::Node(node) => self
@@ -113,7 +113,9 @@ impl PoolShared {
         if count == 0 {
             return home;
         }
-        peers().nth(spread(hash.rotate_left(32), count)).unwrap_or(home)
+        peers()
+            .nth(spread(hash.rotate_left(32), count))
+            .unwrap_or(home)
     }
 
     /// The less loaded of two random candidates, skipping stuck workers.

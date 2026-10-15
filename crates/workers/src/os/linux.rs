@@ -54,7 +54,10 @@ fn tid() -> libc::id_t {
 }
 
 fn rlimit(resource: Resource) -> Option<libc::rlimit> {
-    let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
     // SAFETY: `limit` is a valid rlimit to write.
     let rc = unsafe { libc::getrlimit(resource.0, &mut limit) };
     (rc == 0).then_some(limit)
@@ -71,14 +74,20 @@ impl Os for System {
         // SAFETY: the buffer holds `len` bytes, which is what the kernel may
         // write; pid 0 is the calling thread.
         let rc = unsafe {
-            libc::sched_getaffinity(0, words.len() * size_of::<Word>(), words.as_mut_ptr().cast())
+            libc::sched_getaffinity(
+                0,
+                words.len() * size_of::<Word>(),
+                words.as_mut_ptr().cast(),
+            )
         };
         check(rc)?;
         Ok(words
             .iter()
             .enumerate()
             .flat_map(|(index, word)| {
-                (0..WORD_BITS).filter(move |bit| word & (1 << bit) != 0).map(move |bit| index * WORD_BITS + bit)
+                (0..WORD_BITS)
+                    .filter(move |bit| word & (1 << bit) != 0)
+                    .map(move |bit| index * WORD_BITS + bit)
             })
             .collect())
     }
@@ -98,7 +107,10 @@ impl Os for System {
     }
 
     fn set_affinity_tag(&self, _tag: usize) -> io::Result<()> {
-        Err(io::Error::new(io::ErrorKind::Unsupported, "Linux pins threads instead"))
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Linux pins threads instead",
+        ))
     }
 
     fn set_realtime(&self, policy: RealTimePolicy, priority: u8) -> io::Result<()> {
@@ -107,7 +119,12 @@ impl Os for System {
             RealTimePolicy::Fifo => libc::SCHED_FIFO,
         };
         // SAFETY: plain queries with no preconditions.
-        let (low, high) = unsafe { (libc::sched_get_priority_min(policy), libc::sched_get_priority_max(policy)) };
+        let (low, high) = unsafe {
+            (
+                libc::sched_get_priority_min(policy),
+                libc::sched_get_priority_max(policy),
+            )
+        };
         // SAFETY: an all-zero sched_param is valid; only the priority is set.
         let mut param: libc::sched_param = unsafe { std::mem::zeroed() };
         param.sched_priority = libc::c_int::from(priority).clamp(low, high);
@@ -130,7 +147,10 @@ impl Os for System {
     }
 
     fn set_qos(&self, _class: QosClass) -> io::Result<()> {
-        Err(io::Error::new(io::ErrorKind::Unsupported, "QoS classes exist only on macOS"))
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "QoS classes exist only on macOS",
+        ))
     }
 
     fn scheduling(&self) -> io::Result<Scheduling> {
@@ -145,8 +165,15 @@ impl Os for System {
             let mut param: libc::sched_param = unsafe { std::mem::zeroed() };
             // SAFETY: `param` is writable; pid 0 is the calling thread.
             check(unsafe { libc::sched_getparam(0, &mut param) })?;
-            let policy = if policy == libc::SCHED_RR { RealTimePolicy::RoundRobin } else { RealTimePolicy::Fifo };
-            return Ok(Scheduling::RealTime { policy, priority: param.sched_priority });
+            let policy = if policy == libc::SCHED_RR {
+                RealTimePolicy::RoundRobin
+            } else {
+                RealTimePolicy::Fifo
+            };
+            return Ok(Scheduling::RealTime {
+                policy,
+                priority: param.sched_priority,
+            });
         }
         // getpriority returns -1 for nice -1 as well as for an error, so errno
         // is cleared first and read after.
@@ -167,12 +194,18 @@ impl Os for System {
             MemoryPolicy::Local => (MPOL_LOCAL, Vec::new()),
             MemoryPolicy::Bind(nodes) => {
                 if nodes.is_empty() || nodes.iter().any(|n| *n >= MAX_NODES) {
-                    return Err(io::Error::new(io::ErrorKind::InvalidInput, "node ids must be listed and below 4096"));
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "node ids must be listed and below 4096",
+                    ));
                 }
                 (MPOL_BIND, nodes.clone())
             }
         };
-        let words = mask(nodes.iter().copied(), nodes.iter().max().map_or(0, |n| n + 1));
+        let words = mask(
+            nodes.iter().copied(),
+            nodes.iter().max().map_or(0, |n| n + 1),
+        );
         // The kernel reads one bit fewer than `maxnode` says.
         let max_node = (words.len() * WORD_BITS + 1) as libc::c_ulong;
         let (pointer, max_node) = if mode == MPOL_LOCAL {

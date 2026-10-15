@@ -57,12 +57,16 @@ impl Os for System {
         match result {
             0 => Ok(()),
             libc::KERN_NOT_SUPPORTED => Err(unsupported("this Mac takes no affinity hints")),
-            other => Err(io::Error::other(format!("thread_policy_set returned {other}"))),
+            other => Err(io::Error::other(format!(
+                "thread_policy_set returned {other}"
+            ))),
         }
     }
 
     fn set_realtime(&self, _policy: RealTimePolicy, _priority: u8) -> io::Result<()> {
-        Err(unsupported("macOS schedules general work by QoS class, not real-time policy"))
+        Err(unsupported(
+            "macOS schedules general work by QoS class, not real-time policy",
+        ))
     }
 
     fn set_nice(&self, _nice: i32) -> io::Result<()> {
@@ -85,7 +89,9 @@ impl Os for System {
         let mut class = libc::qos_class_t::QOS_CLASS_UNSPECIFIED;
         let mut relative: libc::c_int = 0;
         // SAFETY: both outputs are writable; the thread is the caller.
-        let rc = unsafe { libc::pthread_get_qos_class_np(libc::pthread_self(), &mut class, &mut relative) };
+        let rc = unsafe {
+            libc::pthread_get_qos_class_np(libc::pthread_self(), &mut class, &mut relative)
+        };
         if rc != 0 {
             return Err(io::Error::from_raw_os_error(rc));
         }
@@ -96,7 +102,9 @@ impl Os for System {
             QosClass::Utility,
             QosClass::Background,
         ];
-        Ok(Scheduling::Qos(all.into_iter().find(|c| qos(*c) as u32 == class as u32)))
+        Ok(Scheduling::Qos(
+            all.into_iter().find(|c| qos(*c) as u32 == class as u32),
+        ))
     }
 
     fn set_memory_policy(&self, policy: &MemoryPolicy) -> io::Result<()> {
@@ -114,7 +122,11 @@ impl Os for System {
         if on_fault {
             return Err(unsupported("macOS has no on-fault locking"));
         }
-        let flags = if future { libc::MCL_CURRENT | libc::MCL_FUTURE } else { libc::MCL_CURRENT };
+        let flags = if future {
+            libc::MCL_CURRENT | libc::MCL_FUTURE
+        } else {
+            libc::MCL_CURRENT
+        };
         // SAFETY: mlockall takes only flags.
         match unsafe { libc::mlockall(flags) } {
             0 => Ok(()),
@@ -123,7 +135,10 @@ impl Os for System {
     }
 
     fn memlock_limit(&self) -> Option<u64> {
-        let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         // SAFETY: `limit` is a valid rlimit to write.
         let rc = unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut limit) };
         (rc == 0 && limit.rlim_cur != libc::RLIM_INFINITY).then_some(limit.rlim_cur)

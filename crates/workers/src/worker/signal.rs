@@ -46,7 +46,11 @@ pub(crate) struct Signal {
 
 impl Signal {
     pub(crate) fn new(parker: Parker) -> Signal {
-        Signal { ready: SegQueue::new(), state: AtomicU8::new(RUNNING), parker }
+        Signal {
+            ready: SegQueue::new(),
+            state: AtomicU8::new(RUNNING),
+            parker,
+        }
     }
 
     /// The thread that parks; set once by the worker thread at start.
@@ -124,7 +128,11 @@ pub(crate) struct TaskWaker {
 impl TaskWaker {
     /// A waker for a task that is queued to run already.
     pub(crate) fn new(signal: Arc<Signal>, key: Key) -> Arc<TaskWaker> {
-        Arc::new(TaskWaker { signal, key, scheduled: AtomicBool::new(true) })
+        Arc::new(TaskWaker {
+            signal,
+            key,
+            scheduled: AtomicBool::new(true),
+        })
     }
 
     /// The worker is about to poll the task: a wake from now on queues it again.
@@ -160,7 +168,10 @@ mod tests {
 
     fn signal() -> (Arc<Signal>, Arc<Count>) {
         let count = Arc::new(Count(AtomicUsize::new(0)));
-        (Arc::new(Signal::new(Parker::Waker(Waker::from(count.clone())))), count)
+        (
+            Arc::new(Signal::new(Parker::Waker(Waker::from(count.clone())))),
+            count,
+        )
     }
 
     #[test]

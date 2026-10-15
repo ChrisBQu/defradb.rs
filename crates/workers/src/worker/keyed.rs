@@ -15,7 +15,9 @@ pub(crate) struct Keyed<J> {
 
 impl<J> Keyed<J> {
     pub(crate) fn new() -> Keyed<J> {
-        Keyed { waiting: RapidHashMap::default() }
+        Keyed {
+            waiting: RapidHashMap::default(),
+        }
     }
 
     /// `job` if it may start now; otherwise it waits behind the key's

@@ -28,7 +28,12 @@ impl CpuSet {
     /// ranges, surrounding whitespace ignored. An empty string is an empty set.
     pub fn parse(list: &str) -> Result<Self, Error> {
         let mut set = Self::new();
-        for part in list.trim().split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        for part in list
+            .trim()
+            .split(',')
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+        {
             let (low, high) = match part.split_once('-') {
                 Some((low, high)) => (parse_id(low, list)?, parse_id(high, list)?),
                 None => {
@@ -37,7 +42,9 @@ impl CpuSet {
                 }
             };
             if low > high {
-                return Err(Error::Config(format!("CPU range {part} in {list:?} runs backwards")));
+                return Err(Error::Config(format!(
+                    "CPU range {part} in {list:?} runs backwards"
+                )));
             }
             (low..=high).for_each(|cpu| set.insert(cpu));
         }
@@ -96,7 +103,12 @@ impl CpuSet {
     /// The CPUs in both sets.
     pub fn intersection(&self, other: &CpuSet) -> CpuSet {
         CpuSet {
-            words: self.words.iter().zip(&other.words).map(|(a, b)| a & b).collect(),
+            words: self
+                .words
+                .iter()
+                .zip(&other.words)
+                .map(|(a, b)| a & b)
+                .collect(),
         }
     }
 
@@ -105,12 +117,18 @@ impl CpuSet {
         if self.words.len() < other.words.len() {
             self.words.resize(other.words.len(), 0);
         }
-        self.words.iter_mut().zip(&other.words).for_each(|(a, b)| *a |= b);
+        self.words
+            .iter_mut()
+            .zip(&other.words)
+            .for_each(|(a, b)| *a |= b);
     }
 
     /// Removes every CPU of `other`.
     pub fn remove_all(&mut self, other: &CpuSet) {
-        self.words.iter_mut().zip(&other.words).for_each(|(a, b)| *a &= !b);
+        self.words
+            .iter_mut()
+            .zip(&other.words)
+            .for_each(|(a, b)| *a &= !b);
     }
 }
 
@@ -120,7 +138,9 @@ fn parse_id(text: &str, list: &str) -> Result<usize, Error> {
         .parse()
         .map_err(|_| Error::Config(format!("{text:?} in CPU list {list:?} is not a CPU id")))?;
     if id >= MAX_CPUS {
-        return Err(Error::Config(format!("CPU {id} in {list:?} is above the supported {MAX_CPUS}")));
+        return Err(Error::Config(format!(
+            "CPU {id} in {list:?} is above the supported {MAX_CPUS}"
+        )));
     }
     Ok(id)
 }

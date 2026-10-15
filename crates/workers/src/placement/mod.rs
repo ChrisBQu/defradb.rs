@@ -74,8 +74,12 @@ fn auto_count(topology: &Topology, config: &Config) -> usize {
     }
     let all: usize = topology.cores().map(|(_, core)| units(core)).sum();
     let usable = topology.cpu_quota.map_or(all, |quota| all.min(quota));
-    let edge = config.edge_threads.unwrap_or_else(|| topology.nodes.len().max(2));
-    usable.saturating_sub(edge + config.compaction_threads).max(1)
+    let edge = config
+        .edge_threads
+        .unwrap_or_else(|| topology.nodes.len().max(2));
+    usable
+        .saturating_sub(edge + config.compaction_threads)
+        .max(1)
 }
 
 /// Every worker's place on `topology` under `config`.
@@ -83,7 +87,16 @@ pub(crate) fn plan(topology: &Topology, config: &Config) -> Plan {
     let count = worker_count(topology, config);
     let mut notes = Vec::new();
     let (seats, oversubscribed) = match &config.placement {
-        Placement::Unpinned => (vec![Seat { node: 0, cpus: CpuSet::new() }; count], false),
+        Placement::Unpinned => (
+            vec![
+                Seat {
+                    node: 0,
+                    cpus: CpuSet::new()
+                };
+                count
+            ],
+            false,
+        ),
         Placement::Custom(sets) => (custom(topology, sets, &mut notes), false),
         Placement::Spread | Placement::Pack => {
             let slots = slots(topology, config.placement == Placement::Spread);
@@ -92,7 +105,10 @@ pub(crate) fn plan(topology: &Topology, config: &Config) -> Plan {
                 .iter()
                 .cycle()
                 .take(count)
-                .map(|(node, cpu)| Seat { node: *node, cpus: std::iter::once(*cpu).collect() })
+                .map(|(node, cpu)| Seat {
+                    node: *node,
+                    cpus: std::iter::once(*cpu).collect(),
+                })
                 .collect();
             (seats, oversubscribed)
         }
@@ -104,7 +120,12 @@ pub(crate) fn plan(topology: &Topology, config: &Config) -> Plan {
         ));
     }
     let background = background(topology, &seats);
-    Plan { seats, background, oversubscribed, notes }
+    Plan {
+        seats,
+        background,
+        oversubscribed,
+        notes,
+    }
 }
 
 /// Each custom set restricted to the allowed CPUs; a set with none left runs
@@ -115,9 +136,14 @@ fn custom(topology: &Topology, sets: &[CpuSet], notes: &mut Vec<String>) -> Vec<
         .map(|set| {
             let cpus = set.intersection(&allowed);
             if cpus.is_empty() {
-                notes.push(format!("custom CPU set {set} holds no allowed CPU: that worker runs unpinned"));
+                notes.push(format!(
+                    "custom CPU set {set} holds no allowed CPU: that worker runs unpinned"
+                ));
             }
-            let node = cpus.first().and_then(|cpu| topology.node_of(cpu)).unwrap_or(0);
+            let node = cpus
+                .first()
+                .and_then(|cpu| topology.node_of(cpu))
+                .unwrap_or(0);
             Seat { node, cpus }
         })
         .collect()
@@ -128,7 +154,10 @@ fn custom(topology: &Topology, sets: &[CpuSet], notes: &mut Vec<String>) -> Vec<
 /// ordered by [`core_order`].
 fn slots(topology: &Topology, spread: bool) -> Vec<(usize, usize)> {
     let cores = core_order(topology, spread);
-    let siblings: Vec<Vec<usize>> = cores.iter().map(|(_, core)| core.cpus.iter().collect()).collect();
+    let siblings: Vec<Vec<usize>> = cores
+        .iter()
+        .map(|(_, core)| core.cpus.iter().collect())
+        .collect();
     let deepest = siblings.iter().map(Vec::len).max().unwrap_or(0);
     (0..deepest)
         .flat_map(|round| {

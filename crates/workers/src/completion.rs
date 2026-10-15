@@ -29,9 +29,9 @@ pub(crate) struct Shared<T> {
 // SAFETY: the value moves between threads (written by one, taken by
 // another) but is never shared by reference: `state` hands it from the one
 // writer to the one taker.
-unsafe impl<T: Send> Send for Shared<T> {}
+unsafe impl<T> Send for Shared<T> where T: Send {}
 // SAFETY: as above.
-unsafe impl<T: Send> Sync for Shared<T> {}
+unsafe impl<T> Sync for Shared<T> where T: Send {}
 
 impl<T> Shared<T> {
     /// Stores the result unless one is stored already; `false` then.
@@ -110,7 +110,12 @@ pub(crate) fn channel<T>() -> (Sender<T>, Completion<T>) {
         state: AtomicU8::new(EMPTY),
         value: UnsafeCell::new(MaybeUninit::uninit()),
     });
-    (Sender { shared: shared.clone() }, Completion { wait: None, shared })
+    (
+        Sender {
+            shared: shared.clone(),
+        },
+        Completion { wait: None, shared },
+    )
 }
 
 /// A task's result: `Ok` with its output, or why it has none (it panicked,
@@ -178,7 +183,9 @@ impl<T> Future for Completion<T> {
 
 impl<T> std::fmt::Debug for Completion<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Completion").field("finished", &self.is_finished()).finish()
+        f.debug_struct("Completion")
+            .field("finished", &self.is_finished())
+            .finish()
     }
 }
 
@@ -265,7 +272,10 @@ mod tests {
         assert_eq!(completion.wait(), Err(Error::ShutDown));
 
         let (sender, completion) = channel::<u8>();
-        sender.shared().fail(Error::Panicked { task: "t", message: "boom".into() });
+        sender.shared().fail(Error::Panicked {
+            task: "t",
+            message: "boom".into(),
+        });
         drop(sender);
         assert!(matches!(completion.wait(), Err(Error::Panicked { .. })));
     }
@@ -273,7 +283,10 @@ mod tests {
     #[test]
     fn a_timed_wait_gives_up_and_a_second_poll_says_consumed() {
         let (sender, completion) = channel::<u8>();
-        assert_eq!(completion.wait_timeout(Duration::from_millis(1)), Err(Error::TimedOut));
+        assert_eq!(
+            completion.wait_timeout(Duration::from_millis(1)),
+            Err(Error::TimedOut)
+        );
         drop(sender);
 
         let (sender, mut completion) = channel::<u8>();
@@ -294,7 +307,11 @@ mod tests {
 
     #[test]
     fn completions_cross_threads() {
-        fn send_sync<T: Send + Sync>() {}
+        fn send_sync<T>()
+        where
+            T: Send + Sync,
+        {
+        }
         send_sync::<Completion<Vec<u8>>>();
     }
 }

@@ -11,7 +11,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use regolith::env::{
-    Capabilities, DiskSpace, FileLock, FileMeta, JoinHandle, LogFile, ReadDir, ReadFile, WriteFile, WriteMode,
+    Capabilities, DiskSpace, FileLock, FileMeta, JoinHandle, LogFile, ReadDir, ReadFile, WriteFile,
+    WriteMode,
 };
 use regolith::Env;
 
@@ -33,12 +34,18 @@ impl PlacedEnv {
 
 impl std::fmt::Debug for PlacedEnv {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PlacedEnv").field("inner", &self.inner).finish_non_exhaustive()
+        f.debug_struct("PlacedEnv")
+            .field("inner", &self.inner)
+            .finish_non_exhaustive()
     }
 }
 
 impl Env for PlacedEnv {
-    fn spawn(&self, name: &str, body: Box<dyn FnOnce() + Send + 'static>) -> io::Result<Box<dyn JoinHandle>> {
+    fn spawn(
+        &self,
+        name: &str,
+        body: Box<dyn FnOnce() + Send + 'static>,
+    ) -> io::Result<Box<dyn JoinHandle>> {
         let placer = self.placer.clone();
         self.inner.spawn(
             name,

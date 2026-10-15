@@ -63,7 +63,8 @@ impl Heartbeat {
         fence(Ordering::Release);
         self.start.store(start, Ordering::Relaxed);
         self.task.store(task, Ordering::Relaxed);
-        self.name_ptr.store(name.as_ptr().cast_mut(), Ordering::Relaxed);
+        self.name_ptr
+            .store(name.as_ptr().cast_mut(), Ordering::Relaxed);
         self.name_len.store(name.len(), Ordering::Relaxed);
         self.seq.store(seq.wrapping_add(2), Ordering::Release);
     }
@@ -99,7 +100,14 @@ mod tests {
         let beat = Heartbeat::new();
         assert_eq!(beat.read(), None);
         beat.begin(7, 42 | REPORTED, "query");
-        assert_eq!(beat.read(), Some(Beat { start: 7, task: 42 | REPORTED, name: "query" }));
+        assert_eq!(
+            beat.read(),
+            Some(Beat {
+                start: 7,
+                task: 42 | REPORTED,
+                name: "query"
+            })
+        );
         beat.idle();
         assert_eq!(beat.read(), None);
     }
@@ -122,7 +130,11 @@ mod tests {
         while !writer.is_finished() {
             if let Some(read) = beat.read() {
                 assert_eq!(read.start, read.task);
-                let expected = if read.start % 2 == 0 { "a-short-name" } else { "a-much-longer-task-name" };
+                let expected = if read.start % 2 == 0 {
+                    "a-short-name"
+                } else {
+                    "a-much-longer-task-name"
+                };
                 assert_eq!(read.name, expected);
             }
         }

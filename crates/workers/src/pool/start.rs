@@ -48,12 +48,29 @@ impl Pool {
         let plan = placement::plan(&topology, &config);
         let notes = plan.notes.clone();
         let memory_lock = os::lock_memory(os, &config.memory_lock);
-        let clock = config.clock.clone().or_else(clock::platform).ok_or_else(|| {
-            Error::Config("this target has no clock; set Config::clock".into())
-        })?;
-        let placer = Arc::new(Placer::new(plan, allowed, config.priorities.clone(), config.memory_policy.clone()));
-        let blocking = Blocking::start(config.blocking_threads, config.blocking_queue, &config.thread_name, placer.clone())?;
-        let parkers = placer.plan.seats.iter().map(|_| Parker::Thread(OnceCell::new())).collect();
+        let clock = config
+            .clock
+            .clone()
+            .or_else(clock::platform)
+            .ok_or_else(|| Error::Config("this target has no clock; set Config::clock".into()))?;
+        let placer = Arc::new(Placer::new(
+            plan,
+            allowed,
+            config.priorities.clone(),
+            config.memory_policy.clone(),
+        ));
+        let blocking = Blocking::start(
+            config.blocking_threads,
+            config.blocking_queue,
+            &config.thread_name,
+            placer.clone(),
+        )?;
+        let parkers = placer
+            .plan
+            .seats
+            .iter()
+            .map(|_| Parker::Thread(OnceCell::new()))
+            .collect();
         let mut shared = PoolShared::new(&config, &topology, placer, clock, parkers);
         shared.blocking = Some(blocking);
         let shared = Arc::new(shared);
@@ -66,7 +83,12 @@ impl Pool {
         let mut threads = Vec::with_capacity(count);
         for index in 0..count {
             let thread = {
-                let (shared, startup, tuning, hook) = (shared.clone(), startup.clone(), tuning.clone(), config.hook.clone());
+                let (shared, startup, tuning, hook) = (
+                    shared.clone(),
+                    startup.clone(),
+                    tuning.clone(),
+                    config.hook.clone(),
+                );
                 let recheck = config.recheck_every;
                 std::thread::Builder::new()
                     .name(format!("{}-{index}", config.thread_name))
@@ -87,7 +109,10 @@ impl Pool {
         let mut workers = Vec::with_capacity(count);
         for (index, placed) in startup.placed.iter().enumerate() {
             match placed.get() {
-                Some(Ok(placement)) => workers.push(WorkerReport { id: shared.workers[index].id, placement: placement.clone() }),
+                Some(Ok(placement)) => workers.push(WorkerReport {
+                    id: shared.workers[index].id,
+                    placement: placement.clone(),
+                }),
                 Some(Err(error)) => {
                     let error = error.clone();
                     shared.shutdown();
@@ -101,7 +126,12 @@ impl Pool {
                 }
             }
         }
-        let report = Report { topology: TopologySummary::of(&topology), workers, memory_lock, notes };
+        let report = Report {
+            topology: TopologySummary::of(&topology),
+            workers,
+            memory_lock,
+            notes,
+        };
         Ok(Pool::from_parts(shared, report, &config, threads))
     }
 }
@@ -134,7 +164,9 @@ impl ReportIn<'_> {
 impl Drop for ReportIn<'_> {
     fn drop(&mut self) {
         let index = self.index;
-        self.send(Err(Error::Spawn(format!("worker {index} stopped while starting"))));
+        self.send(Err(Error::Spawn(format!(
+            "worker {index} stopped while starting"
+        ))));
     }
 }
 
@@ -149,7 +181,11 @@ fn run_worker(
     startup: &Startup,
 ) {
     let _out = CountOut(&shared.stopped);
-    let mut report_in = ReportIn { startup, index, sent: false };
+    let mut report_in = ReportIn {
+        startup,
+        index,
+        sent: false,
+    };
     let worker_shared = shared.workers[index].clone();
     worker_shared.signal.bind_current_thread();
     let placed = shared.placer.place_worker(index);
@@ -159,7 +195,9 @@ fn run_worker(
         Some(Ok(hook)) => Some(hook),
         Some(Err(payload)) => {
             let message = panic_message(payload.as_ref());
-            report_in.send(Err(Error::Spawn(format!("the hook factory panicked: {message}"))));
+            report_in.send(Err(Error::Spawn(format!(
+                "the hook factory panicked: {message}"
+            ))));
             return;
         }
     };

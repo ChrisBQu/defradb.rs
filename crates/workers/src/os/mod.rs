@@ -78,7 +78,10 @@ pub(crate) fn current_affinity() -> Option<CpuSet> {
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Scheduling {
-    RealTime { policy: RealTimePolicy, priority: i32 },
+    RealTime {
+        policy: RealTimePolicy,
+        priority: i32,
+    },
     Nice(i32),
     Qos(Option<QosClass>),
 }
@@ -86,10 +89,16 @@ pub(crate) enum Scheduling {
 impl fmt::Display for Scheduling {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Scheduling::RealTime { policy: RealTimePolicy::RoundRobin, priority } => {
+            Scheduling::RealTime {
+                policy: RealTimePolicy::RoundRobin,
+                priority,
+            } => {
                 write!(f, "SCHED_RR {priority}")
             }
-            Scheduling::RealTime { policy: RealTimePolicy::Fifo, priority } => {
+            Scheduling::RealTime {
+                policy: RealTimePolicy::Fifo,
+                priority,
+            } => {
                 write!(f, "SCHED_FIFO {priority}")
             }
             Scheduling::Nice(nice) => write!(f, "nice {nice}"),
@@ -166,13 +175,19 @@ pub(crate) struct Pinned {
 /// platform takes one. An empty `cpus` asks for no pinning.
 pub(crate) fn pin(os: &dyn Os, cpus: &CpuSet, allowed: &CpuSet, tag: usize) -> Pinned {
     if cpus.is_empty() {
-        return Pinned { outcome: Outcome::new("unpinned", "unpinned", Vec::new()), cpus: None };
+        return Pinned {
+            outcome: Outcome::new("unpinned", "unpinned", Vec::new()),
+            cpus: None,
+        };
     }
     let asked = format!("CPUs {cpus}");
     let reason = match os.set_thread_affinity(cpus) {
         Ok(()) => match check_pin(os, cpus) {
             Ok(()) => {
-                return Pinned { outcome: Outcome::new(&asked, &asked, Vec::new()), cpus: Some(cpus.clone()) };
+                return Pinned {
+                    outcome: Outcome::new(&asked, &asked, Vec::new()),
+                    cpus: Some(cpus.clone()),
+                };
             }
             Err(reason) => {
                 if !allowed.is_empty() {
@@ -184,13 +199,19 @@ pub(crate) fn pin(os: &dyn Os, cpus: &CpuSet, allowed: &CpuSet, tag: usize) -> P
         Err(e) if e.kind() == io::ErrorKind::Unsupported => match os.set_affinity_tag(tag) {
             Ok(()) => {
                 let granted = format!("unpinned, affinity tag {tag} as a hint");
-                return Pinned { outcome: Outcome::new(asked, granted, vec![e.to_string()]), cpus: None };
+                return Pinned {
+                    outcome: Outcome::new(asked, granted, vec![e.to_string()]),
+                    cpus: None,
+                };
             }
             Err(_) => e.to_string(),
         },
         Err(e) => e.to_string(),
     };
-    Pinned { outcome: Outcome::new(asked, "unpinned", vec![reason]), cpus: None }
+    Pinned {
+        outcome: Outcome::new(asked, "unpinned", vec![reason]),
+        cpus: None,
+    }
 }
 
 /// Whether the calling thread is pinned to exactly `cpus` and runs on one of
@@ -221,9 +242,13 @@ enum Step {
 impl fmt::Display for Step {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Step::RealTime(policy, priority) => {
-                fmt::Display::fmt(&Priority::RealTime { policy: *policy, priority: *priority }, f)
-            }
+            Step::RealTime(policy, priority) => fmt::Display::fmt(
+                &Priority::RealTime {
+                    policy: *policy,
+                    priority: *priority,
+                },
+                f,
+            ),
             Step::Qos(class) => write!(f, "QoS {class:?}"),
             Step::Nice(nice) => write!(f, "nice {nice}"),
             Step::NiceFloor(_) => f.write_str("the lowest nice RLIMIT_NICE allows"),
@@ -242,7 +267,9 @@ fn chain(wanted: Priority) -> Vec<Step> {
             Step::Nice(-20),
             Step::NiceFloor(-20),
         ],
-        Priority::Nice(nice) if nice < 0 => vec![Step::Nice(nice.into()), Step::NiceFloor(nice.into())],
+        Priority::Nice(nice) if nice < 0 => {
+            vec![Step::Nice(nice.into()), Step::NiceFloor(nice.into())]
+        }
         Priority::Nice(nice) => vec![Step::Nice(nice.into())],
         Priority::Qos(class) => vec![Step::Qos(class)],
     }
@@ -254,9 +281,9 @@ fn attempt(os: &dyn Os, step: Step) -> io::Result<()> {
         Step::Qos(class) => os.set_qos(class),
         Step::Nice(nice) => os.set_nice(nice),
         Step::NiceFloor(lowest) => {
-            let floor = os
-                .nice_floor()
-                .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "no nice limit to read"))?;
+            let floor = os.nice_floor().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::Unsupported, "no nice limit to read")
+            })?;
             let current = match os.scheduling()? {
                 Scheduling::Nice(current) => current,
                 other => return Err(io::Error::other(format!("the thread runs at {other}"))),
@@ -287,7 +314,11 @@ pub(crate) fn prioritize(os: &dyn Os, wanted: Priority) -> Outcome {
         Err(_) if wanted == Priority::Inherit => "inherited".to_owned(),
         Err(e) => format!("unknown ({e})"),
     };
-    let asked = if wanted == Priority::Inherit { granted.clone() } else { wanted.to_string() };
+    let asked = if wanted == Priority::Inherit {
+        granted.clone()
+    } else {
+        wanted.to_string()
+    };
     Outcome::new(asked, granted, reasons)
 }
 
@@ -327,7 +358,12 @@ fn policy_name(policy: &MemoryPolicy) -> String {
 /// locked only when `RLIMIT_MEMLOCK` is unlimited or holds the footprint,
 /// since past the limit every later allocation fails.
 pub(crate) fn lock_memory(os: &dyn Os, wanted: &MemoryLock) -> Outcome {
-    let MemoryLock::Lock { future, on_fault, footprint } = *wanted else {
+    let MemoryLock::Lock {
+        future,
+        on_fault,
+        footprint,
+    } = *wanted
+    else {
         return Outcome::new("off", "off", Vec::new());
     };
     let mut reasons = Vec::new();
@@ -338,7 +374,12 @@ pub(crate) fn lock_memory(os: &dyn Os, wanted: &MemoryLock) -> Outcome {
         (Some(_), None) => false,
     };
     let mut steps = Vec::with_capacity(4);
-    for step in [(future, on_fault), (future, false), (false, on_fault), (false, false)] {
+    for step in [
+        (future, on_fault),
+        (future, false),
+        (false, on_fault),
+        (false, false),
+    ] {
         if !steps.contains(&step) {
             steps.push(step);
         }
@@ -351,7 +392,10 @@ pub(crate) fn lock_memory(os: &dyn Os, wanted: &MemoryLock) -> Outcome {
                     "{}: RLIMIT_MEMLOCK {limit} bytes is below the footprint {footprint}",
                     lock_name(true, on_fault)
                 ),
-                _ => format!("{}: no footprint set to check RLIMIT_MEMLOCK against", lock_name(true, on_fault)),
+                _ => format!(
+                    "{}: no footprint set to check RLIMIT_MEMLOCK against",
+                    lock_name(true, on_fault)
+                ),
             });
             continue;
         }
@@ -367,7 +411,11 @@ pub(crate) fn lock_memory(os: &dyn Os, wanted: &MemoryLock) -> Outcome {
 }
 
 fn lock_name(future: bool, on_fault: bool) -> String {
-    let what = if future { "current and future" } else { "current" };
+    let what = if future {
+        "current and future"
+    } else {
+        "current"
+    };
     if on_fault {
         format!("{what}, on fault")
     } else {
