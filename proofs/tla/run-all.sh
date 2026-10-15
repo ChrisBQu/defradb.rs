@@ -22,6 +22,11 @@ RUNS=(
   "MC_RetryRegistrationFence_Red_NoOrder.cfg RetryRegistrationFence.tla RED"
   "MC_CollectionVersionOCC_Green.cfg CollectionVersionOCC.tla GREEN" # schema-version dependency rejects stale writer
   "MC_CollectionVersionOCC_Red_NoValidation.cfg CollectionVersionOCC.tla RED" # stale schema-dependent write is admitted
+  "MC_StatementAtomicity_Green.cfg StatementAtomicity.tla GREEN" # statement failure/cancellation restores only its staged effects before next op/commit
+  "MC_StatementAtomicity_Red_NoWriteRollback.cfg StatementAtomicity.tla RED" # failed statement leaves staged storage writes
+  "MC_StatementAtomicity_Red_NoSideEffectRollback.cfg StatementAtomicity.tla RED" # failed statement leaves callback side effects
+  "MC_StatementAtomicity_Red_NextOperationSkipsCleanup.cfg StatementAtomicity.tla RED" # next statement crosses pending cancellation cleanup
+  "MC_StatementAtomicity_Red_CommitSkipsCleanup.cfg StatementAtomicity.tla RED" # transaction commits before cancellation cleanup
   "MC_EventOrder_Green.cfg EventOrder.tla GREEN"
   "MC_EventOrder_Red_Arrival.cfg EventOrder.tla RED"
   "MC_TransactionDecisions_Green.cfg TransactionDecisions.tla GREEN"
