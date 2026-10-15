@@ -62,6 +62,8 @@ pub struct CompositeMergeState {
     /// Fields of each linked Immutable block: their heads are the block.
     pub(crate) immutable_block_fields: RapidHashMap<Cid, Vec<String>>,
     pub(crate) is_branchable: bool,
+    /// Unique-index collisions this merge resolved, published after commit.
+    pub(crate) unique_conflicts: Vec<events::UniqueIndexConflictData>,
 }
 
 enum CompositeMergePreparation {
@@ -652,6 +654,9 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                 }
 
                 if let Some(bus) = self.db.event_bus() {
+                    for conflict in state.unique_conflicts.drain(..) {
+                        bus.publish(Message::unique_index_conflict(conflict));
+                    }
                     let update = Update::new(
                         doc_id_str.to_string(),
                         *cid,
@@ -1063,6 +1068,11 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                     pending_events.push(PendingMergeEvent {
                         message: Message::update(update),
                     });
+                    for conflict in state.unique_conflicts.drain(..) {
+                        pending_events.push(PendingMergeEvent {
+                            message: Message::unique_index_conflict(conflict),
+                        });
+                    }
 
                     if !from_collection {
                         let merge_complete = MergeCompleteData {

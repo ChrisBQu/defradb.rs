@@ -33,6 +33,8 @@ pub enum EventName {
     PendingDagQuarantined,
     /// A long-running database action changed state.
     ActionExecution,
+    /// A merge resolved a unique-index collision between two documents.
+    UniqueIndexConflict,
 }
 
 impl EventName {
@@ -60,6 +62,7 @@ impl std::fmt::Display for EventName {
             EventName::AcpCacheInvalidated => write!(f, "acp-cache-invalidated"),
             EventName::PendingDagQuarantined => write!(f, "pending-dag-quarantined"),
             EventName::ActionExecution => write!(f, "action-execution"),
+            EventName::UniqueIndexConflict => write!(f, "unique-index-conflict"),
         }
     }
 }
@@ -123,6 +126,21 @@ pub struct PendingDagQuarantinedData {
     pub collection_id: String,
     /// Human-readable rejection reason (e.g. unique-index violation).
     pub reason: String,
+}
+
+/// A merge found two documents holding the same unique-index value. Both are
+/// kept; the smallest public DocID holds the entry on every replica, and the
+/// other stays readable by scans but is not indexed for that value.
+#[derive(Debug, Clone)]
+pub struct UniqueIndexConflictData {
+    /// Collection both documents belong to.
+    pub collection_id: String,
+    /// Name of the unique index.
+    pub index: String,
+    /// Document that holds the index entry.
+    pub winner_doc_id: String,
+    /// Document left out of the index for the conflicting value.
+    pub unindexed_doc_id: String,
 }
 
 /// ACP light client height advancement event data.
@@ -244,6 +262,8 @@ pub enum MessageData {
     PendingDagQuarantined(PendingDagQuarantinedData),
     /// Long-running database action changed state.
     ActionExecution(ActionExecution),
+    /// Unique-index collision resolved during a merge.
+    UniqueIndexConflict(UniqueIndexConflictData),
 }
 
 impl Message {
@@ -327,6 +347,14 @@ impl Message {
         }
     }
 
+    /// Create a new UniqueIndexConflict message.
+    pub fn unique_index_conflict(data: UniqueIndexConflictData) -> Self {
+        Self {
+            name: EventName::UniqueIndexConflict,
+            data: MessageData::UniqueIndexConflict(data),
+        }
+    }
+
     /// Create a new ActionExecution message.
     pub fn action_execution(data: ActionExecution) -> Self {
         Self {
@@ -387,6 +415,14 @@ impl Message {
     pub fn as_acp_cache_invalidated(&self) -> Option<&AcpCacheInvalidatedData> {
         match &self.data {
             MessageData::AcpCacheInvalidated(d) => Some(d),
+            _ => None,
+        }
+    }
+
+    /// Get the UniqueIndexConflictData if this is a UniqueIndexConflict message.
+    pub fn as_unique_index_conflict(&self) -> Option<&UniqueIndexConflictData> {
+        match &self.data {
+            MessageData::UniqueIndexConflict(d) => Some(d),
             _ => None,
         }
     }

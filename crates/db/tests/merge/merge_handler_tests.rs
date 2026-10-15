@@ -2973,8 +2973,20 @@ async fn make_handler_with_unique_index_schema() -> (
     DbMergeHandler<RegolithStore, DefraBlockstore<RegolithStore>>,
     Arc<DefraBlockstore<RegolithStore>>,
 ) {
+    let (handler, blockstore, _) = make_handler_with_unique_index_schema_and_bus().await;
+    (handler, blockstore)
+}
+
+async fn make_handler_with_unique_index_schema_and_bus() -> (
+    DbMergeHandler<RegolithStore, DefraBlockstore<RegolithStore>>,
+    Arc<DefraBlockstore<RegolithStore>>,
+    Arc<dyn events::Bus>,
+) {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
-    let db = Arc::new(DB::from_arc(store.clone()).unwrap());
+    let mut db = DB::from_arc(store.clone()).unwrap();
+    let bus: Arc<dyn events::Bus> = Arc::new(events::ChannelBus::new());
+    db.set_event_bus(bus.clone());
+    let db = Arc::new(db);
 
     db.create_collection(
         CollectionVersion::new(
@@ -3004,7 +3016,50 @@ async fn make_handler_with_unique_index_schema() -> (
 
     let blockstore = Arc::new(DefraBlockstore::new(store, false));
     let handler = DbMergeHandler::new(db, blockstore.clone());
-    (handler, blockstore)
+    (handler, blockstore, bus)
+}
+
+/// The deterministic pick is reported as an event naming both documents, so
+/// an application can reconcile the unindexed one (#1996).
+#[tokio::test]
+async fn unique_index_twin_conflict_publishes_the_pick() {
+    let (handler, blockstore, bus) = make_handler_with_unique_index_schema_and_bus().await;
+    let mut conflicts = bus.subscribe(&[events::EventName::UniqueIndexConflict]);
+
+    let mut doc_ids = Vec::new();
+    for (name, peer) in [
+        ("Alice", "did:key:z6MkrSessionA"),
+        ("Bob", "did:key:z6MkrSessionB"),
+    ] {
+        let mut doc = Document::new();
+        doc.set("name", NormalValue::String(name.to_string()));
+        doc.set("session_id", NormalValue::String("dup-session".to_string()));
+        let built = db::block::builder::build_blocks_from_document(
+            &doc,
+            &crate::common::schema::version("v1"),
+            &blockstore,
+        )
+        .await
+        .unwrap();
+        let metadata = BlockMetadata::normal(&built.doc_id, "col-sessions", peer, None, false);
+        let outcome = handler
+            .handle_block(&built.cid, &built.block, metadata)
+            .await
+            .unwrap();
+        assert_eq!(outcome, MergeOutcome::Merged);
+        doc_ids.push(built.doc_id);
+    }
+    doc_ids.sort();
+
+    let message = tokio::time::timeout(std::time::Duration::from_secs(5), conflicts.recv())
+        .await
+        .expect("conflict event")
+        .expect("subscription open");
+    let conflict = message.as_unique_index_conflict().expect("conflict data");
+    assert_eq!(conflict.index, "idx_session_id_unique");
+    assert_eq!(conflict.winner_doc_id, doc_ids[0]);
+    assert_eq!(conflict.unindexed_doc_id, doc_ids[1]);
+    assert!(conflicts.try_recv().is_err(), "one conflict, one event");
 }
 
 /// #1128 composed with #1126: a replicated composite merge that trips a

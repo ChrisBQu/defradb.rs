@@ -45,7 +45,7 @@ pub use document_changes::{DocumentChange, DocumentChangeBatch, DocumentChangeSu
 pub use event::{
     AcpCacheInvalidatedData, AcpHeightAdvancedData, EventName, MergeCompleteData, Message,
     PeerConnectionData, PendingDagQuarantinedData, SEArtifactReceivedData, TopicPeerEventData,
-    Update,
+    UniqueIndexConflictData, Update,
 };
 pub use noop_bus::NoOpBus;
 pub use subscription::{Subscription, TryRecvError};
