@@ -511,6 +511,18 @@ impl EmbeddedNode {
         self.event_bus.subscribe_document_changes()
     }
 
+    /// [`Self::subscribe_document_changes`] limited to the given collections,
+    /// identified by [`CollectionVersion::collection_id`], which is stable
+    /// across schema versions. Updates elsewhere neither wake the subscription
+    /// nor push it into `resync_required`.
+    pub fn subscribe_collection_changes(
+        &self,
+        collection_ids: impl IntoIterator<Item = String>,
+    ) -> events::DocumentChangeSubscription {
+        self.event_bus
+            .subscribe_collection_changes(collection_ids.into_iter().collect())
+    }
+
     /// Begin a manually finalized transaction. Dropping its handle does not
     /// roll it back; use [`Self::begin_transaction_guard`] for scope ownership.
     pub async fn begin_transaction(
