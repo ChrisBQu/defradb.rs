@@ -66,8 +66,9 @@ use tracing::instrument;
 /// Supports both P2P mode (with merge tracking) and local mode (no tracking).
 ///
 /// It keeps no cache of its own: every read goes to the engine, whose block
-/// cache and zero-copy reads serve a repeated read, so every handle over one
-/// store sees the same blocks and merge marks.
+/// cache serves a repeated read, so every handle over one store sees the same
+/// blocks and merge marks. A read returns the caller its own copy of the
+/// block.
 pub struct DefraBlockstore<S: Store> {
     store: InternalBlockstore<S>,
     /// Whether to verify hash on read
@@ -180,7 +181,14 @@ impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
             }
         }
 
-        Ok(result)
+        // The caller gets its own copy, not the engine's bytes. A read hands
+        // back `Bytes` over a regolith `DbSlice`, a refcount on whatever owns
+        // those bytes (a 16 KiB SSTable block, or a memtable arena); a block
+        // kept by its caller (a DAG fetch queue, a merge batch) would keep
+        // that owner resident, and a 200-byte block would hold a whole
+        // SSTable block down. regolith's guidance is to copy when the value
+        // outlives the read.
+        Ok(result.map(|data| Bytes::copy_from_slice(&data)))
     }
 
     #[instrument(level = "trace", skip(self))]

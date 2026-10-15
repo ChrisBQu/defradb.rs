@@ -8,7 +8,6 @@
 //! - `concurrency` — Concurrent reads, writes, deletes, merge ops
 //! - `stress` — Many-block and batch scaling
 //! - `error_paths` — Malformed keys, key format invariants
-//! - `one_view_of_the_store` - handles over one store see the same blocks and marks
 
 use std::str::FromStr;
 use std::sync::Arc;
@@ -1204,6 +1203,69 @@ mod error_paths {
     }
 }
 
+/// The block cache must hold its own copy, not the engine's bytes.
+///
+/// `Reader::get` hands back `Bytes` over a regolith `DbSlice`, which is a
+/// refcount on whatever owns those bytes: an SSTable block, or a memtable
+/// arena. Caching that slice keeps its owner resident for as long as the entry
+/// lives, so a million-entry LRU could pin an unbounded amount of engine memory
+/// and a small value would hold a whole block down.
+///
+/// Pointer identity is what distinguishes the two: a cache holding the engine's
+/// `Bytes` hands back a clone addressing the same memory, while a cache holding
+/// its own copy addresses a different allocation.
+mod cache_ownership {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_cached_block_does_not_alias_the_engine_s_bytes() {
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
+        let blockstore = DefraBlockstore::new(Arc::clone(&store), false);
+        let cid = test_cid();
+        let data = Bytes::from(vec![0xAB; 4096]);
+
+        blockstore.put(&cid, &data).await.unwrap();
+
+        // A second handle over the same store starts with a cold cache, which
+        // is what puts the first read on the miss path. Reading through the
+        // writing handle would only ever hit its write-through entry.
+        let reader = DefraBlockstore::new(Arc::clone(&store), false);
+        // Misses, so this is the engine's own bytes.
+        let from_engine = reader.get(&cid).await.unwrap().expect("block present");
+        // Hits, so this is whatever the cache decided to keep.
+        let from_cache = reader.get(&cid).await.unwrap().expect("block present");
+
+        assert_eq!(from_engine, data, "first read returned the wrong bytes");
+        assert_eq!(from_cache, data, "cached read returned the wrong bytes");
+        assert_ne!(
+            from_engine.as_ptr(),
+            from_cache.as_ptr(),
+            "the cache is holding the engine's slice, which pins its owner"
+        );
+    }
+
+    /// The copy is a copy of the value, not of a truncated or shared view of
+    /// it, so a large block round-trips through the cache intact.
+    #[tokio::test]
+    async fn a_large_cached_block_round_trips_intact() {
+        let store = Arc::new(RegolithStore::in_memory().unwrap());
+        let blockstore = DefraBlockstore::new(Arc::clone(&store), false);
+        let cid = test_cid2();
+        let data: Bytes = (0..64 * 1024u32)
+            .map(|i| (i % 251) as u8)
+            .collect::<Vec<_>>()
+            .into();
+
+        blockstore.put(&cid, &data).await.unwrap();
+        let reader = DefraBlockstore::new(Arc::clone(&store), false);
+        let _ = reader.get(&cid).await.unwrap();
+        let cached = reader.get(&cid).await.unwrap().expect("block present");
+
+        assert_eq!(cached.len(), data.len());
+        assert_eq!(cached, data);
+    }
+}
+
 /// The blockstore keeps no cache of its own, so every handle over one store
 /// sees what the store holds. A handle-local cache answered from what that
 /// handle saw last: a block deleted through another handle was still served,
@@ -1257,22 +1319,14 @@ mod one_view_of_the_store {
     async fn a_batch_put_after_a_delete_through_another_handle_stores_the_blocks() {
         let (writer, reader) = two_handles(false);
         let (first, second) = (test_cid(), test_cid2());
-        reader
-            .put_many(&[
-                (&first, b"first".as_slice()),
-                (&second, b"second".as_slice()),
-            ])
-            .await
-            .unwrap();
+        let blocks = [
+            (&first, b"first".as_slice()),
+            (&second, b"second".as_slice()),
+        ];
+        reader.put_many(&blocks).await.unwrap();
         writer.delete(&first).await.unwrap();
 
-        reader
-            .put_many(&[
-                (&first, b"first".as_slice()),
-                (&second, b"second".as_slice()),
-            ])
-            .await
-            .unwrap();
+        reader.put_many(&blocks).await.unwrap();
 
         assert_eq!(
             writer.get(&first).await.unwrap(),
@@ -1295,23 +1349,5 @@ mod one_view_of_the_store {
         writer.delete(&cid).await.unwrap();
 
         assert!(!reader.is_merged(&cid).await.unwrap());
-    }
-
-    /// A read hands back the engine's bytes whole, a large block included.
-    #[tokio::test]
-    async fn a_large_block_round_trips_intact() {
-        let (writer, reader) = two_handles(false);
-        let cid = test_cid2();
-        let data: Bytes = (0..64 * 1024u32)
-            .map(|i| (i % 251) as u8)
-            .collect::<Vec<_>>()
-            .into();
-
-        writer.put(&cid, &data).await.unwrap();
-        let first = reader.get(&cid).await.unwrap().expect("block present");
-        let second = reader.get(&cid).await.unwrap().expect("block present");
-
-        assert_eq!(first, data);
-        assert_eq!(second, data);
     }
 }
