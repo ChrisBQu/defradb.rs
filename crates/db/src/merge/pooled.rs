@@ -5,10 +5,13 @@
 //! on the network edge; the merge itself, a storage transaction, never runs
 //! there.
 //!
-//! A merge whose document is not known yet (crash recovery reads it from the
-//! block) and a batch that spans documents run on the least-loaded worker:
-//! the storage engine validates every commit wherever it runs. Without a
-//! pool (a test, a one-shot tool) the merge runs where it is called.
+//! A batch that spans documents is split by document, each part merged on
+//! its document's worker, the parts handed to the pool together
+//! (`workers::Pool::submit_batch`: one wake per worker). A merge whose
+//! document is not known yet (crash recovery reads it from the block) runs
+//! on the least-loaded worker: the storage engine validates every commit
+//! wherever it runs. Called on a worker, a merge runs there; without a pool
+//! (a test, a one-shot tool) where it is called.
 
 use std::sync::Arc;
 
@@ -198,23 +201,62 @@ where
         let Some(pool) = &self.pool else {
             return self.inner.handle_block_batch(blocks).await;
         };
-        let target = batch_target(blocks);
-        let count = blocks.len();
-        let blocks = blocks.to_vec();
-        let inner = Arc::clone(&self.inner);
-        let ran = workers::run_on(Some(pool), target, move || async move {
-            inner.handle_block_batch(&blocks).await
-        });
-        match ran.await {
-            Ok(outcomes) => outcomes,
-            // The pool could not run the batch: every block of it failed for
-            // that reason, and stays retryable.
-            Err(error) => (0..count)
-                .map(|_| Err(Self::Error::from(error.clone())))
-                .collect(),
+        let documents = by_document(blocks);
+        if documents.len() < 2 || workers::on_worker() {
+            let (count, blocks) = (blocks.len(), blocks.to_vec());
+            let inner = Arc::clone(&self.inner);
+            let ran = workers::run_on(Some(pool), batch_target(&blocks), move || async move {
+                inner.handle_block_batch(&blocks).await
+            });
+            return outcomes(count, ran.await);
         }
+        // Several documents: each one's blocks merge on its worker, the parts
+        // handed over together.
+        let mut jobs = Vec::with_capacity(documents.len());
+        for indices in &documents {
+            let part: Vec<MergeBlock> =
+                indices.iter().map(|&index| blocks[index].clone()).collect();
+            let inner = Arc::clone(&self.inner);
+            jobs.push((batch_target(&part), move || async move {
+                inner.handle_block_batch(&part).await
+            }));
+        }
+        let mut placed = Vec::with_capacity(blocks.len());
+        for (indices, submitted) in documents.iter().zip(pool.submit_batch(jobs).await) {
+            let ran = match submitted {
+                Ok(completion) => completion.await,
+                Err(error) => Err(error),
+            };
+            placed.extend(indices.iter().copied().zip(outcomes(indices.len(), ran)));
+        }
+        placed.sort_by_key(|(index, _)| *index);
+        placed.into_iter().map(|(_, outcome)| outcome).collect()
     }
 }
+
+/// Where each document's blocks sit in `blocks`, in their order.
+fn by_document(blocks: &[MergeBlock]) -> Vec<Vec<usize>> {
+    let document = |index: &usize| (&blocks[*index].collection_id, &blocks[*index].doc_id);
+    let mut order: Vec<usize> = (0..blocks.len()).collect();
+    // Stable: a document's blocks keep their order.
+    order.sort_by(|a, b| document(a).cmp(&document(b)));
+    order
+        .chunk_by(|a, b| document(a) == document(b))
+        .map(<[usize]>::to_vec)
+        .collect()
+}
+
+/// What `count` blocks merged to, or when the pool could not run them, a
+/// failure for each, which stays retryable.
+fn outcomes<E: From<workers::Error>>(
+    count: usize,
+    ran: Result<Vec<Result<MergeOutcome, E>>, workers::Error>,
+) -> Vec<Result<MergeOutcome, E>> {
+    ran.unwrap_or_else(|error| (0..count).map(|_| Err(E::from(error.clone()))).collect())
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod batch_tests;
 
 #[cfg(test)]
 mod tests {

@@ -15,6 +15,7 @@ mod detached;
 mod driven;
 mod env;
 mod background;
+mod batch;
 mod monitor;
 mod placer;
 mod report;
@@ -391,21 +392,36 @@ impl Pool {
         Fut: Future + 'static,
         Fut::Output: Send + 'static,
     {
+        let worker = admitted.worker().clone();
+        let (job, completion) = Self::job(target, options, admitted, make);
+        worker.push(job);
+        completion
+    }
+
+    /// The job that runs `make` with its admission, not handed over yet.
+    pub(crate) fn job<F, Fut>(
+        target: Target,
+        options: Submit,
+        admitted: crate::worker::Admitted,
+        make: F,
+    ) -> (Job, Completion<Fut::Output>)
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future + 'static,
+        Fut::Output: Send + 'static,
+    {
         let key = match target {
             Target::Key(key) => Some(key),
             _ => None,
         };
-        let worker = admitted.worker().clone();
         let name = options.name.unwrap_or(std::any::type_name::<F>());
-        let (job, completion) = Job::new(
+        Job::new(
             make,
             name,
             key,
             matches!(target, Target::Worker(_)),
             admitted,
-        );
-        worker.push(job);
-        completion
+        )
     }
 
     /// Submits from a plain thread and waits for the result: for the C FFI, a
