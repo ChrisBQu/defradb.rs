@@ -2,7 +2,7 @@
 //!
 //! This format is separate from the canonical CBOR used for blocks and DocIDs.
 //! Empty LWW bytes are a tombstone; their priority must survive materialization.
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use crate::encoding::{cbor_to_normal_value, normal_value_to_cbor};
 use crate::{Document, Error, NormalValue, Result};
@@ -75,12 +75,12 @@ impl StoredDocument {
     pub fn encode(&self) -> Option<Vec<u8>> {
         let mut bytes = MAGIC.to_vec();
         bytes.extend_from_slice(&u32::try_from(self.fields.len()).ok()?.to_be_bytes());
-        let mut names = BTreeSet::new();
+        let mut names = Vec::with_capacity(self.fields.len());
         for (id, field) in &self.fields {
-            if field.name.is_empty() || !names.insert(&field.name) || field.materialize().is_none()
-            {
+            if field.name.is_empty() || field.materialize().is_none() {
                 return None;
             }
+            names.push(field.name.as_str());
             bytes.extend_from_slice(&id.to_be_bytes());
             bytes.push(field.kind as u8);
             bytes.extend_from_slice(&field.priority.to_be_bytes());
@@ -89,10 +89,18 @@ impl StoredDocument {
                 bytes.extend_from_slice(value);
             }
         }
+        names.sort_unstable();
+        if names.windows(2).any(|pair| pair[0] == pair[1]) {
+            return None;
+        }
         Some(bytes)
     }
 
     pub fn decode(bytes: &[u8]) -> Option<Self> {
+        Self::decode_inner(bytes, true)
+    }
+
+    fn decode_inner(bytes: &[u8], validate_values: bool) -> Option<Self> {
         let mut input = bytes.strip_prefix(MAGIC)?;
         let count = u32::from_be_bytes(take(&mut input, 4)?.try_into().ok()?) as usize;
         // Every field has at least 21 bytes of header. Never allocate from an
@@ -101,7 +109,6 @@ impl StoredDocument {
             return None;
         }
         let mut fields = BTreeMap::new();
-        let mut names = BTreeSet::new();
         for _ in 0..count {
             let id = u32::from_be_bytes(take(&mut input, 4)?.try_into().ok()?);
             let kind = match take(&mut input, 1)?[0] {
@@ -123,12 +130,16 @@ impl StoredDocument {
                 value,
             };
             if field.name.is_empty()
-                || !names.insert(field.name.clone())
-                || field.materialize().is_none()
+                || (validate_values && field.materialize().is_none())
                 || fields.insert(id, field).is_some()
             {
                 return None;
             }
+        }
+        let mut names: Vec<_> = fields.values().map(|field| field.name.as_str()).collect();
+        names.sort_unstable();
+        if names.windows(2).any(|pair| pair[0] == pair[1]) {
+            return None;
         }
         input.is_empty().then_some(Self { fields })
     }
@@ -209,11 +220,72 @@ impl Document {
     /// Decode a local stored value without changing the wire CBOR decoder.
     pub fn from_storage_cbor(bytes: &[u8]) -> Result<Self> {
         if bytes.starts_with(MAGIC) {
-            StoredDocument::decode(bytes)
+            StoredDocument::decode_inner(bytes, false)
                 .and_then(|value| value.materialize())
                 .ok_or_else(|| Error::CborDecode("invalid local document value".into()))
         } else {
             Self::from_cbor(bytes)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_storage_cbor_materializes_a_stored_document() {
+        let mut stored = StoredDocument::default();
+        stored.fields.insert(
+            1,
+            StoredField::lww("name".to_owned(), 1, &NormalValue::String("Ada".to_owned())).unwrap(),
+        );
+        let bytes = stored.encode().unwrap();
+
+        let document = Document::from_storage_cbor(&bytes).unwrap();
+        assert_eq!(
+            document.get("name").and_then(NormalValue::as_str),
+            Some("Ada")
+        );
+    }
+
+    #[test]
+    fn from_storage_cbor_rejects_invalid_field_values() {
+        let mut bytes = MAGIC.to_vec();
+        bytes.extend_from_slice(&1_u32.to_be_bytes()); // field count
+        bytes.extend_from_slice(&1_u32.to_be_bytes()); // field ID
+        bytes.push(ValueKind::Lww as u8);
+        bytes.extend_from_slice(&1_u64.to_be_bytes()); // priority
+        bytes.extend_from_slice(&4_u32.to_be_bytes());
+        bytes.extend_from_slice(b"name");
+        bytes.extend_from_slice(&1_u32.to_be_bytes());
+        bytes.push(0xff); // invalid CBOR
+
+        assert!(StoredDocument::decode(&bytes).is_none());
+        assert!(Document::from_storage_cbor(&bytes).is_err());
+    }
+
+    #[test]
+    fn stored_document_rejects_duplicate_field_names() {
+        let mut stored = StoredDocument::default();
+        for id in [1, 2] {
+            stored.fields.insert(
+                id,
+                StoredField::lww("same".to_owned(), 1, &NormalValue::Null).unwrap(),
+            );
+        }
+        assert!(stored.encode().is_none());
+
+        let mut bytes = MAGIC.to_vec();
+        bytes.extend_from_slice(&2_u32.to_be_bytes()); // field count
+        for id in [1_u32, 2] {
+            bytes.extend_from_slice(&id.to_be_bytes());
+            bytes.push(ValueKind::Lww as u8);
+            bytes.extend_from_slice(&1_u64.to_be_bytes()); // priority
+            bytes.extend_from_slice(&4_u32.to_be_bytes());
+            bytes.extend_from_slice(b"same");
+            bytes.extend_from_slice(&0_u32.to_be_bytes()); // null value
+        }
+        assert!(StoredDocument::decode(&bytes).is_none());
     }
 }
