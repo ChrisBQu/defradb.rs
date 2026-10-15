@@ -123,11 +123,21 @@ impl<S: Store> DB<S> {
             });
         }))?;
         txn.commit().await?;
-        // Publish the index definition before taking the backfill fence. A
-        // create that commits before this definition becomes visible may use
-        // the old schema; capturing the fence afterward guarantees its ID is
-        // included in the scan. If the process stops before the first batch
-        // persists progress, startup captures a fresh fence after publication.
+        // The fence is a short-ID cutoff taken after the definition commits.
+        // It is sound without the definition commit's sequence because every
+        // writer reads the definition key inside its own transaction:
+        // - a writer that commits before the definition allocated its short ID
+        //   before it committed, so the ID is below this cutoff and a backfill
+        //   batch, which reads after the definition, indexes the document;
+        // - a writer whose snapshot predates the definition but commits after
+        //   it read the old definition key, a validated read, so it conflicts
+        //   and its re-run sees the index, whatever its short ID;
+        // - a writer whose snapshot follows the definition maintains the index
+        //   itself, and a backfill batch that read the document first conflicts
+        //   on its validated read rather than writing a stale entry.
+        // tests/index/fence.rs and tests/index/create.rs drive each case. If the
+        // process stops before the first batch persists progress, startup
+        // captures a fresh fence after publication.
         let fence = self.reserve_doc_short_id_fence().await?;
         self.publish_started_action(&lease);
         let plan = BackfillPlan::new(collection_name, &collection_id, &index, fence, 0);

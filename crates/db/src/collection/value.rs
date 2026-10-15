@@ -10,6 +10,20 @@ pub(crate) struct FieldOrder {
 }
 type Priorities = RapidHashMap<String, FieldOrder>;
 
+/// How the document value stores a counter field, or `None` when the field is
+/// not a counter of a numeric kind.
+pub(crate) fn counter_kind(field: &schema::FieldDescription) -> Option<ValueKind> {
+    if !field.crdt_type.is_counter() {
+        return None;
+    }
+    match field.kind.as_scalar().map(ScalarKind::base_kind) {
+        Some(ScalarKind::Int) => Some(ValueKind::Int64),
+        Some(ScalarKind::Float32) => Some(ValueKind::Float32),
+        Some(ScalarKind::Float64) => Some(ValueKind::Float64),
+        _ => None,
+    }
+}
+
 fn field_value(
     field: &schema::FieldDescription,
     value: &NormalValue,
@@ -18,43 +32,10 @@ fn field_value(
     if !field.crdt_type.is_counter() {
         return StoredField::lww(field.name.clone(), priority, value).map_err(Error::from);
     }
-    let (kind, value) = match field.kind.as_scalar().map(ScalarKind::base_kind) {
-        Some(ScalarKind::Int) => (
-            ValueKind::Int64,
-            value.as_int().map(|v| v.to_be_bytes().to_vec()),
-        ),
-        Some(ScalarKind::Float32) => (
-            ValueKind::Float32,
-            value
-                .as_float32()
-                .or_else(|| value.as_float64().map(|v| v as f32))
-                .or_else(|| value.as_int().map(|v| v as f32))
-                .map(|v| v.to_be_bytes().to_vec()),
-        ),
-        Some(ScalarKind::Float64) => (
-            ValueKind::Float64,
-            value
-                .as_float64()
-                .or_else(|| value.as_float32().map(f64::from))
-                .or_else(|| value.as_int().map(|v| v as f64))
-                .map(|v| v.to_be_bytes().to_vec()),
-        ),
-        _ => {
-            return Err(Error::InvalidDocument(format!(
-                "unsupported counter field {}",
-                field.name
-            )))
-        }
-    };
-    let value = value.ok_or_else(|| {
-        Error::InvalidDocument(format!("invalid counter value for {}", field.name))
+    let kind = counter_kind(field).ok_or_else(|| {
+        Error::InvalidDocument(format!("unsupported counter field {}", field.name))
     })?;
-    Ok(StoredField {
-        name: field.name.clone(),
-        kind,
-        priority,
-        value,
-    })
+    StoredField::counter(field.name.clone(), kind, priority, value).map_err(Error::from)
 }
 
 impl Collection {
@@ -140,16 +121,12 @@ impl Collection {
         let Some(ids) = self.part_ids(datastore).await? else {
             return Ok(false);
         };
-        let counter_parts: Vec<u32> = self
-            .def
-            .fields
-            .iter()
-            .filter(|field| field.crdt_type.is_counter())
-            .filter_map(|field| ids.get(&field.name).copied())
-            .collect();
+        // Counter increments reach the value as their own operands
+        // (`crdt::Counter`), so a resolved document never restates a counter
+        // and this read decides nothing: it only checks part identities.
         let key = self.doc_key(doc_short_id);
         let Some(bytes) = datastore
-            .get_parts(&key, &counter_parts)
+            .get_parts(&key, &[])
             .await
             .map_err(Error::Storage)?
         else {
@@ -160,63 +137,23 @@ impl Collection {
         };
         let mut parts = StoredDocument::default();
         for field in &self.def.fields {
-            let order = priorities.get(&field.name);
-            if !field.crdt_type.is_counter() && order.is_none() {
+            if field.crdt_type.is_counter() {
                 continue;
             }
+            let Some(order) = priorities.get(&field.name) else {
+                continue;
+            };
             let Some(id) = ids.get(&field.name) else {
                 return Ok(false);
             };
             let old = stored.fields.get(id);
             let value = doc.get(&field.name).unwrap_or(&NormalValue::Null);
-            if field.crdt_type.is_counter() && value.is_nil() {
-                if old.is_some() {
-                    return Ok(false);
-                }
-                continue;
+            let mut resolved = field_value(field, value, order.priority)?;
+            if old.is_some_and(|old| old.name != resolved.name || old.kind != resolved.kind) {
+                return Ok(false);
             }
-            let priority = order
-                .map(|order| order.priority)
-                .or_else(|| old.map(|field| field.priority))
-                .unwrap_or(0);
-            let mut resolved = field_value(field, value, priority)?;
-            if let Some(old) = old {
-                if old.name != resolved.name || old.kind != resolved.kind {
-                    return Ok(false);
-                }
-            }
-            match resolved.kind {
-                ValueKind::Lww => {
-                    if let Some(raw) = order.and_then(|order| order.raw_value.as_ref()) {
-                        resolved.value.clone_from(raw);
-                    }
-                }
-                ValueKind::Int64 => {
-                    let target =
-                        i64::from_be_bytes(resolved.value.as_slice().try_into().map_err(|_| {
-                            Error::InvalidDocument("invalid integer mirror".into())
-                        })?);
-                    let previous = old
-                        .map(|old| {
-                            i64::from_be_bytes(
-                                old.value.as_slice().try_into().expect("decoded integer"),
-                            )
-                        })
-                        .unwrap_or(0);
-                    let delta = target.wrapping_sub(previous);
-                    if delta == 0 && old.is_some() {
-                        continue;
-                    }
-                    resolved.value = delta.to_be_bytes().to_vec();
-                }
-                ValueKind::Float32 | ValueKind::Float64 => {
-                    if let Some(old) = old {
-                        if old.value == resolved.value {
-                            continue;
-                        }
-                        return Ok(false);
-                    }
-                }
+            if let Some(raw) = order.raw_value.as_ref() {
+                resolved.value.clone_from(raw);
             }
             parts.fields.insert(*id, resolved);
         }
@@ -230,6 +167,22 @@ impl Collection {
                 .map_err(Error::Storage)?;
         }
         Ok(true)
+    }
+
+    /// The document as this transaction sees it, read without validation.
+    /// Only for values no decision rests on, such as the result of a blind
+    /// counter increment.
+    pub(crate) async fn read_document_unvalidated(
+        &self,
+        datastore: &NamespaceView,
+        doc_short_id: u64,
+    ) -> Result<Option<Document>> {
+        datastore
+            .get_parts(&self.doc_key(doc_short_id), &[])
+            .await
+            .map_err(Error::Storage)?
+            .map(|bytes| Document::from_storage_cbor(&bytes).map_err(Error::from))
+            .transpose()
     }
 
     pub(crate) async fn merge_local_document_value(
@@ -300,33 +253,14 @@ impl Collection {
                 field_value(field, value, priorities[&field.name].priority)?,
             );
         }
-        // A standalone field-block merge may have advanced the accumulator
-        // before its composite materialized the document. Repair that gap with
-        // a validated put; applying only the new delta to a stale mirror loses
-        // the previously received increment.
+        // An operand must name each part as the stored value does; a schema
+        // transition is a put above, never an operand.
         let mut projected = stored;
         projected.apply(parts.clone()).ok_or_else(|| {
             Error::InvalidDocument(
                 "document part identity changed without a schema transition".into(),
             )
         })?;
-        for field in &self.def.fields {
-            if !field.crdt_type.is_counter() || !modified.contains(&field.name) {
-                continue;
-            }
-            let value = doc.get(&field.name).unwrap_or(&NormalValue::Null);
-            if value.is_nil()
-                || projected
-                    .fields
-                    .get(&ids[&field.name])
-                    .map(|part| &part.value)
-                    != Some(&field_value(field, value, priorities[&field.name].priority)?.value)
-            {
-                return self
-                    .put_document_value(datastore, doc_short_id, doc, false, Some(&priorities))
-                    .await;
-            }
-        }
         if !parts.fields.is_empty() {
             let operand = storage::merge::document_parts(&parts)
                 .ok_or_else(|| Error::InvalidDocument("invalid document operand".into()))?;

@@ -624,8 +624,6 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                 .map_err(MergeError::Database)?;
                 txn.force_commit().await?;
 
-                self.db.maybe_prune_document_heads(doc_short_id).await;
-
                 self.best_effort_finalize_linked_field_blocks(&state.linked_field_cids)
                     .await;
 

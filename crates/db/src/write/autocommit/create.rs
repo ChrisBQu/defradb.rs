@@ -331,13 +331,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             },
         };
 
-        super::helpers::prune_heads_after_commit(
-            &self.db,
-            &collection,
-            std::iter::once(doc_short_id),
-        )
-        .await;
-
         let mut doc = Arc::try_unwrap(doc).unwrap_or_else(|doc| doc.as_ref().clone());
         doc.set_id(doc_id.clone());
         doc.clear_write_preparation();
@@ -710,10 +703,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             }
             _ => None,
         };
-        let doc_short_ids: Vec<_> = identities
-            .iter()
-            .map(|identity| identity.doc_short_id)
-            .collect();
         let attempt = CreateManyRetryAttempt {
             db: Arc::clone(&self.db),
             collection_name: collection_name.to_string(),
@@ -745,7 +734,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 }
             },
         };
-        super::helpers::prune_heads_after_commit(&self.db, &collection, doc_short_ids).await;
         let mut create_results = Vec::with_capacity(results.len());
         for (doc_id, mut doc, cid, block, col_data) in results {
             doc.clear_write_preparation();

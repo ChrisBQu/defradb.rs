@@ -114,7 +114,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         // Resolve the canonical ID before taking the per-document lock. The
         // retry closure repeats the document read and stale-input comparison
         // against each fresh engine snapshot.
-        let (doc_short_id, canonical_doc_id) = {
+        let canonical_doc_id = {
             let identity_txn = self.db.new_txn(true).await.map_err(|error| {
                 query::error::QueryError::execution(format!(
                     "failed to create identity transaction: {error}"
@@ -142,7 +142,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     "failed to discard identity transaction: {error}"
                 ))
             })?;
-            (canonical.0, canonical.1.to_string())
+            canonical.1.to_string()
         };
         doc.set_id(DocID::from_string(&canonical_doc_id).map_err(|error| {
             query::error::QueryError::execution(format!("invalid canonical document ID: {error}"))
@@ -180,13 +180,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 }
             },
         };
-
-        super::helpers::prune_heads_after_commit(
-            &self.db,
-            &collection,
-            std::iter::once(doc_short_id),
-        )
-        .await;
 
         let mut doc = doc;
         doc.clear_write_preparation();
@@ -240,6 +233,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .clone()
             .unwrap_or_else(|| attempt.modified_fields.clone());
         dependencies.extend(attempt.modified_fields.iter().cloned());
+        // A counter increment is a blind operand and decides nothing; an index
+        // or embedding over the counter adds it back below.
+        dependencies.retain(|field| attempt.input.get_counter_delta(field).is_none());
         let fetcher = if attempt.expected.is_none() || attempt.expected_fields.is_some() {
             for index in collection.write_indexes() {
                 if index

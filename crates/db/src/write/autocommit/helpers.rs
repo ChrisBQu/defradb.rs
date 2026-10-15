@@ -3,12 +3,7 @@ use bytes::Bytes;
 
 use crate::block::builder::BlockResult;
 use crate::collection::Collection;
-use crdt::traits::{Context, ValueReader};
-use crdt::{Counter, CounterDelta, NumericKind};
 use datastore::NamespaceView;
-use defra_core::types::DocId as CrdtDocId;
-use document::NormalValue;
-use schema::{FieldKind, ScalarKind};
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn write_branchable_collection_block<S: storage::corekv::Store + 'static>(
@@ -50,30 +45,10 @@ pub(crate) async fn write_branchable_collection_block<S: storage::corekv::Store 
     Ok(written)
 }
 
-/// Run best-effort head reclamation only after the owning mutation has
-/// returned from its engine commit. Opening a nested prune transaction from a
-/// retry closure would repeat side effects on every attempt and can conflict
-/// with the mutation snapshot.
-pub(crate) async fn prune_heads_after_commit<S: storage::corekv::Store + 'static>(
-    db: &crate::database::DB<S>,
-    collection: &Collection,
-    doc_short_ids: impl IntoIterator<Item = u64>,
-) {
-    for doc_short_id in doc_short_ids {
-        db.maybe_prune_document_heads(doc_short_id).await;
-    }
-    if collection.schema().is_branchable {
-        db.maybe_prune_collection_heads(collection.resolved_root_id())
-            .await;
-    }
-}
-
-/// Persist a local UPDATE: apply CRDT field deltas to the authoritative store
-/// (the counter RMW, #1021) and then write the document + maintain indexes. These
-/// are bundled so no mutator can write a document blob without first advancing the
-/// CRDT accumulation store — the single-store invariant is enforced by
-/// construction, not by each mutator remembering to call the counter helper.
-/// When requested, embeddings use the final field values before persistence.
+/// Persist a local UPDATE: write the document's changed parts and maintain
+/// indexes. A counter increment is a blind operand on the counter's part of
+/// the document value, its only stored copy. When requested, embeddings use
+/// the final field values before persistence.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn write_local_update(
     datastore: &NamespaceView,
@@ -90,7 +65,7 @@ pub(crate) async fn write_local_update(
         .await
         .map_err(crate::error::commit_query_error)?;
 
-    apply_local_counter_deltas(datastore, collection, doc, doc_short_id).await?;
+    set_incremented_counters(datastore, collection, doc, doc_short_id).await?;
     if let Some(config) = embedding_config {
         let generated = if let Some(inputs) = prepared_inputs {
             crate::search::embedding::set_embedding_from_inputs(
@@ -131,9 +106,8 @@ pub(crate) async fn write_local_update(
         })
 }
 
-/// Persist a local CREATE: write the document + maintain indexes, then seed the
-/// CRDT accumulation store for counter fields (#1021). Bundled for the same
-/// by-construction reason as `write_local_update`.
+/// Persist a local CREATE: write the document + maintain indexes. A counter's
+/// initial value is its part of the document value.
 pub(crate) async fn write_local_create(
     datastore: &NamespaceView,
     collection: &Collection,
@@ -149,8 +123,8 @@ pub(crate) async fn write_local_create(
     collection
         .create_with_indexes(datastore, doc, doc_short_id, index_manager)
         .await
-        .map_err(|e| crate::error::index_write_query_error("create", e))?;
-    init_counter_stores_on_create(datastore, collection, doc).await
+        .map(|_| ())
+        .map_err(|e| crate::error::index_write_query_error("create", e))
 }
 
 /// Register the identity of a freshly created document (Go `save()` isAdd):
@@ -260,347 +234,49 @@ pub(crate) async fn register_block_doc_id_mappings(
     Ok(())
 }
 
-async fn apply_local_counter_deltas(
+/// Give each counter this update increments its value after the increment as
+/// this transaction sees it: the stored value plus the delta. The increment
+/// itself stays a blind operand. The stored value is read without validation:
+/// whatever rests on the result validates its own dependency (an index on the
+/// counter reads its part with validation, a whole-document put is validated
+/// as a write).
+async fn set_incremented_counters(
     datastore: &NamespaceView,
     collection: &Collection,
     doc: &mut Document,
     doc_short_id: u64,
 ) -> query::error::Result<()> {
-    let schema_version_id = collection.version_id().to_string();
-
-    // Collect the counter fields that carry a local increment, with their kind.
-    let mut counter_fields: Vec<(String, NumericKind, bool, NormalValue)> = Vec::new();
-    for field in &collection.schema().fields {
-        if !field.crdt_type.is_counter() {
-            continue;
-        }
-        let Some(delta) = doc.get_counter_delta(&field.name) else {
-            continue;
-        };
-        let Some(kind) = numeric_kind_from_field_kind(&field.kind) else {
-            continue;
-        };
-        counter_fields.push((
-            field.name.clone(),
-            kind,
-            field.crdt_type.allows_decrement(),
-            delta.clone(),
-        ));
-    }
-
-    if counter_fields.is_empty() {
+    let increments: Vec<_> = collection
+        .schema()
+        .fields
+        .iter()
+        .filter_map(|field| {
+            let kind = crate::collection::value::counter_kind(field)?;
+            Some((
+                field.name.as_str(),
+                kind,
+                doc.get_counter_delta(&field.name)?.clone(),
+            ))
+        })
+        .collect();
+    if increments.is_empty() {
         return Ok(());
     }
-
-    let doc_id = doc
-        .id()
-        .cloned()
-        .ok_or_else(|| query::error::QueryError::execution("counter update requires a doc ID"))?;
-    let doc_id_str = doc_id.to_string();
-    let doc_id_bytes = doc_id_str.as_bytes().to_vec();
-
-    // Freshly read committed doc (inside this write txn) to seed the store the
-    // first time it is touched (init-if-absent). A first update of a doc with no
-    // committed value seeds 0.
-    let committed = collection
-        .get_with_datastore(datastore, doc_short_id, &doc_id)
+    let stored = collection
+        .read_document_unvalidated(datastore, doc_short_id)
         .await
         .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
-
-    // The CRDT operates on a mutable `ReaderWriter`; `NamespaceView` is one, but
-    // it is shared by `&` here. Take an owned clone to obtain a mutable handle —
-    // the clone writes through to the same underlying transaction.
-    let mut rw = datastore.clone();
-
-    for (field_name, kind, allow_decrement, delta) in counter_fields {
-        let counter = Counter::new(
-            schema_version_id.clone(),
-            &doc_id_bytes,
-            field_name.clone(),
-            allow_decrement,
+    for (name, kind, delta) in increments {
+        let value = document::stored::add_counter(
+            name,
             kind,
-        )
-        .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
-
-        // Init-if-absent: seed the accumulation store from the committed blob the
-        // first time only. Never overwrites a present (authoritative) store.
-        let committed_value = committed.as_ref().and_then(|d| d.get(&field_name));
-        match (kind, committed_value) {
-            (NumericKind::Int64, Some(NormalValue::Int(v))) => {
-                counter
-                    .reconcile_int64(&mut rw, *v)
-                    .await
-                    .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
-            }
-            (NumericKind::Float64, Some(NormalValue::Float64(v))) => {
-                counter
-                    .reconcile_float64(&mut rw, *v)
-                    .await
-                    .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
-            }
-            (NumericKind::Float32, Some(NormalValue::Float32(v))) => {
-                counter
-                    .reconcile_float32(&mut rw, *v)
-                    .await
-                    .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
-            }
-            (NumericKind::Float32, Some(NormalValue::Float64(v))) => {
-                counter
-                    .reconcile_float32(&mut rw, *v as f32)
-                    .await
-                    .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
-            }
-            (NumericKind::Float32, Some(NormalValue::Int(v))) => {
-                counter
-                    .reconcile_float32(&mut rw, *v as f32)
-                    .await
-                    .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
-            }
-            (NumericKind::Float64, Some(NormalValue::Int(v))) => {
-                counter
-                    .reconcile_float64(&mut rw, *v as f64)
-                    .await
-                    .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
-            }
-            (NumericKind::Int64, None) => {
-                counter
-                    .reconcile_int64(&mut rw, 0)
-                    .await
-                    .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
-            }
-            (NumericKind::Float64, None) => {
-                counter
-                    .reconcile_float64(&mut rw, 0.0)
-                    .await
-                    .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
-            }
-            (NumericKind::Float32, None) => {
-                counter
-                    .reconcile_float32(&mut rw, 0.0)
-                    .await
-                    .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
-            }
-            _ => {}
-        }
-
-        let counter_delta = build_local_counter_delta(
-            &doc_id_bytes,
-            &field_name,
-            &schema_version_id,
-            kind,
+            stored.as_ref().and_then(|stored| stored.get(name)),
             &delta,
-        )?;
-
-        let ctx = Context {
-            doc_id: CrdtDocId::new(&doc_id_str)
-                .map_err(|e| query::error::QueryError::execution(e.to_string()))?,
-            schema_version: schema_version_id.clone(),
-            is_create: false,
-        };
-
-        crdt::traits::ReplicatedData::merge(&counter, &mut rw, &ctx, &counter_delta)
-            .await
-            .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
-
-        // Mirror the resulting authoritative store value into the blob, overriding
-        // the absolute value the query-plan layer pre-computed from a possibly
-        // stale read.
-        let bytes = ValueReader::value(&counter, &rw)
-            .await
-            .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
-        if let Some(value) = decode_counter_value(&bytes, kind) {
-            doc.set(field_name.clone(), value);
-        }
-    }
-
-    Ok(())
-}
-
-/// Initialize the CRDT accumulation store for counter fields on document
-/// creation so the store is authoritative from creation (matching the
-/// single-store invariant). The created value is absolute (no delta recorded on
-/// create), so the store is seeded directly to it via init-if-absent.
-async fn init_counter_stores_on_create(
-    datastore: &NamespaceView,
-    collection: &Collection,
-    doc: &Document,
-) -> query::error::Result<()> {
-    let schema_version_id = collection.version_id().to_string();
-
-    let mut counter_fields: Vec<(String, NumericKind, bool, NormalValue)> = Vec::new();
-    for field in &collection.schema().fields {
-        if !field.crdt_type.is_counter() {
-            continue;
-        }
-        let Some(value) = doc.get(&field.name) else {
-            continue;
-        };
-        let Some(kind) = numeric_kind_from_field_kind(&field.kind) else {
-            continue;
-        };
-        counter_fields.push((
-            field.name.clone(),
-            kind,
-            field.crdt_type.allows_decrement(),
-            value.clone(),
-        ));
-    }
-
-    if counter_fields.is_empty() {
-        return Ok(());
-    }
-
-    let doc_id = doc
-        .id()
-        .cloned()
-        .ok_or_else(|| query::error::QueryError::execution("counter create requires a doc ID"))?;
-    let doc_id_bytes = doc_id.to_string().into_bytes();
-
-    let mut rw = datastore.clone();
-    for (field_name, kind, allow_decrement, value) in counter_fields {
-        let counter = Counter::new(
-            schema_version_id.clone(),
-            &doc_id_bytes,
-            field_name.clone(),
-            allow_decrement,
-            kind,
         )
         .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
-
-        match (kind, &value) {
-            (NumericKind::Int64, NormalValue::Int(v)) => counter
-                .reconcile_int64(&mut rw, *v)
-                .await
-                .map_err(|e| query::error::QueryError::execution(e.to_string()))?,
-            (NumericKind::Float64, NormalValue::Float64(v)) => counter
-                .reconcile_float64(&mut rw, *v)
-                .await
-                .map_err(|e| query::error::QueryError::execution(e.to_string()))?,
-            (NumericKind::Float32, NormalValue::Float32(v)) => counter
-                .reconcile_float32(&mut rw, *v)
-                .await
-                .map_err(|e| query::error::QueryError::execution(e.to_string()))?,
-            (NumericKind::Float32, NormalValue::Float64(v)) => counter
-                .reconcile_float32(&mut rw, *v as f32)
-                .await
-                .map_err(|e| query::error::QueryError::execution(e.to_string()))?,
-            (NumericKind::Float32, NormalValue::Int(v)) => counter
-                .reconcile_float32(&mut rw, *v as f32)
-                .await
-                .map_err(|e| query::error::QueryError::execution(e.to_string()))?,
-            (NumericKind::Float64, NormalValue::Int(v)) => counter
-                .reconcile_float64(&mut rw, *v as f64)
-                .await
-                .map_err(|e| query::error::QueryError::execution(e.to_string()))?,
-            _ => {}
-        }
+        doc.set(name.to_owned(), value);
     }
-
     Ok(())
-}
-
-fn numeric_kind_from_field_kind(kind: &FieldKind) -> Option<NumericKind> {
-    match kind.as_scalar().map(ScalarKind::base_kind) {
-        Some(ScalarKind::Int) => Some(NumericKind::Int64),
-        Some(ScalarKind::Float32) => Some(NumericKind::Float32),
-        Some(ScalarKind::Float64) => Some(NumericKind::Float64),
-        _ => None,
-    }
-}
-
-fn build_local_counter_delta(
-    doc_id_bytes: &[u8],
-    field_name: &str,
-    schema_version_id: &str,
-    kind: NumericKind,
-    delta: &NormalValue,
-) -> query::error::Result<CounterDelta> {
-    // priority/nonce are irrelevant to the accumulated value (counter merge is
-    // unconditional commutative addition); use stable placeholders.
-    match kind {
-        NumericKind::Int64 => {
-            let inc = match delta {
-                NormalValue::Int(v) => *v,
-                other => {
-                    return Err(query::error::QueryError::execution(format!(
-                        "counter Int64 field got non-int delta: {other:?}"
-                    )));
-                }
-            };
-            CounterDelta::new_int64(
-                doc_id_bytes.to_vec(),
-                field_name.to_string(),
-                1,
-                0,
-                schema_version_id.to_string(),
-                inc,
-            )
-            .map_err(|e| query::error::QueryError::execution(e.to_string()))
-        }
-        NumericKind::Float64 => {
-            let inc = match delta {
-                NormalValue::Float64(v) => *v,
-                NormalValue::Float32(v) => *v as f64,
-                NormalValue::Int(v) => *v as f64,
-                other => {
-                    return Err(query::error::QueryError::execution(format!(
-                        "counter Float64 field got non-numeric delta: {other:?}"
-                    )));
-                }
-            };
-            CounterDelta::new_float64(
-                doc_id_bytes.to_vec(),
-                field_name.to_string(),
-                1,
-                0,
-                schema_version_id.to_string(),
-                inc,
-            )
-            .map_err(|e| query::error::QueryError::execution(e.to_string()))
-        }
-        NumericKind::Float32 => {
-            let inc = match delta {
-                NormalValue::Float32(v) => *v,
-                NormalValue::Float64(v) => *v as f32,
-                NormalValue::Int(v) => *v as f32,
-                other => {
-                    return Err(query::error::QueryError::execution(format!(
-                        "counter Float32 field got non-numeric delta: {other:?}"
-                    )));
-                }
-            };
-            CounterDelta::new_float32(
-                doc_id_bytes.to_vec(),
-                field_name.to_string(),
-                1,
-                0,
-                schema_version_id.to_string(),
-                inc,
-            )
-            .map_err(|e| query::error::QueryError::execution(e.to_string()))
-        }
-        other => Err(query::error::QueryError::execution(format!(
-            "unsupported counter NumericKind {other:?}"
-        ))),
-    }
-}
-
-fn decode_counter_value(bytes: &[u8], kind: NumericKind) -> Option<NormalValue> {
-    match kind {
-        NumericKind::Int64 if bytes.len() == 8 => {
-            let arr: [u8; 8] = bytes.try_into().ok()?;
-            Some(NormalValue::Int(i64::from_be_bytes(arr)))
-        }
-        NumericKind::Float64 if bytes.len() == 8 => {
-            let arr: [u8; 8] = bytes.try_into().ok()?;
-            Some(NormalValue::Float64(f64::from_be_bytes(arr)))
-        }
-        NumericKind::Float32 if bytes.len() == 4 => {
-            let arr: [u8; 4] = bytes.try_into().ok()?;
-            Some(NormalValue::Float32(f32::from_be_bytes(arr)))
-        }
-        _ => None,
-    }
 }
 
 pub(crate) fn ensure_collection_is_active<S: Store>(

@@ -226,7 +226,7 @@ pub(crate) fn compute_document_blocks_with_inputs(
         let head_key = HeadstoreDocKey::new(identity.doc_short_id, field_name, field_cid);
         let priority_bytes = encode_priority_varint(priority);
         headstore_entries.push((
-            crate::block::heads::document::publication_key(&head_key.bytes()),
+            crate::block::heads::document::publication_key(&head_key),
             vec![],
         ));
         headstore_entries.push((head_key.bytes(), priority_bytes));
@@ -296,7 +296,7 @@ pub(crate) fn compute_document_blocks_with_inputs(
     let composite_head_key = HeadstoreDocKey::new(identity.doc_short_id, "C", composite_cid);
     let priority_bytes = encode_priority_varint(priority);
     headstore_entries.push((
-        crate::block::heads::document::publication_key(&composite_head_key.bytes()),
+        crate::block::heads::document::publication_key(&composite_head_key),
         vec![],
     ));
     headstore_entries.push((composite_head_key.bytes(), priority_bytes));

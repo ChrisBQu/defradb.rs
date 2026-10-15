@@ -144,15 +144,6 @@ impl DbOptions {
 /// The main DefraDB database struct.
 ///
 /// This matches Go's DB struct in internal/db/db.go.
-/// Branchable appends between head-key reclamation passes. Sixteen holds the
-/// backlog to a handful of keys per collection while keeping the extra
-/// transaction off fifteen appends out of sixteen.
-const HEAD_PRUNE_INTERVAL: u64 = 16;
-
-/// Keys one reclamation pass may delete. Bounds the pass by what it holds,
-/// and a pass that stops here leaves the rest for the next one.
-const HEAD_PRUNE_MAX_KEYS: usize = 512;
-
 pub struct DB<S: Store> {
     /// The underlying store.
     store: Arc<S>,
@@ -160,15 +151,6 @@ pub struct DB<S: Store> {
     options: DbOptions,
     /// Counter for generating unique transaction IDs.
     txn_id_counter: AtomicU64,
-    /// Branchable appends since a collection's head keys were last reclaimed.
-    ///
-    /// A superseded head key is reclaimed by a transaction of its own (see
-    /// [`crate::block::heads`]), so doing it on every append would double the
-    /// transaction count on that path. Amortizing it over
-    /// [`HEAD_PRUNE_INTERVAL`] appends holds the backlog at a small constant
-    /// per collection for one atomic per mutation.
-    head_prune_tick: AtomicU64,
-    document_head_prune_tick: AtomicU64,
     /// Generation of the committed migration graph.
     ///
     /// Lensed fetchers include this in their history-cache validity checks so
@@ -259,8 +241,6 @@ impl<S: Store> DB<S> {
             store,
             options,
             txn_id_counter: AtomicU64::new(0),
-            head_prune_tick: AtomicU64::new(0),
-            document_head_prune_tick: AtomicU64::new(0),
             migration_generation: AtomicU64::new(0),
             closed: AtomicBool::new(false),
             collections: Arc::new(crate::collection::epoch::EpochedCollections::new(
@@ -327,8 +307,6 @@ impl<S: Store> DB<S> {
             store,
             options,
             txn_id_counter: AtomicU64::new(0),
-            head_prune_tick: AtomicU64::new(0),
-            document_head_prune_tick: AtomicU64::new(0),
             migration_generation: AtomicU64::new(0),
             closed: AtomicBool::new(false),
             collections: Arc::new(crate::collection::epoch::EpochedCollections::new(
@@ -586,110 +564,6 @@ impl<S: Store> DB<S> {
 
     pub(crate) fn vector_codes(&self) -> &crate::index::vector::engine::diskann::CodeCaches {
         &self.vector_codes
-    }
-
-    /// Reclaim superseded collection head keys, if enough have built up.
-    ///
-    /// Called after a branchable append commits. One in
-    /// [`HEAD_PRUNE_INTERVAL`] calls does the work; the rest are an atomic
-    /// increment.
-    pub(crate) async fn maybe_prune_collection_heads(&self, collection_short_id: u32) {
-        if !self
-            .head_prune_tick
-            .fetch_add(1, Ordering::Relaxed)
-            .is_multiple_of(HEAD_PRUNE_INTERVAL)
-        {
-            return;
-        }
-        match self.prune_collection_heads(collection_short_id).await {
-            Ok(_) => {}
-            // Reclamation is the one path here that can lose a write race, and
-            // losing costs nothing: the head set is a function of the markers,
-            // so the next pass repeats the work.
-            Err(error) if error.is_txn_conflict() => tracing::debug!(
-                collection_short_id,
-                %error,
-                "collection head reclamation lost a write race"
-            ),
-            // Any other failure repeats on every pass, and every branchable
-            // append then scans a head set that only grows.
-            Err(error) => tracing::warn!(
-                collection_short_id,
-                %error,
-                "collection head reclamation failed"
-            ),
-        }
-    }
-
-    /// Reclaim document head groups in a separate transaction. Never add this
-    /// work to the mutation: a reclamation race may lose without losing a write.
-    pub(crate) async fn maybe_prune_document_heads(&self, doc_short_id: u64) {
-        if !self
-            .document_head_prune_tick
-            .fetch_add(1, Ordering::Relaxed)
-            .is_multiple_of(HEAD_PRUNE_INTERVAL)
-        {
-            return;
-        }
-        if let Err(error) = self.prune_document_heads(doc_short_id).await {
-            if error.is_txn_conflict() {
-                tracing::debug!(doc_short_id, %error, "document head reclamation lost a write race");
-            } else {
-                tracing::warn!(doc_short_id, %error, "document head reclamation failed");
-            }
-        }
-    }
-
-    pub async fn prune_document_heads(
-        &self,
-        doc_short_id: u64,
-    ) -> Result<crate::block::heads::PruneOutcome> {
-        let txn = self.new_txn(false).await?;
-        let outcome = {
-            let headstore = txn.headstore()?;
-            let prefix = storage::keys::headstore::HeadstoreDocKey::document_prefix(doc_short_id);
-            let markers = crate::block::heads::document::marker_prefix(&prefix);
-            crate::block::heads::prune_prefixes(&headstore, prefix, markers, HEAD_PRUNE_MAX_KEYS)
-                .await
-                .map_err(Error::Storage)?
-        };
-        if outcome == crate::block::heads::PruneOutcome::default() {
-            txn.discard()?;
-        } else {
-            txn.commit().await?;
-        }
-        Ok(outcome)
-    }
-
-    /// Delete collection head keys that a marker supersedes, with their
-    /// markers, in a transaction of its own.
-    ///
-    /// Separate on purpose: two of these write the same keys, whereas two
-    /// appends never do. Folding it into an append would put the write-write
-    /// conflict back on the path that must not have one.
-    pub async fn prune_collection_heads(
-        &self,
-        collection_short_id: u32,
-    ) -> Result<crate::block::heads::PruneOutcome> {
-        let txn = self.new_txn(false).await?;
-        let outcome = {
-            // A live view keeps the transaction referenced, and commit refuses
-            // a referenced transaction.
-            let headstore = txn.headstore()?;
-            crate::block::heads::prune_superseded_heads(
-                &headstore,
-                collection_short_id,
-                HEAD_PRUNE_MAX_KEYS,
-            )
-            .await
-            .map_err(Error::Storage)?
-        };
-        if outcome == crate::block::heads::PruneOutcome::default() {
-            txn.discard()?;
-            return Ok(outcome);
-        }
-        txn.commit().await?;
-        Ok(outcome)
     }
 
     /// Execute a function within a transaction.

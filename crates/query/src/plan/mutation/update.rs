@@ -407,7 +407,18 @@ pub(crate) fn projected_update_fields(
         return None;
     }
 
-    let mut fields = patch_fields.clone();
+    // A counter in the patch is an increment, a blind operand that decides
+    // nothing; an index or embedding over it adds it back below.
+    let mut fields: RapidHashSet<String> = patch_fields
+        .iter()
+        .filter(|name| {
+            !collection
+                .fields
+                .iter()
+                .any(|field| field.name == **name && field.crdt_type.is_counter())
+        })
+        .cloned()
+        .collect();
     // Index maintenance reads every component of an index touched by this
     // patch. Including inactive schema indexes is a harmless superset.
     for index in &collection.indexes {
@@ -886,5 +897,63 @@ mod prepared_target_tests {
             assert_eq!(updates.len(), 2);
             assert!(!updates.iter().any(|(id, _)| id == &appeared.to_string()));
         });
+    }
+}
+
+#[cfg(test)]
+mod projected_fields_tests {
+    use super::*;
+    use schema::{CType, FieldDescription, FieldKind, IndexDescription};
+
+    fn tally() -> CollectionVersion {
+        CollectionVersion::new(
+            "Tally",
+            "tally-v1",
+            "col-tally",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "count", FieldKind::int())
+                    .with_crdt_type(CType::PnCounter),
+                FieldDescription::new("3", "label", FieldKind::string()),
+            ],
+        )
+    }
+
+    fn doc_id_only() -> DocumentMapping {
+        let mut mapping = DocumentMapping::new();
+        mapping.add(0, "_docID");
+        mapping.add_render_key(0, "_docID");
+        mapping
+    }
+
+    fn fields(collection: &CollectionVersion, patch: &[&str]) -> Option<RapidHashSet<String>> {
+        let patch = patch.iter().map(|name| (*name).to_owned()).collect();
+        projected_update_fields(collection, &patch, &doc_id_only(), true, false)
+    }
+
+    /// An increment decides nothing, so it adds no validated part.
+    #[test]
+    fn a_counter_increment_is_not_a_projected_dependency() {
+        let collection = tally();
+        assert_eq!(
+            fields(&collection, &["count"]),
+            Some(RapidHashSet::default())
+        );
+        assert_eq!(
+            fields(&collection, &["count", "label"]),
+            Some(RapidHashSet::from_iter(["label".to_owned()]))
+        );
+    }
+
+    /// An index over the counter reads its old value, so the counter is a
+    /// dependency again.
+    #[test]
+    fn an_indexed_counter_stays_a_projected_dependency() {
+        let collection =
+            tally().with_index(IndexDescription::new("by_count").with_field("count", false));
+        assert_eq!(
+            fields(&collection, &["count"]),
+            Some(RapidHashSet::from_iter(["count".to_owned()]))
+        );
     }
 }

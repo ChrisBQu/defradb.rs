@@ -17,6 +17,7 @@ bench = false
 bytes.workspace = true
 defra-core = { path = "../defra-core" }
 storage = { path = "../storage" }
+document = { path = "../document" }
 rapidhash.workspace = true
 
 # Async

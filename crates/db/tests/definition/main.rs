@@ -3,6 +3,7 @@
 mod common;
 
 mod document_parts;
+mod counter_migration;
 mod format;
 mod helpers;
 mod json;

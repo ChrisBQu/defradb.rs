@@ -1,5 +1,4 @@
 use super::*;
-use bytes::Bytes;
 
 impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     /// Process a Counter delta from a block (standalone, with its own transaction).
@@ -66,8 +65,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         // Determine numeric kind from field type
         let numeric_kind = self.get_numeric_kind_from_field(field)?;
 
-        // Determine if decrement is allowed (PnCounter allows, PCounter doesn't)
-        let allow_decrement = field.crdt_type.allows_decrement();
+        let delta = self.create_counter_delta_for(payload, numeric_kind, &doc_id_str)?;
 
         // Create a new transaction for this merge
         let mut txn = self.db.new_txn(false).await?;
@@ -82,78 +80,31 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             })?
             .doc_short_id;
 
-        // Create the Counter CRDT
-        let counter = Counter::new(
-            payload.schema_version_id.clone(),
-            doc_id_str.as_bytes(),
-            payload.field_name.clone(),
-            allow_decrement,
-            numeric_kind,
-        )
-        .map_err(|e| MergeError::MergeFailed(e.to_string()))?;
-
-        // Create the CounterDelta from payload
-        let delta = self.create_counter_delta_for(payload, numeric_kind, &doc_id_str)?;
-
-        // Perform the merge in a scoped block
         let result = {
             let mut datastore = txn.datastore()?;
             let headstore = txn.headstore()?;
-            let mut doc_exists = false;
-
-            // Seed the CRDT accumulation store from the document's current
-            // materialized value only if the store is not yet initialized
-            // (init-if-absent). The store is the single source of truth; local
-            // writes and merges both RMW their delta into it, so once it holds a
-            // value it is authoritative and must not be overwritten from a
-            // possibly-stale blob. See `Counter::reconcile_int64`.
-            let doc_id = DocID::from_string(&doc_id_str)
-                .map_err(|e| MergeError::MergeFailed(format!("invalid doc ID: {e}")))?;
-            if let Some(existing_doc) = collection
-                .get_by_doc_id(&datastore, &txn.systemstore()?, &doc_id)
+            match counter_in_document(&datastore, &collection, doc_short_id, field, numeric_kind)
                 .await
-                .map_err(MergeError::Database)?
             {
-                doc_exists = true;
-                if let Some(field_value) = existing_doc.get(&payload.field_name) {
-                    match (numeric_kind, field_value) {
-                        (NumericKind::Int64, NormalValue::Int(v)) => {
-                            let _ = counter.reconcile_int64(&mut datastore, *v).await;
-                        }
-                        (NumericKind::Float64, NormalValue::Float64(v)) => {
-                            let _ = counter.reconcile_float64(&mut datastore, *v).await;
-                        }
-                        (NumericKind::Float32, NormalValue::Float32(v)) => {
-                            let _ = counter.reconcile_float32(&mut datastore, *v).await;
-                        }
-                        _ => {}
-                    }
-                }
+                Ok(Some(counter)) => self
+                    .merge_counter_once(
+                        &mut datastore,
+                        &headstore,
+                        cid,
+                        payload,
+                        doc_short_id,
+                        &counter,
+                        &delta,
+                    )
+                    .await
+                    .map(Some),
+                Ok(None) => Ok(None),
+                Err(error) => Err(error),
             }
-
-            let ctx = Context {
-                doc_id: DocId::new(&doc_id_str)
-                    .map_err(|e| MergeError::MergeFailed(e.to_string()))?,
-                schema_version: payload.schema_version_id.clone(),
-                is_create: payload.priority == 1 && !doc_exists,
-            };
-
-            self.merge_counter_once_for_document(
-                &mut datastore,
-                &headstore,
-                cid,
-                payload,
-                doc_short_id,
-                &counter,
-                &ctx,
-                &delta,
-                numeric_kind,
-            )
-            .await
         };
 
         match result {
-            Ok(result) => {
+            Ok(Some(result)) => {
                 txn.force_commit().await?;
                 self.best_effort_finalize_field_block_merge(cid).await;
                 tracing::info!(
@@ -167,6 +118,17 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                 } else {
                     Ok(MergeOutcome::terminal_skip("already merged"))
                 }
+            }
+            Ok(None) => {
+                txn.force_discard().map_err(MergeError::Database)?;
+                // No document value on this block's schema version (the
+                // document is not materialized yet, or its value is on another
+                // version or predates part IDs), so the increment cannot be an
+                // operand on it. The composite that links this block writes the
+                // value and applies the increment there, once.
+                Ok(MergeOutcome::terminal_skip(
+                    "counter merged via its composite: no document value on its schema version",
+                ))
             }
             Err(e) => {
                 if let Err(discard_err) = txn.force_discard() {
@@ -226,75 +188,69 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                 ))
             })?;
 
-        // Determine numeric kind and allow_decrement
         let numeric_kind = self.get_numeric_kind_from_field(field)?;
-        let allow_decrement = field.crdt_type.allows_decrement();
-
-        // Create the Counter CRDT
-        let counter = Counter::new(
-            payload.schema_version_id.clone(),
-            doc_id_str.as_bytes(),
-            payload.field_name.clone(),
-            allow_decrement,
-            numeric_kind,
-        )
-        .map_err(|e| MergeError::MergeFailed(e.to_string()))?;
-
-        // Seed the CRDT accumulation store from the document's current
-        // materialized value only if the store is not yet initialized
-        // (init-if-absent). The store is the single source of truth; local writes
-        // and merges both RMW their delta into it, so once it holds a value it is
-        // authoritative and must not be overwritten from a possibly-stale blob.
-        // See `Counter::reconcile_int64`.
-        let mut doc_exists = false;
-        let doc_id = DocID::from_string(doc_id_str)
-            .map_err(|e| MergeError::MergeFailed(format!("invalid doc ID: {e}")))?;
-        if let Some(existing_doc) = collection
-            .get_with_datastore(datastore, doc_short_id, &doc_id)
-            .await
-            .map_err(MergeError::Database)?
+        let delta = self.create_counter_delta_for(payload, numeric_kind, doc_id_str)?;
+        if let Some(counter) =
+            counter_in_document(datastore, &collection, doc_short_id, field, numeric_kind).await?
         {
-            doc_exists = true;
-            if let Some(field_value) = existing_doc.get(&payload.field_name) {
-                match (numeric_kind, field_value) {
-                    (NumericKind::Int64, NormalValue::Int(v)) => {
-                        let _ = counter.reconcile_int64(datastore, *v).await;
-                    }
-                    (NumericKind::Float64, NormalValue::Float64(v)) => {
-                        let _ = counter.reconcile_float64(datastore, *v).await;
-                    }
-                    (NumericKind::Float32, NormalValue::Float32(v)) => {
-                        let _ = counter.reconcile_float32(datastore, *v).await;
-                    }
-                    _ => {}
-                }
-            }
+            return self
+                .merge_counter_once(
+                    datastore,
+                    headstore,
+                    cid,
+                    payload,
+                    doc_short_id,
+                    &counter,
+                    &delta,
+                )
+                .await;
         }
 
-        // Create the CounterDelta from payload
-        let delta = self.create_counter_delta_for(payload, numeric_kind, doc_id_str)?;
-        let ctx = Context {
-            doc_id: DocId::new(doc_id_str).map_err(|e| MergeError::MergeFailed(e.to_string()))?,
-            schema_version: payload.schema_version_id.clone(),
-            is_create: payload.priority == 1 && !doc_exists,
-        };
-
-        self.merge_counter_once_for_document(
-            datastore,
-            headstore,
-            cid,
-            payload,
-            doc_short_id,
-            &counter,
-            &ctx,
-            &delta,
-            numeric_kind,
-        )
-        .await
+        // The composite rewrites a value that is on another schema version (or
+        // predates part IDs) whole, so the increment is added to the stored
+        // value here and the composite puts the sum.
+        let applied_key =
+            storage::keys::HeadstorePriorityKey::new(doc_short_id, payload.priority, *cid);
+        let stored = collection
+            .read_document_unvalidated(datastore, doc_short_id)
+            .await
+            .map_err(MergeError::Database)?;
+        let stored = stored.as_ref().and_then(|doc| doc.get(&payload.field_name));
+        let kind = crate::collection::value::counter_kind(field).ok_or_else(|| {
+            MergeError::UnsupportedDelta(format!(
+                "Counter field '{}' has no counter kind",
+                field.name
+            ))
+        })?;
+        if headstore
+            .has(&applied_key.bytes())
+            .await
+            .map_err(|e| MergeError::Storage(e.to_string()))?
+        {
+            return Ok(CounterMergeResult {
+                applied: false,
+                value: stored.cloned(),
+            });
+        }
+        let increment = delta
+            .checked_value(numeric_kind, field.crdt_type.allows_decrement())
+            .map_err(|e| MergeError::MergeFailed(e.to_string()))?;
+        let value = document::stored::add_counter(&field.name, kind, stored, &increment)
+            .map_err(|e| MergeError::MergeFailed(e.to_string()))?;
+        headstore
+            .set(&applied_key.bytes(), &[])
+            .await
+            .map_err(|e| MergeError::Storage(e.to_string()))?;
+        Ok(CounterMergeResult {
+            applied: true,
+            value: Some(value),
+        })
     }
 
+    /// Apply the delta once per block: the applied key is the one-winner race
+    /// that makes a redelivered block a no-op.
     #[allow(clippy::too_many_arguments)]
-    async fn merge_counter_once_for_document(
+    async fn merge_counter_once(
         &self,
         datastore: &mut NamespaceView,
         headstore: &NamespaceView,
@@ -302,42 +258,38 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         payload: &defra_core::block::CounterDeltaPayload,
         doc_short_id: u64,
         counter: &Counter,
-        context: &Context,
         delta: &CounterDelta,
-        numeric_kind: NumericKind,
     ) -> std::result::Result<CounterMergeResult, MergeError> {
         let applied_key =
             storage::keys::HeadstorePriorityKey::new(doc_short_id, payload.priority, *cid);
-        if headstore
+        let applied = !headstore
             .has(&applied_key.bytes())
             .await
-            .map_err(|e| MergeError::Storage(e.to_string()))?
-        {
-            let value = self
-                .read_counter_value(counter, datastore, numeric_kind, &payload.field_name)
-                .await;
-            return Ok(CounterMergeResult {
-                applied: false,
-                value,
-            });
-        }
-
-        let merge_result = counter
-            .merge(datastore, context, delta)
-            .await
-            .map_err(|e| MergeError::MergeFailed(e.to_string()))?;
-        headstore
-            .set(&applied_key.bytes(), &[])
-            .await
             .map_err(|e| MergeError::Storage(e.to_string()))?;
-        let value = self
-            .read_counter_value(counter, datastore, numeric_kind, &payload.field_name)
-            .await;
-
-        Ok(CounterMergeResult {
-            applied: merge_result.was_applied(),
-            value,
-        })
+        if applied {
+            let context = Context {
+                doc_id: DocId::new(String::from_utf8_lossy(delta.doc_id()).into_owned())
+                    .map_err(|e| MergeError::MergeFailed(e.to_string()))?,
+                schema_version: payload.schema_version_id.clone(),
+                is_create: false,
+            };
+            counter
+                .merge(datastore, &context, delta)
+                .await
+                .map_err(|e| MergeError::MergeFailed(e.to_string()))?;
+            headstore
+                .set(&applied_key.bytes(), &[])
+                .await
+                .map_err(|e| MergeError::Storage(e.to_string()))?;
+        }
+        let value = match ValueReader::value(counter, datastore).await {
+            Ok(bytes) => decode_counter_value(&bytes, delta.kind()),
+            Err(error) => {
+                tracing::debug!(field_name = %payload.field_name, %error, "Could not read counter value");
+                None
+            }
+        };
+        Ok(CounterMergeResult { applied, value })
     }
 
     pub(crate) async fn best_effort_finalize_field_block_merge(&self, cid: &Cid) {
@@ -457,79 +409,58 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             ))),
         }
     }
+}
 
-    async fn read_counter_value(
-        &self,
-        counter: &Counter,
-        datastore: &mut NamespaceView,
-        numeric_kind: NumericKind,
-        field_name: &str,
-    ) -> Option<NormalValue> {
-        match ValueReader::value(counter, datastore).await {
-            Ok(bytes) => self.decode_counter_value(bytes, numeric_kind, field_name),
-            Err(e) => {
-                tracing::debug!(
-                    field_name,
-                    error = %e,
-                    "Could not read counter value"
-                );
-                None
-            }
-        }
+/// The counter's part of the document value, as an operand target, when the
+/// stored value is on `collection`'s schema version and has part IDs. `None`
+/// otherwise: such a value is rewritten whole by its composite.
+async fn counter_in_document(
+    datastore: &NamespaceView,
+    collection: &Collection,
+    doc_short_id: u64,
+    field: &schema::FieldDescription,
+    numeric_kind: NumericKind,
+) -> std::result::Result<Option<Counter>, MergeError> {
+    let Some(part) = collection
+        .part_ids(datastore)
+        .await
+        .map_err(MergeError::Database)?
+        .and_then(|ids| ids.get(&field.name).copied())
+    else {
+        return Ok(None);
+    };
+    if collection
+        .load_version(datastore, doc_short_id)
+        .await
+        .map_err(MergeError::Database)?
+        .as_deref()
+        != Some(collection.version_id())
+    {
+        return Ok(None);
     }
+    Counter::new(
+        collection.version_id().to_string(),
+        collection.doc_key(doc_short_id),
+        part,
+        field.name.clone(),
+        field.crdt_type.allows_decrement(),
+        numeric_kind,
+    )
+    .map(Some)
+    .map_err(|e| MergeError::MergeFailed(e.to_string()))
+}
 
-    fn decode_counter_value(
-        &self,
-        bytes: Bytes,
-        numeric_kind: NumericKind,
-        field_name: &str,
-    ) -> Option<NormalValue> {
-        if bytes.is_empty() {
-            return None;
-        }
-
-        match numeric_kind {
-            NumericKind::Int64 => {
-                if bytes.len() == 8 {
-                    let arr: [u8; 8] = bytes[..8].try_into().unwrap();
-                    Some(NormalValue::Int(i64::from_be_bytes(arr)))
-                } else {
-                    tracing::warn!(
-                        field_name = %field_name,
-                        "Invalid counter value length for Int64"
-                    );
-                    None
-                }
-            }
-            NumericKind::Float64 => {
-                if bytes.len() == 8 {
-                    let arr: [u8; 8] = bytes[..8].try_into().unwrap();
-                    Some(NormalValue::Float64(f64::from_be_bytes(arr)))
-                } else {
-                    tracing::warn!(
-                        field_name = %field_name,
-                        "Invalid counter value length for Float64"
-                    );
-                    None
-                }
-            }
-            NumericKind::Float32 => {
-                if bytes.len() == 4 {
-                    let arr: [u8; 4] = bytes[..4].try_into().unwrap();
-                    Some(NormalValue::Float32(f32::from_be_bytes(arr)))
-                } else {
-                    tracing::warn!(
-                        field_name = %field_name,
-                        "Invalid counter value length for Float32"
-                    );
-                    None
-                }
-            }
-            other => {
-                tracing::warn!(kind = ?other, "unsupported NumericKind in counter value decode");
-                None
-            }
-        }
+/// A counter part's stored bytes as a value of `kind`.
+fn decode_counter_value(bytes: &[u8], kind: NumericKind) -> Option<NormalValue> {
+    match kind {
+        NumericKind::Int64 => Some(NormalValue::Int(i64::from_be_bytes(bytes.try_into().ok()?))),
+        NumericKind::Float32 => Some(NormalValue::Float32(f32::from_be_bytes(
+            bytes.try_into().ok()?,
+        ))),
+        NumericKind::Float64 => Some(NormalValue::Float64(f64::from_be_bytes(
+            bytes.try_into().ok()?,
+        ))),
+        _ => None,
     }
 }
 
