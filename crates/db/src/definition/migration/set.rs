@@ -3,7 +3,7 @@
 use lens::{LensConfig, TransformId};
 use schema::CollectionSource;
 use storage::corekv::{Key, Store};
-use storage::keys::systemstore::{CollectionKey, CollectionVersionKey, LensConfigKey};
+use storage::keys::systemstore::{CollectionKey, CollectionVersionKey};
 use tracing::instrument;
 
 use super::helpers::{create_orphan_placeholder, create_placeholder_with_source};
@@ -214,13 +214,12 @@ impl<S: Store> DB<S> {
                     .map_err(Error::Storage)?;
             }
 
-            let lens_key = LensConfigKey::new(transform_id.to_string());
-            let lens_data = serde_json::to_vec(&config_for_persistence)
-                .map_err(|e| Error::lens_config_json("failed to serialize lens config", e))?;
-            systemstore
-                .set(&lens_key.bytes(), &lens_data)
-                .await
-                .map_err(Error::Storage)?;
+            super::committed_lenses::write_lens_config(
+                &systemstore,
+                &transform_id,
+                &config_for_persistence,
+            )
+            .await?;
         }
         if !collection_name.is_empty() {
             let cached_collection = crate::collection::Collection::load_index_actions(
@@ -464,13 +463,12 @@ impl<S: Store> DB<S> {
                     .map_err(Error::Storage)?;
             }
 
-            let lens_key = LensConfigKey::new(transform_id.to_string());
-            let lens_data = serde_json::to_vec(&config_for_persistence)
-                .map_err(|e| Error::lens_config_json("failed to serialize lens config", e))?;
-            systemstore
-                .set(&lens_key.bytes(), &lens_data)
-                .await
-                .map_err(Error::Storage)?;
+            super::committed_lenses::write_lens_config(
+                &systemstore,
+                &transform_id,
+                &config_for_persistence,
+            )
+            .await?;
         }
 
         Ok(SetMigrationInTxnOutcome {

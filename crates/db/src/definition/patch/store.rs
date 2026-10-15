@@ -1,6 +1,5 @@
 use super::*;
 use lens::TransformStore;
-use storage::keys::systemstore::LensConfigKey;
 
 impl<S: Store> crate::database::DB<S> {
     /// Create and store a new schema version from a validated patched schema.
@@ -390,13 +389,12 @@ impl<S: Store> crate::database::DB<S> {
                 .map_err(Error::Storage)?;
 
             if let Some((transform_id, config)) = &committed_migration {
-                let lens_key = LensConfigKey::new(transform_id.to_string());
-                let lens_data = serde_json::to_vec(config)
-                    .map_err(|e| Error::lens_config_json("failed to serialize lens config", e))?;
-                systemstore
-                    .set(&lens_key.bytes(), &lens_data)
-                    .await
-                    .map_err(Error::Storage)?;
+                crate::definition::migration::committed_lenses::write_lens_config(
+                    &systemstore,
+                    transform_id,
+                    config,
+                )
+                .await?;
             }
         } // systemstore reference dropped here
 

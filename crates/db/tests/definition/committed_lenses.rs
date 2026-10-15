@@ -2,77 +2,22 @@
 //! the lens store fails afterwards: it is owed, known as a migration, and
 //! registered when it is next used.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use db::database::DB;
 use db::txn::registry::DbTransactionRegistry;
 use futures::TryStreamExt;
-use lens::{
-    LensConfig, LensDoc, LensDocResultStream, LensDocStream, LensModule, MemoryTransformStore,
-    TransformId, TransformStore,
-};
+use lens::{LensConfig, LensDoc, LensDocStream, LensModule, TransformId, TransformStore};
 use query::txn::TransactionRegistry;
-use rapidhash::RapidHashMap;
+use storage::corekv::Key;
+use storage::keys::systemstore::LensConfigKey;
 use storage::RegolithStore;
 
-/// A transform store that refuses to register a lens under its ID while
-/// `refuse` is set, as a store does when a module cannot be read or compiled
-/// at that moment. Transactions register into a store that never refuses.
-struct RefusingStore {
-    inner: MemoryTransformStore,
-    refuse: AtomicBool,
-}
-
-#[async_trait]
-impl TransformStore for RefusingStore {
-    fn new_isolated_store(&self) -> Arc<dyn TransformStore> {
-        Arc::new(MemoryTransformStore::new())
-    }
-
-    async fn add(&self, config: LensConfig) -> lens::Result<TransformId> {
-        self.inner.add(config).await
-    }
-
-    async fn add_with_id(&self, id: TransformId, config: LensConfig) -> lens::Result<()> {
-        if self.refuse.load(Ordering::SeqCst) {
-            return Err(lens::Error::Pipeline("registration refused".to_string()));
-        }
-        self.inner.add_with_id(id, config).await
-    }
-
-    async fn list(&self) -> lens::Result<RapidHashMap<String, LensModule>> {
-        self.inner.list().await
-    }
-
-    fn transform(
-        &self,
-        id: &TransformId,
-        docs: LensDocStream,
-    ) -> lens::Result<LensDocResultStream> {
-        self.inner.transform(id, docs)
-    }
-
-    fn inverse(&self, id: &TransformId, docs: LensDocStream) -> lens::Result<LensDocResultStream> {
-        self.inner.inverse(id, docs)
-    }
-
-    fn has_transform(&self, id: &TransformId) -> bool {
-        self.inner.has_transform(id)
-    }
-
-    async fn remove(&self, id: &TransformId) -> lens::Result<()> {
-        self.inner.remove(id).await
-    }
-}
+use crate::common::refusing_lens_store::RefusingStore;
 
 /// A database with a `Users` collection whose lens store refuses registration.
 async fn node() -> (Arc<DB<RegolithStore>>, Arc<RefusingStore>) {
-    let store = Arc::new(RefusingStore {
-        inner: MemoryTransformStore::new(),
-        refuse: AtomicBool::new(true),
-    });
+    let store = RefusingStore::refusing();
     let mut db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     db.set_lens_store(store.clone());
     db.create_collections_atomic(query::parse_sdl("type Users { name: String }").unwrap())
@@ -120,7 +65,7 @@ async fn assert_owed_until_used(db: &DB<RegolithStore>, store: &RefusingStore, i
     );
     assert!(!store.inner.has_transform(id));
 
-    store.refuse.store(false, Ordering::SeqCst);
+    store.allow();
     let docs = run(db, id)
         .await
         .expect("the owed lens registers when it is used");
@@ -177,5 +122,54 @@ async fn an_added_lens_is_returned_when_its_registration_fails() {
         .await
         .expect("the lens is committed, so adding it succeeds");
 
+    assert_owed_until_used(&db, &store, &id).await;
+}
+
+/// A lens added in a transaction is written into it: its config and blocks are
+/// durable with the commit, and nothing reads its module path afterwards.
+#[tokio::test]
+async fn a_lens_added_in_a_transaction_is_durable_with_its_commit() {
+    let (db, store) = node().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lens.wasm");
+    std::fs::write(&path, b"\0asm\x01\0\0\0").unwrap();
+    let registry = DbTransactionRegistry::new(db.clone());
+    let txn_id = registry.begin(false).await.unwrap();
+    let id = registry
+        .add_lens_in_txn(
+            &txn_id,
+            LensConfig::new(
+                "",
+                "",
+                LensModule::from_path(format!("file://{}", path.display())),
+            ),
+        )
+        .await
+        .unwrap();
+
+    std::fs::remove_file(&path).unwrap();
+    registry.commit(&txn_id).await.unwrap();
+
+    let txn = db.new_txn(true).await.unwrap();
+    assert!(
+        txn.systemstore()
+            .unwrap()
+            .get(&LensConfigKey::new(id.to_string()).bytes())
+            .await
+            .unwrap()
+            .is_some(),
+        "the lens config commits with the transaction"
+    );
+    let root = cid::Cid::try_from(id.to_string().as_str()).unwrap();
+    assert!(
+        txn.blockstore()
+            .unwrap()
+            .get(&root.to_bytes())
+            .await
+            .unwrap()
+            .is_some(),
+        "the lens blocks commit with the transaction"
+    );
+    txn.discard().unwrap();
     assert_owed_until_used(&db, &store, &id).await;
 }

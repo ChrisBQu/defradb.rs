@@ -7,5 +7,6 @@
 pub mod counting_store;
 pub mod fixture;
 pub mod guard_events;
+pub mod refusing_lens_store;
 pub mod schema;
 pub mod stream;
