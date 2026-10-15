@@ -1,5 +1,7 @@
 //! Transform store used when the `wasmtime-runtime` feature is off.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use rapidhash::{HashMapExt, RapidHashMap};
 
@@ -16,6 +18,10 @@ pub struct UnsupportedTransformStore;
 
 #[async_trait]
 impl TransformStore for UnsupportedTransformStore {
+    fn new_isolated_store(&self) -> Arc<dyn TransformStore> {
+        Arc::new(Self)
+    }
+
     async fn add(&self, _config: LensConfig) -> Result<TransformId> {
         Err(Error::RuntimeUnavailable)
     }

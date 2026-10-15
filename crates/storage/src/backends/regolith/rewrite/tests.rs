@@ -238,7 +238,7 @@ async fn a_wrapper_store_without_its_key_is_refused_and_left_unchanged() {
             .unwrap();
         assert!(error.to_string().contains(message), "{error}");
     }
-    let error = RegolithTxn::open_read_only_with_options(&path, keyed(KEY))
+    let error = RegolithTxn::open_read_only(&path, keyed(KEY))
         .err()
         .unwrap();
     assert!(
