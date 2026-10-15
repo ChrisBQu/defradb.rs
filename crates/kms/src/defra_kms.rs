@@ -48,12 +48,14 @@ impl KmsInputs {
     }
 }
 
-/// Peer requests on the caller's own async runtime. A node passes its
-/// network edge instead, through [`KmsInputs::on`].
+/// Peer requests in the requesting task, with no runtime of their own
+/// (`inputs::Runtime::inline`): each request asks its own peers, bounded by
+/// the transports' timeouts. A node passes its network edge instead, through
+/// [`KmsInputs::on`], which shares requests between callers and times them.
 impl Default for KmsInputs {
     fn default() -> Self {
         Self {
-            runtime: inputs::Runtime::ambient(),
+            runtime: inputs::Runtime::inline(),
             remote: inputs::Config {
                 // Past the transports' own subscriber wait and reply timeout.
                 deadline: Duration::from_secs(30),
@@ -86,8 +88,8 @@ pub struct DefraKms {
 
 impl DefraKms {
     /// Construct a new `DefraKms`. Transports may be empty (single-node).
-    /// Peer requests run on the caller's async runtime; a node passes its
-    /// network edge through [`with_inputs`](Self::with_inputs).
+    /// Peer requests run in the requesting task; a node passes its network
+    /// edge through [`with_inputs`](Self::with_inputs).
     pub fn new(
         store: Arc<dyn KeyStore>,
         transports: Vec<Arc<dyn KeyTransport>>,
