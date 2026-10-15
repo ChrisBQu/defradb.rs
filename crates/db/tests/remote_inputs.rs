@@ -469,3 +469,39 @@ async fn identical_texts_are_embedded_once() {
         assert_eq!(created.document.get("vector"), Some(&expected));
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn an_update_and_a_delete_each_sign_in_one_wave() {
+    let db = database().await;
+    let mutator = AutoCommitMutator::new(Arc::clone(&db));
+    let created = mutator
+        .create("Things", documents(1).remove(0))
+        .await
+        .unwrap();
+    let signer = signer(Duration::from_millis(50));
+    sign_with(&signer);
+
+    let mut changed = created.document.clone();
+    changed.set("a", "changed");
+    let updated = mutator
+        .update("Things", changed, ["a".to_string()].into_iter().collect())
+        .await;
+    let waves_after_update = signer.waves.load(Ordering::SeqCst);
+    let signatures_after_update = signer.signatures.load(Ordering::SeqCst);
+    let deleted = mutator.delete("Things", &created.doc_id).await;
+    defra_core::signing::set_signing_config(None);
+
+    updated.unwrap();
+    assert!(deleted.unwrap().existed);
+    // An update's field blocks are past priority 1 and go unsigned: its
+    // composite is the one signature, built from heads read before the
+    // transaction and signed once.
+    assert_eq!(waves_after_update, 1);
+    assert_eq!(signatures_after_update, 1);
+    assert_eq!(
+        signer.waves.load(Ordering::SeqCst),
+        2,
+        "the delete's one wave"
+    );
+    assert_eq!(signer.signatures.load(Ordering::SeqCst), 2);
+}

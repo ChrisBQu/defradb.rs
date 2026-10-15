@@ -681,6 +681,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 schema_version_id,
                 sign_config.as_ref(),
                 self.prepared_inputs.as_ref(),
+                None,
             )
             .await
             .map_err(|error| {
