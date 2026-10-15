@@ -351,6 +351,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
         Ok(JsonValue::Object(results))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn check_doc_access_prepared(
         &self,
         identity: &Identity,
@@ -364,8 +365,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
         // The overlay can change as preceding mutations register/unregister
         // objects. Keep those checks live; memoize only the remote provider
         // answer when no request-local projection can affect it.
-        if !strict_attempt
-            && (crate::txn::current_deferred_acp_mutations().is_some() || prepared_inputs.is_none())
+        if self.acp.supports_transactions()
+            || (!strict_attempt
+                && (crate::txn::current_deferred_acp_mutations().is_some()
+                    || prepared_inputs.is_none()))
         {
             return crate::txn::check_doc_access_with_overlay(
                 self.acp.as_ref(),
@@ -489,21 +492,18 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                 update_input: &mutation.update_input,
             };
             if strict_attempt {
-                let exact_request = serde_json::to_vec(&(
-                    Arc::as_ptr(validator) as *const () as usize,
-                    caller_identity.as_ref().map(ToString::to_string),
-                    &collection.name,
-                    &collection.version_id,
-                    mutation.mutation_type.as_prefix(),
-                    &validation_ids,
-                    &mutation.create_input,
-                    &mutation.update_input,
-                ))
-                .map_err(|error| QueryError::execution(error.to_string()))?;
-                let prepared_request = crate::prepared::PreparedInputRequest::new(
-                    crate::prepared::PreparedInputKind::WriteValidation,
-                    exact_request,
-                );
+                let request = crate::access_hooks::write::WriteValidationInput {
+                    validator: Arc::as_ptr(validator) as *const () as usize,
+                    identity: caller_identity.as_ref().map(ToString::to_string),
+                    collection: (*collection).clone(),
+                    kind: mutation.mutation_type.as_prefix().to_string(),
+                    doc_ids: validation_ids.clone(),
+                    create_input: mutation.create_input.clone(),
+                    update_input: mutation.update_input.clone(),
+                };
+                let prepared_request = request
+                    .prepared_request()
+                    .map_err(|error| QueryError::execution(error.to_string()))?;
                 let inputs = prepared_inputs.ok_or_else(|| {
                     QueryError::execution("write validation attempt has no request memo")
                 })?;

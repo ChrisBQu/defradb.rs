@@ -179,26 +179,21 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     None => false,
                     Some(collection) => match &collection.policy {
                         None => true,
-                        Some(policy) => {
-                            let checker = crate::txn::OverlayChecker {
-                                acp: self.acp.as_ref(),
-                                identity: &identity,
-                            };
-                            acp::read_access::check_doc_read_access(
-                                &checker,
-                                &policy.id,
-                                &policy.resource_name,
-                                &collection.collection_id,
-                                collection.is_branchable,
-                                doc_id,
-                            )
-                            .await
-                            .map_err(|error| {
-                                QueryError::commit_access_check_failed(
-                                    QueryError::acp_check_failed("read", doc_id, error),
-                                )
-                            })?
-                        }
+                        Some(policy) => crate::txn::check_doc_read_access_with_prepared_inputs(
+                            self.acp.as_ref(),
+                            &identity,
+                            &policy.id,
+                            &policy.resource_name,
+                            &collection.collection_id,
+                            collection.is_branchable,
+                            doc_id,
+                            self.retry_inputs.as_ref(),
+                        )
+                        .await
+                        .map_err(|error| match error {
+                            error @ QueryError::NeedsInput(_) => error,
+                            error => QueryError::commit_access_check_failed(error),
+                        })?,
                     },
                 };
                 let allowed = match &collection {

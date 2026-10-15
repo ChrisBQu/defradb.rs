@@ -752,32 +752,16 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         &self,
         input: &crate::prepared::PreparedInputRequest,
     ) -> Result<std::sync::Arc<[u8]>> {
-        #[derive(serde::Deserialize)]
-        struct Request {
-            validator: usize,
-            identity: Option<String>,
-            collection_name: String,
-            version_id: String,
-            kind: String,
-            doc_ids: Vec<String>,
-            create_input: Vec<rapidhash::RapidHashMap<String, serde_json::Value>>,
-            update_input: rapidhash::RapidHashMap<String, serde_json::Value>,
-        }
-        let request: Request = serde_json::from_slice(input.exact_request()).map_err(|_| {
-            crate::error::QueryError::execution("invalid prepared write validation request")
-        })?;
+        let request: crate::access_hooks::write::WriteValidationInput =
+            serde_json::from_slice(input.exact_request()).map_err(|_| {
+                crate::error::QueryError::execution("invalid prepared write validation request")
+            })?;
         let validator = self.write_validator.as_ref().ok_or_else(|| {
             crate::error::QueryError::execution("write validator changed during retry preparation")
         })?;
         if std::sync::Arc::as_ptr(validator) as *const () as usize != request.validator {
             return Err(crate::error::QueryError::execution(
                 "write validator changed during retry preparation",
-            ));
-        }
-        let collection = self.get_collection(&request.collection_name).await?;
-        if collection.version_id != request.version_id {
-            return Err(crate::error::QueryError::execution(
-                "collection schema changed during write validation preparation",
             ));
         }
         let kind = crate::mapper::MutationType::from_prefix(&request.kind)
@@ -793,7 +777,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         validator
             .validate_write(&crate::access_hooks::WriteRequest {
                 identity: identity.as_ref(),
-                collection: &collection,
+                collection: &request.collection,
                 kind,
                 doc_ids: &request.doc_ids,
                 create_input: &request.create_input,
@@ -819,9 +803,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 .and_then(Value::as_str)
                 .ok_or_else(|| crate::error::QueryError::execution("invalid prepared ACP request"))
         };
-        let did = Did::new(field(0)?).map_err(|_| {
-            crate::error::QueryError::execution("invalid identity in prepared ACP request")
-        })?;
+        let did = if field(0)? == "anonymous" {
+            None
+        } else {
+            Some(Did::new(field(0)?).map_err(|_| {
+                crate::error::QueryError::execution("invalid identity in prepared ACP request")
+            })?)
+        };
         let bearer = fields.get(5).and_then(Value::as_str).map(str::to_owned);
         struct BearerGuard(String, Option<String>);
         impl Drop for BearerGuard {
@@ -833,23 +821,27 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 }
             }
         }
-        let previous = defra_core::signing::get_request_bearer_token(did.as_str());
-        match bearer {
-            Some(value) => defra_core::signing::set_request_bearer_token(did.as_str(), value),
-            None => defra_core::signing::clear_request_bearer_token(did.as_str()),
-        }
-        let _bearer_guard = BearerGuard(did.to_string(), previous);
+        let _bearer_guard = did.as_ref().map(|did| {
+            let previous = defra_core::signing::get_request_bearer_token(did.as_str());
+            match bearer {
+                Some(value) => defra_core::signing::set_request_bearer_token(did.as_str(), value),
+                None => defra_core::signing::clear_request_bearer_token(did.as_str()),
+            }
+            BearerGuard(did.to_string(), previous)
+        });
 
-        let response = if field(4)? == "writer" {
+        let acp_identity = did.map(Identity::from).unwrap_or(Identity::Anonymous);
+        let response = if field(1)? == "registered" {
+            let registered = self
+                .acp
+                .is_doc_registered(field(2)?, field(3)?, field(4)?)
+                .await
+                .map_err(|error| crate::error::QueryError::execution(error.to_string()))?;
+            serde_json::to_vec(&registered)
+        } else if field(4)? == "writer" {
             let decision = self
                 .acp
-                .create_access_decision(
-                    &Identity::from(did),
-                    field(1)?,
-                    field(2)?,
-                    field(3)?,
-                    "writer",
-                )
+                .create_access_decision(&acp_identity, field(1)?, field(2)?, field(3)?, "writer")
                 .await
                 .map_err(|error| {
                     crate::error::QueryError::permission_denied(format!(
@@ -870,13 +862,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             };
             let allowed = self
                 .acp
-                .check_doc_access(
-                    &Identity::from(did),
-                    permission,
-                    field(2)?,
-                    field(3)?,
-                    field(4)?,
-                )
+                .check_doc_access(&acp_identity, permission, field(2)?, field(3)?, field(4)?)
                 .await
                 .map_err(|error| crate::error::QueryError::execution(error.to_string()))?;
             serde_json::to_vec(&allowed)

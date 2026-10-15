@@ -2,7 +2,7 @@
 //! write. They narrow ACP and never widen it.
 
 pub(crate) mod read;
-mod write;
+pub(crate) mod write;
 
 pub use read::{AppReadCheck, ReadRequest, ReadValidator};
 pub use write::{WriteRequest, WriteValidator};

@@ -389,7 +389,10 @@ pub async fn check_doc_access_with_prepared_inputs(
     doc_id: &str,
     inputs: Option<&crate::prepared::PreparedInputMemo>,
 ) -> crate::error::Result<bool> {
-    let Some(inputs) = inputs else {
+    // Transaction-bound providers read the attempt's ACP namespace directly so
+    // those reads participate in OCC and see earlier writes in the same batch.
+    // The retry memo is only for external providers without transaction scope.
+    let Some(inputs) = inputs.filter(|_| !acp.supports_transactions()) else {
         return check_doc_access_with_overlay(
             acp,
             identity,
@@ -423,6 +426,114 @@ pub async fn check_doc_access_with_prepared_inputs(
     serde_json::from_slice(&response).map_err(|error| {
         crate::error::QueryError::execution(format!("cached ACP response is invalid: {error}"))
     })
+}
+
+/// Resolve the shared document/branchable read rule through the request memo.
+/// Registration is a separate ACP input because unregistered documents may be
+/// public, and branchable collections fall back to collection-level access.
+#[allow(clippy::too_many_arguments)]
+pub async fn check_doc_read_access_with_prepared_inputs(
+    acp: &dyn DocumentACP,
+    identity: &Identity,
+    policy_id: &str,
+    resource_name: &str,
+    collection_id: &str,
+    is_branchable: bool,
+    doc_id: &str,
+    inputs: Option<&crate::prepared::PreparedInputMemo>,
+) -> crate::error::Result<bool> {
+    use acp::read_access::DocAccess;
+
+    let Some(inputs) = inputs.filter(|_| !acp.supports_transactions()) else {
+        let checker = crate::txn::OverlayChecker { acp, identity };
+        return acp::read_access::check_doc_read_access(
+            &checker,
+            policy_id,
+            resource_name,
+            collection_id,
+            is_branchable,
+            doc_id,
+        )
+        .await
+        .map_err(|error| crate::error::QueryError::execution(error.to_string()));
+    };
+
+    async fn access_for_object(
+        acp: &dyn DocumentACP,
+        identity: &Identity,
+        policy_id: &str,
+        resource_name: &str,
+        object_id: &str,
+        inputs: &crate::prepared::PreparedInputMemo,
+    ) -> crate::error::Result<DocAccess> {
+        let bearer = identity
+            .did()
+            .and_then(|did| defra_core::signing::get_request_bearer_token(did.as_str()));
+        let request_bytes = serde_json::to_vec(&(
+            identity.did().map(Did::as_str).unwrap_or("anonymous"),
+            "registered",
+            policy_id,
+            resource_name,
+            object_id,
+            bearer,
+        ))
+        .map_err(|error| crate::error::QueryError::execution(error.to_string()))?;
+        let request = crate::prepared::PreparedInputRequest::new(
+            crate::prepared::PreparedInputKind::AcpDecision,
+            request_bytes,
+        );
+        let Some(response) = inputs.get(&request) else {
+            return Err(crate::error::QueryError::NeedsInput(request));
+        };
+        let registered = serde_json::from_slice::<bool>(&response)
+            .map_err(|error| crate::error::QueryError::execution(error.to_string()))?;
+        if !registered {
+            return Ok(DocAccess {
+                has_access: acp.unregistered_documents_are_public(),
+                explicit: false,
+            });
+        }
+        let allowed = check_doc_access_with_prepared_inputs(
+            acp,
+            identity,
+            DocumentPermission::Read,
+            policy_id,
+            resource_name,
+            object_id,
+            Some(inputs),
+        )
+        .await?;
+        Ok(DocAccess {
+            has_access: allowed,
+            explicit: true,
+        })
+    }
+
+    if identity.is_authenticated() && defra_core::dac_bypass::get_dac_bypass() {
+        return Ok(true);
+    }
+    if !doc_id.is_empty() {
+        let doc_access =
+            access_for_object(acp, identity, policy_id, resource_name, doc_id, inputs).await?;
+        if doc_access.explicit || !is_branchable {
+            return Ok(doc_access.has_access);
+        }
+    }
+    if is_branchable {
+        let collection_access = access_for_object(
+            acp,
+            identity,
+            policy_id,
+            resource_name,
+            collection_id,
+            inputs,
+        )
+        .await?;
+        if !collection_access.has_access {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Transaction context that provides storage access within a transaction.
@@ -514,6 +625,93 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn prepared_branchable_read_exits_before_external_acp_and_reuses_registration() {
+        let acp = NoopDocumentAcp(true, false);
+        let identity = Identity::Anonymous;
+        let memo = crate::prepared::PreparedInputMemo::default();
+        let result = check_doc_read_access_with_prepared_inputs(
+            &acp,
+            &identity,
+            "policy",
+            "User",
+            "collection-id",
+            true,
+            "doc-1",
+            Some(&memo),
+        )
+        .await;
+        let Err(crate::error::QueryError::NeedsInput(request)) = result else {
+            panic!("expected prepared ACP registration miss, got {result:?}");
+        };
+        assert_eq!(
+            request.kind(),
+            crate::prepared::PreparedInputKind::AcpDecision
+        );
+        let key = crate::prepared::PreparedInputRequest::new(
+            crate::prepared::PreparedInputKind::AcpDecision,
+            serde_json::to_vec(&(
+                "anonymous",
+                "registered",
+                "policy",
+                "User",
+                "doc-1",
+                None::<String>,
+            ))
+            .unwrap(),
+        );
+        assert_eq!(request, key);
+        memo.insert(key, Arc::<[u8]>::from(b"false".as_slice()));
+        let collection_key = crate::prepared::PreparedInputRequest::new(
+            crate::prepared::PreparedInputKind::AcpDecision,
+            serde_json::to_vec(&(
+                "anonymous",
+                "registered",
+                "policy",
+                "User",
+                "collection-id",
+                None::<String>,
+            ))
+            .unwrap(),
+        );
+        memo.insert(collection_key, Arc::<[u8]>::from(b"false".as_slice()));
+
+        // Unregistered docs in this fixture are public. The branchable rule
+        // therefore needs no collection fallback or in-attempt ACP call.
+        assert!(check_doc_read_access_with_prepared_inputs(
+            &acp,
+            &identity,
+            "policy",
+            "User",
+            "collection-id",
+            true,
+            "doc-1",
+            Some(&memo),
+        )
+        .await
+        .unwrap());
+    }
+
+    #[tokio::test]
+    async fn transactional_acp_reads_stay_live_instead_of_using_retry_memo() {
+        let acp = NoopDocumentAcp(false, true);
+        let memo = crate::prepared::PreparedInputMemo::default();
+        let allowed = check_doc_read_access_with_prepared_inputs(
+            &acp,
+            &Identity::Anonymous,
+            "policy",
+            "User",
+            "collection-id",
+            false,
+            "doc-1",
+            Some(&memo),
+        )
+        .await
+        .expect("transactional provider must execute its live read");
+        assert!(!allowed);
+        assert!(memo.is_empty());
+    }
+
+    #[tokio::test]
     async fn projected_registration_reports_registered_and_owner_only_access() {
         let mutations = Arc::new(DeferredAcpMutations::new());
         let owner: Did = "did:key:z6MksQ6mYqY1YxR4KQ2NW6y6x8vJrNs2LEd8w5pYxHw3rroA"
@@ -537,7 +735,7 @@ mod tests {
         let access = scope_deferred_acp_mutations(
             mutations.clone(),
             check_doc_access_with_overlay(
-                &NoopDocumentAcp(true),
+                &NoopDocumentAcp(true, false),
                 &Identity::Authenticated(owner),
                 DocumentPermission::Read,
                 "policy",
@@ -552,7 +750,7 @@ mod tests {
         let access = scope_deferred_acp_mutations(
             mutations,
             check_doc_access_with_overlay(
-                &NoopDocumentAcp(true),
+                &NoopDocumentAcp(true, false),
                 &Identity::Authenticated(stranger),
                 DocumentPermission::Read,
                 "policy",
@@ -580,7 +778,7 @@ mod tests {
         let access = scope_deferred_acp_mutations(
             mutations.clone(),
             check_doc_access_with_overlay(
-                &NoopDocumentAcp(true),
+                &NoopDocumentAcp(true, false),
                 &Identity::Anonymous,
                 DocumentPermission::Read,
                 "policy",
@@ -594,7 +792,12 @@ mod tests {
 
         let registered = scope_deferred_acp_mutations(
             mutations,
-            is_doc_registered_with_overlay(&NoopDocumentAcp(true), "policy", "User", "doc-1"),
+            is_doc_registered_with_overlay(
+                &NoopDocumentAcp(true, false),
+                "policy",
+                "User",
+                "doc-1",
+            ),
         )
         .await
         .expect("registration");
@@ -604,7 +807,7 @@ mod tests {
     #[tokio::test]
     async fn private_unregistration_denies_overlay_and_shared_reads() {
         use acp::read_access::{check_doc_read_access, ObjectAccessChecker};
-        let acp = NoopDocumentAcp(false);
+        let acp = NoopDocumentAcp(false, false);
         let checker = crate::txn::OverlayChecker {
             acp: &acp,
             identity: &Identity::Anonymous,
@@ -657,6 +860,10 @@ mod tests {
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     impl DocumentACP for NoopDocumentAcp {
+        fn supports_transactions(&self) -> bool {
+            self.1
+        }
+
         fn unregistered_documents_are_public(&self) -> bool {
             self.0
         }
@@ -736,5 +943,5 @@ mod tests {
         }
     }
 
-    struct NoopDocumentAcp(bool);
+    struct NoopDocumentAcp(bool, bool);
 }
