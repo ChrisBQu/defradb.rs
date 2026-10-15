@@ -32,7 +32,9 @@ fn collection() -> CollectionVersion {
 
 async fn seeded() -> (CountingDb, DocID) {
     let db = Arc::new(DB::new(CountingStore::new(RegolithStore::in_memory().unwrap())).unwrap());
-    db.create_collection(collection()).await.unwrap();
+    db.create_collection(&defra_core::RequestContext::default(), collection())
+        .await
+        .unwrap();
     let created = AutoCommitMutator::new(Arc::clone(&db))
         .create(
             &defra_core::RequestContext::default(),

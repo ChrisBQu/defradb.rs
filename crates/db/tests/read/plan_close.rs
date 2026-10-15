@@ -135,7 +135,9 @@ impl DocFetcher for FailingFetcher {
 
 async fn seeded_db() -> Arc<DB<RegolithStore>> {
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
-    db.create_collection(users_schema()).await.unwrap();
+    db.create_collection(&defra_core::RequestContext::default(), users_schema())
+        .await
+        .unwrap();
 
     let docs = (0..COLLECTION_SIZE)
         .map(|i| {

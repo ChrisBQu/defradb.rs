@@ -420,13 +420,23 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     }
 
     /// This runner serving a request `caller` makes: the creator of what it
-    /// writes.
+    /// writes and, when there is one, the identity acting in it. Without a
+    /// caller, the identity its boundary established acts.
     pub(crate) fn for_caller(&self, caller: Option<&Did>) -> Self {
         self.for_request(
             self.context
                 .clone()
+                .with_identity(self.acting_identity(caller))
                 .with_creator(caller.map(ToString::to_string)),
         )
+    }
+
+    /// The identity acting in a request `caller` makes: the caller, or the
+    /// identity its boundary established when there is no caller.
+    pub(crate) fn acting_identity(&self, caller: Option<&Did>) -> Option<String> {
+        caller
+            .map(ToString::to_string)
+            .or_else(|| self.context.identity().map(str::to_owned))
     }
 
     /// This runner resolving collections through `provider`.
@@ -612,7 +622,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     ) -> Result<Arc<dyn CollectionProvider>> {
         let context = self
             .registry
-            .get(handle)
+            .get(&self.context, handle)
             .into_result()
             .map_err(|error| QueryError::execution(error.to_string()))?
             .ok_or_else(|| QueryError::execution(format!("transaction '{handle}' not found")))?;

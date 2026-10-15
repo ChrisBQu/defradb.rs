@@ -20,14 +20,18 @@ async fn agent_response_db() -> DB<RegolithStore> {
         "#,
     )
     .unwrap();
-    db.create_collections_atomic(collections).await.unwrap();
+    db.create_collections_atomic(&defra_core::RequestContext::default(), collections)
+        .await
+        .unwrap();
     db
 }
 
 async fn users_db() -> DB<RegolithStore> {
     let db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     let collections = query::parse_sdl("type Users { name: String }").unwrap();
-    db.create_collections_atomic(collections).await.unwrap();
+    db.create_collections_atomic(&defra_core::RequestContext::default(), collections)
+        .await
+        .unwrap();
     db
 }
 
@@ -40,7 +44,10 @@ async fn patch_rejects_an_invalid_default_value() {
         "value": {"Name": "age", "Kind": "Int", "DefaultValue": "unknown"}
     }]"#;
 
-    let error = db.patch_collection("Users", patch, None).await.unwrap_err();
+    let error = db
+        .patch_collection(&defra_core::RequestContext::default(), "Users", patch)
+        .await
+        .unwrap_err();
 
     assert!(error.to_string().contains(
         "default field value is invalid. Collection: Users, Inner: Field 'age' has incompatible type"
@@ -66,7 +73,12 @@ async fn patch_collection_registers_migration_atomically() {
     );
 
     let patched = db
-        .patch_collection_with_migration("Users", ADD_AGE_PATCH, Some(migration), None)
+        .patch_collection_with_migration(
+            &defra_core::RequestContext::default(),
+            "Users",
+            ADD_AGE_PATCH,
+            Some(migration),
+        )
         .await
         .unwrap();
     let previous = patched.previous_version.as_ref().unwrap();
@@ -99,7 +111,11 @@ async fn patch_collection_registers_migration_atomically() {
 async fn patch_collection_rolls_back_when_migration_is_invalid() {
     let expected_db = users_db().await;
     let expected = expected_db
-        .patch_collection("Users", ADD_AGE_PATCH, None)
+        .patch_collection(
+            &defra_core::RequestContext::default(),
+            "Users",
+            ADD_AGE_PATCH,
+        )
         .await
         .unwrap();
 
@@ -107,9 +123,14 @@ async fn patch_collection_rolls_back_when_migration_is_invalid() {
     let original = db.get_collection("Users").unwrap().unwrap();
     let invalid_migration = LensConfig::new("", "", LensModule::from_bytes(vec![0]));
 
-    db.patch_collection_with_migration("Users", ADD_AGE_PATCH, Some(invalid_migration), None)
-        .await
-        .unwrap_err();
+    db.patch_collection_with_migration(
+        &defra_core::RequestContext::default(),
+        "Users",
+        ADD_AGE_PATCH,
+        Some(invalid_migration),
+    )
+    .await
+    .unwrap_err();
 
     assert_eq!(
         db.get_collection("Users").unwrap().unwrap().version_id(),
@@ -118,7 +139,11 @@ async fn patch_collection_rolls_back_when_migration_is_invalid() {
     assert_eq!(db.get_all_collection_versions().await.unwrap().len(), 1);
 
     let retried = db
-        .patch_collection("Users", ADD_AGE_PATCH, None)
+        .patch_collection(
+            &defra_core::RequestContext::default(),
+            "Users",
+            ADD_AGE_PATCH,
+        )
         .await
         .unwrap();
     assert_eq!(retried.version_id, expected.version_id);
@@ -137,7 +162,9 @@ async fn patch_collection_preserves_runtime_root_id() {
         "#,
     )
     .unwrap();
-    db.create_collections_atomic(collections).await.unwrap();
+    db.create_collections_atomic(&defra_core::RequestContext::default(), collections)
+        .await
+        .unwrap();
 
     let original = db.get_collection("Users").unwrap().unwrap();
     let root_id = original.resolved_root_id();
@@ -145,6 +172,7 @@ async fn patch_collection_preserves_runtime_root_id() {
 
     let patched = db
         .patch_collection(
+            &defra_core::RequestContext::default(),
             "Users",
             r#"
             [
@@ -153,7 +181,6 @@ async fn patch_collection_preserves_runtime_root_id() {
                 }}
             ]
             "#,
-            None,
         )
         .await
         .unwrap();
@@ -174,6 +201,7 @@ async fn patch_collection_accepts_numeric_go_kind() {
 
     let patched = db
         .patch_collection(
+            &defra_core::RequestContext::default(),
             "AgentResponse",
             r#"
             [
@@ -182,7 +210,6 @@ async fn patch_collection_accepts_numeric_go_kind() {
                 }}
             ]
             "#,
-            None,
         )
         .await
         .unwrap();
@@ -203,6 +230,7 @@ async fn patch_collection_rejects_new_non_nillable_field() {
     let db = agent_response_db().await;
     let err = db
         .patch_collection(
+            &defra_core::RequestContext::default(),
             "AgentResponse",
             r#"
             [{
@@ -211,7 +239,6 @@ async fn patch_collection_rejects_new_non_nillable_field() {
                 "value": {"Name": "score", "Kind": 23}
             }]
             "#,
-            None,
         )
         .await
         .unwrap_err();
@@ -227,6 +254,7 @@ async fn patch_collection_reports_unknown_numeric_kind_like_go() {
     let db = agent_response_db().await;
     let err = db
         .patch_collection(
+            &defra_core::RequestContext::default(),
             "AgentResponse",
             r#"
             [{
@@ -235,7 +263,6 @@ async fn patch_collection_reports_unknown_numeric_kind_like_go() {
                 "value": {"Name": "score", "Kind": 111}
             }]
             "#,
-            None,
         )
         .await
         .unwrap_err();
@@ -252,18 +279,23 @@ async fn patch_view_query_creates_new_version() {
     let db = DB::new(store).unwrap();
 
     let users = query::parse_sdl("type Users { name: String }").unwrap();
-    db.create_collections_atomic(users).await.unwrap();
+    db.create_collections_atomic(&defra_core::RequestContext::default(), users)
+        .await
+        .unwrap();
 
     let mut views = query::parse_sdl("type UserView { name: String fullName: String }").unwrap();
     let select = query::parse_query("query { Users { name } }").unwrap();
     views[0].query = Some(schema::QuerySource::new(query::select_to_go_json(
         &select[0],
     )));
-    db.create_collections_atomic(views).await.unwrap();
+    db.create_collections_atomic(&defra_core::RequestContext::default(), views)
+        .await
+        .unwrap();
     let original = db.get_collection("UserView").unwrap().unwrap();
 
     let patched = db
         .patch_collection(
+            &defra_core::RequestContext::default(),
             "UserView",
             r#"
             [{
@@ -272,7 +304,6 @@ async fn patch_view_query_creates_new_version() {
                 "value": {"Name": "Users", "Fields": [{"Name": "name", "Alias": "fullName"}]}
             }]
             "#,
-            None,
         )
         .await
         .unwrap();
@@ -295,7 +326,9 @@ async fn patch_view_query_creates_new_version() {
 async fn patch_dematerialization_requires_an_empty_view() {
     let db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     let users = query::parse_sdl("type Users { name: String }").unwrap();
-    db.create_collections_atomic(users).await.unwrap();
+    db.create_collections_atomic(&defra_core::RequestContext::default(), users)
+        .await
+        .unwrap();
 
     let mut views = query::parse_sdl("type UserView { name: String }").unwrap();
     let select = query::parse_query("query { Users { name } }").unwrap();
@@ -303,12 +336,14 @@ async fn patch_dematerialization_requires_an_empty_view() {
         &select[0],
     )));
     views[0].is_materialized = true;
-    db.create_collections_atomic(views).await.unwrap();
+    db.create_collections_atomic(&defra_core::RequestContext::default(), views)
+        .await
+        .unwrap();
     let dematerialized = db
         .patch_collection(
+            &defra_core::RequestContext::default(),
             "UserView",
             r#"[{"op":"replace","path":"/UserView/IsMaterialized","value":false}]"#,
-            None,
         )
         .await
         .unwrap();
@@ -316,9 +351,9 @@ async fn patch_dematerialization_requires_an_empty_view() {
 
     let view = db
         .patch_collection(
+            &defra_core::RequestContext::default(),
             "UserView",
             r#"[{"op":"replace","path":"/UserView/IsMaterialized","value":true}]"#,
-            None,
         )
         .await
         .unwrap();
@@ -345,9 +380,9 @@ async fn patch_dematerialization_requires_an_empty_view() {
 
     let error = db
         .patch_collection(
+            &defra_core::RequestContext::default(),
             "UserView",
             r#"[{"op":"replace","path":"/UserView/IsMaterialized","value":false}]"#,
-            None,
         )
         .await
         .unwrap_err();
@@ -384,7 +419,11 @@ async fn patch_collection_accepts_numeric_kind_in_whole_fields_replacement() {
         "value": fields
     }]);
     let patched = db
-        .patch_collection("AgentResponse", &patch.to_string(), None)
+        .patch_collection(
+            &defra_core::RequestContext::default(),
+            "AgentResponse",
+            &patch.to_string(),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -403,6 +442,7 @@ async fn patch_collection_rejects_numeric_kind_in_direct_kind_replacement() {
     let db = agent_response_db().await;
     let err = db
         .patch_collection(
+            &defra_core::RequestContext::default(),
             "AgentResponse",
             r#"
             [{
@@ -411,7 +451,6 @@ async fn patch_collection_rejects_numeric_kind_in_direct_kind_replacement() {
                 "value": 3
             }]
             "#,
-            None,
         )
         .await
         .unwrap_err();
@@ -434,7 +473,9 @@ async fn patch_collection_rejects_mutating_an_existing_policy() {
         "#,
     )
     .unwrap();
-    db.create_collections_atomic(collections).await.unwrap();
+    db.create_collections_atomic(&defra_core::RequestContext::default(), collections)
+        .await
+        .unwrap();
     assert!(db
         .get_collection("Secrets")
         .unwrap()
@@ -445,6 +486,7 @@ async fn patch_collection_rejects_mutating_an_existing_policy() {
 
     let err = db
         .patch_collection(
+            &defra_core::RequestContext::default(),
             "Secrets",
             r#"
             [{
@@ -453,7 +495,6 @@ async fn patch_collection_rejects_mutating_an_existing_policy() {
                 "value": {"ID": "policy-b", "ResourceName": "secrets"}
             }]
             "#,
-            None,
         )
         .await
         .unwrap_err();
@@ -478,6 +519,7 @@ async fn patch_collection_rejects_adding_a_policy_to_a_policy_free_collection() 
 
     let err = db
         .patch_collection(
+            &defra_core::RequestContext::default(),
             "AgentResponse",
             r#"
             [{
@@ -486,7 +528,6 @@ async fn patch_collection_rejects_adding_a_policy_to_a_policy_free_collection() 
                 "value": {"ID": "policy-a", "ResourceName": "agents"}
             }]
             "#,
-            None,
         )
         .await
         .unwrap_err();
@@ -517,14 +558,14 @@ async fn patch_relation_version_switching_preserves_go_canonical_versions() {
         "#,
     )
     .unwrap();
-    db.create_collections_atomic(collections).await.unwrap();
+    db.create_collections_atomic(&defra_core::RequestContext::default(), collections)
+        .await
+        .unwrap();
 
     let author = db.get_collection("Author").unwrap().unwrap();
     assert_eq!(author.version_id(), AUTHOR_V1);
 
-    db.patch_collection(
-        "Author",
-        r#"
+    db.patch_collection(&defra_core::RequestContext::default(), "Author", r#"
         [
             { "op": "add", "path": "/Author/Fields/-", "value": {
                 "Name": "published", "Kind": "Book", "RelationName": "author_book", "IsPrimary": true
@@ -533,13 +574,12 @@ async fn patch_relation_version_switching_preserves_go_canonical_versions() {
                 "Name": "_publishedID", "Kind": "ID", "RelationName": "author_book", "IsPrimary": true
             }}
         ]
-        "#,
-        None,
-    )
+        "#)
     .await
     .unwrap();
 
     db.patch_collection(
+        &defra_core::RequestContext::default(),
         "Book",
         r#"
         [
@@ -548,7 +588,6 @@ async fn patch_relation_version_switching_preserves_go_canonical_versions() {
             }}
         ]
         "#,
-        None,
     )
     .await
     .unwrap();
@@ -559,7 +598,9 @@ async fn patch_relation_version_switching_preserves_go_canonical_versions() {
         .unwrap();
     assert!(author_v2.is_some());
 
-    db.set_active_collection_version(AUTHOR_V1).await.unwrap();
+    db.set_active_collection_version(&defra_core::RequestContext::default(), AUTHOR_V1)
+        .await
+        .unwrap();
     assert!(db
         .get_collection("Author")
         .unwrap()
@@ -567,7 +608,9 @@ async fn patch_relation_version_switching_preserves_go_canonical_versions() {
         .get_indexes()
         .is_empty());
 
-    db.set_active_collection_version(AUTHOR_V2).await.unwrap();
+    db.set_active_collection_version(&defra_core::RequestContext::default(), AUTHOR_V2)
+        .await
+        .unwrap();
     let author = db.get_collection("Author").unwrap().unwrap();
     assert_eq!(author.version_id(), AUTHOR_V2);
     assert_eq!(author.get_indexes().len(), 1);
@@ -593,7 +636,11 @@ async fn local_document_part_ids_are_persistent_and_never_reused_by_new_versions
     let before = ids(&db, original.version_id()).await;
     assert_eq!(before.len(), original.schema().fields.len());
     let updated = db
-        .patch_collection("Users", ADD_AGE_PATCH, None)
+        .patch_collection(
+            &defra_core::RequestContext::default(),
+            "Users",
+            ADD_AGE_PATCH,
+        )
         .await
         .unwrap();
     let after = ids(&db, &updated.version_id).await;

@@ -106,7 +106,9 @@ async fn values(db: &Arc<DB<RegolithStore>>) -> RapidHashMap<String, Document> {
 async fn accumulators_move_into_their_documents_once() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = Arc::new(DB::from_arc(store.clone()).unwrap());
-    db.create_collection(tally()).await.unwrap();
+    db.create_collection(&defra_core::RequestContext::default(), tally())
+        .await
+        .unwrap();
     let behind = create(&db, r#"{"up": 5, "name": "behind"}"#)
         .await
         .to_string();
@@ -203,7 +205,9 @@ async fn accumulators_move_into_their_documents_once() {
 async fn a_store_without_accumulators_only_records_completion() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = Arc::new(DB::from_arc(store.clone()).unwrap());
-    db.create_collection(tally()).await.unwrap();
+    db.create_collection(&defra_core::RequestContext::default(), tally())
+        .await
+        .unwrap();
     let doc = create(&db, r#"{"up": 3}"#).await.to_string();
     let reopened = Arc::new(DB::open_from_arc(store.clone()).await.unwrap());
     assert_eq!(

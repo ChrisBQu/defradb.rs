@@ -21,16 +21,19 @@ use storage::RegolithStore;
 async fn batch_create_docs_expose_composite_heads() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = Arc::new(DB::from_arc(store).unwrap());
-    db.create_collection(CollectionVersion::new(
-        "Transcript",
-        "v1",
-        "col-transcript",
-        vec![
-            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
-            FieldDescription::new("2", "body", FieldKind::string()),
-            FieldDescription::new("3", "idx", FieldKind::int()),
-        ],
-    ))
+    db.create_collection(
+        &defra_core::RequestContext::default(),
+        CollectionVersion::new(
+            "Transcript",
+            "v1",
+            "col-transcript",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "body", FieldKind::string()),
+                FieldDescription::new("3", "idx", FieldKind::int()),
+            ],
+        ),
+    )
     .await
     .unwrap();
 
@@ -62,16 +65,19 @@ async fn batch_create_docs_expose_composite_heads() {
 async fn falls_back_to_priority_index_when_composite_head_entry_is_missing() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = Arc::new(DB::from_arc(store).unwrap());
-    db.create_collection(CollectionVersion::new(
-        "Transcript",
-        "v1",
-        "col-transcript",
-        vec![
-            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
-            FieldDescription::new("2", "body", FieldKind::string()),
-            FieldDescription::new("3", "idx", FieldKind::int()),
-        ],
-    ))
+    db.create_collection(
+        &defra_core::RequestContext::default(),
+        CollectionVersion::new(
+            "Transcript",
+            "v1",
+            "col-transcript",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "body", FieldKind::string()),
+                FieldDescription::new("3", "idx", FieldKind::int()),
+            ],
+        ),
+    )
     .await
     .unwrap();
 
@@ -107,16 +113,19 @@ async fn falls_back_to_priority_index_when_composite_head_entry_is_missing() {
 async fn falls_back_to_blockstore_scan_when_head_indexes_are_missing() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = Arc::new(DB::from_arc(store).unwrap());
-    db.create_collection(CollectionVersion::new(
-        "Transcript",
-        "v1",
-        "col-transcript",
-        vec![
-            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
-            FieldDescription::new("2", "body", FieldKind::string()),
-            FieldDescription::new("3", "idx", FieldKind::int()),
-        ],
-    ))
+    db.create_collection(
+        &defra_core::RequestContext::default(),
+        CollectionVersion::new(
+            "Transcript",
+            "v1",
+            "col-transcript",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "body", FieldKind::string()),
+                FieldDescription::new("3", "idx", FieldKind::int()),
+            ],
+        ),
+    )
     .await
     .unwrap();
 

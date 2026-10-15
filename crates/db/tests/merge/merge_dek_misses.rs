@@ -78,9 +78,12 @@ async fn a_merge_with_more_encrypted_fields_than_any_cap_merges_whole() {
             FieldKind::string(),
         )
     }));
-    db.create_collection(CollectionVersion::new("Wide", "v1", "col-wide", fields))
-        .await
-        .unwrap();
+    db.create_collection(
+        &defra_core::RequestContext::default(),
+        CollectionVersion::new("Wide", "v1", "col-wide", fields),
+    )
+    .await
+    .unwrap();
     let blockstore = Arc::new(DefraBlockstore::new(store, false));
     let handler = DbMergeHandler::new(db.clone(), blockstore.clone());
     let server = Arc::new(KeyServer {

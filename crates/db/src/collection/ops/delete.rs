@@ -71,8 +71,12 @@ impl<S: Store> crate::database::DB<S> {
     ///
     /// Note: This does NOT delete documents. Use `truncate_collection` first if needed.
     #[instrument(skip(self), fields(collection = %name), name = "db.delete_collection_auto")]
-    pub async fn delete_collection(&self, name: &str) -> Result<()> {
-        self.check_node_access(None, acp::nac::NodePermission::CollectionPatch)
+    pub async fn delete_collection(
+        &self,
+        context: &defra_core::RequestContext,
+        name: &str,
+    ) -> Result<()> {
+        self.check_node_access(context, acp::nac::NodePermission::CollectionPatch)
             .await?;
         let mut txn = self.new_txn(false).await?;
 
@@ -115,8 +119,13 @@ impl<S: Store> crate::database::DB<S> {
     /// is unknown, no deletion is performed. Validation (no documents, no
     /// orphan child versions outside the batch) is delegated to
     /// `delete_collection_versions_batch`.
-    pub async fn delete_collections(&self, names: Vec<String>, active_only: bool) -> Result<()> {
-        self.check_node_access(None, acp::nac::NodePermission::CollectionPatch)
+    pub async fn delete_collections(
+        &self,
+        context: &defra_core::RequestContext,
+        names: Vec<String>,
+        active_only: bool,
+    ) -> Result<()> {
+        self.check_node_access(context, acp::nac::NodePermission::CollectionPatch)
             .await?;
         if names.is_empty() {
             return Err(Error::InvalidPatch(
@@ -163,7 +172,8 @@ impl<S: Store> crate::database::DB<S> {
             }
         }
 
-        self.delete_collection_versions_batch(version_ids).await
+        self.delete_collection_versions_batch(context, version_ids)
+            .await
     }
 
     /// Truncate a collection: delete all documents, heads, blocks, and index entries
@@ -173,10 +183,10 @@ impl<S: Store> crate::database::DB<S> {
     #[instrument(skip(self), fields(collection = %name), name = "db.truncate_collection")]
     pub async fn truncate_collection(
         &self,
+        context: &defra_core::RequestContext,
         name: &str,
-        identity: Option<&identity::Did>,
     ) -> Result<()> {
-        self.check_node_access(identity, acp::nac::NodePermission::CollectionTruncate)
+        self.check_node_access(context, acp::nac::NodePermission::CollectionTruncate)
             .await?;
         let collection = self
             .get_collection(name)?

@@ -12,7 +12,9 @@ use query::mutator::DocMutator;
 #[tokio::test]
 async fn a_signed_create_without_a_kms_commits_the_blocks_prepared_for_it() {
     let (db, _) = make_test_db_with_bus().await;
-    db.create_collection(test_collection()).await.unwrap();
+    db.create_collection(&defra_core::RequestContext::default(), test_collection())
+        .await
+        .unwrap();
     let mutator = AutoCommitMutator::new(db);
     let key = crypto::generate_ed25519().unwrap();
     let public_key = key.public_key();

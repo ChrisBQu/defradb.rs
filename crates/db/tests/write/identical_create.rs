@@ -27,7 +27,7 @@ fn collection() -> CollectionVersion {
 
 async fn open() -> Arc<DB<RegolithStore>> {
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).expect("create db"));
-    db.create_collection(collection())
+    db.create_collection(&defra_core::RequestContext::default(), collection())
         .await
         .expect("create collection");
     db

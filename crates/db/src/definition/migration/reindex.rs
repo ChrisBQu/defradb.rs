@@ -74,8 +74,12 @@ impl<S: Store> DB<S> {
     /// create CRDT commits, update heads, emit mutation events, or gossip data to peers.
     ///
     /// Returns the number of documents whose stored version was advanced.
-    pub async fn materialize_collection(&self, collection_name: &str) -> Result<usize> {
-        self.check_node_access(None, acp::nac::NodePermission::CollectionPatch)
+    pub async fn materialize_collection(
+        &self,
+        context: &defra_core::RequestContext,
+        collection_name: &str,
+    ) -> Result<usize> {
+        self.check_node_access(context, acp::nac::NodePermission::CollectionPatch)
             .await?;
         self.materialize_collection_inner(collection_name, true, None)
             .await

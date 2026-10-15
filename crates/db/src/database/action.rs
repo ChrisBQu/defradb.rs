@@ -276,8 +276,11 @@ impl<S: Store> crate::database::DB<S> {
     }
 
     /// List actions that are in progress or ended with an error.
-    pub async fn list_actions(&self) -> Result<Vec<ActionExecution>> {
-        self.check_node_access(None, acp::nac::NodePermission::ActionList)
+    pub async fn list_actions(
+        &self,
+        context: &defra_core::RequestContext,
+    ) -> Result<Vec<ActionExecution>> {
+        self.check_node_access(context, acp::nac::NodePermission::ActionList)
             .await?;
 
         let txn = self.new_txn(true).await?;
@@ -290,9 +293,10 @@ impl<S: Store> crate::database::DB<S> {
 
     pub async fn list_index_actions(
         &self,
+        context: &defra_core::RequestContext,
         collection_id: &str,
     ) -> Result<RapidHashMap<u32, ActionExecution>> {
-        self.check_node_access(None, acp::nac::NodePermission::IndexList)
+        self.check_node_access(context, acp::nac::NodePermission::IndexList)
             .await?;
 
         let txn = self.new_txn(true).await?;

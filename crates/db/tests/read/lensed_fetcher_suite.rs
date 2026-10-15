@@ -81,11 +81,14 @@ async fn readonly_alias_reads_reuse_schema_history_without_rescanning_storage() 
         ))
         .unwrap(),
     );
-    db.create_collections_atomic(query::parse_sdl("type HistoryProbe { value: String }").unwrap())
-        .await
-        .unwrap();
+    db.create_collections_atomic(
+        &defra_core::RequestContext::default(),
+        query::parse_sdl("type HistoryProbe { value: String }").unwrap(),
+    )
+    .await
+    .unwrap();
     for index in 0..16 {
-        db.patch_collection("HistoryProbe", &format!(r#"[{{"op":"add","path":"/HistoryProbe/Fields/-","value":{{"Name":"extra{index}","Kind":"String"}}}}]"#), None).await.unwrap();
+        db.patch_collection(&defra_core::RequestContext::default(), "HistoryProbe", &format!(r#"[{{"op":"add","path":"/HistoryProbe/Fields/-","value":{{"Name":"extra{index}","Kind":"String"}}}}]"#)).await.unwrap();
     }
     let txn = db.new_txn(true).await.unwrap();
     let fetcher = LensedDocFetcher::new(db.clone(), txn, db.lens_store().clone());
@@ -121,12 +124,13 @@ async fn schema_history_alias_cost_measurement() {
             .unwrap();
             let db = Arc::new(db::DB::new(store).unwrap());
             db.create_collections_atomic(
+                &defra_core::RequestContext::default(),
                 query::parse_sdl("type AliasCost { ordinal: Int payload: String }").unwrap(),
             )
             .await
             .unwrap();
             for index in 1..versions {
-                db.patch_collection("AliasCost", &format!(r#"[{{"op":"add","path":"/AliasCost/Fields/-","value":{{"Name":"extra{index}","Kind":"String"}}}}]"#), None).await.unwrap();
+                db.patch_collection(&defra_core::RequestContext::default(), "AliasCost", &format!(r#"[{{"op":"add","path":"/AliasCost/Fields/-","value":{{"Name":"extra{index}","Kind":"String"}}}}]"#)).await.unwrap();
             }
             let mut doc = Document::new();
             doc.set("ordinal", document::NormalValue::Int(1));
@@ -202,9 +206,12 @@ async fn a_projected_read_by_id_reads_each_identity_and_version_once() {
         ))
         .unwrap(),
     );
-    db.create_collections_atomic(query::parse_sdl("type Probe { left: Int right: Int }").unwrap())
-        .await
-        .unwrap();
+    db.create_collections_atomic(
+        &defra_core::RequestContext::default(),
+        query::parse_sdl("type Probe { left: Int right: Int }").unwrap(),
+    )
+    .await
+    .unwrap();
     let mutator = db::AutoCommitMutator::new(db.clone());
     let mut ids = Vec::new();
     for value in 0..3 {

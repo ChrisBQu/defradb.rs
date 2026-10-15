@@ -215,6 +215,7 @@ impl TransactionRegistry for MockTxnRegistry {
 
     async fn begin(
         &self,
+        _context: &defra_core::RequestContext,
         readonly: bool,
     ) -> std::result::Result<TransactionHandle, TransactionError> {
         let id = self.counter.fetch_add(1, Ordering::SeqCst);
@@ -231,7 +232,11 @@ impl TransactionRegistry for MockTxnRegistry {
         Ok(TransactionHandle::new(txn_id))
     }
 
-    fn get(&self, handle: &TransactionHandle) -> GetTransactionResult {
+    fn get(
+        &self,
+        _context: &defra_core::RequestContext,
+        handle: &TransactionHandle,
+    ) -> GetTransactionResult {
         match self.transactions.get(handle.as_str()) {
             Some(ctx) => GetTransactionResult::Found(ctx),
             None => GetTransactionResult::NotFound,
@@ -240,6 +245,7 @@ impl TransactionRegistry for MockTxnRegistry {
 
     async fn commit(
         &self,
+        _context: &defra_core::RequestContext,
         handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError> {
         match self.transactions.remove(handle.as_str()) {
@@ -253,6 +259,7 @@ impl TransactionRegistry for MockTxnRegistry {
 
     async fn rollback(
         &self,
+        _context: &defra_core::RequestContext,
         handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError> {
         match self.transactions.remove(handle.as_str()) {

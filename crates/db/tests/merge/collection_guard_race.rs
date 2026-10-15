@@ -37,9 +37,12 @@ where
 {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = Arc::new(DB::from_arc(store.clone()).unwrap());
-    db.create_collection(branchable_schema(version_id, collection_id))
-        .await
-        .unwrap();
+    db.create_collection(
+        &defra_core::RequestContext::default(),
+        branchable_schema(version_id, collection_id),
+    )
+    .await
+    .unwrap();
 
     let blockstore = Arc::new(DefraBlockstore::new(store.clone(), false));
     let handler = DbMergeHandler::new(db.clone(), blockstore.clone());

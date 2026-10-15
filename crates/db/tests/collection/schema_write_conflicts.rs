@@ -47,12 +47,17 @@ async fn open() -> Arc<DB<RegolithStore>> {
 #[tokio::test]
 async fn document_write_conflicts_with_collection_drop() {
     let db = open().await;
-    db.create_collection(schema("race", "race-v1", "race-id"))
-        .await
-        .unwrap();
+    db.create_collection(
+        &defra_core::RequestContext::default(),
+        schema("race", "race-v1", "race-id"),
+    )
+    .await
+    .unwrap();
     let writer = stage_create(&db, "race").await;
 
-    db.delete_collection("race").await.unwrap();
+    db.delete_collection(&defra_core::RequestContext::default(), "race")
+        .await
+        .unwrap();
 
     assert!(is_txn_conflict(writer.commit().await.unwrap_err()));
 }
@@ -60,15 +65,18 @@ async fn document_write_conflicts_with_collection_drop() {
 #[tokio::test]
 async fn document_write_conflicts_with_schema_patch() {
     let db = open().await;
-    db.create_collection(schema("race", "race-v1", "race-id"))
-        .await
-        .unwrap();
+    db.create_collection(
+        &defra_core::RequestContext::default(),
+        schema("race", "race-v1", "race-id"),
+    )
+    .await
+    .unwrap();
     let writer = stage_create(&db, "race").await;
 
     db.patch_collection(
+        &defra_core::RequestContext::default(),
         "race",
         r#"[{"op":"add","path":"/race/Fields/-","value":{"Name":"extra","Kind":"String"}}]"#,
-        None,
     )
     .await
     .unwrap();
@@ -79,9 +87,12 @@ async fn document_write_conflicts_with_schema_patch() {
 #[tokio::test]
 async fn document_write_conflicts_with_index_definition() {
     let db = open().await;
-    db.create_collection(schema("race", "race-v1", "race-id"))
-        .await
-        .unwrap();
+    db.create_collection(
+        &defra_core::RequestContext::default(),
+        schema("race", "race-v1", "race-id"),
+    )
+    .await
+    .unwrap();
     let writer = stage_create(&db, "race").await;
 
     db.create_index(
@@ -102,12 +113,18 @@ async fn document_write_conflicts_with_index_definition() {
 #[tokio::test]
 async fn disjoint_collection_writes_both_commit() {
     let db = open().await;
-    db.create_collection(schema("left", "left-v1", "left-id"))
-        .await
-        .unwrap();
-    db.create_collection(schema("right", "right-v1", "right-id"))
-        .await
-        .unwrap();
+    db.create_collection(
+        &defra_core::RequestContext::default(),
+        schema("left", "left-v1", "left-id"),
+    )
+    .await
+    .unwrap();
+    db.create_collection(
+        &defra_core::RequestContext::default(),
+        schema("right", "right-v1", "right-id"),
+    )
+    .await
+    .unwrap();
     let left = stage_create(&db, "left").await;
     let right = stage_create(&db, "right").await;
 

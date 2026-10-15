@@ -33,7 +33,9 @@ fn tally() -> CollectionVersion {
 async fn open() -> (Arc<RegolithStore>, Arc<DB<RegolithStore>>, DocID) {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = Arc::new(DB::from_arc(store.clone()).unwrap());
-    db.create_collection(tally()).await.unwrap();
+    db.create_collection(&defra_core::RequestContext::default(), tally())
+        .await
+        .unwrap();
     let doc_id = AutoCommitMutator::new(db.clone())
         .create(
             &defra_core::RequestContext::default(),

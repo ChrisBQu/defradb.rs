@@ -285,7 +285,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         mut doc: Document,
     ) -> query::error::Result<CreateResult> {
         self.db
-            .check_node_access(None, acp::nac::NodePermission::DocumentUpdate)
+            .check_node_access(context, acp::nac::NodePermission::DocumentUpdate)
             .await
             .map_err(|e| query::error::QueryError::permission_denied(e.to_string()))?;
 
@@ -293,6 +293,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             get_collection_with_index_manager(&self.txn, collection_name).await?;
         self.db
             .check_node_access_in_txn(
+                context,
                 systemstore.sibling(storage::namespace::Namespace::Acpstore),
                 acp::nac::NodePermission::DocumentUpdate,
             )
@@ -419,7 +420,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         mut modified_fields: rapidhash::RapidHashSet<String>,
     ) -> query::error::Result<UpdateResult> {
         self.db
-            .check_node_access(None, acp::nac::NodePermission::DocumentUpdate)
+            .check_node_access(context, acp::nac::NodePermission::DocumentUpdate)
             .await
             .map_err(|e| query::error::QueryError::permission_denied(e.to_string()))?;
 
@@ -427,6 +428,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             get_collection_with_index_manager(&self.txn, collection_name).await?;
         self.db
             .check_node_access_in_txn(
+                context,
                 systemstore.sibling(storage::namespace::Namespace::Acpstore),
                 acp::nac::NodePermission::DocumentUpdate,
             )
@@ -563,7 +565,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         doc_id: &DocID,
     ) -> query::error::Result<DeleteResult> {
         self.db
-            .check_node_access(None, acp::nac::NodePermission::DocumentDelete)
+            .check_node_access(context, acp::nac::NodePermission::DocumentDelete)
             .await
             .map_err(|e| query::error::QueryError::permission_denied(e.to_string()))?;
 
@@ -571,6 +573,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             get_collection_with_index_manager(&self.txn, collection_name).await?;
         self.db
             .check_node_access_in_txn(
+                context,
                 systemstore.sibling(storage::namespace::Namespace::Acpstore),
                 acp::nac::NodePermission::DocumentDelete,
             )

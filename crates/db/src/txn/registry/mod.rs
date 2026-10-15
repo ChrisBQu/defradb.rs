@@ -14,6 +14,7 @@
 //! ```
 
 use async_trait::async_trait;
+use defra_core::RequestContext;
 use document::Document;
 use kovan_map::HopscotchMap;
 use kovan_queue::seg_queue::SegQueue;
@@ -170,14 +171,19 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
 
     /// Get an existing transaction by ID (for internal use).
     ///
-    /// Returns `Ok(None)` if the transaction doesn't exist, belongs to another
-    /// caller, or a cleanup sweep has already claimed it.
-    pub fn get_ctx(&self, txn_id: &str) -> Result<Option<Arc<DbTransactionContext<S>>>> {
+    /// Returns `Ok(None)` if the transaction doesn't exist, belongs to an
+    /// identity other than the one acting in `context`, or a cleanup sweep has
+    /// already claimed it.
+    pub fn get_ctx(
+        &self,
+        context: &RequestContext,
+        txn_id: &str,
+    ) -> Result<Option<Arc<DbTransactionContext<S>>>> {
         Ok(self
             .transactions
             .get(txn_id)
             .and_then(|slot| slot.ctx())
-            .filter(|ctx| ctx.is_owned_by_caller() && ctx.touch()))
+            .filter(|ctx| ctx.is_owned_by(context) && ctx.touch()))
     }
 
     /// Get the number of active transactions in the registry.

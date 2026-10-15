@@ -6,16 +6,16 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
     /// Verify a block signature using the existing transaction's blockstore view.
     pub async fn verify_block_signature_in_txn(
         &self,
+        context: &RequestContext,
         txn_id: &str,
         document_acp: &dyn acp::DocumentACP,
         cid_str: &str,
         public_key_hex: &str,
         key_type: crypto::KeyType,
         caller_identity: &acp::Identity,
-        dac_bypass: bool,
     ) -> Result<()> {
         let ctx = self
-            .get_ctx(txn_id)?
+            .get_ctx(context, txn_id)?
             .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
         let action_lock = ctx.action_lock();
         let _action_guard = action_lock.lock().await;
@@ -33,7 +33,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
             public_key_hex,
             key_type,
             caller_identity,
-            dac_bypass,
+            context.dac_bypass(),
         )
         .await
         .map_err(Error::Other)
@@ -43,14 +43,14 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
     /// return the signer DID.
     pub async fn verified_block_signer_did_in_txn(
         &self,
+        context: &RequestContext,
         txn_id: &str,
         document_acp: &dyn acp::DocumentACP,
         cid_str: &str,
         caller_identity: &acp::Identity,
-        dac_bypass: bool,
     ) -> Result<String> {
         let ctx = self
-            .get_ctx(txn_id)?
+            .get_ctx(context, txn_id)?
             .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
         let action_lock = ctx.action_lock();
         let _action_guard = action_lock.lock().await;
@@ -70,7 +70,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
             systemstore,
             cid_str,
             caller_identity,
-            dac_bypass,
+            context.dac_bypass(),
         )
         .await
         .map_err(Error::Other)

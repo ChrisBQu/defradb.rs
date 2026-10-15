@@ -15,14 +15,14 @@ impl<S: Store> crate::database::DB<S> {
     #[instrument(skip(self, filter), fields(collection = %name), name = "db.truncate_collection_filtered")]
     pub async fn truncate_collection_with_filter(
         self: &Arc<Self>,
+        context: &defra_core::RequestContext,
         name: &str,
         filter: query::Filter,
-        identity: Option<&identity::Did>,
     ) -> Result<()>
     where
         S: 'static,
     {
-        self.check_node_access(identity, acp::nac::NodePermission::CollectionTruncate)
+        self.check_node_access(context, acp::nac::NodePermission::CollectionTruncate)
             .await?;
         filter.validate_depth()?;
 

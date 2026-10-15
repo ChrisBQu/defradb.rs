@@ -119,10 +119,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                     .collect(),
             )
         });
-        let acting_identity = caller_identity
-            .as_ref()
-            .map(ToString::to_string)
-            .or_else(defra_core::current_identity::get_effective_identity);
         let execution = Box::pin(async {
             let mut prepared = runner.prepare_mutations(&request).await?;
             loop {
@@ -150,7 +146,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                 }
             }
         });
-        defra_core::current_identity::with_scoped_identity(acting_identity, execution).await
+        execution.await
     }
 
     /// Execute a GraphQL mutation with a specific mutator, caller_identity, and variables.
@@ -163,27 +159,17 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
         fetcher_override: Option<Arc<dyn crate::fetcher::DocFetcher>>,
     ) -> Result<JsonValue> {
         let mutations = parse_mutations_with_limits(mutation_str, variables, self.query_limits)?;
-        // Embedded callers may establish a node identity outside the query.
-        // Preserve that identity when no request actor overrides it, while
-        // HTTP callers enter with neither ambient form for anonymous requests.
-        let acting_identity = caller_identity
-            .as_ref()
-            .map(ToString::to_string)
-            .or_else(defra_core::current_identity::get_effective_identity);
         // What this request writes is created by its caller.
         let runner = self.for_caller(caller_identity.as_ref());
         // Keep the large mutation state machine off the Tokio worker stack.
-        // `task_local::scope` polls its child inline; boxing here prevents the
-        // scope wrapper from overflowing the default worker stack on the ACP
-        // create path.
-        let execution = Box::pin(runner.execute_parsed_mutations(
+        Box::pin(runner.execute_parsed_mutations(
             mutations,
             mutator,
             caller_identity,
             fetcher_override,
             None,
-        ));
-        defra_core::current_identity::with_scoped_identity(acting_identity, execution).await
+        ))
+        .await
     }
 
     /// Execute pre-parsed mutations, skipping redundant GraphQL parsing.
@@ -218,9 +204,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
             })?;
             truncator
                 .truncate(
+                    &self.context,
                     &mutation.collection_name,
                     mutation.filter.clone(),
-                    caller_identity.as_ref(),
                 )
                 .await?;
 
@@ -1333,9 +1319,9 @@ mod tests {
     impl CollectionTruncator for CapturingTruncator {
         async fn truncate(
             &self,
+            _context: &defra_core::RequestContext,
             collection_name: &str,
             filter: Option<crate::Filter>,
-            _identity: Option<&Did>,
         ) -> Result<()> {
             self.calls
                 .push((collection_name.to_string(), filter.is_some()));

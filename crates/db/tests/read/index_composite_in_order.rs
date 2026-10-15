@@ -63,7 +63,7 @@ fn schema() -> CollectionVersion {
 /// Returns (rank, doc_id) per seeded document, in insertion order.
 async fn populated() -> (Arc<DB<RegolithStore>>, Vec<(i64, String)>) {
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).expect("a database"));
-    db.create_collection(schema())
+    db.create_collection(&defra_core::RequestContext::default(), schema())
         .await
         .expect("the collection must register");
 

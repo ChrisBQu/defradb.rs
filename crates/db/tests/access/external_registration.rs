@@ -178,7 +178,9 @@ async fn node(store: Arc<RegolithStore>, acp: Arc<dyn DocumentACP>, create_schem
     if create_schema {
         for mut schema in query::parse_sdl("type Users { name: String }").unwrap() {
             schema.policy = Some(PolicyDescription::new(POLICY, RESOURCE));
-            db.create_collection(schema).await.unwrap();
+            db.create_collection(&defra_core::RequestContext::default(), schema)
+                .await
+                .unwrap();
         }
     }
     db.set_document_acp(acp.clone());
@@ -216,7 +218,10 @@ async fn readable(runner: &Runner, identity: Option<Did>) -> Vec<String> {
 }
 
 async fn create_in_txn(runner: &Runner, identity: Did, name: &str) -> String {
-    let handle = runner.begin_txn(false).await.unwrap();
+    let handle = runner
+        .begin_txn(&defra_core::RequestContext::default(), false)
+        .await
+        .unwrap();
     let response = runner
         .execute_in_txn(
             request(
@@ -232,7 +237,9 @@ async fn create_in_txn(runner: &Runner, identity: Did, name: &str) -> String {
         .unwrap()
         .to_string();
     // The registration may fail after the durable commit; the document stays.
-    let _ = runner.commit_txn(&handle).await;
+    let _ = runner
+        .commit_txn(&defra_core::RequestContext::default(), &handle)
+        .await;
     doc_id
 }
 
@@ -254,7 +261,11 @@ async fn an_upsert_that_updates_a_public_document_never_registers_its_caller() {
         .unwrap()
         .to_string();
 
-    let handle = node.runner.begin_txn(false).await.unwrap();
+    let handle = node
+        .runner
+        .begin_txn(&defra_core::RequestContext::default(), false)
+        .await
+        .unwrap();
     let upserted = node
         .runner
         .execute_in_txn(
@@ -269,7 +280,10 @@ async fn an_upsert_that_updates_a_public_document_never_registers_its_caller() {
         .await;
     assert!(!upserted.has_errors(), "{:?}", upserted.errors);
     assert_eq!(upserted.data.unwrap()["upsert_Users"][0]["_docID"], doc_id);
-    node.runner.commit_txn(&handle).await.unwrap();
+    node.runner
+        .commit_txn(&defra_core::RequestContext::default(), &handle)
+        .await
+        .unwrap();
 
     assert_eq!(
         remote.owner(&doc_id),

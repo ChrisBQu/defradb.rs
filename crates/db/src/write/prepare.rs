@@ -303,7 +303,11 @@ where
                     ))
                 }
             };
-            db.check_node_access(Some(&identity), permission)
+            // The attempt's identity is part of the request, not the
+            // resolving context.
+            let attempt =
+                defra_core::RequestContext::default().with_identity(Some(identity.to_string()));
+            db.check_node_access(&attempt, permission)
                 .await
                 .map_err(|error| query::error::QueryError::permission_denied(error.to_string()))?;
             Ok(std::sync::Arc::from(b"true".as_slice()))

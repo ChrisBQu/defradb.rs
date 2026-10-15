@@ -104,16 +104,18 @@ impl<S: Store> BatchMutator<S> {
 impl<S: Store + 'static> BatchMutator<S> {
     async fn check_attempt_node_access(
         &self,
+        context: &RequestContext,
         permission: acp::nac::NodePermission,
     ) -> query::error::Result<()> {
         let Some(inputs) = &self.prepared_inputs else {
             return self
                 .db
-                .check_node_access(None, permission)
+                .check_node_access(context, permission)
                 .await
                 .map_err(|error| query::error::QueryError::permission_denied(error.to_string()));
         };
-        let identity = defra_core::current_identity::get_effective_identity()
+        let identity = context
+            .identity()
             .and_then(|value| identity::Did::new(value).ok())
             .unwrap_or_else(identity::Did::wildcard);
         let exact_request = serde_json::to_vec(&(identity.to_string(), permission.as_str()))
@@ -337,13 +339,14 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         collection_name: &str,
         mut doc: Document,
     ) -> query::error::Result<CreateResult> {
-        self.check_attempt_node_access(acp::nac::NodePermission::DocumentUpdate)
+        self.check_attempt_node_access(context, acp::nac::NodePermission::DocumentUpdate)
             .await?;
 
         let (collection, datastore, systemstore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;
         self.db
             .check_node_access_in_txn(
+                context,
                 systemstore.sibling(storage::namespace::Namespace::Acpstore),
                 acp::nac::NodePermission::DocumentUpdate,
             )
@@ -483,13 +486,14 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         mut doc: Document,
         mut modified_fields: RapidHashSet<String>,
     ) -> query::error::Result<UpdateResult> {
-        self.check_attempt_node_access(acp::nac::NodePermission::DocumentUpdate)
+        self.check_attempt_node_access(context, acp::nac::NodePermission::DocumentUpdate)
             .await?;
 
         let (collection, datastore, systemstore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;
         self.db
             .check_node_access_in_txn(
+                context,
                 systemstore.sibling(storage::namespace::Namespace::Acpstore),
                 acp::nac::NodePermission::DocumentUpdate,
             )
@@ -634,13 +638,14 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         collection_name: &str,
         doc_id: &DocID,
     ) -> query::error::Result<DeleteResult> {
-        self.check_attempt_node_access(acp::nac::NodePermission::DocumentDelete)
+        self.check_attempt_node_access(context, acp::nac::NodePermission::DocumentDelete)
             .await?;
 
         let (collection, datastore, systemstore, index_manager) =
             get_collection_with_index_manager(&self.txn, collection_name).await?;
         self.db
             .check_node_access_in_txn(
+                context,
                 systemstore.sibling(storage::namespace::Namespace::Acpstore),
                 acp::nac::NodePermission::DocumentDelete,
             )

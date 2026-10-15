@@ -12,10 +12,11 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
     /// (e.g., placeholders from `set_migration_in_txn`).
     pub async fn get_collections_in_txn(
         &self,
+        context: &RequestContext,
         txn_id: &str,
     ) -> Result<Vec<schema::CollectionVersion>> {
         let ctx = self
-            .get_ctx(txn_id)?
+            .get_ctx(context, txn_id)?
             .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
         let action_lock = ctx.action_lock();
         let _action_guard = action_lock.lock().await;
@@ -57,15 +58,16 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
 
     pub async fn set_collection_active_in_txn(
         &self,
+        context: &RequestContext,
         txn_id: &str,
         version_id: &str,
         is_active: bool,
     ) -> Result<schema::CollectionVersion> {
         let ctx = self
-            .get_ctx(txn_id)?
+            .get_ctx(context, txn_id)?
             .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
         self.db
-            .check_node_access(None, acp::nac::NodePermission::CollectionPatch)
+            .check_node_access(context, acp::nac::NodePermission::CollectionPatch)
             .await?;
         let action_lock = ctx.action_lock();
         let _action_guard = action_lock.lock().await;
@@ -217,6 +219,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
 
     pub async fn delete_collections_in_txn(
         &self,
+        context: &RequestContext,
         txn_id: &str,
         targets: Vec<String>,
         active_only: bool,
@@ -227,10 +230,10 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
             ));
         }
         let ctx = self
-            .get_ctx(txn_id)?
+            .get_ctx(context, txn_id)?
             .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
         self.db
-            .check_node_access(None, acp::nac::NodePermission::CollectionPatch)
+            .check_node_access(context, acp::nac::NodePermission::CollectionPatch)
             .await?;
         let action_lock = ctx.action_lock();
         let _action_guard = action_lock.lock().await;

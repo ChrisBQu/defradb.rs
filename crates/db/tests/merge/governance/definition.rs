@@ -108,6 +108,7 @@ impl Node {
         writer.immutable = true;
         self.db
             .create_collection(
+                &defra_core::RequestContext::default(),
                 CollectionVersion::new(
                     "Grants",
                     "col-grants",
@@ -139,7 +140,10 @@ impl Node {
             ],
         );
         version.is_branchable = true;
-        self.db.create_collection(version).await.unwrap();
+        self.db
+            .create_collection(&defra_core::RequestContext::default(), version)
+            .await
+            .unwrap();
     }
 
     /// What the collection named `Grants` commits to, as this node reads it.
@@ -301,7 +305,11 @@ async fn a_definition_block_reproduces_its_identity_on_a_fresh_node() {
         query::parse_sdl(r#"type Ledgers @governed(root: "root-a") { writer: String @immutable }"#)
             .unwrap()
             .remove(0);
-    author.db.create_collection(defined.clone()).await.unwrap();
+    author
+        .db
+        .create_collection(&defra_core::RequestContext::default(), defined.clone())
+        .await
+        .unwrap();
     let authored = author.db.get_collection("Ledgers").unwrap().unwrap();
     let version_id = authored.schema().version_id.clone();
     let cid: Cid = version_id.parse().expect("the version ID names the block");
@@ -375,7 +383,11 @@ async fn a_policied_definition_block_reproduces_its_identity_on_a_fresh_node() {
         defined.version_id, defined.collection_id,
         "a policy moves the version ID away from the collection ID"
     );
-    author.db.create_collection(defined.clone()).await.unwrap();
+    author
+        .db
+        .create_collection(&defra_core::RequestContext::default(), defined.clone())
+        .await
+        .unwrap();
     let authored = author.db.get_collection("Ledgers").unwrap().unwrap();
     let version_id = authored.schema().version_id.clone();
     let cid: Cid = version_id.parse().expect("the version ID names the block");
@@ -437,14 +449,18 @@ const POLICIED_LEDGERS: &str = r#"type Ledgers @governed(root: "root-a") @policy
 async fn a_synced_version_bound_to_a_policy_this_node_does_not_hold_cannot_be_activated() {
     let author = Node::bare().await;
     let defined = query::parse_sdl(POLICIED_LEDGERS).unwrap().remove(0);
-    author.db.create_collection(defined.clone()).await.unwrap();
+    author
+        .db
+        .create_collection(&defra_core::RequestContext::default(), defined.clone())
+        .await
+        .unwrap();
 
     let fresh = Node::bare().await;
     sync_definition(&author, &fresh, &defined.version_id).await;
 
     let activated = fresh
         .db
-        .set_active_collection_version(&defined.version_id)
+        .set_active_collection_version(&defra_core::RequestContext::default(), &defined.version_id)
         .await;
     assert!(
         activated.is_err(),
@@ -462,24 +478,27 @@ async fn a_synced_version_bound_to_a_policy_this_node_does_not_hold_cannot_be_ac
 async fn a_synced_patch_keeps_the_policy_this_node_holds() {
     let author = Node::bare().await;
     let defined = query::parse_sdl(POLICIED_LEDGERS).unwrap().remove(0);
-    author.db.create_collection(defined.clone()).await.unwrap();
+    author
+        .db
+        .create_collection(&defra_core::RequestContext::default(), defined.clone())
+        .await
+        .unwrap();
     let peer = Node::bare().await;
-    peer.db.create_collection(defined.clone()).await.unwrap();
+    peer.db
+        .create_collection(&defra_core::RequestContext::default(), defined.clone())
+        .await
+        .unwrap();
 
     let patched = author
         .db
-        .patch_collection(
-            "Ledgers",
-            r#"[{"op": "add", "path": "/Ledgers/Fields/-", "value": {"Name": "note", "Kind": "String"}}]"#,
-            None,
-        )
+        .patch_collection(&defra_core::RequestContext::default(), "Ledgers", r#"[{"op": "add", "path": "/Ledgers/Fields/-", "value": {"Name": "note", "Kind": "String"}}]"#)
         .await
         .unwrap();
     assert_ne!(patched.version_id, defined.version_id);
     sync_definition(&author, &peer, &patched.version_id).await;
 
     peer.db
-        .set_active_collection_version(&patched.version_id)
+        .set_active_collection_version(&defra_core::RequestContext::default(), &patched.version_id)
         .await
         .unwrap();
     let active = peer.db.get_collection("Ledgers").unwrap().unwrap();
@@ -552,7 +571,10 @@ async fn a_held_version_is_not_rebuilt_from_its_own_block() {
         let defined = query::parse_sdl(r#"type Ledgers { writer: String @immutable }"#)
             .unwrap()
             .remove(0);
-        node.db.create_collection(defined.clone()).await.unwrap();
+        node.db
+            .create_collection(&defra_core::RequestContext::default(), defined.clone())
+            .await
+            .unwrap();
         sync_definition(&node, &node, &defined.version_id).await;
         let held = node.db.get_collection("Ledgers").unwrap().unwrap();
         assert!(held.schema().is_active, "the cache lost the active flag");

@@ -48,7 +48,9 @@ async fn raw_collection_head_keys(store: &Arc<RegolithStore>) -> Vec<String> {
 async fn branchable_collection_writes_expose_collection_heads() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = Arc::new(DB::from_arc(store.clone()).unwrap());
-    db.create_collection(branchable_schema()).await.unwrap();
+    db.create_collection(&defra_core::RequestContext::default(), branchable_schema())
+        .await
+        .unwrap();
 
     let mutator = AutoCommitMutator::new(db.clone());
     let mut doc = Document::new();

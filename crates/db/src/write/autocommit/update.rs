@@ -119,7 +119,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         modified_fields: rapidhash::RapidHashSet<String>,
     ) -> query::error::Result<UpdateResult> {
         self.db
-            .check_node_access(None, acp::nac::NodePermission::DocumentUpdate)
+            .check_node_access(context, acp::nac::NodePermission::DocumentUpdate)
             .await
             .map_err(|error| query::error::QueryError::permission_denied(error.to_string()))?;
 
@@ -236,6 +236,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .map_err(crate::error::commit_query_error)?;
         self.db
             .check_node_access_in_txn(
+                &attempt.context,
                 txn.acpstore().map_err(crate::error::commit_query_error)?,
                 acp::nac::NodePermission::DocumentUpdate,
             )

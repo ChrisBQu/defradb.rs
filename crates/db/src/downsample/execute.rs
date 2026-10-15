@@ -267,6 +267,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
     /// the remaining windows (the DocID only exists after the create).
     async fn persist_window_update(
         self: &Arc<Self>,
+        context: &RequestContext,
         plan: &DownsamplePlan,
         source_doc: &Document,
         series_doc_id: &str,
@@ -279,7 +280,15 @@ impl<S: Store + 'static> crate::database::DB<S> {
         };
         let created = Arc::new(AtomicBool::new(false));
         match self
-            .persist_window(plan, source_doc, series_doc_id, target, aggregate, &created)
+            .persist_window(
+                context,
+                plan,
+                source_doc,
+                series_doc_id,
+                target,
+                aggregate,
+                &created,
+            )
             .await
         {
             // A create that lost the series to another processor's target
@@ -290,6 +299,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
                     return Err(error);
                 };
                 self.persist_window(
+                    context,
                     plan,
                     source_doc,
                     series_doc_id,
@@ -320,6 +330,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
     /// last attempt took the create branch.
     async fn persist_window(
         self: &Arc<Self>,
+        context: &RequestContext,
         plan: &DownsamplePlan,
         source_doc: &Document,
         series_doc_id: &str,
@@ -329,6 +340,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
     ) -> Result<DocID> {
         let window = Arc::new(WindowWrite {
             db: Arc::clone(self),
+            context: context.clone(),
             plan: plan.clone(),
             source_doc: source_doc.clone(),
             series_doc_id: series_doc_id.to_owned(),
@@ -342,8 +354,6 @@ impl<S: Store + 'static> crate::database::DB<S> {
                 Box::pin(async move { window.write(mutator.as_ref()).await })
             });
         let inputs = query::prepared::PreparedInputMemo::default();
-        // A downsample window is written by the node, for no request.
-        let context = RequestContext::default();
         let mutator = crate::write::autocommit::AutoCommitMutator::new(Arc::clone(self))
             .with_prepared_inputs_value(inputs.clone());
         let controller = mutator.new_retryable_batch_controller();
@@ -351,7 +361,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
             match controller.run(Arc::clone(&operation), None, None).await {
                 Err(query::error::QueryError::NeedsInput(request)) => inputs
                     .answer_miss(&request, || {
-                        mutator.resolve_prepared_input(&context, &request)
+                        mutator.resolve_prepared_input(context, &request)
                     })
                     .await
                     .map_err(Error::Query)?,
@@ -366,6 +376,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
 
     async fn process_source_doc_for_plan(
         self: &Arc<Self>,
+        context: &RequestContext,
         plan: &DownsamplePlan,
         source_doc: &Document,
         complete_through: chrono::DateTime<chrono::FixedOffset>,
@@ -435,6 +446,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
         for aggregate in windows {
             let persisted_id = self
                 .persist_window_update(
+                    context,
                     plan,
                     source_doc,
                     &series_doc_id,
@@ -448,16 +460,26 @@ impl<S: Store + 'static> crate::database::DB<S> {
         Ok(())
     }
 
-    async fn bootstrap_downsample_plan(self: &Arc<Self>, plan: &DownsamplePlan) -> Result<()> {
+    async fn bootstrap_downsample_plan(
+        self: &Arc<Self>,
+        context: &RequestContext,
+        plan: &DownsamplePlan,
+    ) -> Result<()> {
         let now = Utc::now().fixed_offset();
         for source_doc in self.load_source_documents(&plan.source).await? {
-            self.process_source_doc_for_plan(plan, &source_doc, now)
+            self.process_source_doc_for_plan(context, plan, &source_doc, now)
                 .await?;
         }
         Ok(())
     }
 
-    pub async fn bootstrap_downsamples(self: &Arc<Self>, names: Option<&[String]>) -> Result<()> {
+    /// Downsample every source document of the plans `names` selects (all of
+    /// them for `None`), writing the windows in `context`.
+    pub async fn bootstrap_downsamples(
+        self: &Arc<Self>,
+        context: &RequestContext,
+        names: Option<&[String]>,
+    ) -> Result<()> {
         let name_set = names.map(|names| names.iter().cloned().collect::<RapidHashSet<_>>());
         let mut plans = self.downsample_plans(name_set.as_ref(), None)?;
 
@@ -469,7 +491,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
         });
 
         for plan in plans {
-            self.bootstrap_downsample_plan(&plan).await?;
+            self.bootstrap_downsample_plan(context, &plan).await?;
         }
 
         Ok(())
@@ -510,9 +532,11 @@ impl<S: Store + 'static> crate::database::DB<S> {
             }
         };
 
+        // A source write downsamples in the background, for no request.
+        let context = RequestContext::default();
         let now = Utc::now().fixed_offset();
         for plan in plans {
-            self.process_source_doc_for_plan(&plan, &source_doc, now)
+            self.process_source_doc_for_plan(&context, &plan, &source_doc, now)
                 .await?;
         }
 
@@ -527,6 +551,7 @@ where
     S: Store,
 {
     db: Arc<crate::database::DB<S>>,
+    context: RequestContext,
     plan: DownsamplePlan,
     source_doc: Document,
     series_doc_id: String,
@@ -561,9 +586,7 @@ where
                     &self.series_doc_id,
                 )
                 .map_err(decide)?;
-            let created = mutator
-                .create(&RequestContext::default(), target_name, doc)
-                .await?;
+            let created = mutator.create(&self.context, target_name, doc).await?;
             return Ok(serde_json::Value::String(created.doc_id.to_string()));
         };
         let id = doc.id().cloned().ok_or_else(|| {
@@ -595,12 +618,7 @@ where
         doc.set_schema_version_id(self.plan.target.version_id.clone());
         doc.set_id(id);
         mutator
-            .update(
-                &RequestContext::default(),
-                target_name,
-                doc,
-                modified_fields,
-            )
+            .update(&self.context, target_name, doc, modified_fields)
             .await?;
         done
     }
@@ -630,7 +648,9 @@ mod tests {
                 FieldDescription::new("6", "count", FieldKind::int()),
             ],
         );
-        db.create_collection(target).await.unwrap();
+        db.create_collection(&defra_core::RequestContext::default(), target)
+            .await
+            .unwrap();
         let target = db
             .get_collection("Window")
             .unwrap()
@@ -665,23 +685,24 @@ mod tests {
                 .fixed_offset(),
             source_height: height,
         };
+        let context = RequestContext::default();
         let id = db
-            .persist_window_update(&plan, &source, "series", None, &window(1))
+            .persist_window_update(&context, &plan, &source, "series", None, &window(1))
             .await
             .unwrap();
         let high = window(10);
         let middle = window(9);
         let low = window(8);
         let (a, b, c) = tokio::join!(
-            db.persist_window_update(&plan, &source, "series", Some(&id), &high),
-            db.persist_window_update(&plan, &source, "series", Some(&id), &middle),
-            db.persist_window_update(&plan, &source, "series", Some(&id), &low),
+            db.persist_window_update(&context, &plan, &source, "series", Some(&id), &high),
+            db.persist_window_update(&context, &plan, &source, "series", Some(&id), &middle),
+            db.persist_window_update(&context, &plan, &source, "series", Some(&id), &low),
         );
         for result in [a, b, c] {
             assert_eq!(result.unwrap(), id);
         }
         // A delayed processor must also be harmless after all races finish.
-        db.persist_window_update(&plan, &source, "series", Some(&id), &window(2))
+        db.persist_window_update(&context, &plan, &source, "series", Some(&id), &window(2))
             .await
             .unwrap();
         let actual = crate::AutoCommitMutator::new(db)

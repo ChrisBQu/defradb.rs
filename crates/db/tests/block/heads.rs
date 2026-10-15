@@ -344,6 +344,7 @@ async fn appends_through_the_db_store_only_the_live_head() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = Arc::new(db::DB::from_arc(store.clone()).unwrap());
     db.create_collection(
+        &defra_core::RequestContext::default(),
         schema::CollectionVersion::new(
             "Segment",
             "v1",

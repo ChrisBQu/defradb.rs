@@ -124,7 +124,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         doc_id: &DocID,
     ) -> query::error::Result<DeleteResult> {
         self.db
-            .check_node_access(None, acp::nac::NodePermission::DocumentDelete)
+            .check_node_access(context, acp::nac::NodePermission::DocumentDelete)
             .await
             .map_err(|e| query::error::QueryError::permission_denied(e.to_string()))?;
 
@@ -184,6 +184,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
         self.db
             .check_node_access_in_txn(
+                &attempt.context,
                 txn.acpstore().map_err(crate::error::commit_query_error)?,
                 acp::nac::NodePermission::DocumentDelete,
             )
@@ -405,6 +406,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
         self.db
             .check_node_access_in_txn(
+                &attempt.context,
                 txn.acpstore().map_err(crate::error::commit_query_error)?,
                 acp::nac::NodePermission::DocumentDelete,
             )

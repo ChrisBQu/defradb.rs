@@ -21,17 +21,17 @@ impl<S: Store> DbCollectionTruncator<S> {
 impl<S: Store + 'static> query::CollectionTruncator for DbCollectionTruncator<S> {
     async fn truncate(
         &self,
+        context: &defra_core::RequestContext,
         collection_name: &str,
         filter: Option<query::Filter>,
-        identity: Option<&identity::Did>,
     ) -> query::Result<()> {
         let result = match filter {
             Some(filter) => {
                 self.db
-                    .truncate_collection_with_filter(collection_name, filter, identity)
+                    .truncate_collection_with_filter(context, collection_name, filter)
                     .await
             }
-            None => self.db.truncate_collection(collection_name, identity).await,
+            None => self.db.truncate_collection(context, collection_name).await,
         };
         result.map_err(|error| query::QueryError::execution(error.to_string()))
     }

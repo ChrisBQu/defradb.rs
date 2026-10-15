@@ -35,10 +35,10 @@ impl<S: Store> DB<S> {
     ))]
     pub async fn set_migration(
         &self,
+        context: &defra_core::RequestContext,
         config: LensConfig,
-        identity: Option<&identity::Did>,
     ) -> Result<TransformId> {
-        self.check_node_access(identity, acp::nac::NodePermission::MigrationSet)
+        self.check_node_access(context, acp::nac::NodePermission::MigrationSet)
             .await?;
         let dest_version_id = config.destination_schema_version_id.clone();
         let source_version_id = config.source_schema_version_id.clone();
@@ -267,11 +267,11 @@ impl<S: Store> DB<S> {
     ))]
     pub async fn set_migration_in_txn(
         &self,
+        context: &defra_core::RequestContext,
         txn: &DbTxn<S>,
         config: LensConfig,
-        identity: Option<&identity::Did>,
     ) -> Result<TransformId> {
-        self.check_node_access(identity, acp::nac::NodePermission::MigrationSet)
+        self.check_node_access(context, acp::nac::NodePermission::MigrationSet)
             .await?;
         self.set_migration_in_txn_with_store(txn, self.lens_store.clone(), config)
             .await

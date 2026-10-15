@@ -233,7 +233,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         mut doc: Document,
     ) -> query::error::Result<CreateResult> {
         self.db
-            .check_node_access(None, acp::nac::NodePermission::DocumentUpdate)
+            .check_node_access(context, acp::nac::NodePermission::DocumentUpdate)
             .await
             .map_err(|e| query::error::QueryError::permission_denied(e.to_string()))?;
 
@@ -366,6 +366,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .map_err(crate::error::commit_query_error)?;
         self.db
             .check_node_access_in_txn(
+                &attempt.context,
                 txn.acpstore().map_err(crate::error::commit_query_error)?,
                 acp::nac::NodePermission::DocumentUpdate,
             )
@@ -546,7 +547,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         }
 
         self.db
-            .check_node_access(None, acp::nac::NodePermission::DocumentUpdate)
+            .check_node_access(context, acp::nac::NodePermission::DocumentUpdate)
             .await
             .map_err(|e| query::error::QueryError::permission_denied(e.to_string()))?;
 
@@ -746,6 +747,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .map_err(crate::error::commit_query_error)?;
         self.db
             .check_node_access_in_txn(
+                &attempt.context,
                 txn.acpstore().map_err(crate::error::commit_query_error)?,
                 acp::nac::NodePermission::DocumentUpdate,
             )

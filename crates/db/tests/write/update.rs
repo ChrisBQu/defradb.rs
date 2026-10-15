@@ -35,6 +35,7 @@ fn test_collection() -> CollectionVersion {
 async fn stale_disjoint_field_update_without_precondition_preserves_committed_fields() {
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).expect("create db"));
     db.create_collection(
+        &defra_core::RequestContext::default(),
         test_collection().with_index(IndexDescription::new("by_left").with_field("left", false)),
     )
     .await
@@ -92,6 +93,7 @@ async fn stale_disjoint_field_update_without_precondition_preserves_committed_fi
 async fn explicit_disjoint_field_updates_on_one_document_both_commit() {
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).expect("create db"));
     db.create_collection(
+        &defra_core::RequestContext::default(),
         test_collection().with_index(IndexDescription::new("by_left").with_field("left", false)),
     )
     .await
@@ -164,6 +166,7 @@ async fn explicit_disjoint_field_updates_on_one_document_both_commit() {
 async fn stale_update_uses_fresh_unmodified_composite_index_component() {
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).expect("create db"));
     db.create_collection(
+        &defra_core::RequestContext::default(),
         test_collection().with_index(
             IndexDescription::new("by_left_right")
                 .with_field("left", false)
@@ -238,6 +241,7 @@ async fn stale_update_uses_fresh_unmodified_composite_index_component() {
 async fn explicit_same_indexed_field_updates_conflict_on_the_old_index_entry() {
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).expect("create db"));
     db.create_collection(
+        &defra_core::RequestContext::default(),
         test_collection().with_index(IndexDescription::new("by_left").with_field("left", false)),
     )
     .await
@@ -291,7 +295,7 @@ async fn explicit_same_indexed_field_updates_conflict_on_the_old_index_entry() {
 #[tokio::test]
 async fn stale_conditional_update_returns_conflict() {
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).expect("create db"));
-    db.create_collection(test_collection())
+    db.create_collection(&defra_core::RequestContext::default(), test_collection())
         .await
         .expect("schema");
     let mutator = AutoCommitMutator::new(Arc::clone(&db));
@@ -354,7 +358,7 @@ async fn stale_conditional_update_returns_conflict() {
 #[tokio::test]
 async fn conditional_update_of_concurrently_deleted_document_returns_conflict() {
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).expect("create db"));
-    db.create_collection(test_collection())
+    db.create_collection(&defra_core::RequestContext::default(), test_collection())
         .await
         .expect("schema");
     let mutator = AutoCommitMutator::new(Arc::clone(&db));
@@ -459,7 +463,9 @@ async fn update_reads_fresh_values_in_the_transaction_that_writes_them() {
         pending: std::sync::Mutex::new(None),
     });
     let db = Arc::new(DB::open_from_arc(store.clone()).await.unwrap());
-    db.create_collection(test_collection()).await.unwrap();
+    db.create_collection(&defra_core::RequestContext::default(), test_collection())
+        .await
+        .unwrap();
     let mutator = AutoCommitMutator::new(db.clone());
     let created = mutator
         .create(

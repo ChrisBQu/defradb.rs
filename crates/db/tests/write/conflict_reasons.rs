@@ -113,7 +113,9 @@ impl Fixture {
             gate: Arc::clone(&gate),
         };
         let db = Arc::new(DB::new(store).unwrap());
-        db.create_collection(collection).await.unwrap();
+        db.create_collection(&defra_core::RequestContext::default(), collection)
+            .await
+            .unwrap();
         Self { db, gate }
     }
 

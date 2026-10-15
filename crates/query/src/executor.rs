@@ -368,19 +368,20 @@ pub struct ErrorLocation {
 ///     executor: &E,
 ///     queries: Vec<QueryRequest>,
 /// ) -> Result<Vec<QueryResponse>, TransactionError> {
-///     let handle = executor.begin_txn(false).await?;
+///     let context = RequestContext::default();
+///     let handle = executor.begin_txn(&context, false).await?;
 ///     let mut responses = Vec::new();
 ///
 ///     for query in queries {
 ///         let resp = executor.execute_in_txn(query, &handle).await;
 ///         if resp.has_errors() {
-///             executor.rollback_txn(&handle).await.ok();
+///             executor.rollback_txn(&context, &handle).await.ok();
 ///             return Err(TransactionError::execution("query failed"));
 ///         }
 ///         responses.push(resp);
 ///     }
 ///
-///     executor.commit_txn(&handle).await?;
+///     executor.commit_txn(&context, &handle).await?;
 ///     Ok(responses)
 /// }
 /// ```
@@ -444,12 +445,15 @@ pub trait QueryExecutor: MaybeSendSync {
     /// The transaction remains active until `commit_txn()` or `rollback_txn()` is called.
     ///
     /// # Arguments
+    /// * `context` - The context of the request beginning it, whose identity
+    ///   the transaction belongs to
     /// * `readonly` - If true, the transaction cannot perform write operations
     ///
     /// Cancellation must not leave an entry behind: register the transaction
     /// only when returning its handle, with no intervening await.
     async fn begin_txn(
         &self,
+        context: &RequestContext,
         readonly: bool,
     ) -> std::result::Result<TransactionHandle, TransactionError>;
 
@@ -459,6 +463,7 @@ pub trait QueryExecutor: MaybeSendSync {
     /// After commit, the transaction handle is no longer valid.
     async fn commit_txn(
         &self,
+        context: &RequestContext,
         handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError>;
 
@@ -468,6 +473,7 @@ pub trait QueryExecutor: MaybeSendSync {
     /// After rollback, the transaction handle is no longer valid.
     async fn rollback_txn(
         &self,
+        context: &RequestContext,
         handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError>;
 

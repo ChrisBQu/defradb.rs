@@ -82,14 +82,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 && mutator.engine_retries_batches(),
         };
         if prepared.engine_managed_retry {
-            // Match the acting identity that execute_prepared scopes around
-            // the mutation callback, including an explicit request identity.
-            let effective_identity = identity
-                .clone()
-                .or_else(|| {
-                    defra_core::current_identity::get_effective_identity()
-                        .and_then(|value| Did::new(value).ok())
-                })
+            // The identity the mutation's attempts act as.
+            let effective_identity = self
+                .acting_identity(identity.as_ref())
+                .and_then(|value| Did::new(value).ok())
                 .unwrap_or_else(Did::wildcard);
             let mut permissions = rapidhash::RapidHashSet::default();
             for mutation in mutations {

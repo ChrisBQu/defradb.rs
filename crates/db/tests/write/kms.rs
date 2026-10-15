@@ -75,17 +75,20 @@ pub(super) async fn fixture() -> Fixture {
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     let kms = Arc::new(CountingKms::default());
     db.set_kms(kms.clone());
-    db.create_collection(CollectionVersion::new(
-        "Secrets",
-        "secrets-v1",
-        "col-secrets",
-        vec![
-            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
-            FieldDescription::new("2", "left", FieldKind::string()),
-            FieldDescription::new("3", "right", FieldKind::string()),
-            FieldDescription::new("4", "public", FieldKind::string()),
-        ],
-    ))
+    db.create_collection(
+        &defra_core::RequestContext::default(),
+        CollectionVersion::new(
+            "Secrets",
+            "secrets-v1",
+            "col-secrets",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "left", FieldKind::string()),
+                FieldDescription::new("3", "right", FieldKind::string()),
+                FieldDescription::new("4", "public", FieldKind::string()),
+            ],
+        ),
+    )
     .await
     .unwrap();
     Fixture { db, kms }
@@ -341,16 +344,19 @@ async fn signed_encrypted_counter_update_preserves_prepared_randomness() {
     let fixture = fixture().await;
     fixture
         .db
-        .create_collection(CollectionVersion::new(
-            "Counters",
-            "cv1",
-            "counters",
-            vec![
-                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
-                FieldDescription::new("2", "count", FieldKind::int())
-                    .with_crdt_type(schema::CType::PnCounter),
-            ],
-        ))
+        .create_collection(
+            &defra_core::RequestContext::default(),
+            CollectionVersion::new(
+                "Counters",
+                "cv1",
+                "counters",
+                vec![
+                    FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                    FieldDescription::new("2", "count", FieldKind::int())
+                        .with_crdt_type(schema::CType::PnCounter),
+                ],
+            ),
+        )
         .await
         .unwrap();
     let mutator = AutoCommitMutator::new(fixture.db.clone());
@@ -388,15 +394,18 @@ async fn signed_encrypted_counter_update_preserves_prepared_randomness() {
 #[tokio::test]
 async fn signed_document_encryption_without_kms_reuses_local_keys() {
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
-    db.create_collection(CollectionVersion::new(
-        "Local",
-        "local-v1",
-        "local-root",
-        vec![
-            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
-            FieldDescription::new("2", "value", FieldKind::string()),
-        ],
-    ))
+    db.create_collection(
+        &defra_core::RequestContext::default(),
+        CollectionVersion::new(
+            "Local",
+            "local-v1",
+            "local-root",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "value", FieldKind::string()),
+            ],
+        ),
+    )
     .await
     .unwrap();
     let whole_document = RequestContext::default().with_encryption(Some(EncryptionConfig {

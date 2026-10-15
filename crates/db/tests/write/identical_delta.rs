@@ -35,7 +35,7 @@ fn snap_collection() -> CollectionVersion {
 #[tokio::test]
 async fn identical_field_writes_to_distinct_documents_do_not_conflict() {
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).expect("create db"));
-    db.create_collection(snap_collection())
+    db.create_collection(&defra_core::RequestContext::default(), snap_collection())
         .await
         .expect("create collection");
 

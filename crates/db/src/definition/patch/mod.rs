@@ -54,11 +54,11 @@ impl<S: Store> crate::database::DB<S> {
     /// - `Schema` if the resulting schema is invalid
     pub async fn patch_collection(
         &self,
+        context: &defra_core::RequestContext,
         collection_name: &str,
         patch: &str,
-        identity: Option<&identity::Did>,
     ) -> Result<CollectionVersion> {
-        self.patch_collection_with_migration(collection_name, patch, None, identity)
+        self.patch_collection_with_migration(context, collection_name, patch, None)
             .await
     }
 
@@ -66,12 +66,12 @@ impl<S: Store> crate::database::DB<S> {
     #[instrument(skip(self, patch, migration), fields(collection = %collection_name), name = "db.patch_collection")]
     pub async fn patch_collection_with_migration(
         &self,
+        context: &defra_core::RequestContext,
         collection_name: &str,
         patch: &str,
         migration: Option<lens::LensConfig>,
-        identity: Option<&identity::Did>,
     ) -> Result<CollectionVersion> {
-        self.check_node_access(identity, acp::nac::NodePermission::CollectionPatch)
+        self.check_node_access(context, acp::nac::NodePermission::CollectionPatch)
             .await?;
         // Parse the patch early - needed for both collection lookup fallbacks and processing
         let patch_ops: serde_json::Value =
@@ -208,7 +208,8 @@ impl<S: Store> crate::database::DB<S> {
         {
             // True deletion: remove from store entirely (matches Go behavior)
             if is_deactivation {
-                self.delete_collection_version(&old_version_id, &[]).await?;
+                self.delete_collection_version(context, &old_version_id, &[])
+                    .await?;
                 new_schema.is_active = false;
                 new_schema.version_id = old_version_id.clone();
                 if !is_transform_only_change {

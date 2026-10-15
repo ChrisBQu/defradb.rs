@@ -15,7 +15,9 @@ impl Fixture {
     async fn new() -> Self {
         let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
         for schema in query::parse_sdl("type Users { name: String }").unwrap() {
-            db.create_collection(schema).await.unwrap();
+            db.create_collection(&defra_core::RequestContext::default(), schema)
+                .await
+                .unwrap();
         }
         let registry = Arc::new(DbTransactionRegistry::new(db.clone()));
         let runner = Arc::new(query::QueryRunner::with_arc_registry_and_provider(
@@ -62,9 +64,13 @@ async fn create(guard: &TransactionGuard<'_, dyn QueryExecutor>) {
 #[tokio::test]
 async fn dropping_guard_discards_writes_despite_saved_handle() {
     let fixture = Fixture::new().await;
-    let guard = TransactionGuard::begin(fixture.runner.as_ref(), false)
-        .await
-        .unwrap();
+    let guard = TransactionGuard::begin(
+        fixture.runner.as_ref(),
+        defra_core::RequestContext::default(),
+        false,
+    )
+    .await
+    .unwrap();
     create(&guard).await;
     let handle = guard.handle().unwrap().clone();
     assert!(!guard.execute(read()).await.has_errors());
@@ -78,9 +84,13 @@ async fn aborting_owner_removes_transaction() {
     let executor = fixture.runner.clone();
     let (ready, handle) = tokio::sync::oneshot::channel();
     let task = tokio::spawn(async move {
-        let guard = TransactionGuard::begin(executor.as_ref(), false)
-            .await
-            .unwrap();
+        let guard = TransactionGuard::begin(
+            executor.as_ref(),
+            defra_core::RequestContext::default(),
+            false,
+        )
+        .await
+        .unwrap();
         create(&guard).await;
         ready.send(guard.handle().unwrap().clone()).unwrap();
         std::future::pending::<()>().await;
@@ -97,7 +107,11 @@ fn guard_cleanup_does_not_require_a_running_runtime() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let fixture = runtime.block_on(Fixture::new());
     let guard = runtime
-        .block_on(TransactionGuard::begin(fixture.runner.as_ref(), false))
+        .block_on(TransactionGuard::begin(
+            fixture.runner.as_ref(),
+            defra_core::RequestContext::default(),
+            false,
+        ))
         .unwrap();
     runtime.block_on(create(&guard));
     let handle = guard.handle().unwrap().clone();
@@ -124,14 +138,18 @@ async fn cancellation_while_finalization_waits_for_an_active_request_releases_th
 
     for commit in [false, true] {
         let fixture = Fixture::new().await;
-        let guard = TransactionGuard::begin(fixture.runner.as_ref(), false)
-            .await
-            .unwrap();
+        let guard = TransactionGuard::begin(
+            fixture.runner.as_ref(),
+            defra_core::RequestContext::default(),
+            false,
+        )
+        .await
+        .unwrap();
         create(&guard).await;
         let handle = guard.handle().unwrap().clone();
         let ctx = fixture
             .registry
-            .get(&handle)
+            .get(&defra_core::RequestContext::default(), &handle)
             .into_result()
             .unwrap()
             .unwrap();
@@ -181,21 +199,39 @@ impl QueryExecutor for PausedExecutor {
         self.inner.execute_in_txn(request, handle).await
     }
 
-    async fn begin_txn(&self, readonly: bool) -> Result<TransactionHandle, TransactionError> {
+    async fn begin_txn(
+        &self,
+        _context: &defra_core::RequestContext,
+        readonly: bool,
+    ) -> Result<TransactionHandle, TransactionError> {
         self.pause(PauseAt::Begin).await;
-        self.inner.begin_txn(readonly).await
+        self.inner
+            .begin_txn(&defra_core::RequestContext::default(), readonly)
+            .await
     }
 
-    async fn commit_txn(&self, handle: &TransactionHandle) -> Result<(), TransactionError> {
+    async fn commit_txn(
+        &self,
+        _context: &defra_core::RequestContext,
+        handle: &TransactionHandle,
+    ) -> Result<(), TransactionError> {
         self.pause(PauseAt::Commit).await;
-        self.inner.commit_txn(handle).await?;
+        self.inner
+            .commit_txn(&defra_core::RequestContext::default(), handle)
+            .await?;
         self.pause(PauseAt::AfterCommit).await;
         Ok(())
     }
 
-    async fn rollback_txn(&self, handle: &TransactionHandle) -> Result<(), TransactionError> {
+    async fn rollback_txn(
+        &self,
+        _context: &defra_core::RequestContext,
+        handle: &TransactionHandle,
+    ) -> Result<(), TransactionError> {
         self.pause(PauseAt::Rollback).await;
-        self.inner.rollback_txn(handle).await
+        self.inner
+            .rollback_txn(&defra_core::RequestContext::default(), handle)
+            .await
     }
 
     fn abandon_txn(&self, handle: &TransactionHandle) {
@@ -221,13 +257,20 @@ async fn cancellation_at_each_guard_boundary_discards_uncommitted_state() {
             at,
         };
         if at == PauseAt::Begin {
-            let mut begin = Box::pin(TransactionGuard::begin(&executor, false));
+            let mut begin = Box::pin(TransactionGuard::begin(
+                &executor,
+                defra_core::RequestContext::default(),
+                false,
+            ));
             assert!(futures::poll!(&mut begin).is_pending());
             drop(begin);
             assert_eq!(fixture.registry.active_transaction_count().unwrap(), 0);
             continue;
         }
-        let guard = TransactionGuard::begin(&executor, false).await.unwrap();
+        let guard =
+            TransactionGuard::begin(&executor, defra_core::RequestContext::default(), false)
+                .await
+                .unwrap();
         let handle = guard.handle().unwrap().clone();
         let response = fixture
             .runner
@@ -264,7 +307,9 @@ async fn cancellation_after_durable_commit_cannot_undo_it_or_discard_another_tra
         inner: fixture.runner.clone(),
         at: PauseAt::AfterCommit,
     };
-    let guard = TransactionGuard::begin(&executor, false).await.unwrap();
+    let guard = TransactionGuard::begin(&executor, defra_core::RequestContext::default(), false)
+        .await
+        .unwrap();
     let response = guard
         .execute(QueryRequest::new(
             r#"mutation { add_Users(input: {name: "committed"}) { _docID } }"#,
@@ -274,10 +319,18 @@ async fn cancellation_after_durable_commit_cannot_undo_it_or_discard_another_tra
     let mut commit = Box::pin(guard.commit());
     assert!(futures::poll!(&mut commit).is_pending());
     assert_eq!(fixture.registry.active_transaction_count().unwrap(), 0);
-    let other = fixture.runner.begin_txn(false).await.unwrap();
+    let other = fixture
+        .runner
+        .begin_txn(&defra_core::RequestContext::default(), false)
+        .await
+        .unwrap();
     drop(commit);
     assert_eq!(fixture.registry.active_transaction_count().unwrap(), 1);
-    fixture.runner.rollback_txn(&other).await.unwrap();
+    fixture
+        .runner
+        .rollback_txn(&defra_core::RequestContext::default(), &other)
+        .await
+        .unwrap();
     let response = fixture.runner.execute(read()).await;
     assert!(!response.has_errors(), "{:?}", response.errors);
     assert_eq!(

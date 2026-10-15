@@ -8,7 +8,6 @@ use bytes::Bytes;
 use cid::Cid;
 use defra_core::RequestContext;
 use document::{DocID, Document};
-use identity::Did;
 use rapidhash::RapidHashSet;
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
@@ -24,9 +23,9 @@ use crate::Filter;
 pub trait CollectionTruncator: MaybeSendSync {
     async fn truncate(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         filter: Option<Filter>,
-        identity: Option<&Did>,
     ) -> Result<()>;
 }
 

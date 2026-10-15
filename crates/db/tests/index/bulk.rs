@@ -184,7 +184,9 @@ async fn an_empty_source_indexes_nothing() {
 #[tokio::test]
 async fn the_collection_source_streams_every_live_document() {
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
-    db.create_collection(schema()).await.unwrap();
+    db.create_collection(&defra_core::RequestContext::default(), schema())
+        .await
+        .unwrap();
 
     let txn = db.new_txn(false).await.unwrap();
     let mutator = DbDocMutator::new(db.clone(), txn);

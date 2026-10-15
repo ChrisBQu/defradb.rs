@@ -77,7 +77,9 @@ async fn fixture() -> Fixture {
             template: String::new(),
             url: format!("http://{address}"),
         });
-    db.create_collection(collection).await.unwrap();
+    db.create_collection(&defra_core::RequestContext::default(), collection)
+        .await
+        .unwrap();
     Fixture { db, calls, server }
 }
 
@@ -250,7 +252,10 @@ async fn explicit_txn_graphql_update_regenerates_embedding() {
         DbCollectionProvider::new_arc(Arc::clone(&fixture.db)),
         registry,
     );
-    let txn = queries.begin_txn(false).await.unwrap();
+    let txn = queries
+        .begin_txn(&defra_core::RequestContext::default(), false)
+        .await
+        .unwrap();
     let calls_before = fixture.calls();
     let response = queries
         .execute_in_txn(
@@ -263,7 +268,10 @@ async fn explicit_txn_graphql_update_regenerates_embedding() {
         .await;
     assert!(!response.has_errors(), "{:?}", response.errors);
     assert_eq!(fixture.calls(), calls_before + 1);
-    queries.commit_txn(&txn).await.unwrap();
+    queries
+        .commit_txn(&defra_core::RequestContext::default(), &txn)
+        .await
+        .unwrap();
     let stored = AutoCommitMutator::new(Arc::clone(&fixture.db))
         .get_for_update("Texts", &created.doc_id)
         .await
@@ -283,7 +291,10 @@ async fn explicit_txn_graphql_create_generates_embedding() {
         DbCollectionProvider::new_arc(Arc::clone(&fixture.db)),
         registry,
     );
-    let txn = queries.begin_txn(false).await.unwrap();
+    let txn = queries
+        .begin_txn(&defra_core::RequestContext::default(), false)
+        .await
+        .unwrap();
     let response = queries
         .execute_in_txn(
             QueryRequest::new(
@@ -294,7 +305,10 @@ async fn explicit_txn_graphql_create_generates_embedding() {
         .await;
     assert!(!response.has_errors(), "{:?}", response.errors);
     assert_eq!(fixture.calls(), 1);
-    queries.commit_txn(&txn).await.unwrap();
+    queries
+        .commit_txn(&defra_core::RequestContext::default(), &txn)
+        .await
+        .unwrap();
 
     let stored = query::DocFetcher::get_all(
         &LensedAutoCommitFetcher::new(Arc::clone(&fixture.db)),

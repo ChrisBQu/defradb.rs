@@ -14,7 +14,9 @@ use storage::RegolithStore;
 /// named `user-0`..`user-{n-1}` in insertion order.
 async fn fixture_with_docs(n: usize) -> (Arc<DB<RegolithStore>>, String) {
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
-    db.create_collection(test_schema()).await.unwrap();
+    db.create_collection(&defra_core::RequestContext::default(), test_schema())
+        .await
+        .unwrap();
 
     for i in 0..n {
         let txn = db.new_txn(false).await.unwrap();

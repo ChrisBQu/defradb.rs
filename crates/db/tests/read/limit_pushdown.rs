@@ -30,7 +30,9 @@ const LIMIT: usize = 10;
 
 async fn seeded_db<S: Store + 'static>(store: S) -> Arc<DB<CountingStore<S>>> {
     let db = Arc::new(DB::new(CountingStore::new(store)).unwrap());
-    db.create_collection(users_schema()).await.unwrap();
+    db.create_collection(&defra_core::RequestContext::default(), users_schema())
+        .await
+        .unwrap();
 
     let docs = (0..COLLECTION_SIZE)
         .map(|i| {

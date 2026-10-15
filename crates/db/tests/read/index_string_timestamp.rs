@@ -62,7 +62,9 @@ async fn seeded_db() -> Arc<DB<RegolithStore>> {
         index(4, "seen_at"),
     ];
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
-    db.create_collection(version).await.unwrap();
+    db.create_collection(&defra_core::RequestContext::default(), version)
+        .await
+        .unwrap();
     let docs = STAMPS
         .iter()
         .map(|stamp| {

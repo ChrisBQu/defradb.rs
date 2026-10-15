@@ -362,6 +362,7 @@ async fn branchable_permissioned_create_fails_closed_if_collection_acp_registrat
 
     let err = db
         .create_collection_with_acp_registration(
+            &defra_core::RequestContext::default(),
             branchable_collection_with_policy(),
             acp,
             Some(owner),

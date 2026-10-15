@@ -71,7 +71,9 @@ async fn fixture_with_counter(counter: bool) -> Fixture {
             template: String::new(),
             url: format!("http://{address}"),
         });
-    db.create_collection(collection).await.unwrap();
+    db.create_collection(&defra_core::RequestContext::default(), collection)
+        .await
+        .unwrap();
     Fixture { db, server }
 }
 

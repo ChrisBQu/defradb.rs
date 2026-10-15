@@ -112,7 +112,9 @@ async fn a_batch_of_hundreds_of_embedded_encrypted_creates_commits() {
             template: String::new(),
             url: format!("http://{address}"),
         });
-    db.create_collection(collection).await.unwrap();
+    db.create_collection(&defra_core::RequestContext::default(), collection)
+        .await
+        .unwrap();
 
     let runner = query::QueryRunner::with_provider(
         LensedAutoCommitFetcher::new(Arc::clone(&db)),

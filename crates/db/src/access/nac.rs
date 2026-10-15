@@ -1,20 +1,27 @@
 use crate::database::DB;
 use crate::error::{Error, Result};
 use acp::nac::NodePermission;
+use defra_core::RequestContext;
 use identity::Did;
 use storage::corekv::Store;
+
+/// The identity acting in `context`, the wildcard for an anonymous request or
+/// an identity that is not a DID.
+fn acting_did(context: &RequestContext) -> Option<Did> {
+    context.identity().and_then(|value| Did::new(value).ok())
+}
 
 impl<S: Store> DB<S> {
     pub(crate) async fn check_node_access_in_txn(
         &self,
+        context: &RequestContext,
         view: datastore::NamespaceView,
         permission: NodePermission,
     ) -> Result<()> {
         let Some(nac) = self.nac_manager() else {
             return Ok(());
         };
-        let identity = defra_core::current_identity::get_effective_identity()
-            .and_then(|value| Did::new(value).ok());
+        let identity = acting_did(context);
         if self
             .node_did()
             .is_some_and(|owner| identity.as_ref() == Some(&owner))
@@ -35,15 +42,16 @@ impl<S: Store> DB<S> {
         }
     }
 
-    /// Check NAC permission before proceeding with a node-level operation.
-    /// Matches Go's `db.checkNodeAccess()` pattern.
+    /// Check NAC permission for the identity acting in `context` before
+    /// proceeding with a node-level operation. Matches Go's
+    /// `db.checkNodeAccess()` pattern.
     ///
     /// Returns `Ok(())` when NAC is not configured or not enabled (all
     /// operations allowed), or when the identity holds the permission.
     /// Returns `Error::NotAuthorized` when the identity lacks it.
     pub async fn check_node_access(
         &self,
-        identity: Option<&Did>,
+        context: &RequestContext,
         permission: NodePermission,
     ) -> Result<()> {
         let nac = match self.nac_manager() {
@@ -53,15 +61,7 @@ impl<S: Store> DB<S> {
         if !nac.is_enabled().await {
             return Ok(());
         }
-        // Resolve the acting identity: explicit param wins, otherwise fall back
-        // to the ambient request identity. The task_local scope (set by the HTTP
-        // middleware on the multithreaded REST path) takes priority over the
-        // thread_local (set on the pinned query/FFI path).
-        let resolved: Option<Did> = match identity {
-            Some(d) => Some(d.clone()),
-            None => defra_core::current_identity::get_effective_identity()
-                .and_then(|s| Did::new(s).ok()),
-        };
+        let resolved = acting_did(context);
         // Node's own identity always has access (mirrors Go db_nac.go).
         if let Some(node) = self.node_did() {
             if resolved.as_ref() == Some(&node) {

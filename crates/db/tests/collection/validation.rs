@@ -84,7 +84,7 @@ async fn atomic_creation_rejects_an_unknown_relation_target() {
     let posts = CollectionVersion::new("Post", "v-post", "c-post", vec![author]);
 
     let error = database
-        .create_collections_atomic(vec![posts])
+        .create_collections_atomic(&defra_core::RequestContext::default(), vec![posts])
         .await
         .unwrap_err();
 
@@ -102,7 +102,10 @@ async fn creation_rejects_an_invalid_default_value() {
         .with_default(serde_json::json!("not-an-int"));
     let collection = CollectionVersion::new("Counter", "v-counter", "c-counter", vec![count]);
 
-    let error = database.create_collection(collection).await.unwrap_err();
+    let error = database
+        .create_collection(&defra_core::RequestContext::default(), collection)
+        .await
+        .unwrap_err();
 
     assert!(error.to_string().contains(
         "default field value is invalid. Collection: Counter, Inner: Field 'count' has incompatible type"
@@ -130,7 +133,7 @@ async fn creation_accepts_supported_scalar_defaults() {
     .unwrap();
 
     database
-        .create_collections_atomic(collections)
+        .create_collections_atomic(&defra_core::RequestContext::default(), collections)
         .await
         .unwrap();
 }

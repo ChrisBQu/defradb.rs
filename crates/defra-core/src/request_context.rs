@@ -26,6 +26,7 @@ pub struct RequestContext(Arc<Fields>);
 
 #[derive(Clone, Default)]
 struct Fields {
+    identity: Option<String>,
     dac_bypass: bool,
     encryption: Option<EncryptionConfig>,
     signing: Option<SigningConfig>,
@@ -34,6 +35,20 @@ struct Fields {
 }
 
 impl RequestContext {
+    /// The DID acting in this request: the identity node access control
+    /// checks and an explicit transaction belongs to. `None` for an anonymous
+    /// request.
+    pub fn identity(&self) -> Option<&str> {
+        self.0.identity.as_deref()
+    }
+
+    /// This context with the acting identity set to `identity`.
+    #[must_use]
+    pub fn with_identity(mut self, identity: Option<String>) -> Self {
+        Arc::make_mut(&mut self.0).identity = identity;
+        self
+    }
+
     /// Whether node access control grants this request's identity the
     /// `bypass-dac` permission, so document access control lets an
     /// authenticated caller read and write every document. Resolved once, at
@@ -108,6 +123,7 @@ impl RequestContext {
 impl fmt::Debug for RequestContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RequestContext")
+            .field("identity", &self.0.identity)
             .field("dac_bypass", &self.0.dac_bypass)
             .field("encryption", &self.0.encryption)
             .field(
@@ -127,6 +143,7 @@ mod tests {
     #[test]
     fn default_context_grants_nothing() {
         let context = RequestContext::default();
+        assert!(context.identity().is_none());
         assert!(!context.dac_bypass());
         assert!(context.encryption().is_none());
         assert!(context.signing().is_none());

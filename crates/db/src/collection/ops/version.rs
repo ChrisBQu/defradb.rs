@@ -15,8 +15,12 @@ impl<S: Store> crate::database::DB<S> {
     ///
     /// - `CollectionVersionNotFound` if no collection with the given version ID exists
     #[instrument(skip(self), fields(version_id = %version_id), name = "db.set_active_version")]
-    pub async fn set_active_collection_version(&self, version_id: &str) -> Result<()> {
-        self.check_node_access(None, acp::nac::NodePermission::CollectionPatch)
+    pub async fn set_active_collection_version(
+        &self,
+        context: &defra_core::RequestContext,
+        version_id: &str,
+    ) -> Result<()> {
+        self.check_node_access(context, acp::nac::NodePermission::CollectionPatch)
             .await?;
         if version_id.is_empty() {
             return Err(Error::CollectionVersionIDEmpty);
@@ -245,10 +249,11 @@ impl<S: Store> crate::database::DB<S> {
     /// - The collection must have no documents
     pub async fn delete_collection_version(
         &self,
+        context: &defra_core::RequestContext,
         version_id: &str,
         also_deleting: &[String],
     ) -> Result<()> {
-        self.check_node_access(None, acp::nac::NodePermission::CollectionPatch)
+        self.check_node_access(context, acp::nac::NodePermission::CollectionPatch)
             .await?;
         // Load the version from KV store
         let txn = self.new_txn(true).await?;
@@ -386,8 +391,12 @@ impl<S: Store> crate::database::DB<S> {
     /// Versions are sorted topologically (children before parents based on
     /// PreviousVersion) and deleted in that order. When checking for child
     /// references, other versions in the batch are excluded from validation.
-    pub async fn delete_collection_versions_batch(&self, version_ids: Vec<String>) -> Result<()> {
-        self.check_node_access(None, acp::nac::NodePermission::CollectionPatch)
+    pub async fn delete_collection_versions_batch(
+        &self,
+        context: &defra_core::RequestContext,
+        version_ids: Vec<String>,
+    ) -> Result<()> {
+        self.check_node_access(context, acp::nac::NodePermission::CollectionPatch)
             .await?;
         if version_ids.is_empty() {
             return Ok(());
@@ -504,7 +513,7 @@ impl<S: Store> crate::database::DB<S> {
 
         // Delete each version in topological order
         for version_id in &sorted {
-            self.delete_collection_version(version_id, &version_ids)
+            self.delete_collection_version(context, version_id, &version_ids)
                 .await?;
         }
 
@@ -549,7 +558,9 @@ mod tests {
     async fn validated_collection_version_scan_detects_phantom_create() {
         let db = crate::DB::new(storage::RegolithStore::in_memory().unwrap()).unwrap();
         let mut initial = query::parse_sdl("type ExistingSchemaProbe { value: String }").unwrap();
-        db.create_collection(initial.remove(0)).await.unwrap();
+        db.create_collection(&defra_core::RequestContext::default(), initial.remove(0))
+            .await
+            .unwrap();
 
         let mut schema_txn = db.new_txn(false).await.unwrap();
         db.get_all_collection_versions_with_txn(&mut schema_txn)
@@ -562,7 +573,9 @@ mod tests {
 
         let mut concurrent =
             query::parse_sdl("type ConcurrentSchemaProbe { value: String }").unwrap();
-        db.create_collection(concurrent.remove(0)).await.unwrap();
+        db.create_collection(&defra_core::RequestContext::default(), concurrent.remove(0))
+            .await
+            .unwrap();
 
         let result = schema_txn.commit().await;
         assert!(

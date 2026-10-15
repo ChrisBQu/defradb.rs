@@ -69,9 +69,12 @@ async fn signed_branchable_documents_classify_collection_and_signature_blocks() 
     use defra_core::signing::{SigningConfig, SigningKeyType};
 
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
-    db.create_collection(crate::common::schema::test_schema().as_branchable())
-        .await
-        .unwrap();
+    db.create_collection(
+        &defra_core::RequestContext::default(),
+        crate::common::schema::test_schema().as_branchable(),
+    )
+    .await
+    .unwrap();
     let key = crypto::generate_ed25519().unwrap();
     let public_key = key.public_key();
     let signed = defra_core::RequestContext::default().with_signing(Some(SigningConfig {
@@ -335,9 +338,12 @@ async fn offline_scan_is_read_only_and_matches_the_live_snapshot() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("data");
     let db = Arc::new(DB::new(RegolithStore::open(&path).unwrap()).unwrap());
-    db.create_collection(crate::common::schema::test_schema())
-        .await
-        .unwrap();
+    db.create_collection(
+        &defra_core::RequestContext::default(),
+        crate::common::schema::test_schema(),
+    )
+    .await
+    .unwrap();
     let mutator = DbDocMutator::new(db.clone(), db.new_txn(false).await.unwrap());
     let mut doc = Document::new();
     doc.set("name", NormalValue::String("private value".into()));
@@ -478,7 +484,9 @@ async fn shared_blocks_count_each_document_history_once() {
         "other",
         schema::FieldKind::string(),
     ));
-    db.create_collection(schema).await.unwrap();
+    db.create_collection(&defra_core::RequestContext::default(), schema)
+        .await
+        .unwrap();
     let mut ids = Vec::new();
     for other in ["first", "second"] {
         let mutator = DbDocMutator::new(db.clone(), db.new_txn(false).await.unwrap());

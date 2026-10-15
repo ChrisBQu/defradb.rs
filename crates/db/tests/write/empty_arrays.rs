@@ -13,16 +13,19 @@ use storage::RegolithStore;
 #[tokio::test]
 async fn updating_a_document_that_holds_an_empty_string_array_succeeds() {
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
-    db.create_collection(CollectionVersion::new(
-        "Post",
-        "v1",
-        "col-post",
-        vec![
-            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
-            FieldDescription::new("2", "title", FieldKind::string()),
-            FieldDescription::new("3", "tags", FieldKind::nillable_string_array()),
-        ],
-    ))
+    db.create_collection(
+        &defra_core::RequestContext::default(),
+        CollectionVersion::new(
+            "Post",
+            "v1",
+            "col-post",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "title", FieldKind::string()),
+                FieldDescription::new("3", "tags", FieldKind::nillable_string_array()),
+            ],
+        ),
+    )
     .await
     .unwrap();
     let mutator = AutoCommitMutator::new(Arc::clone(&db));
@@ -101,16 +104,20 @@ async fn immutable_tags_update(
     tags: NormalValue,
 ) -> (AutoCommitMutator<RegolithStore>, document::DocID, Document) {
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
-    db.create_collection(CollectionVersion::new(
-        "Post",
-        "v1",
-        "col-post",
-        vec![
-            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
-            FieldDescription::new("2", "title", FieldKind::string()),
-            FieldDescription::new("3", "tags", FieldKind::nillable_string_array()).as_immutable(),
-        ],
-    ))
+    db.create_collection(
+        &defra_core::RequestContext::default(),
+        CollectionVersion::new(
+            "Post",
+            "v1",
+            "col-post",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "title", FieldKind::string()),
+                FieldDescription::new("3", "tags", FieldKind::nillable_string_array())
+                    .as_immutable(),
+            ],
+        ),
+    )
     .await
     .unwrap();
     let mutator = AutoCommitMutator::new(Arc::clone(&db));

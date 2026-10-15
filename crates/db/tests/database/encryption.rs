@@ -31,7 +31,9 @@ async fn document_crud_roundtrips_through_encrypted_store() {
         "#,
     )
     .unwrap();
-    db.create_collections_atomic(collections).await.unwrap();
+    db.create_collections_atomic(&defra_core::RequestContext::default(), collections)
+        .await
+        .unwrap();
 
     // Create a document through the encrypted store via the real mutator flow
     // (allocates the doc short ID and derives the DocID from the genesis block).

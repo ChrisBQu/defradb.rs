@@ -8,7 +8,9 @@ use storage::RegolithStore;
 #[tokio::test]
 async fn graphql_creation_cursor_pages_and_docid_lookup() {
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
-    db.create_collection(users_schema()).await.unwrap();
+    db.create_collection(&defra_core::RequestContext::default(), users_schema())
+        .await
+        .unwrap();
     let mutator = AutoCommitMutator::new(db.clone());
     let mut ids = Vec::new();
     for name in ["one", "two", "three"] {
@@ -48,7 +50,9 @@ async fn hidden_arrivals_advance_page_without_disclosing_document_ids() {
     let mut schema = users_schema();
     schema.policy = Some(schema::PolicyDescription::new("arrival-policy", "users"));
     schema.is_branchable = false;
-    db.create_collection(schema).await.unwrap();
+    db.create_collection(&defra_core::RequestContext::default(), schema)
+        .await
+        .unwrap();
     let mut doc = Document::new();
     doc.set("name", "secret");
     let id = AutoCommitMutator::new(db.clone())
@@ -91,7 +95,9 @@ async fn hidden_arrivals_advance_page_without_disclosing_document_ids() {
 async fn explicit_transaction_arrival_is_invisible_and_rollback_discards_it() {
     use query::fetcher::{DocFetcher, DocumentArrivalOptions};
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
-    db.create_collection(users_schema()).await.unwrap();
+    db.create_collection(&defra_core::RequestContext::default(), users_schema())
+        .await
+        .unwrap();
     let mutator = db::DbDocMutator::new(db.clone(), db.new_txn(false).await.unwrap());
     let mut doc = Document::new();
     doc.set("name", "pending");
@@ -128,7 +134,9 @@ async fn explicit_transaction_arrival_is_invisible_and_rollback_discards_it() {
 async fn concurrent_autocommit_arrivals_are_contiguous() {
     use query::fetcher::{DocFetcher, DocumentArrivalOptions};
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
-    db.create_collection(users_schema()).await.unwrap();
+    db.create_collection(&defra_core::RequestContext::default(), users_schema())
+        .await
+        .unwrap();
     let mut creates = tokio::task::JoinSet::new();
     for index in 0..64 {
         let db = db.clone();
@@ -167,7 +175,9 @@ async fn concurrent_autocommit_arrivals_are_contiguous() {
 async fn overlapping_explicit_transaction_creates_both_commit() {
     use query::fetcher::{DocFetcher, DocumentArrivalOptions};
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
-    db.create_collection(users_schema()).await.unwrap();
+    db.create_collection(&defra_core::RequestContext::default(), users_schema())
+        .await
+        .unwrap();
     let first = db::DbDocMutator::new(db.clone(), db.new_txn(false).await.unwrap());
     let second = db::DbDocMutator::new(db.clone(), db.new_txn(false).await.unwrap());
     let mut one = Document::new();
@@ -207,7 +217,9 @@ async fn overlapping_explicit_transaction_creates_both_commit() {
 async fn explicit_transaction_arrival_gets_a_cursor_only_on_commit() {
     use query::fetcher::{DocFetcher, DocumentArrivalOptions};
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
-    db.create_collection(users_schema()).await.unwrap();
+    db.create_collection(&defra_core::RequestContext::default(), users_schema())
+        .await
+        .unwrap();
     let mutator = db::DbDocMutator::new(db.clone(), db.new_txn(false).await.unwrap());
     let mut doc = Document::new();
     doc.set("name", "pending");

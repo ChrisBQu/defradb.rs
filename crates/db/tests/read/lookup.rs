@@ -66,7 +66,7 @@ fn vector_at(i: usize) -> Vec<f64> {
 
 async fn populated() -> (Arc<DB<RegolithStore>>, u32) {
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).expect("a database"));
-    db.create_collection(schema())
+    db.create_collection(&defra_core::RequestContext::default(), schema())
         .await
         .expect("the collection must register");
 

@@ -107,7 +107,9 @@ async fn deferred_registration_hook_uses_bearer_captured_before_commit() {
         "bearer-hook-policy",
         "BearerHookDoc",
     ));
-    db.create_collection(schema).await.unwrap();
+    db.create_collection(&defra_core::RequestContext::default(), schema)
+        .await
+        .unwrap();
     let collection = db.get_collection("BearerHookDoc").unwrap().unwrap();
     let observer = Arc::new(TokenObserver::default());
     db.set_document_acp(Arc::new(acp::ExternalDocumentAcp::new(
@@ -199,7 +201,9 @@ async fn deferred_unregistration_hook_uses_bearer_captured_before_commit() {
         "bearer-hook-delete-policy",
         "BearerHookDeleteDoc",
     ));
-    db.create_collection(schema).await.unwrap();
+    db.create_collection(&defra_core::RequestContext::default(), schema)
+        .await
+        .unwrap();
     let collection = db.get_collection("BearerHookDeleteDoc").unwrap().unwrap();
     let observer = Arc::new(TokenObserver::default());
     db.set_document_acp(observer.clone());

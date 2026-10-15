@@ -5,12 +5,13 @@ use super::*;
 impl<S: Store + 'static> DbTransactionRegistry<S> {
     fn take_owned_ctx(
         &self,
+        context: &RequestContext,
         handle: &TransactionHandle,
     ) -> std::result::Result<RemovedTransaction<S>, TransactionError> {
         self.transactions
             .get(handle.as_str())
             .and_then(|slot| slot.ctx())
-            .filter(|ctx| ctx.is_owned_by_caller())
+            .filter(|ctx| ctx.is_owned_by(context))
             .and_then(|_| self.take_registered(handle))
             .ok_or_else(|| {
                 TransactionError::not_found(format!("transaction '{}' not found", handle))
@@ -19,6 +20,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
 
     async fn begin_with_options(
         &self,
+        context: &RequestContext,
         readonly: bool,
     ) -> std::result::Result<TransactionHandle, TransactionError> {
         let txn_id = self.id_counter.fetch_add(1, Ordering::SeqCst).to_string();
@@ -42,6 +44,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
             self.db.clone(),
             txn_id.clone(),
             readonly,
+            context.identity().map(str::to_owned),
             fetcher,
             acp_registration_projection,
             self.broadcaster.clone(),
@@ -65,24 +68,26 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
 
     async fn begin(
         &self,
+        context: &RequestContext,
         readonly: bool,
     ) -> std::result::Result<TransactionHandle, TransactionError> {
-        self.begin_with_options(readonly).await
+        self.begin_with_options(context, readonly).await
     }
 
     async fn begin_implicit_read(
         &self,
+        context: &RequestContext,
     ) -> std::result::Result<TransactionHandle, TransactionError> {
-        self.begin_with_options(true).await
+        self.begin_with_options(context, true).await
     }
 
-    fn get(&self, handle: &TransactionHandle) -> GetTransactionResult {
+    fn get(&self, context: &RequestContext, handle: &TransactionHandle) -> GetTransactionResult {
         match self
             .transactions
             .get(handle.as_str())
             .and_then(|slot| slot.ctx())
         {
-            Some(ctx) if ctx.is_owned_by_caller() && ctx.touch() => {
+            Some(ctx) if ctx.is_owned_by(context) && ctx.touch() => {
                 GetTransactionResult::Found(ctx as Arc<dyn TransactionContext>)
             }
             _ => GetTransactionResult::NotFound,
@@ -91,9 +96,10 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
 
     async fn commit(
         &self,
+        context: &RequestContext,
         handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError> {
-        let ctx = self.take_owned_ctx(handle)?;
+        let ctx = self.take_owned_ctx(context, handle)?;
         let action_lock = ctx.action_lock();
         let _action_guard = action_lock.lock().await;
         ctx.recover_pending_statement_sync()
@@ -113,9 +119,10 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
 
     async fn rollback(
         &self,
+        context: &RequestContext,
         handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError> {
-        let ctx = self.take_owned_ctx(handle)?;
+        let ctx = self.take_owned_ctx(context, handle)?;
         let action_lock = ctx.action_lock();
         let _action_guard = action_lock.lock().await;
         ctx.recover_pending_statement_sync()
@@ -138,10 +145,11 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
 
     async fn finish_implicit_read(
         &self,
+        context: &RequestContext,
         handle: &TransactionHandle,
         _apply_read_effects: bool,
     ) -> std::result::Result<(), TransactionError> {
-        let ctx = self.take_owned_ctx(handle)?;
+        let ctx = self.take_owned_ctx(context, handle)?;
         let action_lock = ctx.action_lock();
         let _action_guard = action_lock.lock().await;
         ctx.recover_pending_statement_sync()

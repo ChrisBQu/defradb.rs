@@ -341,15 +341,18 @@ async fn every_write_path_keeps_a_documents_stored_heads_to_its_live_heads() {
     use query::mutator::DocMutator;
     const WRITES: i64 = 24;
     let db = std::sync::Arc::new(db::DB::new(RegolithStore::in_memory().unwrap()).unwrap());
-    db.create_collection(schema::CollectionVersion::new(
-        "Rewritten",
-        "rewritten-v1",
-        "col-rewritten",
-        vec![
-            schema::FieldDescription::new("1", "_docID", schema::FieldKind::doc_id()),
-            schema::FieldDescription::new("2", "value", schema::FieldKind::int()),
-        ],
-    ))
+    db.create_collection(
+        &defra_core::RequestContext::default(),
+        schema::CollectionVersion::new(
+            "Rewritten",
+            "rewritten-v1",
+            "col-rewritten",
+            vec![
+                schema::FieldDescription::new("1", "_docID", schema::FieldKind::doc_id()),
+                schema::FieldDescription::new("2", "value", schema::FieldKind::int()),
+            ],
+        ),
+    )
     .await
     .unwrap();
     let autocommit = db::AutoCommitMutator::new(db.clone());

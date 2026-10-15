@@ -7,7 +7,9 @@ use query::mutator::DocMutator;
 #[tokio::test]
 async fn create_many_collects_field_and_composite_cids_for_both_documents() {
     let (db, _) = make_test_db_with_bus().await;
-    db.create_collection(test_collection()).await.unwrap();
+    db.create_collection(&defra_core::RequestContext::default(), test_collection())
+        .await
+        .unwrap();
     let session = "create-many-field-and-composite-cids";
     batch_signing::batch_start(session);
     let result = AutoCommitMutator::new(db)
@@ -54,7 +56,9 @@ where
 #[tokio::test]
 async fn create_many_rollback_collects_no_cids() {
     let (db, _) = make_test_db_with_bus().await;
-    db.create_collection(test_collection()).await.unwrap();
+    db.create_collection(&defra_core::RequestContext::default(), test_collection())
+        .await
+        .unwrap();
     let mutator = AutoCommitMutator::new(db);
     let collected = collect_failed_write("create-many-rollback", |context| async move {
         mutator
@@ -76,7 +80,9 @@ async fn create_many_rollback_collects_no_cids() {
 #[tokio::test]
 async fn create_rollback_collects_no_cids() {
     let (db, _) = make_test_db_with_bus().await;
-    db.create_collection(test_collection()).await.unwrap();
+    db.create_collection(&defra_core::RequestContext::default(), test_collection())
+        .await
+        .unwrap();
     let mutator = AutoCommitMutator::new(db);
     let doc = || Document::from_json_str(r#"{"x":1}"#).unwrap();
     mutator
@@ -93,7 +99,9 @@ async fn create_rollback_collects_no_cids() {
 #[tokio::test]
 async fn creates_updates_and_deletes_collect_into_their_requests_session() {
     let (db, _) = make_test_db_with_bus().await;
-    db.create_collection(test_collection()).await.unwrap();
+    db.create_collection(&defra_core::RequestContext::default(), test_collection())
+        .await
+        .unwrap();
     let mutator = AutoCommitMutator::new(db);
     let session = "every-write-collects";
     let context = in_session(session);

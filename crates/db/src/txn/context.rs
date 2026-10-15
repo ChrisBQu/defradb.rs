@@ -42,12 +42,14 @@ pub struct DbTransactionContext<S: Store> {
 const CLAIMED_FOR_CLEANUP: u64 = u64::MAX;
 
 impl<S: Store> DbTransactionContext<S> {
-    /// Create a transaction context. Pass `Some(broadcaster)` to forward
-    /// committed writes to P2P peers; pass `None` for the non-P2P case.
+    /// Create a transaction context owned by `owner`, the identity of the
+    /// request that began it. Pass `Some(broadcaster)` to forward committed
+    /// writes to P2P peers; pass `None` for the non-P2P case.
     pub(crate) fn new_with_broadcaster(
         db: Arc<DB<S>>,
         id: String,
         readonly: bool,
+        owner: Option<String>,
         fetcher: Arc<LensedDocFetcher<S>>,
         acp_registration_projection: Arc<AcpRegistrationProjection>,
         broadcaster: Option<Arc<dyn crate::event::emission::TxnBroadcaster>>,
@@ -57,7 +59,7 @@ impl<S: Store> DbTransactionContext<S> {
             db,
             id,
             readonly,
-            owner: defra_core::current_identity::get_effective_identity(),
+            owner,
             fetcher,
             acp_registration_projection,
             broadcaster,
@@ -68,8 +70,9 @@ impl<S: Store> DbTransactionContext<S> {
         }
     }
 
-    pub(crate) fn is_owned_by_caller(&self) -> bool {
-        self.owner == defra_core::current_identity::get_effective_identity()
+    /// Whether the request `context` serves acts as this transaction's owner.
+    pub(crate) fn is_owned_by(&self, context: &defra_core::RequestContext) -> bool {
+        self.owner.as_deref() == context.identity()
     }
 
     /// Get the instant when this transaction was created.

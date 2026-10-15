@@ -8,6 +8,7 @@ use std::sync::Arc;
 use tracing::{instrument, warn};
 
 use acp::nac::NodePermission;
+use defra_core::RequestContext;
 use identity::Did;
 
 use crate::error::{Result, TransactionError};
@@ -243,23 +244,26 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
 
     async fn begin_txn(
         &self,
+        context: &RequestContext,
         readonly: bool,
     ) -> std::result::Result<TransactionHandle, TransactionError> {
-        self.registry.begin(readonly).await
+        self.registry.begin(context, readonly).await
     }
 
     async fn commit_txn(
         &self,
+        context: &RequestContext,
         handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError> {
-        self.registry.commit(handle).await
+        self.registry.commit(context, handle).await
     }
 
     async fn rollback_txn(
         &self,
+        context: &RequestContext,
         handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError> {
-        self.registry.rollback(handle).await
+        self.registry.rollback(context, handle).await
     }
 
     fn abandon_txn(&self, handle: &TransactionHandle) {
@@ -315,13 +319,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         };
 
         if matches!(&parsed, ParsedOperation::Query { .. }) {
-            match self.registry.begin_implicit_read().await {
+            match self.registry.begin_implicit_read(&self.context).await {
                 Ok(handle) => {
                     let response = self.run_in_txn(request.clone(), &handle).await;
                     let apply_read_effects = response.errors.is_empty();
                     if let Err(error) = self
                         .registry
-                        .finish_implicit_read(&handle, apply_read_effects)
+                        .finish_implicit_read(&self.context, &handle, apply_read_effects)
                         .await
                     {
                         if apply_read_effects {
@@ -372,10 +376,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         // Resolve effective identity: request identity takes precedence over default
         let identity = self.resolve_identity(request.identity);
-        let acting_identity = identity
-            .as_ref()
-            .map(ToString::to_string)
-            .or_else(defra_core::current_identity::get_effective_identity);
         // What this request writes is created by its caller.
         let runner = self.for_caller(identity.as_ref());
 
@@ -463,11 +463,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         });
 
-        let result = defra_core::current_identity::with_scoped_identity(
-            acting_identity,
-            await_with_timeout(execution, self.query_timeout),
-        )
-        .await;
+        let result = await_with_timeout(execution, self.query_timeout).await;
 
         match result {
             Ok(data) => QueryResponse {
@@ -494,7 +490,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
     /// [`QueryExecutor::execute_in_txn`] on a runner bound to the request.
     async fn run_in_txn(&self, request: QueryRequest, handle: &TransactionHandle) -> QueryResponse {
-        let txn_ctx = match self.registry.get(handle) {
+        let txn_ctx = match self.registry.get(&self.context, handle) {
             GetTransactionResult::Found(ctx) => ctx,
             GetTransactionResult::NotFound => {
                 return QueryResponse::error(format!(
@@ -1126,12 +1122,17 @@ mod tests {
 
         async fn begin(
             &self,
+            _context: &defra_core::RequestContext,
             _readonly: bool,
         ) -> std::result::Result<TransactionHandle, TransactionError> {
             Ok(TransactionHandle::new(self.ctx.id.clone()))
         }
 
-        fn get(&self, handle: &TransactionHandle) -> GetTransactionResult {
+        fn get(
+            &self,
+            _context: &defra_core::RequestContext,
+            handle: &TransactionHandle,
+        ) -> GetTransactionResult {
             if handle.as_str() == self.ctx.id {
                 GetTransactionResult::Found(self.ctx.clone())
             } else {
@@ -1141,6 +1142,7 @@ mod tests {
 
         async fn commit(
             &self,
+            _context: &defra_core::RequestContext,
             _handle: &TransactionHandle,
         ) -> std::result::Result<(), TransactionError> {
             Ok(())
@@ -1148,6 +1150,7 @@ mod tests {
 
         async fn rollback(
             &self,
+            _context: &defra_core::RequestContext,
             _handle: &TransactionHandle,
         ) -> std::result::Result<(), TransactionError> {
             Ok(())
@@ -1164,7 +1167,10 @@ mod tests {
             collections,
             SerialTxnRegistry::new(txn_fetcher),
         );
-        let handle = runner.begin_txn(true).await.expect("begin txn");
+        let handle = runner
+            .begin_txn(&defra_core::RequestContext::default(), true)
+            .await
+            .expect("begin txn");
 
         let (first, second) = tokio::join!(
             runner.execute_in_txn(QueryRequest::new("query { Users { name } }"), &handle),

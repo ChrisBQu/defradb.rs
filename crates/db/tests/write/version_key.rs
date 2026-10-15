@@ -34,7 +34,9 @@ fn is_version_key(key: &[u8]) -> bool {
 #[tokio::test]
 async fn an_update_at_the_same_version_does_not_rewrite_the_version_key() {
     let db = Arc::new(DB::new(CountingStore::new(RegolithStore::in_memory().unwrap())).unwrap());
-    db.create_collection(collection()).await.unwrap();
+    db.create_collection(&defra_core::RequestContext::default(), collection())
+        .await
+        .unwrap();
 
     let creator = DbDocMutator::new(Arc::clone(&db), db.new_txn(false).await.unwrap());
     let created = creator

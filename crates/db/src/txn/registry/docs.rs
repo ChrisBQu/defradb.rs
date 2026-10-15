@@ -4,9 +4,14 @@ use super::*;
 
 impl<S: Store + 'static> DbTransactionRegistry<S> {
     /// Get all documents from a collection within a transaction.
-    pub async fn get_all_docs(&self, txn_id: &str, collection_name: &str) -> Result<Vec<Document>> {
+    pub async fn get_all_docs(
+        &self,
+        context: &RequestContext,
+        txn_id: &str,
+        collection_name: &str,
+    ) -> Result<Vec<Document>> {
         let ctx = self
-            .get_ctx(txn_id)?
+            .get_ctx(context, txn_id)?
             .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
         let action_lock = ctx.action_lock();
         let _action_guard = action_lock.lock().await;
@@ -24,12 +29,13 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
     /// For information about missing IDs, use the DocFetcher's get_by_ids directly.
     pub async fn get_docs_by_ids(
         &self,
+        context: &RequestContext,
         txn_id: &str,
         collection_name: &str,
         doc_ids: &[String],
     ) -> Result<Vec<Document>> {
         let ctx = self
-            .get_ctx(txn_id)?
+            .get_ctx(context, txn_id)?
             .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
         let action_lock = ctx.action_lock();
         let _action_guard = action_lock.lock().await;

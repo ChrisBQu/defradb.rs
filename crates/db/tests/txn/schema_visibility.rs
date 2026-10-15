@@ -14,9 +14,16 @@ use storage::RegolithStore;
 async fn statements_in_a_transaction_see_the_collection_it_added() {
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     let registry = Arc::new(DbTransactionRegistry::new(Arc::clone(&db)));
-    let handle = registry.begin(false).await.unwrap();
+    let handle = registry
+        .begin(&defra_core::RequestContext::default(), false)
+        .await
+        .unwrap();
     registry
-        .add_schema_in_txn(handle.as_str(), "type TxnOnly { value: Int }")
+        .add_schema_in_txn(
+            &defra_core::RequestContext::default(),
+            handle.as_str(),
+            "type TxnOnly { value: Int }",
+        )
         .await
         .unwrap();
     let runner = QueryRunner::with_arc_registry_and_provider(
@@ -44,5 +51,8 @@ async fn statements_in_a_transaction_see_the_collection_it_added() {
         "a collection added in an open transaction is visible outside it"
     );
 
-    registry.rollback(&handle).await.unwrap();
+    registry
+        .rollback(&defra_core::RequestContext::default(), &handle)
+        .await
+        .unwrap();
 }

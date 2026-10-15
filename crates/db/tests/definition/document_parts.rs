@@ -78,9 +78,12 @@ async fn raw(store: &RegolithStore, prefix: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
 async fn legacy_store(path: &Path) -> (Vec<DocID>, Reads) {
     let store = RegolithStore::open(path).unwrap();
     let db = Arc::new(DB::open(store.clone()).await.unwrap());
-    db.create_collections_atomic(query::parse_sdl(SDL).unwrap())
-        .await
-        .unwrap();
+    db.create_collections_atomic(
+        &defra_core::RequestContext::default(),
+        query::parse_sdl(SDL).unwrap(),
+    )
+    .await
+    .unwrap();
     let mutator = AutoCommitMutator::new(db.clone());
     let mut ids = Vec::new();
     for i in 0..DOCUMENTS {

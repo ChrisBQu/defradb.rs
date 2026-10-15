@@ -55,7 +55,9 @@ async fn make_handler_with_encrypted_index() -> (
         ],
     );
     collection.encrypted_indexes = vec![EncryptedIndexDescription::new("name")];
-    db.create_collection(collection).await.unwrap();
+    db.create_collection(&defra_core::RequestContext::default(), collection)
+        .await
+        .unwrap();
 
     let blockstore = Arc::new(DefraBlockstore::new(store, false));
     let handler = DbMergeHandler::new(db, blockstore.clone());
