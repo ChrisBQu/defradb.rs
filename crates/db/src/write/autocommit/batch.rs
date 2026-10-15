@@ -325,7 +325,7 @@ impl<S: Store + 'static> storage::corekv::RetryAttemptFn for BatchRetryAttempt<S
                 .map_err(|error| storage::corekv::RetryAttemptError::Abort(Box::new(error)))?;
             let (io, mut callbacks) = txn
                 .into_retry_attempt()
-                .map_err(|error| storage::corekv::RetryAttemptError::Storage(error.into()))?;
+                .map_err(storage::corekv::RetryAttemptError::Storage)?;
             let mut guards = batch.doc_guards.lock();
             let doc_guards = std::mem::take(&mut *guards);
             drop(guards);

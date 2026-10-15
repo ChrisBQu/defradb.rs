@@ -468,7 +468,7 @@ impl<S: Store> VersionedFetcher<S> {
                 );
                 let response = inputs
                     .get(&request)
-                    .ok_or_else(|| Error::Query(query::error::QueryError::NeedsInput(request)))?;
+                    .ok_or(Error::Query(query::error::QueryError::NeedsInput(request)))?;
                 let response: crate::write::prepare::PreparedKmsResponse =
                     serde_json::from_slice(&response).map_err(|error| {
                         Error::Serialization(format!("invalid prepared read key: {error}"))
