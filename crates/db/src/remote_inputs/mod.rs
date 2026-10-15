@@ -3,9 +3,12 @@
 //! have theirs inside the KMS; ACP decisions inside the ACP provider.)
 //!
 //! The services run their round trips on the network runtime the node gives
-//! the database ([`DB::set_network`](crate::DB::set_network)), or on the
-//! caller's async runtime when none was given. They are built on first use,
-//! so the runtime is set before the first write that needs one.
+//! the database ([`DB::set_network`](crate::DB::set_network)). Without one,
+//! signatures run in the requesting task (a signer brings its own runtime,
+//! or none), and embeddings, which are HTTP requests, run there only in a
+//! browser: natively they need the network runtime and report its absence.
+//! The services are built on first use, so the runtime is set before the
+//! first write that needs one.
 
 mod embeddings;
 mod signatures;
@@ -30,10 +33,12 @@ impl RemoteInputs {
         self.runtime.set(runtime).is_ok()
     }
 
+    /// The network runtime the node gave, else inline.
     fn runtime(&self) -> inputs::Runtime {
         self.runtime
-            .get_or_init_racy(inputs::Runtime::ambient)
-            .clone()
+            .get()
+            .cloned()
+            .unwrap_or_else(inputs::Runtime::inline)
     }
 
     /// Remote signatures, one call per wave and signer.
@@ -43,10 +48,19 @@ impl RemoteInputs {
         })
     }
 
-    /// Embeddings, single-flighted and cached by text.
-    pub(crate) fn embeddings(&self) -> &inputs::Service<Embeddings> {
-        self.embeddings.get_or_init_racy(|| {
-            inputs::Service::new(Embeddings, embeddings::config(), self.runtime())
-        })
+    /// Embeddings, single-flighted and cached by text: on the network
+    /// runtime, or inline in a browser, where an HTTP request needs no
+    /// runtime of its own. `None` natively without a network runtime.
+    pub(crate) fn embeddings(&self) -> Option<&inputs::Service<Embeddings>> {
+        let runtime = self
+            .runtime
+            .get()
+            .cloned()
+            .or_else(|| cfg!(target_arch = "wasm32").then(inputs::Runtime::inline))?;
+        Some(
+            self.embeddings.get_or_init_racy(|| {
+                inputs::Service::new(Embeddings, embeddings::config(), runtime)
+            }),
+        )
     }
 }

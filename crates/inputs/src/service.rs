@@ -115,6 +115,9 @@ where
     /// go out together, in as few round trips as the batch cap allows.
     pub async fn get_many(&self, keys: Vec<S::Key>) -> Vec<ResultOf<S>> {
         let inner = &self.inner;
+        if inner.runtime.network.is_none() {
+            return inner.inline(keys).await;
+        }
         let start = inner.runtime.now();
         Stats::add(&inner.stats.requests, keys.len() as u64);
         let mut touched: Vec<(S::Group, LaneOf<S>)> = Vec::new();
@@ -131,8 +134,13 @@ where
     /// Starts the round trips `keys` need, without waiting for them: their
     /// answers land in the cache (where the source allows), and a later
     /// [`get_many`](Self::get_many) of a key still in flight joins it.
+    /// Inline, with nothing to run them in the background, it does nothing:
+    /// the later call fetches them.
     pub fn prefetch(&self, keys: Vec<S::Key>) {
         let inner = &self.inner;
+        if inner.runtime.network.is_none() {
+            return;
+        }
         let now = inner.runtime.now();
         Stats::add(&inner.stats.requests, keys.len() as u64);
         let mut touched: Vec<(S::Group, LaneOf<S>)> = Vec::new();
@@ -251,7 +259,12 @@ where
                 started: false,
                 batch: Vec::new(),
             };
-            self.runtime.network.spawn(Box::pin(driving.run()));
+            match &self.runtime.network {
+                Some(network) => network.spawn(Box::pin(driving.run())),
+                // Never reached: an inline service runs no lanes. Dropped, the
+                // claim settles its lane's keys as closed.
+                None => drop(driving),
+            }
         }
     }
 
@@ -279,13 +292,18 @@ where
             }
             let sent = self.runtime.now();
             let fetch = AssertUnwindSafe(self.source.fetch(group, keys)).catch_unwind();
-            let timer = self.runtime.network.sleep(Duration::from_micros(remaining));
-            let outcome = async { Some(fetch.await) }
-                .or(async {
-                    timer.await;
-                    None
-                })
-                .await;
+            let outcome = match &self.runtime.network {
+                Some(network) => {
+                    let timer = network.sleep(Duration::from_micros(remaining));
+                    async { Some(fetch.await) }
+                        .or(async {
+                            timer.await;
+                            None
+                        })
+                        .await
+                }
+                None => Some(fetch.await),
+            };
             self.stats
                 .round_trip_micros
                 .record(self.runtime.now().saturating_sub(sent));
@@ -322,7 +340,9 @@ where
                 %error,
                 "remote input request failed; retrying"
             );
-            self.runtime.network.sleep(wait).await;
+            if let Some(network) = &self.runtime.network {
+                network.sleep(wait).await;
+            }
         }
     }
 
@@ -335,7 +355,17 @@ where
         outcome: Result<Vec<Result<S::Value, S::Error>>, Error<S::Error>>,
         trip: u64,
     ) {
-        let answers: Vec<ResultOf<S>> = match outcome {
+        let answers = self.answers(keys.len(), outcome);
+        self.settle_all(keys, answers, trip);
+    }
+
+    /// One answer per key of a round trip that ended with `outcome`.
+    fn answers(
+        &self,
+        count: usize,
+        outcome: Result<Vec<Result<S::Value, S::Error>>, Error<S::Error>>,
+    ) -> Vec<ResultOf<S>> {
+        match outcome {
             Ok(answers) => answers
                 .into_iter()
                 .map(|answer| answer.map_err(Error::Source))
@@ -344,14 +374,93 @@ where
                 Stats::add(&self.stats.failures, 1);
                 tracing::debug!(
                     input = self.source.name(),
-                    keys = keys.len(),
+                    keys = count,
                     %error,
                     "remote input request ended without answers"
                 );
-                keys.iter().map(|_| Err(error.clone())).collect()
+                (0..count).map(|_| Err(error.clone())).collect()
             }
+        }
+    }
+
+    /// Caches `key`'s answer where the source allows, unless an invalidation
+    /// began since `generation`.
+    fn cache_answer(&self, key: &S::Key, result: &ResultOf<S>, now: u64, generation: u64) {
+        let Ok(value) = result else {
+            return;
         };
-        self.settle_all(keys, answers, trip);
+        if let Some(bytes) = self.source.cache_bytes(key, value) {
+            if self
+                .cache
+                .insert(key.clone(), value.clone(), bytes, now, generation)
+            {
+                Stats::add(&self.stats.cached, 1);
+            }
+        }
+    }
+
+    /// An inline call: the keys not cached go out from this task, batched by
+    /// group, with nothing spawned and no timer read.
+    async fn inline(&self, keys: Vec<S::Key>) -> Vec<ResultOf<S>> {
+        let start = self.runtime.now();
+        Stats::add(&self.stats.requests, keys.len() as u64);
+        let generation = self.cache.generation();
+        let mut results: Vec<Option<ResultOf<S>>> = (0..keys.len()).map(|_| None).collect();
+        let mut first_of: rapidhash::fast::RapidHashMap<S::Key, usize> =
+            rapidhash::fast::RapidHashMap::default();
+        let mut repeats = Vec::new();
+        let mut groups: Vec<(S::Group, Vec<(usize, S::Key)>)> = Vec::new();
+        for (index, key) in keys.into_iter().enumerate() {
+            if let Some(value) = self.cache.get(&key, start) {
+                Stats::add(&self.stats.cache_hits, 1);
+                results[index] = Some(Ok(value));
+                continue;
+            }
+            if let Some(&first) = first_of.get(&key) {
+                Stats::add(&self.stats.joined, 1);
+                repeats.push((index, first));
+                continue;
+            }
+            first_of.insert(key.clone(), index);
+            let group = self.source.group(&key);
+            match groups.iter_mut().find(|(seen, _)| *seen == group) {
+                Some((_, members)) => members.push((index, key)),
+                None => groups.push((group, vec![(index, key)])),
+            }
+        }
+        let mut trips = 0u64;
+        for (group, members) in &groups {
+            for batch in members.chunks(self.config.max_batch) {
+                let keys: Vec<S::Key> = batch.iter().map(|(_, key)| key.clone()).collect();
+                self.trips.fetch_add(1, Ordering::Relaxed);
+                trips += 1;
+                let outcome = {
+                    let _permit = self.in_flight.acquire(1).await;
+                    self.round_trip(group, &keys).await
+                };
+                let now = self.runtime.now();
+                for ((index, key), answer) in batch.iter().zip(self.answers(keys.len(), outcome)) {
+                    self.cache_answer(key, &answer, now, generation);
+                    results[*index] = Some(answer);
+                }
+            }
+        }
+        for (index, first) in repeats {
+            results[index] = results[first].clone();
+        }
+        self.stats
+            .wait_micros
+            .record(self.runtime.now().saturating_sub(start));
+        self.stats.trips_per_call.record(trips);
+        results
+            .into_iter()
+            .map(|result| {
+                result.unwrap_or(Err(Error::Answers {
+                    expected: 1,
+                    got: 0,
+                }))
+            })
+            .collect()
     }
 
     fn settle_all(&self, keys: Vec<S::Key>, answers: Vec<ResultOf<S>>, trip: u64) {
@@ -361,16 +470,7 @@ where
             let Some(flight) = self.flights.get(&key) else {
                 continue;
             };
-            if let Ok(value) = &result {
-                if let Some(bytes) = self.source.cache_bytes(&key, value) {
-                    if self
-                        .cache
-                        .insert(key.clone(), value.clone(), bytes, now, flight.generation)
-                    {
-                        Stats::add(&self.stats.cached, 1);
-                    }
-                }
-            }
+            self.cache_answer(&key, &result, now, flight.generation);
             flight.record(Answer { result, trip });
             settled.push((key, flight));
         }
@@ -397,10 +497,13 @@ where
             if expired || flight.answer().is_some() {
                 continue;
             }
+            let Some(network) = &self.runtime.network else {
+                flight.settled().await;
+                continue;
+            };
             let left = micros(self.config.deadline)
                 .saturating_sub(self.runtime.now().saturating_sub(start));
-            let timer = timer
-                .get_or_insert_with(|| self.runtime.network.sleep(Duration::from_micros(left)));
+            let timer = timer.get_or_insert_with(|| network.sleep(Duration::from_micros(left)));
             let settled = async {
                 flight.settled().await;
                 true
