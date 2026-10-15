@@ -173,3 +173,72 @@ async fn schema_history_alias_cost_measurement() {
         }
     }
 }
+
+/// A document's identity keys (`/d/p/`, `/d/s/`) and its version key (`/v/`).
+fn identity_or_version_key(key: &[u8]) -> bool {
+    use storage::namespace::Namespace;
+    let Some((&namespace, rest)) = key.split_first() else {
+        return false;
+    };
+    (namespace == Namespace::Systemstore.prefix()
+        && (rest.starts_with(b"/d/p/") || rest.starts_with(b"/d/s/")))
+        || (namespace == Namespace::Datastore.prefix() && rest.starts_with(b"/v/"))
+}
+
+/// A projected read by ID reads each document's identity and version once:
+/// the check that the projection is exact and the read share them.
+#[tokio::test]
+async fn a_projected_read_by_id_reads_each_identity_and_version_once() {
+    use crate::common::counting_store::CountingStore;
+    use query::fetcher::DocFetcher;
+    use query::mutator::DocMutator;
+    let db = Arc::new(
+        db::DB::new(CountingStore::new(
+            storage::RegolithStore::in_memory().unwrap(),
+        ))
+        .unwrap(),
+    );
+    db.create_collections_atomic(query::parse_sdl("type Probe { left: Int right: Int }").unwrap())
+        .await
+        .unwrap();
+    let mutator = db::AutoCommitMutator::new(db.clone());
+    let mut ids = Vec::new();
+    for value in 0..3 {
+        let created = mutator
+            .create(
+                "Probe",
+                Document::from_json_str(&format!(r#"{{"left": {value}, "right": {value}}}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        ids.push(created.doc_id.to_string());
+    }
+    let txn = db.new_txn(false).await.unwrap();
+    let fetcher = LensedDocFetcher::new(db.clone(), txn, db.lens_store().clone());
+    let fields: rapidhash::RapidHashSet<String> = ["left".to_string()].into_iter().collect();
+
+    db.store().take_point_keys();
+    let result = fetcher
+        .get_by_ids_projected("Probe", &ids, &fields)
+        .await
+        .unwrap()
+        .expect("documents at the current version read projected");
+    let keys = db.store().take_point_keys();
+
+    assert_eq!(result.found_count(), 3);
+    let mut reads: RapidHashMap<Vec<u8>, usize> = RapidHashMap::default();
+    for key in keys.into_iter().filter(|key| identity_or_version_key(key)) {
+        *reads.entry(key).or_default() += 1;
+    }
+    assert_eq!(
+        reads.len(),
+        9,
+        "two identity keys and a version key per document"
+    );
+    assert!(
+        reads.values().all(|&count| count == 1),
+        "a key was read more than once: {reads:?}"
+    );
+    let _ = fetcher.take_txn().await.unwrap().discard();
+}

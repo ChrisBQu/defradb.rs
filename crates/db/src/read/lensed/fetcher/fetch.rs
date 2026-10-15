@@ -127,34 +127,64 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
     ) -> query::error::Result<Option<FetchByIdsResult>> {
         let (collection, datastore, systemstore) =
             get_collection_with_lazy_load(&self.txn, collection_name).await?;
+        let storage_error = |error: crate::error::Error| {
+            query::error::QueryError::execution(format!("storage error: {error}"))
+        };
 
         // Field projections are exact only for documents written with the
         // current schema, which no lens migration touches. Historical or
         // legacy values require the full read and migration path. Downsample
-        // validation reads the parts it decides on itself.
+        // validation reads the parts it decides on itself. Each document's
+        // identity and version are read once, for the check and the read.
+        let mut identities = Vec::with_capacity(doc_ids.len());
         for id in doc_ids {
-            let Ok(doc_id) = document::DocID::from_string(id) else {
-                continue;
+            let identity = match document::DocID::from_string(id) {
+                Ok(doc_id) => collection
+                    .resolve_doc_identity(&systemstore, &doc_id)
+                    .await
+                    .map_err(storage_error)?,
+                Err(_) => None,
             };
-            let Some((short_id, _)) = collection
-                .resolve_doc_identity(&systemstore, &doc_id)
-                .await
-                .map_err(|error| query::error::QueryError::execution(error.to_string()))?
-            else {
+            let Some((short_id, canonical)) = identity else {
+                identities.push((id, None));
                 continue;
             };
             let version = collection
                 .load_version(&datastore, short_id)
                 .await
-                .map_err(|error| query::error::QueryError::execution(error.to_string()))?;
+                .map_err(storage_error)?;
             if version.as_deref() != Some(collection.schema().version_id.as_str()) {
                 return Ok(None);
             }
+            identities.push((id, Some((short_id, canonical, version))));
         }
 
-        self.get_by_ids_impl_with_projection(collection_name, doc_ids, Some(fields))
-            .await
-            .map(Some)
+        let mut docs = Vec::with_capacity(identities.len());
+        let mut missing_ids = Vec::new();
+        for (id, identity) in identities {
+            let fetched = match identity {
+                Some((short_id, canonical, version)) => collection
+                    .get_with_datastore_fields_at(&datastore, short_id, &canonical, fields, version)
+                    .await
+                    .map_err(storage_error)?,
+                None => None,
+            };
+            match fetched {
+                Some(doc) => docs.push(doc),
+                None => missing_ids.push(id.clone()),
+            }
+        }
+
+        self.finish_by_ids(
+            collection_name,
+            &collection,
+            &datastore,
+            doc_ids.len(),
+            docs,
+            missing_ids,
+        )
+        .await
+        .map(Some)
     }
 
     async fn get_by_ids_impl_with_projection(
@@ -165,10 +195,6 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
     ) -> query::error::Result<FetchByIdsResult> {
         let (collection, datastore, systemstore) =
             get_collection_with_lazy_load(&self.txn, collection_name).await?;
-
-        // Check if collection has migrations by loading full version history (matching Go)
-        let (_, has_migrations) = self.load_versions_and_check_migrations(&collection).await?;
-        let target_version_id = &collection.schema().version_id;
 
         let mut docs = Vec::new();
         let mut missing_ids = Vec::new();
@@ -210,6 +236,31 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
             }
         }
 
+        self.finish_by_ids(
+            collection_name,
+            &collection,
+            &datastore,
+            doc_ids.len(),
+            docs,
+            missing_ids,
+        )
+        .await
+    }
+
+    /// Migrate the documents a by-ID read found, and report the IDs it did not.
+    async fn finish_by_ids(
+        &self,
+        collection_name: &str,
+        collection: &crate::collection::Collection,
+        datastore: &datastore::NamespaceView,
+        requested: usize,
+        docs: Vec<Document>,
+        missing_ids: Vec<String>,
+    ) -> query::error::Result<FetchByIdsResult> {
+        // Check if collection has migrations by loading full version history (matching Go)
+        let (_, has_migrations) = self.load_versions_and_check_migrations(collection).await?;
+        let target_version_id = &collection.schema().version_id;
+
         // Count documents needing migration for logging
         let needs_migration_count = docs
             .iter()
@@ -218,7 +269,7 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
 
         trace!(
             collection = %collection_name,
-            requested = doc_ids.len(),
+            requested,
             found = docs.len(),
             missing = missing_ids.len(),
             needs_migration = needs_migration_count,
@@ -230,7 +281,7 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
         let mut processed_docs = Vec::with_capacity(docs.len());
         for doc in docs {
             let processed = self
-                .process_document(doc, &collection, &datastore, has_migrations)
+                .process_document(doc, collection, datastore, has_migrations)
                 .await?;
             processed_docs.push(processed);
         }
