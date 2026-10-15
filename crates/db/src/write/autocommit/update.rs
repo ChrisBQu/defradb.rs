@@ -319,6 +319,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         current_doc.set_id(canonical_doc_id.clone());
         let mut modified_fields = attempt.modified_fields.clone();
         let embedding_config = self.db.options().embedding_config();
+        let inputs = attempt.prepared_inputs.clone().unwrap_or_default();
         let index_manager = IndexManager::from_indexes(
             collection.resolved_root_id(),
             collection.schema(),
@@ -349,8 +350,8 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     &index_manager,
                     &mut modified_fields,
                     &heads,
-                    Some(&embedding_config),
-                    attempt.prepared_inputs.as_ref(),
+                    &embedding_config,
+                    &inputs,
                 )
                 .await?;
                 let block_result = write_document_blocks_with_inputs(

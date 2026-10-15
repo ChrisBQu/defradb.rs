@@ -1,15 +1,28 @@
 use axum::{routing::post, Json, Router};
-use db::{AutoCommitMutator, DbDocMutator, DB};
+use db::{
+    AutoCommitMutator, DbCollectionProvider, DbDocMutator, DbTransactionRegistry,
+    LensedAutoCommitFetcher, DB,
+};
 use document::{Document, NormalValue};
 use query::mutator::DocMutator;
+use query::{QueryExecutor, QueryRequest};
 use schema::{CollectionVersion, FieldDescription, FieldKind, VectorEmbeddingDescription};
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use storage::RegolithStore;
 
 struct Fixture {
     db: Arc<DB<RegolithStore>>,
+    /// Embedding requests the server has answered.
+    calls: Arc<AtomicUsize>,
     server: tokio::task::JoinHandle<()>,
+}
+
+impl Fixture {
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
 }
 
 impl Drop for Fixture {
@@ -21,12 +34,15 @@ impl Drop for Fixture {
 async fn fixture() -> Fixture {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&calls);
     let server = tokio::spawn(async move {
         axum::serve(
             listener,
             Router::new().route(
                 "/embeddings",
-                post(|Json(request): Json<Value>| async move {
+                post(move |Json(request): Json<Value>| async move {
+                    counted.fetch_add(1, Ordering::SeqCst);
                     assert_eq!(request["model"], "test-model");
                     let vector = match request["input"].as_str().unwrap() {
                         "first\n" => vec![1.0, 2.0],
@@ -62,7 +78,7 @@ async fn fixture() -> Fixture {
             url: format!("http://{address}"),
         });
     db.create_collection(collection).await.unwrap();
-    Fixture { db, server }
+    Fixture { db, calls, server }
 }
 
 fn document(text: &str) -> Document {
@@ -105,6 +121,9 @@ async fn explicit_txn_create_generates_embedding() {
     assert_vector(&stored, vec![1.0, 2.0]);
 }
 
+/// An explicit-transaction update never calls the embedding service inside
+/// the transaction: it ends asking for the input, which is fetched outside and
+/// read from the memo when the update runs again.
 #[tokio::test]
 async fn explicit_txn_update_regenerates_embedding() {
     let fixture = fixture().await;
@@ -118,13 +137,70 @@ async fn explicit_txn_update_regenerates_embedding() {
         .unwrap()
         .unwrap();
     doc.set("text", "second");
+    let calls_before = fixture.calls();
+    let fields: rapidhash::RapidHashSet<String> = ["text".to_string()].into_iter().collect();
+    let error = mutator
+        .update("Texts", doc.clone(), fields.clone())
+        .await
+        .unwrap_err();
+    let query::error::QueryError::NeedsInput(request) = error else {
+        panic!("expected an input request, got {error:?}");
+    };
+    assert_eq!(fixture.calls(), calls_before, "the update called the service");
+
+    let inputs = query::prepared::PreparedInputMemo::default();
+    inputs.insert(
+        request.clone(),
+        mutator.resolve_prepared_input(&request).await.unwrap(),
+    );
+    assert_eq!(fixture.calls(), calls_before + 1);
     let updated = mutator
-        .update("Texts", doc, ["text".to_string()].into_iter().collect())
+        .with_prepared_inputs(inputs)
+        .unwrap()
+        .update("Texts", doc, fields)
         .await
         .unwrap();
+    assert_eq!(fixture.calls(), calls_before + 1);
     assert_vector(&updated.document, vec![3.0, 4.0]);
     mutator.take_txn().await.unwrap().commit().await.unwrap();
     let stored = autocommit
+        .get_for_update("Texts", &created.doc_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_vector(&stored, vec![3.0, 4.0]);
+}
+
+/// A GraphQL update in an explicit transaction gets its embedding: the
+/// statement fetches it between two runs, never inside one.
+#[tokio::test]
+async fn explicit_txn_graphql_update_regenerates_embedding() {
+    let fixture = fixture().await;
+    let created = AutoCommitMutator::new(Arc::clone(&fixture.db))
+        .create("Texts", document("first"))
+        .await
+        .unwrap();
+    let registry = Arc::new(DbTransactionRegistry::new(Arc::clone(&fixture.db)));
+    let queries = query::QueryRunner::with_arc_registry_and_provider(
+        LensedAutoCommitFetcher::new(Arc::clone(&fixture.db)),
+        DbCollectionProvider::new_arc(Arc::clone(&fixture.db)),
+        registry,
+    );
+    let txn = queries.begin_txn(false).await.unwrap();
+    let calls_before = fixture.calls();
+    let response = queries
+        .execute_in_txn(
+            QueryRequest::new(format!(
+                r#"mutation {{ update_Texts(docID: "{}", input: {{text: "second"}}) {{ vector }} }}"#,
+                created.doc_id
+            )),
+            &txn,
+        )
+        .await;
+    assert!(!response.has_errors(), "{:?}", response.errors);
+    assert_eq!(fixture.calls(), calls_before + 1);
+    queries.commit_txn(&txn).await.unwrap();
+    let stored = AutoCommitMutator::new(Arc::clone(&fixture.db))
         .get_for_update("Texts", &created.doc_id)
         .await
         .unwrap()

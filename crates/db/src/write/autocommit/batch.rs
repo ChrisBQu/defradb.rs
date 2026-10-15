@@ -498,20 +498,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         self.validate_collection_for_write(&collection).await?;
         ensure_collection_is_active(&self.db, collection_name, &collection)?;
         let embedding_config = self.db.options().embedding_config();
-
         let prepared_inputs = self.prepared_inputs.clone().unwrap_or_default();
-        let generated = crate::search::embedding::set_embedding_from_inputs(
-            &collection.schema().vector_embeddings,
-            &mut doc,
-            false,
-            &modified_fields,
-            &embedding_config,
-            &prepared_inputs,
-        )?;
-
-        for field in generated {
-            modified_fields.insert(field);
-        }
 
         let doc_id = doc
             .id()
@@ -548,8 +535,8 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             &index_manager,
             &mut modified_fields,
             &heads,
-            None,
-            self.prepared_inputs.as_ref(),
+            &embedding_config,
+            &prepared_inputs,
         )
         .await?;
 

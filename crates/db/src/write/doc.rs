@@ -55,10 +55,20 @@ fn document_json_value(doc: &Document) -> Option<serde_json::Value> {
 /// duration of the transaction. Note: This provides transaction-level caching,
 /// not true snapshot isolation - if collections are accessed at different times,
 /// they reflect the store state at the time of first access.
+///
+/// # Remote inputs
+///
+/// An update's embeddings are remote inputs and are never fetched inside the
+/// transaction: they come from the mutator's memo of prepared inputs (see
+/// [`DocMutator::with_prepared_inputs`]). A miss ends the update with
+/// [`query::error::QueryError::NeedsInput`] before it writes anything; the
+/// caller fetches the input with [`DocMutator::resolve_prepared_input`],
+/// records it in the memo and runs the update again.
 pub struct DbDocMutator<S: Store> {
     db: Arc<DB<S>>,
     txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
     broadcaster: Option<Arc<dyn crate::event::emission::TxnBroadcaster>>,
+    prepared_inputs: query::prepared::PreparedInputMemo,
 }
 
 impl<S: Store> DbDocMutator<S> {
@@ -70,6 +80,7 @@ impl<S: Store> DbDocMutator<S> {
             db,
             txn: Arc::new(TokioMutex::new(Some(txn))),
             broadcaster: None,
+            prepared_inputs: query::prepared::PreparedInputMemo::default(),
         }
     }
 
@@ -86,6 +97,7 @@ impl<S: Store> DbDocMutator<S> {
             db,
             txn,
             broadcaster,
+            prepared_inputs: query::prepared::PreparedInputMemo::default(),
         }
     }
 
@@ -186,6 +198,25 @@ impl<S: Store + 'static> DbDocMutator<S> {
 impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
     fn supports_projected_updates(&self) -> bool {
         true
+    }
+
+    fn with_prepared_inputs(
+        &self,
+        inputs: query::prepared::PreparedInputMemo,
+    ) -> Option<Arc<dyn DocMutator>> {
+        Some(Arc::new(Self {
+            db: Arc::clone(&self.db),
+            txn: Arc::clone(&self.txn),
+            broadcaster: self.broadcaster.clone(),
+            prepared_inputs: inputs,
+        }))
+    }
+
+    async fn resolve_prepared_input(
+        &self,
+        request: &query::prepared::PreparedInputRequest,
+    ) -> query::error::Result<Arc<[u8]>> {
+        crate::write::prepare::resolve_input(&self.db, request).await
     }
 
     fn set_document_acp(&self, provider: Arc<dyn acp::DocumentACP>) {
@@ -375,17 +406,6 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             })?;
         doc.set_id(canonical_doc_id.clone());
 
-        let generated = crate::search::set_embedding(
-            &collection.schema().vector_embeddings,
-            &mut doc,
-            false,
-            Some(&modified_fields),
-            &self.db.options().embedding_config(),
-        )
-        .await
-        .map_err(|e| query::error::QueryError::execution(format!("embedding error: {}", e)))?;
-        modified_fields.extend(generated);
-
         self.db
             .validate_downsample_write(
                 &datastore,
@@ -407,8 +427,8 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             &index_manager,
             &mut modified_fields,
             &heads,
-            None,
-            None,
+            &self.db.options().embedding_config(),
+            &self.prepared_inputs,
         )
         .await?;
 
