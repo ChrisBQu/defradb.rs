@@ -16,8 +16,6 @@ mod wasm;
 
 pub use config::{LensConfig, LensModule};
 pub use doc::{LensDoc, DELETED_FIELD, DOC_ID_FIELD};
-#[cfg(feature = "wasmtime-runtime")]
-pub use engine::WasmSandboxConfig;
 pub use engine::{default_store, default_store_on, UnsupportedTransformStore};
 #[cfg(feature = "wasmtime-runtime")]
 pub use engine::{EpochTick, PoolTicks, TickGuard, TickSource, WasmSandboxConfig};
