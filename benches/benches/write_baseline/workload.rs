@@ -75,6 +75,7 @@ pub struct Measurement {
     pub client_conflicts: u64,
     pub engine_exhaustions: u64,
     pub storage_conflicts: u64,
+    pub engine_retries: u64,
     pub retries_before: ConflictMetricsSnapshot,
     pub retries_after: ConflictMetricsSnapshot,
 }
@@ -233,6 +234,7 @@ pub async fn run(scenario: Scenario, writers: usize, operations: usize) -> Measu
     }
     let elapsed = start.elapsed();
     let commits = successes.len() as u64;
+    let retries_after = telemetry::conflict_metrics_snapshot();
     let measurement = Measurement {
         elapsed,
         latencies,
@@ -240,8 +242,9 @@ pub async fn run(scenario: Scenario, writers: usize, operations: usize) -> Measu
         client_conflicts,
         engine_exhaustions,
         storage_conflicts: stats.snapshot().conflicts - storage_before.conflicts,
+        engine_retries: retries_after.engine.attempts - retries_before.engine.attempts,
         retries_before,
-        retries_after: telemetry::conflict_metrics_snapshot(),
+        retries_after,
     };
     verify::check(&fixture, scenario, &successes).await;
     fixture.store.close().await.unwrap();

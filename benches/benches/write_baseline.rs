@@ -63,6 +63,12 @@ fn metrics(sample: &Measurement) -> Vec<(&'static str, &'static str, bool, f64)>
         ),
         ("merge retries (retired)", "retries/commit", true, 0.0),
         (
+            "engine retries",
+            "retries/commit",
+            true,
+            sample.engine_retries as f64 / commits,
+        ),
+        (
             "push marker retries",
             "retries/commit",
             true,
@@ -179,7 +185,7 @@ fn main() {
         }
         let mut family = Family::new(
             format!("Concurrent writes: {}", scenario.name()),
-            format!("On-disk Immediate durability; {operations} requests per writer; {repetitions} fresh-store repetitions. HTTP execution without sockets, signing or ACP. Latencies include client-conflict and engine-exhausted requests. Storage conflicts exclude pre-commit query conflicts; client conflicts count requests returned with a transaction conflict. Engine exhaustion is reported separately. Retired retry layers report zero by definition."),
+            format!("On-disk Immediate durability; {operations} requests per writer; {repetitions} fresh-store repetitions. HTTP execution without sockets, signing or ACP. Latencies include client-conflict and engine-exhausted requests. Storage conflicts exclude pre-commit query conflicts; client conflicts count requests returned with a transaction conflict. Engine retries count replay executions after a losing attempt; exhaustion is reported separately. Retired retry layers report zero by definition."),
         ).trust(if guard.passed { Trust::Clean } else { Trust::Contaminated });
         for group in groups {
             family = family.group(group);

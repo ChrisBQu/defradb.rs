@@ -330,6 +330,7 @@ impl Store for RegolithStore {
                 attempt_count += 1;
                 if lost.is_some() {
                     conflict_count += 1;
+                    telemetry::record_retry_attempt(telemetry::RetryLayer::Engine);
                 }
                 committed_changes = head_cache::HeadChanges::default();
                 committed_callbacks = RetryCallbacks::default();

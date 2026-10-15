@@ -14,15 +14,17 @@ use opentelemetry::KeyValue;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum RetryLayer {
+    Engine,
     PushMarker,
 }
 
 impl RetryLayer {
-    const COUNT: usize = 1;
+    const COUNT: usize = 2;
 
     #[cfg(feature = "otlp")]
     const fn labels(self) -> &'static [&'static str] {
         match self {
+            Self::Engine => &["engine"],
             // Preserve the pre-stage-3 label for one compatibility window
             // while exposing the marker-based name to new dashboards.
             Self::PushMarker => &["push_marker", "push_ledger"],
@@ -51,10 +53,20 @@ pub struct ConflictMetricsSnapshot {
     /// Retired merge retry layer, preserved as zero for historical readers.
     pub merge: RetryLayerSnapshot,
     pub push_marker: RetryLayerSnapshot,
+    /// Transaction attempts re-executed after a prior attempt lost a conflict.
+    /// Only `attempts` is recorded for this layer; completion and exhaustion
+    /// are owned by the retrying caller.
+    pub engine: EngineRetrySnapshot,
     /// Retired ID-reservation retry layer, preserved as zero for historical readers.
     pub doc_short_id_reservation: RetryLayerSnapshot,
     /// Typed transaction conflicts returned through a client API.
     pub escaped_to_clients: u64,
+}
+
+/// Process-lifetime count of transaction-engine replay executions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EngineRetrySnapshot {
+    pub attempts: u64,
 }
 
 struct RetryCounters {
@@ -93,6 +105,9 @@ pub fn conflict_metrics_snapshot() -> ConflictMetricsSnapshot {
         embedded_execute: RetryLayerSnapshot::default(),
         merge: RetryLayerSnapshot::default(),
         push_marker: RETRIES.layer(RetryLayer::PushMarker),
+        engine: EngineRetrySnapshot {
+            attempts: RETRIES.attempts[RetryLayer::Engine as usize].load(Ordering::Relaxed),
+        },
         doc_short_id_reservation: RetryLayerSnapshot::default(),
         escaped_to_clients: RETRIES.escaped_to_clients.load(Ordering::Relaxed),
     }
