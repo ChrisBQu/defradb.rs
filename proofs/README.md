@@ -228,3 +228,8 @@ the adapter cache and publication lock. `HeadSet.tla` and `HeadSet/Core.lean`
 remain the head-route soundness basis. The Rust/Lean conformance test now imports
 Core directly and retains the sibling, pruning, abort and old-snapshot cases.
 `InteractiveTxnCounter.tla` and its configurations are retired with counter finalization and `batch_gate`. The historical `MergeQueue` model is also retired with `DocWriteQueue`: its no-mutex RED describes the removed read-modify-write implementation, not engine merge operands. Exactly-once application now relies on ordinary transaction markers, and counter/document mirror dependencies remain validated. The explicit counter-versus-merge regression exercises conflict, rollback and retry convergence. Engine OCC remains a boundary; this retirement does not claim that an old mutex model proves the replacement.
+
+`RetryRegistrationFence.tla` separates token allocation from registration commit.
+It checks that a delayed registration cannot cross forget/re-add or replace a
+newer pending marker. Its negative variants remove the incarnation or ordering
+check. This finite model does not verify the Rust implementation.

@@ -17,6 +17,9 @@ RUNS=(
   "MC_RetryPushAdmission_Red_NoPresence.cfg RetryPushAdmission.tla RED"
   "MC_RetryPushAdmission_Red_NoGeneration.cfg RetryPushAdmission.tla RED"
   "MC_RetryPushAdmission_Red_NoDeadline.cfg RetryPushAdmission.tla RED"
+  "MC_RetryRegistrationFence_Green.cfg RetryRegistrationFence.tla GREEN"
+  "MC_RetryRegistrationFence_Red_NoEpoch.cfg RetryRegistrationFence.tla RED"
+  "MC_RetryRegistrationFence_Red_NoOrder.cfg RetryRegistrationFence.tla RED"
   "MC_CollectionVersionOCC_Green.cfg CollectionVersionOCC.tla GREEN" # schema-version dependency rejects stale writer
   "MC_CollectionVersionOCC_Red_NoValidation.cfg CollectionVersionOCC.tla RED" # stale schema-dependent write is admitted
   "MC_EventOrder_Green.cfg EventOrder.tla GREEN"

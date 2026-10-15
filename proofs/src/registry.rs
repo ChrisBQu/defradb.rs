@@ -107,6 +107,14 @@ pub const PROPERTIES: &[Property] = &[
         tiers: &[Boundary],
     },
     Property {
+        family: "Retry input and marker fencing",
+        name: "INV_RegistrationCannotCrossFence — allocated registrations preserve peer incarnation and marker order",
+        axis: Tla,
+        anchor: "crates/storage/src/stores/peerstore.rs RegisterScopeMarkerAttempt; create_replicator",
+        model_ref: "MC_RetryRegistrationFence_{Green,Red_*}.cfg",
+        tiers: &[Boundary],
+    },
+    Property {
         family: "Collection schema-version OCC",
         name: "INV_NoStaleSchemaWrite — a writer cannot commit against an obsolete structural version",
         axis: Tla,
