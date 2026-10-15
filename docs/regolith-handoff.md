@@ -4,7 +4,7 @@ This is the review entry point for Theo (vertexclique). [PR #1953](https://githu
 
 Target: new installations. Jack explicitly waived compatibility with existing encrypted/value layouts and migrations. Regolith is pinned to `d1e36aa747913f6b1ecc14c821f4e5e6314674cf`. Worker-pool/runtime redesign (§5.2 step 9) is outside these eight adoption steps. No PR has been merged.
 
-Latest published tip: [#1956 — engine-owned retries](https://github.com/sourcenetwork/defradb.rs/pull/1956). Step 5 remains draft while batch merge, pending-DAG retries and final validation are integrated. Steps 6–8 are local candidates.
+Latest published tip: [#1961 — proof alignment](https://github.com/sourcenetwork/defradb.rs/pull/1961). **All eight steps are represented by 11 draft PRs; implementation and gates are not complete.** Blocking work: whole implicit GraphQL batch engine retries (step 5), concurrent index-metadata refresh (step 6), and performance/allocation gates. No PR has been merged.
 
 ## Stack and merge order
 
@@ -20,8 +20,11 @@ Merge from the bottom upward, retargeting the next PR after each merge. The bran
 | 6 | 3 mechanisms, in progress | [#1953](https://github.com/sourcenetwork/defradb.rs/pull/1953) | `defralevel/03-engine-mechanisms` | `defralevel/02-transaction-decisions` |
 | 7 | 4 ordered events | [#1955](https://github.com/sourcenetwork/defradb.rs/pull/1955) | `defralevel/04-ordered-events` | `defralevel/03-engine-mechanisms` |
 | 8 | 5 engine-owned retries | [#1956](https://github.com/sourcenetwork/defradb.rs/pull/1956) | `defralevel/05-engine-retries` | `defralevel/04-ordered-events` |
+| 9 | 6 lock removal | [#1959](https://github.com/sourcenetwork/defradb.rs/pull/1959) | `defralevel/06-lock-removal` | `defralevel/05-engine-retries` |
+| 10 | 7 engine telemetry | [#1960](https://github.com/sourcenetwork/defradb.rs/pull/1960) | `defralevel/07-engine-telemetry` | `defralevel/06-lock-removal` |
+| 11 | 8 proof alignment | [#1961](https://github.com/sourcenetwork/defradb.rs/pull/1961) | `defralevel/08-proof-alignment` | `defralevel/07-engine-telemetry` |
 
-The intended total is 11 PRs: these eight plus one each for steps 6–8. Split into two stacks if further necessary splits exceed 11. Do not merge superseded generated implementations (#1897/#1899/#1911); their closure remains pending completion of this adoption.
+The stack now has the intended 11 draft PRs. Split into two stacks if further necessary splits exceed 11. Do not merge superseded generated implementations (#1897/#1899/#1911); their closure remains pending completion of this adoption.
 
 ## Implementation status
 
@@ -157,3 +160,19 @@ At the latest #1955 CI checkpoint, only Native ACP consumer was still running; e
 The step-5 audit found that QueryRunner’s implicit multi-statement / transactional-ACP batch still uses ordinary `DbTxn::commit`, with HTTP and embedded request-level conflict replay. This is separate from `create_many` and remote batch merge, which already use engine retries. A whole-batch execution callback is being implemented so the engine owns the complete sequence, with request-scoped preparation and attempt-local reads, writes and callbacks. Interactive transactions keep returning conflicts to their caller. Do not mark step 5 complete until this path and its forced-conflict regressions are integrated.
 
 At `e0f9c9b9`, native db/storage/p2p all-targets Clippy and WASM Clippy pass. The external Rust checkpoint passes ACP (110, seven ignored), basic (36), and encryption (12), and nine enabled counter-conformance cases pass (eight ignored probes/parity cases). Six mixed Go/Rust encryption cases initially failed before execution because Go binaries were missing; exact pinned Go revision `53f0e76a3` has now been built for reruns. Later full-batch changes require another combined validation.
+
+## Step 6 draft checkpoint (#1959)
+
+Complete head-cache removal is present in ordinary, retry and scoped transaction paths. A restack omission was caught before publication and restored. The final candidate passes native acp/datastore/query/storage/db all-targets Clippy, defra-wasm Clippy, four schema/OCC conflict tests, and the ordered ACP registration regression. Peer conflict transitions now use engine retry, preserving point-read/generation fences; all 37 peerstore tests pass. Namespaced retry I/O scopes iterators and unwraps the original capability for commit. Legacy retry migration is removed, per the new-installation scope. Full combined suites are running on the published branch.
+
+At the preceding step-5 checkpoint, exact Go pin `53f0e76a3` resolves the setup failures: all 12 selected Go/mixed encryption tests pass, as do 95 selected Go ACP cases (16 ignored) and 19 basic cases. These complement the earlier Rust results; final batch conversion still requires new combined checks.
+
+Allocation checkpoint before lock removal: `cargo bench -p benches --bench allocs --profile release-fast` reports **4062.7 allocations/create** (16 fields, 200 operations, source `e0f9c9b9` plus docs-only changes), 269.0 get-by-ID, 36.0 map encoding, 76.0 JSON decoding. The bundle's historical main reference is 2997 allocations/create. Comparable current-main and final-candidate runs, plus overhead investigation, are in progress. No allocation gate pass is claimed.
+
+## Full draft stack checkpoint (#1961)
+
+Steps 7 and 8 are published as #1960 and #1961. Telemetry reuses caller statistics/listeners, reads native commit/policy tickers and records bounded conflict reasons without user keys; duplicate adapter counters are removed. All three telemetry regressions pass, including exact native conflict/winner accounting, with native and WASM Clippy. Proof retirement keeps HeadSet/Core, removes cache/serialized-counter/queue models, and binds arrival ordering to pinned CommitOrderedAppend. All 163 TLC verdicts matched expectations; Lean and registry checks passed on the candidate. Lean passes again after the final restack; registry rerun is ongoing. Boundary models do not prove the Rust adapter or remote authorization behavior.
+
+The combined step-6 database run caught a real failure: `create_index_keeps_pace_with_concurrent_writers` receives a permanent cached-schema mismatch during concurrent index creation (57 other index tests pass). A same-snapshot metadata refresh fix is in progress; validation will not be weakened. Independent DB/core suites continue. This failure and the implicit batch gap block readiness even though all step PRs exist.
+
+Comparable allocation runs confirm a regression: current main `532aac3f` measures 2985.7 allocations/create and 165/get-by-ID; step4 `3c8bed28` measures 3622.0/269; step5 measures 4062.7/269; step6+peer candidate `97e2a3a3` measures 4242.0/269. All use the same release-fast allocation harness; codecs remain 36 map/76 JSON. Investigation is active. The earlier failed head-cache throughput/conflict gate remains open, and no fresh per-removal throughput gate is claimed.
