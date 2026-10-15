@@ -116,13 +116,30 @@ impl VeraProvider for CountingProvider {
     }
 }
 
+/// Round trips as tasks of the test's tokio runtime, whose time it pauses.
+struct TestNetwork;
+
+impl inputs::Network for TestNetwork {
+    fn spawn(&self, work: defra_core::thread_bounds::MaybeBoxFuture<'static, ()>) {
+        drop(tokio::spawn(work));
+    }
+
+    fn sleep(&self, duration: Duration) -> defra_core::thread_bounds::MaybeBoxFuture<'static, ()> {
+        Box::pin(tokio::time::sleep(duration))
+    }
+}
+
+fn test_network() -> inputs::Runtime {
+    inputs::Runtime::new(Arc::new(TestNetwork), Arc::new(inputs::RuntimeClock::new()))
+}
+
 fn service(provider: &Arc<CountingProvider>) -> inputs::Service<RemoteDecisions> {
     inputs::Service::new(
         RemoteDecisions {
             provider: Arc::clone(provider) as Arc<dyn VeraProvider>,
         },
         config(Duration::from_secs(5)),
-        inputs::Runtime::ambient(),
+        test_network(),
     )
 }
 

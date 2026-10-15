@@ -45,7 +45,7 @@ impl VeraDocumentACP {
 
     fn with_cache(provider: Arc<dyn VeraProvider>, access_cache: Option<Arc<AccessCache>>) -> Self {
         Self {
-            decisions: Self::decisions(&provider, inputs::Runtime::ambient(), DECISION_TIMEOUT),
+            decisions: Self::decisions(&provider, inputs::Runtime::inline(), DECISION_TIMEOUT),
             provider,
             access_cache,
             #[cfg(not(target_arch = "wasm32"))]

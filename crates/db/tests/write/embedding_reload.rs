@@ -45,6 +45,7 @@ async fn fixture_with_counter(counter: bool) -> Fixture {
         .unwrap();
     });
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
+    db.set_network(edge::testing::edge());
     let mut collection = CollectionVersion::new(
         "Texts",
         "texts-v1",
