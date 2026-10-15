@@ -131,11 +131,9 @@ pub(crate) async fn load_collection_for_write_attempt(
     if collection.version_id() != expected.version_id() {
         return Err(crate::error::Error::CollectionNotFound(name.to_string()));
     }
-    let mut expected_schema = expected.schema().clone();
-    let mut current_schema = collection.schema().clone();
-    expected_schema.indexes.clear();
-    current_schema.indexes.clear();
-    if expected_schema != current_schema {
+    if expected.schema() != collection.schema()
+        && !same_schema_except_indexes(expected.schema(), collection.schema())
+    {
         return Err(crate::error::Error::Other(format!(
             "collection schema changed during write preparation for '{}'",
             collection.name()
@@ -149,6 +147,36 @@ pub(crate) async fn load_collection_for_write_attempt(
         .await?;
     Ok(collection)
 }
+}
+
+/// Compare schema fields without cloning both definitions just to ignore
+/// indexes. Indexes may change while preserving a collection version ID, but
+/// all other persisted definition data must match the prepared schema. Keep
+/// this list aligned with `CollectionVersion` when adding schema fields.
+fn same_schema_except_indexes(left: &CollectionVersion, right: &CollectionVersion) -> bool {
+    left.name == right.name
+        && left.version_id == right.version_id
+        && left.collection_id == right.collection_id
+        && left.collection_set == right.collection_set
+        && left.query == right.query
+        && left.previous_version == right.previous_version
+        && left.fields == right.fields
+        && left.encrypted_indexes == right.encrypted_indexes
+        && left.fulltext_indexes == right.fulltext_indexes
+        && left.policy == right.policy
+        && left.policy_cid == right.policy_cid
+        && left.governance_root == right.governance_root
+        && left.is_active == right.is_active
+        && left.is_materialized == right.is_materialized
+        && left.downsample_interval == right.downsample_interval
+        && left.downsample_time_field == right.downsample_time_field
+        && left.downsample_retention == right.downsample_retention
+        && left.downsample_source == right.downsample_source
+        && left.is_branchable == right.is_branchable
+        && left.is_embedded_only == right.is_embedded_only
+        && left.is_placeholder == right.is_placeholder
+        && left.vector_embeddings == right.vector_embeddings
+        && left.root_id == right.root_id
 }
 
 /// Load a collection from the systemstore by name.
@@ -355,4 +383,21 @@ pub async fn get_collection_with_index_manager<S: Store + 'static>(
             })?;
 
     Ok((collection, datastore, systemstore, index_manager))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same_schema_except_indexes;
+    use schema::{CollectionVersion, IndexDescription};
+
+    #[test]
+    fn schema_comparison_allows_index_drift_but_rejects_other_changes() {
+        let left = CollectionVersion::new("users", "version", "collection", vec![]);
+        let mut right = left.clone();
+        right.indexes.push(IndexDescription::new("by_name"));
+        assert!(same_schema_except_indexes(&left, &right));
+
+        right.is_branchable = true;
+        assert!(!same_schema_except_indexes(&left, &right));
+    }
 }
