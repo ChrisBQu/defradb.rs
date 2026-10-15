@@ -22,6 +22,7 @@ impl Node {
         config: &Config,
         identity_key_bytes: Option<&[u8]>,
         _acp_store: Arc<dyn acp::AcpStore>,
+        store: Arc<storage::DynStore>,
         zanzibar_store: Arc<dyn acp::ZanzibarStore>,
         event_bus: Arc<dyn events::Bus>,
         nac_checker: Arc<dyn db::NodeAccessChecker>,
@@ -90,7 +91,7 @@ impl Node {
 
             info!("Document ACP configured (Vera)");
             return Ok(DocumentAcpSetup {
-                document_acp,
+                document_acp: gate_external_acp(document_acp, store),
                 http_adapter: Some(http_adapter),
             });
         }
@@ -166,7 +167,7 @@ impl Node {
 
             info!("Document ACP configured (vera.rs)");
             return Ok(DocumentAcpSetup {
-                document_acp,
+                document_acp: gate_external_acp(document_acp, store),
                 http_adapter: Some(http_adapter),
             });
         }
@@ -205,4 +206,32 @@ impl Node {
             nac_manager,
         ))))
     }
+}
+
+/// Gate a Vera provider with the registrations creates still owe it, and
+/// settle in the background any a previous run left owed (a crash, or a
+/// provider call that failed). Until settled, such a document is readable only
+/// by its creator.
+#[cfg(feature = "vera")]
+fn gate_external_acp(
+    provider: Arc<dyn acp::DocumentACP>,
+    store: Arc<storage::DynStore>,
+) -> Arc<dyn acp::DocumentACP> {
+    let gate = Arc::new(acp::ExternalDocumentAcp::new(provider, store));
+    let redrive = Arc::clone(&gate);
+    tokio::spawn(async move {
+        match redrive.redrive_owed().await {
+            Ok(report) if report.settled > 0 => info!(
+                settled = report.settled,
+                failed = report.failed,
+                "Settled ACP registrations owed from a previous run"
+            ),
+            Ok(_) => {}
+            Err(error) => tracing::warn!(
+                %error,
+                "Could not read owed ACP registrations; their documents stay readable only by their creators"
+            ),
+        }
+    });
+    gate
 }
