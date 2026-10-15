@@ -33,10 +33,6 @@ struct AcpRegistrationState {
     savepoints: Vec<AcpRegistrationSavepoint>,
 }
 
-struct AcpRegistrationSavepoint {
-    projected_registrations: RapidHashMap<DocRegistrationKey, ProjectedDocRegistration>,
-}
-
 /// Transaction or request scoped projection of external ACP registration writes.
 ///
 /// External ACP providers cannot participate in the storage transaction. This
@@ -46,6 +42,7 @@ struct AcpRegistrationSavepoint {
 #[derive(Default)]
 pub struct AcpRegistrationProjection {
     state: Atom<AcpRegistrationState>,
+    savepoints: Atom<Vec<RapidHashMap<DocRegistrationKey, ProjectedDocRegistration>>>,
 }
 
 impl AcpRegistrationProjection {
@@ -53,38 +50,47 @@ impl AcpRegistrationProjection {
         Self::default()
     }
 
-    fn lock_state(&self) -> Result<std::sync::MutexGuard<'_, AcpRegistrationState>, String> {
-        self.state
-            .lock()
-            .map_err(|_| "ACP registration projection lock poisoned".to_string())
+    pub fn set_savepoint(&self) {
+        let projected = self
+            .state
+            .peek(|state| state.projected_registrations.clone());
+        self.savepoints.rcu(|savepoints| {
+            let mut savepoints = savepoints.clone();
+            savepoints.push(projected.clone());
+            savepoints
+        });
     }
 
-    pub fn set_statement_savepoint(&self) -> Result<(), String> {
-        let mut state = self.lock_state()?;
-        let savepoint = AcpRegistrationSavepoint {
-            projected_registrations: state.projected_registrations.clone(),
+    pub fn rollback_to_savepoint(&self) -> Result<(), String> {
+        let mut restored = None;
+        self.savepoints.rcu(|savepoints| {
+            let mut savepoints = savepoints.clone();
+            restored = savepoints.pop();
+            savepoints
+        });
+        let Some(saved) = restored else {
+            return Err("ACP projection has no active statement savepoint".into());
         };
-        state.savepoints.push(savepoint);
+        self.state.rcu(|state| {
+            let mut state = state.clone();
+            state.projected_registrations = saved.clone();
+            state
+        });
         Ok(())
     }
 
-    pub fn rollback_statement_savepoint(&self) -> Result<(), String> {
-        let mut state = self.lock_state()?;
-        let savepoint = state
-            .savepoints
-            .pop()
-            .ok_or_else(|| "ACP projection has no active statement savepoint".to_string())?;
-        state.projected_registrations = savepoint.projected_registrations;
-        Ok(())
-    }
-
-    pub fn release_statement_savepoint(&self) -> Result<(), String> {
-        let mut state = self.lock_state()?;
-        state
-            .savepoints
-            .pop()
-            .map(|_| ())
-            .ok_or_else(|| "ACP projection has no active statement savepoint".to_string())
+    pub fn release_savepoint(&self) -> Result<(), String> {
+        let mut had_savepoint = false;
+        self.savepoints.rcu(|savepoints| {
+            let mut savepoints = savepoints.clone();
+            had_savepoint = savepoints.pop().is_some();
+            savepoints
+        });
+        if had_savepoint {
+            Ok(())
+        } else {
+            Err("ACP projection has no active statement savepoint".into())
+        }
     }
 
     fn doc_key(policy_id: &str, resource_name: &str, doc_id: &str) -> DocRegistrationKey {

@@ -139,7 +139,7 @@ impl<S: Store + 'static> DbTransactionContext<S> {
             .ok_or_else(|| "transaction was consumed with statement cleanup pending".to_string())?;
         txn.rollback_statement_savepoint()
             .map_err(|error| error.to_string())?;
-        self.acp_registration_projection.rollback_statement_savepoint()?;
+        self.acp_registration_projection.rollback_to_savepoint()?;
         self.statement_rollback_pending
             .store(false, Ordering::Release);
         Ok(())
@@ -255,11 +255,9 @@ impl<S: Store + 'static> TransactionContext for DbTransactionContext<S> {
         let txn = guard
             .as_mut()
             .ok_or_else(|| "transaction is no longer active".to_string())?;
-        self.acp_registration_projection.set_statement_savepoint()?;
-        if let Err(error) = txn.set_statement_savepoint() {
-            self.acp_registration_projection.rollback_statement_savepoint()?;
-            return Err(error.to_string());
-        }
+        txn.set_statement_savepoint()
+            .map_err(|error| error.to_string())?;
+        self.acp_registration_projection.set_savepoint();
         Ok(())
     }
 
@@ -274,11 +272,11 @@ impl<S: Store + 'static> TransactionContext for DbTransactionContext<S> {
         if success {
             txn.release_statement_savepoint()
                 .map_err(|error| error.to_string())?;
-            self.acp_registration_projection.release_statement_savepoint()?;
+            self.acp_registration_projection.release_savepoint()?;
         } else {
             txn.rollback_statement_savepoint()
                 .map_err(|error| error.to_string())?;
-            self.acp_registration_projection.rollback_statement_savepoint()?;
+            self.acp_registration_projection.rollback_to_savepoint()?;
         }
         self.statement_rollback_pending
             .store(false, Ordering::Release);

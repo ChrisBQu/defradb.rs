@@ -124,6 +124,7 @@ impl RegolithTxn {
             event_order: Arc::new(EventOrder::default()),
             ordered_events: Vec::new(),
             ordered_async_callbacks: Vec::new(),
+            savepoints: Vec::new(),
             has_writes: false,
             scoped_attempt: true,
             owns_active_slot: false,
