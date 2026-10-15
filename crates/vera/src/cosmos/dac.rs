@@ -45,7 +45,7 @@ impl VeraDocumentACP {
 
     fn with_cache(provider: Arc<dyn VeraProvider>, access_cache: Option<Arc<AccessCache>>) -> Self {
         Self {
-            decisions: Self::decisions(&provider, inputs::Runtime::inline(), DECISION_TIMEOUT),
+            decisions: Self::decisions(&provider, inputs::Runtime::on_demand(), DECISION_TIMEOUT),
             provider,
             access_cache,
             #[cfg(not(target_arch = "wasm32"))]
@@ -68,29 +68,30 @@ impl VeraDocumentACP {
     }
 
     /// A cached ACP as `tuning` sets it, its remote decisions on the network
-    /// runtime `network` when the node has one.
+    /// runtime `network` when the node has one, else on the process's
+    /// on-demand runtime.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn tuned(
         provider: Arc<dyn VeraProvider>,
         tuning: &crate::AcpTuning,
         network: Option<&edge::Edge>,
     ) -> Self {
-        let acp = Self::new(provider, tuning.cache_ttl);
-        match network {
-            Some(edge) => acp.on_network(edge, tuning.request_timeout),
-            None => acp,
-        }
+        let runtime = network.map_or_else(inputs::Runtime::on_demand, |edge| {
+            inputs::Runtime::edge(edge.clone())
+        });
+        Self::new(provider, tuning.cache_ttl).on_runtime(runtime, tuning.request_timeout)
     }
 
     /// Remote decisions run on the network runtime `edge`, each within twice
     /// `request_timeout` (one retry).
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn on_network(mut self, edge: &edge::Edge, request_timeout: Duration) -> Self {
-        self.decisions = Self::decisions(
-            &self.provider,
-            inputs::Runtime::edge(edge.clone()),
-            request_timeout,
-        );
+    pub fn on_network(self, edge: &edge::Edge, request_timeout: Duration) -> Self {
+        self.on_runtime(inputs::Runtime::edge(edge.clone()), request_timeout)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn on_runtime(mut self, runtime: inputs::Runtime, request_timeout: Duration) -> Self {
+        self.decisions = Self::decisions(&self.provider, runtime, request_timeout);
         self
     }
 
