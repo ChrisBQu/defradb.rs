@@ -398,6 +398,7 @@ mod tests {
         delays: RapidHashMap<String, Duration>,
         active: AtomicUsize,
         max_active: AtomicUsize,
+        calls: AtomicUsize,
     }
 
     impl MockAcp {
@@ -407,6 +408,7 @@ mod tests {
                 delays,
                 active: AtomicUsize::new(0),
                 max_active: AtomicUsize::new(0),
+                calls: AtomicUsize::new(0),
             }
         }
     }
@@ -440,6 +442,7 @@ mod tests {
             _resource_name: &str,
             doc_id: &str,
         ) -> acp::Result<bool> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             self.max_active.fetch_max(active, Ordering::SeqCst);
 
@@ -492,6 +495,38 @@ mod tests {
         ) -> acp::Result<()> {
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn prepared_permission_check_exits_for_external_input_without_calling_provider() {
+        let yielded = Arc::new(AtomicUsize::new(0));
+        let acp = Arc::new(MockAcp::new(None, RapidHashMap::new()));
+        let memo = crate::prepared::PreparedInputMemo::default();
+        let node = PermissionFilterNode::new(
+            Box::new(MockSource::new(&["doc-1".to_string()], yielded)),
+            acp.clone(),
+            Identity::Anonymous,
+            "policy",
+            "User",
+        )
+        .with_retry_inputs(Some(memo.clone()));
+        let doc = Doc::default();
+        let error = node
+            .permission_check("doc-1".to_string(), doc.deep_clone())
+            .await
+            .unwrap_err();
+        let crate::error::QueryError::NeedsInput(request) = error else {
+            panic!("expected typed ACP input request");
+        };
+        assert_eq!(acp.calls.load(Ordering::SeqCst), 0);
+
+        assert!(memo.insert(request, b"true".as_slice()));
+        let (_, allowed) = node
+            .permission_check("doc-1".to_string(), doc)
+            .await
+            .expect("memoized decision succeeds");
+        assert!(allowed);
+        assert_eq!(acp.calls.load(Ordering::SeqCst), 0);
     }
 
     fn permission_filter(
