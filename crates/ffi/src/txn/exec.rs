@@ -107,15 +107,10 @@ pub unsafe extern "C" fn exec_request_in_txn_with_signing(
         );
         let session_key = batch_session.or_else(|| signing.as_ref().map(|s| s.public_key_hex.clone()));
 
-        // Set the ambient acting identity so DB-layer NAC checks can resolve
-        // the caller. The guard clears it on scope exit so it never leaks into
-        // the next request on this pooled thread.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            identity_str.as_ref().filter(|s| !s.is_empty()).cloned(),
-        );
-
-        // NAC admin/owner can read all documents.
+        // The caller acts in the request's context, so DB-layer NAC checks
+        // resolve it; a NAC admin/owner can read all documents.
         let context = defra_core::RequestContext::default()
+            .with_identity(identity_str.as_ref().filter(|s| !s.is_empty()).cloned())
             .with_dac_bypass(crate::query::resolve_dac_bypass(rt, node_ptr, identity_did))
             .with_signing(signing)
             .with_batch_session(session_key);

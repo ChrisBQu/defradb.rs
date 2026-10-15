@@ -192,6 +192,7 @@ macro_rules! ffi_node_db_async_body {
         node = $node_ptr:ident,
         identity = $identity_did:ident,
         database = $database:ident,
+        context = $context:ident,
         permission = $permission:expr
         $(, $arg:ident => $parsed:ident : $arg_name:literal)*
         $(,)?
@@ -215,17 +216,13 @@ macro_rules! ffi_node_db_async_body {
             )*
             let $database = $crate::try_ffi!($crate::helpers::get_node_database($node_ptr));
 
-            // Bind the caller's identity into the ambient context so DB-layer
-            // NAC checks (which receive no explicit identity) resolve the actual
-            // caller instead of the wildcard. The body runs on this thread via
-            // `block_on`, so the thread-local set here is visible throughout it.
-            // The guard restores the prior value on drop, so it never leaks into
-            // the next request on this pooled thread. Mirrors `query::exec`.
+            // The caller acts in the call's context, so DB-layer NAC checks
+            // resolve the actual caller instead of the wildcard. Mirrors
+            // `query::exec`.
             let __ffi_identity: Option<String> =
                 unsafe { $crate::types::c_str_to_string($identity_did) }
                     .filter(|s| !s.is_empty());
-            let _ffi_identity_guard =
-                defra_core::current_identity::scoped_current_identity(__ffi_identity);
+            let $context = defra_core::RequestContext::default().with_identity(__ffi_identity);
 
             $crate::ffi_async!(rt, $body)
         }

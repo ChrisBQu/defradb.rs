@@ -32,6 +32,7 @@ pub unsafe extern "C" fn delete_collection(
         node = node_ptr,
         identity = identity_did,
         database = database,
+        context = context,
         permission = NodePermission::CollectionPatch,
         name => name_str: "name";
         {
@@ -40,7 +41,7 @@ pub unsafe extern "C" fn delete_collection(
         }
 
         database
-            .delete_collection(&name_str)
+            .delete_collection_as(&context, &name_str)
             .await
             .map_err(|e| format!("failed to delete collection: {}", e))?;
 
@@ -65,6 +66,7 @@ pub unsafe extern "C" fn delete_collections(
         node = node_ptr,
         identity = identity_did,
         database = database,
+        context = context,
         permission = NodePermission::CollectionPatch,
         names_json => names_str: "names_json";
         {
@@ -72,7 +74,7 @@ pub unsafe extern "C" fn delete_collections(
             .map_err(|e| format!("failed to parse collection names JSON: {}", e))?;
 
         database
-            .delete_collections(names, active_only)
+            .delete_collections_as(&context, names, active_only)
             .await
             .map_err(|e| format!("failed to delete collections: {}", e))?;
 
@@ -108,15 +110,13 @@ pub unsafe extern "C" fn delete_collections_in_txn(
             Some(registry) => registry,
             None => return crate::types::FfiResult::error(ERR_INVALID_NODE_HANDLE),
         };
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            crate::types::c_str_to_string(identity_did).filter(|value| !value.is_empty()),
-        );
+        let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|value| !value.is_empty()));
 
         ffi_async!(rt, {
             let targets: Vec<String> = serde_json::from_str(&targets_json)
                 .map_err(|error| format!("failed to parse collection targets JSON: {}", error))?;
             registry
-                .delete_collections_in_txn(&txn_id, targets, active_only)
+                .delete_collections_in_txn_as(&context, &txn_id, targets, active_only)
                 .await
                 .map_err(|error| format!("failed to delete collections: {}", error))?;
             Ok("{}".to_string())
@@ -152,11 +152,12 @@ pub unsafe extern "C" fn set_active_collection_version(
         node = node_ptr,
         identity = identity_did,
         database = database,
+        context = context,
         permission = NodePermission::CollectionPatch,
         version_id => version_str: "version_id";
         {
         database
-            .set_active_collection_version(&version_str)
+            .set_active_collection_version_as(&context, &version_str)
             .await
             .map_err(|e| format!("failed to set active collection version: {}", e))?;
 
@@ -192,13 +193,11 @@ pub unsafe extern "C" fn set_collection_active_in_txn(
             Some(registry) => registry,
             None => return crate::types::FfiResult::error(ERR_INVALID_NODE_HANDLE),
         };
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            crate::types::c_str_to_string(identity_did).filter(|value| !value.is_empty()),
-        );
+        let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|value| !value.is_empty()));
 
         ffi_async!(rt, {
             let version = registry
-                .set_collection_active_in_txn(&txn_id, &version_id, is_active)
+                .set_collection_active_in_txn_as(&context, &txn_id, &version_id, is_active)
                 .await
                 .map_err(|error| format!("failed to update collection active state: {}", error))?;
             serde_json::to_string(&version)
@@ -237,12 +236,13 @@ pub unsafe extern "C" fn patch_collection(
         node = node_ptr,
         identity = identity_did,
         database = database,
+        context = context,
         permission = NodePermission::CollectionPatch,
         collection_name => name_str: "collection_name",
         patch => patch_str: "patch";
         {
         let updated_schema = database
-            .patch_collection(&name_str, &patch_str, None)
+            .patch_collection_as(&context, &name_str, &patch_str)
             .await
             .map_err(|e| format!("failed to patch collection: {}", e))?;
 
@@ -282,11 +282,12 @@ pub unsafe extern "C" fn truncate_collection(
         node = node_ptr,
         identity = identity_did,
         database = database,
+        context = context,
         permission = NodePermission::CollectionTruncate,
         name => name_str: "name";
         {
         database
-            .truncate_collection(&name_str, None)
+            .truncate_collection_as(&context, &name_str)
             .await
             .map_err(|e| format!("failed to truncate collection: {}", e))?;
 
@@ -311,6 +312,7 @@ pub unsafe extern "C" fn truncate_collection_with_filter(
         node = node_ptr,
         identity = identity_did,
         database = database,
+        context = context,
         permission = NodePermission::CollectionTruncate,
         name => name_str: "name",
         filter_json => filter_str: "filter_json";
@@ -323,11 +325,7 @@ pub unsafe extern "C" fn truncate_collection_with_filter(
             .ok_or_else(|| "filter must be a non-null JSON object".to_string())?;
 
         database
-            .truncate_collection_with_filter(
-                &name_str,
-                query::Filter::from_conditions(conditions),
-                None,
-            )
+            .truncate_collection_with_filter_as(&context, &name_str, query::Filter::from_conditions(conditions))
             .await
             .map_err(|e| format!("failed to truncate collection: {}", e))?;
 

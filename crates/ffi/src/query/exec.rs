@@ -116,15 +116,10 @@ pub unsafe extern "C" fn exec_request_with_signing(
         // Use caller-provided session ID if available; otherwise fall back to public key.
         let session_key = batch_session.or_else(|| signing.as_ref().map(|s| s.public_key_hex.clone()));
 
-        // Set the ambient acting identity so DB-layer NAC checks can resolve
-        // the caller. The guard clears it on scope exit so it never leaks into
-        // the next request on this pooled thread.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            identity_str.as_ref().filter(|s| !s.is_empty()).cloned(),
-        );
-
-        // NAC admin/owner can read all documents.
+        // The caller acts in the request's context, so DB-layer NAC checks
+        // resolve it; a NAC admin/owner can read all documents.
         let context = defra_core::RequestContext::default()
+            .with_identity(identity_str.as_ref().filter(|s| !s.is_empty()).cloned())
             .with_dac_bypass(resolve_dac_bypass(rt, node_ptr, identity_did))
             .with_signing(signing)
             .with_batch_session(session_key);
@@ -176,14 +171,8 @@ pub unsafe extern "C" fn exec_request_with_signing(
             // Create result channel for buffering processed subscription results
             let (result_tx, result_rx) = kovan_channel::bounded::<String>(256);
 
-            // Capture the acting identity before spawning: it is a thread-local
-            // set on this thread, but the service runs on a thread of the
-            // network runtime.
-            let sub_acting_did = defra_core::current_identity::get_current_identity();
-
             // A background service processes events and executes queries at event time.
             // This ensures the DB state at query execution matches the event's state.
-            let edge = rt.clone();
             let service = rt.spawn_service(async move {
                 while let Some(message) = subscription.recv().await {
                     if let Some(update) = message.as_update() {
@@ -222,29 +211,9 @@ pub unsafe extern "C" fn exec_request_with_signing(
                             request = request.with_variables(vars.clone());
                         }
 
-                        // Execute pinned to one thread to keep the thread-locals,
-                        // matching HTTP's execute_with_resolved_context pattern.
-                        let runner = query_runner.clone();
-                        let acting_did = sub_acting_did.clone();
-                        let response = match edge
-                            .spawn_pinned(move || {
-                                let identity_guard =
-                                    defra_core::current_identity::scoped_current_identity(
-                                        acting_did,
-                                    );
-                                async move {
-                                    let _identity_guard = identity_guard;
-                                    runner.execute(request).await
-                                }
-                            })
-                            .await
-                        {
-                            Ok(r) => r,
-                            Err(error) => {
-                                tracing::warn!(%error, "subscription query did not run");
-                                continue;
-                            }
-                        };
+                        // The request carries its context, so it runs on this
+                        // service's own task.
+                        let response = query_runner.execute(request).await;
 
                         // Skip empty results (filter excluded the document)
                         if !crate::subscription::response_has_data(&response) {
