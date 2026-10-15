@@ -40,6 +40,9 @@ rapidhash.workspace = true
 kovan.workspace = true
 kovan-queue.workspace = true
 
+# The deadline `close` waits with
+n0-future.workspace = true
+
 # Logging
 tracing.workspace = true
 telemetry = { path = "../telemetry" }
@@ -58,7 +61,6 @@ default = []
 wasm = []
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-n0-future.workspace = true
 getrandom = { version = "0.2", features = ["js"] }
 uuid = { version = "1.0", features = ["v4", "js"] }
 

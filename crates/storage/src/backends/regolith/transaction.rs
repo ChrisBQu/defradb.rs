@@ -10,7 +10,6 @@
 
 #![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -22,6 +21,7 @@ use regolith::{
 use super::event_order::{Event, EventOrder};
 use super::handle::Handle;
 use super::iterator::RegolithIterator;
+use super::slots::TxnSlot;
 use crate::backends::shared::{CallbackCounts, CallbackManager};
 use crate::corekv::{
     AsyncOrderedTxnCallback, AsyncTxnCallback, Error, IterOptions, Iterator, Reader, Result, Txn,
@@ -31,7 +31,10 @@ use crate::corekv::{
 /// Transaction over a regolith store.
 pub struct RegolithTxn {
     handle: Option<Arc<Handle>>,
-    active_txns: Arc<AtomicUsize>,
+    /// This transaction's place in its store's in-flight count, held until
+    /// the transaction and its post-commit work are done. A read-only open
+    /// and a retry attempt's view count against no store.
+    _slot: Option<TxnSlot>,
     callbacks: CallbackManager,
     readonly: bool,
     event_order: Arc<EventOrder>,
@@ -40,7 +43,6 @@ pub struct RegolithTxn {
     savepoints: Vec<SavepointState>,
     has_writes: bool,
     scoped_attempt: bool,
-    owns_active_slot: bool,
 }
 
 #[derive(Clone)]
@@ -64,7 +66,7 @@ impl RegolithTxn {
         })?;
         Ok(Self {
             handle: Some(Arc::new(Handle::ReadOnly(db.snapshot()))),
-            active_txns: Arc::new(AtomicUsize::new(1)),
+            _slot: None,
             callbacks: CallbackManager::default(),
             readonly: true,
             savepoints: Vec::new(),
@@ -73,15 +75,14 @@ impl RegolithTxn {
             ordered_async_callbacks: Vec::new(),
             has_writes: false,
             scoped_attempt: false,
-            owns_active_slot: true,
         })
     }
 
-    pub(crate) fn new(
+    pub(super) fn new(
         db: &Arc<OptimisticTransactionDb>,
         readonly: bool,
         isolation: IsolationLevel,
-        active_txns: Arc<AtomicUsize>,
+        slot: TxnSlot,
         event_order: Arc<EventOrder>,
     ) -> Result<Self> {
         super::blocking(|| {
@@ -92,7 +93,7 @@ impl RegolithTxn {
             };
             Ok(Self {
                 handle: Some(Arc::new(handle)),
-                active_txns,
+                _slot: Some(slot),
                 callbacks: CallbackManager::default(),
                 readonly,
                 savepoints: Vec::new(),
@@ -101,7 +102,6 @@ impl RegolithTxn {
                 ordered_async_callbacks: Vec::new(),
                 has_writes: false,
                 scoped_attempt: false,
-                owns_active_slot: true,
             })
         })
     }
@@ -109,7 +109,7 @@ impl RegolithTxn {
     pub(super) fn scoped_attempt(txn: Box<Transaction>) -> Self {
         Self {
             handle: Some(Arc::new(Handle::Writable(txn))),
-            active_txns: Arc::new(AtomicUsize::new(0)),
+            _slot: None,
             callbacks: CallbackManager::default(),
             readonly: false,
             event_order: Arc::new(EventOrder::default()),
@@ -118,7 +118,6 @@ impl RegolithTxn {
             savepoints: Vec::new(),
             has_writes: false,
             scoped_attempt: true,
-            owns_active_slot: false,
         }
     }
 
@@ -158,23 +157,6 @@ impl RegolithTxn {
             Handle::Writable(txn) => Ok(txn),
             Handle::ReadOnly(_) => Err(Error::ReadOnlyTxn),
         }
-    }
-
-    /// Release this transaction's slot exactly once, so `close` is not
-    /// left waiting on something already finished.
-    fn release(&mut self) {
-        if self.handle.take().is_some() && self.owns_active_slot {
-            self.active_txns.fetch_sub(1, Ordering::AcqRel);
-        }
-    }
-}
-
-impl Drop for RegolithTxn {
-    fn drop(&mut self) {
-        // A transaction dropped without `commit` or `discard` still holds
-        // a slot. regolith rolls its own state back on drop; this only
-        // has to stop `close` blocking forever.
-        self.release();
     }
 }
 
@@ -355,14 +337,13 @@ impl Txn for RegolithTxn {
             ));
         }
         if !self.ordered_events.is_empty() && !self.has_writes {
-            self.release();
+            self.handle.take();
             self.callbacks.run_error().await;
             return Err(Error::Other(
                 "cannot publish ordered events from a transaction with no writes".to_string(),
             ));
         }
         let handle = self.handle.take().ok_or(Error::DiscardedTxn)?;
-        self.active_txns.fetch_sub(1, Ordering::AcqRel);
         // regolith's `commit` consumes the transaction, so this has to be
         // its only owner. An iterator opened from it holds the same `Arc`,
         // so a caller that commits without closing one gets told, rather
@@ -464,7 +445,7 @@ impl Txn for RegolithTxn {
 
     fn discard(mut self: Box<Self>) {
         // Dropping regolith's transaction rolls it back.
-        self.release();
+        self.handle.take();
         self.callbacks.run_discard();
     }
 

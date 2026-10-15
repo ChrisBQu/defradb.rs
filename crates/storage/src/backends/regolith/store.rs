@@ -8,7 +8,6 @@
 #![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -17,6 +16,7 @@ use regolith::{OptimisticTransactionDb, TxnOptions};
 use super::background_errors::{BackgroundErrorListener, ConflictListener};
 use super::config::RegolithStoreOptions;
 use super::event_order::{Event, EventOrder};
+use super::slots::TxnSlots;
 use super::transaction::RegolithTxn;
 use crate::backends::shared::TransactionStatsHandle;
 use crate::corekv::{
@@ -27,8 +27,8 @@ use crate::corekv::{
 /// Key-value store backed by regolith.
 ///
 /// Cloning hands back another handle on the same database, not another
-/// database: the close flag and the in-flight count are shared, so
-/// closing through one handle closes it for all of them.
+/// database: the in-flight slots are shared, so closing through one handle
+/// closes it for all of them.
 #[derive(Clone)]
 pub struct RegolithStore {
     inner: Arc<StoreInner>,
@@ -37,8 +37,7 @@ pub struct RegolithStore {
 struct StoreInner {
     db: Arc<OptimisticTransactionDb>,
     options: RegolithStoreOptions,
-    closed: AtomicBool,
-    active_txns: Arc<AtomicUsize>,
+    slots: Arc<TxnSlots>,
     stats: TransactionStatsHandle,
     event_order: Arc<EventOrder>,
     path: PathBuf,
@@ -90,8 +89,7 @@ impl RegolithStore {
             inner: Arc::new(StoreInner {
                 db: Arc::new(db),
                 options,
-                closed: AtomicBool::new(false),
-                active_txns: Arc::new(AtomicUsize::new(0)),
+                slots: TxnSlots::new(),
                 stats,
                 event_order: Arc::default(),
                 path,
@@ -192,44 +190,8 @@ impl RegolithStore {
         &self.inner.path
     }
 
-    /// Wait for in-flight transactions to finish, up to the configured
-    /// timeout.
-    ///
-    /// On wasm there is nothing to wait for: the runtime is
-    /// single-threaded, so any transaction still counted here belongs to
-    /// this task's own call stack and spinning would deadlock rather than
-    /// let it finish. Report it instead.
-    #[cfg(not(target_arch = "wasm32"))]
-    async fn await_quiescence(&self) -> Result<()> {
-        let deadline = web_time::Instant::now() + self.inner.options.close_timeout;
-        let mut backoff = std::time::Duration::from_millis(1);
-        while self.inner.active_txns.load(Ordering::Acquire) > 0 {
-            if web_time::Instant::now() >= deadline {
-                return Err(self.in_flight_error());
-            }
-            tokio::time::sleep(backoff).await;
-            backoff = (backoff * 2).min(std::time::Duration::from_millis(50));
-        }
-        Ok(())
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    async fn await_quiescence(&self) -> Result<()> {
-        if self.inner.active_txns.load(Ordering::Acquire) > 0 {
-            return Err(self.in_flight_error());
-        }
-        Ok(())
-    }
-
-    fn in_flight_error(&self) -> Error {
-        Error::Backend(format!(
-            "closed with {} transaction(s) still in flight",
-            self.inner.active_txns.load(Ordering::Acquire)
-        ))
-    }
-
     fn ensure_open(&self) -> Result<()> {
-        if self.inner.closed.load(Ordering::Acquire) {
+        if self.inner.slots.is_closing() {
             return Err(Error::DBClosed);
         }
         Ok(())
@@ -252,29 +214,15 @@ impl Store for RegolithStore {
     }
 
     async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>> {
-        self.ensure_open()?;
-        self.inner.active_txns.fetch_add(1, Ordering::AcqRel);
-        // Closing between the check and the count would leak the count,
-        // so re-check and hand it back rather than leaving `close`
-        // waiting on a transaction that was never handed out.
-        if self.inner.closed.load(Ordering::Acquire) {
-            self.inner.active_txns.fetch_sub(1, Ordering::AcqRel);
-            return Err(Error::DBClosed);
-        }
+        let slot = self.inner.slots.enter()?;
         let txn = RegolithTxn::new(
             &self.inner.db,
             readonly,
             self.inner.options.isolation,
-            Arc::clone(&self.inner.active_txns),
+            slot,
             Arc::clone(&self.inner.event_order),
-        );
-        match txn {
-            Ok(txn) => Ok(Box::new(txn)),
-            Err(error) => {
-                self.inner.active_txns.fetch_sub(1, Ordering::AcqRel);
-                Err(error)
-            }
-        }
+        )?;
+        Ok(Box::new(txn))
     }
 
     async fn transact_retry(
@@ -282,20 +230,7 @@ impl Store for RegolithStore {
         options: RetryOptions,
         mut attempt: RetryAttempt,
     ) -> std::result::Result<RetryAttemptValue, RetryAttemptError> {
-        self.ensure_open()?;
-        self.inner.active_txns.fetch_add(1, Ordering::AcqRel);
-        if self.inner.closed.load(Ordering::Acquire) {
-            self.inner.active_txns.fetch_sub(1, Ordering::AcqRel);
-            return Err(RetryAttemptError::Storage(Error::DBClosed));
-        }
-
-        struct ActiveTxnGuard(Arc<AtomicUsize>);
-        impl Drop for ActiveTxnGuard {
-            fn drop(&mut self) {
-                self.0.fetch_sub(1, Ordering::AcqRel);
-            }
-        }
-        let _active = ActiveTxnGuard(Arc::clone(&self.inner.active_txns));
+        let _slot = self.inner.slots.enter()?;
         let queue_db = Arc::clone(&self.inner.db);
         let policy = regolith::RetryPolicy::new(options.max_attempts.max(1));
         let mut event_token = None;
@@ -431,10 +366,15 @@ impl Store for RegolithStore {
     }
 
     async fn close(&self) -> Result<()> {
-        if self.inner.closed.swap(true, Ordering::AcqRel) {
+        if !self.inner.slots.begin_close() {
             return Ok(());
         }
-        self.await_quiescence().await?;
+        // A transaction still open, a commit still running and its
+        // post-commit work each hold a slot; the last to end opens the latch.
+        self.inner
+            .slots
+            .quiesce(self.inner.options.close_timeout)
+            .await?;
         // On OPFS the database is resident in linear memory and only `persist`
         // writes it back, so closing without it discards everything since the
         // last explicit call. A no-op on every other environment.
@@ -710,6 +650,56 @@ mod retry_read_tests {
             Some(&b"new"[..])
         );
         read.discard();
+    }
+}
+
+#[cfg(test)]
+mod close_tests {
+    use super::*;
+    use std::future::Future;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll, Wake, Waker};
+
+    #[derive(Default)]
+    struct CountingWaker(AtomicUsize);
+    impl Wake for CountingWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// The transaction that ends last wakes `close`; nothing polls a clock.
+    #[tokio::test]
+    async fn close_is_woken_by_the_last_transaction_that_ends() {
+        let store = RegolithStore::in_memory().unwrap();
+        let reader = store.new_txn(true).await.unwrap();
+        let mut writer = store.new_txn(false).await.unwrap();
+        writer.set(b"key", b"value").await.unwrap();
+        let counter = Arc::new(CountingWaker::default());
+        let waker = Waker::from(Arc::clone(&counter));
+        let mut cx = Context::from_waker(&waker);
+        let mut close = Box::pin(store.close());
+        assert!(close.as_mut().poll(&mut cx).is_pending());
+        assert!(matches!(store.new_txn(false).await, Err(Error::DBClosed)));
+
+        drop(reader);
+        assert_eq!(counter.0.load(Ordering::SeqCst), 0);
+        writer.commit().await.unwrap();
+        assert_eq!(counter.0.load(Ordering::SeqCst), 1);
+        assert!(matches!(close.as_mut().poll(&mut cx), Poll::Ready(Ok(()))));
+    }
+
+    #[tokio::test]
+    async fn close_reports_a_transaction_still_open_at_its_deadline() {
+        let mut options = RegolithStoreOptions::memory();
+        options.close_timeout = std::time::Duration::from_millis(20);
+        let store = RegolithStore::open_with_options("close-deadline", options).unwrap();
+        let held = store.new_txn(false).await.unwrap();
+        let error = store.close().await.unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("1 transaction(s) still in flight"));
+        drop(held);
     }
 }
 

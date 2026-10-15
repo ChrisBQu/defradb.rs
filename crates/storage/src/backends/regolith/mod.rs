@@ -7,6 +7,7 @@ mod encryption;
 mod event_order;
 mod handle;
 pub(crate) mod iterator;
+mod slots;
 mod store;
 mod transaction;
 
