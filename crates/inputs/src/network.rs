@@ -11,30 +11,15 @@ use workers::Clock;
 /// Where round trips run: network work spawned apart from the tasks that
 /// wait on it, and timers for deadlines and backoff.
 ///
-/// The network edge implements it over its runtime; [`Ambient`] runs on the
-/// async runtime the caller is on.
+/// The network edge ([`edge::Edge`]) is the implementation a node passes at
+/// construction. A service given none runs inline ([`Runtime::inline`]).
 pub trait Network: MaybeSendSync + 'static {
-    /// Runs `work` to its end, whoever waits on it.
+    /// Runs `work` to its end, whoever waits on it. A network that cannot
+    /// run it drops it, which settles its keys as closed.
     fn spawn(&self, work: MaybeBoxFuture<'static, ()>);
 
     /// Completes after `duration`.
     fn sleep(&self, duration: Duration) -> MaybeBoxFuture<'static, ()>;
-}
-
-/// The async runtime the caller runs on: tokio natively, the browser's event
-/// loop on wasm.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Ambient;
-
-impl Network for Ambient {
-    fn spawn(&self, work: MaybeBoxFuture<'static, ()>) {
-        // Detached: dropping the handle never cancels the round trip.
-        drop(n0_future::task::spawn(work));
-    }
-
-    fn sleep(&self, duration: Duration) -> MaybeBoxFuture<'static, ()> {
-        Box::pin(n0_future::time::sleep(duration))
-    }
 }
 
 /// The network edge: round trips run as its network tasks, so they stop
@@ -97,9 +82,17 @@ impl Stopwatch {
 }
 
 /// A service's network and clock, passed together.
+///
+/// With a network (the node's edge) round trips run as its tasks, shared by
+/// every caller that asks for a key in flight, and timed by its timers. Inline
+/// (no network given) a caller's round trips run in the caller's own task:
+/// nothing is spawned and no timer is read, so it never reaches for a runtime
+/// it was not given. Its keys are batched and cached as usual but shared with
+/// no other caller, a round trip is bounded only by the source's own
+/// timeouts, and a retry follows a failure at once.
 #[derive(Clone)]
 pub struct Runtime {
-    pub(crate) network: Arc<dyn Network>,
+    pub(crate) network: Option<Arc<dyn Network>>,
     pub(crate) clock: Arc<dyn Clock>,
 }
 
@@ -107,17 +100,23 @@ impl Runtime {
     /// Round trips on `network`, time read from `clock` (a regolith `Env`'s,
     /// through [`workers::EnvClock`], where the node has one).
     pub fn new(network: Arc<dyn Network>, clock: Arc<dyn Clock>) -> Self {
-        Self { network, clock }
-    }
-
-    /// The caller's async runtime and its clock.
-    pub fn ambient() -> Self {
-        Self::new(Arc::new(Ambient), Arc::new(RuntimeClock::new()))
+        Self {
+            network: Some(network),
+            clock,
+        }
     }
 
     /// The network edge `edge` and its runtime's clock.
     pub fn edge(edge: edge::Edge) -> Self {
         Self::new(Arc::new(edge), Arc::new(RuntimeClock::new()))
+    }
+
+    /// No network: each caller runs its own round trips in its own task.
+    pub fn inline() -> Self {
+        Self {
+            network: None,
+            clock: Arc::new(RuntimeClock::new()),
+        }
     }
 
     /// The same network with `clock`.
@@ -131,15 +130,10 @@ impl Runtime {
     }
 }
 
-impl Default for Runtime {
-    fn default() -> Self {
-        Self::ambient()
-    }
-}
-
 impl fmt::Debug for Runtime {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Runtime")
+            .field("inline", &self.network.is_none())
             .field("clock", &self.clock)
             .finish_non_exhaustive()
     }

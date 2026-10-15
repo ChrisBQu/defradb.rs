@@ -5,6 +5,7 @@
 //! without explicit transaction management while still providing proper
 //! transactional semantics per operation.
 
+mod base_heads;
 pub mod batch;
 mod create;
 mod delete;

@@ -602,6 +602,7 @@ pub async fn get_all_field_heads(
 ///
 /// Replaces multiple overlapping headstore scans with a single prefix scan
 /// of `/d/{doc_id}/`.
+#[derive(Clone)]
 pub struct DocHeadsSnapshot {
     max_priority: u64,
     max_priority_by_field: RapidHashMap<String, u64>,

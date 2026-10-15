@@ -1200,9 +1200,13 @@ impl NodeBuilder {
         let runs_p2p = p2p_config.is_some();
         #[cfg(not(feature = "p2p"))]
         let runs_p2p = false;
+        // Remote inputs are network work too: an embedding endpoint and a
+        // remote ACP each need the network runtime.
+        let reaches_remote_inputs =
+            self.embedding_url.is_some() || !matches!(self.document_acp, DocumentAcpConfig::Local);
         let network = NodeEdge::start(
             self.edge,
-            node_identity_did.is_some() || serves_http || runs_p2p,
+            node_identity_did.is_some() || serves_http || runs_p2p || reaches_remote_inputs,
         )?;
 
         // The data path's worker pool comes before the store, which places
