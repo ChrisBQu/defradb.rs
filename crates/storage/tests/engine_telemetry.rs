@@ -84,6 +84,48 @@ async fn accepted_blind_merges_are_visible_in_policy_tickers() {
     assert_eq!(stats.engine["regolith.policy.blind_merges_commuted"], 1);
 }
 
+fn exported_total(name: &str) -> u64 {
+    telemetry::engine_ticker_totals()
+        .into_iter()
+        .find(|(ticker, _)| *ticker == name)
+        .map_or(0, |(_, total)| total)
+}
+
+/// A store's commit and policy tickers reach the OpenTelemetry export, the same
+/// list its snapshot reports, and a store that closes leaves what it counted in
+/// the exported totals. Other tests commit concurrently, so totals only grow.
+#[tokio::test]
+async fn engine_tickers_are_exported_and_kept_when_the_store_closes() {
+    let before = exported_total("regolith.commit.count");
+    let store = RegolithStore::in_memory().unwrap();
+    let reported: Vec<&str> = store
+        .transaction_stats_handle()
+        .unwrap()
+        .snapshot()
+        .engine
+        .into_keys()
+        .collect();
+    let mut exported: Vec<&str> = telemetry::engine_ticker_totals()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    exported.sort_unstable();
+    assert_eq!(reported, exported);
+
+    for _ in 0..3 {
+        let mut txn = store.new_txn(false).await.unwrap();
+        txn.set(b"exported", b"value").await.unwrap();
+        txn.commit().await.unwrap();
+    }
+    let counted = store.transaction_stats_handle().unwrap().snapshot().commits;
+    assert!(counted >= 3, "{counted}");
+    let live = exported_total("regolith.commit.count");
+    assert!(live >= before + counted, "{live} < {before} + {counted}");
+
+    drop(store);
+    assert!(exported_total("regolith.commit.count") >= live);
+}
+
 struct ConflictOnceAttempt {
     trigger_writer: Option<tokio::sync::oneshot::Sender<()>>,
     writer_finished: Option<tokio::sync::oneshot::Receiver<()>>,

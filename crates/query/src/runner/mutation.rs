@@ -861,17 +861,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
 
         let bound_prepared = prepared.map(|prepared| {
             let mut prepared = prepared.clone();
-            for (projected, actual) in created_ids.iter() {
-                if prepared.update_targets.remove(projected) {
-                    prepared.update_targets.insert(actual.clone());
-                }
-                if let Some(write) = prepared.updates.remove(projected) {
-                    prepared.updates.insert(actual.clone(), write);
-                }
-                if let Some(embeddings) = prepared.embeddings.remove(projected) {
-                    prepared.embeddings.insert(actual.clone(), embeddings);
-                }
-            }
+            prepared.bind_created(created_ids);
             prepared
         });
         let prepared = bound_prepared.as_ref();

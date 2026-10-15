@@ -252,6 +252,9 @@ const WRITE_LABELS: [&str; 5] = ["put", "delete", "range_delete", "merge", "othe
 struct TransactionMetrics {
     engine: Arc<regolith::Statistics>,
     reasons: [[AtomicU64; 5]; 10],
+    /// Held, never read: the engine's tickers stay in the OpenTelemetry
+    /// export while this store's diagnostics are reachable.
+    _export: telemetry::EngineTickerExport,
 }
 
 /// Cloneable handle for reading a live store's engine diagnostics.
@@ -264,6 +267,7 @@ impl TransactionStatsHandle {
     pub(crate) fn from_engine(engine: Arc<regolith::Statistics>) -> Self {
         Self {
             metrics: Arc::new(TransactionMetrics {
+                _export: telemetry::export_engine_tickers(&engine),
                 engine,
                 reasons: std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))),
             }),
@@ -310,13 +314,8 @@ impl TransactionStatsHandle {
             backend: "regolith",
             commits: engine.get_ticker(regolith::Ticker::CommitCount),
             conflicts: engine.get_ticker(regolith::Ticker::CommitConflicts),
-            engine: regolith::Ticker::ALL
-                .iter()
-                .filter(|ticker| {
-                    ticker.name().starts_with("regolith.commit.")
-                        || ticker.name().starts_with("regolith.policy.")
-                })
-                .map(|ticker| (ticker.name(), engine.get_ticker(*ticker)))
+            engine: telemetry::exported_engine_tickers()
+                .map(|ticker| (ticker.name(), engine.get_ticker(ticker)))
                 .collect(),
             conflict_reasons,
         }
