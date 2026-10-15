@@ -10,6 +10,8 @@ use std::future::Future;
 use std::sync::Arc;
 
 use kovan_map::HopscotchMap;
+
+use crate::thread_bounds::MaybeBoxFuture;
 use rapidhash::fast::RandomState;
 use zeroize::Zeroize;
 
@@ -17,13 +19,69 @@ use zeroize::Zeroize;
 ///
 /// Implementations call an external service to produce signatures.
 /// `sign_sync` must be callable from synchronous contexts (the block builder
-/// runs inside `spawn_blocking`).
+/// runs inside `spawn_blocking`). [`sign_batch`](Self::sign_batch) is the
+/// completion form the write path uses: one call per wave of signatures,
+/// completing without holding a thread while the service works.
 pub trait RemoteSigner: Send + Sync {
     fn sign_sync(
         &self,
         data: &[u8],
         authorization: Option<&SigningAuthorization>,
     ) -> Result<Vec<u8>, String>;
+
+    /// Signs every payload of a wave, one result per payload in order, and
+    /// completes when all are signed. A signer that reaches a service
+    /// overrides it to run the payloads concurrently and hold no thread; the
+    /// default signs each with [`sign_sync`](Self::sign_sync) before it
+    /// returns, as a signer with only a synchronous call must.
+    fn sign_batch(
+        &self,
+        payloads: Vec<Arc<[u8]>>,
+        authorization: Option<SigningAuthorization>,
+    ) -> MaybeBoxFuture<'static, Vec<Result<Vec<u8>, SignFailure>>> {
+        let signatures = payloads
+            .iter()
+            .map(|payload| {
+                self.sign_sync(payload, authorization.as_ref())
+                    .map_err(SignFailure::refused)
+            })
+            .collect();
+        Box::pin(std::future::ready(signatures))
+    }
+}
+
+/// A signature a signer could not make.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SignFailure {
+    /// What went wrong, for the caller's error.
+    pub message: String,
+    /// The failure was on the way to the signer (a transport error, a
+    /// timeout): signing the same bytes again may succeed and is safe.
+    pub transient: bool,
+}
+
+impl SignFailure {
+    /// The signer refused or failed in a way asking again does not fix.
+    pub fn refused(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            transient: false,
+        }
+    }
+
+    /// The request did not reach the signer or its answer did not come back.
+    pub fn transient(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            transient: true,
+        }
+    }
+}
+
+impl fmt::Display for SignFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
 }
 
 /// Optional authorization context passed to remote signers.
@@ -31,7 +89,7 @@ pub trait RemoteSigner: Send + Sync {
 /// For Orbis-backed signing, this lets DefraDB attach ACP metadata to a sign
 /// request so Orbis can authorize the signature ceremony before producing a
 /// threshold signature.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum SigningAuthorization {
     Policy {
