@@ -78,8 +78,8 @@ pub use runner::{DocFetcher, FetchByIdsResult, NacChecker, QueryRunner, SeQueryT
 pub use sdl_parse::{parse_sdl, parse_sdl_with_known_types};
 pub use select_convert::select_to_go_json;
 pub use txn::{
-    GetTransactionResult, NoOpTransactionRegistry, TransactionContext, TransactionGuard,
-    TransactionHandle, TransactionRegistry,
+    txn_job, NoOpTransactionRegistry, SharedTurn, TransactionContext, TransactionGuard,
+    TransactionHandle, TransactionRegistry, TxnJob, TxnTurn,
 };
 
 pub mod prepared;
