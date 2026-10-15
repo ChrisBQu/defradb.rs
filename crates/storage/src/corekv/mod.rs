@@ -64,24 +64,30 @@
 /// }
 /// iter.close().await?;
 /// ```
+pub mod callbacks;
 pub mod errors;
 pub mod iterator;
-pub mod retry_policy;
+pub mod retry;
 pub mod traits;
 pub mod types;
 
 // Re-export commonly used types and traits for convenience
+pub(crate) use callbacks::truncate_queue;
+pub use callbacks::{
+    make_async_callback, make_callback, AsyncOrderedRetryCallback, AsyncOrderedTxnCallback,
+    AsyncTxnCallback, OrderedRetryCallback, OrderedTxnCallback, OrderedTxnCallbacks,
+    RetryCallbackCounts, RetryCallbackParts, RetryCallbacks, TxnCallback,
+};
 pub use errors::{Error, Result, TransactionConflict, UNIQUE_CONSTRAINT_VIOLATION_MESSAGE};
 pub use iterator::{Iterator, KvPair};
-pub use retry_policy::{engine_retry_options, DEFAULT_MAX_TXN_RETRIES};
+pub use retry::policy::{engine_retry_options, DEFAULT_MAX_TXN_RETRIES};
+pub use retry::{
+    intercept_retry_writes, RetryAttempt, RetryAttemptError, RetryAttemptFn, RetryAttemptFuture,
+    RetryAttemptIO, RetryAttemptValue, RetryOptions, RetryTxn, RetryWriteInterceptor,
+};
 pub use traits::private;
-pub(crate) use traits::truncate_queue;
 pub use traits::{
-    intercept_retry_writes, make_async_callback, make_callback, AsyncOrderedRetryCallback,
-    AsyncOrderedTxnCallback, AsyncTxnCallback, Dropable, MaybeSend, MaybeSendSync, MaybeSync,
-    OrderedRetryCallback, OrderedTxnCallback, OrderedTxnCallbacks, Reader, ReaderWriter,
-    RetryAttempt, RetryAttemptError, RetryAttemptFn, RetryAttemptFuture, RetryAttemptIO,
-    RetryAttemptValue, RetryCallbackCounts, RetryCallbackParts, RetryCallbacks, RetryOptions,
-    RetryTxn, RetryWriteInterceptor, Store, Txn, TxnCallback, TxnStore, Writer,
+    Dropable, MaybeSend, MaybeSendSync, MaybeSync, Reader, ReaderWriter, Store, Txn, TxnStore,
+    Writer,
 };
 pub use types::{AppendLog, IterOptions, Key};
