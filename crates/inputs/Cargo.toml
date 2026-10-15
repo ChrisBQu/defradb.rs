@@ -1,0 +1,34 @@
+[package]
+name = "inputs"
+description = "Remote inputs (KMS keys, signatures, ACP decisions, embeddings): single-flight, batching, a byte-bounded cache, deadlines, retries and metrics"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+bench = false
+
+[dependencies]
+# `MaybeSend`, `MaybeSendSync` and `MaybeBoxFuture`: one service type for
+# native and wasm.
+defra-core = { path = "../defra-core" }
+# Flights wait on `regolith::sync::Event`; the in-flight cap is a
+# `regolith::sync::Semaphore`; the flight, lane and cache maps are its
+# `HopscotchMap`, the queues its `SegQueue`.
+regolith.workspace = true
+# The clock retries and deadlines read: a regolith `Env`'s where the node has one.
+workers = { path = "../workers" }
+rapidhash.workspace = true
+tracing.workspace = true
+# The runtime a service runs its round trips on until the network edge
+# hands it one: tokio natively, the browser's event loop on wasm.
+n0-future.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }
+
+[lints]
+workspace = true

@@ -34,6 +34,7 @@ members = [
     "crates/replication-filter",
     "crates/telemetry",
     "crates/workers",
+    "crates/inputs",
     "tools/lens-host",
     "tools/ffi-test",
     "tools/integration-test",
