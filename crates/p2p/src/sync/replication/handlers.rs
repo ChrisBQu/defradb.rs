@@ -935,8 +935,13 @@ where
     }
 }
 
-/// Process a sync event after acquiring the CID-level merge guard.
-pub(super) async fn process_event_serialized<B, T, H>(
+/// Process one sync event, unless the block it would merge already merged.
+///
+/// It claims nothing and waits for no other merge or fetch of the CID: one
+/// merge per CID comes from the exactly-once race on the block's applied key
+/// (`h/p/`) in the merge transaction, which a concurrent merge of the same
+/// block loses or finds already applied.
+pub(super) async fn process_one_event<B, T, H>(
     coordinator: &SyncCoordinator<B, T>,
     event: SyncEvent,
     handler: &H,
@@ -947,36 +952,12 @@ where
     T: P2PTransport,
     H: MergeHandler + ?Sized + 'static,
 {
-    let Some(cid) = event_merge_cid(&event) else {
-        return process_event(coordinator, event, handler, config).await;
-    };
-
-    loop {
-        match coordinator
-            .manager()
-            .process_queue()
-            .try_acquire(&cid)
-            .await
-        {
-            Ok(_guard) => {
-                if let Some(result) = skipped_if_already_merged(coordinator, &event, cid).await {
-                    return result;
-                }
-                return process_event(coordinator, event, handler, config).await;
-            }
-            Err(wait_for_current_merge) => {
-                if wait_for_current_merge.await.is_err() {
-                    tracing::debug!(
-                        cid = %cid,
-                        "CID merge guard owner was cancelled; checking merge status"
-                    );
-                }
-                if let Some(result) = skipped_if_already_merged(coordinator, &event, cid).await {
-                    return result;
-                }
-            }
+    if let Some(cid) = event_merge_cid(&event) {
+        if let Some(result) = skipped_if_already_merged(coordinator, &event, cid).await {
+            return result;
         }
     }
+    process_event(coordinator, event, handler, config).await
 }
 
 pub(super) async fn process_events_individually<B, T, H>(
@@ -992,7 +973,7 @@ where
 {
     let mut results = Vec::with_capacity(events.len());
     for event in events {
-        results.push(process_event_serialized(coordinator, event, handler, config).await);
+        results.push(process_one_event(coordinator, event, handler, config).await);
     }
     results
 }

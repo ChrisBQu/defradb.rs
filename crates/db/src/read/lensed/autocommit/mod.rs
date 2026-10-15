@@ -5,17 +5,16 @@
 
 mod fetch;
 pub mod migration;
+mod migration_cache;
 mod scan;
 pub mod stream;
 mod vector;
 
 use bytes::Bytes;
-use rapidhash::RapidHashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use document::Document;
-use lens::TargetedHistoryLink;
 use query::fetcher::CommitsQueryOptions;
 use query::planner::index_selection::IndexScanParams;
 use query::runner::{DocFetcher, FetchByIdsResult};
@@ -23,14 +22,7 @@ use storage::corekv::Store;
 
 use crate::database::DB;
 
-/// Cached migration context for a collection.
-type MigrationContext = (bool, Option<RapidHashMap<String, TargetedHistoryLink>>);
-
-#[derive(Default)]
-struct MigrationCache {
-    generation: u64,
-    contexts: RapidHashMap<String, MigrationContext>,
-}
+use migration_cache::MigrationCache;
 
 /// Document fetcher that auto-commits and applies lens migrations.
 ///
@@ -38,10 +30,9 @@ struct MigrationCache {
 /// migration support from LensedDocFetcher.
 pub struct LensedAutoCommitFetcher<S: Store> {
     db: Arc<DB<S>>,
-    /// Cache of migration contexts keyed by `"{collection_id}:{version_id}"`.
-    /// The full cache is invalidated whenever the committed migration graph's
-    /// generation changes.
-    migration_cache: Mutex<MigrationCache>,
+    /// Migration contexts keyed by `"{collection_id}:{version_id}"`, as one
+    /// snapshot per committed migration-graph generation.
+    migration_cache: MigrationCache,
 }
 
 impl<S: Store> LensedAutoCommitFetcher<S> {
@@ -49,7 +40,7 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
     pub fn new(db: Arc<DB<S>>) -> Self {
         Self {
             db,
-            migration_cache: Mutex::new(MigrationCache::default()),
+            migration_cache: MigrationCache::default(),
         }
     }
 
@@ -60,7 +51,7 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
     pub(super) fn clone_for_stream(&self) -> Self {
         Self {
             db: self.db.clone(),
-            migration_cache: Mutex::new(MigrationCache::default()),
+            migration_cache: MigrationCache::default(),
         }
     }
 }

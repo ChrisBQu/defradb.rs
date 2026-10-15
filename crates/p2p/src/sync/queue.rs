@@ -1,27 +1,23 @@
-//! Process queue for serializing concurrent sync operations.
+//! Single-flight ownership of a CID for its fetch and its ingestion.
 //!
-//! This matches Go's `processQueue` in `p2p.go` which prevents multiple
-//! goroutines from syncing the same CID concurrently, avoiding transaction
-//! conflicts during merge.
+//! The first caller to claim a CID owns its fetch or ingest; a duplicate
+//! learns at once that someone else does, and either backs off or waits on
+//! the owner's [`Event`], which is set when the owner lets go. Merges claim
+//! nothing here: one merge per CID comes from the exactly-once race on the
+//! block's applied key (`h/p/`) in the merge transaction.
 
 use cid::Cid;
 use kovan_map::HopscotchMap;
-use kovan_queue::seg_queue::SegQueue;
 use rapidhash::fast::RandomState;
-use std::sync::atomic::{fence, AtomicBool, Ordering};
+use regolith::sync::{Event, Notify};
 use std::sync::Arc;
-use tokio::sync::oneshot;
 
-/// A queue that serializes processing of the same CID.
-///
-/// When multiple sync requests arrive for the same CID concurrently,
-/// only the first one proceeds while others wait. Once the first
-/// completes, all waiters are released (they can then check if the
-/// block is already merged and skip processing).
+/// The CIDs whose fetch or ingest is owned right now.
 ///
 /// # Go Compatibility
 ///
-/// This matches Go's `processQueue` pattern in `p2p.go:565-611`.
+/// Go's `processQueue` (`p2p.go:565-611`) also serializes merges; here the
+/// merge transaction settles that race instead.
 #[derive(Clone)]
 pub struct ProcessQueue {
     inner: Arc<ProcessQueueInner>,
@@ -33,41 +29,24 @@ impl std::fmt::Debug for ProcessQueue {
     }
 }
 
-#[derive(Default)]
-struct Waiters {
-    senders: SegQueue<oneshot::Sender<()>>,
-    released: AtomicBool,
-}
-
-impl Waiters {
-    /// Marks the entry released before draining, with a SeqCst fence on both
-    /// this side and the joining side, so a sender pushed after the drain
-    /// always observes the flag and re-elects instead of waiting forever.
-    fn release(&self) -> (usize, usize) {
-        self.released.store(true, Ordering::Relaxed);
-        fence(Ordering::SeqCst);
-        let mut total = 0;
-        let mut notified = 0;
-        while let Some(tx) = self.senders.pop() {
-            total += 1;
-            if tx.send(()).is_ok() {
-                notified += 1;
-            }
-        }
-        (notified, total)
-    }
-
-    fn join(&self) -> Option<oneshot::Receiver<()>> {
-        let (tx, rx) = oneshot::channel();
-        self.senders.push(tx);
-        fence(Ordering::SeqCst);
-        (!self.released.load(Ordering::Relaxed)).then_some(rx)
-    }
-}
-
 struct ProcessQueueInner {
-    released: tokio::sync::Notify,
-    waiters: HopscotchMap<Cid, Arc<Waiters>, RandomState>,
+    /// Wakes the pending-DAG dispatch owner whenever a CID is let go.
+    released: Notify,
+    /// Each owned CID with the event its owner sets when it lets go.
+    owners: HopscotchMap<Cid, Arc<Event>, RandomState>,
+}
+
+/// A wait for the current owner of a CID to let it go.
+#[derive(Debug)]
+pub struct ProcessWait {
+    event: Arc<Event>,
+}
+
+impl ProcessWait {
+    /// Completes once the owner lets the CID go, at once if it already has.
+    pub async fn released(self) {
+        self.event.wait().await;
+    }
 }
 
 impl ProcessQueue {
@@ -75,8 +54,8 @@ impl ProcessQueue {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(ProcessQueueInner {
-                released: tokio::sync::Notify::new(),
-                waiters: HopscotchMap::with_hasher(RandomState::default()),
+                released: Notify::new(),
+                owners: HopscotchMap::with_hasher(RandomState::default()),
             }),
         }
     }
@@ -85,13 +64,15 @@ impl ProcessQueue {
     ///
     /// Useful for monitoring and debugging.
     pub fn active_count(&self) -> usize {
-        self.inner.waiters.len()
+        self.inner.owners.len()
     }
 
     pub(crate) fn is_active(&self, cid: &Cid) -> bool {
-        self.inner.waiters.contains_key(cid)
+        self.inner.owners.contains_key(cid)
     }
 
+    /// Completes after some CID is let go: at the next release, or at once
+    /// when one happened since the last call found nobody waiting.
     pub(crate) async fn released(&self) {
         self.inner.released.notified().await;
     }
@@ -100,13 +81,10 @@ impl ProcessQueue {
     ///
     /// Useful for debugging stuck operations.
     pub fn active_cids(&self) -> Vec<Cid> {
-        self.inner.waiters.keys().collect()
+        self.inner.owners.keys().collect()
     }
 
     /// Force release a stuck CID.
-    ///
-    /// Use this to recover from situations where a ProcessGuard was dropped
-    /// outside a tokio runtime and the CID became permanently locked.
     ///
     /// # Safety
     ///
@@ -118,16 +96,10 @@ impl ProcessQueue {
     ///
     /// Returns `true` if the CID was released, `false` if it wasn't locked.
     pub fn force_release(&self, cid: &Cid) -> bool {
-        let Some(waiting) = self.inner.waiters.force_remove(cid) else {
+        if !self.release_sync(cid) {
             return false;
-        };
-        self.inner.released.notify_one();
-        tracing::warn!(
-            ?cid,
-            waiter_count = waiting.senders.len(),
-            "Force-releasing stuck CID"
-        );
-        waiting.release();
+        }
+        tracing::warn!(?cid, "Force-releasing stuck CID");
         true
     }
 
@@ -139,83 +111,51 @@ impl ProcessQueue {
     ///
     /// Returns the number of CIDs that were released.
     pub fn force_release_all(&self) -> usize {
-        let cids: Vec<Cid> = self.inner.waiters.keys().collect();
-        let mut count = 0;
-        for cid in cids {
-            let Some(waiting) = self.inner.waiters.force_remove(&cid) else {
-                continue;
-            };
-            count += 1;
-            tracing::debug!(?cid, "Force-releasing CID");
-            waiting.release();
-        }
+        let cids: Vec<Cid> = self.inner.owners.keys().collect();
+        let count = cids.iter().filter(|cid| self.release_sync(cid)).count();
         if count > 0 {
-            self.inner.released.notify_one();
             tracing::warn!(count = count, "Force-releasing all stuck CIDs");
         }
         count
     }
 
-    /// Try to acquire exclusive processing rights for a CID.
+    /// Claim a CID, or learn who owns it.
     ///
     /// Returns:
-    /// - `Ok(ProcessGuard)` if this caller should process the CID
-    /// - `Err(receiver)` if another caller is already processing; wait on the receiver
+    /// - `Ok(ProcessGuard)` if this caller owns the CID now
+    /// - `Err(ProcessWait)` if another caller does; await
+    ///   [`ProcessWait::released`] to know when it lets go
     ///
     /// # Example
     ///
     /// ```ignore
     /// let queue = ProcessQueue::new();
     ///
-    /// match queue.try_acquire(&cid).await {
+    /// match queue.try_acquire(&cid) {
     ///     Ok(guard) => {
-    ///         // We're the first - do the sync work
-    ///         do_sync(&cid).await;
-    ///         // Guard drop notifies waiters
+    ///         fetch(&cid).await;
+    ///         // Dropping the guard lets the CID go and wakes its waiters.
     ///     }
-    ///     Err(rx) => {
-    ///         // Another task is processing - wait for it
-    ///         let _ = rx.await;
-    ///         // Now check if block is merged and proceed accordingly
-    ///     }
+    ///     Err(wait) => wait.released().await,
     /// }
     /// ```
-    pub async fn try_acquire(&self, cid: &Cid) -> Result<ProcessGuard, oneshot::Receiver<()>> {
-        loop {
-            let existing = match self.inner.waiters.get(cid) {
-                Some(existing) => existing,
-                None => match self
-                    .inner
-                    .waiters
-                    .insert_if_absent(*cid, Arc::new(Waiters::default()))
-                {
-                    None => {
-                        return Ok(ProcessGuard {
-                            cid: *cid,
-                            queue: self.clone(),
-                        })
-                    }
-                    Some(existing) => existing,
-                },
-            };
-            if let Some(rx) = existing.join() {
-                return Err(rx);
-            }
+    pub fn try_acquire(&self, cid: &Cid) -> Result<ProcessGuard, ProcessWait> {
+        match self
+            .inner
+            .owners
+            .insert_if_absent(*cid, Arc::new(Event::new()))
+        {
+            None => Ok(ProcessGuard {
+                cid: *cid,
+                queue: self.clone(),
+            }),
+            Some(event) => Err(ProcessWait { event }),
         }
     }
 
-    /// Try to acquire a CID without allocating or registering a waiter.
-    ///
-    /// Returns `None` immediately when another caller owns the CID.
+    /// Claim a CID, or return `None` at once when another caller owns it.
     pub fn try_acquire_nowait(&self, cid: &Cid) -> Option<ProcessGuard> {
-        self.inner
-            .waiters
-            .insert_if_absent(*cid, Arc::new(Waiters::default()))
-            .is_none()
-            .then(|| ProcessGuard {
-                cid: *cid,
-                queue: self.clone(),
-            })
+        self.try_acquire(cid).ok()
     }
 
     /// Try to acquire exclusive processing rights for every CID without
@@ -248,21 +188,15 @@ impl ProcessQueue {
         Ok(guards)
     }
 
-    /// Release the CID and notify all waiters (synchronous version).
-    fn release_sync(&self, cid: &Cid) {
-        let Some(waiting) = self.inner.waiters.force_remove(cid) else {
-            return;
+    /// Let the CID go: its waiters wake and the dispatch owner is told.
+    /// Returns whether the CID was owned.
+    fn release_sync(&self, cid: &Cid) -> bool {
+        let Some(event) = self.inner.owners.force_remove(cid) else {
+            return false;
         };
+        event.set();
         self.inner.released.notify_one();
-        let (notified, total) = waiting.release();
-        if notified < total {
-            tracing::debug!(
-                ?cid,
-                notified,
-                total,
-                "Some waiters were cancelled before notification"
-            );
-        }
+        true
     }
 }
 
@@ -298,7 +232,6 @@ impl ProcessGuard {
 
 impl Drop for ProcessGuard {
     fn drop(&mut self) {
-        // Release synchronously so it works both inside and outside a runtime.
         self.queue.release_sync(&self.cid);
     }
 }
@@ -306,7 +239,10 @@ impl Drop for ProcessGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
+    use std::pin::pin;
     use std::str::FromStr;
+    use std::task::{Context, Poll, Waker};
     use std::time::Duration;
 
     fn test_cid() -> Cid {
@@ -317,30 +253,28 @@ mod tests {
         Cid::from_str("bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy").unwrap()
     }
 
-    #[tokio::test]
-    async fn test_first_caller_acquires() {
+    #[test]
+    fn test_first_caller_acquires() {
         let queue = ProcessQueue::new();
-        let cid = test_cid();
-
-        let result = queue.try_acquire(&cid).await;
-        assert!(result.is_ok(), "First caller should acquire");
+        assert!(
+            queue.try_acquire(&test_cid()).is_ok(),
+            "First caller should acquire"
+        );
     }
 
-    #[tokio::test]
-    async fn test_second_caller_waits() {
+    #[test]
+    fn test_second_caller_waits() {
         let queue = ProcessQueue::new();
         let cid = test_cid();
-
-        // First caller acquires
-        let _guard = queue.try_acquire(&cid).await.unwrap();
-
-        // Second caller should get a waiter
-        let result = queue.try_acquire(&cid).await;
-        assert!(result.is_err(), "Second caller should wait");
+        let _guard = queue.try_acquire(&cid).unwrap();
+        assert!(
+            queue.try_acquire(&cid).is_err(),
+            "Second caller should wait"
+        );
     }
 
-    #[tokio::test]
-    async fn test_nowait_second_caller_is_suppressed() {
+    #[test]
+    fn test_nowait_second_caller_is_suppressed() {
         let queue = ProcessQueue::new();
         let cid = test_cid();
 
@@ -349,22 +283,18 @@ mod tests {
         assert!(queue.try_acquire_nowait(&cid).is_none());
     }
 
-    #[tokio::test]
-    async fn test_different_cids_independent() {
+    #[test]
+    fn test_different_cids_independent() {
         let queue = ProcessQueue::new();
-        let cid1 = test_cid();
-        let cid2 = test_cid2();
-
-        // First CID acquired
-        let _guard1 = queue.try_acquire(&cid1).await.unwrap();
-
-        // Second CID should also acquire (different CID)
-        let result = queue.try_acquire(&cid2).await;
-        assert!(result.is_ok(), "Different CIDs should be independent");
+        let _guard1 = queue.try_acquire(&test_cid()).unwrap();
+        assert!(
+            queue.try_acquire(&test_cid2()).is_ok(),
+            "Different CIDs should be independent"
+        );
     }
 
-    #[tokio::test]
-    async fn acquire_all_nowait_is_atomic_for_an_overlapping_batch() {
+    #[test]
+    fn acquire_all_nowait_is_atomic_for_an_overlapping_batch() {
         let queue = ProcessQueue::new();
         let cid1 = test_cid();
         let cid2 = test_cid2();
@@ -391,31 +321,45 @@ mod tests {
         assert_eq!(queue.active_count(), 0);
     }
 
+    /// A wait is the owner's event: it completes when the owner lets go,
+    /// with no runtime, and a wait on an owner already gone completes at once.
+    #[test]
+    fn a_wait_completes_when_its_owner_lets_go_without_a_runtime() {
+        let queue = ProcessQueue::new();
+        let cid = test_cid();
+        let guard = queue.try_acquire(&cid).unwrap();
+        let first = queue.try_acquire(&cid).unwrap_err();
+        let second = queue.try_acquire(&cid).unwrap_err();
+
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut waiting = pin!(first.released());
+        assert!(waiting.as_mut().poll(&mut cx).is_pending());
+
+        drop(guard);
+        assert!(waiting.as_mut().poll(&mut cx).is_ready());
+        assert_eq!(
+            pin!(second.released()).poll(&mut cx),
+            Poll::Ready(()),
+            "a wait taken before the release and polled after it completes at once"
+        );
+        assert!(queue.try_acquire(&cid).is_ok());
+    }
+
     #[tokio::test]
     async fn test_waiter_notified_on_release() {
         let queue = ProcessQueue::new();
         let cid = test_cid();
 
-        // First caller acquires
-        let guard = queue.try_acquire(&cid).await.unwrap();
-
-        // Spawn second caller that waits
-        let queue_clone = queue.clone();
+        let guard = queue.try_acquire(&cid).unwrap();
+        let wait = queue.try_acquire(&cid).unwrap_err();
         let waiter = n0_future::task::spawn(async move {
-            let rx = queue_clone.try_acquire(&cid).await.unwrap_err();
-            // Wait for notification
-            rx.await.unwrap();
+            wait.released().await;
             true
         });
 
-        // Give the waiter time to register
-        n0_future::time::sleep(Duration::from_millis(10)).await;
-
-        // Explicitly release guard
         guard.release().await;
 
-        // Waiter should complete
-        let result = n0_future::time::timeout(Duration::from_millis(100), waiter).await;
+        let result = n0_future::time::timeout(Duration::from_secs(5), waiter).await;
         assert!(result.is_ok(), "Waiter should be notified");
         assert!(
             result.unwrap().unwrap(),
@@ -428,146 +372,80 @@ mod tests {
         let queue = ProcessQueue::new();
         let cid = test_cid();
 
-        // First caller acquires
-        let guard = queue.try_acquire(&cid).await.unwrap();
+        let guard = queue.try_acquire(&cid).unwrap();
+        let handles: Vec<_> = (0..5)
+            .map(|_| {
+                let wait = queue.try_acquire(&cid).unwrap_err();
+                n0_future::task::spawn(wait.released())
+            })
+            .collect();
 
-        // Spawn multiple waiters
-        let mut handles = Vec::new();
-        for _ in 0..5 {
-            let queue_clone = queue.clone();
-            handles.push(n0_future::task::spawn(async move {
-                let rx = queue_clone.try_acquire(&cid).await.unwrap_err();
-                rx.await.unwrap();
-            }));
-        }
-
-        // Give waiters time to register
-        n0_future::time::sleep(Duration::from_millis(10)).await;
-
-        // Explicitly release guard
         guard.release().await;
 
-        // All waiters should complete
         for handle in handles {
-            let result = n0_future::time::timeout(Duration::from_millis(100), handle).await;
+            let result = n0_future::time::timeout(Duration::from_secs(5), handle).await;
             assert!(result.is_ok(), "All waiters should be notified");
         }
     }
 
-    #[tokio::test]
-    async fn test_reacquire_after_release() {
-        let queue = ProcessQueue::new();
-        let cid = test_cid();
-
-        // First acquisition
-        {
-            let guard = queue.try_acquire(&cid).await.unwrap();
-            guard.release().await;
-        }
-
-        // Should be able to acquire again immediately
-        let result = queue.try_acquire(&cid).await;
-        assert!(result.is_ok(), "Should be able to reacquire after release");
-    }
-
-    #[tokio::test]
-    async fn test_drop_releases() {
-        let queue = ProcessQueue::new();
-        let cid = test_cid();
-
-        // Acquire and drop (not explicit release)
-        {
-            let _guard = queue.try_acquire(&cid).await.unwrap();
-            // Guard dropped here - release is now synchronous
-        }
-
-        // Should be able to acquire again immediately (drop is now synchronous)
-        let result = queue.try_acquire(&cid).await;
-        assert!(result.is_ok(), "Should be able to reacquire after drop");
-    }
-
     #[test]
-    fn test_drop_releases_outside_tokio() {
-        // Test that dropping ProcessGuard outside tokio runtime works correctly
-        // (previously this would permanently lock the CID)
+    fn test_reacquire_after_release() {
         let queue = ProcessQueue::new();
         let cid = test_cid();
-
-        // Use block_on to acquire in async context, then drop synchronously
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let guard = rt.block_on(async { queue.try_acquire(&cid).await.unwrap() });
-
-        // Drop the guard outside async context
-        drop(guard);
-
-        // Should be able to acquire again
-        let result = rt.block_on(async { queue.try_acquire(&cid).await });
+        drop(queue.try_acquire(&cid).unwrap());
         assert!(
-            result.is_ok(),
-            "Should be able to reacquire after synchronous drop"
+            queue.try_acquire(&cid).is_ok(),
+            "Should be able to reacquire after release"
         );
     }
 
-    #[tokio::test]
-    async fn test_cancelled_waiters_handled_gracefully() {
+    #[test]
+    fn test_cancelled_waiters_handled_gracefully() {
         let queue = ProcessQueue::new();
         let cid = test_cid();
 
-        // First caller acquires
-        let guard = queue.try_acquire(&cid).await.unwrap();
-
-        // Create waiters then drop them (simulating cancelled tasks)
+        let guard = queue.try_acquire(&cid).unwrap();
+        drop(queue.try_acquire(&cid).unwrap_err());
+        let mut cx = Context::from_waker(Waker::noop());
         {
-            let rx1 = queue.try_acquire(&cid).await.unwrap_err();
-            let rx2 = queue.try_acquire(&cid).await.unwrap_err();
-            // Drop receivers without awaiting - simulates task cancellation
-            drop(rx1);
-            drop(rx2);
+            // A wait polled once and then cancelled.
+            let mut cancelled = pin!(queue.try_acquire(&cid).unwrap_err().released());
+            assert!(cancelled.as_mut().poll(&mut cx).is_pending());
         }
 
-        // Release should handle cancelled receivers gracefully (not panic)
-        guard.release().await;
+        drop(guard);
 
-        // Queue should be in clean state
-        let result = queue.try_acquire(&cid).await;
         assert!(
-            result.is_ok(),
+            queue.try_acquire(&cid).is_ok(),
             "Queue should be clean after handling cancelled waiters"
         );
     }
 
-    #[tokio::test]
-    async fn test_mixed_cancelled_and_waiting() {
+    #[test]
+    fn a_release_wakes_the_dispatch_owner_once() {
         let queue = ProcessQueue::new();
         let cid = test_cid();
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut released = pin!(queue.released());
+        assert!(released.as_mut().poll(&mut cx).is_pending());
 
-        // First caller acquires
-        let guard = queue.try_acquire(&cid).await.unwrap();
+        drop(queue.try_acquire(&cid).unwrap());
 
-        // Create a waiter that will be cancelled
-        let rx1 = queue.try_acquire(&cid).await.unwrap_err();
-        drop(rx1); // Cancel immediately
+        assert!(released.as_mut().poll(&mut cx).is_ready());
+    }
 
-        // Create a waiter that will actually wait
-        let queue_clone = queue.clone();
-        let waiter = n0_future::task::spawn(async move {
-            let rx = queue_clone.try_acquire(&cid).await.unwrap_err();
-            rx.await.unwrap();
-            true
-        });
+    #[test]
+    fn force_release_sets_the_owner_event() {
+        let queue = ProcessQueue::new();
+        let cid = test_cid();
+        let _stuck = queue.try_acquire(&cid).unwrap();
+        let wait = queue.try_acquire(&cid).unwrap_err();
 
-        // Give waiter time to register
-        n0_future::time::sleep(Duration::from_millis(10)).await;
+        assert!(queue.force_release(&cid));
+        assert!(!queue.force_release(&cid));
 
-        // Release - should notify the waiting task even though one was cancelled
-        guard.release().await;
-
-        // Active waiter should still be notified
-        let result = n0_future::time::timeout(Duration::from_millis(100), waiter).await;
-        assert!(result.is_ok(), "Active waiter should be notified");
-        assert!(
-            result.unwrap().unwrap(),
-            "Active waiter should complete successfully"
-        );
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(pin!(wait.released()).poll(&mut cx).is_ready());
+        assert_eq!(queue.active_count(), 0);
     }
 }

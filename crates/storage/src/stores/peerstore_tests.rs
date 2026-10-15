@@ -378,6 +378,47 @@ async fn marker_conflicts_run_under_the_configured_retry_budget() {
     assert_eq!(store.attempts.load(AtomicOrdering::SeqCst), 2);
 }
 
+/// The push-marker retry layer counts the engine re-runs of a peerstore
+/// transaction: the re-run, the retried sequence that commits, and the one
+/// that runs out of budget. The counters are process-wide, so the test reads
+/// how much each one grew.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn marker_conflict_retries_are_counted_in_the_push_marker_layer() {
+    let retry_info = super::super::RetryInfo::new_initial().to_bytes().unwrap();
+    let before = telemetry::conflict_metrics_snapshot().push_marker;
+
+    let store = FaultyTransactStore::new(0, 1);
+    let peerstore = Peerstore::new(store).with_max_txn_retries(1);
+    peerstore
+        .create_replicator("peer", b"replicator")
+        .await
+        .unwrap();
+    peerstore
+        .record_push_failure("peer", "doc", "collection", &retry_info)
+        .await
+        .unwrap();
+    let retried = telemetry::conflict_metrics_snapshot().push_marker;
+    assert!(retried.attempts > before.attempts, "{retried:?}");
+    assert!(retried.successes > before.successes, "{retried:?}");
+
+    let store = FaultyTransactStore::new(0, 1);
+    let peerstore = Peerstore::new(store).with_max_txn_retries(0);
+    peerstore
+        .create_replicator("peer", b"replicator")
+        .await
+        .unwrap();
+    let error = peerstore
+        .record_push_failure("peer", "doc", "collection", &retry_info)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, crate::corekv::Error::TxnRetryExhausted(_)),
+        "{error:?}"
+    );
+    let exhausted = telemetry::conflict_metrics_snapshot().push_marker;
+    assert!(exhausted.exhaustions > retried.exhaustions, "{exhausted:?}");
+}
+
 #[tokio::test]
 async fn test_peerstore_basic() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
