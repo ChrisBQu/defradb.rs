@@ -62,7 +62,7 @@ async fn historical_read_key_miss_exits_attempt_and_is_scoped_to_caller() {
         panic!("expected a typed input miss, got {error:?}");
     };
     assert_eq!(kms.0.load(Ordering::SeqCst), 0);
-    txn.discard();
+    txn.discard().unwrap();
 
     let resolver = crate::AutoCommitMutator::new(db.clone());
     let response = resolver.resolve_prepared_input(&request).await.unwrap();
@@ -89,5 +89,5 @@ async fn historical_read_key_miss_exits_attempt_and_is_scoped_to_caller() {
         Err(Error::Query(query::error::QueryError::NeedsInput(_)))
     ));
     assert_eq!(kms.0.load(Ordering::SeqCst), 1);
-    txn.discard();
+    txn.discard().unwrap();
 }
