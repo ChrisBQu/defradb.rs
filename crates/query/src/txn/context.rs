@@ -1,10 +1,11 @@
 //! Transaction context trait.
 
-use acp::error::{Error as AcpError, Result as AcpResult};
+use acp::error::Result as AcpResult;
 use acp::DocumentACP;
 use acp::DocumentPermission;
 use acp::Identity;
 use identity::Did;
+use kovan::Atom;
 use rapidhash::RapidHashMap;
 use std::sync::Arc;
 use storage::corekv::MaybeSendSync;
@@ -26,7 +27,7 @@ struct DocRegistrationKey {
     doc_id: String,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct AcpRegistrationState {
     projected_registrations: RapidHashMap<DocRegistrationKey, ProjectedDocRegistration>,
     savepoints: Vec<AcpRegistrationSavepoint>,
@@ -44,7 +45,7 @@ struct AcpRegistrationSavepoint {
 /// writes. It does not make remote ACP updates atomic with storage.
 #[derive(Default)]
 pub struct AcpRegistrationProjection {
-    state: std::sync::Mutex<AcpRegistrationState>,
+    state: Atom<AcpRegistrationState>,
 }
 
 impl AcpRegistrationProjection {
@@ -100,13 +101,12 @@ impl AcpRegistrationProjection {
         resource_name: &str,
         doc_id: &str,
     ) -> AcpResult<Option<ProjectedDocRegistration>> {
-        let state = self.state.lock().map_err(|_| {
-            AcpError::Storage("ACP registration projection lock poisoned".to_string())
-        })?;
-        Ok(state
-            .projected_registrations
-            .get(&Self::doc_key(policy_id, resource_name, doc_id))
-            .cloned())
+        Ok(self.state.peek(|state| {
+            state
+                .projected_registrations
+                .get(&Self::doc_key(policy_id, resource_name, doc_id))
+                .cloned()
+        }))
     }
 
     pub fn project_registration(
@@ -116,14 +116,16 @@ impl AcpRegistrationProjection {
         doc_id: &str,
         owner: Did,
     ) -> Result<(), String> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| "ACP registration projection lock poisoned".to_string())?;
-        state.projected_registrations.insert(
-            Self::doc_key(policy_id, resource_name, doc_id),
-            ProjectedDocRegistration::Registered { owner },
-        );
+        self.state.rcu(|old| {
+            let mut next = old.clone();
+            next.projected_registrations.insert(
+                Self::doc_key(policy_id, resource_name, doc_id),
+                ProjectedDocRegistration::Registered {
+                    owner: owner.clone(),
+                },
+            );
+            next
+        });
         Ok(())
     }
 
@@ -133,14 +135,14 @@ impl AcpRegistrationProjection {
         resource_name: &str,
         doc_id: &str,
     ) -> Result<(), String> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| "ACP registration projection lock poisoned".to_string())?;
-        state.projected_registrations.insert(
-            Self::doc_key(policy_id, resource_name, doc_id),
-            ProjectedDocRegistration::Unregistered,
-        );
+        self.state.rcu(|old| {
+            let mut next = old.clone();
+            next.projected_registrations.insert(
+                Self::doc_key(policy_id, resource_name, doc_id),
+                ProjectedDocRegistration::Unregistered,
+            );
+            next
+        });
         Ok(())
     }
 }
@@ -546,6 +548,35 @@ pub trait TransactionContext: MaybeSendSync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_projection_writes_compose_without_lost_updates() {
+        let projection = AcpRegistrationProjection::new();
+        let owner: Did = "did:key:z6MksQ6mYqY1YxR4KQ2NW6y6x8vJrNs2LEd8w5pYxHw3rroA"
+            .parse()
+            .unwrap();
+
+        std::thread::scope(|scope| {
+            for index in 0..32 {
+                let projection = &projection;
+                let owner = owner.clone();
+                scope.spawn(move || {
+                    projection
+                        .project_registration("policy", "User", &format!("doc-{index}"), owner)
+                        .unwrap();
+                });
+            }
+        });
+
+        for index in 0..32 {
+            assert!(matches!(
+                projection
+                    .projected_registration("policy", "User", &format!("doc-{index}"))
+                    .unwrap(),
+                Some(ProjectedDocRegistration::Registered { .. })
+            ));
+        }
+    }
 
     #[tokio::test]
     async fn projected_registration_reports_registered_and_owner_only_access() {
