@@ -288,6 +288,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         };
         if let Some((cid, block, col_data)) = &artifacts {
             self.register_deleted_doc_with_acp(
+                &attempt.context,
                 &mut txn,
                 &collection,
                 canonical_doc_id.to_string(),
@@ -514,7 +515,12 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         };
         for (doc_id, _, artifacts) in &results {
             if artifacts.is_some() {
-                self.register_deleted_doc_with_acp(&mut txn, &collection, doc_id.to_string())?;
+                self.register_deleted_doc_with_acp(
+                    &attempt.context,
+                    &mut txn,
+                    &collection,
+                    doc_id.to_string(),
+                )?;
             }
         }
         if let Some(bus) = self.db.event_bus().cloned() {

@@ -1042,15 +1042,13 @@ async fn auto_commit_create_registers_acp_before_publishing_update() {
     let mut sub = bus.subscribe(&[EventName::Update]);
     let owner = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
     let create = tokio::spawn(async move {
-        defra_core::signing::scope_broadcast_creator_did(
-            Some(owner.to_string()),
-            mutator.create(
-                &defra_core::RequestContext::default(),
+        mutator
+            .create(
+                &defra_core::RequestContext::default().with_creator(Some(owner.to_string())),
                 "TestDoc",
                 Document::from_json_str(r#"{"x": 1}"#).expect("doc"),
-            ),
-        )
-        .await
+            )
+            .await
     });
 
     let message = tokio::time::timeout(std::time::Duration::from_secs(1), sub.recv())

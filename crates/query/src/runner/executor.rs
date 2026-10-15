@@ -372,13 +372,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
         // Resolve effective identity: request identity takes precedence over default
         let identity = self.resolve_identity(request.identity);
-        let creator_did = identity.as_ref().map(ToString::to_string);
-        let acting_identity = creator_did
-            .clone()
+        let acting_identity = identity
+            .as_ref()
+            .map(ToString::to_string)
             .or_else(defra_core::current_identity::get_effective_identity);
+        // What this request writes is created by its caller.
+        let runner = self.for_caller(identity.as_ref());
 
         let mut warnings: Vec<GqlWarning> = Vec::new();
-        let scoped_runner = self.scoped_runner(self.acp.clone());
 
         // Route to appropriate handler based on operation type
         // Pass identity and variables through for ACP permission checks and variable substitution
@@ -395,21 +396,23 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         }
                     }
                     if let Some(explain_type) = explain {
-                        self.explain_query_with_identity_and_vars(
-                            &request.query,
-                            identity,
-                            explain_type,
-                            variables.as_ref(),
-                        )
-                        .await
+                        runner
+                            .explain_query_with_identity_and_vars(
+                                &request.query,
+                                identity,
+                                explain_type,
+                                variables.as_ref(),
+                            )
+                            .await
                     } else {
-                        self.execute_selects_internal(
-                            selects,
-                            self.fetcher.as_ref(),
-                            identity,
-                            &mut warnings,
-                        )
-                        .await
+                        runner
+                            .execute_selects_internal(
+                                selects,
+                                runner.fetcher.as_ref(),
+                                identity,
+                                &mut warnings,
+                            )
+                            .await
                     }
                 }
                 ParsedOperation::Mutation {
@@ -417,11 +420,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 } => {
                     if let Some(explain_type) = explain {
                         // Return mutation plan instead of executing
-                        self.explain_mutation_with_identity(&request.query, identity, explain_type)
+                        runner
+                            .explain_mutation_with_identity(&request.query, identity, explain_type)
                             .await
                     } else {
                         // Use pre-parsed mutations to avoid redundant re-parsing
-                        match self.mutator.as_ref() {
+                        match runner.mutator.as_ref() {
                             Some(mutator) => {
                                 let mutator = prepared
                                     .as_ref()
@@ -429,7 +433,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                         mutator.with_prepared_inputs(prepared.inputs.clone())
                                     })
                                     .unwrap_or_else(|| mutator.clone());
-                                scoped_runner
+                                runner
                                     .execute_parsed_mutations(
                                         mutations,
                                         mutator,
@@ -454,22 +458,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 }
                 ParsedOperation::Introspection { query } => {
                     // Introspection queries are executed against the GraphQL schema
-                    self.execute_introspection(&query).await
+                    runner.execute_introspection(&query).await
                 }
             }
         });
 
-        // The primary QueryExecutor path parses mutations once and therefore
-        // does not pass through execute_mutation_internal_with_vars. Scope the
-        // resolved request identity here as well so HTTP/CLI auto-commit and
-        // transactional broadcasts carry the same Creator DID as direct
-        // mutation entry points.
         let result = defra_core::current_identity::with_scoped_identity(
             acting_identity,
-            defra_core::signing::scope_broadcast_creator_did(
-                creator_did,
-                await_with_timeout(execution, self.query_timeout),
-            ),
+            await_with_timeout(execution, self.query_timeout),
         )
         .await;
 

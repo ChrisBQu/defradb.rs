@@ -125,18 +125,16 @@ async fn deferred_registration_hook_uses_bearer_captured_before_commit() {
         ))
         .await
         .unwrap();
-    defra_core::signing::scope_broadcast_creator_did(Some(DID.to_string()), async {
-        defra_core::signing::scope_request_bearer_token(
-            Some(DID.to_string()),
-            Some(TOKEN.to_string()),
-            async {
-                AutoCommitMutator::new(db.clone())
-                    .register_created_doc_with_acp(&mut txn, &collection, "doc-1".into())
-                    .unwrap();
-            },
-        )
-        .await;
-    })
+    let context = defra_core::RequestContext::default().with_creator(Some(DID.to_string()));
+    defra_core::signing::scope_request_bearer_token(
+        Some(DID.to_string()),
+        Some(TOKEN.to_string()),
+        async {
+            AutoCommitMutator::new(db.clone())
+                .register_created_doc_with_acp(&context, &mut txn, &collection, "doc-1".into())
+                .unwrap();
+        },
+    )
     .await;
 
     assert_eq!(defra_core::signing::get_request_bearer_token(DID), None);
@@ -207,18 +205,16 @@ async fn deferred_unregistration_hook_uses_bearer_captured_before_commit() {
     db.set_document_acp(observer.clone());
 
     let mut txn = db.new_txn(false).await.unwrap();
-    defra_core::signing::scope_broadcast_creator_did(Some(DID.to_string()), async {
-        defra_core::signing::scope_request_bearer_token(
-            Some(DID.to_string()),
-            Some(TOKEN.to_string()),
-            async {
-                AutoCommitMutator::new(db.clone())
-                    .register_deleted_doc_with_acp(&mut txn, &collection, "doc-1".into())
-                    .unwrap();
-            },
-        )
-        .await;
-    })
+    let context = defra_core::RequestContext::default().with_creator(Some(DID.to_string()));
+    defra_core::signing::scope_request_bearer_token(
+        Some(DID.to_string()),
+        Some(TOKEN.to_string()),
+        async {
+            AutoCommitMutator::new(db.clone())
+                .register_deleted_doc_with_acp(&context, &mut txn, &collection, "doc-1".into())
+                .unwrap();
+        },
+    )
     .await;
 
     assert_eq!(defra_core::signing::get_request_bearer_token(DID), None);

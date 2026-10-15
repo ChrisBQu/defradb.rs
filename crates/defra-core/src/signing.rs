@@ -4,7 +4,6 @@
 //! [`RequestContext`](crate::RequestContext) carries from the boundary to the
 //! block builder layer.
 
-use std::cell::RefCell;
 use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
@@ -406,7 +405,7 @@ tokio::task_local! {
 
 #[cfg(target_arch = "wasm32")]
 thread_local! {
-    static TASK_REQUEST_BEARER_TOKEN: RefCell<Option<(Option<String>, Option<String>)>> = const { RefCell::new(None) };
+    static TASK_REQUEST_BEARER_TOKEN: std::cell::RefCell<Option<(Option<String>, Option<String>)>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Run a future with the request bearer token visible to ACP providers.
@@ -627,108 +626,5 @@ mod tests {
     fn signing_key_type_from_str_rejects_invalid_values() {
         let error = "invalid".parse::<SigningKeyType>().unwrap_err();
         assert_eq!(error, "unsupported signing key type: invalid");
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Broadcast Creator DID — thread-local for P2P ACP propagation
-// ---------------------------------------------------------------------------
-
-thread_local! {
-    static BROADCAST_CREATOR_DID: RefCell<Option<String>> = const { RefCell::new(None) };
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-tokio::task_local! {
-    static TASK_BROADCAST_CREATOR_DID: Option<String>;
-}
-
-/// Scope the broadcast creator DID to one async mutation task.
-///
-/// A thread-local alone is not safe across `.await`: Tokio may resume the
-/// mutation on a different worker, leaving the old worker contaminated and
-/// clearing an unrelated worker on drop. Async query entry points must use
-/// this scope; the thread-local remains only for synchronous lower-level
-/// callers and tests.
-#[cfg(not(target_arch = "wasm32"))]
-pub async fn scope_broadcast_creator_did<F>(did: Option<String>, future: F) -> F::Output
-where
-    F: Future,
-{
-    TASK_BROADCAST_CREATOR_DID.scope(did, future).await
-}
-
-/// Run an async mutation without server-side task-local P2P state on WASM.
-#[cfg(target_arch = "wasm32")]
-pub async fn scope_broadcast_creator_did<F>(_did: Option<String>, future: F) -> F::Output
-where
-    F: Future,
-{
-    future.await
-}
-
-/// Set the broadcast creator DID for the current thread.
-///
-/// When set, P2P broadcasts use this DID as the Creator field instead of
-/// the node's PeerId. This enables ACP registration on the receiving node:
-/// the merge handler registers the document with this DID as owner.
-#[cfg(test)]
-pub fn set_broadcast_creator_did(did: Option<String>) {
-    BROADCAST_CREATOR_DID.with(|c| {
-        *c.borrow_mut() = did;
-    });
-}
-
-/// Get the broadcast creator DID for this thread.
-///
-/// Returns the DID set by `set_broadcast_creator_did`, or None if no
-/// identity override is active (broadcasts will use the node PeerId).
-#[cfg(not(target_arch = "wasm32"))]
-pub fn get_broadcast_creator_did() -> Option<String> {
-    TASK_BROADCAST_CREATOR_DID
-        .try_with(Clone::clone)
-        .unwrap_or_else(|_| BROADCAST_CREATOR_DID.with(|c| c.borrow().clone()))
-}
-
-#[cfg(target_arch = "wasm32")]
-pub fn get_broadcast_creator_did() -> Option<String> {
-    BROADCAST_CREATOR_DID.with(|c| c.borrow().clone())
-}
-
-#[cfg(test)]
-mod broadcast_creator_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn async_creator_scopes_are_isolated_from_each_other_and_thread_state() {
-        set_broadcast_creator_did(Some("did:key:stale-thread".to_string()));
-
-        let alice = scope_broadcast_creator_did(Some("did:key:alice".to_string()), async {
-            tokio::task::yield_now().await;
-            get_broadcast_creator_did()
-        });
-        let anonymous = scope_broadcast_creator_did(None, async {
-            tokio::task::yield_now().await;
-            get_broadcast_creator_did()
-        });
-
-        let (alice_creator, anonymous_creator) = tokio::join!(alice, anonymous);
-        assert_eq!(alice_creator.as_deref(), Some("did:key:alice"));
-        assert_eq!(anonymous_creator, None);
-
-        set_broadcast_creator_did(None);
-    }
-
-    #[tokio::test]
-    async fn completed_creator_scope_cannot_contaminate_next_anonymous_mutation() {
-        let owner = scope_broadcast_creator_did(Some("did:key:owner".to_string()), async {
-            get_broadcast_creator_did()
-        })
-        .await;
-        assert_eq!(owner.as_deref(), Some("did:key:owner"));
-
-        let anonymous =
-            scope_broadcast_creator_did(None, async { get_broadcast_creator_did() }).await;
-        assert_eq!(anonymous, None);
     }
 }

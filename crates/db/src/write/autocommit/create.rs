@@ -102,6 +102,38 @@ impl<S: Store + 'static> storage::corekv::RetryAttemptFn for CreateManyRetryAtte
 
 #[allow(clippy::type_complexity)]
 impl<S: Store + 'static> AutoCommitMutator<S> {
+    /// The registration an external ACP is owed for a create by the request's
+    /// creator, settled once the create commits.
+    fn owed_acp_registration(
+        &self,
+        context: &RequestContext,
+        collection: &Collection,
+    ) -> query::error::Result<Option<AcpRegistration>> {
+        match (
+            collection.schema().policy.as_ref(),
+            context.creator(),
+            self.db.document_acp().cloned(),
+        ) {
+            (Some(policy), Some(creator), Some(acp)) if !acp.supports_transactions() => {
+                let creator = identity::Did::new(creator).map_err(|error| {
+                    query::error::QueryError::execution(format!(
+                        "invalid mutation creator DID: {error}"
+                    ))
+                })?;
+                let request_bearer_token =
+                    defra_core::signing::get_request_bearer_token(creator.as_str());
+                Ok(Some(AcpRegistration {
+                    acp,
+                    creator,
+                    policy_id: policy.id.clone(),
+                    resource_name: policy.resource_name.clone(),
+                    bearer_token: request_bearer_token,
+                }))
+            }
+            _ => Ok(None),
+        }
+    }
+
     pub(super) async fn create_with_resolved_inputs(
         &self,
         context: &RequestContext,
@@ -253,29 +285,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         }
 
         let schema_version_id = collection.version_id().to_string();
-        let acp_registration = match (
-            collection.schema().policy.as_ref(),
-            defra_core::signing::get_broadcast_creator_did(),
-            self.db.document_acp().cloned(),
-        ) {
-            (Some(policy), Some(creator), Some(acp)) if !acp.supports_transactions() => {
-                let creator = identity::Did::new(&creator).map_err(|error| {
-                    query::error::QueryError::execution(format!(
-                        "invalid mutation creator DID: {error}"
-                    ))
-                })?;
-                let request_bearer_token =
-                    defra_core::signing::get_request_bearer_token(creator.as_str());
-                Some(AcpRegistration {
-                    acp,
-                    creator,
-                    policy_id: policy.id.clone(),
-                    resource_name: policy.resource_name.clone(),
-                    bearer_token: request_bearer_token,
-                })
-            }
-            _ => None,
-        };
+        let acp_registration = self.owed_acp_registration(context, &collection)?;
         let computed_blocks = doc
             .write_preparation()
             .and_then(|write| write.payload::<PreparedCreateBlocks>())
@@ -410,6 +420,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             let block_result = &attempt.computed_blocks.block_result;
             let doc_id = register_created_doc(
                 self.db.document_acp(),
+                attempt.context.creator(),
                 &systemstore,
                 &datastore,
                 &collection,
@@ -674,29 +685,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             computed
         };
 
-        let acp_registration = match (
-            collection.schema().policy.as_ref(),
-            defra_core::signing::get_broadcast_creator_did(),
-            self.db.document_acp().cloned(),
-        ) {
-            (Some(policy), Some(creator), Some(acp)) if !acp.supports_transactions() => {
-                let creator = identity::Did::new(&creator).map_err(|error| {
-                    query::error::QueryError::execution(format!(
-                        "invalid mutation creator DID: {error}"
-                    ))
-                })?;
-                let request_bearer_token =
-                    defra_core::signing::get_request_bearer_token(creator.as_str());
-                Some(AcpRegistration {
-                    acp,
-                    creator,
-                    policy_id: policy.id.clone(),
-                    resource_name: policy.resource_name.clone(),
-                    bearer_token: request_bearer_token,
-                })
-            }
-            _ => None,
-        };
+        let acp_registration = self.owed_acp_registration(context, &collection)?;
         let attempt = CreateManyRetryAttempt {
             db: Arc::clone(&self.db),
             collection_name: collection_name.to_string(),
@@ -818,6 +807,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     })?;
                     let doc_id = register_created_doc(
                         self.db.document_acp(),
+                        attempt.context.creator(),
                         &systemstore,
                         &datastore,
                         &collection,

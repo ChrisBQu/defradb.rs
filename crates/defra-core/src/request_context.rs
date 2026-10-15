@@ -30,6 +30,7 @@ struct Fields {
     encryption: Option<EncryptionConfig>,
     signing: Option<SigningConfig>,
     batch_session: Option<String>,
+    creator: Option<String>,
 }
 
 impl RequestContext {
@@ -87,6 +88,21 @@ impl RequestContext {
         Arc::make_mut(&mut self.0).batch_session = session;
         self
     }
+
+    /// The DID that creates what this request writes: document ACP registers
+    /// it as the owner of the documents it creates, and P2P broadcasts name it
+    /// as their creator, so a receiving node registers the same owner. P2P
+    /// names the node's peer ID instead when there is none.
+    pub fn creator(&self) -> Option<&str> {
+        self.0.creator.as_deref()
+    }
+
+    /// This context with the creator set to `creator`.
+    #[must_use]
+    pub fn with_creator(mut self, creator: Option<String>) -> Self {
+        Arc::make_mut(&mut self.0).creator = creator;
+        self
+    }
 }
 
 impl fmt::Debug for RequestContext {
@@ -99,6 +115,7 @@ impl fmt::Debug for RequestContext {
                 &self.0.signing.as_ref().map(|signing| signing.key_type),
             )
             .field("batch_session", &self.0.batch_session)
+            .field("creator", &self.0.creator)
             .finish()
     }
 }
@@ -114,6 +131,7 @@ mod tests {
         assert!(context.encryption().is_none());
         assert!(context.signing().is_none());
         assert!(context.batch_session().is_none());
+        assert!(context.creator().is_none());
     }
 
     #[test]

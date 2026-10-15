@@ -92,6 +92,7 @@ impl<S: Store> AutoCommitMutator<S> {
 
     pub(super) fn register_created_doc_with_acp(
         &self,
+        context: &RequestContext,
         txn: &mut crate::txn::DbTxn<S>,
         collection: &Collection,
         doc_id: String,
@@ -99,7 +100,7 @@ impl<S: Store> AutoCommitMutator<S> {
         let Some(policy) = collection.schema().policy.as_ref() else {
             return Ok(());
         };
-        let Some(creator_did) = defra_core::signing::get_broadcast_creator_did() else {
+        let Some(creator_did) = context.creator() else {
             return Ok(());
         };
         let Some(acp) = self.db.document_acp().cloned() else {
@@ -108,7 +109,7 @@ impl<S: Store> AutoCommitMutator<S> {
         if acp.supports_transactions() {
             return Ok(());
         }
-        let creator = identity::Did::new(&creator_did).map_err(|error| {
+        let creator = identity::Did::new(creator_did).map_err(|error| {
             query::error::QueryError::execution(format!("invalid mutation creator DID: {error}"))
         })?;
 
@@ -139,6 +140,7 @@ impl<S: Store> AutoCommitMutator<S> {
 
     pub(super) fn register_deleted_doc_with_acp(
         &self,
+        context: &RequestContext,
         txn: &mut crate::txn::DbTxn<S>,
         collection: &Collection,
         doc_id: String,
@@ -155,7 +157,7 @@ impl<S: Store> AutoCommitMutator<S> {
 
         let policy_id = policy.id.clone();
         let resource_name = policy.resource_name.clone();
-        let creator = defra_core::signing::get_broadcast_creator_did();
+        let creator = context.creator().map(str::to_owned);
         let request_bearer_token = creator
             .as_deref()
             .and_then(defra_core::signing::get_request_bearer_token);

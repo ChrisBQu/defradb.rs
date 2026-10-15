@@ -205,12 +205,12 @@ impl<S: Store + 'static> DbDocMutator<S> {
         doc_block: Bytes,
         document_json: Option<serde_json::Value>,
         collection_block: Option<(Cid, Bytes)>,
+        creator_did: Option<String>,
     ) -> query::error::Result<()> {
         let mut txn_guard = self.txn.lock().await;
         let txn = txn_guard.as_mut().ok_or_else(|| {
             query::error::QueryError::execution("transaction is no longer active")
         })?;
-        let creator_did = defra_core::signing::get_broadcast_creator_did();
         register_update_event_callback(
             txn,
             self.db.event_bus(),
@@ -361,6 +361,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
 
             let doc_id = crate::write::autocommit::helpers::register_created_doc(
                 self.db.document_acp(),
+                context.creator(),
                 &systemstore,
                 &datastore,
                 &collection,
@@ -403,6 +404,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             doc_block,
             document_json_value(&doc),
             col_block_data,
+            context.creator().map(str::to_owned),
         )
         .await?;
 
@@ -545,6 +547,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 doc_block,
                 document_json_value(&doc),
                 col_block_data,
+                context.creator().map(str::to_owned),
             )
             .await?;
         }
@@ -673,6 +676,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             doc_block,
             pre_delete_document_json,
             col_block_data,
+            context.creator().map(str::to_owned),
         )
         .await?;
 

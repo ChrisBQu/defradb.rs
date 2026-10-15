@@ -39,6 +39,7 @@ struct PendingBroadcast {
 
 struct BroadcastCapture<'a> {
     collection_name: &'a str,
+    creator_did: Option<String>,
     doc_id: &'a str,
     commit_cid: Option<Cid>,
     commit_block: Option<&'a Bytes>,
@@ -120,6 +121,7 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport + 'static> BroadcastBatc
     async fn capture_broadcast(&self, capture: BroadcastCapture<'_>) -> query::error::Result<()> {
         let BroadcastCapture {
             collection_name,
+            creator_did,
             doc_id,
             commit_cid,
             commit_block,
@@ -150,7 +152,7 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport + 'static> BroadcastBatc
             collection_name: collection_name.to_string(),
             document_json,
             se_artifacts,
-            creator_did: defra_core::signing::get_broadcast_creator_did(),
+            creator_did,
             broadcast_cid,
             broadcast_block: broadcast_block.cloned(),
         });
@@ -371,6 +373,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         let document_json = document_json_value(&result.document);
         self.capture_broadcast(BroadcastCapture {
             collection_name,
+            creator_did: context.creator().map(str::to_owned),
             doc_id: &doc_id,
             commit_cid: result.commit_cid,
             commit_block: result.commit_block.as_ref(),
@@ -401,6 +404,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             let document_json = document_json_value(&result.document);
             self.capture_broadcast(BroadcastCapture {
                 collection_name,
+                creator_did: context.creator().map(str::to_owned),
                 doc_id: &doc_id,
                 commit_cid: result.commit_cid,
                 commit_block: result.commit_block.as_ref(),
@@ -442,6 +446,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         // path and Go's two-update emit for branchable mutations).
         self.capture_broadcast(BroadcastCapture {
             collection_name,
+            creator_did: context.creator().map(str::to_owned),
             doc_id: &doc_id,
             commit_cid: result.commit_cid,
             commit_block: result.commit_block.as_ref(),

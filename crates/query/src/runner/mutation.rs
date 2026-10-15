@@ -106,7 +106,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
         })?;
 
         let mutations = parse_mutations_with_limits(mutation_str, variables, self.query_limits)?;
-        let mut request = crate::executor::QueryRequest::new(mutation_str);
+        // What this request writes is created by its caller.
+        let runner = self.for_caller(caller_identity.as_ref());
+        let mut request =
+            crate::executor::QueryRequest::new(mutation_str).with_context(runner.context.clone());
         request.identity = caller_identity.clone();
         request.variables = variables.map(|values| {
             JsonValue::Object(
@@ -116,18 +119,18 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                     .collect(),
             )
         });
-        let caller_did = caller_identity.as_ref().map(ToString::to_string);
-        let acting_identity = caller_did
-            .clone()
+        let acting_identity = caller_identity
+            .as_ref()
+            .map(ToString::to_string)
             .or_else(defra_core::current_identity::get_effective_identity);
         let execution = Box::pin(async {
-            let mut prepared = self.prepare_mutations(&request).await?;
+            let mut prepared = runner.prepare_mutations(&request).await?;
             loop {
                 let attempt_mutator = prepared
                     .as_ref()
                     .and_then(|prepared| mutator.with_prepared_inputs(prepared.inputs.clone()))
                     .unwrap_or_else(|| mutator.clone());
-                match self
+                match runner
                     .execute_parsed_mutations(
                         mutations.clone(),
                         attempt_mutator,
@@ -139,7 +142,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                 {
                     Err(QueryError::NeedsInput(input)) => {
                         prepared = crate::executor::QueryExecutor::resolve_retry_input(
-                            self, &request, prepared, &input,
+                            &runner, &request, prepared, &input,
                         )
                         .await?;
                     }
@@ -147,11 +150,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                 }
             }
         });
-        defra_core::current_identity::with_scoped_identity(
-            acting_identity,
-            defra_core::signing::scope_broadcast_creator_did(caller_did, execution),
-        )
-        .await
+        defra_core::current_identity::with_scoped_identity(acting_identity, execution).await
     }
 
     /// Execute a GraphQL mutation with a specific mutator, caller_identity, and variables.
@@ -164,29 +163,27 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
         fetcher_override: Option<Arc<dyn crate::fetcher::DocFetcher>>,
     ) -> Result<JsonValue> {
         let mutations = parse_mutations_with_limits(mutation_str, variables, self.query_limits)?;
-        let caller_did = caller_identity.as_ref().map(ToString::to_string);
         // Embedded callers may establish a node identity outside the query.
         // Preserve that identity when no request actor overrides it, while
         // HTTP callers enter with neither ambient form for anonymous requests.
-        let acting_identity = caller_did
-            .clone()
+        let acting_identity = caller_identity
+            .as_ref()
+            .map(ToString::to_string)
             .or_else(defra_core::current_identity::get_effective_identity);
+        // What this request writes is created by its caller.
+        let runner = self.for_caller(caller_identity.as_ref());
         // Keep the large mutation state machine off the Tokio worker stack.
         // `task_local::scope` polls its child inline; boxing here prevents the
         // scope wrapper from overflowing the default worker stack on the ACP
         // create path.
-        let execution = Box::pin(self.execute_parsed_mutations(
+        let execution = Box::pin(runner.execute_parsed_mutations(
             mutations,
             mutator,
             caller_identity,
             fetcher_override,
             None,
         ));
-        defra_core::current_identity::with_scoped_identity(
-            acting_identity,
-            defra_core::signing::scope_broadcast_creator_did(caller_did, execution),
-        )
-        .await
+        defra_core::current_identity::with_scoped_identity(acting_identity, execution).await
     }
 
     /// Execute pre-parsed mutations, skipping redundant GraphQL parsing.
@@ -1452,7 +1449,7 @@ mod tests {
             mut doc: Document,
         ) -> Result<CreateResult> {
             self.broadcast_creators
-                .push(defra_core::signing::get_broadcast_creator_did());
+                .push(context.creator().map(str::to_owned));
             self.encryptions.push(context.encryption().cloned());
             self.authorizations.push(
                 context
@@ -1539,7 +1536,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_executor_mutation_scopes_broadcast_creator_did() {
+    async fn a_mutation_creates_as_its_caller_and_no_one_else() {
         let collection = CollectionVersion::new(
             "User",
             "v1",
@@ -1569,8 +1566,17 @@ mod tests {
             "unexpected errors: {:?}",
             response.errors
         );
-        assert_eq!(mutator.broadcast_creators(), vec![Some(did.to_string())]);
-        assert_eq!(defra_core::signing::get_broadcast_creator_did(), None);
+        let anonymous = runner
+            .execute(QueryRequest::new(
+                r#"mutation { add_User(input: [{ name: "Bob" }]) { _docID } }"#,
+            ))
+            .await;
+        assert!(!anonymous.has_errors(), "{:?}", anonymous.errors);
+        assert_eq!(
+            mutator.broadcast_creators(),
+            vec![Some(did.to_string()), None],
+            "the caller of one mutation created the next one's documents"
+        );
     }
 
     /// Grants every create an access decision a remote signer signs under.

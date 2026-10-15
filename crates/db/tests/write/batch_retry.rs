@@ -783,11 +783,7 @@ async fn remote_acp_batch_replays_with_attempt_local_registration_projection() {
                         prepared.is_some(),
                         "remote ACP batches are request-prepared"
                     );
-                    defra_core::signing::scope_broadcast_creator_did(
-                        Some(owner.to_string()),
-                        runner.execute_prepared(request, prepared),
-                    )
-                    .await
+                    runner.execute_prepared(request, prepared).await
                 },
             )
             .await

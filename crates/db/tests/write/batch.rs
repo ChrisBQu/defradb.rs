@@ -85,16 +85,14 @@ async fn batch_create_registers_external_acp_before_ordered_event() {
     mutator.set_document_acp(acp.clone());
     let mut sub = bus.subscribe(&[EventName::Update]);
     let owner = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
-    let result = defra_core::signing::scope_broadcast_creator_did(
-        Some(owner.to_string()),
-        mutator.create(
-            &defra_core::RequestContext::default(),
+    let result = mutator
+        .create(
+            &defra_core::RequestContext::default().with_creator(Some(owner.to_string())),
             "TestDoc",
             Document::from_json_str(r#"{"x": 1}"#).expect("doc"),
-        ),
-    )
-    .await
-    .expect("create");
+        )
+        .await
+        .expect("create");
 
     let commit = tokio::spawn(async move { mutator.commit().await });
     let message = tokio::time::timeout(std::time::Duration::from_secs(1), sub.recv())

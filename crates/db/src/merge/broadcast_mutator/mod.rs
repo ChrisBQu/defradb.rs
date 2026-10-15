@@ -275,6 +275,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> SeArtifactRep
 impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> BroadcastMutator<S, B, T> {
     async fn broadcast_update_result(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         se_fields: Vec<String>,
         result: UpdateResult,
@@ -320,7 +321,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> BroadcastMuta
             field_cids: vec![],
             encryption_cids: vec![],
         };
-        let creator_did = defra_core::signing::get_broadcast_creator_did();
+        let creator_did = context.creator().map(str::to_owned);
         let branchable_data = if let (Some(col_cid), Some(col_block)) =
             (result.broadcast_cid, result.broadcast_block.as_ref())
         {
@@ -572,8 +573,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             encryption_cids: vec![],
         };
 
-        // Read broadcast creator DID before spawning (reads thread-local state).
-        let creator_did = defra_core::signing::get_broadcast_creator_did();
+        let creator_did = context.creator().map(str::to_owned);
 
         // Capture branchable collection broadcast data before spawning.
         let branchable_data = if let (Some(col_cid), Some(col_block)) =
@@ -710,8 +710,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             .create_many(context, collection_name, docs)
             .await?;
 
-        // Read broadcast creator DID before spawning (reads thread-local state).
-        let creator_did = defra_core::signing::get_broadcast_creator_did();
+        let creator_did = context.creator().map(str::to_owned);
 
         // Build block results and collect broadcast work items.
         // Block building failures return Failed status immediately (not spawned).
@@ -911,7 +910,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             .inner
             .update(context, collection_name, doc, modified_fields)
             .await?;
-        self.broadcast_update_result(collection_name, se_fields, result)
+        self.broadcast_update_result(context, collection_name, se_fields, result)
             .await
     }
 
@@ -928,7 +927,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             .inner
             .update_if_unchanged(context, collection_name, expected, doc, modified_fields)
             .await?;
-        self.broadcast_update_result(collection_name, se_fields, result)
+        self.broadcast_update_result(context, collection_name, se_fields, result)
             .await
     }
 
@@ -1001,8 +1000,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
                 }
             };
 
-        // Read broadcast creator DID before spawning (reads thread-local state).
-        let creator_did = defra_core::signing::get_broadcast_creator_did();
+        let creator_did = context.creator().map(str::to_owned);
 
         // For branchable collections, capture the collection-level head block
         // so we can broadcast it alongside the composite delete (Go emits two

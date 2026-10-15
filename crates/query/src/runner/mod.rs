@@ -419,6 +419,16 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         }
     }
 
+    /// This runner serving a request `caller` makes: the creator of what it
+    /// writes.
+    pub(crate) fn for_caller(&self, caller: Option<&Did>) -> Self {
+        self.for_request(
+            self.context
+                .clone()
+                .with_creator(caller.map(ToString::to_string)),
+        )
+    }
+
     /// This runner resolving collections through `provider`.
     pub(crate) fn with_collection_provider(&self, provider: Arc<dyn CollectionProvider>) -> Self {
         let mut runner = self.scoped_runner(self.acp.clone());
