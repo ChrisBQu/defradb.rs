@@ -66,13 +66,12 @@ pub async fn auth_middleware(
     }
 
     // The request's context carries the caller's DID to the DB-layer NAC
-    // checks the handlers reach, mirroring Go's `identity.FromContext`.
+    // checks the handlers reach, mirroring Go's `identity.FromContext`, and
+    // this request's verified token from its header, the one a remote ACP
+    // acts on the caller's behalf with. Never publish the token in the
+    // process-wide DID map: concurrent requests can share a DID while
+    // carrying different authorization tokens.
     let scoped = acting_did.as_ref().map(ToString::to_string);
-    let context = RequestContext::default().with_identity(scoped.clone());
-    request.extensions_mut().insert(context.clone());
-    // Capture this request's verified token directly from its header. Never
-    // publish it in the process-wide DID map: concurrent requests can share a
-    // DID while carrying different authorization tokens.
     let bearer = acting_did.as_ref().and_then(|_| {
         request
             .headers()
@@ -85,6 +84,10 @@ pub async fn auth_middleware(
             })
             .map(|token| token.trim().to_owned())
     });
+    let context = RequestContext::default()
+        .with_identity(scoped.clone())
+        .with_bearer(scoped, bearer);
+    request.extensions_mut().insert(context.clone());
     let execution = async move {
         if let RoutePermission::Required(perm) = permission {
             let identity = ExtractIdentity::from_did(acting_did);
@@ -94,9 +97,5 @@ pub async fn auth_middleware(
         }
         next.run(request).await
     };
-    context
-        .mirror(defra_core::signing::scope_request_bearer_token(
-            scoped, bearer, execution,
-        ))
-        .await
+    context.mirror(execution).await
 }

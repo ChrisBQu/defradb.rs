@@ -70,15 +70,19 @@ pub(super) fn acp_registration_retry_callback(
     bearer_token: Option<String>,
 ) -> storage::corekv::CommitHook {
     Box::new(move || {
-        Box::pin(defra_core::signing::scope_request_bearer_token(
-            Some(creator.to_string()),
-            bearer_token,
-            async move {
-                acp.redrive_registration(&policy_id, &resource_name, &doc_id)
-                    .await
-                    .map_err(|error| error.to_string())
-            },
-        ))
+        Box::pin(async move {
+            acp::with_request_bearer(
+                &acp,
+                Some(creator.to_string()),
+                bearer_token,
+                |acp| async move {
+                    acp.redrive_registration(&policy_id, &resource_name, &doc_id)
+                        .await
+                        .map_err(|error| error.to_string())
+                },
+            )
+            .await
+        })
     })
 }
 
@@ -120,8 +124,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                         "invalid mutation creator DID: {error}"
                     ))
                 })?;
-                let request_bearer_token =
-                    defra_core::signing::get_request_bearer_token(creator.as_str());
+                let request_bearer_token = context.bearer_token_for(creator.as_str());
                 Ok(Some(AcpRegistration {
                     acp,
                     creator,

@@ -127,25 +127,23 @@ impl<S: Store> AutoCommitMutator<S> {
 
         let policy_id = policy.id.clone();
         let resource_name = policy.resource_name.clone();
-        let request_bearer_token = defra_core::signing::get_request_bearer_token(creator.as_str());
+        let request_bearer_token = context.bearer_token_for(creator.as_str());
         let registration = txn.on_commit(OnCommit::OrderedAsync(Box::new(move || {
-            let acp = Arc::clone(&acp);
-            let policy_id = policy_id.clone();
-            let resource_name = resource_name.clone();
-            let doc_id = doc_id.clone();
-            let creator = creator.clone();
-            let request_bearer_token = request_bearer_token.clone();
-            Box::pin(defra_core::signing::scope_request_bearer_token(
-                Some(creator.to_string()),
-                request_bearer_token,
-                async move {
-                    acp.redrive_registration(&policy_id, &resource_name, &doc_id)
-                        .await
-                        .map_err(|error| {
-                            format!("failed to register document with ACP before publishing update: {error}")
-                        })
-                },
-            ))
+            Box::pin(async move {
+                acp::with_request_bearer(
+                    &acp,
+                    Some(creator.to_string()),
+                    request_bearer_token,
+                    |acp| async move {
+                        acp.redrive_registration(&policy_id, &resource_name, &doc_id)
+                            .await
+                            .map_err(|error| {
+                                format!("failed to register document with ACP before publishing update: {error}")
+                            })
+                    },
+                )
+                .await
+            })
         })));
         registration.map_err(|error| query::error::QueryError::execution(error.to_string()))
     }
@@ -183,25 +181,18 @@ impl<S: Store> AutoCommitMutator<S> {
         let creator = context.creator().map(str::to_owned);
         let request_bearer_token = creator
             .as_deref()
-            .and_then(defra_core::signing::get_request_bearer_token);
+            .and_then(|creator| context.bearer_token_for(creator));
         txn.on_commit(OnCommit::OrderedAsync(Box::new(move || {
-            let acp = Arc::clone(&acp);
-            let policy_id = policy_id.clone();
-            let resource_name = resource_name.clone();
-            let doc_id = doc_id.clone();
-            let creator = creator.clone();
-            let request_bearer_token = request_bearer_token.clone();
-            Box::pin(defra_core::signing::scope_request_bearer_token(
-                creator,
-                request_bearer_token,
-                async move {
+            Box::pin(async move {
+                acp::with_request_bearer(&acp, creator, request_bearer_token, |acp| async move {
                     acp.unregister_doc_object(&policy_id, &resource_name, &doc_id)
                         .await
                         .map_err(|error| {
                             format!("failed to unregister ACP document {doc_id}: {error}")
                         })
-                },
-            ))
+                })
+                .await
+            })
         })))
         .map_err(|error| query::error::QueryError::execution(error.to_string()))
     }

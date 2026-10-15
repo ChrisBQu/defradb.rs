@@ -59,7 +59,27 @@ pub(crate) fn encode_delete_relationship_cmd(
     .unwrap_or_default()
 }
 
+/// [`resolve_registered_or_passthrough_bearer_token_as`] in
+/// [`defra_core::RequestContext::ambient`].
+#[cfg(test)]
 pub(crate) fn resolve_registered_or_passthrough_bearer_token(
+    did: &str,
+    submitter: &str,
+    deployment_id: u64,
+) -> Result<Option<String>, crate::provider::ProviderError> {
+    resolve_registered_or_passthrough_bearer_token_as(
+        &defra_core::RequestContext::ambient(),
+        did,
+        submitter,
+        deployment_id,
+    )
+}
+
+/// The bearer token `did` acts with in the request `context` serves: one
+/// built from its registered secp256k1 key when the node holds it, the token
+/// the request carries for it otherwise.
+pub(crate) fn resolve_registered_or_passthrough_bearer_token_as(
+    context: &defra_core::RequestContext,
     did: &str,
     submitter: &str,
     deployment_id: u64,
@@ -85,7 +105,7 @@ pub(crate) fn resolve_registered_or_passthrough_bearer_token(
         }
     }
 
-    Ok(defra_core::signing::get_request_bearer_token(did))
+    Ok(context.bearer_token_for(did))
 }
 
 #[cfg(test)]

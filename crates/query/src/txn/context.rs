@@ -135,7 +135,7 @@ pub async fn is_doc_registered_with_prepared_inputs(
     };
     let bearer = identity
         .did()
-        .and_then(|did| defra_core::signing::get_request_bearer_token(did.as_str()));
+        .and_then(|did| acp.bearer_token_for(did.as_str()));
     let exact_request = serde_json::to_vec(&(
         identity.did().map(Did::as_str).unwrap_or("anonymous"),
         "registered",
@@ -211,7 +211,7 @@ pub async fn check_doc_access_with_prepared_inputs(
     };
     let bearer = identity
         .did()
-        .and_then(|did| defra_core::signing::get_request_bearer_token(did.as_str()));
+        .and_then(|did| acp.bearer_token_for(did.as_str()));
     let exact_request = serde_json::to_vec(&(
         identity.did().map(Did::as_str).unwrap_or("anonymous"),
         permission.as_str(),
@@ -322,7 +322,7 @@ pub async fn check_doc_read_access_as(
 
         let bearer = identity
             .did()
-            .and_then(|did| defra_core::signing::get_request_bearer_token(did.as_str()));
+            .and_then(|did| acp.bearer_token_for(did.as_str()));
         let request_bytes = serde_json::to_vec(&(
             identity.did().map(Did::as_str).unwrap_or("anonymous"),
             "registered",

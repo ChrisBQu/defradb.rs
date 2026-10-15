@@ -113,16 +113,33 @@ fn subject_to_json(subject: &SubjectRef) -> serde_json::Value {
     }
 }
 
+/// [`resolve_cosmos_bearer_token_as`] in [`defra_core::RequestContext::ambient`].
+#[cfg(test)]
 fn resolve_cosmos_bearer_token(
     did: &str,
     authorized_account: &str,
 ) -> Result<Option<String>, ProviderError> {
+    resolve_cosmos_bearer_token_as(
+        &defra_core::RequestContext::ambient(),
+        did,
+        authorized_account,
+    )
+}
+
+/// The bearer token `did` acts with in the request `context` serves: one
+/// built from its local key when the node holds it, the token the request
+/// carries for it otherwise.
+fn resolve_cosmos_bearer_token_as(
+    context: &defra_core::RequestContext,
+    did: &str,
+    authorized_account: &str,
+) -> Result<Option<String>, ProviderError> {
     let Some(signing_config) = defra_core::signing::get_identity(did) else {
-        return Ok(defra_core::signing::get_request_bearer_token(did));
+        return Ok(context.bearer_token_for(did));
     };
 
     if !signing_config.has_local_private_key() {
-        return Ok(defra_core::signing::get_request_bearer_token(did));
+        return Ok(context.bearer_token_for(did));
     }
 
     let key_type: crypto::KeyType = match signing_config.key_type {
@@ -171,7 +188,16 @@ impl VeraProvider for CosmosProvider {
     }
 
     async fn create_bearer_token(&self, did: &str) -> Result<String, ProviderError> {
-        if let Some(token) = resolve_cosmos_bearer_token(did, &self.signer.address())? {
+        self.create_bearer_token_as(&defra_core::RequestContext::ambient(), did)
+            .await
+    }
+
+    async fn create_bearer_token_as(
+        &self,
+        context: &defra_core::RequestContext,
+        did: &str,
+    ) -> Result<String, ProviderError> {
+        if let Some(token) = resolve_cosmos_bearer_token_as(context, did, &self.signer.address())? {
             return Ok(token);
         }
 

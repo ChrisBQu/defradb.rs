@@ -23,20 +23,33 @@ thread_local! {
     static CREATOR: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
+/// The DID that presented a bearer token, and the token.
+type BearerScope = (Option<String>, Option<String>);
+
 #[cfg(not(target_arch = "wasm32"))]
 tokio::task_local! {
     static TASK_CREATOR: Option<String>;
+    static TASK_BEARER: BearerScope;
+}
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static TASK_BEARER: RefCell<Option<BearerScope>> = const { RefCell::new(None) };
 }
 
 /// The context a test set up on this thread and task.
 pub(crate) fn context() -> RequestContext {
-    RequestContext::default()
+    let context = RequestContext::default()
         .with_identity(crate::current_identity::get_effective_identity())
         .with_dac_bypass(get_dac_bypass())
         .with_encryption(get_encryption_config())
         .with_signing(get_signing_config())
         .with_batch_session(get_batch_session_key())
-        .with_creator(get_broadcast_creator_did())
+        .with_creator(get_broadcast_creator_did());
+    match bearer_scope() {
+        Some((did, token)) => context.with_bearer(did, token),
+        None => context,
+    }
 }
 
 /// Runs `future` with `context` installed as the state above, the way a
@@ -46,9 +59,16 @@ pub(crate) async fn mirror<F: Future>(context: RequestContext, future: F) -> F::
     let identity = context.identity().map(str::to_owned);
     #[cfg(not(target_arch = "wasm32"))]
     let creator = context.creator().map(str::to_owned);
+    let bearer = context.bearer().cloned();
     let installed = install_per_poll(context, future);
     #[cfg(not(target_arch = "wasm32"))]
     let installed = TASK_CREATOR.scope(creator, installed);
+    let installed = async move {
+        match bearer {
+            Some((did, token)) => scope_request_bearer_token(did, token, installed).await,
+            None => installed.await,
+        }
+    };
     crate::current_identity::with_scoped_identity(identity, installed).await
 }
 
@@ -99,6 +119,38 @@ fn swap(state: Installed) -> Installed {
         batch_session: BATCH_SESSION.replace(state.batch_session),
         creator: CREATOR.replace(state.creator),
     }
+}
+
+/// Run a future with the request bearer token visible to ACP providers.
+///
+/// A scoped `None` token deliberately suppresses the process store's token for
+/// that identity, so concurrent requests for the same DID never observe one
+/// another's JWT.
+pub async fn scope_request_bearer_token<F>(
+    did: Option<String>,
+    token: Option<String>,
+    future: F,
+) -> F::Output
+where
+    F: Future,
+{
+    #[cfg(not(target_arch = "wasm32"))]
+    return TASK_BEARER.scope((did, token), future).await;
+    #[cfg(target_arch = "wasm32")]
+    crate::wasm_task_local::scope(&TASK_BEARER, (did, token), future).await
+}
+
+/// The bearer scope of this task, when one is active.
+fn bearer_scope() -> Option<BearerScope> {
+    #[cfg(not(target_arch = "wasm32"))]
+    return TASK_BEARER.try_with(Clone::clone).ok();
+    #[cfg(target_arch = "wasm32")]
+    crate::wasm_task_local::try_with(&TASK_BEARER, Clone::clone)
+}
+
+/// The bearer token `did` presents in the request this task's scope sets up.
+pub fn get_request_bearer_token(did: &str) -> Option<String> {
+    context().bearer_token_for(did)
 }
 
 /// Set the DAC bypass flag for the current thread.

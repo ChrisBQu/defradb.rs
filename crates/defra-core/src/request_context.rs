@@ -19,8 +19,8 @@ use std::sync::Arc;
 use crate::encryption::EncryptionConfig;
 use crate::signing::SigningConfig;
 
-/// What one request carries: who acts, with which privileges, and how its
-/// writes are encrypted and signed.
+/// What one request carries: who acts, with which privileges and bearer
+/// token, and how its writes are encrypted and signed.
 ///
 /// The default context is an anonymous request with nothing granted.
 #[derive(Clone, Default)]
@@ -34,6 +34,9 @@ struct Fields {
     signing: Option<SigningConfig>,
     batch_session: Option<String>,
     creator: Option<String>,
+    /// The DID that presented a bearer token and the token, when the request
+    /// carries a bearer at all.
+    bearer: Option<(Option<String>, Option<String>)>,
 }
 
 impl RequestContext {
@@ -91,6 +94,7 @@ impl RequestContext {
                 .take()
                 .or_else(|| ambient.0.batch_session.clone());
             fields.creator = fields.creator.take().or_else(|| ambient.0.creator.clone());
+            fields.bearer = fields.bearer.take().or_else(|| ambient.0.bearer.clone());
             context
         }
         #[cfg(not(any(test, feature = "ambient")))]
@@ -190,6 +194,35 @@ impl RequestContext {
         Arc::make_mut(&mut self.0).creator = creator;
         self
     }
+
+    /// The bearer token `did` presents in this request, the credential a
+    /// remote ACP provider acts on its behalf with: the request's own token
+    /// when `did` presented it, and none for any other DID. A request that
+    /// carries no bearer at all presents the token the process binds to `did`
+    /// ([`set_request_bearer_token`](crate::signing::set_request_bearer_token)).
+    pub fn bearer_token_for(&self, did: &str) -> Option<String> {
+        match &self.0.bearer {
+            Some((presenter, token)) => (presenter.as_deref() == Some(did))
+                .then(|| token.clone())
+                .flatten(),
+            None => crate::signing::stored_bearer_token(did),
+        }
+    }
+
+    /// The DID that presented this request's bearer token and the token,
+    /// when it carries a bearer.
+    #[cfg(any(test, feature = "ambient"))]
+    pub(crate) fn bearer(&self) -> Option<&(Option<String>, Option<String>)> {
+        self.0.bearer.as_ref()
+    }
+
+    /// This context carrying the bearer `token` `did` authenticated the
+    /// request with, `None` when it presented none.
+    #[must_use]
+    pub fn with_bearer(mut self, did: Option<String>, token: Option<String>) -> Self {
+        Arc::make_mut(&mut self.0).bearer = Some((did, token));
+        self
+    }
 }
 
 impl fmt::Debug for RequestContext {
@@ -204,6 +237,10 @@ impl fmt::Debug for RequestContext {
             )
             .field("batch_session", &self.0.batch_session)
             .field("creator", &self.0.creator)
+            .field(
+                "bearer_presenter",
+                &self.0.bearer.as_ref().map(|(presenter, _)| presenter),
+            )
             .finish()
     }
 }

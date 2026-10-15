@@ -900,17 +900,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let bearer = fields.get(5).and_then(Value::as_str).map(str::to_owned);
         let bearer_did = did.as_ref().map(ToString::to_string);
         let acp_identity = did.map(Identity::from).unwrap_or(Identity::Anonymous);
-        let response = defra_core::signing::scope_request_bearer_token(bearer_did, bearer, async {
+        let response = acp::with_request_bearer(&self.acp, bearer_did, bearer, |acp| async move {
             let response = if field(1)? == "registered" {
-                let registered = self
-                    .acp
+                let registered = acp
                     .is_doc_registered(field(2)?, field(3)?, field(4)?)
                     .await
                     .map_err(|error| crate::error::QueryError::execution(error.to_string()))?;
                 serde_json::to_vec(&registered)
             } else if field(4)? == "writer" {
-                let decision = self
-                    .acp
+                let decision = acp
                     .create_access_decision(
                         &acp_identity,
                         field(1)?,
@@ -936,8 +934,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         ))
                     }
                 };
-                let allowed = self
-                    .acp
+                let allowed = acp
                     .check_doc_access(&acp_identity, permission, field(2)?, field(3)?, field(4)?)
                     .await
                     .map_err(|error| crate::error::QueryError::execution(error.to_string()))?;

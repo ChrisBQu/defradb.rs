@@ -34,7 +34,7 @@ pub mod thread_bounds;
 pub mod transaction;
 pub mod types;
 pub mod vector;
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(any(test, all(target_arch = "wasm32", feature = "ambient")))]
 pub mod wasm_task_local;
 
 pub use action::{Action, ActionExecution, ActionStatus};

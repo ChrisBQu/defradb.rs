@@ -349,6 +349,7 @@ impl<S: Store> crate::database::DB<S> {
 
         if let (Some(document_acp), Some(creator)) = (document_acp, creator) {
             txn.stage_collection_acp_registration(
+                context,
                 document_acp,
                 creator,
                 vec![finalized_schema.clone()],
@@ -519,7 +520,12 @@ impl<S: Store> crate::database::DB<S> {
         }
 
         if let (Some(document_acp), Some(creator)) = (document_acp, creator) {
-            txn.stage_collection_acp_registration(document_acp, creator, finalized_schemas.clone());
+            txn.stage_collection_acp_registration(
+                context,
+                document_acp,
+                creator,
+                finalized_schemas.clone(),
+            );
         }
 
         let mut collections = Vec::with_capacity(finalized_schemas.len());

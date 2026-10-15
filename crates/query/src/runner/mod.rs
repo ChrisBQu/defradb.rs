@@ -24,11 +24,11 @@ mod arrivals;
 mod commits;
 mod commits_height;
 mod commits_numeric;
+#[cfg(test)]
+mod context_tests;
 mod executor;
 mod explain;
 mod fetcher;
-#[cfg(test)]
-mod context_tests;
 pub(crate) mod introspection;
 mod mutation;
 mod mutation_inputs;
@@ -405,7 +405,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// Collections with a policy will have ACP enforced; others are unaffected.
     pub(crate) fn scoped_runner(&self, acp: Arc<dyn DocumentACP>) -> Self {
         Self {
-            acp,
+            acp: acp::bound_to_request(&acp, &self.context()),
             introspection_cache: Arc::new(introspection::cache::IntrospectionSchemaCache::new(
                 false,
             )),
@@ -414,9 +414,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     }
 
     /// This runner serving one request: everything it runs reads `context`
-    /// for that request's own state.
+    /// for that request's own state, and its ACP acts with the credentials
+    /// the request carries.
     pub fn for_request(&self, context: RequestContext) -> Self {
         Self {
+            acp: acp::bound_to_request(&self.acp, &context),
             context: Some(context),
             ..self.clone()
         }
