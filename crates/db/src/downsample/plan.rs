@@ -299,9 +299,7 @@ impl<S: Store> crate::database::DB<S> {
                 .values()
                 .filter_map(|collection| {
                     let schema = collection.schema();
-                    if schema.downsample_interval.is_none() {
-                        return None;
-                    }
+                    schema.downsample_interval.as_ref()?;
                     if names_filter.is_some_and(|names| !names.contains(&schema.name)) {
                         return None;
                     }
