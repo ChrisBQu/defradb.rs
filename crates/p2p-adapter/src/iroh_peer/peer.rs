@@ -241,16 +241,35 @@ impl<S: Store + 'static> IrohPeer<S> {
         // The fallback for a deferred verdict no arrival can release: one
         // named nothing, one past the index's capacity, and everything the
         // index held before this process started.
-        let sweep_handler = Arc::clone(&replication.merge_handler_inner);
-        let sweep_shutdown = coordinator.shutdown_handle();
-        coordinator.spawn_background_task("governance_sweep", async move {
-            db::merge::governance::run_governance_sweep(
-                sweep_handler,
+        // Natively it runs on the database's worker pool; in a browser the
+        // page's one worker is this thread, so the sweep is a task here.
+        // Either way it ends with the coordinator's shutdown.
+        #[cfg(not(target_arch = "wasm32"))]
+        drop(
+            db::merge::governance::start_governance_sweep(
+                Arc::clone(&replication.merge_handler_inner),
                 db::merge::governance::SWEEP_INTERVAL,
-                sweep_shutdown,
+                coordinator.shutdown_handle(),
             )
-            .await;
-        });
+            .map_err(|error| {
+                p2p::Error::Io(std::io::Error::other(format!(
+                    "the governance sweep did not start: {error}"
+                )))
+            })?,
+        );
+        #[cfg(target_arch = "wasm32")]
+        {
+            let sweep_handler = Arc::clone(&replication.merge_handler_inner);
+            let sweep_shutdown = coordinator.shutdown_handle();
+            coordinator.spawn_background_task("governance_sweep", async move {
+                db::merge::governance::run_governance_sweep(
+                    sweep_handler,
+                    db::merge::governance::SWEEP_INTERVAL,
+                    sweep_shutdown,
+                )
+                .await;
+            });
+        }
 
         let event_handler_task = spawn_event_handler(
             events,

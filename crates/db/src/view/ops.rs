@@ -15,9 +15,7 @@ use std::time::Duration;
 use storage::corekv::{IterOptions, Key, Store};
 use storage::keys::datastore::ViewCacheKey;
 #[cfg(not(target_arch = "wasm32"))]
-use tokio::task::JoinHandle;
-#[cfg(not(target_arch = "wasm32"))]
-use tokio::time::{self, Instant, MissedTickBehavior};
+use web_time::Instant;
 
 /// Whether this collection version is a view whose cache can be rebuilt.
 ///
@@ -177,19 +175,32 @@ impl<S: Store> crate::database::DB<S> {
         Ok(scheduled_views)
     }
 
-    /// Spawn a background task that periodically refreshes downsampled materialized views.
+    /// Starts the background job, on the database's pool, that refreshes
+    /// downsampled materialized views when their interval is due. It checks
+    /// every 250 ms on its worker's deadline queue until it is aborted or its
+    /// worker stops.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn start_scheduled_view_refresh_task(self: Arc<Self>) -> JoinHandle<()>
+    pub fn start_scheduled_view_refresh_task(
+        self: Arc<Self>,
+    ) -> std::result::Result<workers::Background, workers::Error>
     where
         S: 'static,
     {
-        tokio::spawn(async move {
-            let mut ticker = time::interval(Duration::from_millis(250));
-            ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let pool = self.pool().cloned();
+        workers::spawn_background(pool.as_ref(), "db::view_refresh", move || async move {
             let mut schedules: RapidHashMap<String, ScheduledViewState> = RapidHashMap::new();
 
             loop {
-                ticker.tick().await;
+                match workers::sleep(Duration::from_millis(250)) {
+                    Ok(tick) => tick.await,
+                    Err(error) => {
+                        tracing::error!(
+                            %error,
+                            "the view refresh job stopped: it runs only on a worker"
+                        );
+                        return;
+                    }
+                }
 
                 let scheduled_views = match self.scheduled_view_refreshes() {
                     Ok(views) => views,

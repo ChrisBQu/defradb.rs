@@ -40,8 +40,8 @@ pub(super) struct ServerSetup {
     pub database: Arc<db::DB<storage::DynStore>>,
     pub p2p_handle: Option<p2p::P2PHostHandle>,
     pub p2p_tasks: Option<P2PTasks>,
-    pub downsample_task: Option<JoinHandle<()>>,
-    pub vector_rebuild_task: Option<JoinHandle<()>>,
+    pub downsample_task: Option<workers::Background>,
+    pub vector_rebuild_task: Option<workers::Background>,
     pub txn_cleanup_task: Option<JoinHandle<()>>,
     pub http_server: defra_http::Server,
     #[cfg(feature = "postgres")]
@@ -57,8 +57,8 @@ pub struct Node {
     pub(super) database: Arc<db::DB<storage::DynStore>>,
     pub(super) p2p_handle: Option<p2p::P2PHostHandle>,
     pub(super) p2p_tasks: Option<P2PTasks>,
-    pub(super) downsample_task: Option<JoinHandle<()>>,
-    pub(super) vector_rebuild_task: Option<JoinHandle<()>>,
+    pub(super) downsample_task: Option<workers::Background>,
+    pub(super) vector_rebuild_task: Option<workers::Background>,
     pub(super) txn_cleanup_task: Option<JoinHandle<()>>,
     pub(super) http_server: Option<defra_http::Server>,
     #[cfg(feature = "postgres")]

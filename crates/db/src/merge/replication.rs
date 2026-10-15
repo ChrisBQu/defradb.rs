@@ -9,10 +9,9 @@ use std::sync::Arc;
 use crate::database::DB;
 use blockstore::Blockstore;
 use cid::Cid;
-use p2p::sync::{DocumentHeadProvider, PushFailure, SyncCoordinator};
+use p2p::sync::{DocumentHeadProvider, PushFailureReceiver, SyncCoordinator};
 use p2p::transport::P2PTransport;
 use storage::corekv::Store;
-use tokio::sync::mpsc;
 
 use crate::event::emission::TxnBroadcaster;
 use crate::merge::acp_merge_handler::AcpMergeHandler;
@@ -112,10 +111,8 @@ pub fn create_replication_stack_with_max_merge_depth<
 pub fn attach_failure_channel<B: Blockstore + 'static, T: P2PTransport>(
     coordinator: &mut SyncCoordinator<B, T>,
     capacity: usize,
-) -> mpsc::Receiver<PushFailure> {
-    let (failure_tx, failure_rx) = mpsc::channel::<PushFailure>(capacity);
-    coordinator.set_failure_channel(failure_tx);
-    failure_rx
+) -> PushFailureReceiver {
+    coordinator.attach_failure_channel(capacity)
 }
 
 pub async fn load_persisted_collections<B: Blockstore + 'static, T: P2PTransport>(

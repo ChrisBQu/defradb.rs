@@ -242,7 +242,7 @@ impl<S: Store> DB<S> {
     /// This creates a DB with an empty collection cache. Use `open_with_options()`
     /// to load existing collections from the store.
     pub fn with_options(store: S, options: DbOptions) -> Result<Self> {
-        let lens_store: Arc<dyn TransformStore> = Self::create_lens_store()?;
+        let lens_store: Arc<dyn TransformStore> = Self::create_lens_store(options.pool.as_ref())?;
         let store = Arc::new(store);
         Ok(Self {
             doc_short_id_allocator: crate::docid::map::DocShortIdAllocator::new(store.clone()),
@@ -309,7 +309,7 @@ impl<S: Store> DB<S> {
     /// **Warning:** When multiple DB instances share a store via `from_arc()`,
     /// transaction IDs may collide if both instances create transactions concurrently.
     pub fn from_arc_with_options(store: Arc<S>, options: DbOptions) -> Result<Self> {
-        let lens_store: Arc<dyn TransformStore> = Self::create_lens_store()?;
+        let lens_store: Arc<dyn TransformStore> = Self::create_lens_store(options.pool.as_ref())?;
         Ok(Self {
             doc_short_id_allocator: crate::docid::map::DocShortIdAllocator::new(store.clone()),
             store,
@@ -718,8 +718,21 @@ impl<S: Store> DB<S> {
     }
 
     /// The lens transform store this database runs its migrations on.
-    fn create_lens_store() -> Result<Arc<dyn TransformStore>> {
-        lens::default_store()
+    /// The database's lens store: its epoch ticks run on `pool`'s deadline
+    /// queue, or on a thread of their own without one.
+    fn create_lens_store(pool: Option<&workers::Pool>) -> Result<Arc<dyn TransformStore>> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let store = match pool {
+            Some(pool) => lens::default_store_on(pool),
+            None => lens::default_store(),
+        };
+        // A browser build compiles no lens runtime: nothing ticks.
+        #[cfg(target_arch = "wasm32")]
+        let store = {
+            let _ = pool;
+            lens::default_store()
+        };
+        store
             .map(crate::definition::migration::committed_lenses::CommittedLensStore::wrap)
             .map_err(|e| Error::Lens(format!("failed to create lens transform store: {}", e)))
     }

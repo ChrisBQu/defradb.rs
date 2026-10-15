@@ -45,7 +45,9 @@ impl Drop for StatementRollbackGuard {
     }
 }
 
-/// Await a future with an optional timeout (native only, WASM always awaits directly).
+/// Await a future with an optional timeout (native only, WASM always awaits
+/// directly). The deadline is a timer of the worker pool's deadline queue:
+/// the calling worker's, or the fallback pool's off the pool.
 #[cfg(not(target_arch = "wasm32"))]
 async fn await_with_timeout<T, F: Future<Output = Result<T>>>(
     future: F,
@@ -53,11 +55,14 @@ async fn await_with_timeout<T, F: Future<Output = Result<T>>>(
 ) -> Result<T> {
     if timeout_secs > 0 {
         let timeout = std::time::Duration::from_secs(timeout_secs);
-        match tokio::time::timeout(timeout, future).await {
+        match workers::timeout(timeout, future).await {
             Ok(r) => r,
-            Err(_) => Err(crate::error::QueryError::execution(format!(
+            Err(workers::Error::TimedOut) => Err(crate::error::QueryError::execution(format!(
                 "query execution timed out after {} seconds",
                 timeout_secs
+            ))),
+            Err(error) => Err(crate::error::QueryError::execution(format!(
+                "the query's deadline could not be kept: {error}"
             ))),
         }
     } else {

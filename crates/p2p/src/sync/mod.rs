@@ -38,7 +38,7 @@ pub use coordinator::IrohSyncCoordinator;
 pub use coordinator::Libp2pSyncCoordinator;
 pub use coordinator::{
     CreateReplicatorResult, HeadHintCarAuthority, HeadHintCarGrant, LoadReplicatorsResult,
-    PushFailure, SyncCoordinator, SyncShutdownHandle, SyncStatus,
+    PushFailure, PushFailureReceiver, SyncCoordinator, SyncShutdownHandle, SyncStatus,
 };
 pub use dag_sync::{DagSync, DagSyncConfig, DagSyncState, NeedsFetchData, SyncPlan};
 pub(crate) use event_dispatcher::classify_p2p_event;

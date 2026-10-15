@@ -209,16 +209,16 @@ impl Node {
         // The fallback for a deferred verdict no arrival can release: one
         // named nothing, one past the index's capacity, and everything the
         // index held before this process started.
-        let sweep_handler = replication.merge_handler_inner.clone();
-        let sweep_shutdown = coordinator.shutdown_handle();
-        coordinator.spawn_background_task("governance_sweep", async move {
-            db::merge::governance::run_governance_sweep(
-                sweep_handler,
+        // It runs on the database's worker pool and ends with the
+        // coordinator's shutdown.
+        drop(
+            db::merge::governance::start_governance_sweep(
+                replication.merge_handler_inner.clone(),
                 db::merge::governance::SWEEP_INTERVAL,
-                sweep_shutdown,
+                coordinator.shutdown_handle(),
             )
-            .await;
-        });
+            .map_err(|e| Error::InvalidConfig(format!("the governance sweep did not start: {e}")))?,
+        );
 
         let coordinator_for_events = coordinator.clone();
         let se_store = store.clone();

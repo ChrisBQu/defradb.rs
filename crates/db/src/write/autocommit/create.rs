@@ -596,10 +596,14 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             identities.push(identity);
         }
 
-        // Compute blocks (parallel on native, sequential on WASM). A failure
-        // aborts the batch: without blocks there is no derived DocID.
+        // Compute blocks (spread over the pool's workers on native,
+        // sequential on WASM). A failure aborts the batch: without blocks
+        // there is no derived DocID. Each document's blocks are a task on the
+        // least-loaded worker, its inputs passed by value; this task joins
+        // them. A database with no pool computes them inline.
         #[cfg(feature = "native")]
         let computed_blocks: Vec<ComputedBlocks> = {
+            let pool = self.db.pool().cloned();
             let block_futures: Vec<_> = prepared_docs
                 .iter()
                 .zip(identities.iter())
@@ -610,7 +614,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     let enc = enc_config.clone();
                     let sign = sign_config.clone();
                     let memo = self.prepared_inputs.clone();
-                    tokio::task::spawn_blocking(move || {
+                    let compute = move || async move {
                         compute_document_blocks_with_inputs(
                             &doc_clone,
                             &schema,
@@ -619,7 +623,25 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                             sign.as_ref(),
                             memo.as_ref(),
                         )
-                    })
+                    };
+                    let pool = pool.clone();
+                    async move {
+                        match pool {
+                            Some(pool) => {
+                                pool.submit_with(
+                                    workers::Target::LeastLoaded,
+                                    workers::Submit {
+                                        name: Some("db::create_blocks"),
+                                        bytes: None,
+                                    },
+                                    compute,
+                                )
+                                .await?
+                                .await
+                            }
+                            None => Ok(compute().await),
+                        }
+                    }
                 })
                 .collect();
 
@@ -639,7 +661,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     }
                     Err(e) => {
                         return Err(query::error::QueryError::execution(format!(
-                            "block computation task panicked: {}",
+                            "block computation task failed: {}",
                             e
                         )));
                     }

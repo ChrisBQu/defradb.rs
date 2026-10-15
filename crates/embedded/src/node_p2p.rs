@@ -226,15 +226,16 @@ where
     // The fallback for a deferred verdict no arrival can release: one named
     // nothing, one past the index's capacity, and everything the index held
     // before this process started.
-    let sweep_handler = replication.merge_handler_inner.clone();
-    let sweep_shutdown = coordinator.shutdown_handle();
+    // It runs on the database's worker pool and ends with the coordinator's
+    // shutdown; the network task here only follows it for the node's teardown.
+    let governance_sweep = db::merge::governance::start_governance_sweep(
+        replication.merge_handler_inner.clone(),
+        db::merge::governance::SWEEP_INTERVAL,
+        coordinator.shutdown_handle(),
+    )
+    .map_err(|error| anyhow::anyhow!("the governance sweep did not start: {error}"))?;
     let governance_sweep_task = tokio::spawn(async move {
-        db::merge::governance::run_governance_sweep(
-            sweep_handler,
-            db::merge::governance::SWEEP_INTERVAL,
-            sweep_shutdown,
-        )
-        .await;
+        let _ = governance_sweep.await;
     });
 
     match db::merge::load_persisted_collections(&coordinator).await {

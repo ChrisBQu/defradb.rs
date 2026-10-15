@@ -11,6 +11,8 @@ repository.workspace = true
 bench = false
 
 [dependencies]
+# Query deadlines on the worker pool's deadline queue.
+workers = { path = "../workers" }
 bytes.workspace = true
 web-time.workspace = true
 

@@ -7441,6 +7441,7 @@ dependencies = [
  "tokio",
  "tracing",
  "wasmtime",
+ "workers",
 ]
 
 [[package]]
@@ -10627,6 +10628,7 @@ dependencies = [
  "tokio",
  "tracing",
  "web-time",
+ "workers",
 ]
 
 [[package]]
