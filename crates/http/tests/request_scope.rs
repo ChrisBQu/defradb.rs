@@ -100,3 +100,56 @@ async fn each_request_binds_its_own_caller() {
         assert_eq!(observed, vec![caller, bound_identity]);
     }
 }
+
+async fn bearer(CallerContext(context): CallerContext) -> Json<Option<String>> {
+    Json(
+        context
+            .identity()
+            .and_then(|did| context.bearer_token_for(did)),
+    )
+}
+
+#[tokio::test]
+async fn each_request_carries_its_own_bearer_in_its_context() {
+    let identity = RawIdentity::from_private_key(crypto::generate_ed25519().unwrap()).unwrap();
+    let first = token(&identity);
+    let second = String::from_utf8(
+        new_token(
+            &identity,
+            Duration::from_secs(7200),
+            Some("localhost:9181".into()),
+            None,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_ne!(first, second);
+    let state =
+        AppStateBuilder::new(Arc::new(MockQueryExecutor::new()), edge::testing::edge()).build();
+    let app = Router::new()
+        .route("/bearer", get(bearer))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            defra_http::auth_middleware::auth_middleware,
+        ))
+        .with_state(state);
+    let request = |token: &str| {
+        Request::builder()
+            .uri("/bearer")
+            .header(HOST, "localhost:9181")
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    let (a, b) = tokio::join!(
+        app.clone().oneshot(request(&first)),
+        app.oneshot(request(&second))
+    );
+    for (response, expected) in [(a.unwrap(), first), (b.unwrap(), second)] {
+        assert!(response.status().is_success());
+        let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let observed: Option<String> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(observed, Some(expected));
+    }
+}

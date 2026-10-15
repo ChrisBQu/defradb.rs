@@ -168,3 +168,35 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod request_bearer_tests {
+    use super::*;
+
+    #[test]
+    fn a_remote_identity_acts_with_the_token_its_request_carries() {
+        let did = "did:key:z6MkVeraRsRequestBearer";
+        defra_core::signing::set_request_bearer_token(did, "stored");
+        let request = defra_core::RequestContext::default()
+            .with_bearer(Some(did.to_string()), Some("request".to_string()));
+
+        let own = resolve_registered_or_passthrough_bearer_token_as(
+            &request,
+            did,
+            "did:key:submitter",
+            9001,
+        )
+        .unwrap();
+        let unscoped = resolve_registered_or_passthrough_bearer_token_as(
+            &defra_core::RequestContext::default(),
+            did,
+            "did:key:submitter",
+            9001,
+        )
+        .unwrap();
+        defra_core::signing::clear_request_bearer_token(did);
+
+        assert_eq!(own.as_deref(), Some("request"));
+        assert_eq!(unscoped.as_deref(), Some("stored"));
+    }
+}

@@ -462,3 +462,30 @@ mod tests {
         defra_core::signing::clear_identity_store();
     }
 }
+
+#[cfg(test)]
+mod request_bearer_tests {
+    use super::*;
+
+    #[test]
+    fn a_remote_identity_acts_with_the_token_its_request_carries() {
+        let did = "did:key:z6MkCosmosRequestBearer";
+        defra_core::signing::set_request_bearer_token(did, "stored");
+        let request = defra_core::RequestContext::default()
+            .with_bearer(Some(did.to_string()), Some("request".to_string()));
+        let elsewhere = defra_core::RequestContext::default().with_bearer(
+            Some("did:key:someone-else".to_string()),
+            Some("other".to_string()),
+        );
+
+        let own = resolve_cosmos_bearer_token_as(&request, did, "cosmos1delegated").unwrap();
+        let foreign = resolve_cosmos_bearer_token_as(&elsewhere, did, "cosmos1delegated").unwrap();
+        defra_core::signing::clear_request_bearer_token(did);
+
+        assert_eq!(own.as_deref(), Some("request"));
+        assert_eq!(
+            foreign, None,
+            "a request another DID authenticated lent its token or the stored one"
+        );
+    }
+}

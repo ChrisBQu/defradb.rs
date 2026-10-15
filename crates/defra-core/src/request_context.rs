@@ -373,6 +373,44 @@ mod tests {
     }
 
     #[test]
+    fn a_request_presents_its_own_bearer_only_for_the_did_that_presented_it() {
+        let did = "did:key:request-context-bearer";
+        let other = "did:key:request-context-other";
+        crate::signing::set_request_bearer_token(did, "stored");
+        crate::signing::set_request_bearer_token(other, "stored-other");
+
+        let request =
+            RequestContext::default().with_bearer(Some(did.to_string()), Some("own".to_string()));
+        assert_eq!(request.bearer_token_for(did).as_deref(), Some("own"));
+        assert_eq!(request.bearer_token_for(other), None);
+
+        let tokenless = RequestContext::default().with_bearer(Some(did.to_string()), None);
+        assert_eq!(
+            tokenless.bearer_token_for(did),
+            None,
+            "a request that presented no token fell back to the process store"
+        );
+
+        let unscoped = RequestContext::default();
+        assert_eq!(unscoped.bearer_token_for(did).as_deref(), Some("stored"));
+
+        crate::signing::clear_request_bearer_token(did);
+        crate::signing::clear_request_bearer_token(other);
+    }
+
+    #[tokio::test]
+    async fn mirror_installs_the_bearer_for_the_old_api() {
+        let did = "did:key:mirrored-bearer";
+        let context = RequestContext::default()
+            .with_bearer(Some(did.to_string()), Some("mirrored".to_string()));
+        let seen = context
+            .mirror(async { crate::ambient::get_request_bearer_token(did) })
+            .await;
+        assert_eq!(seen.as_deref(), Some("mirrored"));
+        assert_eq!(crate::ambient::get_request_bearer_token(did), None);
+    }
+
+    #[test]
     fn with_dac_bypass_leaves_the_context_it_was_cloned_from_unchanged() {
         let anonymous = RequestContext::default();
         let admin = anonymous.clone().with_dac_bypass(true);

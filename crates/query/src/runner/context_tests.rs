@@ -355,3 +355,133 @@ async fn the_dac_bypass_in_a_request_reads_documents_dac_hides() {
         "the bypass never lets an anonymous request read a private document"
     );
 }
+
+/// Records the bearer each access check presents: the one of the request it
+/// is bound to.
+#[derive(Default)]
+struct BearerAcp {
+    seen: Arc<SegQueue<Option<String>>>,
+    bearer: Option<String>,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl DocumentACP for BearerAcp {
+    fn bind_request(&self, context: &RequestContext) -> Option<Arc<dyn DocumentACP>> {
+        Some(Arc::new(Self {
+            seen: Arc::clone(&self.seen),
+            bearer: context.bearer_token_for(CALLER),
+        }))
+    }
+
+    async fn register_doc_object(
+        &self,
+        _identity: &Did,
+        _policy_id: &str,
+        _resource_name: &str,
+        _doc_id: &str,
+    ) -> acp::Result<()> {
+        Ok(())
+    }
+
+    async fn is_doc_registered(
+        &self,
+        _policy_id: &str,
+        _resource_name: &str,
+        _doc_id: &str,
+    ) -> acp::Result<bool> {
+        Ok(true)
+    }
+
+    async fn check_doc_access(
+        &self,
+        _identity: &Identity,
+        _permission: DocumentPermission,
+        _policy_id: &str,
+        _resource_name: &str,
+        _doc_id: &str,
+    ) -> acp::Result<bool> {
+        self.seen.push(self.bearer.clone());
+        Ok(true)
+    }
+
+    async fn add_actor_relationship(
+        &self,
+        _requestor: &Did,
+        _target: &Did,
+        _policy_id: &str,
+        _collection_id: &str,
+        _doc_id: &str,
+        _relation: &str,
+        _managing_relations: &[String],
+    ) -> acp::Result<bool> {
+        Ok(false)
+    }
+
+    async fn delete_actor_relationship(
+        &self,
+        _requestor: &Did,
+        _target: &Did,
+        _policy_id: &str,
+        _collection_id: &str,
+        _doc_id: &str,
+        _relation: &str,
+        _managing_relations: &[String],
+    ) -> acp::Result<bool> {
+        Ok(false)
+    }
+
+    async fn unregister_doc_object(
+        &self,
+        _policy_id: &str,
+        _resource_name: &str,
+        _doc_id: &str,
+    ) -> acp::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn each_read_checks_access_with_its_own_requests_bearer() {
+    let mut company = CollectionVersion::new(
+        "Company",
+        "v1",
+        "coll-company",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "name", FieldKind::string()),
+        ],
+    );
+    company.policy = Some(PolicyDescription::new("policy", "companies"));
+    let fetcher = MockFetcher::new();
+    fetcher.add_doc(
+        "Company",
+        Document::from_json_str(
+            r#"{"_docID":"bae-47bd7c29-69cc-5b8a-856f-caaa93d9ace0","name":"Acme"}"#,
+        )
+        .unwrap(),
+    );
+    let acp = Arc::new(BearerAcp::default());
+    let runner = QueryRunner::new(fetcher, vec![company]).with_acp(acp.clone());
+    let read = |token: &str| {
+        runner.execute(
+            QueryRequest::new("{ Company { name } }")
+                .with_identity(Some(Did::new(CALLER).unwrap()))
+                .with_context(
+                    RequestContext::default()
+                        .with_bearer(Some(CALLER.to_string()), Some(token.to_string())),
+                ),
+        )
+    };
+
+    let (first, second) = tokio::join!(read("first"), read("second"));
+    assert_ok(&first);
+    assert_ok(&second);
+
+    let seen: std::collections::BTreeSet<_> = drain(&acp.seen).into_iter().collect();
+    assert_eq!(
+        seen,
+        [Some("first".to_string()), Some("second".to_string())].into(),
+        "a read checked access with another request's bearer, or none"
+    );
+}
