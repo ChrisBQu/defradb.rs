@@ -1,13 +1,10 @@
-//! Ambient acting-identity DID for the current request thread.
+//! The acting identity tests set the old way: a thread-local, and a
+//! task-local a scope binds to a task.
 //!
-//! HTTP/FFI run the whole async operation inside `spawn_blocking` +
-//! `block_on`, pinning it to one OS thread. Boundaries set the acting
-//! identity here so DB-layer NAC checks (which receive no explicit
-//! identity) can resolve who is acting.
-//!
-//! These threads are pooled and reused across requests. Use
-//! [`scoped_current_identity`] at request boundaries so the identity is
-//! always cleared on exit and never leaks into the next request.
+//! Production code never reads or writes it: the acting identity travels in
+//! the request's [`RequestContext`](crate::RequestContext). Tests written
+//! against this API still set it, and [`crate::ambient`] reads it back into a
+//! context; it is compiled only for tests.
 //!
 //! Stored as `String` because `defra-core` does not depend on the
 //! `identity` crate; callers parse it back into a `Did` where needed.

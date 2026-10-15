@@ -12,6 +12,8 @@ pub mod block_delta;
 pub mod block_signature;
 pub mod cbor;
 pub mod collection;
+/// The acting identity tests set the old way (see [`ambient`]).
+#[cfg(any(test, feature = "ambient"))]
 pub mod current_identity;
 /// The DAC bypass flag tests set the old way (see [`ambient`]).
 #[cfg(any(test, feature = "ambient"))]
