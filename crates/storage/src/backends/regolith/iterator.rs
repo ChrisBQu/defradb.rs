@@ -105,6 +105,9 @@ pub(crate) struct RegolithIterator {
     /// excludes the rest, except for a prefix with no expressible
     /// successor, which is a prefix of all `0xff` bytes.
     prefix: Option<Vec<u8>>,
+    /// The range is exactly the prefix's: it starts at the prefix and ends
+    /// where the prefix does.
+    prefix_range: bool,
     reverse: bool,
     keys_only: bool,
     validated: bool,
@@ -117,12 +120,16 @@ pub(crate) struct RegolithIterator {
 impl RegolithIterator {
     pub(crate) fn open(handle: Arc<Handle>, opts: &IterOptions) -> Result<Self> {
         let (start, end) = range_bounds(opts);
+        let prefix_range = opts.prefix().is_some_and(|prefix| {
+            start.as_deref() == Some(prefix) && end == prefix_successor(prefix)
+        });
         let mut iter = Self {
             source: Source::Empty,
             handle,
             start,
             end,
             prefix: opts.prefix().map(<[u8]>::to_vec),
+            prefix_range,
             reverse: opts.reverse(),
             keys_only: opts.keys_only(),
             validated: opts.validated(),
@@ -152,8 +159,14 @@ impl RegolithIterator {
                 } else {
                     // The cursor skips entries this snapshot cannot see
                     // before it reports a key; only a bound it holds stops
-                    // that skip at the end of the range.
+                    // that skip at the end of the range. A walk of exactly
+                    // the prefix seeks it as one, which holds the same bound
+                    // and lets regolith pass over the tables whose prefix
+                    // filter lacks it (`prefix`).
                     match (self.floor(&anchor), self.end.as_deref()) {
+                        (Some(floor), _) if self.walks_prefix_from(&floor) => {
+                            cursor.seek_prefix(&floor)
+                        }
                         (floor, Some(end)) => cursor.seek_bounded(&floor.unwrap_or_default(), end),
                         (Some(floor), None) => cursor.seek(&floor),
                         (None, None) => cursor.seek_to_first(),
@@ -212,6 +225,12 @@ impl RegolithIterator {
             }),
             None => self.start.clone(),
         }
+    }
+
+    /// Whether a forward walk from `floor` covers exactly the prefix: the
+    /// range is the prefix's, and the walk starts at its first key.
+    fn walks_prefix_from(&self, floor: &[u8]) -> bool {
+        self.prefix_range && self.prefix.as_deref() == Some(floor)
     }
 
     /// The highest key a backward walk may stand on. Seeking at or past the

@@ -169,6 +169,12 @@ pub(super) fn family_of(key: &[u8]) -> Option<&'static Family> {
     FAMILIES.iter().find(|family| key.starts_with(family.start))
 }
 
+/// The length of `key`'s entity prefix, or `None` when its family names no
+/// entity, or when it is cut short or malformed.
+pub(super) fn entity_len(key: &[u8]) -> Option<usize> {
+    family_of(key)?.entity_len(key)
+}
+
 /// Keys of every family and of none, cut short or malformed as often as
 /// whole: what property tests of the table's readers walk.
 #[cfg(test)]

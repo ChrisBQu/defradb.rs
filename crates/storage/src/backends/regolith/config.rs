@@ -72,12 +72,15 @@ impl RegolithStoreOptions {
     }
 
     /// [`Self::engine_with_keys`] with what reading the store's data takes:
-    /// the merge operator its merged values fold with. The writable and the
-    /// read-only open both take their options from here, so a read-only open
-    /// reads a merged value as a writable one does.
+    /// the merge operator its merged values fold with, and the prefix
+    /// extractor its tables' prefix filters are built and read with. The
+    /// writable and the read-only open both take their options from here, so
+    /// a read-only open reads a merged value, and seeks a prefix, as a
+    /// writable one does.
     pub(super) fn engine_for_open(&self) -> Options {
         self.engine_with_keys()
             .merge_operator(Some(Arc::new(super::merge::DefraMergeOperator)))
+            .prefix_extractor(Some(Arc::new(super::prefix::DefraPrefixExtractor)))
     }
 
     /// Server defaults: DefraLevel, fsync on every commit.

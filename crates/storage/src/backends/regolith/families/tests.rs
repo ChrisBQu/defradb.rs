@@ -2,16 +2,12 @@
 
 use proptest::prelude::*;
 
-use super::{family_of, keys, Class};
+use super::{entity_len, family_of, keys, Class};
 use crate::keys::utils::InstanceType;
 use crate::keys::{
     deleted_doc_key, doc_key, encode_doc_short_id, DataStoreKey, HeadstoreColKey,
     HeadstoreColSuperseded, HeadstoreDocKey, HeadstorePriorityKey, IndexDataStoreKey,
 };
-
-fn entity_len(key: &[u8]) -> Option<usize> {
-    family_of(key)?.entity_len(key)
-}
 
 /// `namespace` and a key's bytes, as a store namespace writes them.
 fn stored(namespace: &[u8], key: &[u8]) -> Vec<u8> {
