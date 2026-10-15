@@ -598,6 +598,50 @@ async fn direct_mutation_api_replays_atomically_inside_engine_attempt() {
 }
 
 #[tokio::test]
+async fn single_create_replays_after_engine_conflict_with_consistent_identity_and_cid() {
+    let inner = RegolithStore::in_memory().unwrap();
+    let store = ConflictStore {
+        inner: inner.clone(),
+        attempts: Arc::new(AtomicUsize::new(0)),
+        raced: Arc::new(AtomicBool::new(false)),
+        attempt_ids: Arc::new(Mutex::new(Vec::new())),
+    };
+    let db = Arc::new(DB::new(store.clone()).unwrap());
+    db.create_collection(test_collection()).await.unwrap();
+
+    let result = db::write::autocommit::AutoCommitMutator::new(db.clone())
+        .create(
+            "TestDoc",
+            document::Document::from_json_str(r#"{"x":7}"#).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        store.raced.load(Ordering::SeqCst),
+        "the first commit must conflict"
+    );
+    assert_eq!(result.document.id(), Some(&result.doc_id));
+    let block = result.commit_block.expect("created document block");
+    let cid = result.commit_cid.expect("created document CID");
+    assert_eq!(
+        cid,
+        defra_core::block::generate_cid_from_bytes(&block).unwrap(),
+        "returned CID must identify the exact returned block bytes"
+    );
+    assert!(
+        db::AutoCommitFetcher::new(db)
+            .get_by_ids("TestDoc", &[result.doc_id.to_string()])
+            .await
+            .unwrap()
+            .docs()
+            .first()
+            .is_some(),
+        "the returned ID must resolve to the committed document"
+    );
+}
+
+#[tokio::test]
 async fn transactional_acp_revoke_conflicts_and_denies_batch_update() {
     let inner = RegolithStore::in_memory().unwrap();
     let store = ConflictStore {

@@ -22,7 +22,7 @@ struct CreateRetryAttempt<S: Store> {
     db: Arc<DB<S>>,
     collection_name: String,
     collection: Collection,
-    doc: Document,
+    doc: Arc<Document>,
     computed_blocks: ComputedBlocks,
     doc_short_id: u64,
     sign_config: Option<defra_core::signing::SigningConfig>,
@@ -325,6 +325,8 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 )),
             })?;
 
+        let doc = Arc::new(doc);
+
         // No per-doc write guard for creates: the DocID is derived from the
         // genesis block inside the txn, so no identity exists to guard yet.
         // The DocID-mapping duplicate check is the gate.
@@ -332,7 +334,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             db: Arc::clone(&self.db),
             collection_name: collection_name.to_string(),
             collection: collection.clone(),
-            doc: doc.clone(),
+            doc: Arc::clone(&doc),
             computed_blocks,
             doc_short_id,
             sign_config,
@@ -344,9 +346,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .store()
             .transact_retry(storage::corekv::RetryOptions::new(4), Box::new(attempt))
             .await;
-        let (doc_id, mut doc, cid, block, col_data) = match result {
+        let (doc_id, cid, block, col_data) = match result {
             Ok(value) => *value
-                .downcast::<(DocID, Document, Cid, Bytes, Option<(Cid, Bytes)>)>()
+                .downcast::<(DocID, Cid, Bytes, Option<(Cid, Bytes)>)>()
                 .map_err(|_| query::error::QueryError::execution("invalid create retry result"))?,
             Err(error) => match error.downcast_abort::<query::error::QueryError>() {
                 Ok(error) => return Err(error),
@@ -365,6 +367,8 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         )
         .await;
 
+        let mut doc = Arc::try_unwrap(doc).unwrap_or_else(|doc| doc.as_ref().clone());
+        doc.set_id(doc_id.clone());
         doc.clear_write_preparation();
         let mut result = CreateResult::with_commit(doc_id, doc, cid, block);
         if let Some((col_cid, col_bytes)) = col_data {
@@ -378,7 +382,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         &self,
         retry: &mut dyn storage::corekv::RetryTxn,
         attempt: &CreateRetryAttempt<S>,
-    ) -> query::error::Result<(DocID, Document, Cid, Bytes, Option<(Cid, Bytes)>)> {
+    ) -> query::error::Result<(DocID, Cid, Bytes, Option<(Cid, Bytes)>)> {
         let io = retry
             .begin_attempt_io()
             .map_err(|error| crate::error::commit_query_error(error.into()))?;
@@ -409,7 +413,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             query::error::QueryError::execution(format!("failed to get headstore: {error}"))
         })?;
 
-        let mut doc = attempt.doc.clone();
+        let doc = attempt.doc.as_ref();
         let result: query::error::Result<(DocID, Cid, Bytes, Option<(Cid, Bytes)>)> = async {
             let index_manager = IndexManager::from_indexes(
                 collection.resolved_root_id(),
@@ -424,13 +428,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             })?;
 
             self.db
-                .validate_downsample_write(
-                    &datastore,
-                    &systemstore,
-                    collection.schema(),
-                    &doc,
-                    None,
-                )
+                .validate_downsample_write(&datastore, &systemstore, collection.schema(), doc, None)
                 .await
                 .map_err(|error| query::error::QueryError::execution(error.to_string()))?;
 
@@ -452,11 +450,15 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 block_result,
             )
             .await?;
-            doc.set_id(doc_id.clone());
+            // Keep the source document ID unset through validation above. The
+            // derived ID is needed by series/index persistence, so clone and
+            // annotate only after validation succeeds.
+            let mut stored_doc = doc.clone();
+            stored_doc.set_id(doc_id.clone());
             write_local_create(
                 &datastore,
                 &collection,
-                &doc,
+                &stored_doc,
                 attempt.doc_short_id,
                 &index_manager,
             )
@@ -543,7 +545,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         retry
             .finish_attempt_io(io, callbacks)
             .map_err(|error| crate::error::commit_query_error(error.into()))?;
-        Ok((doc_id, doc, cid, block, col_data))
+        Ok((doc_id, cid, block, col_data))
     }
 
     pub(super) async fn create_many_impl(
