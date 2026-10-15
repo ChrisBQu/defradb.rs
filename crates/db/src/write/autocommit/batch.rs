@@ -28,6 +28,7 @@ pub struct BatchMutator<S: Store> {
     db: Arc<DB<S>>,
     prepared_inputs: Option<query::prepared::PreparedInputMemo>,
     txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
+    acp_registration_projection: Arc<query::txn::AcpRegistrationProjection>,
 }
 
 impl<S: Store> BatchMutator<S> {
@@ -43,6 +44,7 @@ impl<S: Store> BatchMutator<S> {
             db,
             prepared_inputs,
             txn: Arc::new(TokioMutex::new(None)),
+            acp_registration_projection: Arc::new(query::txn::AcpRegistrationProjection::new()),
         }
     }
 
@@ -55,6 +57,7 @@ impl<S: Store> BatchMutator<S> {
             db,
             txn,
             prepared_inputs,
+            acp_registration_projection: Arc::new(query::txn::AcpRegistrationProjection::new()),
         }
     }
 
@@ -151,6 +154,25 @@ impl<S: Store + 'static> BatchMutator<S> {
         let txn = txn_guard.as_mut().ok_or_else(|| {
             query::error::QueryError::execution("mutation batch transaction is no longer active")
         })?;
+        if self
+            .db
+            .document_acp()
+            .is_some_and(|acp| !acp.supports_transactions())
+        {
+            if let (Some(policy), Some(creator)) = (
+                collection.schema().policy.as_ref(),
+                defra_core::signing::get_broadcast_creator_did(),
+            ) {
+                let owner = identity::Did::new(&creator).map_err(|error| {
+                    query::error::QueryError::execution(format!(
+                        "invalid mutation creator DID: {error}"
+                    ))
+                })?;
+                self.acp_registration_projection
+                    .project_registration(&policy.id, &policy.resource_name, &doc_id, owner)
+                    .map_err(query::error::QueryError::execution)?;
+            }
+        }
         super::AutoCommitMutator::new(Arc::clone(&self.db))
             .register_created_doc_with_acp(txn, collection, doc_id)
     }
@@ -265,11 +287,12 @@ impl<S: Store + 'static> storage::corekv::RetryAttemptFn for BatchRetryAttempt<S
                 crate::LensedDocFetcher::new(self.db.clone(), txn, self.db.lens_store.clone())
                     .with_prepared_inputs(self.prepared_inputs.clone()),
             );
-            let batch = Arc::new(BatchMutator::new_with_prepared_inputs(
-                self.db.clone(),
-                fetcher.shared_txn(),
-                self.prepared_inputs.clone(),
-            ));
+            let batch = Arc::new(BatchMutator {
+                db: self.db.clone(),
+                txn: fetcher.shared_txn(),
+                prepared_inputs: self.prepared_inputs.clone(),
+                acp_registration_projection: Arc::new(query::txn::AcpRegistrationProjection::new()),
+            });
             let mutator: Arc<dyn DocMutator> = batch.clone();
             let fetcher_dyn: Arc<dyn query::fetcher::DocFetcher> = fetcher.clone();
             let outcome = (self.operation)(mutator, fetcher_dyn).await;
@@ -310,6 +333,10 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
 
     fn manages_external_acp_hooks(&self) -> bool {
         true
+    }
+
+    fn acp_registration_projection(&self) -> Option<Arc<query::txn::AcpRegistrationProjection>> {
+        Some(self.acp_registration_projection.clone())
     }
 
     async fn register_ordered_async_hook(
@@ -736,6 +763,21 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                     "mutation batch transaction is no longer active",
                 )
             })?;
+            if self
+                .db
+                .document_acp()
+                .is_some_and(|acp| !acp.supports_transactions())
+            {
+                if let Some(policy) = collection.schema().policy.as_ref() {
+                    self.acp_registration_projection
+                        .project_unregistration(
+                            &policy.id,
+                            &policy.resource_name,
+                            &canonical_doc_id.to_string(),
+                        )
+                        .map_err(query::error::QueryError::execution)?;
+                }
+            }
             super::AutoCommitMutator::new(Arc::clone(&self.db)).register_deleted_doc_with_acp(
                 txn,
                 &collection,
