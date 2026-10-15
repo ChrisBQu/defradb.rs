@@ -32,7 +32,17 @@ impl<V, E> Flight<V, E> {
 
     /// Settles the flight. The first answer wins; later ones are dropped.
     pub(crate) fn settle(&self, answer: Answer<V, E>) {
+        self.record(answer);
+        self.release();
+    }
+
+    /// Records the answer without waking anyone yet.
+    pub(crate) fn record(&self, answer: Answer<V, E>) {
         let _ = self.answer.set(answer);
+    }
+
+    /// Wakes every waiter; the answer recorded is theirs.
+    pub(crate) fn release(&self) {
         self.done.set();
     }
 

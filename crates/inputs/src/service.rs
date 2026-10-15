@@ -326,19 +326,20 @@ where
         }
     }
 
+    /// Settles a round trip's keys in two passes: every answer is recorded
+    /// (and cached) first, then every flight is released, so a waiter woken
+    /// by any release of the batch finds the whole batch answered.
     fn deliver(
         &self,
         keys: Vec<S::Key>,
         outcome: Result<Vec<Result<S::Value, S::Error>>, Error<S::Error>>,
         trip: u64,
     ) {
-        let now = self.runtime.now();
-        match outcome {
-            Ok(answers) => {
-                for (key, answer) in keys.into_iter().zip(answers) {
-                    self.settle(key, answer.map_err(Error::Source), trip, now);
-                }
-            }
+        let answers: Vec<ResultOf<S>> = match outcome {
+            Ok(answers) => answers
+                .into_iter()
+                .map(|answer| answer.map_err(Error::Source))
+                .collect(),
             Err(error) => {
                 Stats::add(&self.stats.failures, 1);
                 tracing::debug!(
@@ -347,75 +348,89 @@ where
                     %error,
                     "remote input request ended without answers"
                 );
-                for key in keys {
-                    self.settle(key, Err(error.clone()), trip, now);
-                }
+                keys.iter().map(|_| Err(error.clone())).collect()
             }
-        }
+        };
+        self.settle_all(keys, answers, trip);
     }
 
-    fn settle(&self, key: S::Key, result: ResultOf<S>, trip: u64, now: u64) {
-        let Some(flight) = self.flights.get(&key) else {
-            return;
-        };
-        if let Ok(value) = &result {
-            if let Some(bytes) = self.source.cache_bytes(&key, value) {
-                if self
-                    .cache
-                    .insert(key.clone(), value.clone(), bytes, now, flight.generation)
-                {
-                    Stats::add(&self.stats.cached, 1);
+    fn settle_all(&self, keys: Vec<S::Key>, answers: Vec<ResultOf<S>>, trip: u64) {
+        let now = self.runtime.now();
+        let mut settled = Vec::with_capacity(keys.len());
+        for (key, result) in keys.into_iter().zip(answers) {
+            let Some(flight) = self.flights.get(&key) else {
+                continue;
+            };
+            if let Ok(value) = &result {
+                if let Some(bytes) = self.source.cache_bytes(&key, value) {
+                    if self
+                        .cache
+                        .insert(key.clone(), value.clone(), bytes, now, flight.generation)
+                    {
+                        Stats::add(&self.stats.cached, 1);
+                    }
                 }
             }
+            flight.record(Answer { result, trip });
+            settled.push((key, flight));
         }
-        flight.settle(Answer { result, trip });
-        self.flights
-            .remove_if(&key, |current| Arc::ptr_eq(current, &flight));
+        for (key, flight) in settled {
+            flight.release();
+            self.flights
+                .remove_if(&key, |current| Arc::ptr_eq(current, &flight));
+        }
     }
 
     /// Waits for every slot's answer, together bounded by the deadline.
+    ///
+    /// A round trip settles its keys in the order the caller queued them, so
+    /// the caller suspends on its last unsettled flight first: it is woken
+    /// once per round trip, when the whole batch is settled, never once per
+    /// key. A worker waiting here holds no thread and runs its other tasks.
     async fn wait(&self, slots: Vec<Slot<S>>, start: u64) -> Vec<ResultOf<S>> {
         let mut timer = None;
         let mut expired = false;
-        let mut trips = RapidHashSet::default();
-        let mut results = Vec::with_capacity(slots.len());
-        for slot in slots {
-            let flight = match slot {
-                Slot::Ready(result) => {
-                    results.push(result);
-                    continue;
-                }
-                Slot::Waiting(flight) => flight,
+        for slot in slots.iter().rev() {
+            let Slot::Waiting(flight) = slot else {
+                continue;
             };
-            if flight.answer().is_none() && !expired {
-                let left = micros(self.config.deadline)
-                    .saturating_sub(self.runtime.now().saturating_sub(start));
-                let timer = timer
-                    .get_or_insert_with(|| self.runtime.network.sleep(Duration::from_micros(left)));
-                let settled = async {
-                    flight.settled().await;
-                    true
-                }
-                .or(async {
-                    timer.await;
-                    false
-                })
-                .await;
-                expired = !settled;
+            if expired || flight.answer().is_some() {
+                continue;
             }
-            match flight.answer() {
-                Some(answer) => {
-                    if answer.trip != 0 {
-                        trips.insert(answer.trip);
-                    }
-                    results.push(answer.result.clone());
-                }
-                None => {
-                    Stats::add(&self.stats.deadlines, 1);
-                    results.push(Err(Error::Deadline(self.config.deadline)));
-                }
+            let left = micros(self.config.deadline)
+                .saturating_sub(self.runtime.now().saturating_sub(start));
+            let timer = timer
+                .get_or_insert_with(|| self.runtime.network.sleep(Duration::from_micros(left)));
+            let settled = async {
+                flight.settled().await;
+                true
             }
+            .or(async {
+                timer.await;
+                false
+            })
+            .await;
+            expired = !settled;
         }
+        let mut trips = RapidHashSet::default();
+        let results = slots
+            .into_iter()
+            .map(|slot| match slot {
+                Slot::Ready(result) => result,
+                Slot::Waiting(flight) => match flight.answer() {
+                    Some(answer) => {
+                        if answer.trip != 0 {
+                            trips.insert(answer.trip);
+                        }
+                        answer.result.clone()
+                    }
+                    None => {
+                        Stats::add(&self.stats.deadlines, 1);
+                        Err(Error::Deadline(self.config.deadline))
+                    }
+                },
+            })
+            .collect();
         self.stats
             .wait_micros
             .record(self.runtime.now().saturating_sub(start));
@@ -491,17 +506,14 @@ where
     S: Source,
 {
     fn drop(&mut self) {
-        let now = self.inner.runtime.now();
-        for key in std::mem::take(&mut self.batch) {
-            self.inner.settle(key, Err(Error::Closed), 0, now);
-        }
+        let mut closed = std::mem::take(&mut self.batch);
         if self.holding {
             self.lane.release();
         }
         if !self.started {
-            for key in self.lane.take(usize::MAX) {
-                self.inner.settle(key, Err(Error::Closed), 0, now);
-            }
+            closed.extend(self.lane.take(usize::MAX));
         }
+        let answers = closed.iter().map(|_| Err(Error::Closed)).collect();
+        self.inner.settle_all(closed, answers, 0);
     }
 }

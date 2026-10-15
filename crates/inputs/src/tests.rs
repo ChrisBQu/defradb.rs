@@ -404,3 +404,42 @@ async fn a_refused_round_trip_settles_its_keys_as_closed_and_frees_its_lane() {
     );
     assert_eq!(service.source().round_trips(), 0);
 }
+
+/// Counts how often the future it wraps is polled.
+struct Polls<F> {
+    future: std::pin::Pin<Box<F>>,
+    polls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl<F> std::future::Future for Polls<F>
+where
+    F: std::future::Future,
+{
+    type Output = F::Output;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<F::Output> {
+        self.polls.fetch_add(1, Ordering::SeqCst);
+        self.future.as_mut().poll(cx)
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_caller_is_woken_once_per_round_trip_not_once_per_key() {
+    let service = service(Fake::with_latency(LATENCY), Config::default());
+    let polls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let call = Polls {
+        future: Box::pin(service.get_many((0..100).collect())),
+        polls: std::sync::Arc::clone(&polls),
+    };
+    let answers = call.await;
+    assert!(answers.iter().all(Result::is_ok));
+    assert_eq!(service.source().round_trips(), 1);
+    assert_eq!(
+        polls.load(Ordering::SeqCst),
+        2,
+        "polled once to start and once when the batch settled"
+    );
+}
