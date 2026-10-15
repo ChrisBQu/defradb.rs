@@ -29,12 +29,9 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
             .await
             .map_err(|e| TransactionError::execution(format!("storage error: {}", e)))?;
         db_txn.make_explicit();
-        // Non-Send on wasm32, where the callbacks it holds drop their `Send`
-        // bounds for the single-threaded browser runtime.
-        // Projection state is transaction-owned. Remote ACP effects are
-        // registered as ordered callbacks with the mutation attempt itself.
-        #[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
-        let acp_registration_projection = Arc::new(AcpRegistrationProjection::new());
+        // Owed registrations are this transaction's own writes. Remote ACP
+        // effects are registered as ordered callbacks with the mutation itself.
+        let acp_registration_projection = db_txn.acp_registration_projection();
 
         // Transaction-scoped collection caching: collections are loaded lazily
         // from the SystemStore on first access within the transaction. Once loaded,

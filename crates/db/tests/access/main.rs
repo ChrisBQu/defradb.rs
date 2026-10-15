@@ -4,3 +4,4 @@ mod common;
 
 mod coverage;
 mod enforcement;
+mod external_registration;

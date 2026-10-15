@@ -35,7 +35,7 @@ async fn batch_create_publishes_event_on_commit() {
 
     let txn = db.new_txn(false).await.expect("new_txn");
     let txn_arc = Arc::new(TokioMutex::new(Some(txn)));
-    let mutator = BatchMutator::new(Arc::clone(&db), Arc::clone(&txn_arc));
+    let mutator = BatchMutator::new(Arc::clone(&db), Arc::clone(&txn_arc)).await;
 
     let doc = Document::from_json_str(r#"{"x": 1}"#).expect("doc");
     let result = mutator.create("TestDoc", doc).await.expect("create");
@@ -77,7 +77,8 @@ async fn batch_create_registers_external_acp_before_ordered_event() {
     )));
     let txn = db.new_txn(false).await.expect("new_txn");
     let txn_arc = Arc::new(TokioMutex::new(Some(txn)));
-    let mutator = Arc::new(BatchMutator::new(Arc::clone(&db), txn_arc));
+    let mutator = Arc::new(BatchMutator::new(Arc::clone(&db), txn_arc).await);
+    // The database gates a non-transactional provider itself.
     mutator.set_document_acp(acp.clone());
     let mut sub = bus.subscribe(&[EventName::Update]);
     let owner = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
@@ -118,7 +119,7 @@ async fn batch_delete_missing_doc_publishes_no_event_and_writes_no_block() {
 
     let txn = db.new_txn(false).await.expect("new_txn");
     let txn_arc = Arc::new(TokioMutex::new(Some(txn)));
-    let mutator = BatchMutator::new(Arc::clone(&db), Arc::clone(&txn_arc));
+    let mutator = BatchMutator::new(Arc::clone(&db), Arc::clone(&txn_arc)).await;
 
     let missing_doc_id = document::DocID::new_v0_from_seed("missing-doc");
 
@@ -150,7 +151,7 @@ async fn batch_delete_branchable_surfaces_collection_block_for_broadcast() {
 
     let txn = db.new_txn(false).await.expect("new_txn");
     let txn_arc = Arc::new(TokioMutex::new(Some(txn)));
-    let mutator = BatchMutator::new(Arc::clone(&db), Arc::clone(&txn_arc));
+    let mutator = BatchMutator::new(Arc::clone(&db), Arc::clone(&txn_arc)).await;
 
     let doc = Document::from_json_str(r#"{"x": 1}"#).expect("doc");
     let create_result = mutator.create("TestBranchable", doc).await.expect("create");

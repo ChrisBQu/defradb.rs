@@ -110,9 +110,21 @@ async fn deferred_registration_hook_uses_bearer_captured_before_commit() {
     db.create_collection(schema).await.unwrap();
     let collection = db.get_collection("BearerHookDoc").unwrap().unwrap();
     let observer = Arc::new(TokenObserver::default());
-    db.set_document_acp(observer.clone());
+    db.set_document_acp(Arc::new(acp::ExternalDocumentAcp::new(
+        observer.clone(),
+        db.store().clone(),
+    )));
 
     let mut txn = db.new_txn(false).await.unwrap();
+    acp::PendingRegistrations::new(&txn.acpstore().unwrap())
+        .record(&acp::PendingRegistration::new(
+            Did::new(DID).unwrap(),
+            "bearer-hook-policy",
+            "BearerHookDoc",
+            "doc-1",
+        ))
+        .await
+        .unwrap();
     defra_core::signing::scope_broadcast_creator_did(Some(DID.to_string()), async {
         defra_core::signing::scope_request_bearer_token(
             Some(DID.to_string()),
@@ -140,8 +152,22 @@ async fn deferred_registration_hook_uses_bearer_captured_before_commit() {
 async fn create_retry_callback_uses_bearer_captured_before_commit() {
     let observer = Arc::new(TokenObserver::default());
     let creator = Did::new(DID).unwrap();
+    let store = Arc::new(storage::RegolithStore::in_memory().unwrap());
+    let owed = datastore::BasicTxn::new(store.as_ref(), 0, false)
+        .await
+        .unwrap();
+    acp::PendingRegistrations::new(&owed.acpstore())
+        .record(&acp::PendingRegistration::new(
+            creator.clone(),
+            "policy",
+            "resource",
+            "doc-2",
+        ))
+        .await
+        .unwrap();
+    owed.commit().await.unwrap();
     let callback = super::create::acp_registration_retry_callback(
-        observer.clone(),
+        Arc::new(acp::ExternalDocumentAcp::new(observer.clone(), store)),
         creator,
         "policy".into(),
         "resource".into(),

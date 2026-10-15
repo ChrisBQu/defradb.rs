@@ -110,7 +110,10 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport> BroadcastMutator<S, B, 
         }
     }
 
-    pub fn set_document_acp(&self, acp: Arc<dyn acp::DocumentACP>) {
+    pub fn set_document_acp(&self, acp: Arc<dyn acp::DocumentACP>)
+    where
+        S: 'static,
+    {
         self.inner.set_document_acp(acp);
     }
 

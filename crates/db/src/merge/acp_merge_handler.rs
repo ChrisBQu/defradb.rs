@@ -339,15 +339,24 @@ impl<S: Store, B: blockstore::Blockstore> AcpMergeHandler<S, B> {
         Self { inner, hook }
     }
 
-    pub fn with_document_acp(self, acp: Arc<dyn DocumentACP>) -> Self {
-        self.inner.db.set_document_acp(acp.clone());
-        self.hook.set_document_acp(acp);
+    pub fn with_document_acp(self, acp: Arc<dyn DocumentACP>) -> Self
+    where
+        S: 'static,
+    {
+        self.set_document_acp(acp);
         self
     }
 
-    pub fn set_document_acp(&self, acp: Arc<dyn DocumentACP>) {
-        self.inner.db.set_document_acp(acp.clone());
-        self.hook.set_document_acp(acp);
+    /// The hook decides with the provider as the database installed it, so an
+    /// external provider is gated by the registrations creates owe it.
+    pub fn set_document_acp(&self, acp: Arc<dyn DocumentACP>)
+    where
+        S: 'static,
+    {
+        self.inner.db.set_document_acp(acp);
+        if let Some(installed) = self.inner.db.document_acp() {
+            self.hook.set_document_acp(installed.clone());
+        }
     }
 
     pub fn set_strict_replicated_doc_access(&self, strict: bool) {

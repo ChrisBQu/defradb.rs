@@ -73,16 +73,9 @@ pub(super) fn acp_registration_retry_callback(
             Some(creator.to_string()),
             bearer_token,
             async move {
-                if !acp
-                    .is_doc_registered(&policy_id, &resource_name, &doc_id)
+                acp.redrive_registration(&policy_id, &resource_name, &doc_id)
                     .await
-                    .map_err(|error| error.to_string())?
-                {
-                    acp.register_doc_object(&creator, &policy_id, &resource_name, &doc_id)
-                        .await
-                        .map_err(|error| error.to_string())?;
-                }
-                Ok(())
+                    .map_err(|error| error.to_string())
             },
         ))
     })

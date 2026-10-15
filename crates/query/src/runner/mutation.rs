@@ -47,13 +47,6 @@ impl Drop for EncryptionConfigGuard {
     }
 }
 
-fn preserve_acp_registration_error(doc_id: &str, error: QueryError) -> QueryError {
-    match error {
-        error @ QueryError::NeedsInput(_) => error,
-        error => QueryError::acp_registration_check_failed(doc_id, error),
-    }
-}
-
 fn preserve_acp_input_error(action: &str, doc_id: &str, error: QueryError) -> QueryError {
     match error {
         error @ QueryError::NeedsInput(_) => error,
@@ -1063,9 +1056,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
             );
         }
 
-        // External ACP registration is a separate remote operation. Keep its
-        // projection request/transaction-bound and attach the side effect to
-        // the same receipt that owns the document write.
+        // External ACP cannot join the transaction: a create owes its
+        // registration through a record written in its own transaction (see
+        // `acp::pending`), and the ordered hook settles that record once the
+        // commit is durable. A document an upsert found and updated owes
+        // nothing, so its caller never becomes its owner.
         if !self.acp.supports_transactions()
             && !mutator.manages_external_acp_hooks()
             && matches!(
@@ -1080,18 +1075,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
             ) {
                 for result in &results {
                     if let Some(doc_id) = result.get("_docID").and_then(|value| value.as_str()) {
-                        let registered = crate::txn::is_doc_registered_with_prepared_inputs(
-                            self.acp.as_ref(),
-                            Some(projection.as_ref()),
-                            &Identity::from(caller_identity.as_ref()),
-                            &policy.id,
-                            &policy.resource_name,
-                            doc_id,
-                            prepared_inputs.as_ref(),
-                        )
-                        .await
-                        .map_err(|error| preserve_acp_registration_error(doc_id, error))?;
-                        if registered {
+                        let owed = projection
+                            .owed_creator(&policy.id, &policy.resource_name, doc_id)
+                            .await
+                            .map_err(|error| {
+                                QueryError::acp_registration_check_failed(doc_id, error)
+                            })?;
+                        if owed.is_none() {
                             continue;
                         }
 
@@ -1100,11 +1090,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                         let policy_id = policy.id.clone();
                         let resource_name = policy.resource_name.clone();
                         let doc_id = doc_id.to_string();
-                        let projected_doc_id = doc_id.clone();
                         let token =
                             defra_core::signing::get_request_bearer_token(identity_did.as_str());
-                        let callback: storage::corekv::AsyncOrderedTxnCallback = Arc::new(
-                            move || {
+                        let callback: storage::corekv::AsyncOrderedTxnCallback =
+                            Arc::new(move || {
                                 let acp = acp.clone();
                                 let identity = identity.clone();
                                 let policy_id = policy_id.clone();
@@ -1115,35 +1104,30 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                                     Some(identity.to_string()),
                                     token,
                                     async move {
-                                        if !acp.is_doc_registered(&policy_id, &resource_name, &doc_id)
-                                    .await
-                                    .map_err(|error| format!("failed to check ACP registration before commit receipt {}: {error}", doc_id))?
-                                {
-                                    acp.register_doc_object(&identity, &policy_id, &resource_name, &doc_id)
+                                        acp.redrive_registration(
+                                            &policy_id,
+                                            &resource_name,
+                                            &doc_id,
+                                        )
                                         .await
-                                        .map_err(|error| format!("failed to register ACP document {doc_id}: {error}"))?;
-                                }
-                                        Ok(())
+                                        .map_err(|error| {
+                                            format!(
+                                                "failed to register ACP document {doc_id}: {error}"
+                                            )
+                                        })
                                     },
                                 ))
-                            },
-                        );
+                            });
                         mutator.register_ordered_async_hook(callback).await?;
-                        projection
-                            .project_registration(
-                                &policy.id,
-                                &policy.resource_name,
-                                &projected_doc_id,
-                                identity_did.clone(),
-                            )
-                            .map_err(QueryError::execution)?;
                     }
                 }
-            } else if let (Some(policy), Some(identity_did)) =
-                (collection.policy.as_ref(), caller_identity.as_ref())
-            {
-                // Non-transactional callers without a transaction-owned
-                // projection retain their existing direct provider behavior.
+            } else if let (Some(policy), Some(identity_did), MutationType::Create) = (
+                collection.policy.as_ref(),
+                caller_identity.as_ref(),
+                &mutation.mutation_type,
+            ) {
+                // A mutator with no transaction behind it records nothing owed;
+                // only a create's results are documents this request made.
                 for result in &results {
                     if let Some(doc_id) = result.get("_docID").and_then(|value| value.as_str()) {
                         if !self
@@ -1184,12 +1168,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                                 .unregister_doc_object(&policy.id, &policy.resource_name, doc_id)
                                 .await
                                 .map_err(|error| QueryError::execution(error.to_string()))?;
-                        } else if let Some(projection) = self.acp_registration_projection.as_ref() {
+                        } else if self.acp_registration_projection.is_some() {
                             let acp = self.acp.clone();
                             let policy_id = policy.id.clone();
                             let resource_name = policy.resource_name.clone();
                             let doc_id = doc_id.to_string();
-                            let projected_doc_id = doc_id.clone();
                             let identity = caller_identity.clone();
                             let token = identity.as_ref().and_then(|identity| {
                                 defra_core::signing::get_request_bearer_token(identity.as_str())
@@ -1220,13 +1203,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                                 },
                             );
                             mutator.register_ordered_async_hook(callback).await?;
-                            projection
-                                .project_unregistration(
-                                    &policy.id,
-                                    &policy.resource_name,
-                                    &projected_doc_id,
-                                )
-                                .map_err(QueryError::execution)?;
                         } else if let Err(error) = self
                             .acp
                             .unregister_doc_object(&policy.id, &policy.resource_name, doc_id)

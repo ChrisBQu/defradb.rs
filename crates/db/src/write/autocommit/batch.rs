@@ -32,8 +32,12 @@ pub struct BatchMutator<S: Store> {
 }
 
 impl<S: Store> BatchMutator<S> {
-    pub fn new(db: Arc<DB<S>>, txn: Arc<TokioMutex<Option<DbTxn<S>>>>) -> Self {
-        Self::new_with_prepared_inputs(db, txn, None)
+    pub async fn new(db: Arc<DB<S>>, txn: Arc<TokioMutex<Option<DbTxn<S>>>>) -> Self {
+        let projection = match txn.lock().await.as_ref() {
+            Some(txn) => txn.acp_registration_projection(),
+            None => Arc::new(query::txn::AcpRegistrationProjection::detached()),
+        };
+        Self::new_with_prepared_inputs(db, txn, None, projection)
     }
 
     pub(crate) fn new_retry_controller(
@@ -44,7 +48,7 @@ impl<S: Store> BatchMutator<S> {
             db,
             prepared_inputs,
             txn: Arc::new(TokioMutex::new(None)),
-            acp_registration_projection: Arc::new(query::txn::AcpRegistrationProjection::new()),
+            acp_registration_projection: Arc::new(query::txn::AcpRegistrationProjection::detached()),
         }
     }
 
@@ -52,12 +56,13 @@ impl<S: Store> BatchMutator<S> {
         db: Arc<DB<S>>,
         txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
         prepared_inputs: Option<query::prepared::PreparedInputMemo>,
+        acp_registration_projection: Arc<query::txn::AcpRegistrationProjection>,
     ) -> Self {
         Self {
             db,
             txn,
             prepared_inputs,
-            acp_registration_projection: Arc::new(query::txn::AcpRegistrationProjection::new()),
+            acp_registration_projection,
         }
     }
 
@@ -143,25 +148,6 @@ impl<S: Store + 'static> BatchMutator<S> {
         let txn = txn_guard.as_mut().ok_or_else(|| {
             query::error::QueryError::execution("mutation batch transaction is no longer active")
         })?;
-        if self
-            .db
-            .document_acp()
-            .is_some_and(|acp| !acp.supports_transactions())
-        {
-            if let (Some(policy), Some(creator)) = (
-                collection.schema().policy.as_ref(),
-                defra_core::signing::get_broadcast_creator_did(),
-            ) {
-                let owner = identity::Did::new(&creator).map_err(|error| {
-                    query::error::QueryError::execution(format!(
-                        "invalid mutation creator DID: {error}"
-                    ))
-                })?;
-                self.acp_registration_projection
-                    .project_registration(&policy.id, &policy.resource_name, &doc_id, owner)
-                    .map_err(query::error::QueryError::execution)?;
-            }
-        }
         super::AutoCommitMutator::new(Arc::clone(&self.db))
             .register_created_doc_with_acp(txn, collection, doc_id)
     }
@@ -272,6 +258,7 @@ impl<S: Store + 'static> storage::corekv::RetryAttemptFn for BatchRetryAttempt<S
                 .map_err(storage::corekv::RetryAttemptError::Storage)?;
             let basic_txn = BasicTxn::from_retry_attempt_io(io, 0);
             let txn = self.db.new_db_txn(basic_txn);
+            let acp_registration_projection = txn.acp_registration_projection();
             let fetcher = Arc::new(
                 crate::LensedDocFetcher::new(self.db.clone(), txn, self.db.lens_store.clone())
                     .with_prepared_inputs(self.prepared_inputs.clone()),
@@ -280,7 +267,7 @@ impl<S: Store + 'static> storage::corekv::RetryAttemptFn for BatchRetryAttempt<S
                 db: self.db.clone(),
                 txn: fetcher.shared_txn(),
                 prepared_inputs: self.prepared_inputs.clone(),
-                acp_registration_projection: Arc::new(query::txn::AcpRegistrationProjection::new()),
+                acp_registration_projection,
             });
             let mutator: Arc<dyn DocMutator> = batch.clone();
             let fetcher_dyn: Arc<dyn query::fetcher::DocFetcher> = fetcher.clone();
@@ -756,21 +743,6 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                     "mutation batch transaction is no longer active",
                 )
             })?;
-            if self
-                .db
-                .document_acp()
-                .is_some_and(|acp| !acp.supports_transactions())
-            {
-                if let Some(policy) = collection.schema().policy.as_ref() {
-                    self.acp_registration_projection
-                        .project_unregistration(
-                            &policy.id,
-                            &policy.resource_name,
-                            &canonical_doc_id.to_string(),
-                        )
-                        .map_err(query::error::QueryError::execution)?;
-                }
-            }
             super::AutoCommitMutator::new(Arc::clone(&self.db)).register_deleted_doc_with_acp(
                 txn,
                 &collection,

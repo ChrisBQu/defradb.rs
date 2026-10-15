@@ -309,6 +309,19 @@ impl<S: Store> DbTxn<S> {
             .ok_or(Error::TxnNotActive)
     }
 
+    /// The registrations this transaction's creates owe an external ACP
+    /// provider, read through its own writes. A transaction no longer active
+    /// shows none.
+    #[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
+    pub fn acp_registration_projection(&self) -> Arc<query::txn::AcpRegistrationProjection> {
+        Arc::new(match self.acpstore() {
+            Ok(view) => {
+                query::txn::AcpRegistrationProjection::new(acp::PendingRegistrations::new(&view))
+            }
+            Err(_) => query::txn::AcpRegistrationProjection::detached(),
+        })
+    }
+
     /// Get the rootstore.
     ///
     /// Returns an error if the transaction has been committed or discarded.

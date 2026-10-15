@@ -269,7 +269,7 @@ impl Node {
     async fn create_locally(&self, collection: &str, json: &str) -> Cid {
         let txn = self.db.new_txn(false).await.unwrap();
         let mutator =
-            BatchMutator::new(self.db.clone(), Arc::new(async_lock::Mutex::new(Some(txn))));
+            BatchMutator::new(self.db.clone(), Arc::new(async_lock::Mutex::new(Some(txn)))).await;
         let created = mutator
             .create(collection, Document::from_json_str(json).unwrap())
             .await
