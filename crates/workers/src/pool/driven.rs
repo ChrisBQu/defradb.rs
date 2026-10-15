@@ -9,13 +9,13 @@ use std::time::Duration;
 
 use super::placer::{Placer, ThreadPlacement};
 use super::report::{Report, TopologySummary, WorkerReport};
-use super::{Pool, PoolShared};
+use super::{build_hook, Pool, PoolShared};
 use crate::config::{Config, MemoryPolicy};
 use crate::os::{self, Outcome};
 use crate::placement::{Plan, Seat};
 use crate::topology::{CpuSet, Topology};
 use crate::worker::{Parker, Worker};
-use crate::{clock, Error};
+use crate::{clock, Error, WorkerId};
 
 /// The caller's side of a driven pool: runs its one worker on the calling
 /// thread. Not `Send`: the worker's tasks live on this thread. Dropping it
@@ -57,6 +57,8 @@ fn drive(config: Config, parker: Parker, parks: bool) -> Result<(Pool, Driver), 
         .clone()
         .or_else(clock::platform)
         .ok_or_else(|| Error::Config("this target has no clock; set Config::clock".into()))?;
+    let id = WorkerId { index: 0, node: 0 };
+    let hook = build_hook(config.hook.as_ref(), id)?;
     let topology = Topology::detect();
     let plan = Plan {
         seats: vec![Seat {
@@ -94,8 +96,6 @@ fn drive(config: Config, parker: Parker, parks: bool) -> Result<(Pool, Driver), 
     let worker_shared = shared.workers[0].clone();
     #[cfg(not(target_family = "wasm"))]
     worker_shared.signal.bind_current_thread();
-    let id = worker_shared.id;
-    let hook = config.hook.as_ref().map(|factory| factory(id));
     let worker = Worker::new(
         worker_shared,
         clock,

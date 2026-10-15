@@ -41,6 +41,7 @@ use placer::Placer;
 use crate::clock::Clock;
 use crate::completion::Completion;
 use crate::config::{Config, ThreadClass};
+use crate::hook::{Hook, HookFactory};
 use crate::topology::Topology;
 use crate::worker::{Job, Parker, Signal, Tuning, WorkerShared, WorkerStats};
 use crate::{Error, WorkerId};
@@ -173,6 +174,20 @@ impl PoolShared {
     fn abandon(&self) {
         self.workers.iter().for_each(|worker| worker.abandon());
     }
+}
+
+/// Builds a worker's hook on the calling thread; a factory that panics is
+/// an error, not a dead thread.
+fn build_hook(factory: Option<&HookFactory>, id: WorkerId) -> Result<Option<Box<dyn Hook>>, Error> {
+    let Some(factory) = factory else {
+        return Ok(None);
+    };
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| factory(id)))
+        .map(Some)
+        .map_err(|payload| {
+            let message = crate::worker::panic_message(payload.as_ref());
+            Error::Spawn(format!("the hook factory panicked: {message}"))
+        })
 }
 
 /// A handle to the pool, cheap to clone. When the last handle is dropped

@@ -2,7 +2,6 @@
 //! itself before it builds anything, and a start-up that waits for all of
 //! them and reports what the OS granted.
 
-use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
 
 use regolith::sync::{Latch, OnceCell};
@@ -11,11 +10,11 @@ use super::blocking::Blocking;
 use super::monitor;
 use super::placer::{Placer, ThreadPlacement};
 use super::report::{Report, TopologySummary, WorkerReport};
-use super::{Pool, PoolShared};
+use super::{build_hook, Pool, PoolShared};
 use crate::config::Config;
 use crate::hook::HookFactory;
 use crate::topology::Topology;
-use crate::worker::{every, panic_message, Parker, Tuning, Worker};
+use crate::worker::{every, Parker, Tuning, Worker};
 use crate::{clock, os, placement, Error};
 
 /// What each worker thread reports back while the pool starts.
@@ -190,16 +189,9 @@ fn run_worker(
     worker_shared.signal.bind_current_thread();
     let placed = shared.placer.place_worker(index);
     let id = worker_shared.id;
-    let hook = match hook.map(|factory| panic::catch_unwind(AssertUnwindSafe(|| factory(id)))) {
-        None => None,
-        Some(Ok(hook)) => Some(hook),
-        Some(Err(payload)) => {
-            let message = panic_message(payload.as_ref());
-            report_in.send(Err(Error::Spawn(format!(
-                "the hook factory panicked: {message}"
-            ))));
-            return;
-        }
+    let hook = match build_hook(hook.as_ref(), id) {
+        Ok(hook) => hook,
+        Err(error) => return report_in.send(Err(error)),
     };
     let worker = match Worker::new(worker_shared.clone(), shared.clock.clone(), tuning, hook) {
         Ok(worker) => worker,

@@ -537,6 +537,42 @@ fn a_regolith_io_queue_serves_as_the_hook() {
 }
 
 #[test]
+fn a_driven_pool_whose_hook_factory_panics_is_an_error() {
+    std::thread::spawn(|| {
+        let config = Config {
+            hook: Some(Arc::new(|_| panic!("no queue"))),
+            ..small(1)
+        };
+        assert!(matches!(
+            Pool::driven(config, Waker::noop().clone()),
+            Err(Error::Spawn(_))
+        ));
+        assert!(!crate::on_worker(), "nothing was left half made");
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
+fn a_submission_is_send_though_the_task_it_builds_is_not() {
+    fn send<T>(_: &T)
+    where
+        T: Send,
+    {
+    }
+    let pool = Pool::start(small(1)).unwrap();
+    let submission = pool.submit(Target::LeastLoaded, || async {
+        let not_send = std::rc::Rc::new(1);
+        crate::yield_now().await;
+        *not_send
+    });
+    send(&submission);
+    let done = block_on(submission).unwrap().unwrap();
+    assert_eq!(done.wait(), Ok(1));
+    pool.shutdown_blocking().unwrap();
+}
+
+#[test]
 fn the_pool_and_its_handles_cross_threads() {
     fn send_sync<T>()
     where
