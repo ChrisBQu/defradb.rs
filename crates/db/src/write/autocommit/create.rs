@@ -10,6 +10,14 @@ use crate::block::builder::{
 };
 use crate::write::prepare::PreparedCreateBlocks;
 
+struct AcpRegistration {
+    acp: Arc<dyn acp::DocumentACP>,
+    creator: identity::Did,
+    policy_id: String,
+    resource_name: String,
+    bearer_token: Option<String>,
+}
+
 struct CreateRetryAttempt<S: Store> {
     db: Arc<DB<S>>,
     collection_name: String,
@@ -18,13 +26,7 @@ struct CreateRetryAttempt<S: Store> {
     computed_blocks: ComputedBlocks,
     doc_short_id: u64,
     sign_config: Option<defra_core::signing::SigningConfig>,
-    acp_registration: Option<(
-        Arc<dyn acp::DocumentACP>,
-        identity::Did,
-        String,
-        String,
-        Option<String>,
-    )>,
+    acp_registration: Option<AcpRegistration>,
     prepared_inputs: Option<query::prepared::PreparedInputMemo>,
 }
 
@@ -54,13 +56,7 @@ struct CreateManyRetryAttempt<S: Store> {
     identities: Vec<DocStorageIdentity>,
     computed: Vec<ComputedBlocks>,
     signing_config: Option<defra_core::signing::SigningConfig>,
-    acp_registration: Option<(
-        Arc<dyn acp::DocumentACP>,
-        identity::Did,
-        String,
-        String,
-        Option<String>,
-    )>,
+    acp_registration: Option<AcpRegistration>,
     prepared_inputs: Option<query::prepared::PreparedInputMemo>,
 }
 
@@ -300,13 +296,13 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 })?;
                 let request_bearer_token =
                     defra_core::signing::get_request_bearer_token(creator.as_str());
-                Some((
+                Some(AcpRegistration {
                     acp,
                     creator,
-                    policy.id.clone(),
-                    policy.resource_name.clone(),
-                    request_bearer_token,
-                ))
+                    policy_id: policy.id.clone(),
+                    resource_name: policy.resource_name.clone(),
+                    bearer_token: request_bearer_token,
+                })
             }
             _ => None,
         };
@@ -507,16 +503,14 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 return Err(error);
             }
         };
-        if let Some((acp, creator, policy_id, resource_name, bearer_token)) =
-            attempt.acp_registration.as_ref()
-        {
+        if let Some(registration) = attempt.acp_registration.as_ref() {
             txn.on_retry_success_ordered_async(acp_registration_retry_callback(
-                Arc::clone(acp),
-                creator.clone(),
-                policy_id.clone(),
-                resource_name.clone(),
+                Arc::clone(&registration.acp),
+                registration.creator.clone(),
+                registration.policy_id.clone(),
+                registration.resource_name.clone(),
                 doc_id.to_string(),
-                bearer_token.clone(),
+                registration.bearer_token.clone(),
             ))
             .map_err(crate::error::commit_query_error)?;
         }
@@ -745,13 +739,13 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 })?;
                 let request_bearer_token =
                     defra_core::signing::get_request_bearer_token(creator.as_str());
-                Some((
+                Some(AcpRegistration {
                     acp,
                     creator,
-                    policy.id.clone(),
-                    policy.resource_name.clone(),
-                    request_bearer_token,
-                ))
+                    policy_id: policy.id.clone(),
+                    resource_name: policy.resource_name.clone(),
+                    bearer_token: request_bearer_token,
+                })
             }
             _ => None,
         };
@@ -925,16 +919,14 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             }
         };
         for (doc_id, _, cid, block, col_data) in &results {
-            if let Some((acp, creator, policy_id, resource_name, bearer_token)) =
-                attempt.acp_registration.as_ref()
-            {
+            if let Some(registration) = attempt.acp_registration.as_ref() {
                 txn.on_retry_success_ordered_async(acp_registration_retry_callback(
-                    Arc::clone(acp),
-                    creator.clone(),
-                    policy_id.clone(),
-                    resource_name.clone(),
+                    Arc::clone(&registration.acp),
+                    registration.creator.clone(),
+                    registration.policy_id.clone(),
+                    registration.resource_name.clone(),
                     doc_id.to_string(),
-                    bearer_token.clone(),
+                    registration.bearer_token.clone(),
                 ))
                 .map_err(crate::error::commit_query_error)?;
             }
