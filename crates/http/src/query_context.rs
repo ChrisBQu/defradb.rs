@@ -504,3 +504,138 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod context_tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use kovan_queue::seg_queue::SegQueue;
+    use query::error::{Result, TransactionError};
+
+    use super::*;
+    use crate::router::AppStateBuilder;
+
+    const OWNER_DID: &str = "did:key:z6MkTestNodeOwner";
+    const ADMIN_DID: &str = "did:key:z6MkDacBypassAdmin";
+
+    /// Records the context of every request it serves.
+    #[derive(Default)]
+    struct ContextRecorder {
+        contexts: SegQueue<defra_core::RequestContext>,
+    }
+
+    impl ContextRecorder {
+        fn last(&self) -> Option<defra_core::RequestContext> {
+            std::iter::from_fn(|| self.contexts.pop()).last()
+        }
+    }
+
+    #[async_trait]
+    impl QueryExecutor for ContextRecorder {
+        fn abandon_txn(&self, _handle: &TransactionHandle) {}
+
+        async fn execute(&self, request: QueryRequest) -> QueryResponse {
+            self.contexts.push(request.context);
+            QueryResponse::success(serde_json::json!({}))
+        }
+
+        async fn execute_in_txn(
+            &self,
+            request: QueryRequest,
+            _handle: &TransactionHandle,
+        ) -> QueryResponse {
+            self.contexts.push(request.context);
+            QueryResponse::success(serde_json::json!({}))
+        }
+
+        async fn begin_txn(
+            &self,
+            _readonly: bool,
+        ) -> std::result::Result<TransactionHandle, TransactionError> {
+            Err(TransactionError::not_supported("test executor"))
+        }
+
+        async fn commit_txn(
+            &self,
+            _handle: &TransactionHandle,
+        ) -> std::result::Result<(), TransactionError> {
+            Err(TransactionError::not_supported("test executor"))
+        }
+
+        async fn rollback_txn(
+            &self,
+            _handle: &TransactionHandle,
+        ) -> std::result::Result<(), TransactionError> {
+            Err(TransactionError::not_supported("test executor"))
+        }
+
+        async fn schema(&self) -> Result<String> {
+            Ok(String::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_nac_admin_with_bypass_dac_carries_the_bypass_and_identity_in_its_request() {
+        let admin = identity::Did::new_unchecked(ADMIN_DID.to_string());
+        let executor = Arc::new(ContextRecorder::default());
+        let state = AppStateBuilder::new(executor.clone(), edge::testing::edge())
+            .with_signing_enabled(false)
+            .with_nac(Arc::new(
+                crate::MockNodeAcpOperations::enabled_with_owner(identity::Did::new_unchecked(
+                    OWNER_DID.to_string(),
+                ))
+                .with_grant(admin.clone(), acp::nac::NodePermission::DacBypass),
+            ))
+            .build();
+        let caller = ExtractIdentity::from_did(Some(admin));
+
+        execute_with_context(&state, &caller, QueryRequest::new("{ __typename }")).await;
+        let context = executor.last().expect("the query ran");
+        assert!(context.dac_bypass());
+        assert_eq!(context.identity(), Some(ADMIN_DID));
+
+        execute_in_txn_with_context(
+            &state,
+            &caller,
+            QueryRequest::new("{ __typename }"),
+            TransactionHandle::new("txn".into()),
+        )
+        .await;
+        let context = executor.last().expect("the query ran");
+        assert!(context.dac_bypass());
+        assert_eq!(context.identity(), Some(ADMIN_DID));
+
+        execute_with_resolved_context(
+            &state.edge,
+            executor.clone(),
+            QueryRequest::new("{ __typename }"),
+            None,
+            true,
+            Some(ADMIN_DID.to_string()),
+        )
+        .await;
+        let context = executor.last().expect("the query ran");
+        assert!(context.dac_bypass());
+        assert_eq!(context.identity(), Some(ADMIN_DID));
+    }
+
+    #[tokio::test]
+    async fn a_stranger_carries_no_bypass_in_its_request() {
+        let executor = Arc::new(ContextRecorder::default());
+        let state = AppStateBuilder::new(executor.clone(), edge::testing::edge())
+            .with_signing_enabled(false)
+            .with_nac(Arc::new(crate::MockNodeAcpOperations::enabled_with_owner(
+                identity::Did::new_unchecked(OWNER_DID.to_string()),
+            )))
+            .build();
+        let stranger = ExtractIdentity::from_did(Some(identity::Did::new_unchecked(
+            "did:key:z6MkSomeoneElse".to_string(),
+        )));
+
+        execute_with_context(&state, &stranger, QueryRequest::new("{ __typename }")).await;
+        let context = executor.last().expect("the query ran");
+        assert!(!context.dac_bypass());
+        assert_eq!(context.identity(), Some("did:key:z6MkSomeoneElse"));
+    }
+}

@@ -251,6 +251,91 @@ mod tests {
     }
 
     #[test]
+    fn or_encryption_keeps_the_context_encryption_when_given_none() {
+        let sealed = EncryptionConfig {
+            encrypt_doc: true,
+            encrypt_fields: Vec::new(),
+        };
+        let context = RequestContext::default().with_encryption(Some(sealed));
+        assert!(context
+            .clone()
+            .or_encryption(None)
+            .encryption()
+            .is_some_and(|config| config.encrypt_doc));
+        let fields = EncryptionConfig {
+            encrypt_doc: false,
+            encrypt_fields: vec!["secret".to_string()],
+        };
+        assert!(context
+            .or_encryption(Some(fields))
+            .encryption()
+            .is_some_and(|config| !config.encrypt_doc));
+    }
+
+    #[test]
+    fn a_bound_handle_serves_its_own_request_and_an_unbound_one_the_ambient_one() {
+        let alice = RequestContext::default().with_identity(Some("did:key:alice".to_string()));
+        crate::current_identity::set_current_identity(Some("did:key:thread".to_string()));
+        assert_eq!(
+            RequestContext::bound_or_ambient(Some(&alice)).identity(),
+            Some("did:key:alice")
+        );
+        assert_eq!(
+            RequestContext::bound_or_ambient(None).identity(),
+            Some("did:key:thread")
+        );
+        crate::current_identity::set_current_identity(None);
+    }
+
+    #[test]
+    fn or_ambient_fills_only_what_the_context_leaves_unset() {
+        crate::ambient::set_dac_bypass(true);
+        crate::ambient::set_batch_session_key(Some("ambient-session".to_string()));
+        crate::current_identity::set_current_identity(Some("did:key:ambient".to_string()));
+        let merged = RequestContext::default()
+            .with_identity(Some("did:key:explicit".to_string()))
+            .or_ambient();
+        crate::ambient::set_dac_bypass(false);
+        crate::ambient::set_batch_session_key(None);
+        crate::current_identity::set_current_identity(None);
+
+        assert_eq!(merged.identity(), Some("did:key:explicit"));
+        assert!(merged.dac_bypass());
+        assert_eq!(merged.batch_session(), Some("ambient-session"));
+    }
+
+    #[tokio::test]
+    async fn mirror_installs_the_context_while_its_future_runs_and_restores_after() {
+        let context = RequestContext::default()
+            .with_identity(Some("did:key:mirrored".to_string()))
+            .with_dac_bypass(true)
+            .with_creator(Some("did:key:creator".to_string()));
+        let seen = context
+            .mirror(async {
+                tokio::task::yield_now().await;
+                (
+                    crate::current_identity::get_effective_identity(),
+                    crate::current_identity::get_current_identity(),
+                    crate::ambient::get_dac_bypass(),
+                    crate::ambient::get_broadcast_creator_did(),
+                )
+            })
+            .await;
+        assert_eq!(
+            seen,
+            (
+                Some("did:key:mirrored".to_string()),
+                Some("did:key:mirrored".to_string()),
+                true,
+                Some("did:key:creator".to_string()),
+            )
+        );
+        assert_eq!(crate::current_identity::get_current_identity(), None);
+        assert!(!crate::ambient::get_dac_bypass());
+        assert_eq!(crate::ambient::get_broadcast_creator_did(), None);
+    }
+
+    #[test]
     fn with_dac_bypass_leaves_the_context_it_was_cloned_from_unchanged() {
         let anonymous = RequestContext::default();
         let admin = anonymous.clone().with_dac_bypass(true);

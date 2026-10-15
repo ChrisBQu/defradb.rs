@@ -27,6 +27,8 @@ mod commits_numeric;
 mod executor;
 mod explain;
 mod fetcher;
+#[cfg(test)]
+mod context_tests;
 pub(crate) mod introspection;
 mod mutation;
 mod mutation_inputs;
