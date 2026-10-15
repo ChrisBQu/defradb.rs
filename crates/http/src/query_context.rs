@@ -1,13 +1,9 @@
 //! Query execution with the request's context.
 //!
-//! The signing config, the batch signing session and the DAC bypass travel in
-//! the request's `RequestContext`. The acting identity is still a
-//! thread-local, and a task on a multi-threaded runtime can move between OS
-//! threads at `.await` points, so a query that needs it runs pinned to one
-//! thread of the network runtime ([`Edge::spawn_pinned`]), the identity set on
-//! it first.
+//! The acting identity, the signing config, the batch signing session and the
+//! DAC bypass travel in the request's `RequestContext`, so a query runs on the
+//! task that received it, with no hop to another thread.
 
-use std::future::Future;
 use std::sync::Arc;
 
 use defra_core::signing::SigningConfig;
@@ -24,22 +20,14 @@ pub async fn execute_with_context(
     identity: &ExtractIdentity,
     mut request: QueryRequest,
 ) -> QueryResponse {
-    request.context = request_context(state, identity, request.context).await;
-
-    // Fast path: with no NAC there is no identity to pin.
-    if state.nac.is_none() {
-        return execute_prepared_request(state, request).await;
-    }
-    let executor = state.executor.clone();
-    let acting_did = identity.did().map(|d| d.as_str().to_string());
-    run_pinned_with_identity(&state.edge, acting_did, move || async move {
-        execute_prepared_with_executor(executor.as_ref(), request).await
-    })
-    .await
-}
-
-async fn execute_prepared_request(state: &AppState, request: QueryRequest) -> QueryResponse {
-    execute_prepared_with_executor(state.executor.as_ref(), request).await
+    request.context = request_context(state, identity).await;
+    let context = request.context.clone();
+    context
+        .mirror(execute_prepared_with_executor(
+            state.executor.as_ref(),
+            request,
+        ))
+        .await
 }
 
 async fn execute_prepared_with_executor(
@@ -98,49 +86,44 @@ pub async fn execute_in_txn_with_context(
     mut request: QueryRequest,
     txn_handle: TransactionHandle,
 ) -> QueryResponse {
-    request.context = request_context(state, identity, request.context).await;
-
-    // Fast path: see the note in `execute_with_context`.
-    if state.nac.is_none() {
-        return state.executor.execute_in_txn(request, &txn_handle).await;
-    }
-
-    let executor = state.executor.clone();
-    let acting_did = identity.did().map(|d| d.as_str().to_string());
-    run_pinned_with_identity(&state.edge, acting_did, move || async move {
-        executor.execute_in_txn(request, &txn_handle).await
-    })
-    .await
+    request.context = request_context(state, identity).await;
+    let context = request.context.clone();
+    context
+        .mirror(state.executor.execute_in_txn(request, &txn_handle))
+        .await
 }
 
-/// Execute a query pinned to one thread with pre-resolved context values.
+/// Execute a query with pre-resolved context values, `acting_did` acting in
+/// it.
 ///
 /// Used by SSE streams where signing config and DAC bypass are resolved once
-/// at subscription setup time, then reused for each per-event query.
+/// at subscription setup time, then reused for each per-event query. The
+/// query runs on the calling task; `_edge` is unused.
 pub async fn execute_with_resolved_context(
-    edge: &Edge,
+    _edge: &Edge,
     executor: Arc<dyn QueryExecutor>,
     mut request: QueryRequest,
     signing_config: Option<SigningConfig>,
     dac_bypass: bool,
     acting_did: Option<String>,
 ) -> QueryResponse {
-    request.context = with_signing_and_bypass(request.context, signing_config, dac_bypass);
-    run_pinned_with_identity(edge, acting_did, move || async move {
-        executor.execute(request).await
-    })
-    .await
+    request.context = with_signing_and_bypass(
+        request.context.with_identity(acting_did),
+        signing_config,
+        dac_bypass,
+    );
+    let context = request.context.clone();
+    context.mirror(executor.execute(request)).await
 }
 
-/// `context` with the signing config, batch session and DAC bypass this
-/// request resolves to.
+/// The context of the request `identity` acts in, with the signing config,
+/// batch session and DAC bypass it resolves to.
 async fn request_context(
     state: &AppState,
     identity: &ExtractIdentity,
-    context: defra_core::RequestContext,
 ) -> defra_core::RequestContext {
     with_signing_and_bypass(
-        context,
+        identity.context(),
         resolve_signing_config(state, identity),
         resolve_dac_bypass(state, identity).await,
     )
@@ -158,32 +141,6 @@ fn with_signing_and_bypass(
         .with_dac_bypass(dac_bypass)
         .with_signing(signing_config)
         .with_batch_session(batch_session)
-}
-
-/// Runs the query `run` builds on one thread of the network runtime, with
-/// the acting identity and bearer token set on that thread first.
-async fn run_pinned_with_identity<R, Fut>(
-    edge: &Edge,
-    acting_did: Option<String>,
-    run: R,
-) -> QueryResponse
-where
-    R: FnOnce() -> Fut + Send + 'static,
-    Fut: Future<Output = QueryResponse> + 'static,
-{
-    let bearer = acting_did
-        .as_deref()
-        .and_then(defra_core::signing::get_request_bearer_token);
-    edge.spawn_pinned(move || {
-        let identity_guard =
-            defra_core::current_identity::scoped_current_identity(acting_did.clone());
-        async move {
-            let _identity_guard = identity_guard;
-            defra_core::signing::scope_request_bearer_token(acting_did, bearer, run()).await
-        }
-    })
-    .await
-    .unwrap_or_else(|error| QueryResponse::error(format!("query execution task failed: {error}")))
 }
 
 /// Resolve the signing config for a request identity.

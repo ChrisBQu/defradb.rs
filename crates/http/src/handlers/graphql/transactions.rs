@@ -15,6 +15,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::error::HttpError;
+use crate::request_scope::CallerContext;
 use crate::router::AppState;
 
 /// Query parameters for beginning a transaction (Go-compatible).
@@ -49,24 +50,27 @@ pub struct TxPathParam {
 /// The registry enforces caller ownership; node permissions are checked per operation.
 pub async fn tx_begin(
     State(state): State<AppState>,
+    CallerContext(context): CallerContext,
     Query(query): Query<TxBeginQuery>,
 ) -> Result<impl IntoResponse, HttpError> {
-    Ok(match state.executor.begin_txn(query.read_only).await {
-        Ok(handle) => {
-            // Parse handle to u64 to match Go's numeric ID format
-            let id: u64 = handle.to_string().parse().unwrap_or(0);
-            tracing::info!(
-                txn_id = id,
-                readonly = query.read_only,
-                "Transaction started"
-            );
-            (StatusCode::OK, Json(TxBeginResponse { id })).into_response()
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to begin transaction");
-            HttpError::from(e).into_response()
-        }
-    })
+    Ok(
+        match state.executor.begin_txn_as(&context, query.read_only).await {
+            Ok(handle) => {
+                // Parse handle to u64 to match Go's numeric ID format
+                let id: u64 = handle.to_string().parse().unwrap_or(0);
+                tracing::info!(
+                    txn_id = id,
+                    readonly = query.read_only,
+                    "Transaction started"
+                );
+                (StatusCode::OK, Json(TxBeginResponse { id })).into_response()
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to begin transaction");
+                HttpError::from(e).into_response()
+            }
+        },
+    )
 }
 
 /// Commit a transaction (Go-compatible).
@@ -78,6 +82,7 @@ pub async fn tx_begin(
 /// The registry enforces caller ownership; node permissions are checked per operation.
 pub async fn tx_commit(
     State(state): State<AppState>,
+    CallerContext(context): CallerContext,
     Path(params): Path<TxPathParam>,
 ) -> Result<impl IntoResponse, HttpError> {
     // Parse transaction ID as u64 (Go format)
@@ -91,7 +96,7 @@ pub async fn tx_commit(
         .parse()
         .map_err(|_| HttpError::BadRequest("invalid transaction id".to_string()))?;
 
-    match state.executor.commit_txn(&handle).await {
+    match state.executor.commit_txn_as(&context, &handle).await {
         Ok(()) => {
             tracing::info!(txn_id = %handle, "Transaction committed");
             // Go returns 200 OK with empty body
@@ -114,6 +119,7 @@ pub async fn tx_commit(
 /// The registry enforces caller ownership; node permissions are checked per operation.
 pub async fn tx_discard(
     State(state): State<AppState>,
+    CallerContext(context): CallerContext,
     Path(params): Path<TxPathParam>,
 ) -> Result<impl IntoResponse, HttpError> {
     // Parse transaction ID as u64 (Go format)
@@ -127,7 +133,7 @@ pub async fn tx_discard(
         .parse()
         .map_err(|_| HttpError::BadRequest("invalid transaction id".to_string()))?;
 
-    match state.executor.rollback_txn(&handle).await {
+    match state.executor.rollback_txn_as(&context, &handle).await {
         Ok(()) => {
             tracing::info!(txn_id = %handle, "Transaction discarded");
             // Go returns 200 OK with empty body

@@ -20,6 +20,7 @@ use crate::handlers::collection_selector::CollectionSelectorQuery;
 use crate::handlers::txn_header::{rest_for_request, txn_id_from_headers};
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
+use crate::request_scope::bound;
 use crate::router::{AppState, NodePermission};
 
 const DEFAULT_DOC_IDS_LIMIT: usize = 100;
@@ -111,8 +112,7 @@ pub async fn list_collections(
     let selector = query.into_selector();
 
     let versions = if let Some(txn_id) = txn_id_from_headers(&headers)? {
-        state
-            .require_txn_ops()?
+        bound(state.require_txn_ops()?, &identity.context())
             .get_collections_in_txn(txn_id)
             .await
     } else {
@@ -212,7 +212,7 @@ pub async fn patch_collection(
 ) -> Result<StatusCode, HttpError> {
     require_permission(&state, &identity, NodePermission::CollectionPatch).await?;
 
-    let collection_mgmt = state.require_collection_mgmt()?;
+    let collection_mgmt = bound(state.require_collection_mgmt()?, &identity.context());
 
     // The Patch field may be a JSON string containing patch ops, or a JSON array directly
     let patch_str = if body.patch.is_string() {
@@ -288,7 +288,7 @@ pub async fn set_active(
     let version_id = String::from_utf8(body.to_vec())
         .map_err(|_| HttpError::BadRequest("invalid UTF-8".into()))?;
 
-    let collection_mgmt = state.require_collection_mgmt()?;
+    let collection_mgmt = bound(state.require_collection_mgmt()?, &identity.context());
 
     collection_mgmt
         .set_active_version(version_id.trim())
@@ -319,7 +319,7 @@ pub async fn truncate_collection(
 ) -> Result<Json<()>, HttpError> {
     require_permission(&state, &identity, NodePermission::CollectionTruncate).await?;
 
-    let collection_mgmt = state.require_collection_mgmt()?;
+    let collection_mgmt = bound(state.require_collection_mgmt()?, &identity.context());
 
     let filter = if body.is_empty() {
         None
@@ -357,7 +357,7 @@ pub async fn describe_collection(
 ) -> Result<Json<serde_json::Value>, HttpError> {
     require_permission(&state, &identity, NodePermission::CollectionGet).await?;
 
-    let collection_mgmt = state.require_collection_mgmt()?;
+    let collection_mgmt = bound(state.require_collection_mgmt()?, &identity.context());
 
     match collection_mgmt.get_collection_by_name(&name).await {
         Ok(Some(cv)) => {
@@ -387,7 +387,7 @@ pub async fn collection_exists(
 ) -> Result<Json<serde_json::Value>, HttpError> {
     require_permission(&state, &identity, NodePermission::CollectionGet).await?;
 
-    let collection_mgmt = state.require_collection_mgmt()?;
+    let collection_mgmt = bound(state.require_collection_mgmt()?, &identity.context());
 
     let exists = collection_mgmt
         .has_collection(&name)
@@ -411,7 +411,7 @@ pub async fn find_collection_by_id(
 ) -> Result<Json<serde_json::Value>, HttpError> {
     require_permission(&state, &identity, NodePermission::CollectionGet).await?;
 
-    let collection_mgmt = state.require_collection_mgmt()?;
+    let collection_mgmt = bound(state.require_collection_mgmt()?, &identity.context());
 
     match collection_mgmt.find_collection_by_id(&id).await {
         Ok(Some(cv)) => {
@@ -438,7 +438,7 @@ pub async fn get_collection_by_version_id(
 ) -> Result<Json<serde_json::Value>, HttpError> {
     require_permission(&state, &identity, NodePermission::CollectionGet).await?;
 
-    let collection_mgmt = state.require_collection_mgmt()?;
+    let collection_mgmt = bound(state.require_collection_mgmt()?, &identity.context());
 
     match collection_mgmt.get_collection_by_version_id(&id).await {
         Ok(Some(cv)) => {
@@ -465,7 +465,7 @@ pub async fn delete_collection_versions(
 ) -> Result<Json<serde_json::Value>, HttpError> {
     require_permission(&state, &identity, NodePermission::CollectionPatch).await?;
 
-    let collection_mgmt = state.require_collection_mgmt()?;
+    let collection_mgmt = bound(state.require_collection_mgmt()?, &identity.context());
 
     collection_mgmt
         .delete_collection_versions(version_ids)
@@ -541,7 +541,7 @@ pub async fn delete_collections_by_names(
         None => false,
     };
 
-    let collection_mgmt = state.require_collection_mgmt()?;
+    let collection_mgmt = bound(state.require_collection_mgmt()?, &identity.context());
     collection_mgmt
         .delete_collections(names, active_only)
         .await

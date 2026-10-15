@@ -5,16 +5,19 @@
 //! before the handler runs. Existing per-handler `require_permission()` calls
 //! remain as a redundant safety net.
 //!
-//! It also binds the parsed identity to the request task (via the
-//! `current_identity` task-local) so DB-layer NAC checks on REST paths can
-//! resolve who is acting — reusing the single parse done here rather than a
-//! separate middleware that re-verified the JWT.
+//! It also builds the request's [`RequestContext`] with the parsed identity
+//! acting in it and stores it in the request's extensions, where the handlers
+//! take it (see [`crate::request_scope`]) so DB-layer NAC checks resolve who
+//! is acting, reusing the single parse done here rather than a separate
+//! middleware that re-verified the JWT.
 
 use axum::{
     extract::{MatchedPath, Request, State},
     middleware::Next,
     response::{IntoResponse, Response},
 };
+
+use defra_core::RequestContext;
 
 use crate::identity_extractor::{parse_identity_from_headers, ExtractIdentity, MiddlewareIdentity};
 use crate::nac_guard::require_permission;
@@ -62,11 +65,11 @@ pub async fn auth_middleware(
             .insert(MiddlewareIdentity(acting_did.clone()));
     }
 
-    // Bind the caller's DID to the request task so DB-layer NAC checks on REST
-    // paths resolve who is acting (survives `.await`, mirroring Go's
-    // `identity.FromContext`). This replaces a separate outer middleware that
-    // re-parsed the JWT.
+    // The request's context carries the caller's DID to the DB-layer NAC
+    // checks the handlers reach, mirroring Go's `identity.FromContext`.
     let scoped = acting_did.as_ref().map(ToString::to_string);
+    let context = RequestContext::default().with_identity(scoped.clone());
+    request.extensions_mut().insert(context.clone());
     // Capture this request's verified token directly from its header. Never
     // publish it in the process-wide DID map: concurrent requests can share a
     // DID while carrying different authorization tokens.
@@ -91,9 +94,9 @@ pub async fn auth_middleware(
         }
         next.run(request).await
     };
-    defra_core::current_identity::with_scoped_identity(
-        scoped.clone(),
-        defra_core::signing::scope_request_bearer_token(scoped, bearer, execution),
-    )
-    .await
+    context
+        .mirror(defra_core::signing::scope_request_bearer_token(
+            scoped, bearer, execution,
+        ))
+        .await
 }
