@@ -155,6 +155,18 @@ impl RegolithTxn {
     }
 }
 
+impl Drop for RegolithTxn {
+    /// A transaction dropped without a commit or a discard ended without
+    /// committing: regolith rolls its writes back, and its discard
+    /// callbacks run here, once. Not while unwinding, where a callback that
+    /// panicked too would abort the process.
+    fn drop(&mut self) {
+        if self.handle.take().is_some() && !std::thread::panicking() {
+            self.callbacks.run_discard();
+        }
+    }
+}
+
 pub(super) fn map_txn_error(error: TransactionError) -> Error {
     match error {
         TransactionError::Conflict(conflict) => {
@@ -330,12 +342,13 @@ impl Txn for RegolithTxn {
         // its only owner. An iterator opened from it holds the same `Arc`,
         // so a caller that commits without closing one gets told, rather
         // than a commit that silently does not happen.
-        let handle = Arc::try_unwrap(handle).map_err(|_| {
-            Error::Other(
+        let Ok(handle) = Arc::try_unwrap(handle) else {
+            self.callbacks.run_error().await;
+            return Err(Error::Other(
                 "cannot commit while an iterator opened from this transaction is still open"
                     .to_string(),
-            )
-        })?;
+            ));
+        };
         let Handle::Writable(mut txn) = handle else {
             // A snapshot has nothing to commit and cannot carry ordered work.
             self.callbacks.run_success().await;
