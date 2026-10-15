@@ -122,7 +122,11 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                 CrdtDelta::Immutable(payload) => {
                     let is_genesis = context.block.heads.as_ref().is_none_or(Vec::is_empty)
                         && context.payload.priority == 1;
-                    if !is_genesis || payload.priority != 1 || linked_block.encryption.is_some() {
+                    // Under doc-level encryption every field is encrypted, so
+                    // the builders write no Immutable block for that genesis.
+                    let encrypted =
+                        linked_block.encryption.is_some() || context.block.encryption.is_some();
+                    if !is_genesis || payload.priority != 1 || encrypted {
                         return Err(MergeError::ImmutableFieldChanged(
                             "an immutable block is valid only unencrypted on a genesis composite"
                                 .to_string(),

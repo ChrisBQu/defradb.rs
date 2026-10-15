@@ -108,11 +108,12 @@ fn cbor(value: &str) -> serde_bytes::ByteBuf {
     serde_bytes::ByteBuf::from(data)
 }
 
-/// Store a genesis composite linking `immutable` plus a `body` field block,
-/// returning the composite CID and bytes.
+/// Store a genesis composite linking `immutable`, returning the composite CID
+/// and bytes. `encryption` is the composite's doc-level encryption link.
 async fn put_genesis(
     blockstore: &DefraBlockstore<RegolithStore>,
     immutable: ImmutableDeltaPayload,
+    encryption: Option<cid::Cid>,
 ) -> (cid::Cid, bytes::Bytes) {
     let immutable_block = Block::new(CrdtDelta::Immutable(immutable), vec![], vec![]);
     let immutable_cid = immutable_block.generate_cid().unwrap();
@@ -120,7 +121,7 @@ async fn put_genesis(
         .put(&immutable_cid, &immutable_block.to_dag_cbor().unwrap())
         .await
         .unwrap();
-    let composite = Block::new(
+    let mut composite = Block::new(
         CrdtDelta::Composite(CompositeDeltaPayload {
             schema_version_id: "v1".into(),
             priority: 1,
@@ -129,6 +130,7 @@ async fn put_genesis(
         vec![],
         vec![DAGLink::new(IMMUTABLE_LINK_NAME, immutable_cid)],
     );
+    composite.encryption = encryption;
     let cid = composite.generate_cid().unwrap();
     let bytes = composite.to_dag_cbor().unwrap();
     blockstore.put(&cid, &bytes).await.unwrap();
@@ -289,6 +291,7 @@ async fn peer_without_immutable_flags_merges_and_chains_its_updates() {
                 ("kind".to_string(), cbor("note")),
             ]),
         },
+        None,
     )
     .await;
     let doc_id = DocID::new_v0(cid);
@@ -589,4 +592,61 @@ async fn height_one_commits_carry_every_immutable_field_value() {
             ("kind".to_string(), base64_cbor("note")),
         ]
     );
+}
+
+/// A doc-level encrypted document encrypts every field, so its builders never
+/// write an Immutable block. One arriving under an encrypted genesis would put
+/// plaintext values beside the encrypted ones.
+#[tokio::test]
+async fn an_encrypted_genesis_cannot_carry_an_immutable_block() {
+    let (handler, blockstore, collection) = make_handler().await;
+    let encryption = Block::new(
+        CrdtDelta::Immutable(ImmutableDeltaPayload {
+            priority: 1,
+            schema_version_id: "v1".into(),
+            fields: BTreeMap::new(),
+        }),
+        vec![],
+        vec![],
+    )
+    .generate_cid()
+    .unwrap();
+    let (cid, bytes) = put_genesis(
+        &blockstore,
+        ImmutableDeltaPayload {
+            priority: 1,
+            schema_version_id: "v1".into(),
+            fields: BTreeMap::from([("author".to_string(), cbor("did:key:alice"))]),
+        },
+        Some(encryption),
+    )
+    .await;
+    let doc_id = DocID::new_v0(cid);
+    let doc_id_str = doc_id.to_string();
+
+    let single = handler
+        .handle_block(
+            &cid,
+            &bytes,
+            BlockMetadata::normal(
+                &doc_id_str,
+                COLLECTION_ID,
+                "did:key:z6MkrImmutableBlock",
+                None,
+                false,
+            ),
+        )
+        .await;
+    let batch = handler
+        .handle_block_batch(&[merge_block(cid, bytes.clone(), &doc_id_str)])
+        .await
+        .remove(0);
+
+    for outcome in [single, batch] {
+        assert!(
+            !outcome.as_ref().is_ok_and(|outcome| outcome.is_merged()),
+            "got {outcome:?}"
+        );
+    }
+    assert!(read_doc(&handler, &collection, &doc_id).await.is_none());
 }
