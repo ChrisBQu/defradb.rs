@@ -4,6 +4,7 @@
 //! older data is readable by the current storage layer. Lens migrations then
 //! provide document transforms between schema versions.
 
+pub mod document_parts;
 pub mod format;
 pub mod helpers;
 mod reindex;

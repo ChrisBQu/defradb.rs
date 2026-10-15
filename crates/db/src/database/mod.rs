@@ -379,6 +379,7 @@ impl<S: Store> DB<S> {
     {
         self.load_collections().await?;
         self.initialize_migrations().await?;
+        self.migrate_document_parts().await?;
         self.migrate_index_format().await?;
         self.resume_index_backfills().await
     }
