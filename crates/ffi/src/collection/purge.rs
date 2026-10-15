@@ -71,7 +71,7 @@ pub unsafe extern "C" fn delete_documents(
                 .collect::<Result<Vec<_>, _>>()?;
 
             let results = mutator
-                .delete_many_impl_as(&defra_core::RequestContext::default(), &col_name, &doc_ids)
+                .delete_many_impl(&col_name, &doc_ids)
                 .await
                 .map_err(|e| format!("batch delete failed: {}", e))?;
 

@@ -34,13 +34,7 @@ impl<S: Store + 'static> BackupOperations for BackupAdapter<S> {
     }
 
     async fn import(&self, data: &str) -> Result<ImportResult, String> {
-        let stats = db::backup::import_database(
-            &defra_core::RequestContext::default(),
-            &self.database,
-            &self.runner,
-            data,
-        )
-        .await?;
+        let stats = db::backup::import_database(&self.database, &self.runner, data).await?;
 
         Ok(ImportResult {
             documents_imported: stats.documents_imported,

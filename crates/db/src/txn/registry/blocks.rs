@@ -47,7 +47,8 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         let txn_guard = shared_txn.lock().await;
         let txn = txn_guard.as_ref().ok_or(Error::TxnNotActive)?;
 
-        crate::block::verify::verify_block_signature_in_txn(
+        crate::block::verify::verify_block_signature_in_txn_as(
+            context,
             &self.db,
             document_acp,
             txn,
@@ -55,7 +56,6 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
             public_key_hex,
             key_type,
             caller_identity,
-            context.dac_bypass(),
         )
         .await
         .map_err(Error::Other)

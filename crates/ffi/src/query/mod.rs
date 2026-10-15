@@ -74,3 +74,15 @@ pub(crate) fn resolve_dac_bypass(
         false
     })
 }
+
+/// [`resolve_dac_bypass`] installed in the thread-local DAC bypass, as the FFI
+/// entry points did before the bypass travelled in the request's context;
+/// kept, test-only, for the tests written against it.
+#[cfg(test)]
+pub(crate) fn check_and_set_dac_bypass(
+    rt: &edge::Edge,
+    node_ptr: usize,
+    identity_did: *const c_char,
+) {
+    defra_core::dac_bypass::set_dac_bypass(resolve_dac_bypass(rt, node_ptr, identity_did));
+}
