@@ -380,19 +380,19 @@ async fn failed_partial_batch_keeps_prior_statements_and_discards_its_own_writes
         failed.has_errors(),
         "expected the second unique insert to fail"
     );
-    let recorded = gate.block_keys.lock().unwrap();
     let prior_key_set: HashSet<_> = prior_block_keys.iter().cloned().collect();
-    let failed_block_keys: HashSet<_> = recorded[failed_statement_start..]
-        .iter()
-        .filter(|key| !prior_key_set.contains(*key))
-        .cloned()
-        .collect();
+    let failed_block_keys: HashSet<_> = {
+        let recorded = gate.block_keys.lock().unwrap();
+        recorded[failed_statement_start..]
+            .iter()
+            .filter(|key| !prior_key_set.contains(*key))
+            .cloned()
+            .collect()
+    };
     assert!(
         !failed_block_keys.is_empty(),
         "the failed statement must have written distinct blobstore blocks before its unique-index error"
     );
-    drop(recorded);
-
     runner.commit_txn(&handle).await.unwrap();
     let inspect = inner.new_txn(true).await.unwrap();
     for key in &prior_block_keys {
