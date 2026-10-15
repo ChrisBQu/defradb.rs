@@ -57,6 +57,8 @@ mod pubsub_services;
 mod push_worker;
 mod replicators;
 mod result_types;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod network_tests;
 mod selective_car_access;
 mod subscriptions;
 
