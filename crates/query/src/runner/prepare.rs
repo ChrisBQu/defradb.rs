@@ -3,7 +3,7 @@ use std::sync::Arc;
 use chrono::{FixedOffset, Utc};
 use defra_core::encryption::EncryptionConfig;
 use identity::Did;
-use rapidhash::{HashMapExt, HashSetExt, RapidHashMap, RapidHashSet};
+use rapidhash::{HashMapExt, RapidHashMap, RapidHashSet};
 
 use crate::error::{QueryError, Result};
 use crate::executor::QueryRequest;
