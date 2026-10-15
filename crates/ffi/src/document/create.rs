@@ -128,7 +128,7 @@ pub unsafe extern "C" fn collection_create(
 
         let runner = try_ffi!(get_node_runner(node_ptr));
 
-        ffi_async!(routed, {
+        ffi_async!(caller, {
             let request = query::QueryRequest::new(mutation).with_context(context);
             let response = runner.execute(request).await;
 

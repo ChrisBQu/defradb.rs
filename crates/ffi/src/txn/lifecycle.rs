@@ -63,7 +63,7 @@ pub unsafe extern "C" fn commit_txn(node_ptr: usize, txn_id: *const c_char) -> F
         let txn_str = try_ffi!(require_c_str(txn_id, "txn_id"));
         let runner = try_ffi!(get_node_runner(node_ptr));
 
-        ffi_async_ok!(routed, {
+        ffi_async_ok!(caller, {
             let handle: query::txn::TransactionHandle = txn_str
                 .parse()
                 .map_err(|e| format!("invalid transaction ID: {}", e))?;
@@ -97,7 +97,7 @@ pub unsafe extern "C" fn rollback_txn(node_ptr: usize, txn_id: *const c_char) ->
         let txn_str = try_ffi!(require_c_str(txn_id, "txn_id"));
         let runner = try_ffi!(get_node_runner(node_ptr));
 
-        ffi_async_ok!(routed, {
+        ffi_async_ok!(caller, {
             let handle: query::txn::TransactionHandle = txn_str
                 .parse()
                 .map_err(|e| format!("invalid transaction ID: {}", e))?;

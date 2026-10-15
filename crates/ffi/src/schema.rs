@@ -158,7 +158,7 @@ pub unsafe extern "C" fn add_schema_in_txn(
         // reaches resolve the actual caller instead of the wildcard.
         let context = defra_core::RequestContext::default().with_identity(identity_str);
 
-        ffi_async!(routed, {
+        ffi_async!(caller, {
             let known_types: rapidhash::RapidHashSet<String> = registry
                 .get_collections_in_txn_as(&context, &txn_str)
                 .await
@@ -260,7 +260,7 @@ pub unsafe extern "C" fn get_collections_in_txn(
         // reaches resolve the actual caller instead of the wildcard.
         let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()));
 
-        ffi_async!(routed, {
+        ffi_async!(caller, {
             let collections = registry
                 .get_collections_in_txn_as(&context, &txn_str)
                 .await

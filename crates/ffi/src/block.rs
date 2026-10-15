@@ -154,7 +154,7 @@ pub unsafe extern "C" fn block_verify_signature_in_txn(
             .and_then(|d| identity::Did::try_from(d.clone()).ok())
             .into();
 
-        ffi_async!(routed, {
+        ffi_async!(caller, {
             registry
                 .verify_block_signature_in_txn_as(
                     &context,

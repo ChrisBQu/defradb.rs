@@ -26,7 +26,7 @@ pub extern "C" fn get_node_identity(node_ptr: usize) -> FfiResult {
 
         let database = try_ffi!(get_node_database(node_ptr));
 
-        ffi_async!(node_ptr, {
+        ffi_async!(caller, {
             let identity = database
                 .node_identity()
                 .ok_or_else(|| "node identity not configured".to_string())?;

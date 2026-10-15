@@ -155,7 +155,7 @@ pub unsafe extern "C" fn set_migration_in_txn(
         // reaches resolve the actual caller instead of the wildcard.
         let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()));
 
-        ffi_async!(routed, {
+        ffi_async!(caller, {
             // Parse the LensConfig from JSON
             let lens_config: lens::LensConfig = serde_json::from_str(&config_str)
                 .map_err(|e| format!("failed to parse lens config: {}", e))?;

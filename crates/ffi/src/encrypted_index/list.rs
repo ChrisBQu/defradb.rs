@@ -27,7 +27,7 @@ pub unsafe extern "C" fn list_encrypted_indexes(
         let collection_name_str = try_ffi!(require_c_str(collection_name, "collection_name"));
         let database = try_ffi!(get_node_database(node_ptr));
 
-        ffi_async!(node_ptr, {
+        ffi_async!(caller, {
             let collection = database
                 .get_collection(&collection_name_str)
                 .map_err(|e| format!("failed to get collection: {}", e))?
@@ -61,7 +61,7 @@ pub unsafe extern "C" fn list_all_encrypted_indexes(
         ));
         let database = try_ffi!(get_node_database(node_ptr));
 
-        ffi_async!(node_ptr, {
+        ffi_async!(caller, {
             let names = database
                 .list_collections()
                 .map_err(|e| format!("failed to list collections: {}", e))?;

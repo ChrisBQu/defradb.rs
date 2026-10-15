@@ -110,7 +110,7 @@ pub unsafe extern "C" fn delete_collections_in_txn(
         };
         let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|value| !value.is_empty()));
 
-        ffi_async!(routed, {
+        ffi_async!(caller, {
             let targets: Vec<String> = serde_json::from_str(&targets_json)
                 .map_err(|error| format!("failed to parse collection targets JSON: {}", error))?;
             registry
@@ -191,7 +191,7 @@ pub unsafe extern "C" fn set_collection_active_in_txn(
         };
         let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|value| !value.is_empty()));
 
-        ffi_async!(routed, {
+        ffi_async!(caller, {
             let version = registry
                 .set_collection_active_in_txn_as(&context, &txn_id, &version_id, is_active)
                 .await

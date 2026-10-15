@@ -265,7 +265,7 @@ pub unsafe extern "C" fn lens_list_in_txn(
         // reaches resolve the actual caller instead of the wildcard.
         let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()));
 
-        ffi_async!(routed, {
+        ffi_async!(caller, {
             let lenses = registry
                 .list_lenses_in_txn_as(&context, &txn_str)
                 .await

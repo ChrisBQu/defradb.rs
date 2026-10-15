@@ -160,12 +160,12 @@ macro_rules! try_ffi {
 
 /// Run an async block on node `$node`'s worker pool, the C caller's thread
 /// parked until it completes, and convert its `Result<String, String>` to
-/// `FfiResult`. `routed` instead of a node: the block's work routes itself
-/// into the pool (a GraphQL request, an explicit transaction's call), so it
-/// starts on the caller's thread, which parks until the work completes.
+/// `FfiResult`. `caller` instead of a node runs the block on the caller's
+/// thread: for work that routes itself into the pool (a GraphQL request, an
+/// explicit transaction's call) or that only reads memory.
 #[macro_export]
 macro_rules! ffi_async {
-    (routed, $body:block) => {
+    (caller, $body:block) => {
         $crate::ffi_async!(@into String, $crate::call::wait(async move $body))
     };
     ($node:expr, $body:block) => {
@@ -180,7 +180,7 @@ macro_rules! ffi_async {
 /// [`ffi_async!`] for void operations: `Result<(), String>` to `FfiResult`.
 #[macro_export]
 macro_rules! ffi_async_ok {
-    (routed, $body:block) => {
+    (caller, $body:block) => {
         $crate::ffi_async!(@into (), $crate::call::wait(async move $body))
     };
     ($node:expr, $body:block) => {

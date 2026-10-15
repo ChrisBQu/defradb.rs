@@ -116,7 +116,7 @@ pub unsafe extern "C" fn exec_request_in_txn_with_signing(
 
         let runner = try_ffi!(get_node_runner(node_ptr));
 
-        ffi_async!(routed, {
+        ffi_async!(caller, {
             let handle: query::txn::TransactionHandle = txn_str
                 .parse()
                 .map_err(|e| format!("invalid transaction ID: {}", e))?;
