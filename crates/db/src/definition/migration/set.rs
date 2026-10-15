@@ -3,7 +3,7 @@
 use lens::{LensConfig, TransformId};
 use schema::CollectionSource;
 use storage::corekv::{Key, OnCommit, Store};
-use storage::keys::systemstore::{CollectionKey, CollectionVersionKey, LensConfigKey};
+use storage::keys::systemstore::{CollectionKey, CollectionVersionKey};
 use tracing::instrument;
 
 use super::helpers::{create_orphan_placeholder, create_placeholder_with_source};

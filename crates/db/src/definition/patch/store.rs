@@ -1,7 +1,6 @@
 use super::*;
 use lens::TransformStore;
 use storage::corekv::OnCommit;
-use storage::keys::systemstore::LensConfigKey;
 
 impl<S: Store> crate::database::DB<S> {
     /// Create and store a new schema version from a validated patched schema.

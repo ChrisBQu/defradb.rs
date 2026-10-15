@@ -91,7 +91,7 @@ impl<S: Store> DbDocMutator<S> {
 
     /// Create a mutator that shares a transaction and (optionally) forwards
     /// committed writes to a `TxnBroadcaster`. When `broadcaster` is `Some`,
-    /// each per-mutation `on_success_async` callback both publishes to the
+    /// each per-mutation `on_commit(OnCommit::Async(..))` callback both publishes to the
     /// local event bus and asks the broadcaster to push to P2P peers.
     pub fn from_shared_txn_with_broadcaster(
         db: Arc<DB<S>>,

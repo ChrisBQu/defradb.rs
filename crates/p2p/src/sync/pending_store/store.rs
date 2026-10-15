@@ -436,9 +436,9 @@ async fn read_head(
 
 fn on_commit(
     txn: &mut BasicTxn,
-    callback: storage::corekv::OrderedTxnCallback,
+    callback: storage::corekv::TxnCallback,
 ) -> std::result::Result<(), RetryAttemptError> {
-    txn.on_success_ordered(callback)
+    txn.on_commit(storage::corekv::OnCommit::Ordered(callback))
         .map_err(|error| storage::corekv::Error::Other(error.to_string()).into())
 }
 

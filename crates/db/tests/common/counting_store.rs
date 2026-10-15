@@ -216,13 +216,6 @@ impl Txn for CountingTxn {
         self.inner.release_savepoint()
     }
 
-    fn on_success_ordered_async(
-        &mut self,
-        callback: storage::corekv::AsyncOrderedTxnCallback,
-    ) -> Result<()> {
-        self.inner.on_success_ordered_async(callback)
-    }
-
     fn discard(self: Box<Self>) {
         self.inner.discard()
     }

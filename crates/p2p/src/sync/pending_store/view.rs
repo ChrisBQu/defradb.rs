@@ -16,7 +16,7 @@ use cid::Cid;
 use kovan_map::HopscotchMap;
 use rapidhash::fast::RandomState;
 use rapidhash::RapidHashSet;
-use storage::corekv::OrderedTxnCallback;
+use storage::corekv::TxnCallback;
 
 use super::PersistedPendingDag;
 use crate::sync::head_scope::{HeadVersion, Scope, ScopeDecision};
@@ -111,10 +111,10 @@ impl PersistedView {
         root: Cid,
         record: &PersistedPendingDag,
         retired: Option<Cid>,
-    ) -> OrderedTxnCallback {
+    ) -> TxnCallback {
         let view = Arc::clone(self);
         let head = scope_head(root, record);
-        Arc::new(move || {
+        Box::new(move || {
             // The retired root shares the scope, whose head this one takes.
             if let Some(retired) = retired {
                 view.roots.remove(&retired);
@@ -133,12 +133,12 @@ impl PersistedView {
         root: Cid,
         record: Option<&PersistedPendingDag>,
         newly_quarantined: bool,
-    ) -> OrderedTxnCallback {
+    ) -> TxnCallback {
         let view = Arc::clone(self);
         let scope = record
             .and_then(|record| scope_head(root, record))
             .map(|(scope, _)| scope);
-        Arc::new(move || {
+        Box::new(move || {
             view.roots.remove(&root);
             if let Some(scope) = &scope {
                 if view
@@ -159,14 +159,14 @@ impl PersistedView {
     pub(super) fn swept(
         self: &Arc<Self>,
         records: &[(Cid, PersistedPendingDag)],
-    ) -> OrderedTxnCallback {
+    ) -> TxnCallback {
         let view = Arc::clone(self);
         let roots: RapidHashSet<Cid> = records.iter().map(|(root, _)| *root).collect();
         let heads: Vec<(Scope, HeadVersion)> = records
             .iter()
             .filter_map(|(root, record)| scope_head(*root, record))
             .collect();
-        Arc::new(move || {
+        Box::new(move || {
             let stale_roots: Vec<Cid> = view
                 .roots
                 .keys()
