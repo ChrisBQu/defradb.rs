@@ -22,6 +22,8 @@ mod routing;
 #[cfg(not(target_family = "wasm"))]
 mod start;
 #[cfg(all(test, not(target_family = "wasm")))]
+mod datapath_tests;
+#[cfg(all(test, not(target_family = "wasm")))]
 mod tests;
 
 use std::future::Future;
@@ -155,6 +157,22 @@ impl PoolShared {
         }
     }
 
+    /// Room for a job of `bytes` on a worker `target` allows, taken now
+    /// without waiting; `None` when there is none.
+    pub(crate) fn admit_now(
+        &self,
+        target: Target,
+        bytes: usize,
+    ) -> Result<Option<crate::worker::Admitted>, Error> {
+        if self.closing.load(Ordering::Acquire) {
+            return Err(Error::ShutDown);
+        }
+        Ok(self
+            .route(target)?
+            .try_admit(bytes)
+            .or_else(|| self.admit_anywhere(target, bytes)))
+    }
+
     fn tuning(config: &Config, monitored: bool) -> Tuning {
         Tuning {
             inbox_batch: config.inbox_batch,
@@ -181,54 +199,6 @@ impl PoolShared {
     fn abandon(&self) {
         self.workers.iter().for_each(|worker| worker.abandon());
     }
-}
-
-impl PoolShared {
-    /// Room for a job of `bytes` on a worker `target` allows, taken now;
-    /// else the worker `target` routes to, whose room a caller may wait for.
-    fn admit_now(
-        &self,
-        target: Target,
-        bytes: usize,
-    ) -> Result<Result<crate::worker::Admitted, &Arc<WorkerShared>>, Error> {
-        if self.closing.load(Ordering::Acquire) {
-            return Err(Error::ShutDown);
-        }
-        let routed = self.route(target)?;
-        Ok(routed
-            .try_admit(bytes)
-            .or_else(|| self.admit_anywhere(target, bytes))
-            .ok_or(routed))
-    }
-}
-
-/// Queues `make` on the worker `admitted` holds room on.
-fn enqueue<F, Fut>(
-    target: Target,
-    options: Submit,
-    admitted: crate::worker::Admitted,
-    make: F,
-) -> Completion<Fut::Output>
-where
-    F: FnOnce() -> Fut + Send + 'static,
-    Fut: Future + 'static,
-    Fut::Output: Send + 'static,
-{
-    let key = match target {
-        Target::Key(key) => Some(key),
-        _ => None,
-    };
-    let worker = admitted.worker().clone();
-    let name = options.name.unwrap_or(std::any::type_name::<F>());
-    let (job, completion) = Job::new(
-        make,
-        name,
-        key,
-        matches!(target, Target::Worker(_)),
-        admitted,
-    );
-    worker.push(job);
-    completion
 }
 
 /// Builds a worker's hook on the calling thread; a factory that panics is
@@ -375,15 +345,16 @@ impl Pool {
         let shared = &self.handle.shared;
         let bytes = options.bytes.unwrap_or(std::mem::size_of::<F>());
         let admitted = match shared.admit_now(target, bytes)? {
-            Ok(admitted) => admitted,
-            Err(routed) => routed.admit(bytes).await,
+            Some(admitted) => admitted,
+            None => shared.route(target)?.admit(bytes).await,
         };
-        Ok(enqueue(target, options, admitted, make))
+        Ok(Self::launch(target, options, admitted, make))
     }
 
-    /// [`submit_with`](Self::submit_with) for a caller that cannot wait:
-    /// [`Error::Full`] when no worker `target` allows has room now.
-    pub fn try_submit<F, Fut>(
+    /// [`submit_with`](Self::submit_with) that never waits, for a caller that
+    /// cannot (a destructor, a synchronous API): [`Error::Full`] when no worker
+    /// `target` allows has room now.
+    pub fn try_submit_with<F, Fut>(
         &self,
         target: Target,
         options: Submit,
@@ -399,8 +370,37 @@ impl Pool {
             .handle
             .shared
             .admit_now(target, bytes)?
-            .map_err(|_| Error::Full)?;
-        Ok(enqueue(target, options, admitted, make))
+            .ok_or(Error::Full)?;
+        Ok(Self::launch(target, options, admitted, make))
+    }
+
+    /// Hands an admitted job to the worker its admission belongs to.
+    pub(crate) fn launch<F, Fut>(
+        target: Target,
+        options: Submit,
+        admitted: crate::worker::Admitted,
+        make: F,
+    ) -> Completion<Fut::Output>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future + 'static,
+        Fut::Output: Send + 'static,
+    {
+        let key = match target {
+            Target::Key(key) => Some(key),
+            _ => None,
+        };
+        let worker = admitted.worker().clone();
+        let name = options.name.unwrap_or(std::any::type_name::<F>());
+        let (job, completion) = Job::new(
+            make,
+            name,
+            key,
+            matches!(target, Target::Worker(_)),
+            admitted,
+        );
+        worker.push(job);
+        completion
     }
 
     /// Submits from a plain thread and waits for the result: for the C FFI, a

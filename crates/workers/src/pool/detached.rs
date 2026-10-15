@@ -11,7 +11,7 @@
 
 use std::future::Future;
 
-use super::{enqueue, Pool, Submit, Target};
+use super::{Pool, Submit, Target};
 use crate::Error;
 
 /// Runs the future `make` builds to its end: on the calling worker when
@@ -88,8 +88,8 @@ where
         .shared
         .admit_now(target, std::mem::size_of::<F>())?
     {
-        Ok(admitted) => Ok(enqueue(target, options, admitted, make)),
-        Err(_) => wait_for_room(pool, target, options, make),
+        Some(admitted) => Ok(Pool::launch(target, options, admitted, make)),
+        None => wait_for_room(pool, target, options, make),
     }
 }
 

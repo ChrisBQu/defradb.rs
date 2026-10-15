@@ -29,12 +29,16 @@ enum State {
     /// Its worker has not started it yet.
     Starting(Completion<Result<Completion<()>, Error>>),
     Running(Completion<()>),
+    /// It never started, for this reason.
+    Refused(Error),
     Ended,
 }
 
 /// Runs the future `make` builds in the background: on the calling worker
 /// when called on one, else on `pool` (the fallback pool when `None`), until
-/// it ends, [`Background::abort`] is called, or its worker stops.
+/// it ends, [`Background::abort`] is called, or its worker stops. When no
+/// pool can take it (it shut down, or none can start on this target) that
+/// is logged as an error, and awaiting the handle gives the reason.
 ///
 /// ```no_run
 /// # fn demo(pool: &workers::Pool) -> Result<(), workers::Error> {
@@ -43,29 +47,28 @@ enum State {
 ///         // one pass
 ///     })
 ///     .await;
-/// })?;
+/// });
 /// sweep.abort();
 /// # Ok(())
 /// # }
 /// ```
-pub fn spawn_background<F, Fut>(
-    pool: Option<&Pool>,
-    name: &'static str,
-    make: F,
-) -> Result<Background, Error>
+pub fn spawn_background<F, Fut>(pool: Option<&Pool>, name: &'static str, make: F) -> Background
 where
     F: FnOnce() -> Fut + Send + 'static,
     Fut: Future<Output = ()> + 'static,
 {
     let stop = Arc::new(Event::new());
     let stopped = Arc::clone(&stop);
-    let started = spawn(pool, name, move || async move {
+    let state = match spawn(pool, name, move || async move {
         crate::worker::spawn_daemon_named(name, until(stopped, make()))
-    })?;
-    Ok(Background {
-        stop,
-        state: State::Starting(started),
-    })
+    }) {
+        Ok(started) => State::Starting(started),
+        Err(error) => {
+            tracing::error!(task = name, %error, "background work did not start");
+            State::Refused(error)
+        }
+    };
+    Background { stop, state }
 }
 
 /// `job`, ended early once `stop` is set.
@@ -95,7 +98,7 @@ impl Background {
         match &self.state {
             State::Starting(_) => false,
             State::Running(done) => done.is_finished(),
-            State::Ended => true,
+            State::Refused(_) | State::Ended => true,
         }
     }
 }
@@ -121,6 +124,11 @@ impl Future for Background {
                     let outcome = std::task::ready!(Pin::new(done).poll(cx));
                     this.state = State::Ended;
                     return Poll::Ready(outcome);
+                }
+                State::Refused(error) => {
+                    let error = error.clone();
+                    this.state = State::Ended;
+                    return Poll::Ready(Err(error));
                 }
                 State::Ended => return Poll::Ready(Err(Error::Consumed)),
             }

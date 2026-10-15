@@ -37,8 +37,7 @@ pub enum Error {
     Spawn(String),
     /// A completion was polled again after it returned its result.
     Consumed,
-    /// The worker had no room for one more submission just now; a submitter
-    /// that can wait uses `submit`, which waits for room instead.
+    /// A submission that may not wait found no room on the worker.
     Full,
 }
 
@@ -59,7 +58,7 @@ impl fmt::Display for Error {
             Error::Config(reason) => write!(f, "invalid worker pool configuration: {reason}"),
             Error::Spawn(reason) => write!(f, "could not start a pool thread: {reason}"),
             Error::Consumed => f.write_str("the completion already returned its result"),
-            Error::Full => f.write_str("the worker has no room for more work right now"),
+            Error::Full => f.write_str("the worker has no room for more work now; try again"),
         }
     }
 }
