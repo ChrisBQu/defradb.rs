@@ -57,6 +57,7 @@ impl RegolithStoreOptions {
         self
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn at_rest_keys(&self) -> Option<&AtRestKeys> {
         self.at_rest.as_deref()
     }

@@ -56,6 +56,7 @@ impl AtRestKeys {
     }
 
     /// Every key, the current one first.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn all(&self) -> impl Iterator<Item = &[u8; 32]> {
         self.entries().map(|(_, key)| &**key)
     }
