@@ -9,6 +9,7 @@
 //! the node down stops accepting and drains the node's work alone, then
 //! stops a runtime the node started.
 
+use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use edge::{Edge, EdgeConfig, EdgeRuntime, Scope};
@@ -16,6 +17,10 @@ use kovan_queue::seg_queue::SegQueue;
 
 /// How long shutdown waits for the node's in-flight network work.
 pub(crate) const NETWORK_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Threads of a runtime the node starts itself. Network work is I/O bound;
+/// an application with heavier network work passes its own runtime.
+const OWNED_RUNTIME_THREADS: NonZeroUsize = NonZeroUsize::MIN.saturating_add(1);
 
 pub(crate) struct NodeEdge {
     scope: Scope,
@@ -31,8 +36,12 @@ impl NodeEdge {
         let edge = match given {
             Some(edge) => edge,
             None if needed => {
-                let runtime = EdgeRuntime::start(EdgeConfig::default())
-                    .map_err(|error| anyhow::anyhow!("{error}"))?;
+                let runtime = EdgeRuntime::start(EdgeConfig {
+                    threads: Some(OWNED_RUNTIME_THREADS),
+                    thread_name: "defra-node-edge".to_string(),
+                    ..EdgeConfig::default()
+                })
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
                 let edge = runtime.edge().clone();
                 owned.push(runtime);
                 edge
@@ -71,5 +80,44 @@ impl NodeEdge {
         if let Err(error) = runtime.shutdown_async().await {
             tracing::warn!(%error, "the node's network runtime did not shut down cleanly");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NodeEdge;
+
+    #[test]
+    fn a_node_without_network_work_starts_no_runtime() {
+        assert!(NodeEdge::start(None, false).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_node_given_a_runtime_drains_its_own_scope_of_it() {
+        let given = edge::testing::edge();
+        let network = NodeEdge::start(Some(given.clone()), false)
+            .unwrap()
+            .expect("a given runtime is used even without network work");
+
+        assert!(network.owned.is_empty());
+        assert_ne!(network.edge(), &given);
+        given.block_on(network.drain()).unwrap();
+        assert!(network.edge().is_closed());
+        assert!(!given.is_closed());
+    }
+
+    #[tokio::test]
+    async fn a_node_given_no_runtime_starts_one_and_stops_it() {
+        let network = NodeEdge::start(None, true)
+            .unwrap()
+            .expect("network work needs a runtime");
+        let edge = network.edge().clone();
+
+        assert_eq!(edge.spawn(async { 1 }).await, Ok(1));
+        network.drain().await;
+        network.stop_owned().await;
+
+        assert!(edge.is_closed());
+        assert!(network.owned.is_empty());
     }
 }
