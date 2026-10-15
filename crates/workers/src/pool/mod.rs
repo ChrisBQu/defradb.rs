@@ -330,6 +330,48 @@ impl Pool {
             Some(admitted) => admitted,
             None => routed.admit(bytes).await,
         };
+        Ok(Self::launch(target, options, admitted, make))
+    }
+
+    /// [`submit_with`](Self::submit_with) that never waits, for a caller that
+    /// cannot (a destructor, a synchronous API): [`Error::Full`] when no worker
+    /// `target` allows has room now.
+    pub fn try_submit_with<F, Fut>(
+        &self,
+        target: Target,
+        options: Submit,
+        make: F,
+    ) -> Result<Completion<Fut::Output>, Error>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future + 'static,
+        Fut::Output: Send + 'static,
+    {
+        let shared = &self.handle.shared;
+        if shared.closing.load(Ordering::Acquire) {
+            return Err(Error::ShutDown);
+        }
+        let bytes = options.bytes.unwrap_or(std::mem::size_of::<F>());
+        let admitted = shared
+            .route(target)?
+            .try_admit(bytes)
+            .or_else(|| shared.admit_anywhere(target, bytes))
+            .ok_or(Error::Full)?;
+        Ok(Self::launch(target, options, admitted, make))
+    }
+
+    /// Hands an admitted job to the worker its admission belongs to.
+    fn launch<F, Fut>(
+        target: Target,
+        options: Submit,
+        admitted: crate::worker::Admitted,
+        make: F,
+    ) -> Completion<Fut::Output>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future + 'static,
+        Fut::Output: Send + 'static,
+    {
         let key = match target {
             Target::Key(key) => Some(key),
             _ => None,
@@ -344,7 +386,7 @@ impl Pool {
             admitted,
         );
         worker.push(job);
-        Ok(completion)
+        completion
     }
 
     /// Submits from a plain thread and waits for the result: for the C FFI, a
