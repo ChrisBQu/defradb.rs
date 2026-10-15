@@ -482,6 +482,8 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
         result
     }
 
+    /// Decode and apply a block within the caller-owned attempt.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn process_block_in_txn(
         &self,
         datastore: &NamespaceView,
