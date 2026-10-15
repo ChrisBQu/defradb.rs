@@ -343,6 +343,7 @@ impl DocumentACP for VeraDocumentACP {
                 resource: resource_name.to_string(),
                 object: doc_id.to_string(),
                 permission: permission.as_str().to_string(),
+                state: self.provider.decision_state(),
             })
             .await
             .map_err(|error| match error {

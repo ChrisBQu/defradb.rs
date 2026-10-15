@@ -551,6 +551,13 @@ impl VeraProvider for VeraRsProvider {
         Ok(Some(decision.id))
     }
 
+    fn decision_state(&self) -> Option<String> {
+        self.light_client
+            .header_chain()
+            .state()
+            .map(|state| format_root(state.module_state_root))
+    }
+
     fn acp_light_client_status(&self) -> Result<AcpLightClientStatus, ProviderError> {
         let sync = self.light_client.header_chain().state();
         let last_invalidation_height = self.light_client_observability.load(Ordering::Relaxed);
