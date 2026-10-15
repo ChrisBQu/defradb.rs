@@ -65,12 +65,6 @@ impl AttemptScopedTxn {
             .as_deref()
             .ok_or(storage::corekv::Error::DiscardedTxn)
     }
-
-    fn io_mut(&mut self) -> storage::corekv::Result<&mut (dyn RetryAttemptIO + 'static)> {
-        self.io
-            .as_deref_mut()
-            .ok_or(storage::corekv::Error::DiscardedTxn)
-    }
 }
 
 impl storage::corekv::private::Sealed for AttemptScopedTxn {}
@@ -102,25 +96,25 @@ impl Reader for AttemptScopedTxn {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Writer for AttemptScopedTxn {
-    async fn merge(&mut self, key: &[u8], operand: &[u8]) -> storage::corekv::Result<()> {
-        self.io_mut()?.merge(key, operand).await
+    async fn merge_shared(&self, key: &[u8], operand: &[u8]) -> storage::corekv::Result<()> {
+        self.io()?.merge_shared(key, operand).await
     }
 
-    async fn append(
-        &mut self,
+    async fn append_shared(
+        &self,
         log: &storage::corekv::AppendLog,
         entry: &[u8],
         once_key: Option<&[u8]>,
     ) -> storage::corekv::Result<()> {
-        self.io_mut()?.append(log, entry, once_key).await
+        self.io()?.append_shared(log, entry, once_key).await
     }
 
-    async fn set(&mut self, key: &[u8], value: &[u8]) -> storage::corekv::Result<()> {
-        self.io_mut()?.set(key, value).await
+    async fn set_shared(&self, key: &[u8], value: &[u8]) -> storage::corekv::Result<()> {
+        self.io()?.set_shared(key, value).await
     }
 
-    async fn delete(&mut self, key: &[u8]) -> storage::corekv::Result<()> {
-        self.io_mut()?.delete(key).await
+    async fn delete_shared(&self, key: &[u8]) -> storage::corekv::Result<()> {
+        self.io()?.delete_shared(key).await
     }
 }
 
@@ -195,7 +189,7 @@ impl BasicTxn {
                 storage::corekv::Error::DiscardedTxn
             }));
         }
-        self.shared_txn.set_savepoint().map_err(Error::Storage)?;
+        self.alone()?.set_savepoint().map_err(Error::Storage)?;
         self.savepoints.push(self.callbacks.mark());
         Ok(())
     }
@@ -206,7 +200,7 @@ impl BasicTxn {
                 "transaction has no active savepoint".into(),
             ))
         })?;
-        self.shared_txn
+        self.alone()?
             .rollback_to_savepoint()
             .map_err(Error::Storage)?;
         self.savepoints.pop();
@@ -220,11 +214,16 @@ impl BasicTxn {
                 "transaction has no active savepoint".into(),
             )));
         }
-        self.shared_txn
-            .release_savepoint()
-            .map_err(Error::Storage)?;
+        self.alone()?.release_savepoint().map_err(Error::Storage)?;
         self.savepoints.pop();
         Ok(())
+    }
+
+    /// The transaction, held alone: a savepoint must not race a write, so
+    /// every namespace view of it has to be gone. One still open is an error,
+    /// never a wait.
+    fn alone(&mut self) -> Result<&mut SharedTxn> {
+        Arc::get_mut(&mut self.shared_txn).ok_or(Error::TxnStillInUse)
     }
 
     /// Create the namespace-capable facade for one engine-owned retry attempt.
@@ -388,8 +387,9 @@ impl BasicTxn {
 
     /// Discard the transaction.
     ///
-    /// The abort callbacks run on success.
-    /// Returns an error if the transaction is not active or still has references.
+    /// The abort callbacks run whenever the transaction was active. Returns an
+    /// error if it was not, or if a namespace view still holds it: that view
+    /// rolls the engine transaction back when it drops.
     ///
     /// # Callback Panic Handling
     ///
@@ -412,10 +412,19 @@ impl BasicTxn {
         }
 
         let (_, aborted) = std::mem::take(&mut self.callbacks).into_ends();
-        let shared = Arc::try_unwrap(self.shared_txn).map_err(|_| Error::TxnStillInUse)?;
-        shared.into_txn().discard();
         self.state = TxnState::Discarded;
+        // The discard happens whatever else still holds the transaction: its
+        // abort callbacks run now. A namespace view still open keeps the
+        // engine transaction until the view drops, which rolls it back; that
+        // is reported, not a reason to skip the rest.
+        let released = match Arc::try_unwrap(self.shared_txn) {
+            Ok(shared) => {
+                shared.into_txn().discard();
+                Ok(())
+            }
+            Err(_) => Err(Error::TxnStillInUse),
+        };
         aborted.run_now();
-        Ok(())
+        released
     }
 }

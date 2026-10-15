@@ -254,10 +254,6 @@ impl NamespacedRetryAttemptIO {
     fn inner(&self) -> &dyn crate::corekv::RetryAttemptIO {
         self.inner.as_ref()
     }
-
-    fn inner_mut(&mut self) -> &mut dyn crate::corekv::RetryAttemptIO {
-        self.inner.as_mut()
-    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -304,32 +300,32 @@ impl Reader for NamespacedRetryAttemptIO {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Writer for NamespacedRetryAttemptIO {
-    async fn merge(&mut self, key: &[u8], operand: &[u8]) -> Result<()> {
+    async fn merge_shared(&self, key: &[u8], operand: &[u8]) -> Result<()> {
         let key = self.namespace.prefix_key(key);
-        self.inner_mut().merge(&key, operand).await
+        self.inner().merge_shared(&key, operand).await
     }
 
-    async fn append(
-        &mut self,
+    async fn append_shared(
+        &self,
         log: &crate::corekv::AppendLog,
         entry: &[u8],
         once_key: Option<&[u8]>,
     ) -> Result<()> {
         let log = log.prefixed(&[self.namespace.prefix()]);
         let once_key = once_key.map(|key| self.namespace.prefix_key(key));
-        self.inner_mut()
-            .append(&log, entry, once_key.as_deref())
+        self.inner()
+            .append_shared(&log, entry, once_key.as_deref())
             .await
     }
 
-    async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+    async fn set_shared(&self, key: &[u8], value: &[u8]) -> Result<()> {
         let key = self.namespace.prefix_key(key);
-        self.inner_mut().set(&key, value).await
+        self.inner().set_shared(&key, value).await
     }
 
-    async fn delete(&mut self, key: &[u8]) -> Result<()> {
+    async fn delete_shared(&self, key: &[u8]) -> Result<()> {
         let key = self.namespace.prefix_key(key);
-        self.inner_mut().delete(&key).await
+        self.inner().delete_shared(&key).await
     }
 }
 
@@ -383,31 +379,31 @@ impl Reader for NamespacedTxn {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Writer for NamespacedTxn {
-    async fn merge(&mut self, key: &[u8], operand: &[u8]) -> Result<()> {
+    async fn merge_shared(&self, key: &[u8], operand: &[u8]) -> Result<()> {
         self.txn
-            .merge(&self.namespace.prefix_key(key), operand)
+            .merge_shared(&self.namespace.prefix_key(key), operand)
             .await
     }
 
-    async fn append(
-        &mut self,
+    async fn append_shared(
+        &self,
         log: &crate::corekv::AppendLog,
         entry: &[u8],
         once_key: Option<&[u8]>,
     ) -> Result<()> {
         let log = log.prefixed(&[self.namespace.prefix()]);
         let once_key = once_key.map(|key| self.namespace.prefix_key(key));
-        self.txn.append(&log, entry, once_key.as_deref()).await
+        self.txn.append_shared(&log, entry, once_key.as_deref()).await
     }
 
-    async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+    async fn set_shared(&self, key: &[u8], value: &[u8]) -> Result<()> {
         let prefixed = self.namespace.prefix_key(key);
-        self.txn.set(&prefixed, value).await
+        self.txn.set_shared(&prefixed, value).await
     }
 
-    async fn delete(&mut self, key: &[u8]) -> Result<()> {
+    async fn delete_shared(&self, key: &[u8]) -> Result<()> {
         let prefixed = self.namespace.prefix_key(key);
-        self.txn.delete(&prefixed).await
+        self.txn.delete_shared(&prefixed).await
     }
 }
 

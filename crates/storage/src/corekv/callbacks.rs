@@ -70,6 +70,15 @@ impl OnCommit {
     fn is_ordered(&self) -> bool {
         matches!(self, Self::Ordered(_) | Self::OrderedAsync(_))
     }
+
+    /// Whether a transaction that is `read_only` takes it: one never gets a
+    /// commit receipt to order work by, so it refuses ordered work.
+    pub fn admitted_by(&self, read_only: bool) -> Result<()> {
+        if read_only && self.is_ordered() {
+            return Err(Error::ReadOnlyTxn);
+        }
+        Ok(())
+    }
 }
 
 /// What runs after a transaction ends without committing.
@@ -151,9 +160,7 @@ impl TxnCallbacks {
 
     /// Register `callback` to run once if the transaction commits.
     pub fn on_commit(&mut self, callback: OnCommit) -> Result<()> {
-        if self.read_only && callback.is_ordered() {
-            return Err(Error::ReadOnlyTxn);
-        }
+        callback.admitted_by(self.read_only)?;
         self.push(Entry::Commit(callback));
         Ok(())
     }

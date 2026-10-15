@@ -3932,11 +3932,11 @@ dependencies = [
 name = "datastore"
 version = "0.5.0"
 dependencies = [
- "async-lock",
  "async-trait",
  "bytes",
  "cid",
  "futures",
+ "regolith",
  "storage",
  "thiserror 2.0.18",
  "tokio",

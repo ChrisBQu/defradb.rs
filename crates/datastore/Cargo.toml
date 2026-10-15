@@ -18,7 +18,8 @@ bench = false
 bytes.workspace = true
 # Async runtime
 async-trait.workspace = true
-async-lock.workspace = true
+# Lock-free queue for the callbacks views register.
+regolith.workspace = true
 
 # Error handling
 thiserror.workspace = true
