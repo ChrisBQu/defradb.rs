@@ -245,6 +245,13 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
         crate::write::prepare::resolve_input(&self.db, request).await
     }
 
+    async fn resolve_prepared_inputs(
+        &self,
+        requests: Vec<query::prepared::PreparedInputRequest>,
+    ) -> query::error::Result<Vec<std::sync::Arc<[u8]>>> {
+        crate::write::prepare::resolve_inputs(&self.db, requests).await
+    }
+
     async fn prepared_embedding_request(
         &self,
         collection_name: &str,

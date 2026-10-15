@@ -135,6 +135,13 @@ impl RemoteSignatureInput {
     }
 
     pub fn resolve(&self, signer: &SigningConfig) -> Result<Vec<u8>, String> {
+        self.remote_signer(signer)?
+            .sign_sync(&self.data, self.authorization.as_ref())
+    }
+
+    /// The remote signer of `signer` that may answer this input: the one it
+    /// was prepared for, with the same key and authorization.
+    pub fn remote_signer(&self, signer: &SigningConfig) -> Result<Arc<dyn RemoteSigner>, String> {
         if self.key_type != signer.key_type
             || self.public_key_hex != signer.public_key_hex
             || self.authorization != signer.signing_authorization
@@ -145,9 +152,8 @@ impl RemoteSignatureInput {
         }
         signer
             .remote_signer
-            .as_ref()
-            .ok_or_else(|| "prepared remote signature requires a remote signer".to_string())?
-            .sign_sync(&self.data, self.authorization.as_ref())
+            .clone()
+            .ok_or_else(|| "prepared remote signature requires a remote signer".to_string())
     }
 }
 

@@ -200,17 +200,12 @@ where
             })?;
             Ok(std::sync::Arc::from(response))
         }
-        query::prepared::PreparedInputKind::Signature => {
-            let input = defra_core::signing::RemoteSignatureInput::decode(request.exact_request())
-                .map_err(query::error::QueryError::execution)?;
-            let signer = defra_core::signing::get_signing_config().ok_or_else(|| {
-                query::error::QueryError::execution("remote signature input has no configured signer")
-            })?;
-            let response = input
-                .resolve(&signer)
-                .map_err(query::error::QueryError::execution)?;
-            Ok(std::sync::Arc::from(response))
-        }
+        query::prepared::PreparedInputKind::Signature => resolve_signatures(db, &[request])
+            .await?
+            .pop()
+            .ok_or_else(|| {
+                query::error::QueryError::execution("remote signer returned no signature")
+            }),
         query::prepared::PreparedInputKind::KmsKey => {
             let operation: PreparedKmsOperation = serde_json::from_slice(request.exact_request())
                 .map_err(|error| {
@@ -346,6 +341,86 @@ where
             "prepared {kind:?} input resolution is not available"
         ))),
     }
+}
+
+/// Fetch a wave of external inputs at once, outside any transaction: the
+/// signatures in one call per signer, every other input concurrently. One
+/// answer per request, in order.
+pub(crate) async fn resolve_inputs<S>(
+    db: &DB<S>,
+    requests: Vec<query::prepared::PreparedInputRequest>,
+) -> query::error::Result<Vec<Arc<[u8]>>>
+where
+    S: Store + 'static,
+{
+    let (signatures, others): (Vec<_>, Vec<_>) = requests
+        .iter()
+        .enumerate()
+        .partition(|(_, request)| request.kind() == query::prepared::PreparedInputKind::Signature);
+    let signature_requests: Vec<_> = signatures.iter().map(|(_, request)| *request).collect();
+    let signed = resolve_signatures(db, &signature_requests);
+    let fetched =
+        futures::future::try_join_all(others.iter().map(|(_, request)| resolve_input(db, request)));
+    let (signed, fetched) = futures::future::try_join(signed, fetched).await?;
+    let mut answers: Vec<Option<Arc<[u8]>>> = vec![None; requests.len()];
+    for ((index, _), answer) in signatures
+        .iter()
+        .chain(others.iter())
+        .zip(signed.into_iter().chain(fetched))
+    {
+        answers[*index] = Some(answer);
+    }
+    answers
+        .into_iter()
+        .map(|answer| {
+            answer.ok_or_else(|| {
+                query::error::QueryError::execution("an external input went unanswered")
+            })
+        })
+        .collect()
+}
+
+/// Every remote signature of a wave through the database's signature
+/// service: one `sign_batch` call per signer for the whole wave.
+async fn resolve_signatures<S>(
+    db: &DB<S>,
+    requests: &[&query::prepared::PreparedInputRequest],
+) -> query::error::Result<Vec<Arc<[u8]>>>
+where
+    S: Store + 'static,
+{
+    if requests.is_empty() {
+        return Ok(Vec::new());
+    }
+    let config = defra_core::signing::get_signing_config().ok_or_else(|| {
+        query::error::QueryError::execution("remote signature input has no configured signer")
+    })?;
+    let keys = requests
+        .iter()
+        .map(|request| {
+            let input = defra_core::signing::RemoteSignatureInput::decode(request.exact_request())
+                .map_err(query::error::QueryError::execution)?;
+            let remote = input
+                .remote_signer(&config)
+                .map_err(query::error::QueryError::execution)?;
+            Ok(crate::remote_inputs::Signature {
+                signer: crate::remote_inputs::Signer {
+                    remote,
+                    authorization: input.authorization,
+                },
+                data: Arc::from(input.data),
+            })
+        })
+        .collect::<query::error::Result<Vec<_>>>()?;
+    db.remote_inputs()
+        .signatures()
+        .get_many(keys)
+        .await
+        .into_iter()
+        .map(|signature| {
+            signature.map_err(|error| query::error::QueryError::execution(error.to_string()))
+        })
+        .collect()
 }
 
 pub(crate) fn prepared_identity(doc: &Document) -> Option<DocStorageIdentity> {

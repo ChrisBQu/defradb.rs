@@ -384,6 +384,8 @@ pub(crate) async fn write_document_blocks_with_inputs(
         inherited_encryption_cid(blockstore, &composite_heads).await?
     };
 
+    // The first signature this pass is missing; the pass goes on past it.
+    let mut first_miss = None;
     for (field_name, field_value) in doc.values() {
         if field_name == "_docID" {
             continue;
@@ -547,6 +549,12 @@ pub(crate) async fn write_document_blocks_with_inputs(
                     Ok(None) => {
                         tracing::debug!(field = %field_name, priority = field_priority, "Skipped signing (priority > 1)");
                     }
+                    // The field waits for its signature; the other fields'
+                    // go out in the same wave.
+                    Err(BuildError::NeedsInput(request)) => {
+                        first_miss.get_or_insert(request);
+                        continue;
+                    }
                     Err(e) => {
                         tracing::debug!(field = %field_name, error = %e, "Failed to sign field block");
                         return Err(e);
@@ -622,6 +630,10 @@ pub(crate) async fn write_document_blocks_with_inputs(
                 initial_field_cids.push(field_cid);
             }
         }
+    }
+    // The composite links every field block, so it waits for all of them.
+    if let Some(request) = first_miss {
+        return Err(BuildError::NeedsInput(request));
     }
 
     let composite_payload = CompositeDeltaPayload {
