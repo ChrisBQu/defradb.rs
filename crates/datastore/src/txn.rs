@@ -120,9 +120,6 @@ impl Reader for AttemptScopedTxn {
         self.io()?.has(key).await
     }
 
-    async fn has_for_update(&self, key: &[u8]) -> storage::corekv::Result<bool> {
-        self.io()?.has_for_update(key).await
-    }
 
     async fn get_size(&self, key: &[u8]) -> storage::corekv::Result<Option<usize>> {
         self.io()?.get_size(key).await

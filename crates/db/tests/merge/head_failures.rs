@@ -127,9 +127,7 @@ impl Reader for FailingHeadTxn {
     async fn has(&self, key: &[u8]) -> Result<bool> {
         self.inner.has(key).await
     }
-    async fn has_for_update(&self, key: &[u8]) -> Result<bool> {
-        self.inner.has_for_update(key).await
-    }
+
     async fn get_size(&self, key: &[u8]) -> Result<Option<usize>> {
         self.inner.get_size(key).await
     }

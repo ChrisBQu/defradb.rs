@@ -374,9 +374,6 @@ impl Reader for InterceptingRetryAttemptIO {
     async fn has(&self, key: &[u8]) -> Result<bool> {
         self.inner.as_ref().unwrap().has(key).await
     }
-    async fn has_for_update(&self, key: &[u8]) -> Result<bool> {
-        self.inner.as_ref().unwrap().has_for_update(key).await
-    }
     async fn get_size(&self, key: &[u8]) -> Result<Option<usize>> {
         self.inner.as_ref().unwrap().get_size(key).await
     }
@@ -619,17 +616,6 @@ pub trait Reader: MaybeSendSync + private::Sealed {
     /// Performance may vary by backend. Some backends may need to fetch the value
     /// to check existence.
     async fn has(&self, key: &[u8]) -> Result<bool>;
-
-    /// [`Reader::has`] that also enters `key` into the transaction's
-    /// conflict-detection read set, even when this transaction already wrote
-    /// it — a read served from its own write buffer never reaches the engine,
-    /// so plain `has` records nothing (#1599).
-    ///
-    /// Defaults to [`Reader::has`]: correct for any backend that does not
-    /// validate reads at commit.
-    async fn has_for_update(&self, key: &[u8]) -> Result<bool> {
-        self.has(key).await
-    }
 
     /// Get the size of a value without reading the entire value.
     ///
@@ -1054,10 +1040,6 @@ impl Reader for Box<dyn Txn> {
 
     async fn has(&self, key: &[u8]) -> Result<bool> {
         (**self).has(key).await
-    }
-
-    async fn has_for_update(&self, key: &[u8]) -> Result<bool> {
-        (**self).has_for_update(key).await
     }
 
     async fn get_size(&self, key: &[u8]) -> Result<Option<usize>> {
