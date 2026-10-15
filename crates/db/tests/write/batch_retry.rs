@@ -630,13 +630,12 @@ async fn single_create_replays_after_engine_conflict_with_consistent_identity_an
         "returned CID must identify the exact returned block bytes"
     );
     assert!(
-        db::AutoCommitFetcher::new(db)
+        !db::AutoCommitFetcher::new(db)
             .get_by_ids("TestDoc", &[result.doc_id.to_string()])
             .await
             .unwrap()
             .docs()
-            .first()
-            .is_some(),
+            .is_empty(),
         "the returned ID must resolve to the committed document"
     );
 }
