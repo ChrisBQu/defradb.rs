@@ -1007,6 +1007,60 @@ async fn counter_merge_of_an_unmaterialized_document_waits_for_its_composite() {
     assert!(stored.is_none(), "no partial document value was written");
 }
 
+/// The counter block a standalone merge left to its composite is applied by
+/// that composite, once, and marked merged: the document holds its value.
+#[tokio::test]
+async fn counter_merge_marks_cid_merged() {
+    let (handler, blockstore) = make_handler_with_counter_schema().await;
+    let mut doc = Document::new();
+    doc.set_with_crdt("score", CType::PnCounter, NormalValue::Int(5))
+        .unwrap();
+    doc.set_schema_version_id("v1");
+    let built = db::block::builder::build_blocks_from_document(&doc, "v1", &blockstore)
+        .await
+        .unwrap();
+    let [counter_cid] = built.field_cids[..] else {
+        panic!("one counter field block, got {:?}", built.field_cids);
+    };
+    let counter_block =
+        Block::from_dag_cbor(&blockstore.get(&counter_cid).await.unwrap().unwrap()).unwrap();
+    let CrdtDelta::Counter(payload) = counter_block.delta else {
+        panic!("the counter field block carries a counter delta");
+    };
+    let collection_short_id = handler
+        .db()
+        .get_collection("Counters")
+        .unwrap()
+        .unwrap()
+        .resolved_root_id();
+    register_test_block_owner(&handler, collection_short_id, &built.doc_id, &counter_cid).await;
+    let metadata = BlockMetadata::normal(
+        &built.doc_id,
+        "col-counters",
+        "did:key:z6MkrCounterMergeTest",
+        None,
+        false,
+    );
+
+    let outcome = handler
+        .process_counter_delta(&counter_cid, &payload, &metadata)
+        .await
+        .unwrap();
+    assert!(outcome.is_terminal_skip(), "{outcome:?}");
+    assert!(!blockstore.is_merged(&counter_cid).await.unwrap());
+
+    let outcome = handler
+        .handle_block(&built.cid, &built.block, metadata)
+        .await
+        .unwrap();
+    assert_eq!(outcome, MergeOutcome::Merged);
+    assert!(blockstore.is_merged(&counter_cid).await.unwrap());
+    assert_eq!(
+        read_counter_value(handler.db(), &built.doc_id, "score").await,
+        5
+    );
+}
+
 /// A counter's committed value: its part of the document value, the counter's
 /// only stored copy, read through a fresh read txn on `db`.
 async fn read_counter_value(db: &Arc<DB<RegolithStore>>, doc_id: &str, field: &str) -> i64 {
