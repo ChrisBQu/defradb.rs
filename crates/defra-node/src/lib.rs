@@ -187,12 +187,40 @@ pub struct EmbeddedNode {
     transaction_stats: Option<storage::TransactionStatsHandle>,
     #[cfg(feature = "http")]
     txn_cleanup_task: kovan_queue::seg_queue::SegQueue<tokio::task::JoinHandle<()>>,
+    /// Vector index rebuild and downsample view refresh, as the CLI and the
+    /// `embedded` node run them. Each holds the database open until aborted.
+    #[cfg(not(target_arch = "wasm32"))]
+    background_tasks: BackgroundTasks,
     #[cfg(feature = "p2p")]
     p2p_ops: Option<Arc<dyn defra_http::P2POperations>>,
     #[cfg(feature = "p2p")]
     p2p_lifecycle: Option<p2p_runtime::P2PLifecycle>,
     #[cfg(feature = "otel")]
     telemetry: kovan_queue::seg_queue::SegQueue<TelemetryHandle>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct BackgroundTasks(std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl BackgroundTasks {
+    fn take(&self) -> Vec<tokio::task::JoinHandle<()>> {
+        std::mem::take(
+            &mut *self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for BackgroundTasks {
+    fn drop(&mut self) {
+        for task in self.take() {
+            task.abort();
+        }
+    }
 }
 
 #[cfg(feature = "http")]
@@ -741,6 +769,13 @@ impl EmbeddedNode {
         #[cfg(feature = "http")]
         if let Some(task) = self.txn_cleanup_task.pop() {
             task.abort();
+            let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        for task in self.background_tasks.take() {
+            task.abort();
+            // An aborted task keeps the database open until it is next polled.
             let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
         }
 
@@ -1704,6 +1739,13 @@ impl NodeBuilder {
             policy_lookup,
             event_bus.clone(),
         ));
+        // Started last: nothing after this point fails, so a failed build
+        // never leaves a task holding the store open.
+        #[cfg(not(target_arch = "wasm32"))]
+        let background_tasks = BackgroundTasks(std::sync::Mutex::new(vec![
+            database.clone().start_vector_rebuild_task(),
+            database.clone().start_downsample_task(),
+        ]));
         let block_ops: Arc<dyn BlockOps> = Arc::new(db_impls::DbBlockOps::new(
             database,
             document_acp.clone(),
@@ -1735,6 +1777,8 @@ impl NodeBuilder {
             transaction_stats,
             #[cfg(feature = "http")]
             txn_cleanup_task: single_slot(txn_cleanup_task),
+            #[cfg(not(target_arch = "wasm32"))]
+            background_tasks,
             #[cfg(feature = "p2p")]
             p2p_ops,
             #[cfg(feature = "p2p")]
