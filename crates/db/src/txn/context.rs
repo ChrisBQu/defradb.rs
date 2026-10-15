@@ -3,12 +3,13 @@
 //! The owner lends the transaction to the request ([`OwnedTxn`]'s turn), and
 //! the context hands it to the request's handles: one lensed fetcher for the
 //! whole request, a mutator and a collection provider made on demand. They
-//! share the transaction through `&self`, with no lock, and are all dropped
-//! when the request ends, which gives the transaction back to its owner.
+//! share the transaction through `&self`, with no lock. None of them holds
+//! it: the owner does, and takes it back once no operation of theirs is in
+//! flight; a handle kept past its request finds the transaction gone.
 //!
 //! [`OwnedTxn`]: crate::txn::registry::owned::OwnedTxn
 
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use query::fetcher::CollectionProvider;
 use query::mutator::DocMutator;
@@ -20,7 +21,7 @@ use crate::collection::provider::TxnCollectionProvider;
 use crate::database::DB;
 use crate::event::emission::TxnBroadcaster;
 use crate::read::lensed::fetcher::{LensedDocFetcher, SharedVersionCache};
-use crate::txn::LentTxn;
+use crate::txn::{DbTxn, LentTxn};
 use crate::write::doc::DbDocMutator;
 
 /// One request's view of an explicit transaction.
@@ -28,7 +29,7 @@ pub struct DbTransactionContext<S: Store + 'static> {
     db: Arc<DB<S>>,
     id: String,
     readonly: bool,
-    txn: LentTxn<S>,
+    txn: Weak<DbTxn<S>>,
     fetcher: Arc<LensedDocFetcher<S>>,
     broadcaster: Option<Arc<dyn TxnBroadcaster>>,
 }
@@ -38,14 +39,14 @@ impl<S: Store + 'static> DbTransactionContext<S> {
         db: Arc<DB<S>>,
         id: String,
         readonly: bool,
-        txn: LentTxn<S>,
+        txn: &LentTxn<S>,
         lens_store: Arc<dyn lens::TransformStore>,
         version_cache: SharedVersionCache,
         broadcaster: Option<Arc<dyn TxnBroadcaster>>,
     ) -> Self {
         let fetcher = Arc::new(LensedDocFetcher::lent(
             db.clone(),
-            Arc::clone(&txn),
+            txn,
             lens_store,
             version_cache,
         ));
@@ -53,7 +54,7 @@ impl<S: Store + 'static> DbTransactionContext<S> {
             db,
             id,
             readonly,
-            txn,
+            txn: Arc::downgrade(txn),
             fetcher,
             broadcaster,
         }
@@ -74,23 +75,28 @@ impl<S: Store + 'static> TransactionContext for DbTransactionContext<S> {
     }
 
     fn doc_mutator(&self) -> Option<Arc<dyn DocMutator>> {
-        (!self.readonly).then(|| {
-            Arc::new(DbDocMutator::from_shared_txn_with_broadcaster(
-                self.db.clone(),
-                Arc::clone(&self.txn),
-                self.broadcaster.clone(),
-            )) as Arc<dyn DocMutator>
-        })
-    }
-
-    fn collection_provider(&self) -> Option<Arc<dyn CollectionProvider>> {
-        Some(Arc::new(TxnCollectionProvider::new(
+        if self.readonly {
+            return None;
+        }
+        let txn = self.txn.upgrade()?;
+        Some(Arc::new(DbDocMutator::from_shared_txn_with_broadcaster(
             self.db.clone(),
-            Arc::clone(&self.txn),
+            &txn,
+            self.broadcaster.clone(),
         )))
     }
 
+    fn collection_provider(&self) -> Option<Arc<dyn CollectionProvider>> {
+        let txn = self.txn.upgrade()?;
+        Some(Arc::new(TxnCollectionProvider::new(self.db.clone(), &txn)))
+    }
+
     fn acp_registration_projection(&self) -> Option<Arc<AcpRegistrationProjection>> {
-        Some(self.txn.acp_registration_projection())
+        Some(
+            self.txn
+                .upgrade()
+                .map(|txn| txn.acp_registration_projection())
+                .unwrap_or_else(|| Arc::new(AcpRegistrationProjection::detached())),
+        )
     }
 }

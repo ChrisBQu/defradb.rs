@@ -299,7 +299,7 @@ impl<S: Store> crate::database::DB<S> {
 
         // Execute the view query
         let txn = Arc::new(self.new_txn(true).await?);
-        let fetcher = crate::read::doc::DbDocFetcher::lent(Arc::clone(&txn));
+        let fetcher = crate::read::doc::DbDocFetcher::lent(&txn);
 
         // Build query runner with modified collection (is_materialized=false)
         let query_runner = query::QueryRunner::new(fetcher, modified_collections)

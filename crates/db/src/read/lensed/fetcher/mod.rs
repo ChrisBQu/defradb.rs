@@ -80,20 +80,34 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
     /// * `lens_store` - The lens transform store for applying migrations
     #[allow(dead_code)]
     pub fn new(db: Arc<DB<S>>, txn: DbTxn<S>, lens_store: Arc<dyn TransformStore>) -> Self {
-        Self::lent(db, Arc::new(txn), lens_store, SharedVersionCache::default())
+        Self::with_held(
+            db,
+            Held::new(Arc::new(txn)),
+            lens_store,
+            SharedVersionCache::default(),
+        )
     }
 
-    /// A fetcher over a transaction other handles share too, with the
-    /// version facts its earlier requests found.
+    /// A fetcher over a transaction lent to it, with the version facts its
+    /// earlier requests found: whoever lent the transaction keeps it.
     pub(crate) fn lent(
         db: Arc<DB<S>>,
-        txn: LentTxn<S>,
+        txn: &LentTxn<S>,
+        lens_store: Arc<dyn TransformStore>,
+        version_cache: SharedVersionCache,
+    ) -> Self {
+        Self::with_held(db, Held::borrowed(txn), lens_store, version_cache)
+    }
+
+    fn with_held(
+        db: Arc<DB<S>>,
+        txn: Held<S>,
         lens_store: Arc<dyn TransformStore>,
         version_cache: SharedVersionCache,
     ) -> Self {
         Self {
             db,
-            txn: Held::new(txn),
+            txn,
             lens_store,
             version_cache,
             history_cache: async_lock::RwLock::new(RapidHashMap::new()),

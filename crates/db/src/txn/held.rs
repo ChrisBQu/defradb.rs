@@ -1,8 +1,9 @@
 //! A transaction held by one handle that may also give it back (a fetcher or
-//! a mutator its caller commits through).
+//! a mutator its caller commits through), or only reached by one that was
+//! lent it ([`Held::borrowed`]).
 //!
-//! The handle keeps the transaction's strong reference in a take-only slot
-//! and reaches it, for each operation, through a weak one. Giving it back
+//! A holding handle keeps the transaction's strong reference in a take-only
+//! slot; every handle reaches it, for each operation, through a weak one. Giving it back
 //! takes the strong reference out of the slot and unwraps it: that succeeds
 //! only once no other handle and no operation in flight holds the
 //! transaction, and otherwise puts the reference back and says so. Nothing
@@ -34,6 +35,16 @@ where
         let strong = SegQueue::new();
         strong.push(txn);
         Self { strong, weak }
+    }
+
+    /// Reaches `txn` without holding it: whoever lent it keeps it, and takes
+    /// it back whether this handle is still around or not, once no
+    /// operation of it is in flight. Afterwards every operation finds none.
+    pub(crate) fn borrowed(txn: &LentTxn<S>) -> Self {
+        Self {
+            strong: SegQueue::new(),
+            weak: Arc::downgrade(txn),
+        }
     }
 
     /// A handle that holds no transaction: every operation finds none.

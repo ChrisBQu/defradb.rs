@@ -189,7 +189,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         let acp_registration_projection = txn.acp_registration_projection();
         let fetcher = Arc::new(LensedDocFetcher::lent(
             self.db.clone(),
-            Arc::clone(&txn),
+            &txn,
             self.db.lens_store.clone(),
             Default::default(),
         ));

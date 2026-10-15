@@ -81,18 +81,19 @@ impl<S: Store + 'static> DbDocMutator<S> {
         }
     }
 
-    /// Create a mutator that shares a transaction and (optionally) forwards
-    /// committed writes to a `TxnBroadcaster`. When `broadcaster` is `Some`,
+    /// Create a mutator over a transaction lent to it, which its lender keeps
+    /// and takes back, and that (optionally) forwards committed writes to a
+    /// `TxnBroadcaster`. When `broadcaster` is `Some`,
     /// each per-mutation `on_commit(OnCommit::Async(..))` callback both publishes to the
     /// local event bus and asks the broadcaster to push to P2P peers.
     pub fn from_shared_txn_with_broadcaster(
         db: Arc<DB<S>>,
-        txn: LentTxn<S>,
+        txn: &LentTxn<S>,
         broadcaster: Option<Arc<dyn crate::event::emission::TxnBroadcaster>>,
     ) -> Self {
         Self {
             db,
-            txn: Held::new(txn),
+            txn: Held::borrowed(txn),
             broadcaster,
             prepared_inputs: query::prepared::PreparedInputMemo::default(),
             creates: AtomicU64::new(0),

@@ -171,7 +171,7 @@ where
             self.db.clone(),
             self.id.to_string(),
             self.readonly,
-            txn,
+            &txn,
             self.lens_store(),
             self.version_cache.clone(),
             self.broadcaster.clone(),

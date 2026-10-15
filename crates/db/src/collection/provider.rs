@@ -17,7 +17,7 @@ use storage::corekv::{Key, Store};
 
 use crate::collection;
 use crate::database::DB;
-use crate::txn::LentTxn;
+use crate::txn::{DbTxn, LentTxn};
 
 /// Wrapper around `Arc<DB>` that implements `CollectionProvider`.
 ///
@@ -78,13 +78,23 @@ impl<S: Store + 'static> CollectionProvider for DbCollectionProvider<S> {
 /// writes like newly added schemas), then falls back to the process-wide cache.
 pub struct TxnCollectionProvider<S: Store + 'static> {
     db: Arc<DB<S>>,
-    shared_txn: LentTxn<S>,
+    /// The transaction lent to it; whoever lent it keeps it.
+    shared_txn: std::sync::Weak<DbTxn<S>>,
 }
 
 impl<S: Store + 'static> TxnCollectionProvider<S> {
     /// Create a new transaction-aware collection provider.
-    pub fn new(db: Arc<DB<S>>, shared_txn: LentTxn<S>) -> Self {
-        Self { db, shared_txn }
+    pub fn new(db: Arc<DB<S>>, shared_txn: &LentTxn<S>) -> Self {
+        Self {
+            db,
+            shared_txn: Arc::downgrade(shared_txn),
+        }
+    }
+
+    fn txn(&self) -> QueryResult<LentTxn<S>> {
+        self.shared_txn
+            .upgrade()
+            .ok_or_else(|| QueryError::execution("transaction already consumed"))
     }
 }
 
@@ -94,7 +104,7 @@ impl<S: Store + 'static> CollectionProvider for TxnCollectionProvider<S> {
     async fn get_collection(&self, name: &str) -> QueryResult<Option<Arc<CollectionVersion>>> {
         {
             let systemstore = self
-                .shared_txn
+                .txn()?
                 .systemstore()
                 .map_err(|e| QueryError::execution(e.to_string()))?;
 
@@ -160,7 +170,7 @@ impl<S: Store + 'static> CollectionProvider for TxnCollectionProvider<S> {
 
         {
             let systemstore = self
-                .shared_txn
+                .txn()?
                 .systemstore()
                 .map_err(|e| QueryError::execution(e.to_string()))?;
 

@@ -254,7 +254,7 @@ impl<S: Store + 'static> storage::corekv::RetryAttemptFn for BatchRetryAttempt<S
             let fetcher = Arc::new(
                 crate::LensedDocFetcher::lent(
                     self.db.clone(),
-                    Arc::clone(&txn),
+                    &txn,
                     self.db.lens_store.clone(),
                     Default::default(),
                 )

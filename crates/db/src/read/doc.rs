@@ -45,13 +45,15 @@ impl<S: Store + 'static> DbDocFetcher<S> {
     ///
     /// Collections will be loaded lazily from the transaction's cache.
     pub fn new(txn: DbTxn<S>) -> Self {
-        Self::lent(Arc::new(txn))
+        Self {
+            txn: Held::new(Arc::new(txn)),
+        }
     }
 
-    /// A fetcher over a transaction other handles share too.
-    pub fn lent(txn: LentTxn<S>) -> Self {
+    /// A fetcher over a transaction lent to it: whoever lent it keeps it.
+    pub fn lent(txn: &LentTxn<S>) -> Self {
         Self {
-            txn: Held::new(txn),
+            txn: Held::borrowed(txn),
         }
     }
 
