@@ -136,14 +136,6 @@ impl DeferredAcpMutations {
         Ok(())
     }
 
-    fn with_request_bearer_token(
-        did: &Did,
-        token: Option<String>,
-    ) -> Option<RequestBearerTokenGuard> {
-        let token = token?;
-        Some(RequestBearerTokenGuard::new(did.as_str(), token))
-    }
-
     /// Return the projected registration state for a document within the current transaction.
     fn projected_registration(
         &self,
@@ -184,16 +176,21 @@ impl DeferredAcpMutations {
             "register_doc_object",
             Box::new(move || {
                 Box::pin(async move {
-                    let _request_token_guard =
-                        Self::with_request_bearer_token(&identity, request_bearer_token);
-                    acp.register_doc_object(&identity, &policy_id, &resource_name, &doc_id)
-                        .await
-                        .map_err(|e| {
-                            format!(
-                                "failed to register ACP document '{}' for policy '{}': {}",
-                                doc_id_for_log, policy_id_for_log, e
-                            )
-                        })
+                    defra_core::signing::scope_request_bearer_token(
+                        Some(identity.to_string()),
+                        request_bearer_token,
+                        async {
+                            acp.register_doc_object(&identity, &policy_id, &resource_name, &doc_id)
+                                .await
+                                .map_err(|e| {
+                                    format!(
+                                        "failed to register ACP document '{}' for policy '{}': {}",
+                                        doc_id_for_log, policy_id_for_log, e
+                                    )
+                                })
+                        },
+                    )
+                    .await
                 })
             }),
         )
@@ -223,23 +220,26 @@ impl DeferredAcpMutations {
             "unregister_doc_object",
             Box::new(move || {
                 Box::pin(async move {
-                    let _request_token_guard = caller_identity
-                        .as_ref()
-                        .and_then(|did| Self::with_request_bearer_token(did, request_bearer_token));
+                    defra_core::signing::scope_request_bearer_token(
+                        caller_identity.map(|did| did.to_string()),
+                        request_bearer_token,
+                        async {
+                            if let Err(err) = acp
+                                .unregister_doc_object(&policy_id, &resource_name, &doc_id)
+                                .await
+                            {
+                                tracing::warn!(
+                                    doc_id = %doc_id_for_log,
+                                    policy_id = %policy_id_for_log,
+                                    error = %err,
+                                    "Deferred ACP unregister failed after transaction commit"
+                                );
+                            }
 
-                    if let Err(err) = acp
-                        .unregister_doc_object(&policy_id, &resource_name, &doc_id)
-                        .await
-                    {
-                        tracing::warn!(
-                            doc_id = %doc_id_for_log,
-                            policy_id = %policy_id_for_log,
-                            error = %err,
-                            "Deferred ACP unregister failed after commit"
-                        );
-                    }
-
-                    Ok(())
+                            Ok(())
+                        },
+                    )
+                    .await
                 })
             }),
         )
@@ -275,32 +275,6 @@ impl DeferredAcpMutations {
                     );
                 }
             }
-        }
-    }
-}
-
-struct RequestBearerTokenGuard {
-    did: String,
-    previous_token: Option<String>,
-}
-
-impl RequestBearerTokenGuard {
-    fn new(did: &str, new_token: String) -> Self {
-        let previous_token = defra_core::signing::get_request_bearer_token(did);
-        defra_core::signing::set_request_bearer_token(did, new_token);
-        Self {
-            did: did.to_string(),
-            previous_token,
-        }
-    }
-}
-
-impl Drop for RequestBearerTokenGuard {
-    fn drop(&mut self) {
-        if let Some(previous_token) = self.previous_token.take() {
-            defra_core::signing::set_request_bearer_token(&self.did, previous_token);
-        } else {
-            defra_core::signing::clear_request_bearer_token(&self.did);
         }
     }
 }

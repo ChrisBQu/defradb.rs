@@ -400,7 +400,60 @@ pub fn set_request_bearer_token(did: &str, token: impl Into<String>) {
 
 /// Get the stored request bearer token for a specific DID.
 pub fn get_request_bearer_token(did: &str) -> Option<String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Ok(scoped) = TASK_REQUEST_BEARER_TOKEN.try_with(Clone::clone) {
+        return (scoped.0.as_deref() == Some(did))
+            .then_some(scoped.1)
+            .flatten();
+    }
+    #[cfg(target_arch = "wasm32")]
+    if let Some(scoped) = crate::wasm_task_local::try_with(&TASK_REQUEST_BEARER_TOKEN, Clone::clone)
+    {
+        return (scoped.0.as_deref() == Some(did))
+            .then_some(scoped.1)
+            .flatten();
+    }
     request_token_store().get(did)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+tokio::task_local! {
+    static TASK_REQUEST_BEARER_TOKEN: (Option<String>, Option<String>);
+}
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static TASK_REQUEST_BEARER_TOKEN: RefCell<Option<(Option<String>, Option<String>)>> = const { RefCell::new(None) };
+}
+
+/// Run a future with the request bearer token visible to ACP providers.
+///
+/// A scoped `None` token deliberately suppresses the legacy process-global
+/// fallback for that identity. This keeps concurrent requests for the same
+/// DID from observing or restoring one another's JWT.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn scope_request_bearer_token<F>(
+    did: Option<String>,
+    token: Option<String>,
+    future: F,
+) -> F::Output
+where
+    F: Future,
+{
+    TASK_REQUEST_BEARER_TOKEN.scope((did, token), future).await
+}
+
+/// Run a future with the request bearer token visible to ACP providers on WASM.
+#[cfg(target_arch = "wasm32")]
+pub async fn scope_request_bearer_token<F>(
+    did: Option<String>,
+    token: Option<String>,
+    future: F,
+) -> F::Output
+where
+    F: Future,
+{
+    crate::wasm_task_local::scope(&TASK_REQUEST_BEARER_TOKEN, (did, token), future).await
 }
 
 /// Remove the stored request bearer token for a specific DID.
@@ -412,6 +465,59 @@ pub fn clear_request_bearer_token(did: &str) {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[tokio::test]
+    async fn request_bearer_scope_isolated_across_same_did_and_restores_global_fallback() {
+        let did = "did:key:bearer-scope-test";
+        let other_did = "did:key:bearer-scope-other";
+        set_request_bearer_token(did, "legacy-global");
+        set_request_bearer_token(other_did, "other-global");
+
+        let first = scope_request_bearer_token(
+            Some(did.to_string()),
+            Some("request-one".to_string()),
+            async {
+                assert_eq!(
+                    get_request_bearer_token(did).as_deref(),
+                    Some("request-one")
+                );
+                tokio::task::yield_now().await;
+                assert_eq!(
+                    get_request_bearer_token(did).as_deref(),
+                    Some("request-one")
+                );
+            },
+        );
+        let second = scope_request_bearer_token(
+            Some(did.to_string()),
+            Some("request-two".to_string()),
+            async {
+                assert_eq!(
+                    get_request_bearer_token(did).as_deref(),
+                    Some("request-two")
+                );
+                tokio::task::yield_now().await;
+                assert_eq!(
+                    get_request_bearer_token(did).as_deref(),
+                    Some("request-two")
+                );
+            },
+        );
+        tokio::join!(first, second);
+
+        scope_request_bearer_token(Some(did.to_string()), None, async {
+            assert_eq!(get_request_bearer_token(did), None);
+            assert_eq!(get_request_bearer_token(other_did), None);
+        })
+        .await;
+
+        assert_eq!(
+            get_request_bearer_token(did).as_deref(),
+            Some("legacy-global")
+        );
+        clear_request_bearer_token(did);
+        clear_request_bearer_token(other_did);
+    }
 
     fn make_config(label: &str) -> SigningConfig {
         SigningConfig {

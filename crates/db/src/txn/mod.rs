@@ -45,32 +45,23 @@ enum CollectionGuard {
 
 impl PendingCollectionAcpRegistration {
     async fn run(self) -> Result<()> {
-        let previous_token = self.request_bearer_token.as_ref().map(|token| {
-            let previous = defra_core::signing::get_request_bearer_token(self.creator.as_str());
-            defra_core::signing::set_request_bearer_token(self.creator.as_str(), token.clone());
-            previous
-        });
-
-        let result: acp::Result<()> = async {
-            for schema in &self.schemas {
-                crate::collection::acp::register_collection_if_needed(
-                    self.acp.as_ref(),
-                    Some(&self.creator),
-                    schema,
-                )
-                .await?;
-            }
-            Ok(())
-        }
+        let creator = self.creator;
+        let result = defra_core::signing::scope_request_bearer_token(
+            Some(creator.to_string()),
+            self.request_bearer_token,
+            async {
+                for schema in &self.schemas {
+                    crate::collection::acp::register_collection_if_needed(
+                        self.acp.as_ref(),
+                        Some(&creator),
+                        schema,
+                    )
+                    .await?;
+                }
+                Ok::<_, acp::Error>(())
+            },
+        )
         .await;
-
-        if self.request_bearer_token.is_some() {
-            if let Some(Some(previous)) = previous_token {
-                defra_core::signing::set_request_bearer_token(self.creator.as_str(), previous);
-            } else {
-                defra_core::signing::clear_request_bearer_token(self.creator.as_str());
-            }
-        }
 
         result.map_err(Error::from)
     }

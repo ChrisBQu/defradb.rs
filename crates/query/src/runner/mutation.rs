@@ -1231,11 +1231,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
             }
         }
 
-        // Clear request bearer token after all ACP post-write work is queued or applied.
-        if let Some(ref identity_did) = caller_identity {
-            defra_core::signing::clear_request_bearer_token(identity_did.as_str());
-        }
-
         // Enrich results with _version data if requested.
         // _version is a nested select (Requestable::Select) that returns commit history.
         // This must happen after ACP blocks which also need _docID.

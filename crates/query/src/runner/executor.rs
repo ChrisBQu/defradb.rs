@@ -811,63 +811,55 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             })?)
         };
         let bearer = fields.get(5).and_then(Value::as_str).map(str::to_owned);
-        struct BearerGuard(String, Option<String>);
-        impl Drop for BearerGuard {
-            fn drop(&mut self) {
-                if let Some(value) = self.1.take() {
-                    defra_core::signing::set_request_bearer_token(&self.0, value);
-                } else {
-                    defra_core::signing::clear_request_bearer_token(&self.0);
-                }
-            }
-        }
-        let _bearer_guard = did.as_ref().map(|did| {
-            let previous = defra_core::signing::get_request_bearer_token(did.as_str());
-            match bearer {
-                Some(value) => defra_core::signing::set_request_bearer_token(did.as_str(), value),
-                None => defra_core::signing::clear_request_bearer_token(did.as_str()),
-            }
-            BearerGuard(did.to_string(), previous)
-        });
-
+        let bearer_did = did.as_ref().map(ToString::to_string);
         let acp_identity = did.map(Identity::from).unwrap_or(Identity::Anonymous);
-        let response = if field(1)? == "registered" {
-            let registered = self
-                .acp
-                .is_doc_registered(field(2)?, field(3)?, field(4)?)
-                .await
-                .map_err(|error| crate::error::QueryError::execution(error.to_string()))?;
-            serde_json::to_vec(&registered)
-        } else if field(4)? == "writer" {
-            let decision = self
-                .acp
-                .create_access_decision(&acp_identity, field(1)?, field(2)?, field(3)?, "writer")
-                .await
-                .map_err(|error| {
-                    crate::error::QueryError::permission_denied(format!(
-                        "create authorization failed: {error}"
-                    ))
-                })?;
-            serde_json::to_vec(&decision)
-        } else {
-            let permission = match field(1)? {
-                "read" => DocumentPermission::Read,
-                "update" => DocumentPermission::Update,
-                "delete" => DocumentPermission::Delete,
-                _ => {
-                    return Err(crate::error::QueryError::execution(
-                        "invalid prepared ACP permission",
-                    ))
-                }
-            };
-            let allowed = self
-                .acp
-                .check_doc_access(&acp_identity, permission, field(2)?, field(3)?, field(4)?)
-                .await
-                .map_err(|error| crate::error::QueryError::execution(error.to_string()))?;
-            serde_json::to_vec(&allowed)
-        }
-        .map_err(|error| crate::error::QueryError::execution(error.to_string()))?;
+        let response = defra_core::signing::scope_request_bearer_token(bearer_did, bearer, async {
+            let response = if field(1)? == "registered" {
+                let registered = self
+                    .acp
+                    .is_doc_registered(field(2)?, field(3)?, field(4)?)
+                    .await
+                    .map_err(|error| crate::error::QueryError::execution(error.to_string()))?;
+                serde_json::to_vec(&registered)
+            } else if field(4)? == "writer" {
+                let decision = self
+                    .acp
+                    .create_access_decision(
+                        &acp_identity,
+                        field(1)?,
+                        field(2)?,
+                        field(3)?,
+                        "writer",
+                    )
+                    .await
+                    .map_err(|error| {
+                        crate::error::QueryError::permission_denied(format!(
+                            "create authorization failed: {error}"
+                        ))
+                    })?;
+                serde_json::to_vec(&decision)
+            } else {
+                let permission = match field(1)? {
+                    "read" => DocumentPermission::Read,
+                    "update" => DocumentPermission::Update,
+                    "delete" => DocumentPermission::Delete,
+                    _ => {
+                        return Err(crate::error::QueryError::execution(
+                            "invalid prepared ACP permission",
+                        ))
+                    }
+                };
+                let allowed = self
+                    .acp
+                    .check_doc_access(&acp_identity, permission, field(2)?, field(3)?, field(4)?)
+                    .await
+                    .map_err(|error| crate::error::QueryError::execution(error.to_string()))?;
+                serde_json::to_vec(&allowed)
+            }
+            .map_err(|error| crate::error::QueryError::execution(error.to_string()))?;
+            Ok::<_, crate::error::QueryError>(response)
+        })
+        .await?;
         Ok(std::sync::Arc::from(response))
     }
 }
