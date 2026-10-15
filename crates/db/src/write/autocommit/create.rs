@@ -26,7 +26,7 @@ struct CreateRetryAttempt<S: Store> {
     doc: Arc<Document>,
     computed_blocks: ComputedBlocks,
     doc_short_id: u64,
-    sign_config: Option<defra_core::signing::SigningConfig>,
+    context: RequestContext,
     acp_registration: Option<AcpRegistration>,
     prepared_inputs: Option<query::prepared::PreparedInputMemo>,
 }
@@ -56,7 +56,7 @@ struct CreateManyRetryAttempt<S: Store> {
     docs: Vec<Document>,
     identities: Vec<DocStorageIdentity>,
     computed: Vec<ComputedBlocks>,
-    signing_config: Option<defra_core::signing::SigningConfig>,
+    context: RequestContext,
     acp_registration: Option<AcpRegistration>,
     prepared_inputs: Option<query::prepared::PreparedInputMemo>,
 }
@@ -253,8 +253,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         }
 
         let schema_version_id = collection.version_id().to_string();
-        let enc_config = context.encryption();
-        let sign_config = context.signing().cloned();
         let acp_registration = match (
             collection.schema().policy.as_ref(),
             defra_core::signing::get_broadcast_creator_did(),
@@ -289,8 +287,8 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     &doc,
                     &schema_version_id,
                     identity,
-                    enc_config,
-                    sign_config.as_ref(),
+                    context.encryption(),
+                    context.signing(),
                     self.prepared_inputs.as_ref(),
                 )
             })
@@ -308,7 +306,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             doc: Arc::clone(&doc),
             computed_blocks,
             doc_short_id,
-            sign_config,
+            context: context.clone(),
             acp_registration,
             prepared_inputs: Some(self.prepared_inputs.clone().unwrap_or_default()),
         };
@@ -396,14 +394,19 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 .await
                 .map_err(|error| query::error::QueryError::execution(error.to_string()))?;
 
-            insert_computed_blocks(&blockstore, &headstore, &attempt.computed_blocks)
-                .await
-                .map_err(|error| {
-                    query::error::QueryError::execution(format!(
-                        "failed to write document blocks for create on collection {}: {error}",
-                        attempt.collection_name
-                    ))
-                })?;
+            insert_computed_blocks(
+                &blockstore,
+                &headstore,
+                &attempt.computed_blocks,
+                attempt.context.batch_session(),
+            )
+            .await
+            .map_err(|error| {
+                query::error::QueryError::execution(format!(
+                    "failed to write document blocks for create on collection {}: {error}",
+                    attempt.collection_name
+                ))
+            })?;
             let block_result = &attempt.computed_blocks.block_result;
             let doc_id = register_created_doc(
                 self.db.document_acp(),
@@ -436,7 +439,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 &headstore,
                 block_result.cid,
                 attempt.doc_short_id,
-                attempt.sign_config.as_ref(),
+                &attempt.context,
                 attempt.prepared_inputs.as_ref(),
             )
             .await?;
@@ -540,8 +543,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
         let short_id = collection.resolved_root_id();
         let schema_version_id = collection.version_id().to_string();
-        let sign_config = context.signing().cloned();
-        let enc_config = context.encryption().cloned();
 
         // === Phase 1: Prepare documents (sequential — embeddings are async/external) ===
         let mut prepared_docs: Vec<Document> = Vec::with_capacity(docs.len());
@@ -596,7 +597,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     doc,
                     identity,
                     None,
-                    enc_config.as_ref(),
+                    context.encryption(),
                 )
                 .await?;
             }
@@ -614,16 +615,15 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     let doc_clone = doc.clone();
                     let schema = schema_version_id.clone();
                     let identity = *identity;
-                    let enc = enc_config.clone();
-                    let sign = sign_config.clone();
+                    let context = context.clone();
                     let memo = self.prepared_inputs.clone();
                     tokio::task::spawn_blocking(move || {
                         compute_document_blocks_with_inputs(
                             &doc_clone,
                             &schema,
                             identity,
-                            enc.as_ref(),
-                            sign.as_ref(),
+                            context.encryption(),
+                            context.signing(),
                             memo.as_ref(),
                         )
                     })
@@ -664,8 +664,8 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     doc,
                     &schema_version_id,
                     *identity,
-                    enc_config.as_ref(),
-                    sign_config.as_ref(),
+                    context.encryption(),
+                    context.signing(),
                     self.prepared_inputs.as_ref(),
                 )
                 .map_err(|error| error.into_query_error_in("failed to compute document blocks"))?;
@@ -704,7 +704,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             docs: prepared_docs,
             identities,
             computed: computed_blocks,
-            signing_config: sign_config,
+            context: context.clone(),
             acp_registration,
             prepared_inputs: Some(self.prepared_inputs.clone().unwrap_or_default()),
         };
@@ -804,13 +804,18 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                         )
                         .await
                         .map_err(|error| query::error::QueryError::execution(error.to_string()))?;
-                    insert_computed_blocks(&blockstore, &headstore, computed)
-                        .await
-                        .map_err(|error| {
-                            query::error::QueryError::execution(format!(
-                                "failed to insert precomputed blocks: {error}"
-                            ))
-                        })?;
+                    insert_computed_blocks(
+                        &blockstore,
+                        &headstore,
+                        computed,
+                        attempt.context.batch_session(),
+                    )
+                    .await
+                    .map_err(|error| {
+                        query::error::QueryError::execution(format!(
+                            "failed to insert precomputed blocks: {error}"
+                        ))
+                    })?;
                     let doc_id = register_created_doc(
                         self.db.document_acp(),
                         &systemstore,
@@ -837,7 +842,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                         &headstore,
                         computed.block_result.cid,
                         identity.doc_short_id,
-                        attempt.signing_config.as_ref(),
+                        &attempt.context,
                         attempt.prepared_inputs.as_ref(),
                     )
                     .await?;

@@ -1,10 +1,10 @@
 //! Query execution with the request's context.
 //!
-//! The signing config and the DAC bypass travel in the request's
-//! `RequestContext`. The acting identity and the batch signing session are
-//! still thread-locals, and because tokio's work-stealing scheduler can move
-//! tasks between OS threads at `.await` points, execution that needs them is
-//! pinned to a single thread using `spawn_blocking` + `Handle::block_on`.
+//! The signing config, the batch signing session and the DAC bypass travel in
+//! the request's `RequestContext`. The acting identity is still a
+//! thread-local, and because tokio's work-stealing scheduler can move tasks
+//! between OS threads at `.await` points, execution that needs it is pinned to
+//! a single thread using `spawn_blocking` + `Handle::block_on`.
 
 use std::sync::Arc;
 
@@ -26,11 +26,12 @@ pub async fn execute_with_context(
     request.context = request
         .context
         .with_dac_bypass(resolve_dac_bypass(state, identity).await)
-        .with_signing(signing_config);
+        .with_signing(signing_config)
+        .with_batch_session(batch_session_key);
 
     // Fast path: when there is nothing to put on the thread-locals, skip
     // spawn_blocking entirely.
-    if batch_session_key.is_none() && state.nac.is_none() {
+    if state.nac.is_none() {
         return execute_prepared_request(state, request).await;
     }
     let executor = state.executor.clone();
@@ -44,7 +45,6 @@ pub async fn execute_with_context(
     match tokio::task::spawn_blocking(move || {
         let _identity_guard =
             defra_core::current_identity::scoped_current_identity(acting_did.clone());
-        defra_core::batch_signing::set_batch_session_key(batch_session_key);
         handle.block_on(defra_core::signing::scope_request_bearer_token(
             acting_did,
             bearer,
@@ -124,10 +124,11 @@ pub async fn execute_in_txn_with_context(
     request.context = request
         .context
         .with_dac_bypass(resolve_dac_bypass(state, identity).await)
-        .with_signing(signing_config);
+        .with_signing(signing_config)
+        .with_batch_session(batch_session_key);
 
     // Fast path: see the note in `execute_with_context`.
-    if batch_session_key.is_none() && state.nac.is_none() {
+    if state.nac.is_none() {
         return state.executor.execute_in_txn(request, &txn_handle).await;
     }
 
@@ -142,7 +143,6 @@ pub async fn execute_in_txn_with_context(
     match tokio::task::spawn_blocking(move || {
         let _identity_guard =
             defra_core::current_identity::scoped_current_identity(acting_did.clone());
-        defra_core::batch_signing::set_batch_session_key(batch_session_key);
         handle.block_on(defra_core::signing::scope_request_bearer_token(
             acting_did,
             bearer,
@@ -172,7 +172,8 @@ pub async fn execute_with_resolved_context(
     request.context = request
         .context
         .with_dac_bypass(dac_bypass)
-        .with_signing(signing_config);
+        .with_signing(signing_config)
+        .with_batch_session(batch_session_key);
 
     let bearer = acting_did
         .as_deref()
@@ -180,7 +181,6 @@ pub async fn execute_with_resolved_context(
     match tokio::task::spawn_blocking(move || {
         let _identity_guard =
             defra_core::current_identity::scoped_current_identity(acting_did.clone());
-        defra_core::batch_signing::set_batch_session_key(batch_session_key);
         handle.block_on(defra_core::signing::scope_request_bearer_token(
             acting_did,
             bearer,

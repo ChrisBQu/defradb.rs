@@ -89,11 +89,11 @@ impl QueryExecutor for TestExecution {
                 for _ in 0..3 {
                     let signing_config = request.context.signing();
                     let current_identity = defra_core::current_identity::get_current_identity();
-                    let batch_session_key = defra_core::batch_signing::get_batch_session_key();
+                    let batch_session_key = request.context.batch_session();
                     if signing_config.map(|config| config.public_key_hex.as_str())
                         != Some(expected_public_key_hex.as_str())
                         || current_identity.as_deref() != Some(expected_did.as_str())
-                        || batch_session_key.as_deref() != Some(expected_public_key_hex.as_str())
+                        || batch_session_key != Some(expected_public_key_hex.as_str())
                     {
                         return query::QueryResponse::error(
                             "signed query context did not survive an await boundary",

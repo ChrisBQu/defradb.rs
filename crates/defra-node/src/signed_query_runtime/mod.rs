@@ -19,12 +19,14 @@ pub(super) async fn execute_with_signing_context(
     signed_query_permit: SignedQueryPermit,
 ) -> QueryResponse {
     let spawn_handle = runtime_handle.clone();
-    let batch_session_key = Some(signing_config.public_key_hex.clone());
-    request.context = request.context.with_signing(Some(signing_config));
+    let batch_session = Some(signing_config.public_key_hex.clone());
+    request.context = request
+        .context
+        .with_signing(Some(signing_config))
+        .with_batch_session(batch_session);
 
     let run_query = move || {
         let _signed_query_permit = signed_query_permit;
-        let _signing_guard = ThreadSigningContextGuard::install(batch_session_key);
         let _id_guard = defra_core::current_identity::scoped_current_identity(Some(node_did));
         runtime_handle.block_on(async {
             match txn_handle {
@@ -48,26 +50,6 @@ pub(super) fn unavailable_node_signer_response(node_did: &str) -> QueryResponse 
     QueryResponse::error(format!(
         "configured node signing identity {node_did} is unavailable"
     ))
-}
-
-struct ThreadSigningContextGuard {
-    previous_batch_session_key: Option<String>,
-}
-
-impl ThreadSigningContextGuard {
-    fn install(batch_session_key: Option<String>) -> Self {
-        let previous_batch_session_key = defra_core::batch_signing::get_batch_session_key();
-        defra_core::batch_signing::set_batch_session_key(batch_session_key);
-        Self {
-            previous_batch_session_key,
-        }
-    }
-}
-
-impl Drop for ThreadSigningContextGuard {
-    fn drop(&mut self) {
-        defra_core::batch_signing::set_batch_session_key(self.previous_batch_session_key.take());
-    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]

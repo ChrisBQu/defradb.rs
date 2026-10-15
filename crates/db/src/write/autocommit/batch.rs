@@ -412,6 +412,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 None,
                 enc_config,
                 sign_config,
+                context.batch_session(),
                 self.db.kms().as_ref(),
                 self.prepared_inputs.as_ref(),
                 None,
@@ -446,7 +447,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 &headstore,
                 block_result.cid,
                 doc_short_id,
-                sign_config,
+                context,
                 self.prepared_inputs.as_ref(),
             )
             .await?;
@@ -568,6 +569,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 Some(&modified_fields),
                 enc_config,
                 sign_config,
+                context.batch_session(),
                 self.db.kms().as_ref(),
                 self.prepared_inputs.as_ref(),
                 Some(&heads),
@@ -594,7 +596,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 &headstore,
                 block_result.cid,
                 doc_short_id,
-                sign_config,
+                context,
                 self.prepared_inputs.as_ref(),
             )
             .await?;
@@ -682,6 +684,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 doc_short_id,
                 schema_version_id,
                 sign_config,
+                context.batch_session(),
                 self.prepared_inputs.as_ref(),
             )
             .await
@@ -709,7 +712,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 &headstore,
                 composite_cid,
                 doc_short_id,
-                sign_config,
+                context,
                 self.prepared_inputs.as_ref(),
             )
             .await?;

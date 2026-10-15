@@ -18,8 +18,7 @@ struct UpdateRetryAttempt<S: Store> {
     modified_fields: rapidhash::RapidHashSet<String>,
     input_doc_id: DocID,
     canonical_doc_id: String,
-    signing_config: Option<defra_core::signing::SigningConfig>,
-    encryption_config: Option<defra_core::encryption::EncryptionConfig>,
+    context: RequestContext,
     prepared_inputs: Option<query::prepared::PreparedInputMemo>,
 }
 
@@ -177,8 +176,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             modified_fields,
             input_doc_id,
             canonical_doc_id,
-            signing_config: context.signing().cloned(),
-            encryption_config: context.encryption().cloned(),
+            context: context.clone(),
             prepared_inputs: Some(self.prepared_inputs.clone().unwrap_or_default()),
         };
         let result = self
@@ -379,8 +377,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     collection.version_id(),
                     DocStorageIdentity::new(collection.resolved_root_id(), doc_short_id),
                     Some(&modified_fields),
-                    attempt.encryption_config.as_ref(),
-                    attempt.signing_config.as_ref(),
+                    attempt.context.encryption(),
+                    attempt.context.signing(),
+                    attempt.context.batch_session(),
                     self.db.kms().as_ref(),
                     attempt.prepared_inputs.as_ref(),
                     Some(&heads),
@@ -403,7 +402,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     &headstore,
                     block_result.cid,
                     doc_short_id,
-                    attempt.signing_config.as_ref(),
+                    &attempt.context,
                     attempt.prepared_inputs.as_ref(),
                 )
                 .await?;

@@ -10,7 +10,7 @@ struct DeleteRetryAttempt<S: Store> {
     collection_name: String,
     collection: Collection,
     doc_id: DocID,
-    signing_config: Option<defra_core::signing::SigningConfig>,
+    context: RequestContext,
     prepared_inputs: Option<query::prepared::PreparedInputMemo>,
 }
 
@@ -19,7 +19,7 @@ struct DeleteManyRetryAttempt<S: Store> {
     collection_name: String,
     collection: Collection,
     doc_ids: Vec<DocID>,
-    signing_config: Option<defra_core::signing::SigningConfig>,
+    context: RequestContext,
     prepared_inputs: Option<query::prepared::PreparedInputMemo>,
 }
 
@@ -135,7 +135,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             collection_name: collection_name.to_string(),
             collection: collection.clone(),
             doc_id: doc_id.clone(),
-            signing_config: context.signing().cloned(),
+            context: context.clone(),
             prepared_inputs: Some(self.prepared_inputs.clone().unwrap_or_default()),
         };
         let result = self
@@ -242,7 +242,8 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 &doc_id_string,
                 doc_short_id,
                 collection.version_id(),
-                attempt.signing_config.as_ref(),
+                attempt.context.signing(),
+                attempt.context.batch_session(),
                 attempt.prepared_inputs.as_ref(),
             )
             .await
@@ -262,7 +263,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 &headstore,
                 block_result.cid,
                 doc_short_id,
-                attempt.signing_config.as_ref(),
+                &attempt.context,
                 attempt.prepared_inputs.as_ref(),
             )
             .await?;
@@ -359,7 +360,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             collection_name: collection_name.to_string(),
             collection: collection.clone(),
             doc_ids: doc_ids.to_vec(),
-            signing_config: context.signing().cloned(),
+            context: context.clone(),
             prepared_inputs: Some(self.prepared_inputs.clone().unwrap_or_default()),
         };
         let result = self
@@ -466,7 +467,8 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     &canonical_id.to_string(),
                     doc_short_id,
                     collection.version_id(),
-                    attempt.signing_config.as_ref(),
+                    attempt.context.signing(),
+                    attempt.context.batch_session(),
                     attempt.prepared_inputs.as_ref(),
                 )
                 .await
@@ -486,7 +488,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     &headstore,
                     block_result.cid,
                     doc_short_id,
-                    attempt.signing_config.as_ref(),
+                    &attempt.context,
                     attempt.prepared_inputs.as_ref(),
                 )
                 .await?;

@@ -14,7 +14,7 @@ pub(crate) async fn write_branchable_collection_block<S: storage::corekv::Store 
     headstore: &NamespaceView,
     doc_cid: Cid,
     _doc_short_id: u64,
-    signing_config: Option<&defra_core::signing::SigningConfig>,
+    context: &RequestContext,
     prepared_inputs: Option<&query::prepared::PreparedInputMemo>,
 ) -> query::error::Result<Option<(Cid, Bytes)>> {
     if !collection.schema().is_branchable {
@@ -27,7 +27,8 @@ pub(crate) async fn write_branchable_collection_block<S: storage::corekv::Store 
         collection.resolved_root_id(),
         collection.version_id(),
         doc_cid,
-        signing_config,
+        context.signing(),
+        context.batch_session(),
         prepared_inputs,
     )
     .await

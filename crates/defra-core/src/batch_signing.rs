@@ -1,10 +1,10 @@
 //! Batch CID collection and Merkle root computation for batch signing.
 //!
-//! During block creation, individual CIDs are collected into a session.
-//! After all documents in a batch are created, the collected CIDs are
-//! used to compute a Merkle root which is then signed as a single batch.
+//! During block creation, individual CIDs are collected into a session, the
+//! one a request's [`RequestContext`](crate::RequestContext) names. After all
+//! documents in a batch are created, the collected CIDs are used to compute a
+//! Merkle root which is then signed as a single batch.
 
-use std::cell::RefCell;
 use std::sync::{Arc, OnceLock};
 
 use cid::Cid;
@@ -96,26 +96,6 @@ pub fn batch_take_cids(session_key: &str) -> Option<Vec<Cid>> {
 }
 
 // ---------------------------------------------------------------------------
-// Thread-local session key  (same pattern as CURRENT_SIGNING_CONFIG)
-// ---------------------------------------------------------------------------
-
-thread_local! {
-    static BATCH_SESSION_KEY: RefCell<Option<String>> = const { RefCell::new(None) };
-}
-
-/// Set the batch session key for the current thread.
-pub fn set_batch_session_key(key: Option<String>) {
-    BATCH_SESSION_KEY.with(|k| {
-        *k.borrow_mut() = key;
-    });
-}
-
-/// Get the batch session key for the current thread.
-pub fn get_batch_session_key() -> Option<String> {
-    BATCH_SESSION_KEY.with(|k| k.borrow().clone())
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -184,13 +164,5 @@ mod tests {
         let c = make_cid(b"stray");
         batch_collect_cid(key, c);
         assert!(batch_take_cids(key).is_none());
-    }
-
-    #[test]
-    fn thread_local_session_key() {
-        set_batch_session_key(Some("my-key".to_string()));
-        assert_eq!(get_batch_session_key(), Some("my-key".to_string()));
-        set_batch_session_key(None);
-        assert_eq!(get_batch_session_key(), None);
     }
 }

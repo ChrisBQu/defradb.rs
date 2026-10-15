@@ -29,6 +29,7 @@ struct Fields {
     dac_bypass: bool,
     encryption: Option<EncryptionConfig>,
     signing: Option<SigningConfig>,
+    batch_session: Option<String>,
 }
 
 impl RequestContext {
@@ -73,6 +74,19 @@ impl RequestContext {
         Arc::make_mut(&mut self.0).signing = signing;
         self
     }
+
+    /// The batch signing session the CIDs of the blocks this request commits
+    /// are collected into (see [`crate::batch_signing`]), if it runs in one.
+    pub fn batch_session(&self) -> Option<&str> {
+        self.0.batch_session.as_deref()
+    }
+
+    /// This context with the batch signing session set to `session`.
+    #[must_use]
+    pub fn with_batch_session(mut self, session: Option<String>) -> Self {
+        Arc::make_mut(&mut self.0).batch_session = session;
+        self
+    }
 }
 
 impl fmt::Debug for RequestContext {
@@ -84,6 +98,7 @@ impl fmt::Debug for RequestContext {
                 "signing",
                 &self.0.signing.as_ref().map(|signing| signing.key_type),
             )
+            .field("batch_session", &self.0.batch_session)
             .finish()
     }
 }
@@ -98,6 +113,7 @@ mod tests {
         assert!(!context.dac_bypass());
         assert!(context.encryption().is_none());
         assert!(context.signing().is_none());
+        assert!(context.batch_session().is_none());
     }
 
     #[test]

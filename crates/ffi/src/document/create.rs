@@ -99,8 +99,9 @@ pub unsafe extern "C" fn collection_create(
             signing_enabled,
         );
         let session_key = batch_session.or_else(|| signing.as_ref().map(|s| s.public_key_hex.clone()));
-        defra_core::batch_signing::set_batch_session_key(session_key);
-        let context = defra_core::RequestContext::default().with_signing(signing);
+        let context = defra_core::RequestContext::default()
+            .with_signing(signing)
+            .with_batch_session(session_key);
 
         // Bind the caller's identity into the ambient context so DB-layer NAC
         // checks resolve the actual caller instead of the wildcard. The body
