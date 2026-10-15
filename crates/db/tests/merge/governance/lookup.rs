@@ -63,31 +63,19 @@ async fn immutable_fields_reads_one_document_not_the_collection() {
 type Lookups = Vec<(String, Result<Vec<String>, String>)>;
 
 /// Defers a grant held by "gated" until the composite `gate` is held, and
-/// on a note looks every probe value up on each of `fields`: one after
-/// another, or all at once when `joined`.
+/// on a note looks every probe value up on each of `fields`.
 struct Probe {
     gate: Mutex<Cid>,
     fields: &'static [&'static str],
-    joined: bool,
     values: Mutex<Vec<String>>,
     found: Mutex<Lookups>,
 }
 
 impl Probe {
     fn new(fields: &'static [&'static str]) -> Arc<Self> {
-        Self::with(fields, false)
-    }
-
-    /// A probe whose lookups all run concurrently through the one view.
-    fn joined(fields: &'static [&'static str]) -> Arc<Self> {
-        Self::with(fields, true)
-    }
-
-    fn with(fields: &'static [&'static str], joined: bool) -> Arc<Self> {
         Arc::new(Self {
             gate: Mutex::new(Cid::default()),
             fields,
-            joined,
             values: Mutex::new(Vec::new()),
             found: Mutex::new(Vec::new()),
         })
@@ -126,46 +114,22 @@ impl MergeValidator for Probe {
             return Ok(MergeVerdict::Accept);
         }
         let values = self.values.lock().unwrap().clone();
-        let probes: Vec<(&str, &str)> = values
-            .iter()
-            .flat_map(|value| {
-                self.fields
-                    .iter()
-                    .map(move |field| (*field, value.as_str()))
-            })
-            .collect();
-        let found = if self.joined {
-            futures::future::join_all(
-                probes
-                    .iter()
-                    .map(|(field, value)| find_grants(view, field, value)),
-            )
-            .await
-        } else {
-            let mut found = Vec::with_capacity(probes.len());
-            for (field, value) in &probes {
-                found.push(find_grants(view, field, value).await);
+        for value in values {
+            for field in self.fields {
+                let mut found = view
+                    .find_documents("Grants", field, &NormalValue::String(value.clone()))
+                    .await;
+                if let Ok(ids) = &mut found {
+                    ids.sort();
+                }
+                self.found
+                    .lock()
+                    .unwrap()
+                    .push((format!("{field}={value}"), found));
             }
-            found
-        };
-        self.found.lock().unwrap().extend(found);
+        }
         Ok(MergeVerdict::Accept)
     }
-}
-
-/// The Grants whose `field` is `value`, sorted, keyed `field=value`.
-async fn find_grants(
-    view: &dyn MergeView,
-    field: &str,
-    value: &str,
-) -> (String, Result<Vec<String>, String>) {
-    let mut found = view
-        .find_documents("Grants", field, &NormalValue::String(value.to_string()))
-        .await;
-    if let Ok(ids) = &mut found {
-        ids.sort();
-    }
-    (format!("{field}={value}"), found)
 }
 
 impl Node {
@@ -364,12 +328,70 @@ async fn find_documents_still_finds_a_deleted_document_on_both_paths() {
     assert!(ids("writer=absent").is_empty());
 }
 
+/// On a note, looks every value up on each of `fields`, all at once through
+/// the one view.
+struct JoinedProbe {
+    fields: &'static [&'static str],
+    values: Mutex<Vec<String>>,
+    found: Mutex<Lookups>,
+}
+
+impl JoinedProbe {
+    fn new(fields: &'static [&'static str]) -> Arc<Self> {
+        Arc::new(Self {
+            fields,
+            values: Mutex::new(Vec::new()),
+            found: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// What a note's verdict finds for `values`, by `field=value`.
+    async fn lookups(&self, node: &Node, values: &[&str]) -> Lookups {
+        *self.values.lock().unwrap() = values.iter().map(|value| value.to_string()).collect();
+        let writer = signer();
+        let note = genesis("col-notes", "grant", &values.join(","), &writer);
+        assert_eq!(note.merge(node, &writer.did).await, MergeOutcome::Merged);
+        self.found.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl MergeValidator for JoinedProbe {
+    async fn validate(
+        &self,
+        candidate: &MergeCandidate<'_>,
+        view: &dyn MergeView,
+    ) -> Result<MergeVerdict, String> {
+        if candidate.collection.name == "Grants" {
+            return Ok(MergeVerdict::Accept);
+        }
+        let values = self.values.lock().unwrap().clone();
+        let probes: Vec<(&str, String)> = values
+            .iter()
+            .flat_map(|value| self.fields.iter().map(move |field| (*field, value.clone())))
+            .collect();
+        let found =
+            futures::future::join_all(probes.into_iter().map(|(field, value)| async move {
+                let mut found = view
+                    .find_documents("Grants", field, &NormalValue::String(value.clone()))
+                    .await;
+                if let Ok(ids) = &mut found {
+                    ids.sort();
+                }
+                (format!("{field}={value}"), found)
+            }))
+            .await;
+        *self.found.lock().unwrap() = found;
+        Ok(MergeVerdict::Accept)
+    }
+}
+
 /// A validator may run its reads concurrently through one view: they open one
 /// snapshot between them, fill the per-verdict index and deleted-row memos
 /// at once, and answer exactly as the same reads made one after another.
 #[tokio::test]
 async fn concurrent_lookups_through_one_view_answer_as_sequential_ones() {
-    let probe = Probe::joined(&["writer", "twin"]);
+    let probe = JoinedProbe::new(&["writer", "twin"]);
     let node = Node::with_indexed_grants(probe.clone()).await;
     let peer = signer();
     let forked = grant("shared", "a", &peer);
