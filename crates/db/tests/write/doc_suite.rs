@@ -1092,7 +1092,7 @@ async fn transactional_broadcasts_and_releases_follow_commit_receipts() {
 
     let entered = Arc::new(regolith::sync::Event::new());
     let gate = Arc::new(regolith::sync::Event::new());
-    let mut first_txn = db.new_txn(false).await.expect("first txn");
+    let first_txn = db.new_txn(false).await.expect("first txn");
     let (held_entered, held_gate) = (Arc::clone(&entered), Arc::clone(&gate));
     first_txn
         .on_commit(OnCommit::Async(Box::new(move || {

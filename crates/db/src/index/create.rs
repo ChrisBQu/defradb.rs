@@ -63,7 +63,7 @@ impl<S: Store> DB<S> {
         let collection = self.require_collection(collection_name)?;
         let collection_id = collection.collection_id().to_string();
 
-        let mut txn = self.new_txn(false).await?;
+        let txn = self.new_txn(false).await?;
         txn.validate_collection_for_write(&collection).await?;
         let (index, lease, committed_schema) = {
             let datastore = txn.datastore()?;

@@ -327,7 +327,7 @@ pub async fn get_collection_with_lazy_load<S: Store + 'static>(
         let db_txn = txn_guard
             .as_ref()
             .ok_or_else(|| query::error::QueryError::execution("transaction already consumed"))?;
-        let collection_opt = db_txn.collection_cache().get(collection_name).cloned();
+        let collection_opt = db_txn.cached_collection(collection_name);
         let shared = collection_opt
             .is_none()
             .then(|| db_txn.shared_collection(collection_name))

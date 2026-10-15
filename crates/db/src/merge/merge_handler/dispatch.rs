@@ -52,7 +52,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> MergeRetryAttempt<
             .begin_attempt_io()
             .map_err(|error| MergeError::Database(crate::error::Error::Storage(error)))?;
         let basic_txn = datastore::BasicTxn::from_retry_attempt_io(io, 0);
-        let mut txn = self.handler.db.new_db_txn(basic_txn);
+        let txn = self.handler.db.new_db_txn(basic_txn);
         let datastore = txn.datastore()?;
         let headstore = txn.headstore()?;
         let systemstore = txn.systemstore()?;
