@@ -120,7 +120,12 @@ pub trait RetryTxn: MaybeSendSync + private::Sealed {
     /// Why the previous commit lost, without exposing user key bytes.
     fn previous_conflict(&self) -> Option<super::errors::TransactionConflict>;
 
+    /// A plain validated read, as `Reader::get`: checked at commit when the
+    /// attempt writes, so an identical rewrite of the key is not a conflict
+    /// and an attempt that ends up writing nothing commits at its snapshot.
+    /// Projected and unvalidated reads go through `begin_attempt_io`.
     async fn get(&self, key: &[u8]) -> Result<Option<Bytes>>;
+    /// Whether `key` holds a value, read as `get` reads it.
     async fn has(&self, key: &[u8]) -> Result<bool>;
     async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()>;
     async fn delete(&mut self, key: &[u8]) -> Result<()>;
@@ -150,12 +155,31 @@ pub trait RetryTxn: MaybeSendSync + private::Sealed {
 
 /// Success callbacks collected by datastore's attempt facade. The store runs
 /// them only after the winning native commit has produced its receipt.
+///
+/// Each kind is a FIFO queue owned by the bundle: a queue is what makes the
+/// bundle `Sync` without a lock (the attempt view holding it is shared by
+/// reference across awaits), and the queues are built on the first
+/// registration, so an attempt that registers nothing allocates nothing.
 #[derive(Default)]
 pub struct RetryCallbacks {
-    sync: Vec<Arc<Mutex<Option<TxnCallback>>>>,
-    asynchronous: Vec<Arc<Mutex<Option<AsyncTxnCallback>>>>,
-    ordered: Vec<Arc<Mutex<Option<OrderedRetryCallback>>>>,
-    ordered_async: Vec<Arc<Mutex<Option<AsyncOrderedRetryCallback>>>>,
+    queues: Option<Box<RetryQueues>>,
+}
+
+#[derive(Default)]
+struct RetryQueues {
+    sync: SegQueue<TxnCallback>,
+    asynchronous: SegQueue<AsyncTxnCallback>,
+    ordered: SegQueue<OrderedRetryCallback>,
+    ordered_async: SegQueue<AsyncOrderedRetryCallback>,
+}
+
+/// The callbacks of a [`RetryCallbacks`] bundle, by kind, in registration
+/// order.
+pub struct RetryCallbackParts {
+    pub sync: Vec<TxnCallback>,
+    pub asynchronous: Vec<AsyncTxnCallback>,
+    pub ordered: Vec<OrderedRetryCallback>,
+    pub ordered_async: Vec<AsyncOrderedRetryCallback>,
 }
 
 /// Lengths of retry-success callback queues at a transaction savepoint.
@@ -167,7 +191,8 @@ pub struct RetryCallbackCounts {
     ordered_async: usize,
 }
 
-use std::sync::{Arc, Mutex};
+use regolith::sync::SegQueue;
+use std::sync::Arc;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub type OrderedRetryCallback = Box<dyn FnOnce() + Send + 'static>;
@@ -183,67 +208,125 @@ pub type AsyncOrderedRetryCallback = Box<
 pub type AsyncOrderedRetryCallback =
     Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = std::result::Result<(), String>>>> + 'static>;
 
-#[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
+/// Keep the first `keep` entries of `queue`, in order, and drop the rest.
+pub(crate) fn truncate_queue<T>(queue: &SegQueue<T>, keep: usize)
+where
+    T: 'static,
+{
+    let mut retained = Vec::with_capacity(keep.min(queue.len()));
+    for _ in 0..keep {
+        match queue.pop() {
+            Some(entry) => retained.push(entry),
+            None => break,
+        }
+    }
+    while queue.pop().is_some() {}
+    for entry in retained {
+        queue.push(entry);
+    }
+}
+
+fn drain_queue<T>(queue: SegQueue<T>) -> Vec<T>
+where
+    T: 'static,
+{
+    let mut drained = Vec::with_capacity(queue.len());
+    while let Some(entry) = queue.pop() {
+        drained.push(entry);
+    }
+    drained
+}
+
 impl RetryCallbacks {
+    fn queues(&mut self) -> &RetryQueues {
+        self.queues.get_or_insert_with(Box::default)
+    }
+
     pub fn counts(&self) -> RetryCallbackCounts {
+        let Some(queues) = &self.queues else {
+            return RetryCallbackCounts::default();
+        };
         RetryCallbackCounts {
-            sync: self.sync.len(),
-            asynchronous: self.asynchronous.len(),
-            ordered: self.ordered.len(),
-            ordered_async: self.ordered_async.len(),
+            sync: queues.sync.len(),
+            asynchronous: queues.asynchronous.len(),
+            ordered: queues.ordered.len(),
+            ordered_async: queues.ordered_async.len(),
         }
     }
 
     pub fn truncate(&mut self, counts: RetryCallbackCounts) {
-        self.sync.truncate(counts.sync);
-        self.asynchronous.truncate(counts.asynchronous);
-        self.ordered.truncate(counts.ordered);
-        self.ordered_async.truncate(counts.ordered_async);
+        let Some(queues) = &self.queues else {
+            return;
+        };
+        truncate_queue(&queues.sync, counts.sync);
+        truncate_queue(&queues.asynchronous, counts.asynchronous);
+        truncate_queue(&queues.ordered, counts.ordered);
+        truncate_queue(&queues.ordered_async, counts.ordered_async);
     }
 
     pub fn has_ordered_callbacks(&self) -> bool {
-        !self.ordered.is_empty() || !self.ordered_async.is_empty()
+        self.queues
+            .as_ref()
+            .is_some_and(|queues| !queues.ordered.is_empty() || !queues.ordered_async.is_empty())
     }
 
-    pub fn append(&mut self, mut other: Self) {
-        self.sync.append(&mut other.sync);
-        self.asynchronous.append(&mut other.asynchronous);
-        self.ordered.append(&mut other.ordered);
-        self.ordered_async.append(&mut other.ordered_async);
+    pub fn append(&mut self, other: Self) {
+        let Some(other) = other.queues else {
+            return;
+        };
+        let queues = self.queues();
+        for entry in drain_queue(other.sync) {
+            queues.sync.push(entry);
+        }
+        for entry in drain_queue(other.asynchronous) {
+            queues.asynchronous.push(entry);
+        }
+        for entry in drain_queue(other.ordered) {
+            queues.ordered.push(entry);
+        }
+        for entry in drain_queue(other.ordered_async) {
+            queues.ordered_async.push(entry);
+        }
     }
 
     pub fn push_sync(&mut self, callback: TxnCallback) {
-        self.sync.push(Arc::new(Mutex::new(Some(callback))));
+        self.queues().sync.push(callback);
     }
 
     pub fn push_async(&mut self, callback: AsyncTxnCallback) {
-        self.asynchronous.push(Arc::new(Mutex::new(Some(callback))));
+        self.queues().asynchronous.push(callback);
     }
 
     pub fn push_ordered(&mut self, callback: OrderedRetryCallback) {
-        self.ordered.push(Arc::new(Mutex::new(Some(callback))));
+        self.queues().ordered.push(callback);
     }
 
     pub fn push_ordered_async(&mut self, callback: AsyncOrderedRetryCallback) {
-        self.ordered_async
-            .push(Arc::new(Mutex::new(Some(callback))));
+        self.queues().ordered_async.push(callback);
     }
 
-    #[allow(clippy::type_complexity)]
-    pub fn into_parts(
-        self,
-    ) -> (
-        Vec<Arc<Mutex<Option<TxnCallback>>>>,
-        Vec<Arc<Mutex<Option<AsyncTxnCallback>>>>,
-        Vec<Arc<Mutex<Option<OrderedRetryCallback>>>>,
-        Vec<Arc<Mutex<Option<AsyncOrderedRetryCallback>>>>,
-    ) {
-        (
-            self.sync,
-            self.asynchronous,
-            self.ordered,
-            self.ordered_async,
-        )
+    /// The callbacks by kind, each in registration order.
+    pub fn into_parts(self) -> RetryCallbackParts {
+        let Some(queues) = self.queues else {
+            return RetryCallbackParts {
+                sync: Vec::new(),
+                asynchronous: Vec::new(),
+                ordered: Vec::new(),
+                ordered_async: Vec::new(),
+            };
+        };
+        let RetryQueues {
+            sync,
+            asynchronous,
+            ordered,
+            ordered_async,
+        } = *queues;
+        RetryCallbackParts {
+            sync: drain_queue(sync),
+            asynchronous: drain_queue(asynchronous),
+            ordered: drain_queue(ordered),
+            ordered_async: drain_queue(ordered_async),
+        }
     }
 }
 
@@ -342,7 +425,7 @@ impl RetryTxn for InterceptingRetryTxn<'_> {
     }
     fn begin_attempt_io(&mut self) -> Result<Box<dyn RetryAttemptIO>> {
         Ok(Box::new(InterceptingRetryAttemptIO {
-            inner: Some(self.inner.begin_attempt_io()?),
+            inner: self.inner.begin_attempt_io()?,
             interceptor: Arc::clone(&self.interceptor),
         }))
     }
@@ -356,7 +439,7 @@ impl RetryTxn for InterceptingRetryTxn<'_> {
 }
 
 struct InterceptingRetryAttemptIO {
-    inner: Option<Box<dyn RetryAttemptIO>>,
+    inner: Box<dyn RetryAttemptIO>,
     interceptor: RetryWriteInterceptor,
 }
 
@@ -366,19 +449,19 @@ impl private::Sealed for InterceptingRetryAttemptIO {}
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Reader for InterceptingRetryAttemptIO {
     async fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
-        self.inner.as_ref().unwrap().get(key).await
+        self.inner.get(key).await
     }
     async fn get_parts(&self, key: &[u8], parts: &[u32]) -> Result<Option<Bytes>> {
-        self.inner.as_ref().unwrap().get_parts(key, parts).await
+        self.inner.get_parts(key, parts).await
     }
     async fn has(&self, key: &[u8]) -> Result<bool> {
-        self.inner.as_ref().unwrap().has(key).await
+        self.inner.has(key).await
     }
     async fn get_size(&self, key: &[u8]) -> Result<Option<usize>> {
-        self.inner.as_ref().unwrap().get_size(key).await
+        self.inner.get_size(key).await
     }
     async fn iterator(&self, options: IterOptions) -> Result<Box<dyn Iterator>> {
-        self.inner.as_ref().unwrap().iterator(options).await
+        self.inner.iterator(options).await
     }
 }
 
@@ -387,7 +470,7 @@ impl Reader for InterceptingRetryAttemptIO {
 impl Writer for InterceptingRetryAttemptIO {
     async fn merge(&mut self, key: &[u8], operand: &[u8]) -> Result<()> {
         (self.interceptor)(key, Some(operand))?;
-        self.inner.as_mut().unwrap().merge(key, operand).await
+        self.inner.merge(key, operand).await
     }
     async fn append(
         &mut self,
@@ -396,19 +479,15 @@ impl Writer for InterceptingRetryAttemptIO {
         once_key: Option<&[u8]>,
     ) -> Result<()> {
         (self.interceptor)(&log.head_key, Some(entry))?;
-        self.inner
-            .as_mut()
-            .unwrap()
-            .append(log, entry, once_key)
-            .await
+        self.inner.append(log, entry, once_key).await
     }
     async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         (self.interceptor)(key, Some(value))?;
-        self.inner.as_mut().unwrap().set(key, value).await
+        self.inner.set(key, value).await
     }
     async fn delete(&mut self, key: &[u8]) -> Result<()> {
         (self.interceptor)(key, None)?;
-        self.inner.as_mut().unwrap().delete(key).await
+        self.inner.delete(key).await
     }
 }
 
@@ -417,8 +496,8 @@ impl RetryAttemptIO for InterceptingRetryAttemptIO {
     fn as_any(&self) -> &dyn Any {
         self
     }
-    fn into_any(mut self: Box<Self>) -> Box<dyn Any> {
-        self.inner.take().unwrap().into_any()
+    fn into_any(self: Box<Self>) -> Box<dyn Any> {
+        self.inner.into_any()
     }
 }
 
@@ -427,8 +506,8 @@ impl RetryAttemptIO for InterceptingRetryAttemptIO {
     fn as_any(&self) -> &dyn Any {
         self
     }
-    fn into_any(mut self: Box<Self>) -> Box<dyn Any> {
-        self.inner.take().unwrap().into_any()
+    fn into_any(self: Box<Self>) -> Box<dyn Any> {
+        self.inner.into_any()
     }
 }
 
@@ -442,7 +521,6 @@ pub type RetryAttemptValue = Box<dyn Any>;
 pub enum RetryAttemptError {
     Storage(super::errors::Error),
     Exhausted(super::errors::TransactionConflict),
-    PostCommit(super::errors::Error),
     #[cfg(not(target_arch = "wasm32"))]
     Abort(Box<dyn Any + Send>),
     #[cfg(target_arch = "wasm32")]
@@ -456,7 +534,6 @@ impl std::fmt::Debug for RetryAttemptError {
             Self::Exhausted(conflict) => {
                 formatter.debug_tuple("Exhausted").field(conflict).finish()
             }
-            Self::PostCommit(error) => formatter.debug_tuple("PostCommit").field(error).finish(),
             Self::Abort(_) => formatter.write_str("Abort(<typed domain error>)"),
         }
     }
@@ -473,7 +550,6 @@ impl RetryAttemptError {
         match self {
             Self::Storage(error) => error,
             Self::Exhausted(conflict) => super::errors::Error::TxnRetryExhausted(conflict),
-            Self::PostCommit(error) => error,
             Self::Abort(_) => super::errors::Error::Other(
                 "transaction attempt aborted with a domain error".to_string(),
             ),
@@ -1111,6 +1187,46 @@ mod tests {
             println!("Test callback");
         });
         // Just ensure it compiles and has the right type
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn retry_callbacks_are_shareable_without_a_lock() {
+        fn shareable<T>()
+        where
+            T: Send + Sync,
+        {
+        }
+        shareable::<RetryCallbacks>();
+    }
+
+    #[test]
+    fn retry_callbacks_keep_registration_order_through_append_and_truncate() {
+        let seen = std::sync::Arc::new(regolith::sync::SegQueue::new());
+        let push = |value: u32| -> TxnCallback {
+            let seen = std::sync::Arc::clone(&seen);
+            Box::new(move || seen.push(value))
+        };
+        let mut callbacks = RetryCallbacks::default();
+        assert!(callbacks.queues.is_none());
+        assert!(!callbacks.has_ordered_callbacks());
+        callbacks.push_sync(push(1));
+        let mark = callbacks.counts();
+        callbacks.push_sync(push(2));
+        callbacks.push_ordered(Box::new(|| {}));
+        assert!(callbacks.has_ordered_callbacks());
+        callbacks.truncate(mark);
+        assert!(!callbacks.has_ordered_callbacks());
+        let mut more = RetryCallbacks::default();
+        more.push_sync(push(3));
+        callbacks.append(more);
+        callbacks.append(RetryCallbacks::default());
+        for callback in callbacks.into_parts().sync {
+            callback();
+        }
+        let order: Vec<u32> = std::iter::from_fn(|| seen.pop()).collect();
+        assert_eq!(order, vec![1, 3]);
+        assert!(RetryCallbacks::default().into_parts().sync.is_empty());
     }
 
     #[test]

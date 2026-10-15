@@ -36,14 +36,14 @@ async fn encrypted_engine_reopens_and_requires_the_same_key() {
     }
     check_files(dir.path());
     assert!(RegolithStore::open(dir.path()).is_err());
-    assert!(RegolithTxn::open_read_only(dir.path()).is_err());
+    assert!(RegolithTxn::open_read_only(dir.path(), RegolithStoreOptions::default()).is_err());
     assert!(RegolithStore::open_with_options(
         dir.path(),
         RegolithStoreOptions::default().with_encryption_key([0x72; 32]),
     )
     .is_err());
 
-    let txn = RegolithTxn::open_read_only_with_options(dir.path(), options.clone()).unwrap();
+    let txn = RegolithTxn::open_read_only(dir.path(), options.clone()).unwrap();
     assert_eq!(
         txn.get(b"private-key").await.unwrap().as_deref(),
         Some(&b"private-value"[..])

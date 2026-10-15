@@ -19,9 +19,8 @@ use crate::merge::merge_handler::DbMergeHandler;
 pub trait LocalCommitRelease: MaybeSendSync {
     /// `cid` and `block_data` are the composite the write committed.
     ///
-    /// Called from the committing transaction's success callback, which still
-    /// holds that document's write guard, so the re-drive this triggers must
-    /// run off the caller's task.
+    /// Called in commit-receipt order from the ordered event dispatch, which
+    /// must not wait, so the re-drive this triggers runs off the caller's task.
     fn committed(&self, cid: Cid, block_data: Bytes);
 }
 

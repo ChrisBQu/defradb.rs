@@ -56,7 +56,7 @@ pub mod downsample;
 pub mod error;
 pub mod event;
 pub mod index;
-pub use event::emission::{TxnBroadcastEvent, TxnBroadcaster};
+pub use event::emission::{BroadcastDone, TxnBroadcastEvent, TxnBroadcaster};
 pub mod merge;
 pub mod nac;
 pub mod read;

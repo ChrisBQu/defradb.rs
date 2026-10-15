@@ -166,6 +166,88 @@ pub fn storage_background_error_count() -> u64 {
     STORAGE_BACKGROUND_ERRORS.load(Ordering::Relaxed)
 }
 
+/// Something the storage engine, or the store around it, reports: what the
+/// engine did in the background, how each transaction ended, and post-commit
+/// work that failed after its commit was durable (the commit stands).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
+pub enum StorageEvent {
+    Flush,
+    CompactionBegin,
+    Compaction,
+    TableFileCreated,
+    TableFileDeleted,
+    Ingest,
+    WalTailDiscarded,
+    Commit,
+    AbortRollback,
+    AbortConflict,
+    AbortError,
+    AbortClosed,
+    AbortCallbackPanicked,
+    PostCommitHookFailed,
+    PostCommitHookPanicked,
+    PostCommitHookCancelled,
+    PostCommitEventPanicked,
+    PostCommitCallbackPanicked,
+}
+
+impl StorageEvent {
+    const COUNT: usize = 18;
+
+    /// The `event` label of `defradb.storage.events`.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Flush => "flush",
+            Self::CompactionBegin => "compaction_begin",
+            Self::Compaction => "compaction",
+            Self::TableFileCreated => "table_file_created",
+            Self::TableFileDeleted => "table_file_deleted",
+            Self::Ingest => "ingest",
+            Self::WalTailDiscarded => "wal_tail_discarded",
+            Self::Commit => "commit",
+            Self::AbortRollback => "abort_rollback",
+            Self::AbortConflict => "abort_conflict",
+            Self::AbortError => "abort_error",
+            Self::AbortClosed => "abort_closed",
+            Self::AbortCallbackPanicked => "abort_callback_panicked",
+            Self::PostCommitHookFailed => "post_commit_hook_failed",
+            Self::PostCommitHookPanicked => "post_commit_hook_panicked",
+            Self::PostCommitHookCancelled => "post_commit_hook_cancelled",
+            Self::PostCommitEventPanicked => "post_commit_event_panicked",
+            Self::PostCommitCallbackPanicked => "post_commit_callback_panicked",
+        }
+    }
+}
+
+static STORAGE_EVENTS: [AtomicU64; StorageEvent::COUNT] =
+    [const { AtomicU64::new(0) }; StorageEvent::COUNT];
+
+/// Count one storage event, with the bytes it moved when it moved any.
+pub fn record_storage_event(event: StorageEvent, bytes: u64) {
+    STORAGE_EVENTS[event as usize].fetch_add(1, Ordering::Relaxed);
+    emit_storage_event(event, bytes);
+}
+
+/// Storage events of this kind recorded in this process.
+pub fn storage_event_count(event: StorageEvent) -> u64 {
+    STORAGE_EVENTS[event as usize].load(Ordering::Relaxed)
+}
+
+#[cfg(feature = "otlp")]
+fn emit_storage_event(event: StorageEvent, bytes: u64) {
+    with_instruments(|metrics| {
+        let labels = [KeyValue::new("event", event.label())];
+        metrics.storage_events.add(1, &labels);
+        if bytes > 0 {
+            metrics.storage_event_bytes.add(bytes, &labels);
+        }
+    });
+}
+
+#[cfg(not(feature = "otlp"))]
+fn emit_storage_event(_event: StorageEvent, _bytes: u64) {}
+
 #[cfg(feature = "otlp")]
 fn emit_retry_attempt(layer: RetryLayer) {
     with_instruments(|metrics| {
@@ -236,6 +318,8 @@ fn emit_storage_background_error(_backend: &'static str, _reason: &'static str) 
 struct Instruments {
     storage_conflicts: Counter<u64>,
     storage_background_errors: Counter<u64>,
+    storage_events: Counter<u64>,
+    storage_event_bytes: Counter<u64>,
     retry_attempts: Counter<u64>,
     retry_successes: Counter<u64>,
     retry_exhaustions: Counter<u64>,
@@ -260,6 +344,14 @@ pub(crate) fn install(provider: &opentelemetry_sdk::metrics::SdkMeterProvider) -
         storage_background_errors: meter
             .u64_counter("defradb.storage.background.errors")
             .with_description("Failed background storage jobs")
+            .build(),
+        storage_events: meter
+            .u64_counter("defradb.storage.events")
+            .with_description("Storage engine and transaction events by kind")
+            .build(),
+        storage_event_bytes: meter
+            .u64_counter("defradb.storage.event.bytes")
+            .with_description("Bytes moved by storage events, by kind")
             .build(),
         retry_attempts: meter
             .u64_counter("defradb.transaction.retry.attempts")
@@ -310,5 +402,43 @@ fn with_instruments(record: impl FnOnce(&Instruments)) {
     let guard = registry.load();
     if let Some((_, metrics)) = guard.last() {
         record(metrics);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_storage_event_has_its_own_label_and_counter() {
+        let events = [
+            StorageEvent::Flush,
+            StorageEvent::CompactionBegin,
+            StorageEvent::Compaction,
+            StorageEvent::TableFileCreated,
+            StorageEvent::TableFileDeleted,
+            StorageEvent::Ingest,
+            StorageEvent::WalTailDiscarded,
+            StorageEvent::Commit,
+            StorageEvent::AbortRollback,
+            StorageEvent::AbortConflict,
+            StorageEvent::AbortError,
+            StorageEvent::AbortClosed,
+            StorageEvent::AbortCallbackPanicked,
+            StorageEvent::PostCommitHookFailed,
+            StorageEvent::PostCommitHookPanicked,
+            StorageEvent::PostCommitHookCancelled,
+            StorageEvent::PostCommitEventPanicked,
+            StorageEvent::PostCommitCallbackPanicked,
+        ];
+        assert_eq!(events.len(), StorageEvent::COUNT);
+        let labels: std::collections::BTreeSet<_> = events.iter().map(|e| e.label()).collect();
+        assert_eq!(labels.len(), StorageEvent::COUNT);
+        for (index, event) in events.into_iter().enumerate() {
+            assert_eq!(event as usize, index);
+            let before = storage_event_count(event);
+            record_storage_event(event, 3);
+            assert!(storage_event_count(event) > before);
+        }
     }
 }

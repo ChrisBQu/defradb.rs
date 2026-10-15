@@ -1048,11 +1048,110 @@ struct CapturingBroadcaster {
     events: Arc<SegQueue<db::event::emission::TxnBroadcastEvent>>,
 }
 
-#[async_trait::async_trait]
 impl db::event::emission::TxnBroadcaster for CapturingBroadcaster {
-    async fn broadcast_update(&self, event: db::event::emission::TxnBroadcastEvent) {
+    fn submit_update(
+        &self,
+        event: db::event::emission::TxnBroadcastEvent,
+        _done: db::event::emission::BroadcastDone,
+    ) {
         self.events.push(event);
     }
+}
+
+/// Records the composites local commits release, in the order released.
+struct CapturingRelease {
+    released: Arc<SegQueue<cid::Cid>>,
+}
+
+impl db::merge::governance::LocalCommitRelease for CapturingRelease {
+    fn committed(&self, cid: cid::Cid, _block_data: bytes::Bytes) {
+        self.released.push(cid);
+    }
+}
+
+/// Two transactions commit one after the other; the first one's later
+/// success work is held at a gate. Its broadcast and its release still go
+/// out first, because they follow commit receipts, not the order the
+/// transactions' tasks happen to reach them.
+#[tokio::test]
+async fn transactional_broadcasts_and_releases_follow_commit_receipts() {
+    let (db, _bus) = make_test_db_with_bus().await;
+    db.create_collection(test_collection())
+        .await
+        .expect("schema");
+    let captured: Arc<SegQueue<db::event::emission::TxnBroadcastEvent>> = Arc::new(SegQueue::new());
+    let broadcaster: Arc<dyn db::event::emission::TxnBroadcaster> =
+        Arc::new(CapturingBroadcaster {
+            events: Arc::clone(&captured),
+        });
+    let released = Arc::new(SegQueue::new());
+    db.set_local_commit_release(Arc::new(CapturingRelease {
+        released: Arc::clone(&released),
+    }));
+
+    let entered = Arc::new(regolith::sync::Event::new());
+    let gate = Arc::new(regolith::sync::Event::new());
+    let mut first_txn = db.new_txn(false).await.expect("first txn");
+    let (held_entered, held_gate) = (Arc::clone(&entered), Arc::clone(&gate));
+    first_txn
+        .on_success_async(Box::new(move || {
+            Box::pin(async move {
+                held_entered.set();
+                held_gate.wait().await;
+            })
+        }))
+        .expect("gate");
+    let first = DbDocMutator::from_shared_txn_with_broadcaster(
+        Arc::clone(&db),
+        Arc::new(TokioMutex::new(Some(first_txn))),
+        Some(Arc::clone(&broadcaster)),
+    );
+    let first_doc = first
+        .create(
+            "TestDoc",
+            Document::from_json_str(r#"{"x": 1}"#).expect("doc"),
+        )
+        .await
+        .expect("first create");
+    let first_txn = first.take_txn().await.expect("take first");
+    let first_commit = tokio::spawn(async move { first_txn.commit().await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered.wait())
+        .await
+        .expect("the first commit reached its success work");
+
+    let second = DbDocMutator::from_shared_txn_with_broadcaster(
+        Arc::clone(&db),
+        Arc::new(TokioMutex::new(Some(
+            db.new_txn(false).await.expect("second txn"),
+        ))),
+        Some(broadcaster),
+    );
+    let second_doc = second
+        .create(
+            "TestDoc",
+            Document::from_json_str(r#"{"x": 2}"#).expect("doc"),
+        )
+        .await
+        .expect("second create");
+    second
+        .take_txn()
+        .await
+        .expect("take second")
+        .commit()
+        .await
+        .expect("second commit");
+
+    let events = drain(&captured);
+    let broadcast: Vec<String> = events.iter().map(|event| event.doc_id.clone()).collect();
+    assert_eq!(
+        broadcast,
+        vec![first_doc.doc_id.to_string(), second_doc.doc_id.to_string()]
+    );
+    let release_order: Vec<cid::Cid> = std::iter::from_fn(|| released.pop()).collect();
+    let broadcast_cids: Vec<cid::Cid> = events.iter().map(|event| event.doc_cid).collect();
+    assert_eq!(release_order, broadcast_cids);
+    gate.set();
+    first_commit.await.expect("join").expect("first commit");
 }
 
 fn drain(

@@ -60,6 +60,7 @@ rapidhash.workspace = true
 kovan.workspace = true
 kovan-map.workspace = true
 kovan-queue.workspace = true
+regolith.workspace = true
 
 # Random number generation (for Counter CRDT nonces)
 rand.workspace = true
@@ -114,7 +115,6 @@ proptest.workspace = true
 blst = "0.3"
 getrandom = "0.2"
 tempfile = "3"
-regolith.workspace = true
 ed25519-dalek.workspace = true
 
 [lints]

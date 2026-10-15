@@ -5,7 +5,7 @@ use storage::backends::regolith::RegolithStore;
 use storage::corekv::{Store, Writer};
 
 #[tokio::test]
-async fn eventful_empty_commit_is_rejected_instead_of_reusing_old_receipt() {
+async fn eventful_empty_commit_commits_and_dispatches_its_events() {
     let store = RegolithStore::in_memory().expect("store");
     let mut first = store.new_txn(false).await.expect("first txn");
     first.set(b"key", b"value").await.expect("write");
@@ -20,8 +20,8 @@ async fn eventful_empty_commit_is_rejected_instead_of_reusing_old_receipt() {
         }))
         .expect("register event");
 
-    assert!(empty.commit().await.is_err());
-    assert_eq!(published.load(Ordering::SeqCst), 0);
+    empty.commit().await.expect("a commit that writes nothing");
+    assert_eq!(published.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -56,7 +56,7 @@ async fn accepted_identical_blind_write_keeps_its_event_callback() {
 }
 
 #[tokio::test]
-async fn failed_ordered_hook_suppresses_events_and_releases_later_commits() {
+async fn failed_ordered_hook_keeps_the_commit_its_events_and_later_commits() {
     let store = RegolithStore::in_memory().expect("store");
     let published = Arc::new(AtomicUsize::new(0));
 
@@ -73,8 +73,11 @@ async fn failed_ordered_hook_suppresses_events_and_releases_later_commits() {
             Box::pin(async { Err("external postcommit hook failed".to_string()) })
         }))
         .expect("failing hook");
-    assert!(first.commit().await.is_err());
-    assert_eq!(published.load(Ordering::SeqCst), 0);
+    first
+        .commit()
+        .await
+        .expect("a durable commit stands when its hook fails");
+    assert_eq!(published.load(Ordering::SeqCst), 1);
 
     let mut second = store.new_txn(false).await.expect("second txn");
     second.set(b"second", b"value").await.expect("second write");
@@ -85,5 +88,5 @@ async fn failed_ordered_hook_suppresses_events_and_releases_later_commits() {
         }))
         .expect("second event");
     second.commit().await.expect("second commit");
-    assert_eq!(published.load(Ordering::SeqCst), 1);
+    assert_eq!(published.load(Ordering::SeqCst), 2);
 }

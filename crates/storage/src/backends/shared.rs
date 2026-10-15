@@ -139,18 +139,7 @@ impl CallbackManager {
         let Some(lists) = self.registered() else {
             return;
         };
-        fn trim<T: 'static>(queue: &SegQueue<T>, keep: usize) {
-            let mut retained = Vec::with_capacity(keep);
-            for _ in 0..keep {
-                if let Some(callback) = queue.pop() {
-                    retained.push(callback);
-                }
-            }
-            while queue.pop().is_some() {}
-            for callback in retained {
-                queue.push(callback);
-            }
-        }
+        use crate::corekv::truncate_queue as trim;
         trim(&lists.success, counts.success);
         trim(&lists.success_async, counts.success_async);
         trim(&lists.error, counts.error);

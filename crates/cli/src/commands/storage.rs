@@ -29,7 +29,7 @@ impl StorageArgs {
             ));
         }
         let StorageCommand::Stats { versions } = self.command;
-        let txn = storage::backends::RegolithTxn::open_read_only_with_options(
+        let txn = storage::backends::RegolithTxn::open_read_only(
             config.data_path(),
             crate::commands::start::Node::encryption_options(
                 config,

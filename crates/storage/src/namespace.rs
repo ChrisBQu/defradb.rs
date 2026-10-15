@@ -210,7 +210,7 @@ impl crate::corekv::RetryTxn for NamespacedRetryTxn<'_> {
 
     fn begin_attempt_io(&mut self) -> Result<Box<dyn crate::corekv::RetryAttemptIO>> {
         Ok(Box::new(NamespacedRetryAttemptIO {
-            inner: Some(self.txn.begin_attempt_io()?),
+            inner: self.txn.begin_attempt_io()?,
             namespace: self.namespace,
         }))
     }
@@ -227,13 +227,12 @@ impl crate::corekv::RetryTxn for NamespacedRetryTxn<'_> {
         if namespaced.namespace != self.namespace {
             return Err(Error::Other("retry IO namespace mismatch".into()));
         }
-        self.txn
-            .finish_attempt_io(namespaced.inner.expect("retry IO is present"), callbacks)
+        self.txn.finish_attempt_io(namespaced.inner, callbacks)
     }
 }
 
 struct NamespacedRetryAttemptIO {
-    inner: Option<Box<dyn crate::corekv::RetryAttemptIO>>,
+    inner: Box<dyn crate::corekv::RetryAttemptIO>,
     namespace: Namespace,
 }
 
@@ -241,11 +240,11 @@ impl crate::corekv::private::Sealed for NamespacedRetryAttemptIO {}
 
 impl NamespacedRetryAttemptIO {
     fn inner(&self) -> &dyn crate::corekv::RetryAttemptIO {
-        self.inner.as_deref().expect("retry IO is present")
+        self.inner.as_ref()
     }
 
     fn inner_mut(&mut self) -> &mut dyn crate::corekv::RetryAttemptIO {
-        self.inner.as_deref_mut().expect("retry IO is present")
+        self.inner.as_mut()
     }
 }
 

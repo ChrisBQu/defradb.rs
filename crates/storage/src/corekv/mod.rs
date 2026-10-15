@@ -75,12 +75,13 @@ pub use errors::{Error, Result, TransactionConflict, UNIQUE_CONSTRAINT_VIOLATION
 pub use iterator::{Iterator, KvPair};
 pub use retry_policy::{engine_retry_options, DEFAULT_MAX_TXN_RETRIES};
 pub use traits::private;
+pub(crate) use traits::truncate_queue;
 pub use traits::{
     intercept_retry_writes, make_async_callback, make_callback, AsyncOrderedRetryCallback,
     AsyncOrderedTxnCallback, AsyncTxnCallback, Dropable, MaybeSend, MaybeSendSync, MaybeSync,
     OrderedRetryCallback, OrderedTxnCallback, OrderedTxnCallbacks, Reader, ReaderWriter,
     RetryAttempt, RetryAttemptError, RetryAttemptFn, RetryAttemptFuture, RetryAttemptIO,
-    RetryAttemptValue, RetryCallbackCounts, RetryCallbacks, RetryOptions, RetryTxn,
-    RetryWriteInterceptor, Store, Txn, TxnCallback, TxnStore, Writer,
+    RetryAttemptValue, RetryCallbackCounts, RetryCallbackParts, RetryCallbacks, RetryOptions,
+    RetryTxn, RetryWriteInterceptor, Store, Txn, TxnCallback, TxnStore, Writer,
 };
 pub use types::{AppendLog, IterOptions, Key};
