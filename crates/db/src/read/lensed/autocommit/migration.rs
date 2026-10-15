@@ -1,6 +1,7 @@
 //! Migration context loading and document migration logic.
 
 use rapidhash::{HashMapExt, RapidHashMap};
+use std::sync::Arc;
 
 use document::Document;
 use lens::{build_targeted_history, CollectionHistoryLink, Lens, LensDoc, TargetedHistoryLink};
@@ -33,14 +34,11 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
         let cache_key = format!("{}:{}", collection_id, target_version_id);
         loop {
             let generation = self.db.migration_generation();
-            if let Ok(mut cache) = self.migration_cache.lock() {
-                if cache.generation != generation {
-                    cache.generation = generation;
-                    cache.contexts.clear();
-                }
-                if let Some(cached) = cache.contexts.get(&cache_key) {
-                    return Ok((generation, cached.0, cached.1.clone()));
-                }
+            let cached = self
+                .migration_cache
+                .peek(|cache| cache.get(generation, &cache_key));
+            if let Some(context) = cached {
+                return Ok((generation, context.0, context.1.clone()));
             }
 
             let history = self.load_collection_history(collection).await.ok();
@@ -49,21 +47,24 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
                 .as_ref()
                 .is_some_and(|h| h.values().any(|link| link.transform.is_some()));
 
-            let result = (has_migrations, if has_migrations { history } else { None });
+            let context = Arc::new((has_migrations, if has_migrations { history } else { None }));
 
             // A migration may have committed while history was being loaded.
             // Never publish a context under the wrong generation.
             if self.db.migration_generation() != generation {
                 continue;
             }
-            if let Ok(mut cache) = self.migration_cache.lock() {
-                if cache.generation != generation {
-                    continue;
-                }
-                cache.contexts.insert(cache_key.clone(), result.clone());
+            let mut published = false;
+            self.migration_cache.rcu(|cache| {
+                let next = cache.with(generation, &cache_key, &context);
+                published = next.is_some();
+                next.unwrap_or_else(|| cache.clone())
+            });
+            if !published {
+                continue;
             }
 
-            return Ok((generation, result.0, result.1));
+            return Ok((generation, context.0, context.1.clone()));
         }
     }
 
@@ -330,3 +331,7 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/read/lensed_migration_cache.rs"]
+mod tests;
