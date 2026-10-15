@@ -1,4 +1,4 @@
-use super::utils::{decode_uvarint_ascending, encode_uvarint_ascending};
+use super::utils::{decode_uvarint_ascending, encode_uvarint_ascending, read_uvarint};
 use crate::corekv::{Error, Key, Result};
 use crate::encoding::{
     decode_uvarint_ascending as decode_go_uvarint_ascending,
@@ -35,13 +35,30 @@ pub fn decode_doc_short_id(data: &[u8]) -> Result<u64> {
     Ok(doc_short_id)
 }
 
+/// The width and value of the document short ID `data` starts with: an
+/// ordered uvarint, never zero. Allocates nothing.
+fn read_doc_short_id(data: &[u8]) -> Option<(usize, u64)> {
+    read_uvarint(data).filter(|(_, doc_short_id)| *doc_short_id != 0)
+}
+
 /// Decode a document short ID prefix, returning the remaining bytes.
 pub fn decode_doc_short_id_prefix(data: &[u8]) -> Result<(&[u8], u64)> {
-    let (rest, doc_short_id) = decode_uvarint_ascending(data)?;
-    if doc_short_id == 0 {
-        return Err(Error::Other("doc short ID cannot be 0".into()));
+    match read_doc_short_id(data) {
+        Some((width, doc_short_id)) => Ok((&data[width..], doc_short_id)),
+        None => {
+            // Either the uvarint itself is cut short, which its decoder says,
+            // or it holds zero.
+            decode_uvarint_ascending(data)?;
+            Err(Error::Other("doc short ID cannot be 0".into()))
+        }
     }
-    Ok((rest, doc_short_id))
+}
+
+/// The length of the document short ID `data` starts with, or `None` where
+/// [`decode_doc_short_id_prefix`] fails. Allocates nothing, for a caller that
+/// only needs to know where the ID ends.
+pub fn doc_short_id_len(data: &[u8]) -> Option<usize> {
+    read_doc_short_id(data).map(|(width, _)| width)
 }
 
 /// Reference from a public DocID to its node-local storage identity.
@@ -302,6 +319,29 @@ mod tests {
         assert!(encode_doc_short_id(0).is_empty());
         assert!(decode_doc_short_id(&[0x00]).is_err());
         assert!(decode_doc_short_id(&[]).is_err());
+    }
+
+    /// The length a reader that only needs the ID's end gets agrees with the
+    /// decoder, for every width, and both refuse what the other refuses.
+    #[test]
+    fn test_doc_short_id_len_agrees_with_decode() {
+        for id in [1u64, 47, 239, 240, 287, 2287, 2288, 65_535, u64::MAX] {
+            let mut encoded = encode_doc_short_id(id);
+            let width = encoded.len();
+            encoded.extend_from_slice(b"/rest");
+            let (rest, decoded) = decode_doc_short_id_prefix(&encoded).unwrap();
+            assert_eq!(decoded, id);
+            assert_eq!(doc_short_id_len(&encoded), Some(width));
+            assert_eq!(rest, b"/rest");
+            for cut in 0..width {
+                assert_eq!(doc_short_id_len(&encoded[..cut]), None);
+                assert!(decode_doc_short_id_prefix(&encoded[..cut]).is_err());
+            }
+        }
+        for zero in [&[0x00][..], &[0xF8, 0x00][..], &[0xF9, 0x00, 0x00][..]] {
+            assert_eq!(doc_short_id_len(zero), None);
+            assert!(decode_doc_short_id_prefix(zero).is_err());
+        }
     }
 
     #[test]
