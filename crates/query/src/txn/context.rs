@@ -481,10 +481,13 @@ mod tests {
             ))
             .unwrap(),
         );
-        assert!(memo.insert(
-            doc_request,
-            std::sync::Arc::<[u8]>::from(b"false".as_slice())
-        ));
+        assert_eq!(
+            &*memo.insert(
+                doc_request,
+                std::sync::Arc::<[u8]>::from(b"false".as_slice())
+            ),
+            b"false"
+        );
         let request_bytes = serde_json::to_vec(&(
             "anonymous",
             "registered",
