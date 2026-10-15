@@ -270,6 +270,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                         );
                         return Ok(EffectiveLinkedDelta::SkipField);
                     }
+                    Err(error @ MergeError::NeedsDecryptionKey(_)) => return Err(error),
                     Err(error @ MergeError::Kms(_)) => return Err(error),
                     Err(error) => {
                         tracing::debug!(
@@ -301,6 +302,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                         );
                         return Ok(EffectiveLinkedDelta::SkipField);
                     }
+                    Err(error @ MergeError::NeedsDecryptionKey(_)) => return Err(error),
                     Err(error @ MergeError::Kms(_)) => return Err(error),
                     Err(error) => {
                         tracing::debug!(

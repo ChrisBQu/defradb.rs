@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use cid::Cid;
+use defra_core::block::Block;
 use defra_core::merge::{
     BlockMetadata, ExplicitReplayAuthorization, MergeBlock, MergeErrorDisposition, MergeHandler,
     MergeOutcome, RecoveredBlockMetadata,
@@ -9,6 +10,7 @@ use storage::corekv::Store;
 use super::{cid_set, DbMergeHandler, MergeError};
 use crate::merge::governance::{RedrivenMerge, REDRIVE_BUDGET};
 use kovan_queue::seg_queue::SegQueue;
+use std::sync::Arc;
 
 struct MergeRetryAttempt<S: Store, B: blockstore::Blockstore> {
     handler: DbMergeHandler<S, B>,
@@ -45,6 +47,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> MergeRetryAttempt<
         &mut self,
         retry: &mut dyn storage::corekv::RetryTxn,
     ) -> Result<MergeOutcome, MergeError> {
+        self.handler.reset_retry_dek_prefetch_request();
         let io = retry
             .begin_attempt_io()
             .map_err(|error| MergeError::Database(crate::error::Error::Storage(error)))?;
@@ -262,27 +265,106 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
         } else {
             None
         };
-        let attempt = MergeRetryAttempt {
-            handler: self.clone(),
-            cid: *cid,
-            block_data: block_data.to_vec(),
-            doc_id: doc_id.clone(),
-            collection_id: collection_id.clone(),
-            creator,
-            sender_peer: metadata.sender_peer.map(str::to_owned),
+        let retry_deks = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let prefetch_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let retry_metadata = BlockMetadata {
+            doc_id: doc_id.as_deref(),
+            collection_id: collection_id.as_deref(),
+            creator: creator.as_deref(),
+            sender_peer: metadata.sender_peer,
             is_explicit_replicator: metadata.is_explicit_replicator,
-            authorization: metadata.explicit_replay_authorization.clone(),
+            explicit_replay_authorization: metadata.explicit_replay_authorization.clone(),
+            verified_creator: None,
             is_recovery: metadata.is_recovery,
             is_schema_block: metadata.is_schema_block,
         };
-        let result = self
-            .db
-            .store()
-            .transact_retry(
-                storage::corekv::RetryOptions::new(MAX_TXN_RETRIES as u32),
-                Box::new(attempt),
-            )
-            .await;
+        let kms_context = Self::kms_request_context(Some(&retry_metadata));
+        const MAX_KMS_INPUT_MISSES: usize = 64;
+        let mut kms_input_misses = 0;
+        let result = loop {
+            let attempt = MergeRetryAttempt {
+                handler: self.with_retry_decryption_context(
+                    Arc::clone(&retry_deks),
+                    Arc::clone(&prefetch_requested),
+                ),
+                cid: *cid,
+                block_data: block_data.to_vec(),
+                doc_id: doc_id.clone(),
+                collection_id: collection_id.clone(),
+                creator: creator.clone(),
+                sender_peer: metadata.sender_peer.map(str::to_owned),
+                is_explicit_replicator: metadata.is_explicit_replicator,
+                authorization: metadata.explicit_replay_authorization.clone(),
+                is_recovery: metadata.is_recovery,
+                is_schema_block: metadata.is_schema_block,
+            };
+            let result = self
+                .db
+                .store()
+                .transact_retry(
+                    storage::corekv::RetryOptions::new(MAX_TXN_RETRIES as u32),
+                    Box::new(attempt),
+                )
+                .await;
+            match result {
+                Ok(value) => {
+                    break value
+                        .downcast::<MergeOutcome>()
+                        .map(|outcome| *outcome)
+                        .map_err(|_| MergeError::MergeFailed("invalid merge retry result".into()));
+                }
+                Err(error) => match error.downcast_abort::<MergeError>() {
+                    Ok(MergeError::NeedsDecryptionKey(enc_cid)) => {
+                        kms_input_misses += 1;
+                        if kms_input_misses > MAX_KMS_INPUT_MISSES {
+                            break Err(MergeError::MergeFailed(
+                                "merge exceeded its prepared KMS dependency budget".into(),
+                            ));
+                        }
+                        let Some(kms) = self.kms() else {
+                            break Err(MergeError::Kms(kms::Error::KeyUnavailable));
+                        };
+                        let resolved = async {
+                            let results = kms
+                                .get_keys(&kms_context, std::slice::from_ref(&enc_cid))
+                                .await?;
+                            let key = results
+                                .wait_all()
+                                .await?
+                                .remove(&enc_cid)
+                                .ok_or(kms::Error::KeyUnavailable)?;
+                            Ok::<_, kms::Error>((enc_cid, key))
+                        }
+                        .await;
+                        match resolved {
+                            Ok((cid, key)) => {
+                                retry_deks
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .insert(cid, key);
+                            }
+                            Err(error) => break Err(MergeError::Kms(error)),
+                        }
+                    }
+                    Ok(error) => break Err(error),
+                    Err(error) => {
+                        break Err(MergeError::Database(crate::error::Error::Storage(
+                            error.into_storage(),
+                        )));
+                    }
+                },
+            }
+        };
+        // Preserve sync-time warming for encrypted standalone field blocks,
+        // but spawn the detached request only after the retry engine has
+        // stopped invoking the attempt closure.
+        if prefetch_requested.load(std::sync::atomic::Ordering::Acquire) {
+            if let Ok(block) = Block::from_dag_cbor(block_data) {
+                if let Some(enc_cid) = block.encryption {
+                    self.spawn_dek_prefetch(enc_cid, &retry_metadata);
+                }
+            }
+        }
         // Head reclamation is a separate best-effort transaction. Run it
         // only after the retry engine has committed and released its ordered
         // commit token, so it cannot repeat inside a losing attempt.
@@ -313,18 +395,6 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
                 }
             }
         }
-        let result = match result {
-            Ok(value) => value
-                .downcast::<MergeOutcome>()
-                .map(|outcome| *outcome)
-                .map_err(|_| MergeError::MergeFailed("invalid merge retry result".into())),
-            Err(error) => match error.downcast_abort::<MergeError>() {
-                Ok(error) => Err(error),
-                Err(error) => Err(MergeError::Database(crate::error::Error::Storage(
-                    error.into_storage(),
-                ))),
-            },
-        };
         match result {
             Err(MergeError::RetryRejected(reason)) => Ok(MergeOutcome::rejected(reason)),
             Err(error) if error.disposition() == MergeErrorDisposition::Terminal => {

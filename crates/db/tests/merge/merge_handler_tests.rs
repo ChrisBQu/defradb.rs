@@ -2919,6 +2919,70 @@ async fn decrypt_block_data_routes_through_kms_when_set() {
 }
 
 #[tokio::test]
+async fn merge_attempt_resolves_dek_outside_attempt_and_reuses_it() {
+    let (handler, blockstore, _) = make_handler_with_schema_and_bus().await;
+    let key = [17u8; 32];
+    let encryption = Encryption::new(key.to_vec());
+    let encryption_cid = encryption.generate_cid().unwrap();
+    blockstore
+        .put(&encryption_cid, &encryption.to_dag_cbor().unwrap())
+        .await
+        .unwrap();
+
+    let mut plaintext = Vec::new();
+    ciborium::into_writer(&NormalValue::String("prepared DEK".into()), &mut plaintext).unwrap();
+    let (ciphertext, _) =
+        crypto::encryption::aes::encrypt_aes(&plaintext, &key, &[], true).unwrap();
+    let field_block = Block::new_with_options(
+        CrdtDelta::Lww(LwwDeltaPayload {
+            field_name: "name".into(),
+            schema_version_id: "v1".into(),
+            priority: 1,
+            data: ciphertext,
+        }),
+        vec![],
+        vec![],
+        Some(encryption_cid),
+        None,
+    );
+    let field_cid = field_block.generate_cid().unwrap();
+    blockstore
+        .put(&field_cid, &field_block.to_dag_cbor().unwrap())
+        .await
+        .unwrap();
+
+    let composite_block = Block::new(
+        CrdtDelta::Composite(CompositeDeltaPayload {
+            schema_version_id: "v1".into(),
+            priority: 1,
+            status: 1,
+        }),
+        vec![],
+        vec![DAGLink::new("name", field_cid)],
+    );
+    let composite_cid = composite_block.generate_cid().unwrap();
+    let composite_data = composite_block.to_dag_cbor().unwrap();
+    let doc_id = db::block::builder::derive_doc_id(&composite_cid);
+    let metadata = BlockMetadata::normal(
+        &doc_id,
+        "col-users",
+        "did:key:z6MkrPreparedMergeDek",
+        None,
+        false,
+    );
+
+    let kms = Arc::new(StubKms::fixed_key(key));
+    handler.set_kms(kms.clone());
+    let outcome = handler
+        .handle_block(&composite_cid, &composite_data, metadata)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, MergeOutcome::Merged);
+    assert_eq!(kms.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn decrypt_block_data_treats_wrong_kms_key_as_retryable() {
     let (handler, _blockstore) = make_handler();
     let correct_key = [7u8; 32];

@@ -58,6 +58,11 @@ pub enum MergeError {
     #[error("KMS error: {0}")]
     Kms(#[from] kms::Error),
 
+    /// The current merge attempt needs this DEK from KMS. The retry driver
+    /// resolves it outside the engine attempt and starts a fresh attempt.
+    #[error("merge requires prepared encryption key for {0}")]
+    NeedsDecryptionKey(Cid),
+
     /// Block signature verification failed — block MUST be rejected.
     #[error("block signature verification failed for cid={cid}: {reason}")]
     SignatureVerificationFailed { cid: Cid, reason: String },
@@ -103,6 +108,7 @@ impl MergeError {
             | Self::Database(_)
             | Self::Storage(_)
             | Self::Kms(_)
+            | Self::NeedsDecryptionKey(_)
             | Self::GateContended => MergeErrorDisposition::Retryable,
         }
     }

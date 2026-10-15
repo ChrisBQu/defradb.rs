@@ -32,6 +32,10 @@ use kovan_queue::seg_queue::SegQueue;
 use rapidhash::fast::RandomState;
 use rapidhash::{RapidHashMap, RapidHashSet};
 use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{atomic::AtomicBool, Mutex},
+};
 
 use cid::Cid;
 use crdt::traits::{Context, ReplicatedData, ValueReader};
@@ -66,6 +70,8 @@ pub const DEFAULT_MAX_MERGE_DEPTH: usize = 8192;
 
 /// A lock-free set of block CIDs.
 pub type CidSet = HopscotchMap<Cid, (), RandomState>;
+
+pub(crate) type RetryDecryptionKeys = Arc<Mutex<HashMap<Cid, [u8; 32]>>>;
 
 /// An empty [`CidSet`].
 pub fn cid_set() -> CidSet {
@@ -117,6 +123,10 @@ pub struct DbMergeHandler<S: Store, B: blockstore::Blockstore> {
     /// retrieval through the KMS (NAC/DAC-gated, cross-peer fetch) instead
     /// of reading the raw key directly from the Encryption block.
     kms: Arc<std::sync::OnceLock<Arc<dyn kms::KmsService>>>,
+    /// Request-scoped DEKs prepared outside an engine-owned merge attempt.
+    /// `None` means this handler is on the legacy non-retry path.
+    retry_decryption_keys: Option<RetryDecryptionKeys>,
+    retry_prefetch_requested: Option<Arc<AtomicBool>>,
     /// Per-document write serialization queue, shared with the DB so that local
     /// writes and P2P merges that touch the same document are mutually
     /// serialized. Ensures concurrent merges (and concurrent local writes) for
@@ -154,6 +164,8 @@ impl<S: Store, B: blockstore::Blockstore> Clone for DbMergeHandler<S, B> {
             #[cfg(not(target_arch = "wasm32"))]
             se_repusher: Arc::clone(&self.se_repusher),
             kms: Arc::clone(&self.kms),
+            retry_decryption_keys: self.retry_decryption_keys.clone(),
+            retry_prefetch_requested: self.retry_prefetch_requested.clone(),
             merge_queue: Arc::clone(&self.merge_queue),
             prefetched_dek_cids: Arc::clone(&self.prefetched_dek_cids),
             deferred: Arc::clone(&self.deferred),
@@ -164,6 +176,36 @@ impl<S: Store, B: blockstore::Blockstore> Clone for DbMergeHandler<S, B> {
 }
 
 impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
+    pub(super) fn with_retry_decryption_context(
+        &self,
+        keys: RetryDecryptionKeys,
+        prefetch_requested: Arc<AtomicBool>,
+    ) -> Self {
+        let mut handler = self.clone();
+        handler.retry_decryption_keys = Some(keys);
+        handler.retry_prefetch_requested = Some(prefetch_requested);
+        handler
+    }
+
+    pub(super) fn retry_decryption_keys(&self) -> Option<&RetryDecryptionKeys> {
+        self.retry_decryption_keys.as_ref()
+    }
+
+    pub(super) fn request_retry_dek_prefetch(&self) -> bool {
+        if let Some(requested) = &self.retry_prefetch_requested {
+            requested.store(true, std::sync::atomic::Ordering::Release);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(super) fn reset_retry_dek_prefetch_request(&self) {
+        if let Some(requested) = &self.retry_prefetch_requested {
+            requested.store(false, std::sync::atomic::Ordering::Release);
+        }
+    }
+
     /// The database handle this merge handler writes through.
     pub fn db(&self) -> &Arc<DB<S>> {
         &self.db
@@ -246,6 +288,8 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             #[cfg(not(target_arch = "wasm32"))]
             se_repusher: Arc::new(std::sync::OnceLock::new()),
             kms: Arc::new(std::sync::OnceLock::new()),
+            retry_decryption_keys: None,
+            retry_prefetch_requested: None,
             merge_queue,
             prefetched_dek_cids: Arc::new(cid_set()),
             deferred: Arc::new(Default::default()),

@@ -49,7 +49,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     /// falling back to the P2P blockstore when the metadata arrived via replay,
     /// extracts the AES key, and decrypts the data. Returns data unchanged if
     /// no encryption CID is present.
-    fn kms_request_context(metadata: Option<&BlockMetadata<'_>>) -> kms::RequestContext {
+    pub(super) fn kms_request_context(metadata: Option<&BlockMetadata<'_>>) -> kms::RequestContext {
         let Some(metadata) = metadata else {
             return kms::RequestContext::anonymous();
         };
@@ -85,6 +85,17 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         // resolves the key locally or via cross-peer fetch and returns the
         // plaintext key; we then AES-GCM decrypt the block data.
         if let Some(kms) = self.kms() {
+            if let Some(keys) = self.retry_decryption_keys() {
+                let key = keys
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get(enc_cid)
+                    .copied()
+                    .ok_or(MergeError::NeedsDecryptionKey(*enc_cid))?;
+                return crypto::encryption::aes::decrypt_aes(None, data, &key, &[]).map_err(|e| {
+                    kms::Error::Crypto(format!("KMS-keyed decryption failed: {e}")).into()
+                });
+            }
             let ctx = Self::kms_request_context(metadata);
             let results = kms.get_keys(&ctx, std::slice::from_ref(enc_cid)).await?;
             let mut receiver = results.into_receiver();

@@ -379,7 +379,9 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
             // Still REQUEST the DEK (detached) — see the twin gate in
             // `mod.rs::handle_block` for the Go-parity rationale.
             if let Some(enc_cid) = block.encryption {
-                self.spawn_dek_prefetch(enc_cid, &metadata);
+                if !self.request_retry_dek_prefetch() {
+                    self.spawn_dek_prefetch(enc_cid, &metadata);
+                }
             }
             return Ok(MergeOutcome::terminal_skip(
                 "field block has no unambiguous owner; merged via its composite",
@@ -416,6 +418,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
                                 "encryption key unavailable for standalone field block",
                             ));
                         }
+                        Err(error @ MergeError::NeedsDecryptionKey(_)) => return Err(error),
                         Err(error @ MergeError::Kms(_)) => return Err(error),
                         Err(_) => &block,
                     }
@@ -446,6 +449,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
                                 "encryption key unavailable for standalone field block",
                             ));
                         }
+                        Err(error @ MergeError::NeedsDecryptionKey(_)) => return Err(error),
                         Err(error @ MergeError::Kms(_)) => return Err(error),
                         Err(_) => &block,
                     }
