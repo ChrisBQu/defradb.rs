@@ -43,7 +43,7 @@ pub mod txn;
 
 // Re-export commonly used types
 pub use error::{Error, Result};
-pub use multistore::{NamespaceView, RootView, SharedTxn};
+pub use multistore::{NamespaceView, RootView, SharedTxn, WeakNamespaceView};
 pub use traits::Txn;
 pub use txn::{AsyncCallback, BasicTxn};
 
