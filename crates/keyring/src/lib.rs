@@ -39,6 +39,11 @@ pub const PEER_KEY: &str = "peer-key";
 /// Standard key name for data encryption (AES-256)
 pub const ENCRYPTION_KEY: &str = "encryption-key";
 
+/// Key name for at-rest keys used before the current [`ENCRYPTION_KEY`]: one
+/// or more 32-byte keys, concatenated. Files sealed under them stay readable
+/// after a rotation; new files are sealed under the current key.
+pub const PREVIOUS_ENCRYPTION_KEYS: &str = "encryption-key-previous";
+
 /// Standard key name for searchable encryption
 pub const SEARCHABLE_ENCRYPTION_KEY: &str = "searchable-encryption-key";
 

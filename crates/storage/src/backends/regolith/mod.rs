@@ -7,6 +7,8 @@ mod encryption;
 mod event_order;
 mod handle;
 pub(crate) mod iterator;
+#[cfg(not(target_arch = "wasm32"))]
+mod rewrite;
 mod store;
 mod transaction;
 

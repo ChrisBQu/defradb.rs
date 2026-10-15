@@ -63,9 +63,11 @@ impl RegolithTxn {
         path: impl AsRef<std::path::Path>,
         options: super::RegolithStoreOptions,
     ) -> Result<Self> {
-        let db = regolith::Db::open_read_only(path, options.engine).map_err(|error| {
-            Error::Backend(format!("failed to open regolith read-only: {error}"))
-        })?;
+        let db = regolith::Db::open_read_only(path.as_ref(), options.engine_with_keys()).map_err(
+            |error| Error::Backend(format!("failed to open regolith read-only: {error}")),
+        )?;
+        #[cfg(not(target_arch = "wasm32"))]
+        super::rewrite::check_read_only(path.as_ref(), &db, &options)?;
         Ok(Self {
             handle: Some(Arc::new(Handle::ReadOnly(db.snapshot()))),
             active_txns: Arc::new(AtomicUsize::new(1)),

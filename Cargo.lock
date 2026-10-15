@@ -12811,6 +12811,7 @@ dependencies = [
  "bytes",
  "chrono",
  "cid",
+ "crypto",
  "defra-core",
  "document",
  "futures",
@@ -12825,6 +12826,7 @@ dependencies = [
  "schema",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "telemetry",
  "tempfile",
  "thiserror 2.0.18",
@@ -12832,6 +12834,7 @@ dependencies = [
  "tracing",
  "uuid",
  "web-time",
+ "zeroize",
 ]
 
 [[package]]

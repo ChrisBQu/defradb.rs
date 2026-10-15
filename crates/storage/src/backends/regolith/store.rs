@@ -76,14 +76,17 @@ impl RegolithStore {
         let engine_stats = options.engine.get_statistics().cloned().unwrap_or_default();
         let stats = TransactionStatsHandle::from_engine(engine_stats.clone());
         let engine = options
-            .engine
-            .clone()
+            .engine_with_keys()
             .statistics(Some(engine_stats))
             .add_listener(Arc::new(BackgroundErrorListener))
             .add_listener(Arc::new(ConflictListener(stats.clone())))
             .merge_operator(Some(Arc::new(crate::merge::DefraMergeOperator)));
+        #[cfg(not(target_arch = "wasm32"))]
+        let db = super::rewrite::open(&path, engine, &options)?;
+        #[cfg(target_arch = "wasm32")]
         let db = OptimisticTransactionDb::open(&path, engine)
-            .map_err(|error| Error::Backend(format!("failed to open regolith: {error}")))?
+            .map_err(|error| Error::Backend(format!("failed to open regolith: {error}")))?;
+        let db = db
             .with_isolation(options.isolation)
             .with_policy(Arc::new(super::classifier::DefraKeyClassifier));
         Ok(Self {

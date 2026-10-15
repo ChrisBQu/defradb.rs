@@ -831,6 +831,7 @@ pub struct NodeBuilder {
     node_identity_did: Option<String>,
     node_acp_enabled: bool,
     at_rest_encryption_key: Option<[u8; 32]>,
+    previous_at_rest_encryption_keys: Vec<[u8; 32]>,
     max_txn_retries: Option<u32>,
     query_timeout: Option<Duration>,
     query_limits: QueryLimits,
@@ -850,6 +851,20 @@ fn resolve_regolith_options(
     durability: storage::backends::DurabilityMode,
 ) -> storage::RegolithStoreOptions {
     explicit.unwrap_or_default().with_durability(durability)
+}
+
+/// The builder's at-rest keys, current and previous, installed on `options`.
+fn with_at_rest_keys(
+    options: storage::RegolithStoreOptions,
+    current: Option<[u8; 32]>,
+    previous: &[[u8; 32]],
+) -> anyhow::Result<storage::RegolithStoreOptions> {
+    match current {
+        Some(key) => options
+            .with_encryption_keys(key, previous.iter().copied())
+            .map_err(|e| anyhow::anyhow!("invalid at-rest encryption keys: {e}")),
+        None => Ok(options),
+    }
 }
 
 struct StoreBuildArgs {
@@ -936,6 +951,17 @@ impl NodeBuilder {
     /// Enable engine file encryption at rest for the persistent storage backend.
     pub fn with_at_rest_encryption_key(mut self, key: [u8; 32]) -> Self {
         self.at_rest_encryption_key = Some(key);
+        self
+    }
+
+    /// Keys the store's files may still be sealed under after a rotation to
+    /// the key given to [`NodeBuilder::with_at_rest_encryption_key`]. They
+    /// only open what they sealed; new files use the current key.
+    pub fn with_previous_at_rest_encryption_keys<I>(mut self, keys: I) -> Self
+    where
+        I: IntoIterator<Item = [u8; 32]>,
+    {
+        self.previous_at_rest_encryption_keys = keys.into_iter().collect();
         self
     }
 
@@ -1158,11 +1184,11 @@ impl NodeBuilder {
                 data_path = %path.display(),
                 "embedded node starting"
             );
-            let mut opts =
-                resolve_regolith_options(self.regolith_options.clone(), self.storage_durability);
-            if let Some(key) = self.at_rest_encryption_key {
-                opts = opts.with_encryption_key(key);
-            }
+            let opts = with_at_rest_keys(
+                resolve_regolith_options(self.regolith_options.clone(), self.storage_durability),
+                self.at_rest_encryption_key,
+                &self.previous_at_rest_encryption_keys,
+            )?;
             let store = storage::RegolithStore::open_with_options(&path, opts)
                 .map_err(|e| anyhow::anyhow!("failed to open regolith store: {}", e))?;
 
@@ -1173,13 +1199,14 @@ impl NodeBuilder {
                 "embedded node starting (ephemeral, no data_path)"
             );
             let store = Arc::new(
-                storage::RegolithStore::open_with_options("memory", {
-                    let opts = storage::RegolithStoreOptions::memory();
-                    match self.at_rest_encryption_key {
-                        Some(key) => opts.with_encryption_key(key),
-                        None => opts,
-                    }
-                })
+                storage::RegolithStore::open_with_options(
+                    "memory",
+                    with_at_rest_keys(
+                        storage::RegolithStoreOptions::memory(),
+                        self.at_rest_encryption_key,
+                        &self.previous_at_rest_encryption_keys,
+                    )?,
+                )
                 .map_err(|e| anyhow::anyhow!("failed to open in-memory regolith: {}", e))?,
             );
 
