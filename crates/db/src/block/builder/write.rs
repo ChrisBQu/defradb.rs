@@ -590,7 +590,7 @@ pub(crate) async fn write_document_blocks_with_inputs(
                 .map_err(|e| format!("Failed to write field head: {}", e))?;
             headstore
                 .set(
-                    &crate::block::heads::document::publication_key(&head_key.bytes()),
+                    &crate::block::heads::document::publication_key(&head_key),
                     &[],
                 )
                 .await
@@ -686,7 +686,7 @@ pub(crate) async fn write_document_blocks_with_inputs(
         .map_err(|e| format!("Failed to write composite head: {}", e))?;
     headstore
         .set(
-            &crate::block::heads::document::publication_key(&composite_head_key.bytes()),
+            &crate::block::heads::document::publication_key(&composite_head_key),
             &[],
         )
         .await
@@ -698,6 +698,11 @@ pub(crate) async fn write_document_blocks_with_inputs(
         )
         .await
         .map_err(|e| format!("Failed to write composite priority index: {}", e))?;
+    if !is_create {
+        crate::block::heads::document::reclaim(headstore, identity.doc_short_id)
+            .await
+            .map_err(|e| format!("Failed to reclaim superseded document heads: {e}"))?;
+    }
 
     let doc_id_str = if is_create {
         derive_doc_id(&composite_cid)
@@ -816,7 +821,7 @@ pub(crate) async fn write_delete_block_with_inputs(
         .map_err(|e| format!("Failed to write delete composite head: {}", e))?;
     headstore
         .set(
-            &crate::block::heads::document::publication_key(&composite_head_key.bytes()),
+            &crate::block::heads::document::publication_key(&composite_head_key),
             &[],
         )
         .await
@@ -828,6 +833,9 @@ pub(crate) async fn write_delete_block_with_inputs(
         )
         .await
         .map_err(|e| format!("Failed to write delete priority index: {}", e))?;
+    crate::block::heads::document::reclaim(headstore, doc_short_id)
+        .await
+        .map_err(|e| format!("Failed to reclaim superseded document heads: {e}"))?;
 
     tracing::debug!(
         doc_id = %doc_id,

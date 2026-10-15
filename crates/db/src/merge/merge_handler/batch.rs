@@ -404,48 +404,6 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
             }
         }
 
-        // Pruning is a separate best-effort operation after the winning receipt.
-        if result.is_ok() {
-            let mut prune_doc_ids = Vec::new();
-            let mut prune_collection_ids = Vec::new();
-            if let Ok(read_txn) = self.db.new_txn(true).await {
-                if let Ok(systemstore) = read_txn.systemstore() {
-                    for block in blocks {
-                        let Ok(Some(collection)) =
-                            self.block_collection(&block.collection_id, None).await
-                        else {
-                            continue;
-                        };
-                        if collection.schema().is_branchable
-                            && !prune_collection_ids.contains(&collection.resolved_root_id())
-                        {
-                            prune_collection_ids.push(collection.resolved_root_id());
-                        }
-                        if let Ok(Some(doc_short_id)) = crate::docid::map::get_doc_short_id(
-                            &systemstore,
-                            collection.resolved_root_id(),
-                            &block.doc_id,
-                        )
-                        .await
-                        {
-                            if !prune_doc_ids.contains(&doc_short_id) {
-                                prune_doc_ids.push(doc_short_id);
-                            }
-                        }
-                    }
-                }
-                let _ = read_txn.discard();
-            }
-            for doc_short_id in prune_doc_ids {
-                self.db.maybe_prune_document_heads(doc_short_id).await;
-            }
-            for collection_short_id in prune_collection_ids {
-                self.db
-                    .maybe_prune_collection_heads(collection_short_id)
-                    .await;
-            }
-        }
-
         result
     }
 

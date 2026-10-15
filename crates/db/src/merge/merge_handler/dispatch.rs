@@ -340,36 +340,6 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
                 }
             }
         }
-        // Head reclamation is a separate best-effort transaction. Run it
-        // only after the retry engine has committed and released its ordered
-        // commit token, so it cannot repeat inside a losing attempt.
-        if result.is_ok() {
-            if let (Some(collection_id), Some(doc_id)) =
-                (collection_id.as_deref(), doc_id.as_deref())
-            {
-                if let Ok(Some(collection)) = self.block_collection(collection_id, None).await {
-                    if let Ok(txn) = self.db.new_txn(true).await {
-                        if let Ok(systemstore) = txn.systemstore() {
-                            if let Ok(Some(doc_short_id)) = crate::docid::map::get_doc_short_id(
-                                &systemstore,
-                                collection.resolved_root_id(),
-                                doc_id,
-                            )
-                            .await
-                            {
-                                self.db.maybe_prune_document_heads(doc_short_id).await;
-                            }
-                        }
-                        let _ = txn.discard();
-                    }
-                    if collection.schema().is_branchable {
-                        self.db
-                            .maybe_prune_collection_heads(collection.resolved_root_id())
-                            .await;
-                    }
-                }
-            }
-        }
         match result {
             Err(MergeError::RetryRejected(reason)) => Ok(MergeOutcome::rejected(reason)),
             Err(error) if error.disposition() == MergeErrorDisposition::Terminal => {

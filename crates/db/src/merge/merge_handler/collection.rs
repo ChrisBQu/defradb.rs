@@ -434,11 +434,17 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                     "Failed to write collection head to headstore"
                 );
             }
+            // Replication supersedes heads the same way a local append does,
+            // so the same reclamation applies, in the same transaction.
+            crate::block::heads::prune_superseded_heads(
+                &headstore,
+                short_id,
+                crate::block::heads::RECLAIM_MAX_KEYS,
+            )
+            .await
+            .map_err(|e| MergeError::Storage(e.to_string()))?;
         }
         txn.force_commit().await?;
-        // Replication supersedes heads the same way a local append does, so
-        // the same reclamation applies.
-        self.db.maybe_prune_collection_heads(short_id).await;
 
         tracing::info!(
             cid = %cid,
@@ -796,23 +802,28 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
 
         batch_merged_collections.insert(*cid, ());
 
-        {
-            if let Some(heads) = &block.heads {
-                let _ =
-                    crate::block::heads::record_supersedes(headstore, short_id, heads, *cid).await;
-            }
-
-            let col_key = storage::keys::headstore::HeadstoreColKey::new(short_id, *cid);
-            let priority_bytes = encode_priority_varint(payload.priority);
-            let _ = headstore
-                .set(
-                    &<storage::keys::headstore::HeadstoreColKey as storage::corekv::Key>::bytes(
-                        &col_key,
-                    ),
-                    &priority_bytes,
-                )
-                .await;
+        if let Some(heads) = &block.heads {
+            crate::block::heads::record_supersedes(headstore, short_id, heads, *cid)
+                .await
+                .map_err(|e| MergeError::Storage(e.to_string()))?;
         }
+        let col_key = storage::keys::headstore::HeadstoreColKey::new(short_id, *cid);
+        headstore
+            .set(
+                &<storage::keys::headstore::HeadstoreColKey as storage::corekv::Key>::bytes(
+                    &col_key,
+                ),
+                &encode_priority_varint(payload.priority),
+            )
+            .await
+            .map_err(|e| MergeError::Storage(e.to_string()))?;
+        crate::block::heads::prune_superseded_heads(
+            headstore,
+            short_id,
+            crate::block::heads::RECLAIM_MAX_KEYS,
+        )
+        .await
+        .map_err(|e| MergeError::Storage(e.to_string()))?;
 
         if any_merged {
             Ok(MergeOutcome::Merged)

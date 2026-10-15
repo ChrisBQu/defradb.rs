@@ -50,24 +50,6 @@ pub(crate) async fn write_branchable_collection_block<S: storage::corekv::Store 
     Ok(written)
 }
 
-/// Run best-effort head reclamation only after the owning mutation has
-/// returned from its engine commit. Opening a nested prune transaction from a
-/// retry closure would repeat side effects on every attempt and can conflict
-/// with the mutation snapshot.
-pub(crate) async fn prune_heads_after_commit<S: storage::corekv::Store + 'static>(
-    db: &crate::database::DB<S>,
-    collection: &Collection,
-    doc_short_ids: impl IntoIterator<Item = u64>,
-) {
-    for doc_short_id in doc_short_ids {
-        db.maybe_prune_document_heads(doc_short_id).await;
-    }
-    if collection.schema().is_branchable {
-        db.maybe_prune_collection_heads(collection.resolved_root_id())
-            .await;
-    }
-}
-
 /// Persist a local UPDATE: apply CRDT field deltas to the authoritative store
 /// (the counter RMW, #1021) and then write the document + maintain indexes. These
 /// are bundled so no mutator can write a document blob without first advancing the

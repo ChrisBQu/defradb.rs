@@ -336,11 +336,10 @@ async fn reclamation_does_not_abort_a_concurrent_append() {
     assert_eq!(heads, vec![appended]);
 }
 
-/// Appends through the database reclaim what they supersede: the stored head
-/// set stays bounded by the prune interval, not by the number of appends, and
-/// an explicit pass leaves only the live head.
+/// Appends through the database reclaim what they supersede in their own
+/// transaction: after any number of appends only the live head is stored.
 #[tokio::test]
-async fn appends_through_the_db_keep_the_stored_head_set_bounded() {
+async fn appends_through_the_db_store_only_the_live_head() {
     const APPENDS: usize = 64;
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = Arc::new(db::DB::from_arc(store.clone()).unwrap());
@@ -377,20 +376,62 @@ async fn appends_through_the_db_keep_the_stored_head_set_bounded() {
         txn.discard().unwrap();
         id
     };
-    let head_keys = HeadstoreColKey::collection_prefix(collection_id);
-
-    let stored = stored_keys(&store, head_keys.clone()).await.len();
-    assert!(
-        stored < APPENDS / 2,
-        "{stored} head keys stored after {APPENDS} appends"
+    assert_eq!(
+        stored_keys(&store, HeadstoreColKey::collection_prefix(collection_id))
+            .await
+            .len(),
+        1
     );
-
-    db.prune_collection_heads(collection_id).await.unwrap();
-    assert_eq!(stored_keys(&store, head_keys).await.len(), 1);
     assert!(stored_keys(
         &store,
         HeadstoreColSuperseded::collection_prefix(collection_id)
     )
     .await
     .is_empty());
+}
+
+/// Two appends that both reclaim the same superseded group in their own
+/// transactions both commit: the deletes are blind, and the second one meets
+/// a key the first already deleted.
+#[tokio::test]
+async fn appends_reclaiming_the_same_group_both_commit() {
+    let store = RegolithStore::in_memory().unwrap();
+    let (old, current) = (cid_of(b"old"), cid_of(b"current"));
+    seed(&store, &[(old, 1), (current, 2)], &[(old, current)]).await;
+
+    let mut appends = Vec::new();
+    for name in [b"first".as_slice(), b"second"] {
+        let txn = SharedTxn::new(store.new_txn(false).await.unwrap());
+        let view = headstore(&txn);
+        let found = live_collection_heads(&view, COLLECTION).await.unwrap();
+        assert_eq!(found.live, vec![current]);
+        let appended = cid_of(name);
+        db::block::heads::record_supersedes(&view, COLLECTION, &found.live, appended)
+            .await
+            .unwrap();
+        view.set(
+            &Key::bytes(&HeadstoreColKey::new(COLLECTION, appended)),
+            &[3],
+        )
+        .await
+        .unwrap();
+        let outcome = prune_superseded_heads(&view, COLLECTION, 512)
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome.heads_removed, 2,
+            "the old group and the one just superseded"
+        );
+        drop(view);
+        appends.push((txn, appended));
+    }
+    let mut expected = Vec::new();
+    for (txn, appended) in appends {
+        commit(txn).await;
+        expected.push(appended);
+    }
+    expected.sort_by_cached_key(Cid::to_string);
+    let (heads, superseded) = live(&store).await;
+    assert_eq!(heads, expected);
+    assert_eq!(superseded, 0);
 }

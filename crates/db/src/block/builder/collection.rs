@@ -116,6 +116,13 @@ pub(crate) async fn write_collection_block_with_inputs(
         .set(&col_head_key.bytes(), &priority_bytes)
         .await
         .map_err(|e| format!("Failed to write collection head: {}", e))?;
+    crate::block::heads::prune_superseded_heads(
+        headstore,
+        collection_short_id,
+        crate::block::heads::RECLAIM_MAX_KEYS,
+    )
+    .await
+    .map_err(|e| format!("Failed to reclaim superseded collection heads: {e}"))?;
 
     tracing::debug!(
         collection_id = collection_short_id,

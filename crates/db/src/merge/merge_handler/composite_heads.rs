@@ -61,6 +61,9 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                     .map_err(|e| MergeError::Storage(e.to_string()))?;
             }
         }
+        crate::block::heads::document::reclaim(headstore, context.doc_short_id)
+            .await
+            .map_err(|e| MergeError::Storage(e.to_string()))?;
         Ok(())
     }
 }

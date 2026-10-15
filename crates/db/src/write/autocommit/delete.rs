@@ -2,7 +2,7 @@ use super::helpers::write_branchable_collection_block;
 use super::*;
 use events::{Message, Update};
 
-type DeleteAttemptResult = (DocID, bool, Option<CommitArtifacts>, Option<u64>);
+type DeleteAttemptResult = (DocID, bool, Option<CommitArtifacts>);
 
 struct DeleteRetryAttempt<S: Store> {
     db: Arc<DB<S>>,
@@ -153,9 +153,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .store()
             .transact_retry(storage::corekv::RetryOptions::new(4), Box::new(attempt))
             .await;
-        let (canonical_doc_id, commit_result, doc_short_id) = match result {
+        let (canonical_doc_id, commit_result) = match result {
             Ok(value) => *value
-                .downcast::<(DocID, Option<CommitArtifacts>, Option<u64>)>()
+                .downcast::<(DocID, Option<CommitArtifacts>)>()
                 .map_err(|_| query::error::QueryError::execution("invalid delete retry result"))?,
             Err(error) => match error.downcast_abort::<query::error::QueryError>() {
                 Ok(error) => return Err(error),
@@ -169,14 +169,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         let Some((cid, block, col_data)) = commit_result else {
             return Ok(DeleteResult::new(doc_id.clone(), false));
         };
-        if let Some(doc_short_id) = doc_short_id {
-            super::helpers::prune_heads_after_commit(
-                &self.db,
-                &collection,
-                std::iter::once(doc_short_id),
-            )
-            .await;
-        }
         let mut result = DeleteResult::with_commit(canonical_doc_id, true, cid, block);
         if let Some((col_cid, col_bytes)) = col_data {
             result.broadcast_cid = Some(col_cid);
@@ -189,7 +181,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         &self,
         retry: &mut dyn storage::corekv::RetryTxn,
         attempt: &DeleteRetryAttempt<S>,
-    ) -> query::error::Result<(DocID, Option<CommitArtifacts>, Option<u64>)> {
+    ) -> query::error::Result<(DocID, Option<CommitArtifacts>)> {
         let io = retry
             .begin_attempt_io()
             .map_err(|error| crate::error::commit_query_error(error.into()))?;
@@ -219,13 +211,13 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         let headstore = txn.headstore().map_err(|error| {
             query::error::QueryError::execution(format!("failed to get headstore: {error}"))
         })?;
-        let result: query::error::Result<(DocID, Option<CommitArtifacts>, Option<u64>)> = async {
+        let result: query::error::Result<(DocID, Option<CommitArtifacts>)> = async {
             let Some((doc_short_id, canonical_doc_id)) = collection
                 .resolve_doc_identity(&systemstore, &attempt.doc_id)
                 .await
                 .map_err(|error| query::error::QueryError::execution(error.to_string()))?
             else {
-                return Ok((attempt.doc_id.clone(), None, None));
+                return Ok((attempt.doc_id.clone(), None));
             };
             let index_manager = IndexManager::from_indexes(
                 collection.resolved_root_id(),
@@ -244,7 +236,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     query::error::QueryError::execution(format!("delete error: {error}"))
                 })?;
             if !existed {
-                return Ok((canonical_doc_id, None, None));
+                return Ok((canonical_doc_id, None));
             }
             crate::write::autocommit::helpers::unregister_deleted_doc(
                 self.db.document_acp(),
@@ -294,7 +286,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             Ok((
                 canonical_doc_id,
                 Some((block_result.cid, block_result.block, col_data)),
-                Some(doc_short_id),
             ))
         }
         .await;
@@ -302,7 +293,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         drop(systemstore);
         drop(blockstore);
         drop(headstore);
-        let (canonical_doc_id, artifacts, doc_short_id) = match result {
+        let (canonical_doc_id, artifacts) = match result {
             Ok(result) => result,
             Err(error) => {
                 if let Err(discard_error) = txn.discard() {
@@ -353,7 +344,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         retry
             .finish_attempt_io(io, callbacks)
             .map_err(|error| crate::error::commit_query_error(error.into()))?;
-        Ok((canonical_doc_id, artifacts, doc_short_id))
+        Ok((canonical_doc_id, artifacts))
     }
 
     /// Delete multiple documents in a single transaction.
@@ -405,14 +396,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 }
             },
         };
-        let doc_short_ids: Vec<_> = results
-            .iter()
-            .filter_map(|(_, _, _, short_id)| *short_id)
-            .collect();
-        super::helpers::prune_heads_after_commit(&self.db, &collection, doc_short_ids).await;
         Ok(results
             .into_iter()
-            .map(|(doc_id, existed, _, _)| DeleteResult::new(doc_id, existed))
+            .map(|(doc_id, existed, _)| DeleteResult::new(doc_id, existed))
             .collect())
     }
 
@@ -470,7 +456,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                         ))
                     })?
                 else {
-                    results.push((requested_id.clone(), false, None, None));
+                    results.push((requested_id.clone(), false, None));
                     continue;
                 };
                 let existed = collection
@@ -480,7 +466,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                         query::error::QueryError::execution(format!("delete error: {e}"))
                     })?;
                 if !existed {
-                    results.push((canonical_id, false, None, None));
+                    results.push((canonical_id, false, None));
                     continue;
                 }
                 crate::write::autocommit::helpers::unregister_deleted_doc(
@@ -531,7 +517,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     canonical_id,
                     true,
                     Some((block_result.cid, block_result.block, col_data)),
-                    Some(doc_short_id),
                 ));
             }
             Ok(results)
@@ -548,13 +533,13 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 return Err(error);
             }
         };
-        for (doc_id, _, artifacts, _) in &results {
+        for (doc_id, _, artifacts) in &results {
             if artifacts.is_some() {
                 self.register_deleted_doc_with_acp(&mut txn, &collection, doc_id.to_string())?;
             }
         }
         if let Some(bus) = self.db.event_bus().cloned() {
-            for (doc_id, _, artifacts, _) in &results {
+            for (doc_id, _, artifacts) in &results {
                 let Some((cid, block, col_data)) = artifacts else {
                     continue;
                 };
