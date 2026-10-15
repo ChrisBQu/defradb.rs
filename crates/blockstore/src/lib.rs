@@ -67,8 +67,9 @@ use tracing::instrument;
 ///
 /// It keeps no cache of its own: every read goes to the engine, whose block
 /// cache serves a repeated read, so every handle over one store sees the same
-/// blocks and merge marks. A read returns the caller its own copy of the
-/// block.
+/// blocks and merge marks. A read is zero-copy: the `Bytes` it returns hold
+/// the engine's own bytes, which stay unchanged for as long as they are held,
+/// whatever the store does after.
 pub struct DefraBlockstore<S: Store> {
     store: InternalBlockstore<S>,
     /// Whether to verify hash on read
@@ -181,14 +182,7 @@ impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
             }
         }
 
-        // The caller gets its own copy, not the engine's bytes. A read hands
-        // back `Bytes` over a regolith `DbSlice`, a refcount on whatever owns
-        // those bytes (a 16 KiB SSTable block, or a memtable arena); a block
-        // kept by its caller (a DAG fetch queue, a merge batch) would keep
-        // that owner resident, and a 200-byte block would hold a whole
-        // SSTable block down. regolith's guidance is to copy when the value
-        // outlives the read.
-        Ok(result.map(|data| Bytes::copy_from_slice(&data)))
+        Ok(result)
     }
 
     #[instrument(level = "trace", skip(self))]
