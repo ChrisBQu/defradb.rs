@@ -3,7 +3,6 @@
 //! store as it was so a retry installs the head.
 
 use super::*;
-use blockstore::Blockstore as _;
 use defra_core::block::CollectionDeltaPayload;
 use defra_core::merge::MergeOutcome;
 
