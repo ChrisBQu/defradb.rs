@@ -23,7 +23,7 @@ mod scan;
 pub mod stream;
 
 use bytes::Bytes;
-use rapidhash::{HashMapExt, RapidHashMap};
+use rapidhash::RapidHashMap;
 use std::sync::Arc;
 
 use async_lock::Mutex as TokioMutex;
@@ -36,7 +36,13 @@ use storage::corekv::Store;
 use crate::database::DB;
 use crate::txn::DbTxn;
 
-type VersionCache = RapidHashMap<String, (Arc<[schema::CollectionVersion]>, bool)>;
+use super::generation_cache::GenerationCache;
+
+/// A collection's versions and whether any of them has a migration.
+type VersionFacts = (Arc<[schema::CollectionVersion]>, bool);
+
+/// A collection version's targeted history, by version id.
+type History = RapidHashMap<String, TargetedHistoryLink>;
 
 /// Document fetcher that applies lens migrations to documents.
 ///
@@ -48,11 +54,15 @@ pub struct LensedDocFetcher<S: Store> {
     txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
     #[allow(dead_code)]
     lens_store: Arc<dyn TransformStore>,
-    /// Read-only snapshot facts; writable transactions always reload their own schema writes.
-    version_cache: Arc<async_lock::RwLock<VersionCache>>,
-    /// Cache of collection version histories keyed by collection name.
-    pub history_cache:
-        async_lock::RwLock<RapidHashMap<String, RapidHashMap<String, TargetedHistoryLink>>>,
+    /// Version facts by collection id, cached for read-only transactions
+    /// only: a writable one always reloads its own schema writes.
+    version_cache: Arc<GenerationCache<VersionFacts>>,
+    /// Targeted histories by `"{collection_id}:{version_id}"`.
+    ///
+    /// Both caches are shared with the fetcher's stream clones and have
+    /// generations of their own, which a schema change in the transaction
+    /// advances ([`invalidate_migration_cache`](Self::invalidate_migration_cache)).
+    history_cache: Arc<GenerationCache<History>>,
     /// Optional field projection used by mutation rebases whose dependencies
     /// are known. General query fetches leave this unset.
     projection: Option<rapidhash::RapidHashSet<String>>,
@@ -61,12 +71,10 @@ pub struct LensedDocFetcher<S: Store> {
 
 impl<S: Store> LensedDocFetcher<S> {
     /// Seed the per-version history cache directly.
-    pub async fn insert_history(
-        &self,
-        key: String,
-        history: RapidHashMap<String, TargetedHistoryLink>,
-    ) {
-        self.history_cache.write().await.insert(key, history);
+    pub fn insert_history(&self, key: String, history: History) {
+        let generation = self.history_cache.generation();
+        self.history_cache
+            .publish(generation, &key, &Arc::new(history));
     }
 
     /// Create a new lensed document fetcher.
@@ -81,8 +89,8 @@ impl<S: Store> LensedDocFetcher<S> {
             db,
             txn: Arc::new(TokioMutex::new(Some(txn))),
             lens_store,
-            version_cache: Arc::new(async_lock::RwLock::new(RapidHashMap::new())),
-            history_cache: async_lock::RwLock::new(RapidHashMap::new()),
+            version_cache: Arc::default(),
+            history_cache: Arc::default(),
             projection: None,
             prepared_inputs: None,
         }
@@ -109,16 +117,15 @@ impl<S: Store> LensedDocFetcher<S> {
         fetcher
     }
 
-    /// Build a lightweight fetcher sharing this one's transaction, for use by a `DocStream` that outlives a single
-    /// `&self` call. `history_cache` starts fresh rather than shared: it is
-    /// pure memoization, so recomputing it costs nothing correctness-wise.
+    /// Build a lightweight fetcher sharing this one's transaction and caches,
+    /// for use by a `DocStream` that outlives a single `&self` call.
     pub(super) fn stream_clone(&self) -> Self {
         Self {
             db: self.db.clone(),
             txn: self.txn.clone(),
             lens_store: self.lens_store.clone(),
             version_cache: self.version_cache.clone(),
-            history_cache: async_lock::RwLock::new(RapidHashMap::new()),
+            history_cache: self.history_cache.clone(),
             projection: self.projection.clone(),
             prepared_inputs: self.prepared_inputs.clone(),
         }
@@ -151,9 +158,12 @@ impl<S: Store> LensedDocFetcher<S> {
         self.lens_store.clone()
     }
 
-    pub(crate) async fn invalidate_migration_cache(&self) {
-        self.history_cache.write().await.clear();
-        self.version_cache.write().await.clear();
+    /// Drops what the fetcher derived from its transaction's schema, after a
+    /// schema change in the transaction; a value computed before this call is
+    /// never cached after it.
+    pub(crate) fn invalidate_migration_cache(&self) {
+        self.history_cache.invalidate();
+        self.version_cache.invalidate();
     }
 }
 

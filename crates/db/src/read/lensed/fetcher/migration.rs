@@ -16,7 +16,7 @@ use crate::definition::migration::helpers::{
     cache_migrated_document_with_indexes, lens_doc_to_document,
 };
 
-use super::LensedDocFetcher;
+use super::{History, LensedDocFetcher, VersionFacts};
 
 impl<S: Store> LensedDocFetcher<S> {
     /// Check if any version in a list of collection versions has migrations registered.
@@ -118,6 +118,7 @@ impl<S: Store> LensedDocFetcher<S> {
         collection: &Collection,
     ) -> query::error::Result<(Arc<[CollectionVersion]>, bool)> {
         let collection_id = &collection.schema().collection_id;
+        let generation = self.version_cache.generation();
 
         // Load all versions from systemstore
         let txn_guard = self.txn.lock().await;
@@ -134,8 +135,8 @@ impl<S: Store> LensedDocFetcher<S> {
             (readonly, systemstore)
         };
         if readonly {
-            if let Some(facts) = self.version_cache.read().await.get(collection_id) {
-                return Ok(facts.clone());
+            if let Some(facts) = self.version_cache.get(generation, collection_id) {
+                return Ok(VersionFacts::clone(&facts));
             }
         }
 
@@ -152,9 +153,7 @@ impl<S: Store> LensedDocFetcher<S> {
         let facts = (Arc::from(versions), has_migrations);
         if readonly {
             self.version_cache
-                .write()
-                .await
-                .insert(collection_id.clone(), facts.clone());
+                .publish(generation, collection_id, &Arc::new(facts.clone()));
         }
         drop(txn_guard);
         Ok(facts)
@@ -166,17 +165,14 @@ impl<S: Store> LensedDocFetcher<S> {
     async fn load_collection_history(
         &self,
         collection: &Collection,
-    ) -> query::error::Result<RapidHashMap<String, TargetedHistoryLink>> {
+    ) -> query::error::Result<Arc<History>> {
         let collection_id = &collection.schema().collection_id;
         let target_version_id = &collection.schema().version_id;
         let cache_key = format!("{}:{}", collection_id, target_version_id);
 
-        // First check if history is cached
-        {
-            let cache = self.history_cache.read().await;
-            if let Some(history) = cache.get(&cache_key) {
-                return Ok(history.clone());
-            }
+        let generation = self.history_cache.generation();
+        if let Some(history) = self.history_cache.get(generation, &cache_key) {
+            return Ok(history);
         }
 
         // Load versions using the helper
@@ -198,12 +194,8 @@ impl<S: Store> LensedDocFetcher<S> {
                 ))
             })?;
 
-        // Cache the history
-        {
-            let mut cache = self.history_cache.write().await;
-            cache.insert(cache_key, history.clone());
-        }
-
+        let history = Arc::new(history);
+        self.history_cache.publish(generation, &cache_key, &history);
         Ok(history)
     }
 
@@ -357,3 +349,7 @@ impl<S: Store> LensedDocFetcher<S> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/read/lensed_fetcher_caches.rs"]
+mod cache_tests;

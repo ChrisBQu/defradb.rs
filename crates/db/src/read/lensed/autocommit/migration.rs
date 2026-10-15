@@ -325,3 +325,7 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/read/lensed_migration_cache.rs"]
+mod migration_cache_tests;
