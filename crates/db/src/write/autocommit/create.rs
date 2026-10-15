@@ -652,17 +652,29 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         #[cfg(not(feature = "native"))]
         let computed_blocks: Vec<ComputedBlocks> = {
             let mut computed = Vec::with_capacity(prepared_docs.len());
+            // Every document's missing inputs join one wave: a miss is kept
+            // and the next document computed.
+            let mut first_miss = None;
             for (doc, identity) in prepared_docs.iter().zip(identities.iter()) {
-                let blocks = compute_document_blocks_with_inputs(
+                match compute_document_blocks_with_inputs(
                     doc,
                     &schema_version_id,
                     *identity,
                     enc_config.as_ref(),
                     sign_config.as_ref(),
                     self.prepared_inputs.as_ref(),
-                )
-                .map_err(|error| error.into_query_error_in("failed to compute document blocks"))?;
-                computed.push(blocks);
+                ) {
+                    Ok(blocks) => computed.push(blocks),
+                    Err(crate::block::builder::BuildError::NeedsInput(request)) => {
+                        first_miss.get_or_insert(request);
+                    }
+                    Err(error) => {
+                        return Err(error.into_query_error_in("failed to compute document blocks"))
+                    }
+                }
+            }
+            if let Some(request) = first_miss {
+                return Err(query::error::QueryError::NeedsInput(request));
             }
             computed
         };
