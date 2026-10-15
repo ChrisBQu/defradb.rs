@@ -97,6 +97,7 @@ impl<S: Store> DB<S> {
             collection_name: collection_name.to_owned(),
             materialize_identity_paths,
             lens_store: self.lens_store.clone(),
+            collections: std::sync::Arc::clone(&self.collections),
             settles,
         };
         match self
@@ -121,6 +122,7 @@ struct MaterializeAttempt {
     collection_name: String,
     materialize_identity_paths: bool,
     lens_store: std::sync::Arc<dyn lens::TransformStore>,
+    collections: std::sync::Arc<crate::collection::epoch::EpochedCollections>,
     settles: Option<(String, u64)>,
 }
 
@@ -291,8 +293,13 @@ impl MaterializeAttempt {
             }
 
             if let Some((collection_id, token)) = &self.settles {
-                super::owed_reindex::clear_owed_reindex(&txn_systemstore, collection_id, *token)
-                    .await?;
+                super::owed_reindex::clear_owed_reindex(
+                    &txn_systemstore,
+                    &self.collections,
+                    collection_id,
+                    *token,
+                )
+                .await?;
             }
 
             tracing::debug!(

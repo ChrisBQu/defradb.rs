@@ -102,6 +102,18 @@ impl CollectionMap {
         self.by_id.get(collection_id)
     }
 
+    /// Replace the collection with `collection_id` by what `update` makes of
+    /// it, which must keep its name and version.
+    pub(crate) fn update(
+        &mut self,
+        collection_id: &str,
+        update: impl FnOnce(&Collection) -> Collection,
+    ) {
+        if let Some(entry) = self.by_id.get_mut(collection_id) {
+            *entry = update(entry);
+        }
+    }
+
     /// The collection whose cached version is `version_id`.
     ///
     /// Only the current version of each collection is cached, so a superseded

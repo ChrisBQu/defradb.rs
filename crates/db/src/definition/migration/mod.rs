@@ -22,8 +22,8 @@ use storage::corekv::Store;
 use crate::error::Result;
 use crate::DB;
 
-pub(crate) use owed_reindex::owe_reindex;
 pub use owed_reindex::ReindexReport;
+pub(crate) use owed_reindex::{owe_reindex, reindex_owed};
 
 impl<S: Store> DB<S> {
     /// Run the ordered database-open migration pipeline.

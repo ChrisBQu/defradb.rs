@@ -84,7 +84,13 @@ impl<S: Store> crate::database::DB<S> {
                 .set(&name_key.bytes(), version_id.as_bytes())
                 .await
                 .map_err(Error::Storage)?;
-            crate::definition::migration::owe_reindex(&systemstore, &collection_id, None).await?;
+            crate::definition::migration::owe_reindex(
+                &systemstore,
+                &self.collections,
+                &collection_id,
+                None,
+            )
+            .await?;
 
             // Find and deactivate other versions with the same collection_id
             let version_prefix = CollectionVersionKey::collection_prefix(&collection_id);

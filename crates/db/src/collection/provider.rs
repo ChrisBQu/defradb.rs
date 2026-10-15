@@ -114,14 +114,12 @@ impl<S: Store + 'static> CollectionProvider for TxnCollectionProvider<S> {
                         collection::populate_collection_root_id(&systemstore, &mut schema)
                             .await
                             .map_err(|e| QueryError::execution(e.to_string()))?;
-                        let actions = crate::database::action::index_action_statuses(
-                            &systemstore,
-                            &schema.collection_id,
-                        )
-                        .await
-                        .map_err(|e| QueryError::execution(e.to_string()))?;
+                        let statuses =
+                            collection::IndexStatuses::load(&systemstore, &schema.collection_id)
+                                .await
+                                .map_err(|e| QueryError::execution(e.to_string()))?;
                         return Ok(Some(
-                            collection::Collection::with_index_actions(schema, &actions)
+                            collection::Collection::with_index_actions(schema, &statuses)
                                 .schema_for_queries(),
                         ));
                     }
@@ -138,14 +136,12 @@ impl<S: Store + 'static> CollectionProvider for TxnCollectionProvider<S> {
                     collection::populate_collection_root_id(&systemstore, &mut schema)
                         .await
                         .map_err(|e| QueryError::execution(e.to_string()))?;
-                    let actions = crate::database::action::index_action_statuses(
-                        &systemstore,
-                        &schema.collection_id,
-                    )
-                    .await
-                    .map_err(|e| QueryError::execution(e.to_string()))?;
+                    let statuses =
+                        collection::IndexStatuses::load(&systemstore, &schema.collection_id)
+                            .await
+                            .map_err(|e| QueryError::execution(e.to_string()))?;
                     return Ok(Some(
-                        collection::Collection::with_index_actions(schema, &actions)
+                        collection::Collection::with_index_actions(schema, &statuses)
                             .schema_for_queries(),
                     ));
                 }
