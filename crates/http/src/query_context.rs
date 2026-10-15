@@ -275,7 +275,7 @@ mod tests {
     // Retry telemetry counters are process-global. These tests take snapshots
     // around their own HTTP retry sequences, so serialize the two cases that
     // record this layer's counters.
-    static RETRY_METRICS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static RETRY_METRICS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[derive(Default)]
     struct ConflictExecutor {
@@ -378,7 +378,7 @@ mod tests {
 
     #[tokio::test]
     async fn auto_commit_execution_retries_typed_conflicts() {
-        let _metrics_guard = RETRY_METRICS_TEST_LOCK.lock().unwrap();
+        let _metrics_guard = RETRY_METRICS_TEST_LOCK.lock().await;
         let metrics_before = telemetry::conflict_metrics_snapshot().http_auto_commit;
         let executor = Arc::new(ConflictExecutor::default());
         let state = AppStateBuilder::new(executor.clone())
@@ -424,7 +424,7 @@ mod tests {
 
     #[tokio::test]
     async fn auto_commit_resolves_input_outside_attempt_and_preserves_it_across_conflict() {
-        let _metrics_guard = RETRY_METRICS_TEST_LOCK.lock().unwrap();
+        let _metrics_guard = RETRY_METRICS_TEST_LOCK.lock().await;
         let executor = Arc::new(ConflictExecutor {
             input_on_second: true,
             ..Default::default()

@@ -111,6 +111,7 @@ pub(crate) async fn app_allows(
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct ReadValidationInput {
     pub identity: Option<String>,
+    #[serde(with = "super::collection_input")]
     pub collection: CollectionVersion,
     pub doc_id: String,
 }
@@ -137,7 +138,8 @@ mod retry_tests {
     async fn prepared_read_validation_defers_provider_and_keys_all_decision_inputs() {
         let provider = Arc::new(Validator(AtomicUsize::new(0)));
         let validator: Arc<dyn ReadValidator> = provider.clone();
-        let schema = CollectionVersion::new("Users", "v1", "users", vec![]);
+        let mut schema = CollectionVersion::new("Users", "v1", "users", vec![]);
+        schema.root_id = 42;
         let reader = Some(Did::new("did:key:reader").unwrap());
         let memo = crate::prepared::PreparedInputMemo::default();
         let check = AppReadCheck::bind(Some(&validator), reader.clone(), &schema)

@@ -38,6 +38,7 @@ pub trait WriteValidator: MaybeSendSync {
 pub(crate) struct WriteValidationInput {
     pub validator: usize,
     pub identity: Option<String>,
+    #[serde(with = "super::collection_input")]
     pub collection: CollectionVersion,
     pub kind: String,
     pub doc_ids: Vec<String>,
@@ -75,7 +76,14 @@ mod retry_tests {
             create_input: vec![],
             update_input: RapidHashMap::default(),
         };
+        first.collection.root_id = 42;
         let first_key = first.prepared_request().unwrap();
+        let restored: WriteValidationInput =
+            serde_json::from_slice(first_key.exact_request()).unwrap();
+        assert_eq!(restored.collection.root_id, 42);
+        first.collection.root_id = 43;
+        assert_ne!(first_key, first.prepared_request().unwrap());
+        first.collection.root_id = 42;
         first.collection.policy = Some(schema::PolicyDescription::new("policy", "Users"));
         let changed_schema_key = first.prepared_request().unwrap();
 
