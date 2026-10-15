@@ -3,11 +3,12 @@ use std::sync::Arc;
 use chrono::{FixedOffset, Utc};
 use defra_core::encryption::EncryptionConfig;
 use identity::Did;
-use rapidhash::{HashMapExt, RapidHashMap};
+use rapidhash::{HashMapExt, HashSetExt, RapidHashMap, RapidHashSet};
 
 use crate::error::{QueryError, Result};
 use crate::executor::QueryRequest;
 use crate::mapper::MutationType;
+use crate::plan::mutation::projected_update_fields;
 use crate::prepared::{PreparedMutation, PreparedMutations};
 use crate::query_parse::{parse_request_with_limits, validate_parsed_operation, ParsedOperation};
 use crate::txn::TransactionRegistry;
@@ -201,15 +202,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         .collect(),
                 };
                 entry.doc_ids = Some(ids.clone());
-                // A single unconditional ID update with no external write
-                // inputs does not need a preparation-time document snapshot:
-                // UpdateNode will fetch and validate the exact read set that
-                // the mutation/output selection needs. Avoiding this eager
-                // full read is required for its projected `_docID`-only path
-                // to narrow the transaction's initial dependencies. Multi-
-                // mutation requests retain the overlay read below because
-                // later statements may depend on earlier writes.
-                if mutation.mutation_type == MutationType::Update
+                // A single unconditional ID update can use the same projected
+                // read as execution when no persistent write inputs or
+                // embeddings need preparation. Keep the ordinary fetch as a
+                // fallback and retain its found-target and prepare_write
+                // behavior below.
+                let projected_fields = if mutation.mutation_type == MutationType::Update
                     && mutations.len() == 1
                     && mutation.doc_ids.is_some()
                     && mutation.filter.is_none()
@@ -217,15 +215,32 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     && !mutation.encrypt_doc
                     && !mutator.requires_write_preparation()
                     && collection.vector_embeddings.is_empty()
+                    && mutator.supports_projected_updates()
                 {
-                    entry.update_targets.extend(ids);
-                    prepared.mutations.insert(mutation.output_name(), entry);
-                    continue;
+                    let patch_fields: RapidHashSet<String> =
+                        mutation.update_input.keys().cloned().collect();
+                    projected_update_fields(
+                        collection,
+                        &patch_fields,
+                        &authorized.mapping,
+                        true,
+                        false,
+                    )
+                } else {
+                    None
+                };
+                let mut docs = if let Some(fields) = projected_fields {
+                    match fetcher
+                        .get_by_ids_projected(&mutation.collection_name, &ids, &fields)
+                        .await?
+                    {
+                        Some(result) => result,
+                        None => fetcher.get_by_ids(&mutation.collection_name, &ids).await?,
+                    }
+                } else {
+                    fetcher.get_by_ids(&mutation.collection_name, &ids).await?
                 }
-                let mut docs = fetcher
-                    .get_by_ids(&mutation.collection_name, &ids)
-                    .await?
-                    .into_docs();
+                .into_docs();
                 if mutation.mutation_type == MutationType::Upsert && docs.is_empty() {
                     if let Some(input) = mutation.create_input.first() {
                         let input = self.build_upsert_input_from_map(collection, input)?;

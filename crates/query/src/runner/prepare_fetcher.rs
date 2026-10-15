@@ -53,6 +53,27 @@ impl DocFetcher for PreparationFetcher<'_> {
         Ok(FetchByIdsResult::partial(found, missing))
     }
 
+    async fn get_by_ids_projected(
+        &self,
+        collection: &str,
+        ids: &[String],
+        fields: &rapidhash::RapidHashSet<String>,
+    ) -> Result<Option<FetchByIdsResult>> {
+        // Projected storage reads cannot include changes staged by an earlier
+        // statement in this preparation overlay. Let the caller use its full
+        // fallback whenever any requested ID is shadowed here.
+        if ids.iter().any(|id| {
+            self.documents
+                .iter()
+                .any(|(name, projected_id, _)| name == collection && projected_id == id)
+        }) {
+            return Ok(None);
+        }
+        self.base
+            .get_by_ids_projected(collection, ids, fields)
+            .await
+    }
+
     async fn stream_by_doc_short_ids(
         &self,
         _: &str,

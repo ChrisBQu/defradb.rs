@@ -182,6 +182,10 @@ impl<S: Store + 'static> DbDocMutator<S> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
+    fn supports_projected_updates(&self) -> bool {
+        true
+    }
+
     fn set_document_acp(&self, provider: Arc<dyn acp::DocumentACP>) {
         self.db.set_document_acp(provider);
     }

@@ -447,6 +447,10 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         self.inner.manages_external_acp_hooks()
     }
 
+    fn supports_projected_updates(&self) -> bool {
+        self.inner.supports_projected_updates()
+    }
+
     async fn register_ordered_async_hook(
         &self,
         callback: storage::corekv::AsyncOrderedTxnCallback,

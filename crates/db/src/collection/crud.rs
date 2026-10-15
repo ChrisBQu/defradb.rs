@@ -54,8 +54,8 @@ impl Collection {
         Ok((data, version))
     }
 
-    /// Read only named fields when the stored schema version is current. A
-    /// lens transition needs the complete old value, so those reads retain the
+    /// Read the complete document while validating only the named field parts
+    /// when the stored schema version is current. A lens transition needs the
     /// conservative whole-blob dependency.
     pub(crate) async fn get_with_datastore_fields(
         &self,

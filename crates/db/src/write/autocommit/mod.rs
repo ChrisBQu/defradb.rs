@@ -216,6 +216,10 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
         true
     }
 
+    fn supports_projected_updates(&self) -> bool {
+        true
+    }
+
     fn with_prepared_inputs(
         &self,
         inputs: query::prepared::PreparedInputMemo,

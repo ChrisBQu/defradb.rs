@@ -351,74 +351,87 @@ impl UpdateNode {
         Ok(doc)
     }
 
-    /// Return the fields that make an unconditional, ID-targeted update safe
-    /// to revalidate as a projected read. Query predicates and returned fields
-    /// outside `_docID` need the full query snapshot and stay conservative.
     fn projected_update_fields(&self) -> Option<RapidHashSet<String>> {
-        if self.doc_ids.is_none() || self.filter.is_some() {
-            return None;
-        }
-        let rendered_doc_id_only = self.document_mapping.render_keys.len() == 1
-            && self.document_mapping.render_keys[0].key == "_docID"
-            && self.document_mapping.render_keys[0].index == 0
-            && self
-                .document_mapping
-                .indexes_by_name_iter()
-                .all(|(name, indexes)| name == "_docID" && indexes == [0])
-            && self
-                .document_mapping
-                .child_mappings
-                .iter()
-                .all(Option::is_none);
-        if !rendered_doc_id_only {
-            return None;
-        }
-
         let collection = self.collection.as_deref()?;
-        // A projected fetch cannot safely perform a schema migration or a
-        // query-backed view transformation.
-        if collection.previous_version.is_some() || collection.query.is_some() {
-            return None;
-        }
-
-        // The dependency set below models top-level scalar patches. Relation,
-        // object, and other structural input forms keep the full read until
-        // their nested mutation dependencies can be enumerated here.
-        if self.input.fields.keys().any(|name| {
-            collection
-                .fields
-                .iter()
-                .find(|field| field.name == *name)
-                .is_none_or(|field| !field.kind.is_scalar() || field.relation_name.is_some())
-        }) {
-            return None;
-        }
-
-        let mut fields: RapidHashSet<String> = self.input.fields.keys().cloned().collect();
-        // Index maintenance reads every component of an index touched by this
-        // patch. Including schema indexes that are currently inactive is a
-        // harmless conservative superset.
-        for index in &collection.indexes {
-            if index
-                .fields
-                .iter()
-                .any(|field| self.input.fields.contains_key(&field.name))
-            {
-                fields.extend(index.fields.iter().map(|field| field.name.clone()));
-            }
-        }
-        // Embedding generation may depend on fields beyond the patch itself.
-        for embedding in &collection.vector_embeddings {
-            if embedding
-                .fields
-                .iter()
-                .any(|field| self.input.fields.contains_key(field))
-            {
-                fields.extend(embedding.fields.iter().cloned());
-            }
-        }
-        (!fields.is_empty()).then_some(fields)
+        let patch_fields: RapidHashSet<String> = self.input.fields.keys().cloned().collect();
+        projected_update_fields(
+            collection,
+            &patch_fields,
+            &self.document_mapping,
+            self.doc_ids.is_some(),
+            self.filter.is_some(),
+        )
     }
+}
+
+/// Return the fields needed for the supported unconditional, ID-targeted
+/// scalar update. Query predicates and returned fields outside `_docID` need
+/// their normal full query snapshot and stay conservative.
+pub(crate) fn projected_update_fields(
+    collection: &CollectionVersion,
+    patch_fields: &RapidHashSet<String>,
+    mapping: &DocumentMapping,
+    has_doc_ids: bool,
+    has_filter: bool,
+) -> Option<RapidHashSet<String>> {
+    if !has_doc_ids || has_filter {
+        return None;
+    }
+    let rendered_doc_id_only = mapping.render_keys.len() == 1
+        && mapping.render_keys[0].key == "_docID"
+        && mapping.render_keys[0].index == 0
+        && mapping
+            .indexes_by_name_iter()
+            .all(|(name, indexes)| name == "_docID" && indexes == [0])
+        && mapping.child_mappings.iter().all(Option::is_none);
+    if !rendered_doc_id_only || patch_fields.is_empty() {
+        return None;
+    }
+
+    // A projected fetch cannot safely perform a schema migration or a
+    // query-backed view transformation.
+    if collection.previous_version.is_some() || collection.query.is_some() {
+        return None;
+    }
+
+    // The dependency set below models top-level scalar patches. Relation,
+    // object, and other structural input forms keep the full read until their
+    // nested mutation dependencies can be enumerated here.
+    if patch_fields.iter().any(|name| {
+        collection
+            .fields
+            .iter()
+            .find(|field| field.name == *name)
+            .is_none_or(|field| !field.kind.is_scalar() || field.relation_name.is_some())
+    }) {
+        return None;
+    }
+
+    let mut fields = patch_fields.clone();
+    // Index maintenance reads every component of an index touched by this
+    // patch. Including inactive schema indexes is a harmless superset.
+    for index in &collection.indexes {
+        if index
+            .fields
+            .iter()
+            .any(|field| patch_fields.contains(&field.name))
+        {
+            fields.extend(index.fields.iter().map(|field| field.name.clone()));
+        }
+    }
+    // Embedding generation may depend on fields beyond the patch itself. The
+    // generated vector field is included for index maintenance as well.
+    for embedding in &collection.vector_embeddings {
+        if embedding
+            .fields
+            .iter()
+            .any(|field| patch_fields.contains(field))
+        {
+            fields.extend(embedding.fields.iter().cloned());
+            fields.insert(embedding.field_name.clone());
+        }
+    }
+    Some(fields)
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -489,7 +502,11 @@ impl PlanNode for UpdateNode {
                 // the lensedFetcher migrates documents on read, ensuring migrated
                 // field values (e.g., SetDefault) are present before the update
                 // patch is applied and the result is returned.
-                let projected_fields = self.projected_update_fields();
+                let projected_fields = self
+                    .mutator
+                    .supports_projected_updates()
+                    .then(|| self.projected_update_fields())
+                    .flatten();
                 let projected_result = if let Some(fields) = &projected_fields {
                     self.fetcher
                         .get_by_ids_projected(

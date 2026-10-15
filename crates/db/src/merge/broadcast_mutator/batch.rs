@@ -296,6 +296,10 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         self.inner.requires_write_preparation()
     }
 
+    fn supports_projected_updates(&self) -> bool {
+        self.inner.supports_projected_updates()
+    }
+
     async fn prepare_write(
         &self,
         collection_name: &str,
