@@ -63,19 +63,31 @@ async fn immutable_fields_reads_one_document_not_the_collection() {
 type Lookups = Vec<(String, Result<Vec<String>, String>)>;
 
 /// Defers a grant held by "gated" until the composite `gate` is held, and
-/// on a note looks every probe value up on each of `fields`.
+/// on a note looks every probe value up on each of `fields`: one after
+/// another, or all at once when `joined`.
 struct Probe {
     gate: Mutex<Cid>,
     fields: &'static [&'static str],
+    joined: bool,
     values: Mutex<Vec<String>>,
     found: Mutex<Lookups>,
 }
 
 impl Probe {
     fn new(fields: &'static [&'static str]) -> Arc<Self> {
+        Self::with(fields, false)
+    }
+
+    /// A probe whose lookups all run concurrently through the one view.
+    fn joined(fields: &'static [&'static str]) -> Arc<Self> {
+        Self::with(fields, true)
+    }
+
+    fn with(fields: &'static [&'static str], joined: bool) -> Arc<Self> {
         Arc::new(Self {
             gate: Mutex::new(Cid::default()),
             fields,
+            joined,
             values: Mutex::new(Vec::new()),
             found: Mutex::new(Vec::new()),
         })
@@ -114,22 +126,46 @@ impl MergeValidator for Probe {
             return Ok(MergeVerdict::Accept);
         }
         let values = self.values.lock().unwrap().clone();
-        for value in values {
-            for field in self.fields {
-                let mut found = view
-                    .find_documents("Grants", field, &NormalValue::String(value.clone()))
-                    .await;
-                if let Ok(ids) = &mut found {
-                    ids.sort();
-                }
-                self.found
-                    .lock()
-                    .unwrap()
-                    .push((format!("{field}={value}"), found));
+        let probes: Vec<(&str, &str)> = values
+            .iter()
+            .flat_map(|value| {
+                self.fields
+                    .iter()
+                    .map(move |field| (*field, value.as_str()))
+            })
+            .collect();
+        let found = if self.joined {
+            futures::future::join_all(
+                probes
+                    .iter()
+                    .map(|(field, value)| find_grants(view, field, value)),
+            )
+            .await
+        } else {
+            let mut found = Vec::with_capacity(probes.len());
+            for (field, value) in &probes {
+                found.push(find_grants(view, field, value).await);
             }
-        }
+            found
+        };
+        self.found.lock().unwrap().extend(found);
         Ok(MergeVerdict::Accept)
     }
+}
+
+/// The Grants whose `field` is `value`, sorted, keyed `field=value`.
+async fn find_grants(
+    view: &dyn MergeView,
+    field: &str,
+    value: &str,
+) -> (String, Result<Vec<String>, String>) {
+    let mut found = view
+        .find_documents("Grants", field, &NormalValue::String(value.to_string()))
+        .await;
+    if let Ok(ids) = &mut found {
+        ids.sort();
+    }
+    (format!("{field}={value}"), found)
 }
 
 impl Node {
@@ -326,4 +362,41 @@ async fn find_documents_still_finds_a_deleted_document_on_both_paths() {
     assert_eq!(ids("twin=gone"), vec![gone.doc_id.clone()]);
     assert_eq!(ids("writer=kept"), vec![kept.doc_id.clone()]);
     assert!(ids("writer=absent").is_empty());
+}
+
+/// A validator may run its reads concurrently through one view: they open one
+/// snapshot between them, fill the per-verdict index and deleted-row memos
+/// at once, and answer exactly as the same reads made one after another.
+#[tokio::test]
+async fn concurrent_lookups_through_one_view_answer_as_sequential_ones() {
+    let probe = Probe::joined(&["writer", "twin"]);
+    let node = Node::with_indexed_grants(probe.clone()).await;
+    let peer = signer();
+    let forked = grant("shared", "a", &peer);
+    assert_eq!(forked.merge(&node, &peer.did).await, MergeOutcome::Merged);
+    node.create_locally(
+        "Grants",
+        r#"{"writer": "shared", "twin": "shared", "holder": "b"}"#,
+    )
+    .await;
+    let gone = grant("gone", "c", &peer);
+    assert_eq!(gone.merge(&node, &peer.did).await, MergeOutcome::Merged);
+    node.delete_locally("Grants", &gone.doc_id).await;
+
+    let found = probe.lookups(&node, &["shared", "gone", "absent"]).await;
+    assert_eq!(found.len(), 6);
+    let ids = |key: &str| {
+        let (_, ids) = found.iter().find(|(found, _)| found == key).unwrap();
+        ids.clone().unwrap()
+    };
+    assert_eq!(ids("writer=shared").len(), 2);
+    assert!(ids("writer=shared").contains(&forked.doc_id));
+    assert_eq!(ids("writer=gone"), vec![gone.doc_id.clone()]);
+    assert!(ids("writer=absent").is_empty());
+    for value in ["shared", "gone", "absent"] {
+        assert_eq!(
+            ids(&format!("writer={value}")),
+            ids(&format!("twin={value}"))
+        );
+    }
 }

@@ -25,14 +25,12 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeView<'_, S, B> {
         field: &str,
         value: &NormalValue,
     ) -> Result<Option<Vec<Document>>, String> {
-        let snapshot = self.snapshot().await?;
-        let txn = snapshot.as_ref().expect("snapshot opened above");
+        let txn = self.snapshot().await?;
         let datastore = txn.datastore().map_err(|error| error.to_string())?;
         let systemstore = txn.systemstore().map_err(|error| error.to_string())?;
 
         let key = (collection.name().to_string(), field.to_string());
-        let chosen = self.indexes.lock().await.get(&key).cloned();
-        let index = match chosen {
+        let index = match self.indexes.get(&key) {
             Some(index) => index,
             None => {
                 // The definition as the snapshot holds it: an index defined or
@@ -48,8 +46,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeView<'_, S, B> {
                         SimpleIndex::try_new(stored.resolved_root_id(), index.clone()).ok()
                     })
                     .map(Arc::new);
-                self.indexes.lock().await.insert(key, index.clone());
-                index
+                self.indexes.get_or_insert(key, index)
             }
         };
         let Some(index) = index else {
@@ -74,7 +71,6 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeView<'_, S, B> {
             .into_iter()
             .map(|(_, document, _)| document)
             .collect();
-        drop(snapshot);
         // A delete removes a document's index entries, and a governance read
         // must still see the document (`MergeView::find_documents`). The
         // caller filters by value, so the deleted rows join the candidates.
