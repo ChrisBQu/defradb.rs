@@ -277,10 +277,7 @@ async fn test_persisted_collection_root_id_allocation_conflicts_instead_of_dupli
 
     let err = txn2.commit().await.unwrap_err();
     assert!(
-        matches!(
-            err,
-            Error::Datastore(datastore::Error::Storage(storage::Error::TxnConflict))
-        ),
+        err.is_txn_conflict(),
         "expected write-write conflict, got: {err}"
     );
 

@@ -78,6 +78,6 @@ async fn structural_pruning_conflicts_with_a_new_link() {
     add.commit().await.unwrap();
     assert!(matches!(
         prune.commit().await,
-        Err(storage::Error::TxnConflict)
+        Err(storage::Error::TxnConflictDetails(_))
     ));
 }
