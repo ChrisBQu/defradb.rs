@@ -114,10 +114,7 @@ impl RegolithTxn {
         })
     }
 
-    pub(super) fn scoped_attempt(
-        txn: Box<Transaction>,
-        stats: TransactionStatsHandle,
-    ) -> Self {
+    pub(super) fn scoped_attempt(txn: Box<Transaction>, stats: TransactionStatsHandle) -> Self {
         Self {
             handle: Some(Arc::new(Handle::Writable(txn))),
             active_txns: Arc::new(AtomicUsize::new(0)),
@@ -136,9 +133,7 @@ impl RegolithTxn {
 
     // Ownership arrives boxed from the sealed attempt IO capability.
     #[allow(clippy::boxed_local)]
-    pub(super) fn into_scoped_engine_txn(
-        mut self: Box<Self>,
-    ) -> Result<(Box<Transaction>, bool)> {
+    pub(super) fn into_scoped_engine_txn(mut self: Box<Self>) -> Result<(Box<Transaction>, bool)> {
         if !self.scoped_attempt {
             return Err(Error::Other("not a scoped retry transaction".into()));
         }
