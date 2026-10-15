@@ -895,9 +895,7 @@ impl<S: Store> DbTxn<S> {
 
     fn discard_active_txn(&mut self) -> Result<()> {
         match self.txn.take() {
-            Some(txn) => {
-                txn.discard().map_err(Error::Datastore)
-            }
+            Some(txn) => txn.discard().map_err(Error::Datastore),
             None => Err(Error::TxnNotActive),
         }
     }
