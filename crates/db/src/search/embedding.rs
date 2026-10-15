@@ -1,10 +1,9 @@
 use crate::search::EmbeddingClientConfig;
-use anyhow::{anyhow, bail, Result as AnyhowResult};
+use anyhow::Result as AnyhowResult;
 use document::{Document, NormalValue};
 use rapidhash::RapidHashSet;
 use schema::VectorEmbeddingDescription;
 use serde::{Deserialize, Serialize};
-use std::sync::OnceLock;
 use tracing::warn;
 
 const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434/api";
@@ -27,6 +26,9 @@ type EmbeddingError = Box<dyn std::error::Error>;
 ///
 /// On update: generates embeddings only if a source field was modified.
 /// Skips generation if the user explicitly set the vector field.
+///
+/// The requests go through the process's embedding service, on its network
+/// runtime, never from the calling task.
 pub async fn set_embedding(
     embeddings: &[VectorEmbeddingDescription],
     doc: &mut Document,
@@ -34,8 +36,27 @@ pub async fn set_embedding(
     modified_fields: Option<&RapidHashSet<String>>,
     embedding_config: &EmbeddingClientConfig,
 ) -> Result<Vec<String>, EmbeddingError> {
-    let mut generated = Vec::new();
+    set_embedding_with(
+        &crate::remote_inputs::shared_embeddings(),
+        embeddings,
+        doc,
+        is_create,
+        modified_fields,
+        embedding_config,
+    )
+    .await
+}
 
+/// [`set_embedding`] through `service`: a database's own.
+pub(crate) async fn set_embedding_with(
+    service: &inputs::Service<crate::remote_inputs::Embeddings>,
+    embeddings: &[VectorEmbeddingDescription],
+    doc: &mut Document,
+    is_create: bool,
+    modified_fields: Option<&RapidHashSet<String>>,
+    embedding_config: &EmbeddingClientConfig,
+) -> Result<Vec<String>, EmbeddingError> {
+    let mut wanted = Vec::new();
     for embedding in embeddings {
         // Skip if user explicitly provided the embedding vector
         if is_create {
@@ -80,30 +101,44 @@ pub async fn set_embedding(
             }
         };
 
-        // Build text from source field values
-        let mut text = String::new();
-        for field_name in &embedding.fields {
-            if let Some(val) = doc.get(field_name) {
-                let s = normal_value_to_string(val);
-                text.push_str(&s);
-                text.push('\n');
-            }
-        }
-
-        let vec = call_embedding(
-            &embedding.provider,
-            resolved_config.url,
-            resolved_config.model,
-            &embedding_config.api_key,
-            &text,
-        )
-        .await?;
-
-        doc.set(&embedding.field_name, NormalValue::Float64Array(vec));
-        generated.push(embedding.field_name.clone());
+        let input = EmbeddingInput {
+            provider: embedding.provider.clone(),
+            url: resolved_config.url.to_string(),
+            model: resolved_config.model.to_string(),
+            api_key: embedding_config.api_key.clone(),
+            text: source_text(embedding, doc),
+        };
+        wanted.push((
+            embedding.field_name.clone(),
+            crate::remote_inputs::Embedding::new(input),
+        ));
+    }
+    if wanted.is_empty() {
+        return Ok(Vec::new());
     }
 
+    // Every field's text goes out at once.
+    let (fields, keys): (Vec<_>, Vec<_>) = wanted.into_iter().unzip();
+    let vectors = service.get_many(keys).await;
+    let mut generated = Vec::with_capacity(fields.len());
+    for (field, vector) in fields.into_iter().zip(vectors) {
+        let vector = vector.map_err(crate::remote_inputs::embedding_error)?;
+        doc.set(&field, NormalValue::Float64Array(vector.to_vec()));
+        generated.push(field);
+    }
     Ok(generated)
+}
+
+/// The text an embedding embeds: each source field's value, one per line.
+fn source_text(embedding: &VectorEmbeddingDescription, doc: &Document) -> String {
+    let mut text = String::new();
+    for field in &embedding.fields {
+        if let Some(value) = doc.get(field) {
+            text.push_str(&normal_value_to_string(value));
+            text.push('\n');
+        }
+    }
+    text
 }
 
 /// Apply only exact memoized embedding responses inside a transaction attempt.
@@ -177,19 +212,12 @@ pub(crate) fn prepared_embedding_request(
             MissingEmbeddingConfig::Url => "embedding URL is empty".to_string(),
             MissingEmbeddingConfig::Model => "embedding model is empty".to_string(),
         })?;
-    let mut text = String::new();
-    for field in &embedding.fields {
-        if let Some(value) = doc.get(field) {
-            text.push_str(&normal_value_to_string(value));
-            text.push('\n');
-        }
-    }
     let request = PreparedEmbeddingRequest {
         provider: embedding.provider.clone(),
         url: resolved.url.to_string(),
         model: resolved.model.to_string(),
         api_key: config.api_key.clone(),
-        text,
+        text: source_text(embedding, doc),
     };
     let bytes = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
     Ok(query::prepared::PreparedInputRequest::new(
@@ -260,30 +288,62 @@ pub async fn embed_text_with_provider(
     text: &str,
     model: Option<&str>,
 ) -> AnyhowResult<Vec<f64>> {
+    let input = query_input(embedding_config, provider, text, model).map_err(anyhow::Error::msg)?;
+    call_embedding(
+        &input.provider,
+        &input.url,
+        &input.model,
+        &input.api_key,
+        &input.text,
+    )
+    .await
+    .map_err(|err| anyhow::Error::msg(err.to_string()))
+}
+
+/// A query text's embedding, through the process's embedding service on
+/// its network runtime: never cached, so each query asks its provider.
+pub(crate) async fn embed_query(
+    embedding_config: &EmbeddingClientConfig,
+    provider: &str,
+    text: &str,
+    model: Option<&str>,
+) -> Result<Vec<f64>, EmbeddingCallError> {
+    let input = query_input(embedding_config, provider, text, model)
+        .map_err(EmbeddingCallError::final_error)?;
+    crate::remote_inputs::shared_embeddings()
+        .get(crate::remote_inputs::Embedding::query(input))
+        .await
+        .map(|vector| vector.to_vec())
+        .map_err(crate::remote_inputs::embedding_error)
+}
+
+/// What a query's text embeds with: the endpoint the config names and the
+/// model the query names, else the config's.
+fn query_input(
+    embedding_config: &EmbeddingClientConfig,
+    provider: &str,
+    text: &str,
+    model: Option<&str>,
+) -> Result<EmbeddingInput, &'static str> {
     let url = embedding_config.url.trim();
     if url.is_empty() {
-        bail!("embedding URL is empty");
+        return Err("embedding URL is empty");
     }
-
-    let resolved_model = model
+    let model = model
         .map(str::trim)
         .filter(|model| !model.is_empty())
         .or_else(|| {
             let default_model = embedding_config.model.trim();
             (!default_model.is_empty()).then_some(default_model)
         })
-        .ok_or_else(|| anyhow!("embedding model is empty"))?;
-
-    let vector = call_embedding(
-        provider,
-        url,
-        resolved_model,
-        &embedding_config.api_key,
-        text,
-    )
-    .await
-    .map_err(|err| anyhow!(err.to_string()))?;
-    Ok(vector)
+        .ok_or("embedding model is empty")?;
+    Ok(EmbeddingInput {
+        provider: provider.to_string(),
+        url: url.to_string(),
+        model: model.to_string(),
+        api_key: embedding_config.api_key.clone(),
+        text: text.to_string(),
+    })
 }
 
 fn normal_value_to_string(val: &NormalValue) -> String {
@@ -356,7 +416,7 @@ pub(crate) struct EmbeddingCallError {
 }
 
 impl EmbeddingCallError {
-    fn final_error(message: impl Into<String>) -> Self {
+    pub(crate) fn final_error(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
             retryable: false,
@@ -551,8 +611,9 @@ fn normalize_embedding(embedding: &mut [f64]) -> Result<(), EmbeddingError> {
 }
 
 fn embedding_client() -> &'static reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(reqwest::Client::new)
+    static CLIENT: regolith::sync::Lazy<reqwest::Client> =
+        regolith::sync::Lazy::new(reqwest::Client::new);
+    &CLIENT
 }
 
 pub fn parse_embedding_vector(embedding: &[serde_json::Value]) -> Result<Vec<f64>, String> {

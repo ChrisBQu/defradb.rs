@@ -213,7 +213,8 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 inputs,
             )?;
         } else {
-            crate::search::set_embedding(
+            crate::search::embedding::set_embedding_with(
+                self.db.remote_inputs().embeddings(),
                 &collection.schema().vector_embeddings,
                 &mut doc,
                 true,
@@ -558,7 +559,8 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     Err(error) => return Err(error),
                 }
             } else {
-                crate::search::set_embedding(
+                crate::search::embedding::set_embedding_with(
+                    self.db.remote_inputs().embeddings(),
                     &collection.schema().vector_embeddings,
                     &mut doc,
                     true,

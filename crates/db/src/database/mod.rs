@@ -503,7 +503,8 @@ impl<S: Store> DB<S> {
 
     /// Runs the database's remote inputs (signatures, embeddings) on the
     /// node's network runtime. Set once at startup, before the first write
-    /// that needs one; without it they run on the caller's async runtime.
+    /// that needs one; without it signatures run in the caller's task and
+    /// embeddings on the process's on-demand network runtime.
     pub fn set_network(&self, edge: edge::Edge) {
         if !self.remote_inputs.set_runtime(inputs::Runtime::edge(edge)) {
             tracing::warn!("the database's network runtime was already set; keeping the first");

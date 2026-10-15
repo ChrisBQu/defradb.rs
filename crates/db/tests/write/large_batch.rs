@@ -104,7 +104,6 @@ async fn a_batch_of_hundreds_of_embedded_encrypted_creates_commits() {
     });
 
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
-    db.set_network(edge::testing::edge());
     let kms = Arc::new(KeyingKms {
         issued: AtomicU64::new(1),
         keys: HopscotchMap::with_hasher(RandomState::default()),
