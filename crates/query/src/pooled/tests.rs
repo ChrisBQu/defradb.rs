@@ -1,6 +1,6 @@
 //! Requests run on the pool, one task per document at a time, an explicit
-//! transaction's requests on one worker, and a worker awaiting a request it
-//! submitted itself never waits on itself.
+//! transaction's requests go to its registry, and a worker awaiting a
+//! request it submitted itself never waits on itself.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -138,20 +138,19 @@ fn writes_to_one_document_run_one_at_a_time() {
     pool.shutdown_blocking().unwrap();
 }
 
+/// An explicit transaction's requests reach the inner executor from where
+/// they are made: its registry, not this boundary, sends them to the worker
+/// that owns the transaction.
 #[test]
-fn an_explicit_transactions_requests_run_on_one_worker_in_turn() {
-    let (recorder, executor, pool) = pooled(4);
-    let handle = TransactionHandle::new("t-1".into());
-    let requests = (0..8)
-        .map(|_| executor.execute_in_txn(QueryRequest::new("{ User { name } }"), &handle))
-        .collect();
-    all(requests);
+fn an_explicit_transactions_requests_pass_through_to_its_registry() {
+    let (recorder, executor, pool) = pooled(2);
+    let handle = workers::block_on(executor.begin_txn(false)).unwrap().unwrap();
+    workers::block_on(executor.execute_in_txn(QueryRequest::new("{ User { name } }"), &handle))
+        .unwrap();
     workers::block_on(executor.commit_txn(&handle))
         .unwrap()
         .unwrap();
-    assert_eq!(recorder.most.load(Ordering::SeqCst), 1);
-    let ran = recorder.workers();
-    assert!(ran.windows(2).all(|pair| pair[0] == pair[1]), "{ran:?}");
+    assert_eq!(recorder.workers(), vec![None, None, None]);
     pool.shutdown_blocking().unwrap();
 }
 

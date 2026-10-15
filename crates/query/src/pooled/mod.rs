@@ -9,9 +9,10 @@
 //! runs changes:
 //! - a write naming one document runs on that document's worker, one such
 //!   task per document at a time;
-//! - every request of an explicit transaction runs on that transaction's
-//!   worker, one at a time, in arrival order;
 //! - reads and everything else run on the least-loaded worker;
+//! - an explicit transaction's requests go to the inner executor as they
+//!   come: its transaction registry sends each to the worker that owns the
+//!   transaction, so routing them here would add a hop;
 //! - preparing a request's remote inputs (embeddings, keys) is network
 //!   work: it runs where the caller is, before the request enters the pool.
 
@@ -73,10 +74,6 @@ fn unavailable(error: workers::Error) -> QueryError {
     QueryError::execution(format!("the request did not run: {error}"))
 }
 
-fn txn_unavailable(error: QueryError) -> TransactionError {
-    TransactionError::execution(error.to_string())
-}
-
 #[async_trait]
 impl QueryExecutor for PooledExecutor {
     async fn prepare_request(
@@ -122,50 +119,28 @@ impl QueryExecutor for PooledExecutor {
         request: QueryRequest,
         handle: &TransactionHandle,
     ) -> QueryResponse {
-        let target = route::transaction_target(handle);
-        let handle = handle.clone();
-        self.on_pool(target, move |inner| async move {
-            inner.execute_in_txn(request, &handle).await
-        })
-        .await
-        .unwrap_or_else(|error| QueryResponse::error(error.to_string()))
+        self.inner.execute_in_txn(request, handle).await
     }
 
     async fn begin_txn(
         &self,
         readonly: bool,
     ) -> std::result::Result<TransactionHandle, TransactionError> {
-        self.on_pool(workers::Target::LeastLoaded, move |inner| async move {
-            inner.begin_txn(readonly).await
-        })
-        .await
-        .map_err(txn_unavailable)?
+        self.inner.begin_txn(readonly).await
     }
 
     async fn commit_txn(
         &self,
         handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError> {
-        let target = route::transaction_target(handle);
-        let handle = handle.clone();
-        self.on_pool(target, move |inner| async move {
-            inner.commit_txn(&handle).await
-        })
-        .await
-        .map_err(txn_unavailable)?
+        self.inner.commit_txn(handle).await
     }
 
     async fn rollback_txn(
         &self,
         handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError> {
-        let target = route::transaction_target(handle);
-        let handle = handle.clone();
-        self.on_pool(target, move |inner| async move {
-            inner.rollback_txn(&handle).await
-        })
-        .await
-        .map_err(txn_unavailable)?
+        self.inner.rollback_txn(handle).await
     }
 
     fn abandon_txn(&self, handle: &TransactionHandle) {

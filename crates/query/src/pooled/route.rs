@@ -17,7 +17,6 @@ use graphql_parser::query::{Definition, OperationDefinition, Selection, Value};
 use serde_json::Value as JsonValue;
 
 use crate::executor::QueryRequest;
-use crate::txn::TransactionHandle;
 
 /// The mutation fields that act on documents already written, by prefix.
 const ONE_DOCUMENT_FIELDS: [&str; 3] = ["update_", "delete_", "upsert_"];
@@ -27,12 +26,6 @@ pub(super) fn request_target(request: &QueryRequest) -> workers::Target {
     one_document(request).map_or(workers::Target::LeastLoaded, |(collection, doc_id)| {
         workers::Target::Key(document_key(&collection, &doc_id))
     })
-}
-
-/// The worker every request of the explicit transaction `handle` runs on, so
-/// they run there one at a time, in arrival order.
-pub(super) fn transaction_target(handle: &TransactionHandle) -> workers::Target {
-    workers::Target::Key(hash_parts(&[b"txn", handle.as_str().as_bytes()]))
 }
 
 /// The routing key of document `doc_id` of `collection`: the same for every
@@ -143,7 +136,5 @@ mod tests {
     fn the_key_separates_its_parts() {
         assert_ne!(document_key("ab", "c"), document_key("a", "bc"));
         assert_eq!(document_key("User", "bae-1"), document_key("User", "bae-1"));
-        let handle = TransactionHandle::new("7".into());
-        assert_eq!(transaction_target(&handle), transaction_target(&handle));
     }
 }
