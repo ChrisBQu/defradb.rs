@@ -262,6 +262,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
         };
 
         if fetcher_override.is_none()
+            && prepared.is_some()
             && (self.acp.supports_transactions()
                 || (mutations.len() > 1 && !has_policy_backed_mutation))
         {
