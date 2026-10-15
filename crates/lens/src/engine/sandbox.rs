@@ -30,10 +30,11 @@ pub struct WasmSandboxConfig {
     /// `docs/benchmarks/lens-epoch-period/measurement.md`.
     pub epoch_tick_period: Option<Duration>,
 
-    /// The most lens calls that run to completion for their caller (one
-    /// document's migration, a JSON batch) at once; a call past it waits for
-    /// one to end. Each call holds at most `max_memory_bytes` of instance
-    /// memory and one fiber stack per module, so this bounds their memory.
+    /// The most lens modules that run to completion for their caller (one
+    /// document's migration, a JSON batch) at once; a call takes one permit
+    /// per module of its lens and waits while they are not free. Each module
+    /// holds at most `max_memory_bytes` of instance memory and the fiber
+    /// stacks it runs on, so this bounds their memory.
     ///
     /// A streaming call (a lensed view reading its source) takes no permit: it
     /// waits on its source, which may itself run lens calls, so a permit held
