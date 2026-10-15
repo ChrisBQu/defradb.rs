@@ -346,6 +346,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
         Ok(JsonValue::Object(results))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn check_doc_access_prepared(
         &self,
         identity: &Identity,

@@ -608,14 +608,21 @@ async fn remote_acp_batch_replays_with_attempt_local_registration_projection() {
     .with_identity(Some(owner.clone()));
     let response =
         defra_core::current_identity::with_scoped_identity(Some(owner.to_string()), async {
-            let prepared = runner.prepare_request(&request).await.unwrap();
-            assert!(
-                prepared.is_some(),
-                "remote ACP batches are request-prepared"
-            );
-            defra_core::signing::scope_broadcast_creator_did(
+            defra_core::signing::scope_request_bearer_token(
                 Some(owner.to_string()),
-                runner.execute_prepared(request, prepared),
+                Some("batch-request-token".to_string()),
+                async {
+                    let prepared = runner.prepare_request(&request).await.unwrap();
+                    assert!(
+                        prepared.is_some(),
+                        "remote ACP batches are request-prepared"
+                    );
+                    defra_core::signing::scope_broadcast_creator_did(
+                        Some(owner.to_string()),
+                        runner.execute_prepared(request, prepared),
+                    )
+                    .await
+                },
             )
             .await
         })

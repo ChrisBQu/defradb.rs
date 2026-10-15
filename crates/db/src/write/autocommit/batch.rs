@@ -303,7 +303,7 @@ impl<S: Store + 'static> storage::corekv::RetryAttemptFn for BatchRetryAttempt<S
                 .map_err(|error| storage::corekv::RetryAttemptError::Abort(Box::new(error)))?;
             let (io, callbacks) = txn
                 .into_retry_attempt()
-                .map_err(|error| storage::corekv::RetryAttemptError::Storage(error.into()))?;
+                .map_err(storage::corekv::RetryAttemptError::Storage)?;
             drop(batch);
             retry
                 .finish_attempt_io(io, callbacks)

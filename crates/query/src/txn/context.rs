@@ -281,6 +281,7 @@ pub async fn check_doc_access_with_projection(
 /// Resolve a document permission through the request memo when running inside
 /// an engine retry attempt. A cache miss exits the attempt so the caller can
 /// ask the external ACP provider and re-enter with the exact answer.
+#[allow(clippy::too_many_arguments)]
 pub async fn check_doc_access_with_prepared_inputs(
     acp: &dyn DocumentACP,
     projection: Option<&AcpRegistrationProjection>,
