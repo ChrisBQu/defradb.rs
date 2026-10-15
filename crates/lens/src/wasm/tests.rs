@@ -61,7 +61,7 @@ fn a_call_in_flight_keeps_the_clock_until_it_ends() {
 fn a_lens_removed_during_a_call_lives_until_the_call_ends() {
     let store = WasmTransformStore::new().unwrap();
     let id = block_on(store.add(identity_config())).unwrap();
-    let modules = Arc::downgrade(&store.modules.get(&id).unwrap());
+    let held = store.modules.get(&id).unwrap();
     let (input, docs) = futures::channel::mpsc::unbounded::<LensDoc>();
     let mut output = store.transform(&id, Box::pin(docs)).unwrap();
 
@@ -74,18 +74,23 @@ fn a_lens_removed_during_a_call_lives_until_the_call_ends() {
         store.transform(&id, Box::pin(futures::stream::empty())),
         Err(Error::TransformNotFound(_))
     ));
-    assert!(
-        modules.upgrade().is_some(),
-        "the call in flight holds the lens"
-    );
 
     input.unbounded_send(doc(2)).unwrap();
-    assert_eq!(block_on(output.next()).unwrap().unwrap(), doc(2));
+    assert_eq!(
+        block_on(output.next()).unwrap().unwrap(),
+        doc(2),
+        "the call in flight still runs the removed lens"
+    );
+    // This test's reference and the call's; the map's own copy goes when
+    // the removed entry is reclaimed, which may be later.
+    let in_flight = Arc::strong_count(&held);
+    assert!(in_flight >= 2, "the call holds the lens");
+
     drop(input);
     assert!(block_on(output.next()).is_none());
     assert!(
-        modules.upgrade().is_none(),
-        "the lens is dropped once its call ends"
+        Arc::strong_count(&held) < in_flight,
+        "the ended call let the lens go"
     );
 }
 

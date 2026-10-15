@@ -3,7 +3,8 @@
 //!
 //! Each registered lens keeps its modules' `InstancePre`s in the transform
 //! map. A call takes a reference to them, so removing a lens while a call is
-//! in flight drops them once that call ends. Resource limits (memory, CPU
+//! in flight drops them once that call ends and the map's removed entry is
+//! reclaimed (the lock-free map frees removed entries in batches). Resource limits (memory, CPU
 //! fuel, epoch interruption, concurrent calls) are opt-in via
 //! `WasmSandboxConfig`; the engine, its ticks, its calls and the limits live
 //! in the `engine` module.

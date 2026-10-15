@@ -11,8 +11,8 @@
 //! What must never happen: a call that runs on unbounded (each store has the
 //! sandbox's fuel and ticks per input document, and traps past them), a call
 //! that keeps its worker from other tasks (it yields on every epoch tick), or
-//! a call that outlives the module it runs (the pipeline is reference-counted,
-//! so removing a lens drops it once the calls on it end).
+//! a module dropped under a call that runs it (the pipeline is
+//! reference-counted, so a removed lens lives until the calls on it end).
 
 mod channel;
 mod guest;
