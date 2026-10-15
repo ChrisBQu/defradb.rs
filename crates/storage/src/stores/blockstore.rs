@@ -1,4 +1,7 @@
-use crate::corekv::{IterOptions, Iterator, Key, Reader, Result, Store, Txn, Writer};
+use crate::corekv::{
+    IterOptions, Iterator, Key, Reader, Result, RetryAttemptFn, RetryAttemptFuture, RetryOptions,
+    RetryTxn, Store, Txn, Writer,
+};
 use crate::keys::blockstore::{BlockstoreKey, ToMergeIndexKey, OBJECT_MARKER};
 use crate::namespace::{Namespace, NamespacedStore};
 use async_trait::async_trait;
@@ -29,6 +32,88 @@ impl<S: Store> Blockstore<S> {
     /// Create a new Blockstore (uses Blockstore namespace by default)
     pub fn new(store: Arc<S>, is_p2p: bool) -> Self {
         Self::new_with_namespace(store, is_p2p, Namespace::Blockstore)
+    }
+
+    /// Run `writes` in one transaction whose conflicts the engine re-runs
+    /// under `retry`. Each re-run reads the blocks again, so a block another
+    /// writer stored first is left as it is. Returns, per write, whether it
+    /// found or changed a block: false for a put of a block already stored and
+    /// for a merge mark of a block not stored.
+    pub async fn write_blocks(
+        &self,
+        retry: RetryOptions,
+        writes: Vec<BlockWrite>,
+    ) -> Result<Vec<bool>> {
+        let attempt = Box::new(BlockWritesAttempt {
+            writes,
+            is_p2p: self.is_p2p,
+        });
+        self.store
+            .transact_retry(retry, attempt)
+            .await
+            .map_err(crate::corekv::RetryAttemptError::into_storage)?
+            .downcast::<Vec<bool>>()
+            .map(|written| *written)
+            .map_err(|_| crate::corekv::Error::Other("invalid block write result".into()))
+    }
+}
+
+/// One write [`Blockstore::write_blocks`] runs.
+pub enum BlockWrite {
+    /// Store a block if it is not stored yet; in P2P mode it starts unmerged.
+    Put { cid: Cid, data: Bytes },
+    /// Mark a block merged.
+    MarkMerged(Cid),
+    /// Delete a block and its merge mark.
+    Delete(Cid),
+}
+
+/// The keys a put writes: the block, and in P2P mode its unmerged mark.
+fn put_keys(cid: Cid, is_p2p: bool) -> (Vec<u8>, Option<Vec<u8>>) {
+    (
+        BlockstoreKey::new(cid).bytes(),
+        is_p2p.then(|| ToMergeIndexKey::new(cid).bytes()),
+    )
+}
+
+struct BlockWritesAttempt {
+    writes: Vec<BlockWrite>,
+    is_p2p: bool,
+}
+
+impl RetryAttemptFn for BlockWritesAttempt {
+    fn run<'a>(&'a mut self, txn: &'a mut dyn RetryTxn) -> RetryAttemptFuture<'a> {
+        Box::pin(async move {
+            let mut found = Vec::with_capacity(self.writes.len());
+            for write in &self.writes {
+                found.push(match write {
+                    BlockWrite::Put { cid, data } => {
+                        let (block_key, merge_key) = put_keys(*cid, self.is_p2p);
+                        if txn.has(&block_key).await? {
+                            false
+                        } else {
+                            txn.set(&block_key, data).await?;
+                            if let Some(merge_key) = merge_key {
+                                // 0xff matches the Go marker for cross-implementation compatibility.
+                                txn.set(&merge_key, &[OBJECT_MARKER]).await?;
+                            }
+                            true
+                        }
+                    }
+                    BlockWrite::MarkMerged(cid) => {
+                        let stored = txn.has(&BlockstoreKey::new(*cid).bytes()).await?;
+                        txn.delete(&ToMergeIndexKey::new(*cid).bytes()).await?;
+                        stored
+                    }
+                    BlockWrite::Delete(cid) => {
+                        txn.delete(&BlockstoreKey::new(*cid).bytes()).await?;
+                        txn.delete(&ToMergeIndexKey::new(*cid).bytes()).await?;
+                        true
+                    }
+                });
+            }
+            Ok(Box::new(found) as crate::corekv::RetryAttemptValue)
+        })
     }
 }
 
@@ -77,18 +162,12 @@ pub struct BlockstoreTxn {
 impl BlockstoreTxn {
     /// Put a block with automatic merge tracking
     pub async fn put_block(&mut self, cid: &Cid, data: &[u8]) -> Result<()> {
-        let block_key = BlockstoreKey::new(*cid);
-
-        // Write the block data
-        self.set(&block_key.bytes(), data).await?;
-
-        // If this is a P2P store, track it as unmerged
-        if self.is_p2p {
-            let merge_key = ToMergeIndexKey::new(*cid);
-            // Use 0xff marker value to match Go implementation for cross-impl compatibility
-            self.set(&merge_key.bytes(), &[OBJECT_MARKER]).await?;
+        let (block_key, merge_key) = put_keys(*cid, self.is_p2p);
+        self.set(&block_key, data).await?;
+        if let Some(merge_key) = merge_key {
+            // 0xff matches the Go marker for cross-implementation compatibility.
+            self.set(&merge_key, &[OBJECT_MARKER]).await?;
         }
-
         Ok(())
     }
 

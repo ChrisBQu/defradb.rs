@@ -22,7 +22,10 @@ impl Node {
         let max_txn_retries = database.options().max_txn_retries();
         info!("Initializing P2P network (libp2p)");
 
-        let blockstore = Arc::new(blockstore::DefraBlockstore::new(store.clone(), true));
+        let blockstore = Arc::new(
+            blockstore::DefraBlockstore::new(store.clone(), true)
+                .with_max_txn_retries(max_txn_retries),
+        );
         let bitswap_store = p2p::BitswapStoreAdapter::new(blockstore);
         let classifier = defra_p2p_adapter::DbBlockClassifier::new_arc(database.clone());
         let serve_acp = Arc::new(p2p::bitswap::LateBoundServeAcp::new());
@@ -52,7 +55,10 @@ impl Node {
         let manage_hooks = defra_p2p_adapter::manage::hooks::new_manage_hooks_cell();
         let manage_hooks_for_events = manage_hooks.clone();
 
-        let sync_blockstore = Arc::new(blockstore::DefraBlockstore::new(store.clone(), true));
+        let sync_blockstore = Arc::new(
+            blockstore::DefraBlockstore::new(store.clone(), true)
+                .with_max_txn_retries(max_txn_retries),
+        );
         let merge_blockstore = sync_blockstore.clone();
         let collection_store: Arc<dyn p2p::sync::P2PCollectionStorage> =
             Arc::new(p2p::sync::P2PCollectionStore::new(store.clone()));

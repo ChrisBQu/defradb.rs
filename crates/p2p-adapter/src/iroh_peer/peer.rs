@@ -74,7 +74,10 @@ impl<S: Store + 'static> IrohPeer<S> {
         let transport = IrohTransport::new(command_tx, secret_key);
         let local_peer_id = transport.local_peer_id().to_string();
 
-        let blockstore = Arc::new(IrohBlockstore::new(Arc::clone(&store), true));
+        let blockstore = Arc::new(
+            IrohBlockstore::new(Arc::clone(&store), true)
+                .with_max_txn_retries(database.options().max_txn_retries()),
+        );
         let serve_acp = Arc::new(LateBoundServeAcp::new());
         let (mut coordinator, sync_events) =
             match p2p::sync::SyncCoordinator::with_head_provider_and_serve_gate(

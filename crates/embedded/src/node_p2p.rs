@@ -97,7 +97,9 @@ where
         .listen_addr
         .parse()
         .map_err(|error| anyhow!("invalid multiaddr '{}': {error}", config.listen_addr))?;
-    let blockstore = Arc::new(EmbeddedBlockstore::new(store.clone(), true));
+    let blockstore = Arc::new(
+        EmbeddedBlockstore::new(store.clone(), true).with_max_txn_retries(max_txn_retries),
+    );
     let bitswap_store = BitswapStoreAdapter::new(blockstore.clone());
 
     let mut seed = crate::node_peer_key::load_with_keyring(
