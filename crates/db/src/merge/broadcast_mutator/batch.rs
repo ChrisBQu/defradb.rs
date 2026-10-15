@@ -6,7 +6,6 @@ use document::{DocID, Document};
 use kovan_queue::seg_queue::SegQueue;
 use p2p::sync::SyncCoordinator;
 use p2p::transport::P2PTransport;
-use parking_lot::Mutex as StdMutex;
 use query::mutator::{
     BroadcastStatus, CreateResult, DeleteResult, DocMutator, MutationBatchController, UpdateResult,
 };
@@ -474,7 +473,10 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> MutationBatch
         mutator: Option<Arc<dyn DocMutator>>,
         fetcher: Option<Arc<dyn query::fetcher::DocFetcher>>,
     ) -> query::error::Result<serde_json::Value> {
-        let committed = Arc::new(StdMutex::new(None));
+        // The broadcasts of the attempt that succeeded last. Attempts run one
+        // after another, so each one empties the queue before it offers its
+        // own: the queue never holds more than the latest attempt's.
+        let committed: Arc<SegQueue<Vec<PendingBroadcast>>> = Arc::new(SegQueue::new());
         let committed_for_attempt = committed.clone();
         let inner_controller = self.inner_controller.clone();
         let sync = self.sync.clone();
@@ -495,7 +497,8 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> MutationBatch
                 Box::pin(async move {
                     let result = operation(wrapper_mutator, attempt_fetcher).await;
                     if result.is_ok() {
-                        *committed.lock() = Some(wrapper.drain_pending_broadcasts());
+                        while committed.pop().is_some() {}
+                        committed.push(wrapper.drain_pending_broadcasts());
                     }
                     result
                 })
@@ -505,7 +508,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> MutationBatch
             .inner_controller
             .run(wrapped_operation, mutator, fetcher)
             .await?;
-        let pending_broadcasts = committed.lock().take().unwrap_or_default();
+        let pending_broadcasts = committed.pop().unwrap_or_default();
         if !pending_broadcasts.is_empty() {
             let mut marker_errors = Vec::new();
             for pending in &pending_broadcasts {

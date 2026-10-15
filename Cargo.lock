@@ -3975,7 +3975,6 @@ dependencies = [
  "multihash",
  "n0-future",
  "p2p",
- "parking_lot 0.12.5",
  "proptest",
  "query",
  "rand 0.8.8",
