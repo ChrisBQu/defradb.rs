@@ -237,7 +237,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         .map_err(|e| query::error::QueryError::execution(format!("embedding error: {}", e)))?;
 
         self.db
-            .validate_downsample_write(&datastore, &systemstore, collection.schema(), &doc, None)
+            .validate_downsample_write(&datastore, &systemstore, &collection, &doc, None)
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
@@ -390,7 +390,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             .validate_downsample_write(
                 &datastore,
                 &systemstore,
-                collection.schema(),
+                &collection,
                 &doc,
                 Some(&modified_fields),
             )

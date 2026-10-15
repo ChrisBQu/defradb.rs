@@ -115,8 +115,8 @@ impl Collection {
         Ok(Some(ids))
     }
 
-    /// The part IDs of `names`, in order, or `None` when the version has no
-    /// map or the map does not name one of them.
+    /// The sorted part IDs of `names`, or `None` when the version has no map
+    /// or the map does not name one of them.
     pub(crate) async fn part_ids_of<'a, I>(
         &self,
         datastore: &NamespaceView,
@@ -126,10 +126,13 @@ impl Collection {
         I: IntoIterator<Item = &'a str>,
     {
         Ok(self.part_ids(datastore).await?.and_then(|ids| {
-            names
+            let mut parts = names
                 .into_iter()
                 .map(|name| ids.get(name).copied())
-                .collect()
+                .collect::<Option<Vec<u32>>>()?;
+            parts.sort_unstable();
+            parts.dedup();
+            Some(parts)
         }))
     }
 }

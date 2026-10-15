@@ -366,7 +366,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         // genesis block inside the txn; the mapping duplicate check is the gate.
 
         self.db
-            .validate_downsample_write(&datastore, &systemstore, collection.schema(), &doc, None)
+            .validate_downsample_write(&datastore, &systemstore, &collection, &doc, None)
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
@@ -532,7 +532,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             .validate_downsample_write(
                 &datastore,
                 &systemstore,
-                collection.schema(),
+                &collection,
                 &doc,
                 Some(&modified_fields),
             )

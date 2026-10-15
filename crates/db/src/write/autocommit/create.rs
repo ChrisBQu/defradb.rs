@@ -392,7 +392,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             })?;
 
             self.db
-                .validate_downsample_write(&datastore, &systemstore, collection.schema(), doc, None)
+                .validate_downsample_write(&datastore, &systemstore, &collection, doc, None)
                 .await
                 .map_err(|error| query::error::QueryError::execution(error.to_string()))?;
 
@@ -804,7 +804,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                         .validate_downsample_write(
                             &datastore,
                             &systemstore,
-                            collection.schema(),
+                            &collection,
                             &doc,
                             None,
                         )

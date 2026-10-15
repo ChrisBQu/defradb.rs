@@ -141,6 +141,19 @@ pub trait DocFetcher: MaybeSendSync {
     /// Get all documents from a collection (excludes deleted documents).
     async fn get_all(&self, collection_name: &str) -> Result<Vec<Document>>;
 
+    /// Get all documents from a collection for an update whose decision rests
+    /// only on `fields` (see [`crate::update_parts`]): a document the
+    /// transaction later writes is validated over those parts alone, so a
+    /// concurrent write of another field does not conflict with it. A fetcher
+    /// that cannot narrow the check reads as [`Self::get_all`].
+    async fn get_all_projected(
+        &self,
+        collection_name: &str,
+        _fields: &rapidhash::RapidHashSet<String>,
+    ) -> Result<Vec<Document>> {
+        self.get_all(collection_name).await
+    }
+
     /// Get all documents from a collection with their deletion status.
     ///
     /// If `show_deleted` is true, returns all documents including deleted ones.

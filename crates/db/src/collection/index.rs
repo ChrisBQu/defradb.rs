@@ -81,22 +81,12 @@ impl Collection {
         // Get old document for index update
         let old_doc = match modified {
             Some(changed) => {
-                // A counter increment is a blind operand: its old value is a
-                // dependency only of an index over the counter, added below.
-                let mut fields: rapidhash::RapidHashSet<String> = changed
-                    .iter()
-                    .filter(|name| doc.get_counter_delta(name).is_none())
-                    .cloned()
-                    .collect();
-                for index in index_manager.get_indexes() {
-                    if index
-                        .fields
-                        .iter()
-                        .any(|field| changed.contains(&field.name))
-                    {
-                        fields.extend(index.fields.iter().map(|field| field.name.clone()));
-                    }
-                }
+                let fields = query::update_parts::written(
+                    &self.def,
+                    index_manager.get_indexes(),
+                    changed,
+                    |name| doc.get_counter_delta(name).is_some(),
+                );
                 self.get_with_datastore_fields(datastore, doc_short_id, doc_id, &fields)
                     .await?
             }
@@ -144,7 +134,8 @@ impl Collection {
             None => self.validate_immutable_fields_unchanged(&old_doc, doc)?,
         }
 
-        let series_changed = modified.is_none_or(|changed| changed.contains("source_doc_id"));
+        let series_changed =
+            modified.is_none_or(|changed| changed.contains(crate::downsample::SERIES_FIELD));
         if series_changed {
             self.release_series(datastore, &old_doc).await?;
             self.claim_series(datastore, doc).await?;

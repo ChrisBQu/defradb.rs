@@ -7,6 +7,7 @@ mod batch_retry;
 mod batch_signing;
 mod conflict_reasons;
 mod counter_merges;
+mod disjoint_parts;
 mod doc_suite;
 mod embedding;
 mod embedding_reload;

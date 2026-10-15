@@ -15,7 +15,7 @@ impl Collection {
             return Ok(());
         }
         let series = doc
-            .get("source_doc_id")
+            .get(crate::downsample::SERIES_FIELD)
             .and_then(|value| value.as_str())
             .ok_or_else(|| {
                 Error::InvalidDocument("downsample target is missing source_doc_id".into())
@@ -46,7 +46,8 @@ impl Collection {
             return Ok(());
         }
         if let (Some(series), Some(doc_id)) = (
-            doc.get("source_doc_id").and_then(|value| value.as_str()),
+            doc.get(crate::downsample::SERIES_FIELD)
+                .and_then(|value| value.as_str()),
             doc.id(),
         ) {
             let key = self.series_key(series);

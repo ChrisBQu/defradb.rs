@@ -228,33 +228,16 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         // The fresh read, stale-plan comparison, rebase, and writes all belong
         // to this attempt. A storage conflict therefore repeats the complete
         // decision against the next engine snapshot.
-        let mut dependencies = attempt
-            .expected_fields
-            .clone()
-            .unwrap_or_else(|| attempt.modified_fields.clone());
-        dependencies.extend(attempt.modified_fields.iter().cloned());
-        // A counter increment is a blind operand and decides nothing; an index
-        // or embedding over the counter adds it back below.
-        dependencies.retain(|field| attempt.input.get_counter_delta(field).is_none());
+        // The parts this update decides on: those its plan compared and those
+        // its writes decide on.
+        let mut dependencies = query::update_parts::written(
+            collection.schema(),
+            collection.write_indexes(),
+            &attempt.modified_fields,
+            |field| attempt.input.get_counter_delta(field).is_some(),
+        );
+        dependencies.extend(attempt.expected_fields.iter().flatten().cloned());
         let fetcher = if attempt.expected.is_none() || attempt.expected_fields.is_some() {
-            for index in collection.write_indexes() {
-                if index
-                    .fields
-                    .iter()
-                    .any(|field| attempt.modified_fields.contains(&field.name))
-                {
-                    dependencies.extend(index.fields.iter().map(|field| field.name.clone()));
-                }
-            }
-            for embedding in &collection.schema().vector_embeddings {
-                if embedding
-                    .fields
-                    .iter()
-                    .any(|field| attempt.modified_fields.contains(field))
-                {
-                    dependencies.extend(embedding.fields.iter().cloned());
-                }
-            }
             LensedDocFetcher::new_projected(
                 Arc::clone(&self.db),
                 txn,
@@ -350,7 +333,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     .validate_downsample_write(
                         &datastore,
                         &systemstore,
-                        collection.schema(),
+                        &collection,
                         &current_doc,
                         Some(&modified_fields),
                     )

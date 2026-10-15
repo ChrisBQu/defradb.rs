@@ -289,9 +289,44 @@ impl Collection {
         systemstore: &NamespaceView,
         show_deleted: bool,
     ) -> Result<Vec<(u64, Document, bool)>> {
+        self.scan_documents(datastore, systemstore, show_deleted, None)
+            .await
+    }
+
+    /// Every live document, for an update whose decision rests only on
+    /// `fields`: a document this transaction later merges into is validated
+    /// over those parts alone, so a write of another field does not conflict.
+    /// A version without part IDs scans as [`Self::get_all_with_datastore`].
+    pub(crate) async fn get_all_with_datastore_deciding_on(
+        &self,
+        datastore: &NamespaceView,
+        systemstore: &NamespaceView,
+        fields: &rapidhash::RapidHashSet<String>,
+    ) -> Result<Vec<Document>> {
+        let parts = self
+            .part_ids_of(datastore, fields.iter().map(String::as_str))
+            .await?;
+        let entries = self
+            .scan_documents(
+                datastore,
+                systemstore,
+                false,
+                parts.map(Vec::into_boxed_slice),
+            )
+            .await?;
+        Ok(entries.into_iter().map(|(_, doc, _)| doc).collect())
+    }
+
+    async fn scan_documents(
+        &self,
+        datastore: &NamespaceView,
+        systemstore: &NamespaceView,
+        show_deleted: bool,
+        parts: Option<Box<[u32]>>,
+    ) -> Result<Vec<(u64, Document, bool)>> {
         let prefix = self.collection_key_prefix();
         let prefix_len = prefix.len();
-        let opts = IterOptions::new().with_prefix(prefix);
+        let opts = IterOptions::new().with_prefix(prefix).with_parts(parts);
 
         let mut iter = datastore.iterator(opts).await.map_err(Error::Storage)?;
 
