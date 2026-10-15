@@ -30,7 +30,7 @@ fn router() -> Router {
 }
 
 fn router_with(mgmt: Arc<MockCollectionManagementOperations>) -> Router {
-    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()), edge::testing::edge())
         .with_rest(Arc::new(MockRestOperations::new()) as Arc<dyn RestOperations>)
         .with_collection_mgmt(mgmt)
         .build();

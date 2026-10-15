@@ -22,9 +22,9 @@ use crate::{ffi_async_ok, try_ffi, ERR_INVALID_NODE_HANDLE};
 #[no_mangle]
 pub extern "C" fn begin_txn(node_ptr: usize, readonly: i32) -> NewTxnResult {
     ffi_entry! {
-        let rt = match crate::runtime::RUNTIME.get() {
+        let rt = match crate::runtime::edge() {
             Some(rt) => rt,
-            None => return NewTxnResult::error("runtime not initialized - call defra_init() first"),
+            None => return NewTxnResult::error(crate::helpers::ERR_RUNTIME_NOT_INITIALIZED),
         };
 
         // Validate node handle before entering async block
@@ -33,7 +33,7 @@ pub extern "C" fn begin_txn(node_ptr: usize, readonly: i32) -> NewTxnResult {
             None => return NewTxnResult::error(ERR_INVALID_NODE_HANDLE),
         };
 
-        let result = rt.block_on(async {
+        let result = crate::helpers::block_on(rt, async {
             let handle = runner
                 .begin_txn(readonly != 0)
                 .await

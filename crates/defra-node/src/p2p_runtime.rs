@@ -35,6 +35,7 @@ pub(super) struct P2PSetupResult {
     pub(super) wire_kms: Option<WireKmsCallback>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
     store: Arc<S>,
     database: Arc<db::DB<S>>,
@@ -43,6 +44,7 @@ pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
     node_identity: Option<Arc<identity::RawIdentity>>,
     document_acp: Arc<dyn acp::DocumentACP>,
     strict_replicated_doc_access: bool,
+    edge: &edge::Edge,
 ) -> anyhow::Result<P2PSetupResult> {
     let secret_key =
         p2p::iroh::load_or_generate_secret_key(config.secret_key_path.as_deref()).await?;
@@ -59,6 +61,7 @@ pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
             allowlist: config.allowlist.clone(),
         },
         document_acp,
+        edge.clone(),
     );
     peer_config.strict_replicated_doc_access = strict_replicated_doc_access;
     peer_config.sync = p2p::sync::SyncConfig {

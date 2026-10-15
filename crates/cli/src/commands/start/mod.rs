@@ -316,8 +316,8 @@ pub struct StartArgs {
 }
 
 impl StartArgs {
-    /// Execute the start command
-    pub async fn execute(self, mut config: Config) -> Result<()> {
+    /// Execute the start command, serving on the network runtime `edge`.
+    pub async fn execute(self, mut config: Config, edge: edge::Edge) -> Result<()> {
         // Apply start-specific flags to config
         self.apply_to_config(&mut config)?;
 
@@ -335,7 +335,7 @@ impl StartArgs {
         // Set up Orbis remote signer if configured
         #[cfg(feature = "orbis")]
         if self.signer_type.as_deref() == Some("orbis") {
-            self.setup_orbis_signer(&user_identity).await?;
+            self.setup_orbis_signer(&user_identity, &edge).await?;
         }
 
         // regolith keeps a descriptor per live SSTable; a service manager's
@@ -343,7 +343,7 @@ impl StartArgs {
         fd_limit::raise_nofile_limit();
 
         // Start the node
-        let node = Node::new(config, user_identity).await?;
+        let node = Node::new(config, user_identity, edge).await?;
         node.run().await
     }
 
@@ -355,6 +355,7 @@ impl StartArgs {
     async fn setup_orbis_signer(
         &self,
         user_identity: &Option<std::sync::Arc<identity::RawIdentity>>,
+        edge: &edge::Edge,
     ) -> Result<()> {
         let service_identity = match self.parse_orbis_service_identity()? {
             Some(identity) => identity,
@@ -389,6 +390,7 @@ impl StartArgs {
             derivation_id.clone(),
             public_key,
             service_identity.clone(),
+            edge.clone(),
         )
         .await
         .map_err(|e| Error::InvalidConfig(format!("Orbis signer setup failed: {}", e)))?;

@@ -185,7 +185,7 @@ async fn the_unversioned_mount_is_enforced_as_its_real_permission() {
         let (caller, bearer) = nac_owner();
         let nac =
             Arc::new(MockNodeAcpOperations::enabled_with_owner(owner).with_grant(caller, granted));
-        let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+        let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()), edge::testing::edge())
             .with_nac(nac as Arc<dyn NodeAcpOperations>)
             .build();
         let router: Router = defra_http::create_router_with_state(state.clone()).route_layer(

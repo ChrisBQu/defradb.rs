@@ -160,7 +160,7 @@ mod tests {
             "Store": {"Path": "<redacted>"},
         }))
         .unwrap();
-        let app = Server::new(MockQueryExecutor::new())
+        let app = Server::new(MockQueryExecutor::new(), edge::testing::edge())
             .with_node_options(options)
             .router()
             .unwrap();
@@ -185,7 +185,7 @@ mod tests {
 
     #[tokio::test]
     async fn node_options_returns_not_found_when_host_does_not_supply_them() {
-        let response = Server::new(MockQueryExecutor::new())
+        let response = Server::new(MockQueryExecutor::new(), edge::testing::edge())
             .router()
             .unwrap()
             .oneshot(

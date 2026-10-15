@@ -62,6 +62,7 @@ acp = { path = "../acp" }
 vera = { path = "../vera", optional = true }
 identity = { path = "../identity" }
 defra-core = { path = "../defra-core" }
+edge = { path = "../edge" }
 schema = { path = "../schema" }
 lens = { path = "../lens", default-features = false }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "net", "sync", "time"] }
@@ -94,6 +95,7 @@ defra-p2p-adapter = { workspace = true, optional = true, default-features = fals
 telemetry = { path = "../telemetry", default-features = false }
 
 [dev-dependencies]
+edge = { path = "../edge", features = ["testing"] }
 axum.workspace = true
 kovan.workspace = true
 crypto = { path = "../crypto" }

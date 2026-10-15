@@ -29,7 +29,7 @@ mod tests {
 
     #[tokio::test]
     async fn serves_the_pinned_go_openapi_document() {
-        let response = Server::new(MockQueryExecutor::new())
+        let response = Server::new(MockQueryExecutor::new(), edge::testing::edge())
             .router()
             .unwrap()
             .oneshot(
@@ -61,7 +61,9 @@ mod tests {
 
     #[tokio::test]
     async fn every_documented_path_exists_in_the_rust_router() {
-        let app = Server::new(MockQueryExecutor::new()).router().unwrap();
+        let app = Server::new(MockQueryExecutor::new(), edge::testing::edge())
+            .router()
+            .unwrap();
         let document: Value = serde_json::from_str(OPENAPI_JSON).unwrap();
 
         for path in document["paths"].as_object().unwrap().keys() {

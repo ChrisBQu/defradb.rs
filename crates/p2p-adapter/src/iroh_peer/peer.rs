@@ -57,6 +57,7 @@ impl<S: Store + 'static> IrohPeer<S> {
     ) -> p2p::Result<Self> {
         let IrohPeerConfig {
             endpoint,
+            edge,
             document_acp,
             strict_replicated_doc_access,
             sync,
@@ -67,6 +68,9 @@ impl<S: Store + 'static> IrohPeer<S> {
             load_persisted_collections,
             replicator_push_options,
         } = config;
+        // Without KMS nothing in the peer runs on the edge yet.
+        #[cfg(not(feature = "kms"))]
+        let _ = edge;
 
         let secret_key = endpoint.secret_key.clone();
         let (command_tx, events, replicators, endpoint_task) =
@@ -120,6 +124,7 @@ impl<S: Store + 'static> IrohPeer<S> {
         let kms_transport = match p2p::kms::PubsubKeyTransport::new(
             transport.clone(),
             Arc::new(p2p::IrohPeerIdentityResolver::new(transport.clone())),
+            edge,
         )
         .await
         {

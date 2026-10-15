@@ -61,7 +61,7 @@ pub unsafe extern "C" fn p2p_add_replicator(
 
                 let addr = addr_str.clone();
                 let collections = collections.clone();
-                rt.block_on(async move {
+                crate::helpers::block_on(rt, async move {
                     p2p.system
                         .ops()
                         .add_replicator(collections, Some(&addr), Default::default(), Vec::new(), None)
@@ -141,7 +141,7 @@ pub unsafe extern "C" fn p2p_add_replicator_with_filter(
                 let addr = addr_str.clone();
                 let collections = collections.clone();
                 let filters = filters.clone();
-                rt.block_on(async move {
+                crate::helpers::block_on(rt, async move {
                     p2p.system
                         .ops()
                         .add_replicator(collections, Some(&addr), filters, Vec::new(), None)
@@ -207,7 +207,7 @@ pub unsafe extern "C" fn p2p_delete_replicator(
 
                 let peer = peer_str.clone();
                 let collections = collections.clone();
-                rt.block_on(async move {
+                crate::helpers::block_on(rt, async move {
                     p2p.system
                         .ops()
                         .remove_replicator(collections, Some(&peer))
@@ -258,7 +258,7 @@ pub unsafe extern "C" fn p2p_list_replicators(
                     None => return Err(FfiP2PError::no_p2p_system()),
                 };
 
-                rt.block_on(async {
+                crate::helpers::block_on(rt, async {
                     let replicators = p2p
                         .system
                         .ops()

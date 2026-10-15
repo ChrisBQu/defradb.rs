@@ -139,6 +139,7 @@ impl EventAccessContext {
                 collection.name, subject_doc_id
             );
             let response = execute_with_resolved_context(
+                &self.state.edge,
                 self.executor.clone(),
                 QueryRequest::new(query).with_identity(self.did.clone()),
                 self.signing_config.clone(),
@@ -156,6 +157,7 @@ impl EventAccessContext {
 
         let query = format!(r#"query {{ {}(limit: 1) {{ _docID }} }}"#, collection.name);
         let response = execute_with_resolved_context(
+            &self.state.edge,
             self.executor.clone(),
             QueryRequest::new(query).with_identity(self.did.clone()),
             self.signing_config.clone(),

@@ -25,7 +25,7 @@ use serde_json::{json, Value};
 use tower::ServiceExt;
 
 fn router() -> Router {
-    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()), edge::testing::edge())
         .with_rest(Arc::new(MockRestOperations::new()) as Arc<dyn RestOperations>)
         .build();
     defra_http::create_router_with_state(state)

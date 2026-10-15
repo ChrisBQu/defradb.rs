@@ -19,9 +19,9 @@ pub unsafe extern "C" fn new_node_with_p2p(
     listen_addr: *const c_char,
 ) -> NewNodeResult {
     ffi_entry! {
-        let rt = match crate::runtime::RUNTIME.get() {
+        let rt = match crate::runtime::edge() {
             Some(rt) => rt,
-            None => return NewNodeResult::error("runtime not initialized - call defra_init() first"),
+            None => return NewNodeResult::error(crate::helpers::ERR_RUNTIME_NOT_INITIALIZED),
         };
 
         let listen_addr_str = c_str_to_string(listen_addr).unwrap_or_default();
@@ -30,8 +30,7 @@ pub unsafe extern "C" fn new_node_with_p2p(
             Err(error) => return NewNodeResult::error(error),
         };
 
-        let result = rt
-            .block_on(async { build_node_state(options, transport).await })
+        let result = crate::helpers::block_on(rt, build_node_state(options, transport, rt.clone()))
             .map(|state| NODES.insert(state));
 
         match result {

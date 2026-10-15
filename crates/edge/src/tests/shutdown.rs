@@ -1,0 +1,84 @@
+use std::future::pending;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::task::Poll;
+use std::time::Duration;
+
+use super::{poll_once, runtime, runtime_with, DropFlag};
+use crate::{EdgeConfig, EdgeError};
+
+#[test]
+fn shutdown_stops_accepting_drains_then_stops_the_rest() {
+    let runtime = runtime_with(EdgeConfig {
+        drain: Duration::from_millis(100),
+        ..EdgeConfig::default()
+    });
+    let edge = runtime.edge().clone();
+
+    let finished = Arc::new(AtomicBool::new(false));
+    let watcher = edge.clone();
+    let finishing = Arc::clone(&finished);
+    drop(edge.spawn(async move {
+        watcher.closing().await;
+        finishing.store(true, Ordering::SeqCst);
+    }));
+    let (flag, stopped) = DropFlag::new();
+    drop(edge.spawn(async move {
+        let _flag = flag;
+        pending::<()>().await
+    }));
+
+    let drained = runtime.shutdown().unwrap();
+
+    // Stop accepting woke the closing watcher, which finished within the
+    // drain; the stuck task outlived it and was stopped with the rest.
+    assert_eq!(drained.remaining, 1);
+    assert!(finished.load(Ordering::SeqCst));
+    assert!(stopped.load(Ordering::SeqCst));
+    assert!(edge.is_closed());
+    assert_eq!(
+        poll_once(edge.spawn(async { 1 })),
+        Poll::Ready(Err(EdgeError::Closed))
+    );
+    assert_eq!(edge.block_on(async { 1 }), Err(EdgeError::Closed));
+    assert_eq!(edge.stats().refused, 2);
+}
+
+#[test]
+fn shutdown_inside_a_single_threaded_executor_does_not_wait() {
+    let runtime = runtime();
+    let edge = runtime.edge().clone();
+    let current = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+
+    let outcome = current.block_on(async move { runtime.shutdown() });
+
+    assert_eq!(outcome, Err(EdgeError::WouldBlock));
+    assert!(edge.is_closed());
+}
+
+#[test]
+fn dropping_the_runtime_inside_an_async_context_is_safe() {
+    let runtime = runtime();
+    let edge = runtime.edge().clone();
+    let current = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+
+    current.block_on(async move { drop(runtime) });
+
+    assert!(edge.is_closed());
+}
+
+#[test]
+fn an_awaited_shutdown_completes_once_the_runtime_is_gone() {
+    let runtime = runtime();
+    let current = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+
+    let drained = current.block_on(runtime.shutdown_async()).unwrap();
+
+    assert!(drained.is_complete());
+}

@@ -53,7 +53,7 @@ pub unsafe extern "C" fn p2p_add_collections(
                     None => return Err(FfiP2PError::no_p2p_system()),
                 };
 
-                rt.block_on(async {
+                crate::helpers::block_on(rt, async {
                     p2p.system
                         .ops()
                         .add_collections(collections)
@@ -110,7 +110,7 @@ pub unsafe extern "C" fn p2p_delete_collections(
                     None => return Err(FfiP2PError::no_p2p_system()),
                 };
 
-                rt.block_on(async {
+                crate::helpers::block_on(rt, async {
                     p2p.system
                         .ops()
                         .remove_collections(collections)
@@ -160,7 +160,7 @@ pub unsafe extern "C" fn p2p_list_collections(
                     None => return Err(FfiP2PError::no_p2p_system()),
                 };
 
-                rt.block_on(async {
+                crate::helpers::block_on(rt, async {
                     let collections = p2p
                         .system
                         .ops()

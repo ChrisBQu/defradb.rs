@@ -182,6 +182,7 @@ async fn assert_blocks_without_plaintext(pair: &Pair) -> Result<()> {
 
 async fn build_node(signing: SigningConfig) -> Result<Node> {
     let config = EmbeddedNodeConfig {
+        edge: Some(edge::testing::edge()),
         transport: TransportConfig::Iroh(IrohConfig {
             bind_addr: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
             bind_port: Some(0),

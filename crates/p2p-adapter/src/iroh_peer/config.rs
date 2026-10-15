@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use edge::Edge;
 use p2p::bitswap::AccessMode;
 use p2p::iroh::IrohEndpointConfig;
 use p2p::sync::SyncConfig;
@@ -11,6 +12,8 @@ use crate::ReplicatorPushOptionsState;
 
 pub struct IrohPeerConfig {
     pub endpoint: IrohEndpointConfig,
+    /// The network runtime the peer's network work runs on.
+    pub edge: Edge,
     /// Bound before the peer handles any traffic: block serving, the
     /// coordinator, merge, outbound pushes, and pre-broadcast registration.
     pub document_acp: Arc<dyn acp::DocumentACP>,
@@ -32,9 +35,14 @@ pub struct IrohPeerConfig {
 }
 
 impl IrohPeerConfig {
-    pub fn new(endpoint: IrohEndpointConfig, document_acp: Arc<dyn acp::DocumentACP>) -> Self {
+    pub fn new(
+        endpoint: IrohEndpointConfig,
+        document_acp: Arc<dyn acp::DocumentACP>,
+        edge: Edge,
+    ) -> Self {
         Self {
             endpoint,
+            edge,
             document_acp,
             strict_replicated_doc_access: false,
             sync: SyncConfig::default(),

@@ -30,11 +30,12 @@ mod db_impls;
 pub mod dense_search;
 #[cfg(test)]
 mod embedded_query_identity_tests;
+mod network;
 mod node_acp;
 #[cfg(feature = "p2p")]
 mod p2p_runtime;
 pub mod search_chunks;
-mod signed_query_runtime;
+mod signed_query;
 mod transaction;
 pub mod version;
 
@@ -70,11 +71,9 @@ pub use telemetry::{ConflictMetricsSnapshot, RetryLayerSnapshot};
 pub use telemetry::{TelemetryConfig, TelemetryHandle};
 pub use transaction::EmbeddedTransaction;
 
+use network::NodeEdge;
 #[cfg(not(target_arch = "wasm32"))]
-use signed_query_runtime::{
-    execute_with_signing_context, unavailable_node_signer_response, SignedQueryRuntime,
-    SIGNED_QUERY_DRAIN_TIMEOUT,
-};
+use signed_query::{execute_with_signing_context, unavailable_node_signer_response};
 
 /// Type-erased schema operations so we can store DB<S> without leaking the Store generic.
 #[async_trait::async_trait]
@@ -142,8 +141,9 @@ pub struct EmbeddedNode {
     embedding_config: db::EmbeddingClientConfig,
     node_identity_did: Option<String>,
     node_query_identity: Option<identity::Did>,
-    #[cfg(not(target_arch = "wasm32"))]
-    signed_query_runtime: Option<SignedQueryRuntime>,
+    /// The node's share of the network runtime; `None` when the node has
+    /// no network work and was given no runtime.
+    network: Option<NodeEdge>,
     #[cfg(not(target_arch = "wasm32"))]
     transaction_stats: Option<storage::TransactionStatsHandle>,
     #[cfg(feature = "http")]
@@ -242,23 +242,18 @@ impl EmbeddedNode {
             return unavailable_node_signer_response(node_identity_did);
         };
         #[cfg(not(target_arch = "wasm32"))]
-        let Some(signed_query_runtime) = self.signed_query_runtime.as_ref() else {
+        let Some(network) = self.network.as_ref() else {
             return unavailable_node_signer_response(node_identity_did);
-        };
-        #[cfg(not(target_arch = "wasm32"))]
-        let Some(signed_query_permit) = signed_query_runtime.admit() else {
-            return QueryResponse::error("signed query runtime is shutting down");
         };
 
         #[cfg(not(target_arch = "wasm32"))]
         execute_with_signing_context(
+            network.edge(),
             self.runner.clone(),
             request,
             txn_handle,
             signing_config,
             node_identity_did.to_string(),
-            signed_query_runtime.handle(),
-            signed_query_permit,
         )
         .await
     }
@@ -656,28 +651,15 @@ impl EmbeddedNode {
             let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
         }
 
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(runtime) = &self.signed_query_runtime {
-            if !runtime
-                .close_admission_and_wait_for(SIGNED_QUERY_DRAIN_TIMEOUT)
-                .await
-            {
-                tracing::warn!(
-                    active_queries = runtime.active_queries(),
-                    timeout_secs = SIGNED_QUERY_DRAIN_TIMEOUT.as_secs(),
-                    "timed out draining signed queries during node shutdown"
-                );
-            }
+        // Stop accepting the node's network work (signed queries, the HTTP
+        // server's accept loop) and drain what is in flight.
+        if let Some(network) = &self.network {
+            network.drain().await;
         }
 
         #[cfg(feature = "p2p")]
         if let Some(lifecycle) = &self.p2p_lifecycle {
             lifecycle.shutdown().await;
-        }
-
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(runtime) = &self.signed_query_runtime {
-            runtime.shutdown().await;
         }
 
         // Flush buffered spans / metrics. Done after P2P shutdown so trailing
@@ -690,6 +672,12 @@ impl EmbeddedNode {
         #[cfg(feature = "otel")]
         if let Some(handle) = self.telemetry.pop() {
             let _ = tokio::task::spawn_blocking(move || handle.shutdown()).await;
+        }
+
+        // Last: a runtime the node started itself goes once nothing of the
+        // node runs on it.
+        if let Some(network) = &self.network {
+            network.stop_owned().await;
         }
     }
 }
@@ -820,6 +808,7 @@ pub enum StorageBackend {
 /// Builder for constructing an `EmbeddedNode`.
 #[derive(Default)]
 pub struct NodeBuilder {
+    edge: Option<edge::Edge>,
     data_path: Option<PathBuf>,
     storage_backend: StorageBackend,
     storage_durability: storage::backends::DurabilityMode,
@@ -868,6 +857,7 @@ fn with_at_rest_keys(
 }
 
 struct StoreBuildArgs {
+    network: Option<NodeEdge>,
     persistence: node_acp::Persistence,
     document_acp_config: DocumentAcpConfig,
     db_options: db::DbOptions,
@@ -888,6 +878,7 @@ struct StoreBuildArgs {
 }
 
 struct PersistentStoreBuildArgs {
+    network: Option<NodeEdge>,
     document_acp_config: DocumentAcpConfig,
     db_options: db::DbOptions,
     event_bus: Arc<dyn events::Bus>,
@@ -907,6 +898,14 @@ struct PersistentStoreBuildArgs {
 }
 
 impl NodeBuilder {
+    /// Run the node's network work (signed queries, the HTTP server, P2P)
+    /// on the application's network runtime. Without one, the node starts
+    /// its own when it has network work to run, and stops it at shutdown.
+    pub fn with_edge(mut self, edge: edge::Edge) -> Self {
+        self.edge = Some(edge);
+        self
+    }
+
     /// Set the data directory for persistent storage.
     /// If not set, uses in-memory storage.
     pub fn data_path(mut self, path: impl Into<PathBuf>) -> Self {
@@ -1156,11 +1155,27 @@ impl NodeBuilder {
         #[cfg(feature = "otel")]
         let telemetry_handle: Option<TelemetryHandle> = self.telemetry_handle;
 
+        // The node's network runtime comes first, so a failure to start it
+        // leaves no network work behind.
+        #[cfg(feature = "http")]
+        let serves_http = http_config.is_some();
+        #[cfg(not(feature = "http"))]
+        let serves_http = false;
+        #[cfg(feature = "p2p")]
+        let runs_p2p = p2p_config.is_some();
+        #[cfg(not(feature = "p2p"))]
+        let runs_p2p = false;
+        let network = NodeEdge::start(
+            self.edge,
+            node_identity_did.is_some() || serves_http || runs_p2p,
+        )?;
+
         // 3. Storage backend + database
         let node = if let Some(path) = self.data_path {
             tokio::fs::create_dir_all(&path).await?;
 
             let persistent_args = PersistentStoreBuildArgs {
+                network,
                 document_acp_config: self.document_acp.clone(),
                 db_options: db_options.clone(),
                 event_bus,
@@ -1213,6 +1228,7 @@ impl NodeBuilder {
             Self::build_with_store(
                 store,
                 StoreBuildArgs {
+                    network,
                     persistence: node_acp::Persistence::Memory,
                     document_acp_config: self.document_acp,
                     db_options,
@@ -1238,19 +1254,26 @@ impl NodeBuilder {
         // 4. Spawn HTTP server if configured
         #[cfg(feature = "http")]
         if let Some(http_cfg) = http_config {
+            let network = node
+                .network
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("the HTTP server needs the network runtime"))?;
             let server_config = defra_http::ServerConfig {
                 address: http_cfg.address,
                 request_timeout: timeout_secs(http_cfg.request_timeout),
                 query_limits,
                 ..Default::default()
             };
-            let server =
-                defra_http::Server::from_arc_with_config(node.runner.clone(), server_config)
-                    .with_event_bus_arc(node.event_bus.clone())
-                    .with_schema_arc(Arc::new(HttpSchemaOps {
-                        schema_ops: Arc::clone(&node.schema_ops),
-                    }))
-                    .with_collection_versions_arc(Arc::clone(&node.collection_version_ops));
+            let server = defra_http::Server::from_arc_with_config(
+                node.runner.clone(),
+                server_config,
+                network.edge().clone(),
+            )
+            .with_event_bus_arc(node.event_bus.clone())
+            .with_schema_arc(Arc::new(HttpSchemaOps {
+                schema_ops: Arc::clone(&node.schema_ops),
+            }))
+            .with_collection_versions_arc(Arc::clone(&node.collection_version_ops));
 
             let server = if let Some(did) = node_identity_did.as_ref() {
                 server.with_node_identity_did(did.clone())
@@ -1268,7 +1291,9 @@ impl NodeBuilder {
             let addr = http_cfg.address;
             let extra_routes = http_cfg.extra_routes;
             let bound = http_cfg.listener;
-            tokio::spawn(async move {
+            // The accept loop is a service of the node's scope: shutting the
+            // node down stops it accepting.
+            let service = network.edge().spawn_service(async move {
                 let router_result = server.router();
                 let run_result = async {
                     let mut router = router_result?;
@@ -1311,6 +1336,7 @@ impl NodeBuilder {
                     tracing::error!(error = %e, address = %addr, "HTTP server exited with error");
                 }
             });
+            service.detach();
             tracing::info!(address = %addr, "HTTP server started");
         }
 
@@ -1322,6 +1348,7 @@ impl NodeBuilder {
         args: PersistentStoreBuildArgs,
     ) -> anyhow::Result<EmbeddedNode> {
         let PersistentStoreBuildArgs {
+            network,
             document_acp_config,
             db_options,
             event_bus,
@@ -1343,6 +1370,7 @@ impl NodeBuilder {
         Self::build_with_store(
             store,
             StoreBuildArgs {
+                network,
                 persistence: node_acp::Persistence::Persistent,
                 document_acp_config,
                 db_options,
@@ -1370,6 +1398,7 @@ impl NodeBuilder {
         args: StoreBuildArgs,
     ) -> anyhow::Result<EmbeddedNode> {
         let StoreBuildArgs {
+            network,
             persistence,
             document_acp_config,
             db_options,
@@ -1439,16 +1468,6 @@ impl NodeBuilder {
             database.set_nac_manager(nac_manager);
         }
 
-        // Build the node-owned signed-query runtime before starting P2P. If
-        // runtime construction fails, the builder can return without leaving
-        // already-started network tasks behind.
-        #[cfg(not(target_arch = "wasm32"))]
-        let signed_query_runtime = node_identity_did
-            .as_ref()
-            .map(|_| SignedQueryRuntime::new())
-            .transpose()
-            .map_err(anyhow::Error::msg)?;
-
         let acp_setup =
             node_acp::create_document_acp(store.clone(), persistence, &document_acp_config).await?;
         let document_acp = acp_setup.document_acp.clone();
@@ -1460,6 +1479,9 @@ impl NodeBuilder {
         // P2P setup (affects mutator choice)
         #[cfg(feature = "p2p")]
         let mut p2p_result = if let Some(p2p_cfg) = p2p_config {
+            let network = network
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("P2P needs the network runtime"))?;
             Some(
                 p2p_runtime::setup_p2p(
                     store.clone(),
@@ -1469,6 +1491,7 @@ impl NodeBuilder {
                     node_p2p_identity,
                     document_acp.clone(),
                     _strict_replicated_doc_access,
+                    network.edge(),
                 )
                 .await?,
             )
@@ -1653,8 +1676,7 @@ impl NodeBuilder {
             embedding_config,
             node_identity_did,
             node_query_identity,
-            #[cfg(not(target_arch = "wasm32"))]
-            signed_query_runtime,
+            network,
             #[cfg(not(target_arch = "wasm32"))]
             transaction_stats,
             #[cfg(feature = "http")]

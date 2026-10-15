@@ -459,10 +459,12 @@ mod tests {
     #[tokio::test]
     async fn add_doc_relationships_validates_every_item_before_writing() {
         let doc_acp = Arc::new(MockDocumentAcpOperations::new());
-        let state =
-            AppStateBuilder::new(Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>)
-                .with_doc_acp(Arc::clone(&doc_acp) as Arc<dyn DocumentAcpOperations>)
-                .build();
+        let state = AppStateBuilder::new(
+            Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>,
+            edge::testing::edge(),
+        )
+        .with_doc_acp(Arc::clone(&doc_acp) as Arc<dyn DocumentAcpOperations>)
+        .build();
         let requestor = identity::Did::new("did:key:requestor").unwrap();
         let identity = ExtractIdentity::from_did(Some(requestor));
 

@@ -138,7 +138,7 @@ pub unsafe extern "C" fn add_dac_policy(
         #[cfg(feature = "vera")]
         if let Some(sh_acp) = sh_acp {
             // Vera mode: submit MsgCreatePolicy transaction
-            let result = rt.block_on(async {
+            let result = crate::helpers::block_on(rt, async {
                 let policy_id = sh_acp
                     .add_policy(&identity_str, &policy_str)
                     .await
@@ -172,7 +172,12 @@ pub unsafe extern "C" fn add_dac_policy(
                 return FfiResult::error("local ACP backend is not available");
             };
 
-            let counter = match rt.block_on(local_zanzibar_store.next_policy_counter()) {
+            let counter = match crate::helpers::block_on(rt, async {
+                local_zanzibar_store
+                    .next_policy_counter()
+                    .await
+                    .map_err(|e| e.to_string())
+            }) {
                 Ok(counter) => counter,
                 Err(e) => {
                     return FfiResult::error(format!("failed to advance policy counter: {}", e))
@@ -190,7 +195,7 @@ pub unsafe extern "C" fn add_dac_policy(
                 .with_validation()
                 .with_dpi_enforcement();
 
-            let result = rt.block_on(async {
+            let result = crate::helpers::block_on(rt, async {
                 local_zanzibar_store
                     .store_policy_with_options(&policy, &options)
                     .await
@@ -383,7 +388,7 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
             Err(e) => return FfiResult::error(e),
         };
 
-        let result = rt.block_on(async {
+        let result = crate::helpers::block_on(rt, async {
             let requestor = identity::Did::new(&requestor_str)
                 .map_err(|e| format!("invalid requestor DID '{}': {}", requestor_str, e))?;
             let target = if target_str == "*" {
@@ -533,7 +538,7 @@ pub unsafe extern "C" fn delete_dac_actor_relationship(
             Err(e) => return FfiResult::error(e),
         };
 
-        let result = rt.block_on(async {
+        let result = crate::helpers::block_on(rt, async {
             let requestor = identity::Did::new(&requestor_str)
                 .map_err(|e| format!("invalid requestor DID '{}': {}", requestor_str, e))?;
             let target = if target_str == "*" {

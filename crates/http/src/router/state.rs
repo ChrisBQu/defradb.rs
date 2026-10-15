@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use edge::Edge;
 use query::executor::QueryExecutor;
 use query::rest::RestOperations;
 use query::QueryLimits;
@@ -31,6 +32,8 @@ impl CollectionVersionOperations for CollectionVersionsFromManagement {
 #[derive(Clone)]
 pub struct AppState {
     pub executor: Arc<dyn QueryExecutor>,
+    /// The network runtime request work runs on.
+    pub edge: Edge,
     pub rest: Option<Arc<dyn RestOperations>>,
     pub p2p: Option<Arc<dyn P2POperations>>,
     pub manage: Option<Arc<dyn ManageRequester>>,
@@ -272,6 +275,7 @@ impl AppState {
 /// Builder for constructing AppState with optional components.
 pub struct AppStateBuilder {
     executor: Arc<dyn QueryExecutor>,
+    edge: Edge,
     rest: Option<Arc<dyn RestOperations>>,
     p2p: Option<Arc<dyn P2POperations>>,
     manage: Option<Arc<dyn ManageRequester>>,
@@ -298,10 +302,12 @@ pub struct AppStateBuilder {
 }
 
 impl AppStateBuilder {
-    /// Create a new builder with the required executor.
-    pub fn new(executor: Arc<dyn QueryExecutor>) -> Self {
+    /// Create a new builder with the required executor and the network
+    /// runtime its requests run on.
+    pub fn new(executor: Arc<dyn QueryExecutor>, edge: Edge) -> Self {
         Self {
             executor,
+            edge,
             rest: None,
             p2p: None,
             manage: None,
@@ -484,6 +490,7 @@ impl AppStateBuilder {
     pub fn build(self) -> AppState {
         AppState {
             executor: self.executor,
+            edge: self.edge,
             rest: self.rest,
             p2p: self.p2p,
             manage: self.manage,
