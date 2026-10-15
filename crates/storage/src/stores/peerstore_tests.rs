@@ -569,6 +569,18 @@ async fn stale_scope_registration_cannot_cross_peer_forget_and_readd() {
     assert!(peerstore.get_retry_info("peer").await.unwrap().is_none());
 }
 
+#[test]
+fn peer_incarnation_keys_cannot_alias_allocator_state() {
+    let sequence_key = b"/rep/incarnation/sequence".to_vec();
+    for peer_id in ["sequence", "id", "generation"] {
+        assert_ne!(
+            crate::keys::peerstore::ReplicatorIncarnationKey::new(peer_id).bytes(),
+            sequence_key,
+            "peer id must not overlap the incarnation allocator key"
+        );
+    }
+}
+
 #[tokio::test]
 async fn stale_ack_cannot_erase_a_concurrent_dirty_registration() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());

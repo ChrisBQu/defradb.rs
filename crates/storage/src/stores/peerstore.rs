@@ -526,7 +526,7 @@ impl<S: Store> Peerstore<S> {
         let key = ReplicatorKey::new(peer_id);
         let incarnation = self
             .store
-            .allocate(b"/rep/incarnation/generation", 1)
+            .allocate(b"/rep/incarnation/sequence", 1)
             .await?
             .end;
         let incarnation_key = ReplicatorIncarnationKey::new(peer_id);

@@ -95,11 +95,11 @@ impl ReplicatorIncarnationKey {
 
 impl Key for ReplicatorIncarnationKey {
     fn bytes(&self) -> Vec<u8> {
-        format!("/rep/incarnation/{}", self.peer_id).into_bytes()
+        format!("/rep/incarnation/id/{}", self.peer_id).into_bytes()
     }
 
     fn to_string(&self) -> String {
-        format!("/rep/incarnation/{}", self.peer_id)
+        format!("/rep/incarnation/id/{}", self.peer_id)
     }
 }
 
