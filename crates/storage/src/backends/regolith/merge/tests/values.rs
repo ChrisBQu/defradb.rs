@@ -114,3 +114,56 @@ fn malformed_operands_and_stats_overflow_are_rejected() {
         .full_merge(b"key", Some(&stats), &[&delta])
         .is_none());
 }
+
+/// Standalone counters and statistics are whole values: every operand touches
+/// every part, before and after a fold. Integer counters fold exactly, and
+/// their folds keep that answer; floating-point counters and checked
+/// statistics never fold, so `check_touches` finds no pair of them to test.
+#[test]
+fn whole_value_operands_touch_every_part_through_folds() {
+    use regolith::testing::proptest::collection::vec;
+    use regolith::testing::proptest::prelude::*;
+
+    let parts = || vec(0u32..4, 0..4);
+    let checked = regolith::testing::check_touches(
+        &DefraMergeOperator,
+        Just(b"d/data/counter".to_vec()),
+        any::<i64>().prop_map(counter_i64),
+        parts(),
+    )
+    .unwrap();
+    assert!(checked.folds > 0, "integer counters fold");
+    let unfolded = [
+        any::<i32>()
+            .prop_map(|value| crate::merge::counter_f32(value as f32))
+            .boxed(),
+        any::<i32>()
+            .prop_map(|value| crate::merge::counter_f64(f64::from(value)))
+            .boxed(),
+        (any::<i32>(), any::<i32>())
+            .prop_map(|(documents, length)| {
+                crate::merge::stats_delta(documents.into(), length.into())
+            })
+            .boxed(),
+    ];
+    for operands in unfolded {
+        let checked = regolith::testing::check_touches(
+            &DefraMergeOperator,
+            Just(b"counter".to_vec()),
+            operands,
+            parts(),
+        )
+        .unwrap();
+        assert_eq!(checked.folds, 0, "only exact sums fold early");
+    }
+    for operand in [
+        counter_i64(1),
+        crate::merge::counter_f32(1.0),
+        crate::merge::counter_f64(1.0),
+        crate::merge::stats_delta(1, 1),
+    ] {
+        for parts in [&[][..], &[0], &[1, 7]] {
+            assert!(DefraMergeOperator.touches(b"counter", &operand, parts));
+        }
+    }
+}

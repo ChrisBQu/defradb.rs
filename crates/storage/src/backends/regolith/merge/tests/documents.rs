@@ -363,3 +363,74 @@ async fn encrypted_document_operands_survive_reopen_and_schema_put_terminates_ol
     assert_eq!(doc.get("field1"), None);
     assert_eq!(doc.get("field2"), Some(&NormalValue::Int(40)));
 }
+
+/// Floating-point counter parts beside LWW parts: a fold, where one happens,
+/// touches exactly the parts its operands touch.
+#[test]
+fn float_counter_parts_keep_touches_through_folds() {
+    use regolith::testing::proptest::prelude::*;
+    for kind in [ValueKind::Float32, ValueKind::Float64] {
+        regolith::testing::check_touches(
+            &DefraMergeOperator,
+            Just(b"doc".to_vec()),
+            mixed_parts(kind).prop_map(|value| document_parts(&value).unwrap()),
+            regolith::testing::proptest::collection::vec(0u32..5, 0..6),
+        )
+        .unwrap();
+    }
+}
+
+/// The half of `touches`'s contract `check_touches` leaves to the caller: a
+/// part no operand touches keeps its bytes through `full_merge`, and the
+/// operator says the operands leave it alone.
+#[test]
+fn a_part_no_operand_touches_keeps_its_bytes() {
+    use regolith::testing::proptest::collection::vec;
+    use regolith::testing::proptest::test_runner::{Config, TestCaseError, TestRunner};
+
+    for kind in [ValueKind::Int64, ValueKind::Float64] {
+        let mut runner = TestRunner::new(Config {
+            failure_persistence: None,
+            ..Config::default()
+        });
+        runner
+            .run(
+                &(mixed_parts(kind), vec(mixed_parts(kind), 1..6)),
+                |(base, operands)| {
+                    let encoded: Vec<Vec<u8>> = operands
+                        .iter()
+                        .map(|operand| document_parts(operand).unwrap())
+                        .collect();
+                    let refs: Vec<&[u8]> = encoded.iter().map(Vec::as_slice).collect();
+                    let merged = DefraMergeOperator
+                        .full_merge(b"doc", Some(&base.encode().unwrap()), &refs)
+                        .ok_or_else(|| TestCaseError::fail("the operands must merge"))?;
+                    let merged = StoredDocument::decode(&merged)
+                        .ok_or_else(|| TestCaseError::fail("the merged value must decode"))?;
+                    for (id, field) in &base.fields {
+                        if operands
+                            .iter()
+                            .any(|operand| operand.fields.contains_key(id))
+                        {
+                            continue;
+                        }
+                        if encoded
+                            .iter()
+                            .any(|operand| DefraMergeOperator.touches(b"doc", operand, &[*id]))
+                        {
+                            return Err(TestCaseError::fail(format!(
+                                "an operand without part {id} touches it"
+                            )));
+                        }
+                        if merged.fields.get(id) != Some(field) {
+                            return Err(TestCaseError::fail(format!(
+                                "part {id} changed though no operand touches it"
+                            )));
+                        }
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+}

@@ -126,3 +126,134 @@ async fn encrypted_links_reopen_and_structural_put_terminates_operands() {
         replacement
     );
 }
+
+/// Counts add to the metadata's bookkeeping and saturate, so they are not
+/// associative and never fold early. The routing state (part 0: entry point,
+/// top layer, rebuilds) keeps its bytes under any run of them, which is what
+/// lets a read of the routing part ignore them.
+#[test]
+fn counts_obey_the_engine_contract_and_leave_routing_alone() {
+    use regolith::testing::proptest::collection::vec;
+    use regolith::testing::proptest::prelude::*;
+    use regolith::testing::proptest::test_runner::{Config, TestCaseError, TestRunner};
+
+    let metas = (
+        any::<u64>(),
+        0usize..8,
+        any::<u64>(),
+        any::<u64>(),
+        any::<u32>(),
+    )
+        .prop_map(|(entry, top_layer, live, waste, rebuilds)| Meta {
+            entry_point: NodeId(entry),
+            top_layer,
+            live,
+            waste,
+            rebuilds,
+        });
+    let counts =
+        (any::<i64>(), any::<u64>()).prop_map(|(live, waste)| vector::counts(live, waste));
+    let checked = regolith::testing::check_merge_operator(
+        &DefraMergeOperator,
+        Just(b"meta".to_vec()),
+        metas.clone().prop_map(|meta| encode_meta(&meta)),
+        counts.clone(),
+    )
+    .unwrap();
+    assert_eq!(checked.folds, 0, "saturating counts never fold early");
+    let checked = regolith::testing::check_touches(
+        &DefraMergeOperator,
+        Just(b"meta".to_vec()),
+        counts.clone(),
+        vec(0u32..3, 0..4),
+    )
+    .unwrap();
+    assert_eq!(checked.folds, 0);
+
+    let mut runner = TestRunner::new(Config {
+        failure_persistence: None,
+        ..Config::default()
+    });
+    runner
+        .run(&(metas, vec(counts, 1..8)), |(meta, operands)| {
+            let refs: Vec<&[u8]> = operands.iter().map(Vec::as_slice).collect();
+            let merged = DefraMergeOperator
+                .full_merge(b"meta", Some(&encode_meta(&meta)), &refs)
+                .ok_or_else(|| TestCaseError::fail("counts onto a meta must merge"))?;
+            let merged =
+                decode_meta(&merged).map_err(|error| TestCaseError::fail(error.to_string()))?;
+            if (merged.entry_point, merged.top_layer, merged.rebuilds)
+                != (meta.entry_point, meta.top_layer, meta.rebuilds)
+            {
+                return Err(TestCaseError::fail(format!(
+                    "{merged:?} lost the routing state of {meta:?}"
+                )));
+            }
+            if refs
+                .iter()
+                .any(|operand| DefraMergeOperator.touches(b"meta", operand, &[0]))
+            {
+                return Err(TestCaseError::fail("a count touches the routing part"));
+            }
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// Link additions change adjacency (part 1) only: a node's id, vector, layer
+/// count and deletion mark keep their bytes under any run of them.
+#[test]
+fn links_leave_the_structural_part_alone() {
+    use regolith::testing::proptest::collection::vec;
+    use regolith::testing::proptest::prelude::*;
+    use regolith::testing::proptest::test_runner::{Config, TestCaseError, TestRunner};
+
+    let graph_nodes = (
+        any::<u64>(),
+        vec(-1000i32..1000, 1..4),
+        0usize..4,
+        any::<bool>(),
+    )
+        .prop_map(|(id, coordinates, top_layer, deleted)| {
+            let coordinates = coordinates.into_iter().map(|x| x as f32).collect();
+            let mut built = Node::new(NodeId(id), coordinates, top_layer);
+            built.deleted = deleted;
+            built
+        });
+    let mut runner = TestRunner::new(Config {
+        failure_persistence: None,
+        ..Config::default()
+    });
+    runner
+        .run(
+            &(graph_nodes, vec((0u32..4, any::<u64>()), 1..8)),
+            |(base, additions)| {
+                let operands: Vec<Vec<u8>> = additions
+                    .iter()
+                    .filter(|(layer, _)| (*layer as usize) < base.layers.len())
+                    .map(|(layer, neighbor)| vector::links(*layer, *neighbor))
+                    .collect();
+                let refs: Vec<&[u8]> = operands.iter().map(Vec::as_slice).collect();
+                let merged = DefraMergeOperator
+                    .full_merge(b"node", Some(&encode_node(&base)), &refs)
+                    .ok_or_else(|| TestCaseError::fail("links within its layers must merge"))?;
+                let merged = decode_node(&merged)
+                    .map_err(|error| TestCaseError::fail(error.to_string()))?;
+                if (merged.id, &merged.vector, merged.layers.len(), merged.deleted)
+                    != (base.id, &base.vector, base.layers.len(), base.deleted)
+                {
+                    return Err(TestCaseError::fail(format!(
+                        "{merged:?} lost the structure of {base:?}"
+                    )));
+                }
+                if refs
+                    .iter()
+                    .any(|operand| DefraMergeOperator.touches(b"node", operand, &[0]))
+                {
+                    return Err(TestCaseError::fail("a link touches the structural part"));
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+}
