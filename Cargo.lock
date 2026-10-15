@@ -4635,6 +4635,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "edge"
+version = "0.5.0"
+dependencies = [
+ "defra-core",
+ "n0-future",
+ "regolith",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "educe"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
