@@ -207,6 +207,135 @@ impl crate::corekv::RetryTxn for NamespacedRetryTxn<'_> {
     async fn delete(&mut self, key: &[u8]) -> Result<()> {
         self.txn.delete(&self.namespace.prefix_key(key)).await
     }
+
+    fn begin_attempt_io(&mut self) -> Result<Box<dyn crate::corekv::RetryAttemptIO>> {
+        Ok(Box::new(NamespacedRetryAttemptIO {
+            inner: Some(self.txn.begin_attempt_io()?),
+            namespace: self.namespace,
+        }))
+    }
+
+    fn finish_attempt_io(
+        &mut self,
+        io: Box<dyn crate::corekv::RetryAttemptIO>,
+        callbacks: crate::corekv::RetryCallbacks,
+    ) -> Result<()> {
+        let namespaced = io
+            .into_any()
+            .downcast::<NamespacedRetryAttemptIO>()
+            .map_err(|_| Error::Other("invalid namespaced retry IO".into()))?;
+        if namespaced.namespace != self.namespace {
+            return Err(Error::Other("retry IO namespace mismatch".into()));
+        }
+        self.txn
+            .finish_attempt_io(namespaced.inner.expect("retry IO is present"), callbacks)
+    }
+}
+
+struct NamespacedRetryAttemptIO {
+    inner: Option<Box<dyn crate::corekv::RetryAttemptIO>>,
+    namespace: Namespace,
+}
+
+impl crate::corekv::private::Sealed for NamespacedRetryAttemptIO {}
+
+impl NamespacedRetryAttemptIO {
+    fn inner(&self) -> &dyn crate::corekv::RetryAttemptIO {
+        self.inner.as_deref().expect("retry IO is present")
+    }
+
+    fn inner_mut(&mut self) -> &mut dyn crate::corekv::RetryAttemptIO {
+        self.inner.as_deref_mut().expect("retry IO is present")
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl crate::corekv::RetryAttemptIO for NamespacedRetryAttemptIO {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
+        self
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Reader for NamespacedRetryAttemptIO {
+    async fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
+        self.inner().get(&self.namespace.prefix_key(key)).await
+    }
+
+    async fn get_parts(&self, key: &[u8], parts: &[u32]) -> Result<Option<Bytes>> {
+        self.inner()
+            .get_parts(&self.namespace.prefix_key(key), parts)
+            .await
+    }
+
+    async fn has(&self, key: &[u8]) -> Result<bool> {
+        self.inner().has(&self.namespace.prefix_key(key)).await
+    }
+
+    async fn get_size(&self, key: &[u8]) -> Result<Option<usize>> {
+        self.inner().get_size(&self.namespace.prefix_key(key)).await
+    }
+
+    async fn iterator(&self, opts: IterOptions) -> Result<Box<dyn Iterator>> {
+        let mut prefixed = IterOptions::new();
+        if let Some(prefix) = opts.prefix() {
+            prefixed = prefixed.with_prefix(self.namespace.prefix_key(prefix));
+        } else {
+            prefixed = prefixed.with_prefix(vec![self.namespace.prefix()]);
+        }
+        if let Some(start) = opts.start() {
+            prefixed = prefixed.with_start(self.namespace.prefix_key(start));
+        }
+        if let Some(end) = opts.end() {
+            prefixed = prefixed.with_end(self.namespace.prefix_key(end));
+        }
+        prefixed = prefixed
+            .with_reverse(opts.reverse())
+            .with_keys_only(opts.keys_only())
+            .with_validation(opts.validated());
+        Ok(Box::new(NamespacedIterator {
+            iter: self.inner().iterator(prefixed).await?,
+            namespace: self.namespace,
+        }))
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Writer for NamespacedRetryAttemptIO {
+    async fn merge(&mut self, key: &[u8], operand: &[u8]) -> Result<()> {
+        let key = self.namespace.prefix_key(key);
+        self.inner_mut().merge(&key, operand).await
+    }
+
+    async fn append(
+        &mut self,
+        log: &crate::corekv::AppendLog,
+        entry: &[u8],
+        once_key: Option<&[u8]>,
+    ) -> Result<()> {
+        let log = log.prefixed(&[self.namespace.prefix()]);
+        let once_key = once_key.map(|key| self.namespace.prefix_key(key));
+        self.inner_mut()
+            .append(&log, entry, once_key.as_deref())
+            .await
+    }
+
+    async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+        let key = self.namespace.prefix_key(key);
+        self.inner_mut().set(&key, value).await
+    }
+
+    async fn delete(&mut self, key: &[u8]) -> Result<()> {
+        let key = self.namespace.prefix_key(key);
+        self.inner_mut().delete(&key).await
+    }
 }
 
 /// A namespaced transaction that wraps a Txn implementation

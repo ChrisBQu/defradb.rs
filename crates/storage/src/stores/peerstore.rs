@@ -19,7 +19,6 @@ use tracing;
 const PUSH_RETRY_TXN_MAX_ATTEMPTS: usize = 4;
 #[cfg(not(target_arch = "wasm32"))]
 const PUSH_MARKER_IO_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(10);
-const LEGACY_RETRY_COMMIT_PREFIX: &str = "/rep/retry/commit/";
 const RETRY_MARKER_GENERATION_MAGIC: &[u8] = b"DFRGMARKER1";
 
 fn encode_retry_marker_generation(generation: u64) -> Vec<u8> {
@@ -32,18 +31,6 @@ fn decode_retry_marker_generation(bytes: &[u8]) -> Option<u64> {
     let generation_bytes = bytes.strip_prefix(RETRY_MARKER_GENERATION_MAGIC)?;
     let generation_bytes: [u8; 8] = generation_bytes.try_into().ok()?;
     Some(u64::from_be_bytes(generation_bytes))
-}
-
-fn legacy_retry_commit_prefix(peer_id: Option<&str>) -> Vec<u8> {
-    match peer_id {
-        Some(peer_id) => format!("{LEGACY_RETRY_COMMIT_PREFIX}{peer_id}/").into_bytes(),
-        None => LEGACY_RETRY_COMMIT_PREFIX.as_bytes().to_vec(),
-    }
-}
-
-#[cfg(test)]
-fn legacy_retry_commit_key(peer_id: &str, collection_id: &str, cid: &str) -> Vec<u8> {
-    format!("{LEGACY_RETRY_COMMIT_PREFIX}{peer_id}/{collection_id}/{cid}").into_bytes()
 }
 
 async fn retry_push_txn<T, F, Fut, P>(mut operation: F, is_retryable: P) -> Result<T>
@@ -86,14 +73,6 @@ where
     unreachable!("bounded transaction retry loop always returns")
 }
 
-async fn retry_push_txn_conflicts<T, F, Fut>(operation: F) -> Result<T>
-where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = Result<T>>,
-{
-    retry_push_txn(operation, crate::corekv::Error::is_retriable).await
-}
-
 async fn retry_scope_marker_write<T, F, Fut>(operation: F) -> Result<T>
 where
     F: FnMut() -> Fut,
@@ -127,6 +106,245 @@ struct RegisterScopeMarkerAttempt {
     retry_info_bytes: Vec<u8>,
     retry_schedule: super::RetrySchedule,
     generation: u64,
+}
+
+enum PeerstoreRetryAttempt {
+    DeleteReplicator {
+        peer_id: String,
+    },
+    Reschedule {
+        peer_id: String,
+        defer_for: Option<std::time::Duration>,
+        advance_cursor_by: u64,
+        schedule: super::RetrySchedule,
+    },
+    Restart {
+        peer_id: String,
+        advance_cursor_by: u64,
+        schedule: super::RetrySchedule,
+    },
+    RecordHint {
+        peer_id: String,
+        delay: std::time::Duration,
+    },
+    Activate {
+        peer_id: String,
+    },
+    CompleteMarker {
+        peer_id: String,
+        key: Vec<u8>,
+        expected_generation: u64,
+    },
+    ClearPeer {
+        peer_id: String,
+    },
+}
+
+impl RetryAttemptFn for PeerstoreRetryAttempt {
+    fn run<'a>(&'a mut self, txn: &'a mut dyn RetryTxn) -> RetryAttemptFuture<'a> {
+        Box::pin(async move {
+            use PeerstoreRetryAttempt as Attempt;
+            match self {
+                Attempt::DeleteReplicator { peer_id } => {
+                    let mut io = txn.begin_attempt_io()?;
+                    let key = ReplicatorKey::new(peer_id.as_str()).bytes();
+                    // This point read conflicts with every state transition that
+                    // validates the peer incarnation before writing.
+                    let _ = io.get(&key).await?;
+                    io.delete(&key).await?;
+                    let mut keys = Vec::new();
+                    for prefix in [
+                        ReplicatorRetryDocIDKey::peer_prefix(peer_id.as_str()),
+                        ReplicatorRetryCollectionKey::peer_prefix(peer_id.as_str()),
+                    ] {
+                        let mut iter = io.iterator(IterOptions::new().with_prefix(prefix)).await?;
+                        while let Some(pair) = iter.next().await? {
+                            keys.push(pair.key);
+                        }
+                        iter.close().await?;
+                    }
+                    for key in keys {
+                        io.delete(&key).await?;
+                    }
+                    io.delete(&ReplicatorRetryIDKey::new(peer_id.as_str()).bytes())
+                        .await?;
+                    txn.finish_attempt_io(io, crate::corekv::RetryCallbacks::default())?;
+                    Ok(Box::new(()) as crate::corekv::RetryAttemptValue)
+                }
+                Attempt::Reschedule {
+                    peer_id,
+                    defer_for,
+                    advance_cursor_by,
+                    schedule,
+                } => {
+                    if txn
+                        .get(&ReplicatorKey::new(peer_id.as_str()).bytes())
+                        .await?
+                        .is_none()
+                    {
+                        return Ok(Box::new(false) as crate::corekv::RetryAttemptValue);
+                    }
+                    let key = ReplicatorRetryIDKey::new(peer_id.as_str()).bytes();
+                    let Some(bytes) = txn.get(&key).await? else {
+                        return Ok(Box::new(false) as crate::corekv::RetryAttemptValue);
+                    };
+                    let mut info = super::RetryInfo::from_bytes(&bytes)
+                        .map_err(crate::corekv::Error::Other)?;
+                    info.advance_dispatch_cursor(*advance_cursor_by);
+                    if let Some(delay) = defer_for {
+                        info.defer_for(*delay);
+                    } else {
+                        info.bump_with_schedule(peer_id, schedule);
+                    }
+                    txn.set(&key, &info.to_bytes().map_err(crate::corekv::Error::Other)?)
+                        .await?;
+                    Ok(Box::new(true) as crate::corekv::RetryAttemptValue)
+                }
+                Attempt::Restart {
+                    peer_id,
+                    advance_cursor_by,
+                    schedule,
+                } => {
+                    if txn
+                        .get(&ReplicatorKey::new(peer_id.as_str()).bytes())
+                        .await?
+                        .is_none()
+                    {
+                        return Ok(Box::new(false) as crate::corekv::RetryAttemptValue);
+                    }
+                    let key = ReplicatorRetryIDKey::new(peer_id.as_str()).bytes();
+                    let Some(bytes) = txn.get(&key).await? else {
+                        return Ok(Box::new(false) as crate::corekv::RetryAttemptValue);
+                    };
+                    let mut info = super::RetryInfo::from_bytes(&bytes)
+                        .map_err(crate::corekv::Error::Other)?;
+                    info.advance_dispatch_cursor(*advance_cursor_by);
+                    info.num_retries = 0;
+                    info.bump_with_schedule(peer_id, schedule);
+                    txn.set(&key, &info.to_bytes().map_err(crate::corekv::Error::Other)?)
+                        .await?;
+                    Ok(Box::new(true) as crate::corekv::RetryAttemptValue)
+                }
+                Attempt::RecordHint { peer_id, delay } => {
+                    if txn
+                        .get(&ReplicatorKey::new(peer_id.as_str()).bytes())
+                        .await?
+                        .is_none()
+                    {
+                        return Ok(Box::new(false) as crate::corekv::RetryAttemptValue);
+                    }
+                    let key = ReplicatorRetryIDKey::new(peer_id.as_str()).bytes();
+                    let mut info = match txn.get(&key).await? {
+                        Some(bytes) => super::RetryInfo::from_bytes(&bytes)
+                            .map_err(crate::corekv::Error::Other)?,
+                        None => super::RetryInfo::new_initial(),
+                    };
+                    info.defer_for_hint(*delay);
+                    txn.set(&key, &info.to_bytes().map_err(crate::corekv::Error::Other)?)
+                        .await?;
+                    Ok(Box::new(true) as crate::corekv::RetryAttemptValue)
+                }
+                Attempt::Activate { peer_id } => {
+                    if txn
+                        .get(&ReplicatorKey::new(peer_id.as_str()).bytes())
+                        .await?
+                        .is_none()
+                    {
+                        return Ok(Box::new(false) as crate::corekv::RetryAttemptValue);
+                    }
+                    let key = ReplicatorRetryIDKey::new(peer_id.as_str()).bytes();
+                    let Some(bytes) = txn.get(&key).await? else {
+                        return Ok(Box::new(false) as crate::corekv::RetryAttemptValue);
+                    };
+                    let mut info = super::RetryInfo::from_bytes(&bytes)
+                        .map_err(crate::corekv::Error::Other)?;
+                    info.defer_for(std::time::Duration::ZERO);
+                    txn.set(&key, &info.to_bytes().map_err(crate::corekv::Error::Other)?)
+                        .await?;
+                    Ok(Box::new(true) as crate::corekv::RetryAttemptValue)
+                }
+                Attempt::CompleteMarker {
+                    peer_id,
+                    key,
+                    expected_generation,
+                } => {
+                    if txn
+                        .get(&ReplicatorKey::new(peer_id.as_str()).bytes())
+                        .await?
+                        .is_none()
+                    {
+                        return Ok(Box::new(false) as crate::corekv::RetryAttemptValue);
+                    }
+                    let Some(bytes) = txn.get(key).await? else {
+                        return Ok(Box::new(false) as crate::corekv::RetryAttemptValue);
+                    };
+                    let current = decode_retry_marker_generation(&bytes).unwrap_or(0);
+                    if current != *expected_generation {
+                        return Ok(Box::new(false) as crate::corekv::RetryAttemptValue);
+                    }
+                    txn.delete(key).await?;
+                    Ok(Box::new(true) as crate::corekv::RetryAttemptValue)
+                }
+                Attempt::ClearPeer { peer_id } => {
+                    let mut io = txn.begin_attempt_io()?;
+                    let exists = io
+                        .get(&ReplicatorKey::new(peer_id.as_str()).bytes())
+                        .await?
+                        .is_some();
+                    let mut has_markers = false;
+                    let mut empty_legacy_keys = Vec::new();
+                    if exists {
+                        for (prefix, expected_prefix) in [
+                            (
+                                ReplicatorRetryDocIDKey::peer_prefix(peer_id.as_str()),
+                                format!("/rep/retry/doc/{peer_id}/"),
+                            ),
+                            (
+                                ReplicatorRetryCollectionKey::peer_prefix(peer_id.as_str()),
+                                format!("/rep/retry/col/{peer_id}/"),
+                            ),
+                        ] {
+                            let mut iter =
+                                io.iterator(IterOptions::new().with_prefix(prefix)).await?;
+                            while let Some(pair) = iter.next().await? {
+                                let key = String::from_utf8_lossy(&pair.key);
+                                if key
+                                    .strip_prefix(&expected_prefix)
+                                    .is_some_and(str::is_empty)
+                                {
+                                    empty_legacy_keys.push(pair.key);
+                                } else {
+                                    has_markers = true;
+                                    break;
+                                }
+                            }
+                            iter.close().await?;
+                            if has_markers {
+                                break;
+                            }
+                        }
+                        if !has_markers {
+                            for key in empty_legacy_keys {
+                                io.delete(&key).await?;
+                            }
+                            let key = ReplicatorRetryIDKey::new(peer_id.as_str()).bytes();
+                            let keep_deadline = match io.get(&key).await? {
+                                Some(bytes) => !super::RetryInfo::from_bytes(&bytes)
+                                    .map_err(crate::corekv::Error::Other)?
+                                    .is_backpressure_elapsed(),
+                                None => false,
+                            };
+                            if !keep_deadline {
+                                io.delete(&key).await?;
+                            }
+                        }
+                    }
+                    txn.finish_attempt_io(io, crate::corekv::RetryCallbacks::default())?;
+                    Ok(Box::new(()) as crate::corekv::RetryAttemptValue)
+                }
+            }
+        })
+    }
 }
 
 impl RetryAttemptFn for RegisterScopeMarkerAttempt {
@@ -183,6 +401,22 @@ impl RetryAttemptFn for RegisterScopeMarkerAttempt {
 }
 
 impl<S: Store> Peerstore<S> {
+    async fn transact_conflicts<T: Send + 'static>(
+        &self,
+        attempt: crate::corekv::RetryAttempt,
+    ) -> Result<T> {
+        self.store
+            .transact_retry(
+                RetryOptions::new(PUSH_RETRY_TXN_MAX_ATTEMPTS as u32),
+                attempt,
+            )
+            .await
+            .map_err(crate::corekv::RetryAttemptError::into_storage)?
+            .downcast::<T>()
+            .map(|value| *value)
+            .map_err(|_| crate::corekv::Error::Other("invalid peer retry result".into()))
+    }
+
     /// Create a new Peerstore
     pub fn new(store: Arc<S>) -> Self {
         Self {
@@ -219,38 +453,10 @@ impl<S: Store> Peerstore<S> {
 
     /// Delete a replicator and all of its persisted push-retry state.
     pub async fn delete_replicator(&self, peer_id: &str) -> Result<()> {
-        retry_push_txn_conflicts(|| self.delete_replicator_once(peer_id)).await
-    }
-
-    async fn delete_replicator_once(&self, peer_id: &str) -> Result<()> {
-        let mut txn = self.store.new_txn(false).await?;
-        // This point read conflicts with every marker/schedule transaction,
-        // which validates the same key before writing. Deletion and any
-        // in-flight retry-state transition therefore have a serial order.
-        let _ = txn.get(&ReplicatorKey::new(peer_id).bytes()).await?;
-        txn.delete(&ReplicatorKey::new(peer_id).bytes()).await?;
-        Self::delete_retry_state(txn.as_mut(), peer_id).await?;
-        txn.commit().await
-    }
-
-    async fn delete_retry_state(txn: &mut dyn Txn, peer_id: &str) -> Result<()> {
-        let mut keys = Vec::new();
-        for prefix in [
-            ReplicatorRetryDocIDKey::peer_prefix(peer_id),
-            ReplicatorRetryCollectionKey::peer_prefix(peer_id),
-            legacy_retry_commit_prefix(Some(peer_id)),
-        ] {
-            let mut iter = txn.iterator(IterOptions::new().with_prefix(prefix)).await?;
-            while let Some(pair) = iter.next().await? {
-                keys.push(pair.key);
-            }
-        }
-
-        for key in keys {
-            txn.delete(&key).await?;
-        }
-        txn.delete(&ReplicatorRetryIDKey::new(peer_id).bytes())
-            .await
+        self.transact_conflicts(Box::new(PeerstoreRetryAttempt::DeleteReplicator {
+            peer_id: peer_id.to_owned(),
+        }))
+        .await
     }
 
     /// Get all stored replicator configurations.
@@ -430,106 +636,6 @@ impl<S: Store> Peerstore<S> {
             .map_err(|_| crate::corekv::Error::Other("invalid retry attempt result".into()))
     }
 
-    /// One-way conversion of payload-valued document records and CID-scoped
-    /// collection commits into generation-fenced scope markers.
-    async fn migrate_push_retry_markers(&self, only_peer: Option<&str>) -> Result<usize> {
-        retry_push_txn_conflicts(|| async {
-            let mut txn = self.store.new_txn(false).await?;
-            let mut migrated = 0usize;
-            let doc_prefix = only_peer
-                .map(ReplicatorRetryDocIDKey::peer_prefix)
-                .unwrap_or_else(ReplicatorRetryDocIDKey::retry_doc_prefix);
-            let mut docs = txn
-                .iterator(IterOptions::new().with_prefix(doc_prefix))
-                .await?;
-            let mut doc_keys = Vec::new();
-            while let Some(pair) = docs.next().await? {
-                if decode_retry_marker_generation(&pair.value).is_none() {
-                    let key = String::from_utf8_lossy(&pair.key);
-                    let peer = key
-                        .strip_prefix("/rep/retry/doc/")
-                        .and_then(|rest| rest.split('/').next())
-                        .filter(|peer| !peer.is_empty())
-                        .map(str::to_owned);
-                    doc_keys.push((pair.key, peer));
-                }
-            }
-            drop(docs);
-            for (key, peer) in doc_keys {
-                if key.ends_with(b"/") {
-                    txn.delete(&key).await?;
-                } else {
-                    let generation = self
-                        .store
-                        .allocate(b"/rep/retry/marker-generation", 1)
-                        .await?
-                        .end;
-                    txn.set(&key, &encode_retry_marker_generation(generation))
-                        .await?;
-                    if let Some(peer) = peer {
-                        let id_key = ReplicatorRetryIDKey::new(&peer);
-                        if !txn.has(&id_key.bytes()).await? {
-                            let info = super::RetryInfo::new_initial();
-                            txn.set(
-                                &id_key.bytes(),
-                                &info.to_bytes().map_err(crate::corekv::Error::Other)?,
-                            )
-                            .await?;
-                        }
-                    }
-                }
-                migrated += 1;
-            }
-
-            let commit_prefix = legacy_retry_commit_prefix(only_peer);
-            let mut commits = txn
-                .iterator(IterOptions::new().with_prefix(commit_prefix))
-                .await?;
-            let mut legacy = Vec::new();
-            while let Some(pair) = commits.next().await? {
-                let key = String::from_utf8_lossy(&pair.key);
-                let Some(rest) = key.strip_prefix(LEGACY_RETRY_COMMIT_PREFIX) else {
-                    continue;
-                };
-                let mut parts = rest.split('/');
-                let (Some(peer), Some(collection)) = (parts.next(), parts.next()) else {
-                    continue;
-                };
-                if !peer.is_empty() && !collection.is_empty() {
-                    legacy.push((pair.key.clone(), peer.to_string(), collection.to_string()));
-                }
-            }
-            drop(commits);
-            for (old_key, peer, collection) in legacy {
-                let generation = self
-                    .store
-                    .allocate(b"/rep/retry/marker-generation", 1)
-                    .await?
-                    .end;
-                txn.set(
-                    &ReplicatorRetryCollectionKey::new(&peer, &collection).bytes(),
-                    &encode_retry_marker_generation(generation),
-                )
-                .await?;
-                let id_key = ReplicatorRetryIDKey::new(&peer);
-                if !txn.has(&id_key.bytes()).await? {
-                    let mut info = super::RetryInfo::new_initial();
-                    info.bump_with_schedule(&peer, &self.retry_schedule);
-                    txn.set(
-                        &id_key.bytes(),
-                        &info.to_bytes().map_err(crate::corekv::Error::Other)?,
-                    )
-                    .await?;
-                }
-                txn.delete(&old_key).await?;
-                migrated += 1;
-            }
-            txn.commit().await?;
-            Ok(migrated)
-        })
-        .await
-    }
-
     /// Record a push failure for a specific peer/doc pair.
     ///
     /// Writes the peer schedule and advances the document or collection marker generation.
@@ -667,11 +773,6 @@ impl<S: Store> Peerstore<S> {
         self.load_scope_markers(peer_id).await
     }
 
-    /// Migrate legacy payload/CID records into scope markers after startup.
-    pub async fn migrate_legacy_push_retries(&self) -> Result<usize> {
-        self.migrate_push_retry_markers(None).await
-    }
-
     /// Count durable scope markers and report the oldest shared peer schedule.
     pub async fn push_retry_marker_stats(&self) -> Result<super::PushRetryMarkerStats> {
         let txn = self.store.new_txn(true).await?;
@@ -734,32 +835,12 @@ impl<S: Store> Peerstore<S> {
         defer_for: Option<std::time::Duration>,
         advance_cursor_by: u64,
     ) -> Result<bool> {
-        retry_push_txn_conflicts(|| async {
-            let mut txn = self.store.new_txn(false).await?;
-            if txn
-                .get(&ReplicatorKey::new(peer_id).bytes())
-                .await?
-                .is_none()
-            {
-                return Ok(false);
-            }
-            let key = ReplicatorRetryIDKey::new(peer_id).bytes();
-            let Some(bytes) = txn.get(&key).await? else {
-                return Ok(false);
-            };
-            let mut info =
-                super::RetryInfo::from_bytes(&bytes).map_err(crate::corekv::Error::Other)?;
-            info.advance_dispatch_cursor(advance_cursor_by);
-            if let Some(delay) = defer_for {
-                info.defer_for(delay);
-            } else {
-                info.bump_with_schedule(peer_id, &self.retry_schedule);
-            }
-            txn.set(&key, &info.to_bytes().map_err(crate::corekv::Error::Other)?)
-                .await?;
-            txn.commit().await?;
-            Ok(true)
-        })
+        self.transact_conflicts(Box::new(PeerstoreRetryAttempt::Reschedule {
+            peer_id: peer_id.to_owned(),
+            defer_for,
+            advance_cursor_by,
+            schedule: self.retry_schedule.clone(),
+        }))
         .await
     }
 
@@ -767,29 +848,11 @@ impl<S: Store> Peerstore<S> {
     /// documents. Escalation is evidence of an unreachable peer; a peer that
     /// is taking documents has refuted it.
     pub async fn restart_retry_peer(&self, peer_id: &str, advance_cursor_by: u64) -> Result<bool> {
-        retry_push_txn_conflicts(|| async {
-            let mut txn = self.store.new_txn(false).await?;
-            if txn
-                .get(&ReplicatorKey::new(peer_id).bytes())
-                .await?
-                .is_none()
-            {
-                return Ok(false);
-            }
-            let key = ReplicatorRetryIDKey::new(peer_id).bytes();
-            let Some(bytes) = txn.get(&key).await? else {
-                return Ok(false);
-            };
-            let mut info =
-                super::RetryInfo::from_bytes(&bytes).map_err(crate::corekv::Error::Other)?;
-            info.advance_dispatch_cursor(advance_cursor_by);
-            info.num_retries = 0;
-            info.bump_with_schedule(peer_id, &self.retry_schedule);
-            txn.set(&key, &info.to_bytes().map_err(crate::corekv::Error::Other)?)
-                .await?;
-            txn.commit().await?;
-            Ok(true)
-        })
+        self.transact_conflicts(Box::new(PeerstoreRetryAttempt::Restart {
+            peer_id: peer_id.to_owned(),
+            advance_cursor_by,
+            schedule: self.retry_schedule.clone(),
+        }))
         .await
     }
 
@@ -800,28 +863,10 @@ impl<S: Store> Peerstore<S> {
         peer_id: &str,
         delay: std::time::Duration,
     ) -> Result<bool> {
-        retry_push_txn_conflicts(|| async {
-            let mut txn = self.store.new_txn(false).await?;
-            if txn
-                .get(&ReplicatorKey::new(peer_id).bytes())
-                .await?
-                .is_none()
-            {
-                return Ok(false);
-            }
-            let key = ReplicatorRetryIDKey::new(peer_id).bytes();
-            let mut info = match txn.get(&key).await? {
-                Some(bytes) => {
-                    super::RetryInfo::from_bytes(&bytes).map_err(crate::corekv::Error::Other)?
-                }
-                None => super::RetryInfo::new_initial(),
-            };
-            info.defer_for_hint(delay);
-            txn.set(&key, &info.to_bytes().map_err(crate::corekv::Error::Other)?)
-                .await?;
-            txn.commit().await?;
-            Ok(true)
-        })
+        self.transact_conflicts(Box::new(PeerstoreRetryAttempt::RecordHint {
+            peer_id: peer_id.to_owned(),
+            delay,
+        }))
         .await
     }
 
@@ -830,29 +875,9 @@ impl<S: Store> Peerstore<S> {
     /// delivery evidence: retaining an old connection-failure deadline after
     /// that event can leave otherwise actionable scope markers dormant.
     pub async fn activate_retry_peer(&self, peer_id: &str) -> Result<bool> {
-        // The point read of the replicator key conflicts with forget while
-        // the schedule read/write conflicts with other retry transitions.
-        retry_push_txn_conflicts(|| async {
-            let mut txn = self.store.new_txn(false).await?;
-            if txn
-                .get(&ReplicatorKey::new(peer_id).bytes())
-                .await?
-                .is_none()
-            {
-                return Ok(false);
-            }
-            let key = ReplicatorRetryIDKey::new(peer_id).bytes();
-            let Some(bytes) = txn.get(&key).await? else {
-                return Ok(false);
-            };
-            let mut info =
-                super::RetryInfo::from_bytes(&bytes).map_err(crate::corekv::Error::Other)?;
-            info.defer_for(std::time::Duration::ZERO);
-            txn.set(&key, &info.to_bytes().map_err(crate::corekv::Error::Other)?)
-                .await?;
-            txn.commit().await?;
-            Ok(true)
-        })
+        self.transact_conflicts(Box::new(PeerstoreRetryAttempt::Activate {
+            peer_id: peer_id.to_owned(),
+        }))
         .await
     }
 
@@ -888,26 +913,11 @@ impl<S: Store> Peerstore<S> {
         } else {
             ReplicatorRetryDocIDKey::new(peer_id, doc_id).bytes()
         };
-        retry_push_txn_conflicts(|| async {
-            let mut txn = self.store.new_txn(false).await?;
-            if txn
-                .get(&ReplicatorKey::new(peer_id).bytes())
-                .await?
-                .is_none()
-            {
-                return Ok(false);
-            }
-            let Some(bytes) = txn.get(&key).await? else {
-                return Ok(false);
-            };
-            let current_generation = decode_retry_marker_generation(&bytes).unwrap_or(0);
-            if current_generation != expected_generation {
-                return Ok(false);
-            }
-            txn.delete(&key).await?;
-            txn.commit().await?;
-            Ok(true)
-        })
+        self.transact_conflicts(Box::new(PeerstoreRetryAttempt::CompleteMarker {
+            peer_id: peer_id.to_owned(),
+            key,
+            expected_generation,
+        }))
         .await
     }
 
@@ -965,70 +975,10 @@ impl<S: Store> Peerstore<S> {
 
     /// Stop sweeping an empty peer after its receiver backpressure has expired.
     pub async fn clear_retry_peer(&self, peer_id: &str) -> Result<()> {
-        retry_push_txn_conflicts(|| self.clear_retry_peer_once(peer_id)).await
-    }
-
-    async fn clear_retry_peer_once(&self, peer_id: &str) -> Result<()> {
-        let mut txn = self.store.new_txn(false).await?;
-        // A clear that started before deletion must not erase a freshly
-        // re-added replicator's schedule. This read validates the incarnation
-        // that owns every retry marker for the peer.
-        if txn
-            .get(&ReplicatorKey::new(peer_id).bytes())
-            .await?
-            .is_none()
-        {
-            return txn.commit().await;
-        }
-        let mut has_markers = false;
-        let mut empty_legacy_keys = Vec::new();
-
-        for (prefix, expected_prefix) in [
-            (
-                ReplicatorRetryDocIDKey::peer_prefix(peer_id),
-                format!("/rep/retry/doc/{peer_id}/"),
-            ),
-            (
-                ReplicatorRetryCollectionKey::peer_prefix(peer_id),
-                format!("/rep/retry/col/{peer_id}/"),
-            ),
-        ] {
-            let mut iter = txn.iterator(IterOptions::new().with_prefix(prefix)).await?;
-            while let Some(pair) = iter.next().await? {
-                let key = String::from_utf8_lossy(&pair.key);
-                if key
-                    .strip_prefix(&expected_prefix)
-                    .is_some_and(str::is_empty)
-                {
-                    empty_legacy_keys.push(pair.key);
-                } else {
-                    has_markers = true;
-                    break;
-                }
-            }
-            drop(iter);
-            if has_markers {
-                break;
-            }
-        }
-
-        if !has_markers {
-            for key in empty_legacy_keys {
-                txn.delete(&key).await?;
-            }
-            let key = ReplicatorRetryIDKey::new(peer_id).bytes();
-            let keep_deadline = match txn.get(&key).await? {
-                Some(bytes) => !super::RetryInfo::from_bytes(&bytes)
-                    .map_err(crate::corekv::Error::Other)?
-                    .is_backpressure_elapsed(),
-                None => false,
-            };
-            // An in-flight ACK clears a scope, not the receiver's peer-wide hint.
-            if !keep_deadline {
-                txn.delete(&key).await?;
-            }
-        }
-        txn.commit().await
+        self.transact_conflicts(Box::new(PeerstoreRetryAttempt::ClearPeer {
+            peer_id: peer_id.to_owned(),
+        }))
+        .await
     }
 }
 

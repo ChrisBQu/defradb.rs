@@ -58,41 +58,6 @@ use crate::corekv::Key;
 use crate::keys::peerstore::ReplicatorKey;
 
 #[tokio::test]
-async fn push_transaction_conflicts_retry_to_success() {
-    let attempts = AtomicUsize::new(0);
-
-    retry_push_txn_conflicts(|| async {
-        if attempts.fetch_add(1, AtomicOrdering::Relaxed) < 2 {
-            Err(crate::corekv::Error::TxnConflict)
-        } else {
-            Ok(())
-        }
-    })
-    .await
-    .unwrap();
-
-    assert_eq!(attempts.load(AtomicOrdering::Relaxed), 3);
-}
-
-#[tokio::test]
-async fn push_transaction_conflicts_stop_at_bound() {
-    let attempts = AtomicUsize::new(0);
-
-    let error = retry_push_txn_conflicts(|| async {
-        attempts.fetch_add(1, AtomicOrdering::Relaxed);
-        Err::<(), _>(crate::corekv::Error::TxnConflict)
-    })
-    .await
-    .unwrap_err();
-
-    assert!(error.is_txn_conflict());
-    assert_eq!(
-        attempts.load(AtomicOrdering::Relaxed),
-        PUSH_RETRY_TXN_MAX_ATTEMPTS
-    );
-}
-
-#[tokio::test]
 async fn engine_retry_attempt_restarts_after_commit_conflict() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let interfering_store = store.clone();
@@ -388,7 +353,6 @@ async fn test_delete_replicator() {
         .await
         .unwrap()
         .is_empty());
-    assert_eq!(peerstore.migrate_legacy_push_retries().await.unwrap(), 0);
 }
 
 #[tokio::test]
@@ -481,6 +445,10 @@ async fn stale_ack_cannot_erase_a_concurrent_dirty_registration() {
 #[tokio::test]
 async fn delete_replicator_clears_orphaned_retry_state() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
+    let system_store = crate::namespace::NamespacedStore::new(
+        store.clone(),
+        crate::namespace::Namespace::Systemstore,
+    );
     let peerstore = Peerstore::new(store);
     let retry_info = super::super::RetryInfo::new_initial().to_bytes().unwrap();
 
@@ -493,6 +461,10 @@ async fn delete_replicator_clears_orphaned_retry_state() {
         .record_push_failure("orphan", "doc", "collection", &retry_info)
         .await
         .unwrap();
+    let unrelated_key = b"/rep/retry/doc/orphan/unrelated";
+    let mut unrelated = system_store.new_txn(false).await.unwrap();
+    unrelated.set(unrelated_key, b"keep").await.unwrap();
+    unrelated.commit().await.unwrap();
     peerstore.delete_replicator("orphan").await.unwrap();
 
     assert!(peerstore.get_all_retry_peers().await.unwrap().is_empty());
@@ -501,6 +473,9 @@ async fn delete_replicator_clears_orphaned_retry_state() {
         .await
         .unwrap()
         .is_empty());
+    let unrelated = system_store.new_txn(true).await.unwrap();
+    assert_eq!(unrelated.get(unrelated_key).await.unwrap().unwrap(), "keep");
+    unrelated.discard();
 }
 
 #[tokio::test]
@@ -762,44 +737,6 @@ async fn versionless_empty_document_failure_creates_no_retry_state() {
 }
 
 #[tokio::test]
-async fn dormant_legacy_payload_document_retry_migrates_and_arms_due_schedule() {
-    let store = Arc::new(RegolithStore::in_memory().unwrap());
-    let peerstore = Peerstore::new(store);
-    let mut txn = peerstore.store.new_txn(false).await.unwrap();
-    txn.set(&ReplicatorKey::new("peer").bytes(), b"replicator")
-        .await
-        .unwrap();
-    txn.set(
-        &ReplicatorRetryDocIDKey::new("peer", "doc").bytes(),
-        b"collection",
-    )
-    .await
-    .unwrap();
-    txn.commit().await.unwrap();
-
-    assert_eq!(peerstore.migrate_legacy_push_retries().await.unwrap(), 1);
-    let legacy = peerstore.get_retry_documents("peer").await.unwrap();
-    assert_eq!(legacy.len(), 1);
-    assert_eq!(legacy[0].doc_id, "doc");
-    assert!(legacy[0].collection_id.is_empty());
-    let txn = peerstore.store.new_txn(true).await.unwrap();
-    let marker = txn
-        .get(&ReplicatorRetryDocIDKey::new("peer", "doc").bytes())
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(decode_retry_marker_generation(&marker).is_some());
-    let schedule = txn
-        .get(&ReplicatorRetryIDKey::new("peer").bytes())
-        .await
-        .unwrap()
-        .expect("migration must reactivate a dormant legacy document marker");
-    let schedule = super::super::RetryInfo::from_bytes(&schedule).unwrap();
-    assert!(schedule.is_due());
-    assert_eq!(schedule.num_retries, 0);
-}
-
-#[tokio::test]
 async fn peer_retry_cursor_rotates_bounded_marker_prefix_after_failure() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store);
@@ -865,46 +802,6 @@ async fn capacity_reschedule_rotates_without_advancing_failure_ladder() {
     assert_eq!(after.num_retries, before.num_retries);
     assert_eq!(after.dispatch_cursor, before.dispatch_cursor + 1);
     assert!(after.next_retry_unix >= now + 2);
-}
-
-#[tokio::test]
-async fn legacy_cid_scoped_commits_collapse_to_one_collection_marker() {
-    let store = Arc::new(RegolithStore::in_memory().unwrap());
-    let peerstore = Peerstore::new(store);
-    let mut txn = peerstore.store.new_txn(false).await.unwrap();
-    txn.set(&ReplicatorKey::new("peer").bytes(), b"replicator")
-        .await
-        .unwrap();
-    for cid in ["commit-a", "commit-b"] {
-        txn.set(
-            &legacy_retry_commit_key("peer", "collection", cid),
-            b"legacy-payload",
-        )
-        .await
-        .unwrap();
-    }
-    txn.commit().await.unwrap();
-
-    assert_eq!(peerstore.migrate_legacy_push_retries().await.unwrap(), 2);
-    let retries = peerstore.get_retry_documents("peer").await.unwrap();
-    assert_eq!(retries.len(), 1);
-    assert!(retries[0].is_collection_commit());
-    assert_eq!(retries[0].collection_id, "collection");
-
-    let txn = peerstore.store.new_txn(true).await.unwrap();
-    for cid in ["commit-a", "commit-b"] {
-        assert!(txn
-            .get(&legacy_retry_commit_key("peer", "collection", cid))
-            .await
-            .unwrap()
-            .is_none());
-    }
-    let marker = txn
-        .get(&ReplicatorRetryCollectionKey::new("peer", "collection").bytes())
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(decode_retry_marker_generation(&marker).is_some());
 }
 
 #[tokio::test]

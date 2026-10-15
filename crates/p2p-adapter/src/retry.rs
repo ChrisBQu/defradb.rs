@@ -541,9 +541,6 @@ where
     T: P2PTransport,
 {
     n0_future::task::spawn(async move {
-        if let Err(error) = peerstore.migrate_legacy_push_retries().await {
-            tracing::warn!(%error, "failed to migrate legacy push retries after restart");
-        }
         let replay = async {
             loop {
                 n0_future::time::sleep(p2p::sync::PERSISTED_RETRY_SWEEP_INTERVAL).await;
