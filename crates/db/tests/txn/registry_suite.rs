@@ -5,8 +5,8 @@ use document::NormalValue;
 use lens::LensConfig;
 use lens::LensModule;
 use query::mutator::DocMutator;
-use query::txn::GetTransactionResult;
-use query::txn::TransactionContext;
+use crate::common::owned::in_txn;
+use query::txn::txn_job;
 use query::txn::TransactionHandle;
 use query::txn::TransactionRegistry;
 use schema::CollectionVersion;
@@ -68,6 +68,26 @@ async fn seed_committed_user(
     doc_id
 }
 
+/// Whether a request for `txn_id` still reaches its transaction.
+async fn found(registry: &DbTransactionRegistry<RegolithStore>, txn_id: &TransactionHandle) -> bool {
+    registry
+        .run(txn_id, None, txn_job(|_| Box::pin(async {})))
+        .await
+        .is_ok()
+}
+
+/// Every document of `collection`, read by a request on `txn_id`.
+async fn get_all(
+    registry: &DbTransactionRegistry<RegolithStore>,
+    txn_id: &TransactionHandle,
+    collection: &'static str,
+) -> query::error::Result<Vec<Document>> {
+    in_txn(registry, txn_id, move |ctx| {
+        Box::pin(async move { ctx.doc_fetcher().get_all(collection).await })
+    })
+    .await
+}
+
 fn empty_wasm_module() -> LensModule {
     LensModule::from_bytes(vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])
 }
@@ -87,8 +107,7 @@ async fn test_begin_readonly_transaction() {
     let registry = DbTransactionRegistry::new(db);
 
     let txn_id = registry.begin(true).await.unwrap();
-    let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
-    assert!(ctx.is_readonly());
+    assert!(in_txn(&registry, &txn_id, |ctx| Box::pin(async move { ctx.is_readonly() })).await);
 }
 
 #[tokio::test]
@@ -97,8 +116,7 @@ async fn test_begin_readwrite_transaction() {
     let registry = DbTransactionRegistry::new(db);
 
     let txn_id = registry.begin(false).await.unwrap();
-    let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
-    assert!(!ctx.is_readonly());
+    assert!(!in_txn(&registry, &txn_id, |ctx| Box::pin(async move { ctx.is_readonly() })).await);
 }
 
 #[tokio::test]
@@ -137,8 +155,8 @@ async fn test_transaction_id_matches() {
     let registry = DbTransactionRegistry::new(db);
 
     let txn_id = registry.begin(false).await.unwrap();
-    let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
-    assert_eq!(ctx.id(), txn_id.as_str());
+    let id = in_txn(&registry, &txn_id, |ctx| Box::pin(async move { ctx.id().to_owned() })).await;
+    assert_eq!(id, txn_id.as_str());
 }
 
 #[tokio::test]
@@ -189,10 +207,7 @@ async fn test_get_nonexistent_returns_not_found() {
     let registry = DbTransactionRegistry::new(db);
 
     let nonexistent: TransactionHandle = "nonexistent".parse().unwrap();
-    assert!(matches!(
-        registry.get(&nonexistent),
-        GetTransactionResult::NotFound
-    ));
+    assert!(!found(&registry, &nonexistent).await);
 }
 
 #[tokio::test]
@@ -250,13 +265,10 @@ async fn test_get_returns_not_found_after_commit() {
     let registry = DbTransactionRegistry::new(db);
 
     let txn_id = registry.begin(false).await.unwrap();
-    assert!(registry.get(&txn_id).is_found());
+    assert!(found(&registry, &txn_id).await);
 
     registry.commit(&txn_id).await.unwrap();
-    assert!(matches!(
-        registry.get(&txn_id),
-        GetTransactionResult::NotFound
-    ));
+    assert!(!found(&registry, &txn_id).await);
 }
 
 #[tokio::test]
@@ -265,13 +277,10 @@ async fn test_get_returns_not_found_after_rollback() {
     let registry = DbTransactionRegistry::new(db);
 
     let txn_id = registry.begin(false).await.unwrap();
-    assert!(registry.get(&txn_id).is_found());
+    assert!(found(&registry, &txn_id).await);
 
     registry.rollback(&txn_id).await.unwrap();
-    assert!(matches!(
-        registry.get(&txn_id),
-        GetTransactionResult::NotFound
-    ));
+    assert!(!found(&registry, &txn_id).await);
 }
 
 #[tokio::test]
@@ -336,11 +345,15 @@ async fn test_doc_fetcher_get_all_empty_collection() {
     let registry = DbTransactionRegistry::new(db);
 
     let txn_id = registry.begin(true).await.unwrap();
-    let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
-    let fetcher = ctx.doc_fetcher();
+    in_txn(&registry, &txn_id, move |ctx| {
+        Box::pin(async move {
+            let fetcher = ctx.doc_fetcher();
 
-    let docs = fetcher.get_all("Users").await.unwrap();
-    assert!(docs.is_empty());
+                let docs = fetcher.get_all("Users").await.unwrap();
+                assert!(docs.is_empty());
+        })
+    })
+    .await;
 
     registry.rollback(&txn_id).await.unwrap();
 }
@@ -351,12 +364,16 @@ async fn test_doc_fetcher_get_all_unknown_collection() {
     let registry = DbTransactionRegistry::new(db);
 
     let txn_id = registry.begin(true).await.unwrap();
-    let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
-    let fetcher = ctx.doc_fetcher();
+    in_txn(&registry, &txn_id, move |ctx| {
+        Box::pin(async move {
+            let fetcher = ctx.doc_fetcher();
 
-    let result = fetcher.get_all("NonExistent").await;
-    assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("NonExistent"));
+                let result = fetcher.get_all("NonExistent").await;
+                assert!(result.is_err());
+                assert!(result.unwrap_err().to_string().contains("NonExistent"));
+        })
+    })
+    .await;
 
     registry.rollback(&txn_id).await.unwrap();
 }
@@ -367,12 +384,16 @@ async fn test_doc_fetcher_get_by_ids_empty() {
     let registry = DbTransactionRegistry::new(db);
 
     let txn_id = registry.begin(true).await.unwrap();
-    let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
-    let fetcher = ctx.doc_fetcher();
+    in_txn(&registry, &txn_id, move |ctx| {
+        Box::pin(async move {
+            let fetcher = ctx.doc_fetcher();
 
-    let result = fetcher.get_by_ids("Users", &[]).await.unwrap();
-    assert!(result.docs().is_empty());
-    assert!(result.missing_ids().is_empty());
+                let result = fetcher.get_by_ids("Users", &[]).await.unwrap();
+                assert!(result.docs().is_empty());
+                assert!(result.missing_ids().is_empty());
+        })
+    })
+    .await;
 
     registry.rollback(&txn_id).await.unwrap();
 }
@@ -385,16 +406,20 @@ async fn test_doc_fetcher_get_by_ids_invalid_id_treated_as_not_found() {
     let registry = DbTransactionRegistry::new(db);
 
     let txn_id = registry.begin(true).await.unwrap();
-    let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
-    let fetcher = ctx.doc_fetcher();
+    in_txn(&registry, &txn_id, move |ctx| {
+        Box::pin(async move {
+            let fetcher = ctx.doc_fetcher();
 
-    let result = fetcher
-        .get_by_ids("Users", &["not-a-valid-docid".to_string()])
-        .await
-        .unwrap();
-    // Invalid doc ID is treated as not found, not an error
-    assert!(result.docs().is_empty());
-    assert_eq!(result.missing_ids(), &["not-a-valid-docid".to_string()]);
+                let result = fetcher
+                    .get_by_ids("Users", &["not-a-valid-docid".to_string()])
+                    .await
+                    .unwrap();
+                // Invalid doc ID is treated as not found, not an error
+                assert!(result.docs().is_empty());
+                assert_eq!(result.missing_ids(), &["not-a-valid-docid".to_string()]);
+        })
+    })
+    .await;
 
     registry.rollback(&txn_id).await.unwrap();
 }
@@ -405,11 +430,10 @@ async fn test_is_consumed_returns_false_before_take() {
     let registry = DbTransactionRegistry::new(db);
 
     let txn_id = registry.begin(true).await.unwrap();
-    let ctx = registry.get_ctx(&txn_id).unwrap().unwrap();
 
     assert!(
-        !ctx.is_consumed().await,
-        "Transaction should not be consumed before take_txn"
+        found(&registry, &txn_id).await,
+        "Transaction should not be consumed before it ends"
     );
 
     registry.rollback(&txn_id).await.unwrap();
@@ -421,14 +445,13 @@ async fn test_is_consumed_returns_true_after_take() {
     let registry = DbTransactionRegistry::new(db);
 
     let txn_id = registry.begin(true).await.unwrap();
-    let ctx = registry.get_ctx(&txn_id).unwrap().unwrap();
 
-    // Take the transaction
-    let _txn = ctx.take_txn().await;
+    // End the transaction
+    registry.rollback(&txn_id).await.unwrap();
 
     assert!(
-        ctx.is_consumed().await,
-        "Transaction should be consumed after take_txn"
+        !found(&registry, &txn_id).await,
+        "Transaction should be consumed after it ends"
     );
 }
 
@@ -438,11 +461,14 @@ async fn test_doc_fetcher_after_txn_consumed_returns_error() {
     let registry = DbTransactionRegistry::new(db);
 
     let txn_id = registry.begin(true).await.unwrap();
-    let ctx = registry.get_ctx(&txn_id).unwrap().unwrap();
-    let fetcher = ctx.doc_fetcher();
+    // A fetcher kept past its request.
+    let fetcher = in_txn(&registry, &txn_id, |ctx| {
+        Box::pin(async move { ctx.doc_fetcher() })
+    })
+    .await;
 
-    // Manually take the transaction to simulate commit/rollback having consumed it
-    let _txn = ctx.take_txn().await;
+    // Ending the transaction takes it back from every handle it was lent to.
+    registry.rollback(&txn_id).await.unwrap();
 
     // Now try to use the fetcher - should fail with "transaction already consumed"
     let result = fetcher.get_all("Users").await;
@@ -463,12 +489,16 @@ async fn test_transaction_sees_committed_data() {
 
     // Read via registry
     let txn_id = registry.begin(true).await.unwrap();
-    let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
-    let fetcher = ctx.doc_fetcher();
+    in_txn(&registry, &txn_id, move |ctx| {
+        Box::pin(async move {
+            let fetcher = ctx.doc_fetcher();
 
-    let docs = fetcher.get_all("Users").await.unwrap();
-    assert_eq!(docs.len(), 1);
-    assert_eq!(docs[0].get("name").unwrap().as_str(), Some("Alice"));
+                let docs = fetcher.get_all("Users").await.unwrap();
+                assert_eq!(docs.len(), 1);
+                assert_eq!(docs[0].get("name").unwrap().as_str(), Some("Alice"));
+        })
+    })
+    .await;
 
     registry.rollback(&txn_id).await.unwrap();
 }
@@ -484,16 +514,20 @@ async fn test_get_by_ids_returns_matching_docs() {
 
     // Query for just one document
     let txn_id = registry.begin(true).await.unwrap();
-    let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
-    let fetcher = ctx.doc_fetcher();
+    in_txn(&registry, &txn_id, move |ctx| {
+        Box::pin(async move {
+            let fetcher = ctx.doc_fetcher();
 
-    let result = fetcher.get_by_ids("Users", &[doc1_id]).await.unwrap();
-    assert_eq!(result.docs().len(), 1);
-    assert!(result.missing_ids().is_empty());
-    assert_eq!(
-        result.docs()[0].get("name").unwrap().as_str(),
-        Some("Alice")
-    );
+                let result = fetcher.get_by_ids("Users", &[doc1_id]).await.unwrap();
+                assert_eq!(result.docs().len(), 1);
+                assert!(result.missing_ids().is_empty());
+                assert_eq!(
+                    result.docs()[0].get("name").unwrap().as_str(),
+                    Some("Alice")
+                );
+        })
+    })
+    .await;
 
     registry.rollback(&txn_id).await.unwrap();
 }
@@ -507,9 +541,9 @@ async fn test_multiple_concurrent_transactions() {
     let txn2 = registry.begin(true).await.unwrap();
     let txn3 = registry.begin(false).await.unwrap();
 
-    assert!(registry.get(&txn1).is_found());
-    assert!(registry.get(&txn2).is_found());
-    assert!(registry.get(&txn3).is_found());
+    assert!(found(&registry, &txn1).await);
+    assert!(found(&registry, &txn2).await);
+    assert!(found(&registry, &txn3).await);
 
     assert_ne!(txn1, txn2);
     assert_ne!(txn2, txn3);
@@ -572,15 +606,13 @@ async fn test_transaction_does_not_see_uncommitted_writes() {
 
     // Start a reader transaction FIRST
     let reader_txn_id = registry.begin(true).await.unwrap();
-    let reader_ctx = registry.get(&reader_txn_id).into_result().unwrap().unwrap();
-    let reader_fetcher = reader_ctx.doc_fetcher();
 
     // Start a writer transaction and write WITHOUT committing
     let write_txn = db.new_txn(false).await.unwrap();
     let (write_txn, _doc_id) = seed_user_in_txn(&db, write_txn, "Uncommitted", None).await;
 
     // Reader should NOT see the uncommitted write
-    let docs = reader_fetcher.get_all("Users").await.unwrap();
+    let docs = get_all(&registry, &reader_txn_id, "Users").await.unwrap();
     assert!(
         docs.is_empty(),
         "Reader should not see uncommitted writes (dirty read protection)"
@@ -603,7 +635,7 @@ async fn test_concurrent_parallel_transaction_operations() {
                 tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 
                 assert!(
-                    reg.get(&txn_id).is_found(),
+                    found(&reg, &txn_id).await,
                     "Task {} should find its transaction",
                     i
                 );
@@ -612,7 +644,7 @@ async fn test_concurrent_parallel_transaction_operations() {
                 reg.rollback(&txn_id).await.unwrap();
 
                 assert!(
-                    !reg.get(&txn_id).is_found(),
+                    !found(&reg, &txn_id).await,
                     "Task {} transaction should be gone after rollback",
                     i
                 );
@@ -631,14 +663,18 @@ async fn test_doc_fetcher_get_by_ids_unknown_collection() {
     let registry = DbTransactionRegistry::new(db);
 
     let txn_id = registry.begin(true).await.unwrap();
-    let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
-    let fetcher = ctx.doc_fetcher();
+    in_txn(&registry, &txn_id, move |ctx| {
+        Box::pin(async move {
+            let fetcher = ctx.doc_fetcher();
 
-    let result = fetcher
-        .get_by_ids("NonExistent", &["some-id".to_string()])
-        .await;
-    assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("NonExistent"));
+                let result = fetcher
+                    .get_by_ids("NonExistent", &["some-id".to_string()])
+                    .await;
+                assert!(result.is_err());
+                assert!(result.unwrap_err().to_string().contains("NonExistent"));
+        })
+    })
+    .await;
 
     registry.rollback(&txn_id).await.unwrap();
 }
@@ -656,32 +692,36 @@ async fn test_get_by_ids_with_nonexistent_valid_id() {
 
     // Query for both
     let txn_id = registry.begin(true).await.unwrap();
-    let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
-    let fetcher = ctx.doc_fetcher();
+    in_txn(&registry, &txn_id, move |ctx| {
+        Box::pin(async move {
+            let fetcher = ctx.doc_fetcher();
 
-    let result = fetcher
-        .get_by_ids("Users", &[existing_id, nonexistent_id.clone()])
-        .await
-        .unwrap();
+                let result = fetcher
+                    .get_by_ids("Users", &[existing_id, nonexistent_id.clone()])
+                    .await
+                    .unwrap();
 
-    assert_eq!(
-        result.docs().len(),
-        1,
-        "Should only return existing document"
-    );
-    assert_eq!(
-        result.docs()[0].get("name").unwrap().as_str(),
-        Some("Exists")
-    );
+                assert_eq!(
+                    result.docs().len(),
+                    1,
+                    "Should only return existing document"
+                );
+                assert_eq!(
+                    result.docs()[0].get("name").unwrap().as_str(),
+                    Some("Exists")
+                );
 
-    // Verify missing IDs are reported
-    assert_eq!(
-        result.missing_ids().len(),
-        1,
-        "Should report one missing ID"
-    );
-    assert_eq!(result.missing_ids()[0], nonexistent_id);
-    assert!(!result.is_complete(), "Result should not be complete");
+                // Verify missing IDs are reported
+                assert_eq!(
+                    result.missing_ids().len(),
+                    1,
+                    "Should report one missing ID"
+                );
+                assert_eq!(result.missing_ids()[0], nonexistent_id);
+                assert!(!result.is_complete(), "Result should not be complete");
+        })
+    })
+    .await;
 
     registry.rollback(&txn_id).await.unwrap();
 }
@@ -827,7 +867,7 @@ async fn test_cleanup_only_old_transactions() {
     );
 
     // The new transaction should still be usable
-    assert!(registry.get(&new_txn).is_found());
+    assert!(found(&registry, &new_txn).await);
     registry.rollback(&new_txn).await.unwrap();
 }
 
@@ -839,7 +879,7 @@ async fn test_cleanup_uses_idle_age_not_creation_age() {
     let txn = registry.begin(true).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(30)).await;
 
-    assert!(registry.get(&txn).is_found());
+    assert!(found(&registry, &txn).await);
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
     let result = registry
@@ -851,7 +891,7 @@ async fn test_cleanup_uses_idle_age_not_creation_age() {
         result.cleaned, 0,
         "Recently used transaction should not be cleaned by creation age"
     );
-    assert!(registry.get(&txn).is_found());
+    assert!(found(&registry, &txn).await);
 
     tokio::time::sleep(std::time::Duration::from_millis(45)).await;
 
@@ -915,11 +955,9 @@ async fn test_snapshot_isolation_after_external_commit() {
 
     // Step 1: Start reader transaction A FIRST (gets snapshot at this point)
     let reader_txn_id = registry.begin(true).await.unwrap();
-    let reader_ctx = registry.get(&reader_txn_id).into_result().unwrap().unwrap();
-    let reader_fetcher = reader_ctx.doc_fetcher();
 
     // Verify initially empty
-    let initial_docs = reader_fetcher.get_all("Users").await.unwrap();
+    let initial_docs = get_all(&registry, &reader_txn_id, "Users").await.unwrap();
     assert!(
         initial_docs.is_empty(),
         "Reader should see empty collection initially"
@@ -930,7 +968,7 @@ async fn test_snapshot_isolation_after_external_commit() {
 
     // Step 3: Reader transaction A should STILL see empty (snapshot isolation)
     // because its snapshot was taken before the write committed
-    let after_commit_docs = reader_fetcher.get_all("Users").await.unwrap();
+    let after_commit_docs = get_all(&registry, &reader_txn_id, "Users").await.unwrap();
     assert!(
         after_commit_docs.is_empty(),
         "Reader should NOT see committed data due to snapshot isolation (found {} docs)",
@@ -941,14 +979,8 @@ async fn test_snapshot_isolation_after_external_commit() {
 
     // Step 4: A NEW transaction started after commit SHOULD see the data
     let new_reader_txn_id = registry.begin(true).await.unwrap();
-    let new_reader_ctx = registry
-        .get(&new_reader_txn_id)
-        .into_result()
-        .unwrap()
-        .unwrap();
-    let new_reader_fetcher = new_reader_ctx.doc_fetcher();
 
-    let new_docs = new_reader_fetcher.get_all("Users").await.unwrap();
+    let new_docs = get_all(&registry, &new_reader_txn_id, "Users").await.unwrap();
     assert_eq!(
         new_docs.len(),
         1,
@@ -1001,11 +1033,9 @@ async fn test_collection_snapshot_isolation_during_deletion() {
 
     // Start a transaction BEFORE deletion
     let reader_txn_id = registry.begin(true).await.unwrap();
-    let reader_ctx = registry.get(&reader_txn_id).into_result().unwrap().unwrap();
-    let reader_fetcher = reader_ctx.doc_fetcher();
 
     // Verify reader can see the collection with data
-    let docs_before = reader_fetcher.get_all("Users").await.unwrap();
+    let docs_before = get_all(&registry, &reader_txn_id, "Users").await.unwrap();
     assert_eq!(
         docs_before.len(),
         1,
@@ -1017,7 +1047,7 @@ async fn test_collection_snapshot_isolation_during_deletion() {
 
     // The reader transaction should STILL be able to query the collection
     // because it has a snapshot from before the deletion
-    let docs_after = reader_fetcher.get_all("Users").await.unwrap();
+    let docs_after = get_all(&registry, &reader_txn_id, "Users").await.unwrap();
     assert_eq!(
         docs_after.len(),
         1,
@@ -1039,10 +1069,8 @@ async fn test_collection_snapshot_isolation_during_deletion() {
 
     // A NEW transaction should NOT see the deleted collection
     let new_txn_id = registry.begin(true).await.unwrap();
-    let new_ctx = registry.get(&new_txn_id).into_result().unwrap().unwrap();
-    let new_fetcher = new_ctx.doc_fetcher();
 
-    let result = new_fetcher.get_all("Users").await;
+    let result = get_all(&registry, &new_txn_id, "Users").await;
     assert!(
         result.is_err(),
         "New transaction should not see deleted collection"
