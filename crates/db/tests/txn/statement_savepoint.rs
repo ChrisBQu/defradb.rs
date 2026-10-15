@@ -1,5 +1,6 @@
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use db::{DbCollectionProvider, DbTransactionRegistry, LensedAutoCommitFetcher, DB};
@@ -15,6 +16,7 @@ use storage::RegolithStore;
 struct WriteGate {
     armed: AtomicBool,
     entered: tokio::sync::Notify,
+    block_keys: Mutex<Vec<Vec<u8>>>,
 }
 
 struct PauseAfterSetStore {
@@ -98,6 +100,11 @@ impl Writer for PauseAfterSetTxn {
 
     async fn set(&mut self, key: &[u8], value: &[u8]) -> StorageResult<()> {
         self.inner.set(key, value).await?;
+        if key.first() == Some(&storage::namespace::Namespace::Blockstore.prefix())
+            && cid::Cid::try_from(&key[1..]).is_ok()
+        {
+            self.gate.block_keys.lock().unwrap().push(key.to_vec());
+        }
         if self.gate.armed.swap(false, Ordering::SeqCst) {
             self.gate.entered.notify_one();
             std::future::pending::<()>().await;
@@ -322,12 +329,19 @@ async fn timing_out_a_statement_rolls_back_only_that_statement_before_commit() {
 #[tokio::test]
 async fn failed_partial_batch_keeps_prior_statements_and_discards_its_own_writes() {
     let bus: Arc<dyn Bus> = Arc::new(ChannelBus::new());
-    let mut db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
+    let inner = RegolithStore::in_memory().unwrap();
+    let gate = Arc::new(WriteGate::default());
+    let mut db = DB::new(PauseAfterSetStore {
+        inner: inner.clone(),
+        gate: Arc::clone(&gate),
+    })
+    .unwrap();
     db.set_event_bus(bus.clone());
     let db = Arc::new(db);
     for schema in query::parse_sdl("type Users { email: String @index(unique: true) }").unwrap() {
         db.create_collection(schema).await.unwrap();
     }
+    let after_schema = gate.block_keys.lock().unwrap().len();
     let registry = Arc::new(DbTransactionRegistry::new(Arc::clone(&db)));
     let runner = Arc::new(query::QueryRunner::with_arc_registry_and_provider(
         LensedAutoCommitFetcher::new(Arc::clone(&db)),
@@ -344,7 +358,13 @@ async fn failed_partial_batch_keeps_prior_statements_and_discards_its_own_writes
         )
         .await;
     assert!(!prior.has_errors(), "{:?}", prior.errors);
+    let prior_block_keys = gate.block_keys.lock().unwrap()[after_schema..].to_vec();
+    assert!(
+        !prior_block_keys.is_empty(),
+        "the prior successful statement must write blobstore blocks"
+    );
 
+    let failed_statement_start = gate.block_keys.lock().unwrap().len();
     let failed = runner
         .execute_in_txn(
             QueryRequest::new(
@@ -360,8 +380,34 @@ async fn failed_partial_batch_keeps_prior_statements_and_discards_its_own_writes
         failed.has_errors(),
         "expected the second unique insert to fail"
     );
+    let recorded = gate.block_keys.lock().unwrap();
+    let prior_key_set: HashSet<_> = prior_block_keys.iter().cloned().collect();
+    let failed_block_keys: HashSet<_> = recorded[failed_statement_start..]
+        .iter()
+        .filter(|key| !prior_key_set.contains(*key))
+        .cloned()
+        .collect();
+    assert!(
+        !failed_block_keys.is_empty(),
+        "the failed statement must have written distinct blobstore blocks before its unique-index error"
+    );
+    drop(recorded);
 
     runner.commit_txn(&handle).await.unwrap();
+    let inspect = inner.new_txn(true).await.unwrap();
+    for key in &prior_block_keys {
+        assert!(
+            inspect.has(key).await.unwrap(),
+            "blob from the prior successful statement must survive commit"
+        );
+    }
+    for key in &failed_block_keys {
+        assert!(
+            !inspect.has(key).await.unwrap(),
+            "blob written by the failed statement must be absent after commit"
+        );
+    }
+    inspect.discard();
     let response = runner
         .execute(QueryRequest::new("{ Users { email } }"))
         .await;
