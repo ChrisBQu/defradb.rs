@@ -8,6 +8,7 @@ mod batch_signing;
 mod doc_suite;
 mod embedding;
 mod embedding_reload;
+mod identical_create;
 mod identical_delta;
 mod kms;
 mod kms_authorization;
