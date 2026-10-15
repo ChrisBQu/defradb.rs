@@ -61,17 +61,6 @@ impl<S: Store> BatchMutator<S> {
         }
     }
 
-    pub(crate) fn new_retry_controller(
-        db: Arc<DB<S>>,
-        prepared_inputs: Option<query::prepared::PreparedInputMemo>,
-    ) -> Self {
-        Self {
-            db,
-            prepared_inputs,
-            txn: Arc::new(TokioMutex::new(None)),
-        }
-    }
-
     async fn block_and_head_stores(
         &self,
     ) -> query::error::Result<(datastore::NamespaceView, datastore::NamespaceView)> {

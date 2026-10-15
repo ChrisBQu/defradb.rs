@@ -284,6 +284,77 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport + 'static> BroadcastBatc
 impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
     for BroadcastBatchMutator<S, B, T>
 {
+    fn engine_retries_batches(&self) -> bool {
+        self.inner.engine_retries_batches()
+    }
+
+    fn acp_registration_projection(&self) -> Option<Arc<query::txn::AcpRegistrationProjection>> {
+        self.inner.acp_registration_projection()
+    }
+
+    fn requires_write_preparation(&self) -> bool {
+        self.inner.requires_write_preparation()
+    }
+
+    async fn prepare_write(
+        &self,
+        collection_name: &str,
+        doc: Document,
+        modified_fields: Option<RapidHashSet<String>>,
+        encryption: Option<defra_core::encryption::EncryptionConfig>,
+    ) -> query::error::Result<Document> {
+        self.inner
+            .prepare_write(collection_name, doc, modified_fields, encryption)
+            .await
+    }
+
+    async fn resolve_prepared_input(
+        &self,
+        request: &query::prepared::PreparedInputRequest,
+    ) -> query::error::Result<Arc<[u8]>> {
+        self.inner.resolve_prepared_input(request).await
+    }
+
+    async fn prepared_embedding_request(
+        &self,
+        collection_name: &str,
+        field_name: &str,
+        doc: &Document,
+    ) -> query::error::Result<Option<query::prepared::PreparedInputRequest>> {
+        self.inner
+            .prepared_embedding_request(collection_name, field_name, doc)
+            .await
+    }
+
+    fn set_document_acp(&self, acp: Arc<dyn acp::DocumentACP>) {
+        self.inner.set_document_acp(acp);
+    }
+
+    fn manages_external_acp_hooks(&self) -> bool {
+        self.inner.manages_external_acp_hooks()
+    }
+
+    async fn register_ordered_async_hook(
+        &self,
+        callback: storage::corekv::AsyncOrderedTxnCallback,
+    ) -> query::error::Result<()> {
+        self.inner.register_ordered_async_hook(callback).await
+    }
+
+    fn with_prepared_inputs(
+        &self,
+        inputs: query::prepared::PreparedInputMemo,
+    ) -> Option<Arc<dyn DocMutator>> {
+        let inner = self.inner.with_prepared_inputs(inputs)?;
+        Some(Arc::new(Self::new(
+            inner,
+            self.inner_controller.clone(),
+            self.sync.clone(),
+            self.db.clone(),
+            self.se_options.clone(),
+        )))
+    }
+
     async fn create(
         &self,
         collection_name: &str,

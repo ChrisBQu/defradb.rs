@@ -234,11 +234,12 @@ impl Planner {
             collection,
         )
         .map(|check| check.with_retry_inputs(self.retry_inputs.clone()));
-        PermissionFilterNode::wrap_with_projection(
+        PermissionFilterNode::wrap_with_projection_and_inputs(
             plan,
             acp,
             app,
             self.acp_registration_projection.clone(),
+            self.retry_inputs.clone(),
         )
     }
 

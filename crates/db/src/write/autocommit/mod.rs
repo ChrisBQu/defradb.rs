@@ -68,6 +68,16 @@ impl<S: Store> AutoCommitMutator<S> {
         }
     }
 
+    pub(crate) fn with_prepared_inputs_value(
+        &self,
+        inputs: query::prepared::PreparedInputMemo,
+    ) -> Self {
+        Self {
+            db: self.db.clone(),
+            prepared_inputs: Some(inputs),
+        }
+    }
+
     pub fn set_document_acp(&self, acp: Arc<dyn acp::DocumentACP>) {
         self.db.set_document_acp(acp);
     }

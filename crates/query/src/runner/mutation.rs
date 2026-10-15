@@ -47,6 +47,20 @@ impl Drop for EncryptionConfigGuard {
     }
 }
 
+fn preserve_acp_registration_error(doc_id: &str, error: QueryError) -> QueryError {
+    match error {
+        error @ QueryError::NeedsInput(_) => error,
+        error => QueryError::acp_registration_check_failed(doc_id, error),
+    }
+}
+
+fn preserve_acp_input_error(action: &str, doc_id: &str, error: QueryError) -> QueryError {
+    match error {
+        error @ QueryError::NeedsInput(_) => error,
+        error => QueryError::acp_check_failed(action, doc_id, error),
+    }
+}
+
 impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R> {
     pub(crate) async fn check_doc_access_for_read(
         &self,
@@ -342,64 +356,36 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
         prepared_inputs: Option<&crate::prepared::PreparedInputMemo>,
         strict_attempt: bool,
     ) -> Result<bool> {
-        // A transaction projection can change after preceding mutations; use it live.
-        // Otherwise memoize the remote provider answer when an attempt capsule exists.
-        if self.acp_registration_projection.is_some()
-            || self.acp.supports_transactions()
-            || prepared_inputs.is_none()
-        {
-            return crate::txn::check_doc_access_with_projection(
-                self.acp.as_ref(),
-                self.acp_registration_projection.as_deref(),
-                identity,
-                permission,
-                policy_id,
-                resource_name,
-                doc_id,
-            )
-            .await
-            .map_err(|error| QueryError::execution(error.to_string()));
-        }
-
-        let bearer = identity
-            .did()
-            .and_then(|did| defra_core::signing::get_request_bearer_token(did.as_str()));
-        let exact_request = serde_json::to_vec(&(
-            identity
-                .did()
-                .map(identity::Did::as_str)
-                .unwrap_or("anonymous"),
-            permission.as_str(),
+        let result = crate::txn::check_doc_access_with_prepared_inputs(
+            self.acp.as_ref(),
+            self.acp_registration_projection.as_deref(),
+            identity,
+            permission,
             policy_id,
             resource_name,
             doc_id,
-            bearer,
-        ))
-        .map_err(|error| QueryError::execution(error.to_string()))?;
-        let request = crate::prepared::PreparedInputRequest::new(
-            crate::prepared::PreparedInputKind::AcpDecision,
-            exact_request,
-        );
-        let inputs = prepared_inputs.expect("checked above");
-        if let Some(response) = inputs.get(&request) {
-            return serde_json::from_slice::<bool>(&response).map_err(|error| {
-                QueryError::execution(format!("cached ACP response is invalid: {error}"))
-            });
+            prepared_inputs,
+        )
+        .await;
+        match result {
+            Err(QueryError::NeedsInput(request)) if !strict_attempt => {
+                let allowed = self
+                    .acp
+                    .check_doc_access(identity, permission, policy_id, resource_name, doc_id)
+                    .await
+                    .map_err(|error| QueryError::execution(error.to_string()))?;
+                let Some(inputs) = prepared_inputs else {
+                    return Ok(allowed);
+                };
+                let response = serde_json::to_vec(&allowed)
+                    .map_err(|error| QueryError::execution(error.to_string()))?;
+                if !inputs.insert(request, std::sync::Arc::<[u8]>::from(response)) {
+                    return Err(QueryError::execution("prepared input memo budget exceeded"));
+                }
+                Ok(allowed)
+            }
+            result => result,
         }
-        if strict_attempt {
-            return Err(QueryError::NeedsInput(request));
-        }
-        let allowed = self
-            .acp
-            .check_doc_access(identity, permission, policy_id, resource_name, doc_id)
-            .await
-            .map_err(|error| QueryError::execution(error.to_string()))?;
-        let response = serde_json::to_vec(&allowed)
-            .map_err(|error| QueryError::execution(error.to_string()))?;
-        if !inputs.insert(request, std::sync::Arc::<[u8]>::from(response)) {
-            return Err(QueryError::execution("prepared input memo budget exceeded"));
-        }
-        Ok(allowed)
     }
 
     pub(super) async fn authorize_mutation(
@@ -526,7 +512,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                                     strict_attempt,
                                 )
                                 .await
-                                .unwrap_or(false);
+                                .map_err(|error| preserve_acp_input_error("read", doc_id, error))?;
 
                             if !can_read {
                                 // Document is invisible to this identity -- skip silently
@@ -545,7 +531,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                                     strict_attempt,
                                 )
                                 .await
-                                .map_err(|error| match error {
+.map_err(|error| match error {
                                     error @ QueryError::NeedsInput(_) => error,
                                     error => QueryError::acp_check_failed("update", doc_id, error),
                                 })?;
@@ -583,7 +569,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                                     strict_attempt,
                                 )
                                 .await
-                                .unwrap_or(false);
+                                .map_err(|error| preserve_acp_input_error("read", doc_id, error))?;
 
                             if !can_read {
                                 // Document is invisible to this identity -- skip silently
@@ -602,7 +588,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                                     strict_attempt,
                                 )
                                 .await
-                                .map_err(|error| match error {
+.map_err(|error| match error {
                                     error @ QueryError::NeedsInput(_) => error,
                                     error => QueryError::acp_check_failed("delete", doc_id, error),
                                 })?;
@@ -917,7 +903,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                 .with_input(input)
                 .with_prepared_writes(prepared.map(|p| p.updates.clone()))
                 .with_prepared_update_targets(prepared.map(|p| p.update_targets.clone()))
-                .with_prepared_embeddings(prepared.map(|p| p.embeddings.clone()), prepared_inputs);
+                .with_prepared_embeddings(
+                    prepared.map(|p| p.embeddings.clone()),
+                    prepared_inputs.clone(),
+                );
 
                 // Use ACP-filtered doc_ids (invisible docs removed), or resolved/original
                 if let Some(ref doc_ids) = acp_filtered_doc_ids {
@@ -1090,17 +1079,17 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
             ) {
                 for result in &results {
                     if let Some(doc_id) = result.get("_docID").and_then(|value| value.as_str()) {
-                        let registered = crate::txn::is_doc_registered_with_projection(
+                        let registered = crate::txn::is_doc_registered_with_prepared_inputs(
                             self.acp.as_ref(),
                             Some(projection.as_ref()),
+                            &Identity::from(caller_identity.as_ref()),
                             &policy.id,
                             &policy.resource_name,
                             doc_id,
+                            prepared_inputs.as_ref(),
                         )
                         .await
-                        .map_err(|error| {
-                            QueryError::acp_registration_check_failed(doc_id, error)
-                        })?;
+                        .map_err(|error| preserve_acp_registration_error(doc_id, error))?;
                         if registered {
                             continue;
                         }

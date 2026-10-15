@@ -195,6 +195,63 @@ pub async fn is_doc_registered_with_projection(
         .await
 }
 
+/// Resolve registration state from attempt-local projection, the live
+/// transaction provider, or an exact request memo for external providers.
+pub async fn is_doc_registered_with_prepared_inputs(
+    acp: &dyn DocumentACP,
+    projection: Option<&AcpRegistrationProjection>,
+    identity: &Identity,
+    policy_id: &str,
+    resource_name: &str,
+    doc_id: &str,
+    inputs: Option<&crate::prepared::PreparedInputMemo>,
+) -> crate::error::Result<bool> {
+    if let Some(projection) = projection {
+        if let Some(projected) = projection
+            .projected_registration(policy_id, resource_name, doc_id)
+            .map_err(|error| crate::error::QueryError::execution(error.to_string()))?
+        {
+            return Ok(matches!(
+                projected,
+                ProjectedDocRegistration::Registered { .. }
+            ));
+        }
+    }
+    if acp.supports_transactions() || inputs.is_none() {
+        return is_doc_registered_with_projection(
+            acp,
+            projection,
+            policy_id,
+            resource_name,
+            doc_id,
+        )
+        .await
+        .map_err(|error| crate::error::QueryError::execution(error.to_string()));
+    }
+    let bearer = identity
+        .did()
+        .and_then(|did| defra_core::signing::get_request_bearer_token(did.as_str()));
+    let exact_request = serde_json::to_vec(&(
+        identity.did().map(Did::as_str).unwrap_or("anonymous"),
+        "registered",
+        policy_id,
+        resource_name,
+        doc_id,
+        bearer,
+    ))
+    .map_err(|error| crate::error::QueryError::execution(error.to_string()))?;
+    let request = crate::prepared::PreparedInputRequest::new(
+        crate::prepared::PreparedInputKind::AcpDecision,
+        exact_request,
+    );
+    let Some(response) = inputs.expect("checked above").get(&request) else {
+        return Err(crate::error::QueryError::NeedsInput(request));
+    };
+    serde_json::from_slice(&response).map_err(|error| {
+        crate::error::QueryError::execution(format!("cached ACP response is invalid: {error}"))
+    })
+}
+
 /// Check document access using an explicit request/transaction projection.
 pub async fn check_doc_access_with_projection(
     acp: &dyn DocumentACP,
@@ -234,11 +291,22 @@ pub async fn check_doc_access_with_prepared_inputs(
     doc_id: &str,
     inputs: Option<&crate::prepared::PreparedInputMemo>,
 ) -> crate::error::Result<bool> {
-    // Transaction-capable providers must read the bound attempt view on every
-    // access so their writes participate in OCC and are visible immediately.
-    // External providers use the immutable prepared response unless an
-    // attempt-local projected registration supersedes it.
-    if projection.is_some() || acp.supports_transactions() || inputs.is_none() {
+    // Projected registrations override remote state, while transaction-capable
+    // providers stay live so their reads participate in OCC.
+    if let Some(projected) = projection
+        .map(|projection| projection.projected_registration(policy_id, resource_name, doc_id))
+        .transpose()
+        .map_err(|error| crate::error::QueryError::execution(error.to_string()))?
+        .flatten()
+    {
+        return Ok(match projected {
+            ProjectedDocRegistration::Unregistered => acp.unregistered_documents_are_public(),
+            ProjectedDocRegistration::Registered { owner } => {
+                matches!(identity, Identity::Authenticated(did) if did == &owner)
+            }
+        });
+    }
+    if acp.supports_transactions() || inputs.is_none() {
         return check_doc_access_with_projection(
             acp,
             projection,
@@ -292,8 +360,7 @@ pub async fn check_doc_read_access_with_prepared_inputs(
 ) -> crate::error::Result<bool> {
     use acp::read_access::DocAccess;
 
-    let Some(inputs) = inputs.filter(|_| !acp.supports_transactions() && projection.is_none())
-    else {
+    let Some(inputs) = inputs.filter(|_| !acp.supports_transactions()) else {
         let checker = crate::txn::OverlayChecker {
             acp,
             projection,
@@ -328,15 +395,18 @@ pub async fn check_doc_read_access_with_prepared_inputs(
             .map_err(|error| crate::error::QueryError::execution(error.to_string()))?
             .flatten()
         {
-            let has_access = match projected {
-                ProjectedDocRegistration::Unregistered => acp.unregistered_documents_are_public(),
-                ProjectedDocRegistration::Registered { owner } => {
-                    matches!(identity, Identity::Authenticated(did) if did == &owner)
+            let (has_access, explicit) = match projected {
+                ProjectedDocRegistration::Unregistered => {
+                    (acp.unregistered_documents_are_public(), false)
                 }
+                ProjectedDocRegistration::Registered { owner } => (
+                    matches!(identity, Identity::Authenticated(did) if did == &owner),
+                    true,
+                ),
             };
             return Ok(DocAccess {
                 has_access,
-                explicit: true,
+                explicit,
             });
         }
 
@@ -593,6 +663,63 @@ mod tests {
             !check_doc_read_access(&checker, "policy", "User", "collection", false, "doc-1",)
                 .await
                 .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn projected_unregistered_branchable_doc_falls_back_to_collection_policy() {
+        let projection = AcpRegistrationProjection::new();
+        projection
+            .project_unregistration("policy", "User", "doc-1")
+            .unwrap();
+        let memo = crate::prepared::PreparedInputMemo::default();
+        let request_bytes = serde_json::to_vec(&(
+            "anonymous",
+            "registered",
+            "policy",
+            "User",
+            "collection-1",
+            None::<String>,
+        ))
+        .unwrap();
+        let request = crate::prepared::PreparedInputRequest::new(
+            crate::prepared::PreparedInputKind::AcpDecision,
+            request_bytes,
+        );
+        assert!(memo.insert(request, std::sync::Arc::<[u8]>::from(b"true".as_slice())));
+        let permission_request = crate::prepared::PreparedInputRequest::new(
+            crate::prepared::PreparedInputKind::AcpDecision,
+            serde_json::to_vec(&(
+                "anonymous",
+                "read",
+                "policy",
+                "User",
+                "collection-1",
+                None::<String>,
+            ))
+            .unwrap(),
+        );
+        assert!(memo.insert(
+            permission_request,
+            std::sync::Arc::<[u8]>::from(b"false".as_slice()),
+        ));
+
+        let allowed = check_doc_read_access_with_prepared_inputs(
+            &NoopDocumentAcp(true),
+            Some(&projection),
+            &Identity::Anonymous,
+            "policy",
+            "User",
+            "collection-1",
+            true,
+            "doc-1",
+            Some(&memo),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !allowed,
+            "a public unregistered object still falls back to its branchable collection"
         );
     }
 

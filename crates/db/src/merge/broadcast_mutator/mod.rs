@@ -427,6 +427,51 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> BroadcastMuta
 impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
     for BroadcastMutator<S, B, T>
 {
+    fn with_prepared_inputs(
+        &self,
+        inputs: query::prepared::PreparedInputMemo,
+    ) -> Option<Arc<dyn DocMutator>> {
+        Some(Arc::new(Self {
+            inner: self.inner.with_prepared_inputs_value(inputs),
+            sync: self.sync.clone(),
+            db: self.db.clone(),
+            se_options: Atom::new(self.load_se_options()),
+        }))
+    }
+
+    fn acp_registration_projection(&self) -> Option<Arc<query::txn::AcpRegistrationProjection>> {
+        self.inner.acp_registration_projection()
+    }
+
+    fn manages_external_acp_hooks(&self) -> bool {
+        self.inner.manages_external_acp_hooks()
+    }
+
+    async fn register_ordered_async_hook(
+        &self,
+        callback: storage::corekv::AsyncOrderedTxnCallback,
+    ) -> query::error::Result<()> {
+        self.inner.register_ordered_async_hook(callback).await
+    }
+
+    async fn resolve_prepared_input(
+        &self,
+        request: &query::prepared::PreparedInputRequest,
+    ) -> query::error::Result<Arc<[u8]>> {
+        self.inner.resolve_prepared_input(request).await
+    }
+
+    async fn prepared_embedding_request(
+        &self,
+        collection_name: &str,
+        field_name: &str,
+        doc: &Document,
+    ) -> query::error::Result<Option<query::prepared::PreparedInputRequest>> {
+        self.inner
+            .prepared_embedding_request(collection_name, field_name, doc)
+            .await
+    }
+
     fn engine_retries_batches(&self) -> bool {
         true
     }
