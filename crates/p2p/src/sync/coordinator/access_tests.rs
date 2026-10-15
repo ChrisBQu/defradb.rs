@@ -1836,10 +1836,14 @@ async fn committed_head_admission_does_not_wait_for_a_batching_timer() {
     let markers = n0_future::task::spawn(async move {
         while let Some(mut observation) = failure_rx.recv().await {
             if let Some(ack) = observation.durable_tx.take() {
-                if !observation.admission_only {
+                if !observation.admission_only
+                    && !observation.create_retry
+                    && !observation.acknowledged
+                {
                     observer.fetch_add(1, Ordering::SeqCst);
                 }
-                let _ = ack.send(true);
+                let generation = Some(observation.marker_generation.unwrap_or(1));
+                let _ = ack.send(generation);
             }
         }
     });
@@ -2065,7 +2069,8 @@ async fn filtered_car_authority_is_rederived_after_sender_restart() {
     n0_future::task::spawn(async move {
         while let Some(mut event) = failure_rx.recv().await {
             if let Some(durable_tx) = event.durable_tx.take() {
-                let _ = durable_tx.send(true);
+                let generation = Some(event.marker_generation.unwrap_or(1));
+                let _ = durable_tx.send(generation);
             }
         }
     });

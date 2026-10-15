@@ -200,7 +200,7 @@ where
     // The recorder reads the persisted peer floor, so replay-installed hints
     // and process restarts cannot be bypassed by the volatile live queue.
     if context.failure_tx.load().is_some()
-        && !report_push_event(
+        && report_push_event(
             &context.failure_tx,
             &job.peer_id,
             job.doc_id.clone(),

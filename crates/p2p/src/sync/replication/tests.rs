@@ -2907,7 +2907,8 @@ async fn merged_head_forwards_to_configured_replicator_without_gossip_rebroadcas
     n0_future::task::spawn(async move {
         while let Some(mut event) = failure_rx.recv().await {
             if let Some(durable_tx) = event.durable_tx.take() {
-                let _ = durable_tx.send(true);
+                let generation = Some(event.marker_generation.unwrap_or(1));
+                let _ = durable_tx.send(generation);
             }
         }
     });

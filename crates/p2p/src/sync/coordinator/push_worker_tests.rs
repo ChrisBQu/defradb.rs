@@ -36,9 +36,22 @@ fn test_context_with_admission(
     tokio::spawn(async move {
         while let Some(mut event) = events.recv().await {
             if event.admission_only {
-                event.durable_tx.take().unwrap().send(admit).unwrap();
-            } else if forward.send(event).await.is_err() {
-                break;
+                // A marker generation admits the push; `None` represents the
+                // durable recorder denying it. The fake recorder supplies a
+                // stable generation when this test job has no prior marker.
+                let generation = admit.then_some(event.marker_generation.unwrap_or(1));
+                event.durable_tx.take().unwrap().send(generation).unwrap();
+            } else {
+                // A durable write/ack also returns the marker generation to
+                // the worker. Resolve it before forwarding the observation so
+                // tests awaiting the worker cannot deadlock on the oneshot.
+                if let Some(durable_tx) = event.durable_tx.take() {
+                    let generation = Some(event.marker_generation.unwrap_or(1));
+                    let _ = durable_tx.send(generation);
+                }
+                if forward.send(event).await.is_err() {
+                    break;
+                }
             }
         }
     });
@@ -551,11 +564,12 @@ async fn report_push_failure_backpressures_instead_of_dropping() {
     );
 
     assert_eq!(rx.recv().await.unwrap().doc_id, "occupant-doc");
-    let delivered = n0_future::time::timeout(Duration::from_secs(2), rx.recv())
+    let mut delivered = n0_future::time::timeout(Duration::from_secs(2), rx.recv())
         .await
         .expect("failure must be delivered once capacity frees")
         .unwrap();
     assert_eq!(delivered.doc_id, "doc-slow");
+    delivered.durable_tx.take().unwrap().send(Some(1)).unwrap();
     reporter.await.unwrap();
 }
 
@@ -565,24 +579,28 @@ async fn collection_commit_failure_enters_the_retry_channel_with_its_cid() {
     let slot = Arc::new(AtomOption::some(tx));
     let cid = Cid::new_v1(0x55, Code::Sha2_256.digest(b"collection-commit"));
 
-    report_push_failure(
-        &slot,
-        &PeerId::new("peer".to_string()),
-        String::new(),
-        "collection".to_string(),
-        Some(cid),
-        1,
-    )
-    .await;
+    let reporter = tokio::spawn(async move {
+        report_push_failure(
+            &slot,
+            &PeerId::new("peer".to_string()),
+            String::new(),
+            "collection".to_string(),
+            Some(cid),
+            1,
+        )
+        .await;
+    });
 
     // defradb#1113: the obligation must reach the ledger. It is doc-less, so
     // it is keyed and replayed by CID; dropping it made failed
     // collection-commit pushes permanent (source-inc/gents#696).
-    let failure = rx.try_recv().expect("commit failure must be recorded");
+    let mut failure = rx.recv().await.expect("commit failure must be recorded");
     assert_eq!(failure.doc_id, "");
     assert_eq!(failure.collection_id, "collection");
     assert_eq!(failure.cid, cid.to_string());
     assert!(failure.create_retry);
+    failure.durable_tx.take().unwrap().send(Some(1)).unwrap();
+    reporter.await.unwrap();
 }
 
 /// A doc-less failure with no CID has nothing to replay and is still
