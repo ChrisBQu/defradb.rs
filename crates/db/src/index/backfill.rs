@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use datastore::NamespaceView;
 use defra_core::{Action, ActionStatus};
 use document::Document;
-use lens::{Lens, TargetedHistoryLink, TransformStore};
+use lens::{TargetedHistoryLink, TransformStore};
 use schema::IndexDescription;
 use storage::corekv::{Key, Store};
 use storage::keys::systemstore::ActionProgressKey;
@@ -217,14 +217,11 @@ impl<S: Store> DB<S> {
     }
 
     async fn backfill_batches(&self, plan: &BackfillPlan) -> Result<usize> {
-        let history = self.migration_history(plan).await?;
         let mut last = plan.last;
         let mut indexed = 0;
         let mut max_docs = BACKFILL_BATCH_DOCS;
         loop {
-            let batch = self
-                .backfill_batch(plan, &history, last, &mut max_docs)
-                .await?;
+            let batch = self.backfill_batch(plan, last, &mut max_docs).await?;
             indexed += batch.indexed;
             if let Some(id) = batch.last_doc_short_id {
                 last = id;
@@ -234,117 +231,179 @@ impl<S: Store> DB<S> {
             }
         }
 
-        let collection = self.require_collection(&plan.collection_name)?;
-        let txn = self.new_txn(false).await?;
-        let built = {
-            let datastore = txn.datastore()?;
-            match IndexManager::from_collection(
-                collection.schema().resolved_root_id(),
-                collection.schema(),
-            ) {
-                Ok(manager) => manager
-                    .build_index(&datastore, &plan.index_name)
-                    .await
-                    .map_err(Error::from),
-                Err(error) => Err(error.into()),
+        let attempt = FinishIndexAttempt {
+            collection: self.require_collection(&plan.collection_name)?,
+            index_name: plan.index_name.clone(),
+        };
+        match self
+            .store()
+            .transact_retry(
+                storage::corekv::RetryOptions::new(
+                    self.options().max_txn_retries().saturating_add(1),
+                ),
+                Box::new(attempt),
+            )
+            .await
+        {
+            Ok(_) => {}
+            Err(error) => {
+                return Err(match error.downcast_abort::<Error>() {
+                    Ok(error) => error,
+                    Err(error) => Error::Storage(error.into_storage()),
+                })
             }
-        };
-        if let Err(error) = built {
-            txn.discard()?;
-            return Err(error);
         }
-        txn.commit().await?;
         Ok(indexed)
-    }
-
-    async fn migration_history(&self, plan: &BackfillPlan) -> Result<History> {
-        let collection = self.require_collection(&plan.collection_name)?;
-        let txn = self.new_txn(true).await?;
-        let versions = {
-            let systemstore = txn.systemstore()?;
-            get_collections_by_collection_id(&systemstore, &plan.collection_id).await?
-        };
-        txn.discard()?;
-        build_collection_history(&versions, collection.version_id()).ok_or_else(|| {
-            Error::Lens(format!(
-                "failed to build migration history for collection '{}'",
-                plan.collection_name
-            ))
-        })
     }
 
     async fn backfill_batch(
         &self,
         plan: &BackfillPlan,
-        history: &History,
         last: u64,
         max_docs: &mut usize,
     ) -> Result<BatchIndexResult> {
-        let max_retries = self.options().max_txn_retries();
-        let mut retries_at_one = 0;
-        loop {
-            let collection = self.require_collection(&plan.collection_name)?;
-            let txn = self.new_txn(false).await?;
-            let outcome = {
-                let datastore = txn.datastore()?;
-                let systemstore = txn.systemstore()?;
-                let mut source = MigratingSource {
-                    inner: BackfillSource::open_range(
-                        collection.clone(),
-                        datastore.clone(),
-                        systemstore.clone(),
-                        (last > 0).then_some(last),
-                        Some(plan.fence),
-                    )
-                    .await?,
-                    collection: collection.clone(),
-                    datastore: datastore.clone(),
-                    systemstore: systemstore.clone(),
-                    lens_store: Arc::clone(&self.lens_store),
-                    history: history.clone(),
-                };
-                index_batch(
-                    &collection,
-                    &datastore,
-                    &systemstore,
-                    plan,
-                    &mut source,
-                    *max_docs,
-                )
-                .await
-            };
-            let batch = match outcome {
-                Ok(batch) => batch,
-                Err(error) => {
-                    txn.discard()?;
-                    return Err(error);
-                }
-            };
-            match txn.commit().await {
-                Ok(()) => {
-                    *max_docs = (*max_docs * 2).min(BACKFILL_BATCH_DOCS);
-                    return Ok(batch);
-                }
-                Err(error)
-                    if error.is_txn_conflict()
-                        && (*max_docs > 1 || retries_at_one < max_retries) =>
-                {
-                    if *max_docs > 1 {
-                        *max_docs /= 2;
-                    } else {
-                        retries_at_one += 1;
-                    }
-                    tracing::debug!(
-                        collection_id = %plan.collection_id,
-                        index_id = plan.index_id,
-                        last,
-                        max_docs = *max_docs,
-                        "index backfill batch conflicted with a concurrent write"
-                    );
-                }
-                Err(error) => return Err(error),
+        let collection = self.require_collection(&plan.collection_name)?;
+        let attempts = self
+            .options()
+            .max_txn_retries()
+            .saturating_add(max_docs.ilog2())
+            .saturating_add(1);
+        let attempt = BackfillRetryAttempt {
+            collection,
+            plan: plan.clone(),
+            last,
+            max_docs: *max_docs,
+            lens_store: Arc::clone(&self.lens_store),
+        };
+        let result = self
+            .store()
+            .transact_retry(
+                storage::corekv::RetryOptions::new(attempts),
+                Box::new(attempt),
+            )
+            .await;
+        match result {
+            Ok(value) => {
+                let (batch, size) = *value
+                    .downcast::<(BatchIndexResult, usize)>()
+                    .map_err(|_| Error::Other("invalid backfill retry result".into()))?;
+                *max_docs = (size * 2).min(BACKFILL_BATCH_DOCS);
+                Ok(batch)
             }
+            Err(error) => match error.downcast_abort::<Error>() {
+                Ok(error) => Err(error),
+                Err(error) => Err(Error::Storage(error.into_storage())),
+            },
         }
+    }
+}
+
+/// Publish the completed index against the same definition snapshot as its build.
+struct FinishIndexAttempt {
+    collection: Collection,
+    index_name: String,
+}
+
+impl storage::corekv::RetryAttemptFn for FinishIndexAttempt {
+    fn run<'a>(
+        &'a mut self,
+        retry: &'a mut dyn storage::corekv::RetryTxn,
+    ) -> storage::corekv::RetryAttemptFuture<'a> {
+        Box::pin(async move {
+            let io = retry.begin_attempt_io()?;
+            let txn = datastore::BasicTxn::from_retry_attempt_io(io, 0);
+            let datastore = txn.datastore();
+            let built: Result<()> = async move {
+                self.collection
+                    .validate_write_definition(&datastore, true)
+                    .await?;
+                let manager = IndexManager::from_collection(
+                    self.collection.schema().resolved_root_id(),
+                    self.collection.schema(),
+                )?;
+                manager.build_index(&datastore, &self.index_name).await?;
+                Ok(())
+            }
+            .await;
+            built.map_err(|error| storage::corekv::RetryAttemptError::Abort(Box::new(error)))?;
+            let (io, callbacks) = txn.into_retry_attempt()?;
+            retry.finish_attempt_io(io, callbacks)?;
+            Ok(Box::new(()) as storage::corekv::RetryAttemptValue)
+        })
+    }
+}
+
+struct BackfillRetryAttempt {
+    collection: Collection,
+    plan: BackfillPlan,
+    last: u64,
+    max_docs: usize,
+    lens_store: Arc<dyn TransformStore>,
+}
+
+impl storage::corekv::RetryAttemptFn for BackfillRetryAttempt {
+    fn run<'a>(
+        &'a mut self,
+        retry: &'a mut dyn storage::corekv::RetryTxn,
+    ) -> storage::corekv::RetryAttemptFuture<'a> {
+        Box::pin(async move {
+            if let Some(reason) = retry.previous_conflict() {
+                self.max_docs = (self.max_docs / 2).max(1);
+                tracing::debug!(access = ?reason.access, winning_write = ?reason.winning_write,
+                    max_docs = self.max_docs, "shrinking conflicted index backfill attempt");
+            }
+            let io = retry.begin_attempt_io()?;
+            let txn = datastore::BasicTxn::from_retry_attempt_io(io, 0);
+            let result = self
+                .index(txn.datastore(), txn.systemstore())
+                .await
+                .map_err(|error| storage::corekv::RetryAttemptError::Abort(Box::new(error)))?;
+            let (io, callbacks) = txn.into_retry_attempt()?;
+            retry.finish_attempt_io(io, callbacks)?;
+            Ok(Box::new((result, self.max_docs)) as storage::corekv::RetryAttemptValue)
+        })
+    }
+}
+
+impl BackfillRetryAttempt {
+    async fn index(
+        &self,
+        datastore: NamespaceView,
+        systemstore: NamespaceView,
+    ) -> Result<BatchIndexResult> {
+        let collection = &self.collection;
+        collection
+            .validate_write_definition(&datastore, true)
+            .await?;
+        let versions =
+            get_collections_by_collection_id(&systemstore, &self.plan.collection_id).await?;
+        let history = build_collection_history(&versions, collection.version_id())
+            .ok_or_else(|| Error::Lens("failed to build backfill migration history".into()))?;
+        let mut source = MigratingSource {
+            inner: BackfillSource::open_range(
+                collection.clone(),
+                datastore.clone(),
+                systemstore.clone(),
+                (self.last > 0).then_some(self.last),
+                Some(self.plan.fence),
+            )
+            .await?,
+            collection: collection.clone(),
+            datastore: datastore.clone(),
+            systemstore: systemstore.clone(),
+            lens_store: Arc::clone(&self.lens_store),
+            history,
+        };
+        let batch = index_batch(
+            collection,
+            &datastore,
+            &systemstore,
+            &self.plan,
+            &mut source,
+            self.max_docs,
+        )
+        .await?;
+        Ok(batch)
     }
 }
 
@@ -380,20 +439,14 @@ impl DocumentSource for MigratingSource {
         let lens_doc = doc_to_lens_doc(&doc).ok_or_else(|| {
             IndexError::Other(format!("document {:?} cannot be migrated", doc.id()))
         })?;
-        let mut lens = Lens::new(Arc::clone(&self.lens_store), target, self.history.clone());
-        lens.put(&version, lens_doc)
-            .await
-            .map_err(|e| IndexError::Other(e.to_string()))?;
-        let migrated = lens
-            .next()
-            .await
-            .ok_or_else(|| {
-                IndexError::Other(format!(
-                    "lens produced no document while migrating {:?}",
-                    doc.id()
-                ))
-            })?
-            .map_err(|e| IndexError::Other(e.to_string()))?;
+        let migrated = lens::transform_to_target(
+            &self.lens_store,
+            target,
+            &self.history,
+            lens::LensInput::new(&version, lens_doc),
+        )
+        .await
+        .map_err(|error| IndexError::Other(error.to_string()))?;
         let migrated = lens_doc_to_document(migrated, &doc, &self.collection);
         cache_migrated_document_with_indexes(
             &self.datastore,

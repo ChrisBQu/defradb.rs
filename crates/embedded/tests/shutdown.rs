@@ -16,8 +16,8 @@ use embedded::Libp2pConfig;
 use embedded::{EmbeddedNodeConfig, NodeBuilder};
 #[cfg(any(feature = "libp2p", feature = "iroh"))]
 use embedded::{Persistence, TransportConfig};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
 

@@ -334,6 +334,12 @@ impl Store for RegolithStore {
                 committed_changes = head_cache::HeadChanges::default();
                 committed_callbacks = RetryCallbacks::default();
                 let mut retry_txn = RegolithRetryTxn {
+                    previous_conflict: lost.map(|reason| crate::corekv::TransactionConflict {
+                        access: reason.mine(),
+                        winning_write: reason.theirs(),
+                        observed_seq: reason.observed_seq(),
+                        latest_seq: reason.latest_seq(),
+                    }),
                     txn,
                     changes: head_cache::HeadChanges::default(),
                     head_cache: Arc::clone(&self.inner.head_cache),
@@ -483,6 +489,7 @@ impl Store for RegolithStore {
 }
 
 struct RegolithRetryTxn<'a> {
+    previous_conflict: Option<crate::corekv::TransactionConflict>,
     txn: &'a mut regolith::Transaction,
     changes: head_cache::HeadChanges,
     head_cache: SharedHeadCache,
@@ -517,6 +524,10 @@ impl crate::corekv::private::Sealed for RegolithRetryTxn<'_> {}
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl RetryTxn for RegolithRetryTxn<'_> {
+    fn previous_conflict(&self) -> Option<crate::corekv::TransactionConflict> {
+        self.previous_conflict
+    }
+
     async fn get(&self, key: &[u8]) -> Result<Option<bytes::Bytes>> {
         self.ensure_no_active_attempt_io()?;
         if key.is_empty() {

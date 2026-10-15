@@ -117,6 +117,9 @@ pub type AsyncTxnCallback = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()>>
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait RetryTxn: MaybeSendSync + private::Sealed {
+    /// Why the previous commit lost, without exposing user key bytes.
+    fn previous_conflict(&self) -> Option<super::errors::TransactionConflict>;
+
     async fn get(&self, key: &[u8]) -> Result<Option<Bytes>>;
     async fn has(&self, key: &[u8]) -> Result<bool>;
     async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()>;
@@ -319,6 +322,10 @@ impl private::Sealed for InterceptingRetryTxn<'_> {}
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl RetryTxn for InterceptingRetryTxn<'_> {
+    fn previous_conflict(&self) -> Option<super::errors::TransactionConflict> {
+        self.inner.previous_conflict()
+    }
+
     async fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         self.inner.get(key).await
     }

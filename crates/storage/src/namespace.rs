@@ -188,6 +188,10 @@ impl crate::corekv::private::Sealed for NamespacedRetryTxn<'_> {}
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl crate::corekv::RetryTxn for NamespacedRetryTxn<'_> {
+    fn previous_conflict(&self) -> Option<crate::corekv::TransactionConflict> {
+        self.txn.previous_conflict()
+    }
+
     async fn get(&self, key: &[u8]) -> Result<Option<bytes::Bytes>> {
         self.txn.get(&self.namespace.prefix_key(key)).await
     }

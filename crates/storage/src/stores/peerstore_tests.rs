@@ -19,11 +19,17 @@ impl crate::corekv::RetryAttemptFn for EngineConflictAttempt {
             let current = txn.get(b"engine-retry").await?;
             let first = attempts.fetch_add(1, AtomicOrdering::Relaxed) == 0;
             if first {
+                assert!(txn.previous_conflict().is_none());
                 txn.set(b"engine-retry", b"loser").await?;
                 let mut winner = store.new_txn(false).await?;
                 winner.set(b"engine-retry", b"winner").await?;
                 winner.commit().await?;
             } else {
+                let conflict = txn
+                    .previous_conflict()
+                    .expect("retry retains conflict facts");
+                assert!(conflict.latest_seq > conflict.observed_seq);
+                assert_eq!(conflict.winning_write, regolith::WriteKind::Put);
                 assert_eq!(current.as_deref(), Some(b"winner".as_slice()));
                 txn.set(b"engine-retry", b"winner-retried").await?;
             }

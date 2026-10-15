@@ -11,9 +11,10 @@
 //! below this decorator, and is not counted here.
 
 use async_trait::async_trait;
-use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use storage::corekv::private::Sealed;
 use storage::corekv::AsyncTxnCallback;
 use storage::corekv::IterOptions;
 use storage::corekv::Iterator;
@@ -24,7 +25,6 @@ use storage::corekv::Store;
 use storage::corekv::Txn;
 use storage::corekv::TxnCallback;
 use storage::corekv::Writer;
-use storage::corekv::private::Sealed;
 
 #[derive(Default)]
 struct Counts {
