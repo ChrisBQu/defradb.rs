@@ -15,20 +15,22 @@ const THREADS: usize = 2;
 
 static RUNTIME: OnceCell<EdgeRuntime> = OnceCell::new();
 
-/// A handle onto the process's on-demand network runtime, started on first
-/// use. One caller starts it while the others wait for it; a start that
-/// fails is returned, and the next caller tries again.
-pub async fn on_demand() -> Result<Edge, EdgeError> {
-    RUNTIME
-        .get_or_try_init(async {
-            EdgeRuntime::start(EdgeConfig {
-                threads: NonZeroUsize::new(THREADS),
-                thread_name: "defra-edge-on-demand".to_string(),
-                ..EdgeConfig::default()
-            })
-        })
-        .await
-        .map(|runtime| runtime.edge().clone())
+/// The process's on-demand network runtime, started on first use. Never
+/// waits: callers racing the first start each start one, one is kept and
+/// the others stop at once. A start that fails is returned, and the next
+/// caller tries again.
+pub fn on_demand() -> Result<&'static Edge, EdgeError> {
+    if let Some(runtime) = RUNTIME.get() {
+        return Ok(runtime.edge());
+    }
+    let started = EdgeRuntime::start(EdgeConfig {
+        threads: NonZeroUsize::new(THREADS),
+        thread_name: "defra-edge-on-demand".to_string(),
+        ..EdgeConfig::default()
+    })?;
+    // A racing start that published first wins; this one is dropped, which
+    // stops it.
+    Ok(RUNTIME.get_or_init_racy(|| started).edge())
 }
 
 #[cfg(test)]
@@ -39,9 +41,7 @@ mod tests {
 
     #[test]
     fn the_on_demand_runtime_starts_once_and_is_shared() {
-        let (first, second) = n0_future::future::block_on(async {
-            (on_demand().await.unwrap(), on_demand().await.unwrap())
-        });
+        let (first, second) = (on_demand().unwrap(), on_demand().unwrap());
         assert!(Arc::ptr_eq(&first.shared, &second.shared));
         let answer = n0_future::future::block_on(first.spawn(async { 6 * 7 })).unwrap();
         assert_eq!(answer, 42);
