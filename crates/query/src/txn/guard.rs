@@ -32,7 +32,7 @@ use super::TransactionHandle;
 ///     executor: &E,
 ///     queries: Vec<QueryRequest>,
 /// ) -> Result<Vec<QueryResponse>, TransactionError> {
-///     let guard = TransactionGuard::begin(executor, RequestContext::default(), false).await?;
+///     let guard = TransactionGuard::begin_in(executor, RequestContext::default(), false).await?;
 ///     let mut responses = Vec::new();
 ///
 ///     for query in queries {
@@ -51,24 +51,42 @@ use super::TransactionHandle;
 #[must_use = "dropping the guard abandons the transaction"]
 pub struct TransactionGuard<'a, E: crate::QueryExecutor + ?Sized> {
     executor: &'a E,
-    context: RequestContext,
+    /// The context it was begun in; `None` when begun in the ambient one,
+    /// which each later call then reads afresh.
+    context: Option<RequestContext>,
     pub(crate) handle: Option<TransactionHandle>,
 }
 
 impl<'a, E: crate::QueryExecutor + ?Sized> TransactionGuard<'a, E> {
-    /// Begin a new transaction for the request `context` serves and return a
-    /// guard for it.
+    /// Begin a new transaction and return a guard for it, in
+    /// [`RequestContext::ambient`].
     ///
     /// Dropping the returned guard abandons the transaction.
     pub async fn begin(
         executor: &'a E,
+        readonly: bool,
+    ) -> std::result::Result<Self, TransactionError> {
+        let handle = executor.begin_txn(readonly).await?;
+        Ok(Self {
+            executor,
+            context: None,
+            handle: Some(handle),
+        })
+    }
+
+    /// Begin a new transaction for the request `context` serves and return a
+    /// guard for it.
+    ///
+    /// Dropping the returned guard abandons the transaction.
+    pub async fn begin_in(
+        executor: &'a E,
         context: RequestContext,
         readonly: bool,
     ) -> std::result::Result<Self, TransactionError> {
-        let handle = executor.begin_txn(&context, readonly).await?;
+        let handle = executor.begin_txn_in(&context, readonly).await?;
         Ok(Self {
             executor,
-            context,
+            context: Some(context),
             handle: Some(handle),
         })
     }
@@ -78,9 +96,11 @@ impl<'a, E: crate::QueryExecutor + ?Sized> TransactionGuard<'a, E> {
     pub async fn execute(&self, request: crate::QueryRequest) -> crate::QueryResponse {
         match &self.handle {
             Some(handle) => {
-                self.executor
-                    .execute_in_txn(request.with_context(self.context.clone()), handle)
-                    .await
+                let request = match &self.context {
+                    Some(context) => request.with_context(context.clone()),
+                    None => request,
+                };
+                self.executor.execute_in_txn(request, handle).await
             }
             None => crate::QueryResponse::error("transaction already finalized"),
         }
@@ -99,7 +119,10 @@ impl<'a, E: crate::QueryExecutor + ?Sized> TransactionGuard<'a, E> {
             .handle
             .as_ref()
             .ok_or_else(|| TransactionError::already_finalized("transaction already finalized"))?;
-        self.executor.commit_txn(&self.context, handle).await?;
+        match &self.context {
+            Some(context) => self.executor.commit_txn_in(context, handle).await?,
+            None => self.executor.commit_txn(handle).await?,
+        }
         self.handle = None;
         Ok(())
     }
@@ -112,7 +135,10 @@ impl<'a, E: crate::QueryExecutor + ?Sized> TransactionGuard<'a, E> {
             .handle
             .as_ref()
             .ok_or_else(|| TransactionError::already_finalized("transaction already finalized"))?;
-        self.executor.rollback_txn(&self.context, handle).await?;
+        match &self.context {
+            Some(context) => self.executor.rollback_txn_in(context, handle).await?,
+            None => self.executor.rollback_txn(handle).await?,
+        }
         self.handle = None;
         Ok(())
     }

@@ -95,6 +95,7 @@ defra-p2p-adapter = { workspace = true, optional = true, default-features = fals
 telemetry = { path = "../telemetry", default-features = false }
 
 [dev-dependencies]
+defra-core = { path = "../defra-core", features = ["ambient"] }
 edge = { path = "../edge", features = ["testing"] }
 axum.workspace = true
 kovan.workspace = true

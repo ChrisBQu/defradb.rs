@@ -179,11 +179,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     None => false,
                     Some(collection) => match &collection.policy {
                         None => true,
-                        Some(policy) => crate::txn::check_doc_read_access_with_prepared_inputs(
+                        Some(policy) => crate::txn::check_doc_read_access_in(
+                            &self.context(),
                             self.acp.as_ref(),
                             self.acp_registration_projection.as_deref(),
                             &identity,
-                            self.context.dac_bypass(),
                             &policy.id,
                             &policy.resource_name,
                             &collection.collection_id,

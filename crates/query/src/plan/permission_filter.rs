@@ -9,6 +9,7 @@ use acp::{DocumentACP, DocumentPermission, Identity};
 use async_trait::async_trait;
 use defra_core::thread_bounds::MaybeBoxFuture;
 use futures::{stream::FuturesOrdered, FutureExt, StreamExt};
+use identity::Did;
 use sync_wrapper::SyncWrapper;
 
 use crate::access_hooks::read::app_allows;
@@ -76,18 +77,32 @@ pub struct PermissionFilterNode {
 }
 
 impl PermissionFilterNode {
-    /// Create a permission filter node that passes the documents `read`
-    /// allows of those `source` yields.
-    pub fn new(source: Box<dyn PlanNode>, read: AcpRead) -> Self {
+    /// Create a new permission filter node, with the DAC bypass of
+    /// [`defra_core::RequestContext::ambient`] until
+    /// [`PermissionFilterNode::with_dac_bypass`] sets the request's.
+    ///
+    /// # Arguments
+    /// * `source` - The source node to filter
+    /// * `acp` - Document ACP for permission checks
+    /// * `identity` - The identity requesting access
+    /// * `policy_id` - Policy ID from the collection
+    /// * `resource_name` - Resource name from the policy
+    pub fn new(
+        source: Box<dyn PlanNode>,
+        acp: Arc<dyn DocumentACP>,
+        identity: Identity,
+        policy_id: impl Into<String>,
+        resource_name: impl Into<String>,
+    ) -> Self {
         let document_mapping = source.document_map().clone();
         Self {
             source,
             acp: Some(AcpReadCheck {
-                acp: read.acp,
-                identity: Arc::new(read.identity),
-                dac_bypass: read.dac_bypass,
-                policy_id: Arc::from(read.policy_id),
-                resource_name: Arc::from(read.resource_name),
+                acp,
+                identity: Arc::new(identity),
+                dac_bypass: defra_core::RequestContext::ambient().dac_bypass(),
+                policy_id: Arc::from(policy_id.into()),
+                resource_name: Arc::from(resource_name.into()),
                 retry_inputs: None,
                 projection: None,
             }),
@@ -97,6 +112,26 @@ impl PermissionFilterNode {
             pending: SyncWrapper::new(FuturesOrdered::new()),
             source_exhausted: false,
         }
+    }
+
+    /// Create from an optional DID for backward compatibility.
+    pub fn from_optional_did(
+        source: Box<dyn PlanNode>,
+        acp: Arc<dyn DocumentACP>,
+        did: Option<Did>,
+        policy_id: impl Into<String>,
+        resource_name: impl Into<String>,
+    ) -> Self {
+        Self::new(source, acp, Identity::from(did), policy_id, resource_name)
+    }
+
+    /// Let an authenticated reader see every document when the request's node
+    /// access grants it `bypass-dac` (`RequestContext::dac_bypass`).
+    pub fn with_dac_bypass(mut self, bypass: bool) -> Self {
+        if let Some(acp) = &mut self.acp {
+            acp.dac_bypass = bypass;
+        }
+        self
     }
 
     /// A filter that applies only an app read check.
@@ -168,10 +203,17 @@ impl PermissionFilterNode {
     ) -> Box<dyn PlanNode> {
         match (acp, app) {
             (Some(read), app) => Box::new(
-                Self::new(source, read)
-                    .with_app_check(app)
-                    .with_projection(projection)
-                    .with_retry_inputs(retry_inputs),
+                Self::new(
+                    source,
+                    read.acp,
+                    read.identity,
+                    read.policy_id,
+                    read.resource_name,
+                )
+                .with_dac_bypass(read.dac_bypass)
+                .with_app_check(app)
+                .with_projection(projection)
+                .with_retry_inputs(retry_inputs),
             ),
             (None, Some(app)) => Box::new(Self::app_only(source, app)),
             (None, None) => source,

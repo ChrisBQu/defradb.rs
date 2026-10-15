@@ -26,6 +26,19 @@ pub(super) struct AuthorizedMutation {
     pub acp_filtered_doc_ids: Option<Vec<String>>,
 }
 
+/// The guard that cleared the encryption thread-local when mutations still
+/// set it. A mutation's encryption now travels in its `RequestContext`; the
+/// guard stays, test-only, for the tests written against it.
+#[cfg(test)]
+struct EncryptionConfigGuard;
+
+#[cfg(test)]
+impl Drop for EncryptionConfigGuard {
+    fn drop(&mut self) {
+        defra_core::encryption::set_encryption_config(None);
+    }
+}
+
 fn preserve_acp_input_error(action: &str, doc_id: &str, error: QueryError) -> QueryError {
     match error {
         error @ QueryError::NeedsInput(_) => error,
@@ -108,8 +121,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
         let mutations = parse_mutations_with_limits(mutation_str, variables, self.query_limits)?;
         // What this request writes is created by its caller.
         let runner = self.for_caller(caller_identity.as_ref());
-        let mut request =
-            crate::executor::QueryRequest::new(mutation_str).with_context(runner.context.clone());
+        let mut request = crate::executor::QueryRequest::new(mutation_str)
+            .with_context(runner.context().into_owned());
         request.identity = caller_identity.clone();
         request.variables = variables.map(|values| {
             JsonValue::Object(
@@ -203,8 +216,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                 )
             })?;
             truncator
-                .truncate(
-                    &self.context,
+                .truncate_in(
+                    &self.context(),
                     &mutation.collection_name,
                     mutation.filter.clone(),
                 )
@@ -660,7 +673,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
 
         // This mutation's own encryption and, for a remote signer, the access
         // decision its creates are signed under, so neither reaches another one.
-        let mut context = self.context.clone().with_encryption(mutation.encryption());
+        let mut context = self
+            .context()
+            .into_owned()
+            .with_encryption(mutation.encryption());
 
         if matches!(mutation.mutation_type, MutationType::Create) {
             match context.signing().cloned() {
@@ -805,16 +821,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
             MutationType::Create => {
                 let inputs = self.build_create_inputs(mutation, &collection)?;
                 Box::new(
-                    CreateNode::new(
-                        &mutation.collection_name,
-                        mutator.clone(),
-                        context.clone(),
-                        mapping.clone(),
-                    )
-                    .with_collection(collection.clone())
-                    .with_request_time(request_time)
-                    .with_inputs(inputs)
-                    .with_prepared_documents(prepared.map(|p| p.creates.clone())),
+                    CreateNode::new(&mutation.collection_name, mutator.clone(), mapping.clone())
+                        .with_context(context.clone())
+                        .with_collection(collection.clone())
+                        .with_request_time(request_time)
+                        .with_inputs(inputs)
+                        .with_prepared_documents(prepared.map(|p| p.creates.clone())),
                 )
             }
             MutationType::Update => {
@@ -822,10 +834,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                 let mut node = UpdateNode::new(
                     &mutation.collection_name,
                     mutator.clone(),
-                    context.clone(),
                     fetcher.clone(),
                     mapping.clone(),
                 )
+                .with_context(context.clone())
                 .with_collection(collection.clone())
                 .with_request_time(request_time)
                 .with_input(input)
@@ -859,10 +871,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                 let mut node = DeleteNode::new(
                     &mutation.collection_name,
                     mutator.clone(),
-                    context.clone(),
                     fetcher.clone(),
                     mapping.clone(),
-                );
+                )
+                .with_context(context.clone());
 
                 // Use ACP-filtered doc_ids (invisible docs removed), or resolved/original
                 if let Some(ref doc_ids) = acp_filtered_doc_ids {
@@ -884,15 +896,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                 Box::new(node)
             }
             MutationType::Upsert => {
-                let mut node = UpsertNode::new(
-                    &mutation.collection_name,
-                    mutator.clone(),
-                    context.clone(),
-                    mapping.clone(),
-                )
-                .with_collection(collection.clone())
-                .with_request_time(request_time)
-                .with_prepared_writes(prepared.cloned());
+                let mut node =
+                    UpsertNode::new(&mutation.collection_name, mutator.clone(), mapping.clone())
+                        .with_context(context.clone())
+                        .with_collection(collection.clone())
+                        .with_request_time(request_time)
+                        .with_prepared_writes(prepared.cloned());
 
                 // Set create_input (from Go's 'add' argument)
                 if !mutation.create_input.is_empty() {

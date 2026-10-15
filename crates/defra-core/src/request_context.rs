@@ -12,6 +12,7 @@
 //! shared.
 
 use std::fmt;
+use std::future::Future;
 use std::sync::Arc;
 
 use crate::encryption::EncryptionConfig;
@@ -44,6 +45,16 @@ impl RequestContext {
         return crate::ambient::context();
         #[cfg(not(any(test, feature = "ambient")))]
         Self::default()
+    }
+
+    /// Runs `future` with this context installed in the thread-local state
+    /// tests set the old way, so a test double that reads that state sees the
+    /// request it serves; outside tests this is `future` itself.
+    pub fn mirror<F: Future>(&self, future: F) -> impl Future<Output = F::Output> {
+        #[cfg(any(test, feature = "ambient"))]
+        return crate::ambient::mirror(self.clone(), future);
+        #[cfg(not(any(test, feature = "ambient")))]
+        future
     }
 
     /// This context with every field it leaves unset taken from

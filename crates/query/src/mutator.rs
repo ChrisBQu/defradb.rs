@@ -8,6 +8,7 @@ use bytes::Bytes;
 use cid::Cid;
 use defra_core::RequestContext;
 use document::{DocID, Document};
+use identity::Did;
 use rapidhash::RapidHashSet;
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
@@ -23,10 +24,24 @@ use crate::Filter;
 pub trait CollectionTruncator: MaybeSendSync {
     async fn truncate(
         &self,
+        collection_name: &str,
+        filter: Option<Filter>,
+        identity: Option<&Did>,
+    ) -> Result<()>;
+
+    /// [`Self::truncate`] for the request `context` serves. The default runs
+    /// `truncate` for the request's creator inside [`RequestContext::mirror`].
+    async fn truncate_in(
+        &self,
         context: &RequestContext,
         collection_name: &str,
         filter: Option<Filter>,
-    ) -> Result<()>;
+    ) -> Result<()> {
+        let creator = context.creator().and_then(|did| Did::new(did).ok());
+        context
+            .mirror(self.truncate(collection_name, filter, creator.as_ref()))
+            .await
+    }
 }
 
 /// Status of P2P broadcast after a mutation.
@@ -419,9 +434,12 @@ impl MutationBatch {
 /// which provides read operations. Implementations are expected to be
 /// transaction-scoped, meaning all operations occur within a single transaction.
 ///
-/// Every write takes the [`RequestContext`] of the request it serves: how its
-/// blocks are encrypted, signed and attributed comes from there and from
-/// nowhere else.
+/// Each write comes twice: `*_in` takes the [`RequestContext`] of the request
+/// it serves, and how its blocks are encrypted, signed and attributed comes
+/// from there; the plain form runs in [`RequestContext::ambient`]. A storage
+/// mutator overrides both. The `*_in` defaults run the plain form inside
+/// [`RequestContext::mirror`], so a mutator that implements only the plain
+/// form still serves a request.
 ///
 /// # Transaction Semantics
 ///
@@ -437,7 +455,7 @@ impl MutationBatch {
 ///     doc.set("name", name);
 ///     doc.set("age", age);
 ///
-///     let result = mutator.create(&RequestContext::default(), "Users", doc).await?;
+///     let result = mutator.create_in(&RequestContext::default(), "Users", doc).await?;
 ///     Ok(result.doc_id)
 /// }
 /// ```
@@ -466,8 +484,13 @@ pub trait DocMutator: MaybeSendSync {
     }
 
     /// Whether this mutator resolves persistent inputs before request retries.
-    fn requires_write_preparation(&self, _context: &RequestContext) -> bool {
+    fn requires_write_preparation(&self) -> bool {
         false
+    }
+
+    /// [`Self::requires_write_preparation`] for the request `context` serves.
+    fn requires_write_preparation_in(&self, _context: &RequestContext) -> bool {
+        self.requires_write_preparation()
     }
 
     /// Whether update reads may be projected to the mutation's known field
@@ -483,12 +506,31 @@ pub trait DocMutator: MaybeSendSync {
     /// Resolve persistent inputs without staging a document mutation.
     async fn prepare_write(
         &self,
-        _context: &RequestContext,
         _collection_name: &str,
         doc: Document,
         _modified_fields: Option<rapidhash::RapidHashSet<String>>,
+        _encryption: Option<defra_core::encryption::EncryptionConfig>,
     ) -> Result<Document> {
         Ok(doc)
+    }
+
+    /// [`Self::prepare_write`] for the request `context` serves, encrypting
+    /// as its context says.
+    async fn prepare_write_in(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        doc: Document,
+        modified_fields: Option<rapidhash::RapidHashSet<String>>,
+    ) -> Result<Document> {
+        context
+            .mirror(self.prepare_write(
+                collection_name,
+                doc,
+                modified_fields,
+                context.encryption().cloned(),
+            ))
+            .await
     }
 
     /// Resolve one exact external request after a transaction attempt has
@@ -496,12 +538,20 @@ pub trait DocMutator: MaybeSendSync {
     /// the provider response bytes for per-request memoization.
     async fn resolve_prepared_input(
         &self,
-        _context: &RequestContext,
         _request: &crate::prepared::PreparedInputRequest,
     ) -> Result<Arc<[u8]>> {
         Err(crate::error::QueryError::execution(
             "prepared input resolution is not supported by this mutator",
         ))
+    }
+
+    /// [`Self::resolve_prepared_input`] for the request `context` serves.
+    async fn resolve_prepared_input_in(
+        &self,
+        context: &RequestContext,
+        request: &crate::prepared::PreparedInputRequest,
+    ) -> Result<Arc<[u8]>> {
+        context.mirror(self.resolve_prepared_input(request)).await
     }
 
     /// Build the exact remote request for a regenerated embedding using the
@@ -567,12 +617,17 @@ pub trait DocMutator: MaybeSendSync {
     /// - The collection does not exist
     /// - The document fails schema validation
     /// - A document with the same content already exists
-    async fn create(
+    async fn create(&self, collection_name: &str, doc: Document) -> Result<CreateResult>;
+
+    /// [`Self::create`] for the request `context` serves.
+    async fn create_in(
         &self,
         context: &RequestContext,
         collection_name: &str,
         doc: Document,
-    ) -> Result<CreateResult>;
+    ) -> Result<CreateResult> {
+        context.mirror(self.create(collection_name, doc)).await
+    }
 
     /// Create multiple documents in a single transaction.
     ///
@@ -580,15 +635,26 @@ pub trait DocMutator: MaybeSendSync {
     /// can override for single-transaction batching (one commit/fsync for N docs).
     async fn create_many(
         &self,
-        context: &RequestContext,
         collection_name: &str,
         docs: Vec<Document>,
     ) -> Result<Vec<CreateResult>> {
         let mut results = Vec::with_capacity(docs.len());
         for doc in docs {
-            results.push(self.create(context, collection_name, doc).await?);
+            results.push(self.create(collection_name, doc).await?);
         }
         Ok(results)
+    }
+
+    /// [`Self::create_many`] for the request `context` serves.
+    async fn create_many_in(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        docs: Vec<Document>,
+    ) -> Result<Vec<CreateResult>> {
+        context
+            .mirror(self.create_many(collection_name, docs))
+            .await
     }
 
     /// Update an existing document.
@@ -615,11 +681,23 @@ pub trait DocMutator: MaybeSendSync {
     /// - The document fails schema validation
     async fn update(
         &self,
-        context: &RequestContext,
         collection_name: &str,
         doc: Document,
         modified_fields: RapidHashSet<String>,
     ) -> Result<UpdateResult>;
+
+    /// [`Self::update`] for the request `context` serves.
+    async fn update_in(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        doc: Document,
+        modified_fields: RapidHashSet<String>,
+    ) -> Result<UpdateResult> {
+        context
+            .mirror(self.update(collection_name, doc, modified_fields))
+            .await
+    }
 
     /// Update a document only if its persisted state still matches the
     /// snapshot used to select and materialize the mutation.
@@ -630,14 +708,26 @@ pub trait DocMutator: MaybeSendSync {
     /// acquiring their per-document serialization guard.
     async fn update_if_unchanged(
         &self,
-        context: &RequestContext,
         collection_name: &str,
         expected: Document,
         doc: Document,
         modified_fields: RapidHashSet<String>,
     ) -> Result<UpdateResult> {
         let _ = expected;
-        self.update(context, collection_name, doc, modified_fields)
+        self.update(collection_name, doc, modified_fields).await
+    }
+
+    /// [`Self::update_if_unchanged`] for the request `context` serves.
+    async fn update_if_unchanged_in(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        expected: Document,
+        doc: Document,
+        modified_fields: RapidHashSet<String>,
+    ) -> Result<UpdateResult> {
+        context
+            .mirror(self.update_if_unchanged(collection_name, expected, doc, modified_fields))
             .await
     }
 
@@ -646,7 +736,6 @@ pub trait DocMutator: MaybeSendSync {
     /// the conservative full-document check.
     async fn update_if_fields_unchanged(
         &self,
-        context: &RequestContext,
         collection_name: &str,
         expected: Document,
         expected_fields: RapidHashSet<String>,
@@ -654,7 +743,28 @@ pub trait DocMutator: MaybeSendSync {
         modified_fields: RapidHashSet<String>,
     ) -> Result<UpdateResult> {
         let _ = expected_fields;
-        self.update_if_unchanged(context, collection_name, expected, doc, modified_fields)
+        self.update_if_unchanged(collection_name, expected, doc, modified_fields)
+            .await
+    }
+
+    /// [`Self::update_if_fields_unchanged`] for the request `context` serves.
+    async fn update_if_fields_unchanged_in(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        expected: Document,
+        expected_fields: RapidHashSet<String>,
+        doc: Document,
+        modified_fields: RapidHashSet<String>,
+    ) -> Result<UpdateResult> {
+        context
+            .mirror(self.update_if_fields_unchanged(
+                collection_name,
+                expected,
+                expected_fields,
+                doc,
+                modified_fields,
+            ))
             .await
     }
 
@@ -674,12 +784,17 @@ pub trait DocMutator: MaybeSendSync {
     /// Returns an error if:
     /// - The collection does not exist
     /// - A storage error occurs
-    async fn delete(
+    async fn delete(&self, collection_name: &str, doc_id: &DocID) -> Result<DeleteResult>;
+
+    /// [`Self::delete`] for the request `context` serves.
+    async fn delete_in(
         &self,
         context: &RequestContext,
         collection_name: &str,
         doc_id: &DocID,
-    ) -> Result<DeleteResult>;
+    ) -> Result<DeleteResult> {
+        context.mirror(self.delete(collection_name, doc_id)).await
+    }
 
     /// Check if a document exists.
     ///

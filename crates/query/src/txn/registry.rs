@@ -15,6 +15,12 @@ use super::result::GetTransactionResult;
 /// used by the query executor. A transaction belongs to the identity of the
 /// context that began it, and only a request carrying that identity reaches
 /// it again.
+///
+/// Each operation comes twice: `*_in` takes the [`RequestContext`] of the
+/// request it serves, and the plain form runs in
+/// [`RequestContext::ambient`]. An implementation that tracks ownership
+/// overrides both; the async `*_in` defaults run the plain form inside
+/// [`RequestContext::mirror`], and `get_in` calls `get`.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait TransactionRegistry: MaybeSendSync + 'static {
@@ -24,9 +30,17 @@ pub trait TransactionRegistry: MaybeSendSync + 'static {
     /// Registration and returning the handle must not be separated by an await.
     async fn begin(
         &self,
-        context: &RequestContext,
         readonly: bool,
     ) -> std::result::Result<TransactionHandle, TransactionError>;
+
+    /// [`Self::begin`] for the request `context` serves.
+    async fn begin_in(
+        &self,
+        context: &RequestContext,
+        readonly: bool,
+    ) -> std::result::Result<TransactionHandle, TransactionError> {
+        context.mirror(self.begin(readonly)).await
+    }
 
     /// Begin the short-lived read-only transaction used for a standalone query.
     ///
@@ -34,9 +48,16 @@ pub trait TransactionRegistry: MaybeSendSync + 'static {
     /// closed can override this separately from user-managed transactions.
     async fn begin_implicit_read(
         &self,
+    ) -> std::result::Result<TransactionHandle, TransactionError> {
+        self.begin(true).await
+    }
+
+    /// [`Self::begin_implicit_read`] for the request `context` serves.
+    async fn begin_implicit_read_in(
+        &self,
         context: &RequestContext,
     ) -> std::result::Result<TransactionHandle, TransactionError> {
-        self.begin(context, true).await
+        context.mirror(self.begin_implicit_read()).await
     }
 
     /// Get an existing transaction by handle.
@@ -44,25 +65,48 @@ pub trait TransactionRegistry: MaybeSendSync + 'static {
     /// Returns `Found(context)` if the transaction exists,
     /// `NotFound` if it doesn't exist or has been committed/rolled back,
     /// or `LockPoisoned` if the registry lock is poisoned.
-    fn get(&self, context: &RequestContext, handle: &TransactionHandle) -> GetTransactionResult;
+    fn get(&self, handle: &TransactionHandle) -> GetTransactionResult;
+
+    /// [`Self::get`] for the request `context` serves.
+    fn get_in(
+        &self,
+        _context: &RequestContext,
+        handle: &TransactionHandle,
+    ) -> GetTransactionResult {
+        self.get(handle)
+    }
 
     /// Commit a transaction.
     ///
     /// After commit, the handle is no longer valid for `get()`.
-    async fn commit(
+    async fn commit(&self, handle: &TransactionHandle)
+        -> std::result::Result<(), TransactionError>;
+
+    /// [`Self::commit`] for the request `context` serves.
+    async fn commit_in(
         &self,
         context: &RequestContext,
         handle: &TransactionHandle,
-    ) -> std::result::Result<(), TransactionError>;
+    ) -> std::result::Result<(), TransactionError> {
+        context.mirror(self.commit(handle)).await
+    }
 
     /// Rollback a transaction.
     ///
     /// After rollback, the handle is no longer valid for `get()`.
     async fn rollback(
         &self,
-        context: &RequestContext,
         handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError>;
+
+    /// [`Self::rollback`] for the request `context` serves.
+    async fn rollback_in(
+        &self,
+        context: &RequestContext,
+        handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError> {
+        context.mirror(self.rollback(handle)).await
+    }
 
     /// Synchronously remove an abandoned entry without committing its writes.
     /// Must be idempotent and work without an async runtime. Existing context
@@ -75,11 +119,22 @@ pub trait TransactionRegistry: MaybeSendSync + 'static {
     /// implementation simply rolls the snapshot back.
     async fn finish_implicit_read(
         &self,
-        context: &RequestContext,
         handle: &TransactionHandle,
         _apply_read_effects: bool,
     ) -> std::result::Result<(), TransactionError> {
-        self.rollback(context, handle).await
+        self.rollback(handle).await
+    }
+
+    /// [`Self::finish_implicit_read`] for the request `context` serves.
+    async fn finish_implicit_read_in(
+        &self,
+        context: &RequestContext,
+        handle: &TransactionHandle,
+        apply_read_effects: bool,
+    ) -> std::result::Result<(), TransactionError> {
+        context
+            .mirror(self.finish_implicit_read(handle, apply_read_effects))
+            .await
     }
 }
 
@@ -96,7 +151,6 @@ impl TransactionRegistry for NoOpTransactionRegistry {
 
     async fn begin(
         &self,
-        _context: &RequestContext,
         _readonly: bool,
     ) -> std::result::Result<TransactionHandle, TransactionError> {
         Err(TransactionError::not_supported(
@@ -104,13 +158,12 @@ impl TransactionRegistry for NoOpTransactionRegistry {
         ))
     }
 
-    fn get(&self, _context: &RequestContext, _handle: &TransactionHandle) -> GetTransactionResult {
+    fn get(&self, _handle: &TransactionHandle) -> GetTransactionResult {
         GetTransactionResult::NotFound
     }
 
     async fn commit(
         &self,
-        _context: &RequestContext,
         _handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError> {
         Err(TransactionError::not_supported(
@@ -120,7 +173,6 @@ impl TransactionRegistry for NoOpTransactionRegistry {
 
     async fn rollback(
         &self,
-        _context: &RequestContext,
         _handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError> {
         Err(TransactionError::not_supported(

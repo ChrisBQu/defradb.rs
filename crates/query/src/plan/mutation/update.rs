@@ -175,7 +175,7 @@ fn increment_value(current: Option<&NormalValue>, increment: &NormalValue) -> Re
 /// let input = UpdateInput::new()
 ///     .with_field("email", json!("newemail@example.com"));
 ///
-/// let mut node = UpdateNode::new("Users", mutator, context, fetcher, mapping)
+/// let mut node = UpdateNode::new("Users", mutator, fetcher, mapping)
 ///     .with_doc_ids(vec!["bae-123".to_string()])
 ///     .with_input(input);
 ///
@@ -192,7 +192,8 @@ pub struct UpdateNode {
     collection_name: String,
     /// Document mutator for storage operations
     mutator: Arc<dyn DocMutator>,
-    /// The context of the request the updates serve
+    /// The context of the request the updates serve: [`RequestContext::ambient`]
+    /// until [`UpdateNode::with_context`] sets it
     context: RequestContext,
     /// Document fetcher for resolving filters and getting all documents
     fetcher: Arc<dyn DocFetcher>,
@@ -233,20 +234,18 @@ impl UpdateNode {
     ///
     /// * `collection_name` - Name of the collection to update documents in
     /// * `mutator` - Document mutator for storage operations
-    /// * `context` - The context of the request the updates serve
     /// * `fetcher` - Document fetcher for resolving filters and getting all documents
     /// * `document_mapping` - Field mapping for result documents
     pub fn new(
         collection_name: impl Into<String>,
         mutator: Arc<dyn DocMutator>,
-        context: RequestContext,
         fetcher: Arc<dyn DocFetcher>,
         document_mapping: DocumentMapping,
     ) -> Self {
         Self {
             collection_name: collection_name.into(),
             mutator,
-            context,
+            context: RequestContext::ambient(),
             fetcher,
             document_mapping,
             collection: None,
@@ -265,6 +264,12 @@ impl UpdateNode {
             did_update: false,
             initialized: false,
         }
+    }
+
+    /// Serve the request `context` belongs to.
+    pub fn with_context(mut self, context: RequestContext) -> Self {
+        self.context = context;
+        self
     }
 
     /// Set specific document IDs to update.
@@ -563,7 +568,7 @@ impl PlanNode for UpdateNode {
                     // Persist update with modified field tracking
                     let result = if let Some(expected_fields) = projected_fields {
                         self.mutator
-                            .update_if_fields_unchanged(
+                            .update_if_fields_unchanged_in(
                                 &self.context,
                                 &self.collection_name,
                                 expected,
@@ -574,7 +579,7 @@ impl PlanNode for UpdateNode {
                             .await?
                     } else {
                         self.mutator
-                            .update_if_unchanged(
+                            .update_if_unchanged_in(
                                 &self.context,
                                 &self.collection_name,
                                 expected,

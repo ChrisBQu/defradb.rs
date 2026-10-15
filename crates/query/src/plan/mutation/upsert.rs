@@ -115,7 +115,7 @@ pub enum UpsertAction {
 /// let update_input = UpsertInput::new()
 ///     .with_field("age", json!(31));
 ///
-/// let mut node = UpsertNode::new("Users", mutator, context, mapping)
+/// let mut node = UpsertNode::new("Users", mutator, mapping)
 ///     .with_create_input(create_input)
 ///     .with_update_input(update_input)
 ///     .with_doc_ids(vec!["bae-123".to_string()]);
@@ -133,7 +133,8 @@ pub struct UpsertNode {
     collection_name: String,
     /// Document mutator for storage operations
     mutator: Arc<dyn DocMutator>,
-    /// The context of the request the upserts serve
+    /// The context of the request the upserts serve: [`RequestContext::ambient`]
+    /// until [`UpsertNode::with_context`] sets it
     context: RequestContext,
     /// Document mapping for field positions
     document_mapping: DocumentMapping,
@@ -171,13 +172,12 @@ impl UpsertNode {
     pub fn new(
         collection_name: impl Into<String>,
         mutator: Arc<dyn DocMutator>,
-        context: RequestContext,
         document_mapping: DocumentMapping,
     ) -> Self {
         Self {
             collection_name: collection_name.into(),
             mutator,
-            context,
+            context: RequestContext::ambient(),
             document_mapping,
             collection: None,
             request_time: None,
@@ -194,6 +194,12 @@ impl UpsertNode {
             did_upsert: false,
             initialized: false,
         }
+    }
+
+    /// Serve the request `context` belongs to.
+    pub fn with_context(mut self, context: RequestContext) -> Self {
+        self.context = context;
+        self
     }
 
     pub fn with_prepared_writes(
@@ -313,7 +319,7 @@ impl UpsertNode {
             }
             let result = self
                 .mutator
-                .update(&self.context, &self.collection_name, doc, modified_fields)
+                .update_in(&self.context, &self.collection_name, doc, modified_fields)
                 .await?;
 
             let plan_doc = self.result_to_doc(&result.document)?;
@@ -363,7 +369,7 @@ impl UpsertNode {
             let doc = self.prepared_create(doc)?;
             let result = self
                 .mutator
-                .create(&self.context, &self.collection_name, doc)
+                .create_in(&self.context, &self.collection_name, doc)
                 .await?;
 
             let plan_doc = self.result_to_doc(&result.document)?;
@@ -399,7 +405,7 @@ impl UpsertNode {
         let doc = self.prepared_create(doc)?;
         let result = self
             .mutator
-            .create(&self.context, &self.collection_name, doc)
+            .create_in(&self.context, &self.collection_name, doc)
             .await?;
 
         let plan_doc = self.result_to_doc(&result.document)?;

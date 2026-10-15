@@ -93,6 +93,7 @@ telemetry = { path = "../telemetry", optional = true }
 db = { path = "../db", default-features = false, features = ["native"] }
 
 [dev-dependencies]
+defra-core = { path = "../defra-core", features = ["ambient"] }
 edge = { path = "../edge", features = ["testing"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "test-util"] }
 tower = { workspace = true, features = ["util"] }

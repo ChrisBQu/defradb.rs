@@ -39,6 +39,63 @@ pub(crate) fn context() -> RequestContext {
         .with_creator(get_broadcast_creator_did())
 }
 
+/// Runs `future` with `context` installed as the state above, the way a
+/// boundary of the old API installed it, so a test double that reads that
+/// state sees the request it serves.
+pub(crate) async fn mirror<F: Future>(context: RequestContext, future: F) -> F::Output {
+    let identity = context.identity().map(str::to_owned);
+    #[cfg(not(target_arch = "wasm32"))]
+    let creator = context.creator().map(str::to_owned);
+    let installed = install_per_poll(context, future);
+    #[cfg(not(target_arch = "wasm32"))]
+    let installed = TASK_CREATOR.scope(creator, installed);
+    crate::current_identity::with_scoped_identity(identity, installed).await
+}
+
+/// The thread-local half of a mirrored context. Tasks interleave on one
+/// thread at every await, so it is installed for each poll and the previous
+/// state put back before another task runs.
+async fn install_per_poll<F: Future>(context: RequestContext, future: F) -> F::Output {
+    let mut future = std::pin::pin!(future);
+    std::future::poll_fn(|cx| {
+        let previous = swap(Installed::from(&context));
+        let poll = future.as_mut().poll(cx);
+        swap(previous);
+        poll
+    })
+    .await
+}
+
+struct Installed {
+    dac_bypass: bool,
+    encryption: Option<EncryptionConfig>,
+    signing: Option<SigningConfig>,
+    batch_session: Option<String>,
+    creator: Option<String>,
+}
+
+impl From<&RequestContext> for Installed {
+    fn from(context: &RequestContext) -> Self {
+        Self {
+            dac_bypass: context.dac_bypass(),
+            encryption: context.encryption().cloned(),
+            signing: context.signing().cloned(),
+            batch_session: context.batch_session().map(str::to_owned),
+            creator: context.creator().map(str::to_owned),
+        }
+    }
+}
+
+fn swap(state: Installed) -> Installed {
+    Installed {
+        dac_bypass: DAC_BYPASS.replace(state.dac_bypass),
+        encryption: ENCRYPTION.replace(state.encryption),
+        signing: SIGNING.replace(state.signing),
+        batch_session: BATCH_SESSION.replace(state.batch_session),
+        creator: CREATOR.replace(state.creator),
+    }
+}
+
 /// Set the DAC bypass flag for the current thread.
 pub fn set_dac_bypass(bypass: bool) {
     DAC_BYPASS.with(|c| *c.borrow_mut() = bypass);

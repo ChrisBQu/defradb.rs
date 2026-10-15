@@ -157,7 +157,7 @@ impl Default for CreateInput {
 ///     .with_field("name", json!("Alice"))
 ///     .with_field("age", json!(30));
 ///
-/// let mut node = CreateNode::new("Users", mutator, context, mapping)
+/// let mut node = CreateNode::new("Users", mutator, mapping)
 ///     .with_input(input);
 ///
 /// node.init().await?;
@@ -173,7 +173,8 @@ pub struct CreateNode {
     collection_name: String,
     /// Document mutator for storage operations
     mutator: Arc<dyn DocMutator>,
-    /// The context of the request the creates serve
+    /// The context of the request the creates serve: [`RequestContext::ambient`]
+    /// until [`CreateNode::with_context`] sets it
     context: RequestContext,
     /// Document mapping for field positions
     document_mapping: DocumentMapping,
@@ -203,18 +204,16 @@ impl CreateNode {
     ///
     /// * `collection_name` - Name of the collection to create documents in
     /// * `mutator` - Document mutator for storage operations
-    /// * `context` - The context of the request the creates serve
     /// * `document_mapping` - Field mapping for result documents
     pub fn new(
         collection_name: impl Into<String>,
         mutator: Arc<dyn DocMutator>,
-        context: RequestContext,
         document_mapping: DocumentMapping,
     ) -> Self {
         Self {
             collection_name: collection_name.into(),
             mutator,
-            context,
+            context: RequestContext::ambient(),
             document_mapping,
             collection: None,
             request_time: None,
@@ -226,6 +225,12 @@ impl CreateNode {
             did_create: false,
             initialized: false,
         }
+    }
+
+    /// Serve the request `context` belongs to.
+    pub fn with_context(mut self, context: RequestContext) -> Self {
+        self.context = context;
+        self
     }
 
     /// Add an input document to create.
@@ -332,7 +337,7 @@ impl PlanNode for CreateNode {
             // Batch create: single transaction, single commit/fsync
             let results = self
                 .mutator
-                .create_many(&self.context, &self.collection_name, docs)
+                .create_many_in(&self.context, &self.collection_name, docs)
                 .await?;
 
             for result in &results {

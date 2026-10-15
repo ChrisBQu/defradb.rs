@@ -201,9 +201,10 @@ pub struct QueryRunner<F: DocFetcher, R: TransactionRegistry = NoOpTransactionRe
     /// Cache of built introspection schemas, shared by the runners bound to
     /// requests from this one.
     pub(crate) introspection_cache: Arc<introspection::cache::IntrospectionSchemaCache>,
-    /// The context of the request this runner serves; the default for a
-    /// runner bound to none (see [`QueryRunner::for_request`]).
-    pub(crate) context: RequestContext,
+    /// The context of the request this runner serves; `None` for a runner
+    /// bound to none (see [`QueryRunner::for_request`]), which reads
+    /// [`RequestContext::ambient`] at each use.
+    context: Option<RequestContext>,
 }
 
 impl<F, R> Clone for QueryRunner<F, R>
@@ -259,7 +260,7 @@ impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
             retry_inputs: None,
             se_transport: None,
             introspection_cache: Default::default(),
-            context: RequestContext::default(),
+            context: None,
         }
     }
 
@@ -286,7 +287,7 @@ impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
             retry_inputs: None,
             se_transport: None,
             introspection_cache: Default::default(),
-            context: RequestContext::default(),
+            context: None,
         }
     }
 }
@@ -315,7 +316,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             retry_inputs: None,
             se_transport: None,
             introspection_cache: Default::default(),
-            context: RequestContext::default(),
+            context: None,
         }
     }
 
@@ -347,7 +348,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             write_validator: None,
             se_transport: None,
             introspection_cache: Default::default(),
-            context: RequestContext::default(),
+            context: None,
         }
     }
 
@@ -378,7 +379,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             write_validator: None,
             se_transport: None,
             introspection_cache: Default::default(),
-            context: RequestContext::default(),
+            context: None,
         }
     }
 
@@ -414,8 +415,22 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// for that request's own state.
     pub fn for_request(&self, context: RequestContext) -> Self {
         Self {
-            context,
+            context: Some(context),
             ..self.clone()
+        }
+    }
+
+    /// This runner serving `request`, in its context; a request built
+    /// without one runs in [`RequestContext::ambient`].
+    pub(crate) fn for_query(&self, request: &crate::executor::QueryRequest) -> Self {
+        self.for_request(request.context.clone().or_ambient())
+    }
+
+    /// The context of the request this runner serves.
+    pub(crate) fn context(&self) -> std::borrow::Cow<'_, RequestContext> {
+        match &self.context {
+            Some(context) => std::borrow::Cow::Borrowed(context),
+            None => std::borrow::Cow::Owned(RequestContext::ambient()),
         }
     }
 
@@ -424,8 +439,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// caller, the identity its boundary established acts.
     pub(crate) fn for_caller(&self, caller: Option<&Did>) -> Self {
         self.for_request(
-            self.context
-                .clone()
+            self.context()
+                .into_owned()
                 .with_identity(self.acting_identity(caller))
                 .with_creator(caller.map(ToString::to_string)),
         )
@@ -436,7 +451,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     pub(crate) fn acting_identity(&self, caller: Option<&Did>) -> Option<String> {
         caller
             .map(ToString::to_string)
-            .or_else(|| self.context.identity().map(str::to_owned))
+            .or_else(|| self.context().identity().map(str::to_owned))
     }
 
     /// This runner resolving collections through `provider`.
@@ -622,7 +637,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     ) -> Result<Arc<dyn CollectionProvider>> {
         let context = self
             .registry
-            .get(&self.context, handle)
+            .get_in(&self.context(), handle)
             .into_result()
             .map_err(|error| QueryError::execution(error.to_string()))?
             .ok_or_else(|| QueryError::execution(format!("transaction '{handle}' not found")))?;

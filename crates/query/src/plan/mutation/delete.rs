@@ -27,7 +27,7 @@ use crate::planner::{Doc, PlanNode};
 /// # Example
 ///
 /// ```ignore
-/// let mut node = DeleteNode::new("Users", mutator, context, fetcher, mapping)
+/// let mut node = DeleteNode::new("Users", mutator, fetcher, mapping)
 ///     .with_doc_ids(vec!["bae-123".to_string()]);
 ///
 /// node.init().await?;
@@ -43,7 +43,8 @@ pub struct DeleteNode {
     collection_name: String,
     /// Document mutator for storage operations
     mutator: Arc<dyn DocMutator>,
-    /// The context of the request the deletes serve
+    /// The context of the request the deletes serve: [`RequestContext::ambient`]
+    /// until [`DeleteNode::with_context`] sets it
     context: RequestContext,
     /// Document fetcher for resolving filters and getting all documents
     fetcher: Arc<dyn DocFetcher>,
@@ -74,20 +75,18 @@ impl DeleteNode {
     ///
     /// * `collection_name` - Name of the collection to delete documents from
     /// * `mutator` - Document mutator for storage operations
-    /// * `context` - The context of the request the deletes serve
     /// * `fetcher` - Document fetcher for resolving filters and getting all documents
     /// * `document_mapping` - Field mapping for result documents
     pub fn new(
         collection_name: impl Into<String>,
         mutator: Arc<dyn DocMutator>,
-        context: RequestContext,
         fetcher: Arc<dyn DocFetcher>,
         document_mapping: DocumentMapping,
     ) -> Self {
         Self {
             collection_name: collection_name.into(),
             mutator,
-            context,
+            context: RequestContext::ambient(),
             fetcher,
             document_mapping,
             doc_ids: None,
@@ -99,6 +98,12 @@ impl DeleteNode {
             did_delete: false,
             initialized: false,
         }
+    }
+
+    /// Serve the request `context` belongs to.
+    pub fn with_context(mut self, context: RequestContext) -> Self {
+        self.context = context;
+        self
     }
 
     /// Set specific document IDs to delete.
@@ -205,7 +210,7 @@ impl PlanNode for DeleteNode {
                 for (doc_id_str, doc_id) in parsed_ids {
                     let result = self
                         .mutator
-                        .delete(&self.context, &self.collection_name, &doc_id)
+                        .delete_in(&self.context, &self.collection_name, &doc_id)
                         .await?;
 
                     if result.existed {
@@ -247,7 +252,7 @@ impl PlanNode for DeleteNode {
 
                         let result = self
                             .mutator
-                            .delete(&self.context, &self.collection_name, &doc_id)
+                            .delete_in(&self.context, &self.collection_name, &doc_id)
                             .await?;
 
                         if result.existed {

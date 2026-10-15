@@ -4,6 +4,7 @@ use acp::error::Result as AcpResult;
 use acp::DocumentACP;
 use acp::DocumentPermission;
 use acp::Identity;
+use defra_core::RequestContext;
 use identity::Did;
 use std::sync::Arc;
 use storage::corekv::MaybeSendSync;
@@ -232,7 +233,37 @@ pub async fn check_doc_read_access_with_prepared_inputs(
     acp: &dyn DocumentACP,
     projection: Option<&AcpRegistrationProjection>,
     identity: &Identity,
-    dac_bypass: bool,
+    policy_id: &str,
+    resource_name: &str,
+    collection_id: &str,
+    is_branchable: bool,
+    doc_id: &str,
+    inputs: Option<&crate::prepared::PreparedInputMemo>,
+) -> crate::error::Result<bool> {
+    check_doc_read_access_in(
+        &RequestContext::ambient(),
+        acp,
+        projection,
+        identity,
+        policy_id,
+        resource_name,
+        collection_id,
+        is_branchable,
+        doc_id,
+        inputs,
+    )
+    .await
+}
+
+/// [`check_doc_read_access_with_prepared_inputs`] for the request `context`
+/// serves: an authenticated reader whose node access grants it `bypass-dac`
+/// reads every document.
+#[allow(clippy::too_many_arguments)]
+pub async fn check_doc_read_access_in(
+    context: &RequestContext,
+    acp: &dyn DocumentACP,
+    projection: Option<&AcpRegistrationProjection>,
+    identity: &Identity,
     policy_id: &str,
     resource_name: &str,
     collection_id: &str,
@@ -242,12 +273,14 @@ pub async fn check_doc_read_access_with_prepared_inputs(
 ) -> crate::error::Result<bool> {
     use acp::read_access::DocAccess;
 
+    if identity.is_authenticated() && context.dac_bypass() {
+        return Ok(true);
+    }
     let Some(inputs) = inputs.filter(|_| !acp.supports_transactions()) else {
         let checker = crate::txn::OverlayChecker {
             acp,
             projection,
             identity,
-            dac_bypass,
         };
         return acp::read_access::check_doc_read_access(
             &checker,
@@ -324,9 +357,6 @@ pub async fn check_doc_read_access_with_prepared_inputs(
         })
     }
 
-    if identity.is_authenticated() && dac_bypass {
-        return Ok(true);
-    }
     if !doc_id.is_empty() {
         let object = access_for_object(
             acp,

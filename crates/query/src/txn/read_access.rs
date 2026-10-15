@@ -8,12 +8,14 @@ use super::context::{
     check_doc_access_with_projection, is_doc_registered_with_projection, AcpRegistrationProjection,
 };
 
+/// Object access through a transaction's overlay. The NAC `bypass-dac`
+/// privilege is checked before this rule runs (see
+/// [`super::check_doc_read_access_in`]), as Go's checkDocAccess checks
+/// canDACBypass first on every path.
 pub struct OverlayChecker<'a> {
     pub acp: &'a dyn DocumentACP,
     pub projection: Option<&'a AcpRegistrationProjection>,
     pub identity: &'a Identity,
-    /// The request's DAC bypass (`RequestContext::dac_bypass`).
-    pub dac_bypass: bool,
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -25,15 +27,6 @@ impl ObjectAccessChecker for OverlayChecker<'_> {
         resource_name: &str,
         object_id: &str,
     ) -> acp::Result<DocAccess> {
-        // NAC `bypass-dac` privilege grants full access, exactly as DirectChecker
-        // and Go's checkDocAccess (canDACBypass is the first check on every path).
-        if self.identity.is_authenticated() && self.dac_bypass {
-            return Ok(DocAccess {
-                has_access: true,
-                explicit: true,
-            });
-        }
-
         if !is_doc_registered_with_projection(
             self.acp,
             self.projection,

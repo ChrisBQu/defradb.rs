@@ -141,7 +141,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         &self,
         request: &QueryRequest,
     ) -> Result<Option<std::sync::Arc<crate::prepared::PreparedMutations>>> {
-        let runner = self.for_request(request.context.clone());
+        let runner = self.for_query(request);
         await_with_timeout(runner.prepare_mutations(request), self.query_timeout).await
     }
 
@@ -150,7 +150,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         request: QueryRequest,
         prepared: Option<std::sync::Arc<crate::prepared::PreparedMutations>>,
     ) -> QueryResponse {
-        self.for_request(request.context.clone())
+        self.for_query(&request)
             .run_prepared(request, prepared)
             .await
     }
@@ -161,7 +161,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         prepared: Option<std::sync::Arc<crate::prepared::PreparedMutations>>,
         input: &crate::prepared::PreparedInputRequest,
     ) -> Result<Option<std::sync::Arc<crate::prepared::PreparedMutations>>> {
-        let runner = self.for_request(request.context.clone());
+        let runner = self.for_query(request);
         let Some(prepared) = prepared else {
             return Err(crate::error::QueryError::execution(
                 "retry input has no request preparation capsule",
@@ -189,7 +189,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                                 "retry input has no document mutator",
                             )
                         })?;
-                        mutator.resolve_prepared_input(&runner.context, input).await
+                        mutator
+                            .resolve_prepared_input_in(&runner.context(), input)
+                            .await
                     }
                 }
             })
@@ -237,33 +239,52 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         request: QueryRequest,
         handle: &TransactionHandle,
     ) -> QueryResponse {
-        self.for_request(request.context.clone())
-            .run_in_txn(request, handle)
-            .await
+        self.for_query(&request).run_in_txn(request, handle).await
     }
 
     async fn begin_txn(
         &self,
+        readonly: bool,
+    ) -> std::result::Result<TransactionHandle, TransactionError> {
+        self.registry.begin(readonly).await
+    }
+
+    async fn begin_txn_in(
+        &self,
         context: &RequestContext,
         readonly: bool,
     ) -> std::result::Result<TransactionHandle, TransactionError> {
-        self.registry.begin(context, readonly).await
+        self.registry.begin_in(context, readonly).await
     }
 
     async fn commit_txn(
         &self,
-        context: &RequestContext,
         handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError> {
-        self.registry.commit(context, handle).await
+        self.registry.commit(handle).await
     }
 
-    async fn rollback_txn(
+    async fn commit_txn_in(
         &self,
         context: &RequestContext,
         handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError> {
-        self.registry.rollback(context, handle).await
+        self.registry.commit_in(context, handle).await
+    }
+
+    async fn rollback_txn(
+        &self,
+        handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError> {
+        self.registry.rollback(handle).await
+    }
+
+    async fn rollback_txn_in(
+        &self,
+        context: &RequestContext,
+        handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError> {
+        self.registry.rollback_in(context, handle).await
     }
 
     fn abandon_txn(&self, handle: &TransactionHandle) {
@@ -319,13 +340,13 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         };
 
         if matches!(&parsed, ParsedOperation::Query { .. }) {
-            match self.registry.begin_implicit_read(&self.context).await {
+            match self.registry.begin_implicit_read_in(&self.context()).await {
                 Ok(handle) => {
                     let response = self.run_in_txn(request.clone(), &handle).await;
                     let apply_read_effects = response.errors.is_empty();
                     if let Err(error) = self
                         .registry
-                        .finish_implicit_read(&self.context, &handle, apply_read_effects)
+                        .finish_implicit_read_in(&self.context(), &handle, apply_read_effects)
                         .await
                     {
                         if apply_read_effects {
@@ -490,7 +511,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
     /// [`QueryExecutor::execute_in_txn`] on a runner bound to the request.
     async fn run_in_txn(&self, request: QueryRequest, handle: &TransactionHandle) -> QueryResponse {
-        let txn_ctx = match self.registry.get(&self.context, handle) {
+        let txn_ctx = match self.registry.get_in(&self.context(), handle) {
             GetTransactionResult::Found(ctx) => ctx,
             GetTransactionResult::NotFound => {
                 return QueryResponse::error(format!(
@@ -698,9 +719,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                     txn_ctx
                                         .finish_statement_savepoint(false)
                                         .map_err(crate::error::QueryError::execution)?;
+                                    let context = self.context();
                                     inputs
                                         .answer_miss(&input, || {
-                                            mutator.resolve_prepared_input(&self.context, &input)
+                                            mutator.resolve_prepared_input_in(&context, &input)
                                         })
                                         .await?;
                                     txn_ctx

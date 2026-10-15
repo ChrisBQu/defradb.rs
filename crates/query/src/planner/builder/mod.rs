@@ -83,7 +83,8 @@ pub struct Planner {
     acp_registration_projection: Option<Arc<crate::txn::AcpRegistrationProjection>>,
     /// Identity for ACP permission checks
     identity_did: Option<Did>,
-    /// The request's DAC bypass (`RequestContext::dac_bypass`)
+    /// The request's DAC bypass (`RequestContext::dac_bypass`); that of
+    /// `RequestContext::ambient` until `with_dac_bypass` sets it
     dac_bypass: bool,
     /// App read validator, applied after ACP
     retry_inputs: Option<crate::prepared::PreparedInputMemo>,
@@ -132,7 +133,7 @@ impl Planner {
             acp: None,
             acp_registration_projection: None,
             identity_did: None,
-            dac_bypass: false,
+            dac_bypass: defra_core::RequestContext::ambient().dac_bypass(),
             read_validator: None,
             retry_inputs: None,
             fts_scores: RapidHashMap::new(),
@@ -177,16 +178,15 @@ impl Planner {
         self
     }
 
-    /// Set ACP, the reading identity and the request's DAC bypass for
-    /// permission filtering in plans.
-    pub fn with_acp(
-        mut self,
-        acp: Arc<dyn DocumentACP>,
-        identity_did: Option<Did>,
-        dac_bypass: bool,
-    ) -> Self {
+    /// Set ACP and identity for permission filtering in plans.
+    pub fn with_acp(mut self, acp: Arc<dyn DocumentACP>, identity_did: Option<Did>) -> Self {
         self.acp = Some(acp);
         self.identity_did = identity_did;
+        self
+    }
+
+    /// Set the request's DAC bypass for permission filtering in plans.
+    pub fn with_dac_bypass(mut self, dac_bypass: bool) -> Self {
         self.dac_bypass = dac_bypass;
         self
     }

@@ -22,11 +22,12 @@ pub trait ObjectAccessChecker: MaybeSendSync {
     ) -> Result<DocAccess>;
 }
 
+/// Object access straight through a document ACP. A caller whose request
+/// holds the NAC `bypass-dac` privilege checks it before this rule runs, as
+/// Go's checkDocAccess checks canDACBypass first on every path.
 pub struct DirectChecker<'a> {
     pub acp: &'a dyn DocumentACP,
     pub identity: &'a Identity,
-    /// The request's DAC bypass (`RequestContext::dac_bypass`).
-    pub dac_bypass: bool,
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -38,13 +39,6 @@ impl ObjectAccessChecker for DirectChecker<'_> {
         resource_name: &str,
         object_id: &str,
     ) -> Result<DocAccess> {
-        if self.identity.is_authenticated() && self.dac_bypass {
-            return Ok(DocAccess {
-                has_access: true,
-                explicit: true,
-            });
-        }
-
         if !self
             .acp
             .is_doc_registered(policy_id, resource_name, object_id)
