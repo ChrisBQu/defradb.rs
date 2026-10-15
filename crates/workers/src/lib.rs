@@ -4,16 +4,21 @@
 //! code kept off the workers, and shutdown.
 
 mod clock;
+mod completion;
 mod config;
 mod error;
 mod hook;
 mod os;
 mod placement;
 pub mod topology;
+mod worker;
 
 pub use clock::{Clock, EnvClock};
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub use clock::StdClock;
+pub use completion::Completion;
+#[cfg(not(target_family = "wasm"))]
+pub use completion::{block_on, block_on_timeout};
 pub use config::{
     Config, MemoryLock, MemoryPolicy, Placement, Priorities, Priority, QosClass, RealTimePolicy, Smt,
     ThreadClass, Workers,
@@ -21,6 +26,10 @@ pub use config::{
 pub use error::Error;
 pub use hook::{Hook, HookFactory, HookProgress};
 pub use os::Outcome;
+pub use worker::{
+    current_worker, every, on_worker, sleep, spawn_daemon, spawn_local, yield_now, Budget, Sleep,
+    WorkerStats, YieldNow,
+};
 
 /// A worker's identity: its index in the pool and the NUMA node it runs on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
