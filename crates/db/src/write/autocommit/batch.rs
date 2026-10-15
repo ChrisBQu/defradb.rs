@@ -293,7 +293,7 @@ impl<S: Store + 'static> storage::corekv::RetryAttemptFn for BatchRetryAttempt<S
                 .begin_attempt_io()
                 .map_err(storage::corekv::RetryAttemptError::Storage)?;
             let basic_txn = BasicTxn::from_retry_attempt_io(io, 0);
-            let txn = DbTxn::<S>::new(basic_txn);
+            let txn = self.db.new_db_txn(basic_txn);
             let fetcher = Arc::new(
                 crate::LensedDocFetcher::new(self.db.clone(), txn, self.db.lens_store.clone())
                     .with_prepared_inputs(self.prepared_inputs.clone()),

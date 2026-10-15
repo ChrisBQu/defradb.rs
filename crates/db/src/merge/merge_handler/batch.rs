@@ -56,7 +56,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> BatchMergeRetryAtt
             .begin_attempt_io()
             .map_err(|error| MergeError::Database(crate::error::Error::Storage(error)))?;
         let basic_txn = datastore::BasicTxn::from_retry_attempt_io(io, 0);
-        let mut txn = crate::txn::DbTxn::<S>::new(basic_txn);
+        let mut txn = self.handler.db.new_db_txn(basic_txn);
         let batch_merged = cid_set();
         let batch_merged_collections = cid_set();
         let pending_events: SegQueue<PendingMergeEvent> = SegQueue::new();

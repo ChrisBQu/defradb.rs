@@ -561,7 +561,13 @@ impl<S: Store> DB<S> {
         let basic_txn = BasicTxn::new(&*self.store, id, readonly)
             .await
             .map_err(Error::Storage)?;
-        Ok(DbTxn::new(basic_txn).with_vector_codes(self.vector_codes.clone()))
+        Ok(self.new_db_txn(basic_txn))
+    }
+
+    /// Wraps a BasicTxn created by a storage-owned retry attempt while keeping
+    /// database-scoped caches shared with ordinary transactions.
+    pub(crate) fn new_db_txn(&self, basic_txn: BasicTxn) -> DbTxn<S> {
+        DbTxn::new(basic_txn).with_vector_codes(self.vector_codes.clone())
     }
 
     pub(crate) fn vector_codes(&self) -> &crate::index::vector::engine::diskann::CodeCaches {
@@ -799,5 +805,24 @@ impl<S: Store> DB<S> {
     /// Get the current transaction ID counter value.
     pub fn current_txn_id(&self) -> u64 {
         self.txn_id_counter.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg(test)]
+mod vector_cache_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn retry_transactions_share_database_vector_code_caches() {
+        let db = DB::new(storage::RegolithStore::in_memory().unwrap()).unwrap();
+        let ordinary = db.new_txn(true).await.unwrap();
+        let basic = BasicTxn::new(&*db.store, db.next_txn_id(), true)
+            .await
+            .unwrap();
+        let retry = db.new_db_txn(basic);
+
+        let ordinary_cache = ordinary.vector_codes().get(17, 29);
+        let retry_cache = retry.vector_codes().get(17, 29);
+        assert!(Arc::ptr_eq(&ordinary_cache, &retry_cache));
     }
 }
