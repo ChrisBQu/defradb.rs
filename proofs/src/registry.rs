@@ -99,7 +99,7 @@ pub const PROPERTIES: &[Property] = &[
         tiers: &[Boundary],
     },
     Property {
-        family: "Queued push admission",
+        family: "Retry input and marker fencing",
         name: "INV_QueuedPushOwnsLiveMarker — admission requires current durable ownership and elapsed backpressure",
         axis: Tla,
         anchor: "crates/storage/src/stores/peerstore.rs admit_push_scope; crates/p2p-adapter/src/retry.rs spawn_failure_recorder; crates/p2p/src/sync/coordinator/push_worker.rs run_push_job",
