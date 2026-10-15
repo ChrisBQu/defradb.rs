@@ -202,7 +202,7 @@ Document arrivals use the pinned engine's `Transaction::append`, with the docume
 arrival marker as `once_key`. `crates/db/src/event/arrivals.rs` never allocates a
 position itself; rows and their cursor positions appear only after commit. The
 binding in `src/registry.rs` is to
-[CommitOrderedAppend.tla](https://github.com/sourcenetwork/regolith/blob/d1e36aa747913f6b1ecc14c821f4e5e6314674cf/proofs/tla/CommitOrderedAppend.tla).
+[CommitOrderedAppend.tla](https://github.com/sourcenetwork/regolith/blob/e844baefe838f3af76403afd46c4b42f1a0b98a5/proofs/tla/CommitOrderedAppend.tla).
 Its GREEN Groups/Pipeline/Faults configurations cover dense numbering, commit
 order, at-most-once keys and snapshot prefixes. Counter, OnceFromView and
 AssignBeforeValidation are negative controls. The engine's model is kept at the

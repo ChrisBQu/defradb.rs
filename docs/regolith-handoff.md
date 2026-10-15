@@ -2,7 +2,7 @@
 
 [PR #1953](https://github.com/sourcenetwork/defradb.rs/pull/1953) is the permanent review entry point; the current stack tip is [#1961](https://github.com/sourcenetwork/defradb.rs/pull/1961). The stack represents prep step 0 and all eight §5.2 adoption steps. **All PRs remain drafts and none are merged.** Merge bottom-up, retargeting each next PR only after its base lands.
 
-Scope is new installations only. Existing-store format compatibility and migrations are explicitly waived. Step 9's worker-pool redesign is excluded. Regolith is pinned to `d1e36aa747913f6b1ecc14c821f4e5e6314674cf`; the integrated main base is `8a38e96f2`.
+Scope is new installations only. Existing-store format compatibility and migrations are explicitly waived. Step 9's worker-pool redesign is excluded. Regolith is pinned to `e844baefe838f3af76403afd46c4b42f1a0b98a5`; the integrated main base is `8a38e96f2`.
 
 ## Merge order and step map
 

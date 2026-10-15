@@ -87,7 +87,7 @@ pub const PROPERTIES: &[Property] = &[
         name: "dense positions / commit order / at-most-once / snapshot prefix",
         axis: Tla,
         anchor: "crates/db/src/event/arrivals.rs record; crates/storage/src/backends/regolith/transaction.rs append; crates/db/tests/read/arrival_transactions.rs",
-        model_ref: "regolith@d1e36aa747913f6b1ecc14c821f4e5e6314674cf proofs/tla/CommitOrderedAppend.tla (GREEN Groups/Pipeline/Faults, RED Counter/OnceFromView/AssignBeforeValidation)",
+        model_ref: "regolith@e844baefe838f3af76403afd46c4b42f1a0b98a5 proofs/tla/CommitOrderedAppend.tla (GREEN Groups/Pipeline/Faults, RED Counter/OnceFromView/AssignBeforeValidation)",
         tiers: &[Behavioral],
     },
     Property {
@@ -298,7 +298,7 @@ pub const PROPERTIES: &[Property] = &[
         name: "Validated point reads reject crossing writes",
         axis: Tla,
         anchor: "crates/storage/src/backends/regolith/transaction.rs; proofs/tests/behavioral/ssi.rs",
-        model_ref: "regolith@d1e36aa747913f6b1ecc14c821f4e5e6314674cf proofs/tla/DefraLevel.tla",
+        model_ref: "regolith@e844baefe838f3af76403afd46c4b42f1a0b98a5 proofs/tla/DefraLevel.tla",
         tiers: &[Behavioral, Boundary],
     },
     Property {
