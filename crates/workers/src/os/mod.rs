@@ -59,6 +59,28 @@ pub(crate) trait Os {
     fn lock_memory(&self, future: bool, on_fault: bool) -> io::Result<()>;
     /// `RLIMIT_MEMLOCK` in bytes; `None` when unlimited.
     fn memlock_limit(&self) -> Option<u64>;
+    /// The calling thread's id, by which another thread reads its counters.
+    fn thread_id(&self) -> Option<u64> {
+        None
+    }
+    /// How often thread `tid` of this process was switched out so far.
+    fn context_switches(&self, _tid: u64) -> io::Result<ContextSwitches> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "per-thread context switches are not readable on this platform",
+        ))
+    }
+}
+
+/// How often a thread was switched out of its CPU: because it waited
+/// (`voluntary`: a park, a blocking call) or because the scheduler took the
+/// CPU from it (`involuntary`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ContextSwitches {
+    /// The thread gave up its CPU to wait.
+    pub voluntary: u64,
+    /// The scheduler took its CPU away.
+    pub involuntary: u64,
 }
 
 /// The running platform's calls.

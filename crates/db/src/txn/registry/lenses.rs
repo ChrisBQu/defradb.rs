@@ -15,7 +15,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         self.db
             .check_node_access(None, acp::nac::NodePermission::LensCreate)
             .await?;
-        let lens = PreparedLens::new(config).await?;
+        let lens = PreparedLens::new(config, self.db.pool()).await?;
         let db = self.db.clone();
         self.in_txn(txn_id, move |owned| {
             Box::pin(async move {

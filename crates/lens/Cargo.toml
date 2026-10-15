@@ -26,6 +26,8 @@ rapidhash.workspace = true
 # Lock-free shared state, and the waits a lens call makes
 kovan-map.workspace = true
 regolith.workspace = true
+# Epoch ticks as a job of the worker pool's deadline queue.
+workers = { path = "../workers" }
 
 # Serialization
 serde.workspace = true

@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
+use defra_core::thread_bounds::MaybeSend;
 use futures::future::LocalBoxFuture;
 use regolith::sync::{UnboundedReceiver, UnboundedSender};
 use web_time::Instant;
@@ -22,10 +23,18 @@ use web_time::Instant;
 use super::{Shared, TxnId};
 
 /// A request's work on the transaction.
+#[cfg(not(target_family = "wasm"))]
 pub(super) type Work<T> = Box<dyn for<'t> FnOnce(&'t mut T) -> LocalBoxFuture<'t, ()> + Send>;
+/// A request's work on the transaction.
+#[cfg(target_family = "wasm")]
+pub(super) type Work<T> = Box<dyn for<'t> FnOnce(&'t mut T) -> LocalBoxFuture<'t, ()>>;
 
 /// The work that ends the transaction, given it by value.
+#[cfg(not(target_family = "wasm"))]
 pub(super) type Last<T> = Box<dyn FnOnce(T) -> LocalBoxFuture<'static, ()> + Send>;
+/// The work that ends the transaction, given it by value.
+#[cfg(target_family = "wasm")]
+pub(super) type Last<T> = Box<dyn FnOnce(T) -> LocalBoxFuture<'static, ()>>;
 
 pub(super) enum Message<T> {
     /// A request.
@@ -49,7 +58,7 @@ pub(super) enum Message<T> {
 /// A request's work, its signature fixed for every lifetime of the borrow.
 pub(super) fn work<T, F>(work: F) -> Work<T>
 where
-    F: for<'t> FnOnce(&'t mut T) -> LocalBoxFuture<'t, ()> + Send + 'static,
+    F: for<'t> FnOnce(&'t mut T) -> LocalBoxFuture<'t, ()> + MaybeSend + 'static,
 {
     Box::new(work)
 }

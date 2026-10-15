@@ -16,6 +16,13 @@ pub struct Histogram {
 
 impl Default for Histogram {
     fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Histogram {
+    /// An empty histogram; usable in a `static`.
+    pub const fn new() -> Self {
         Self {
             buckets: [const { AtomicU64::new(0) }; BUCKETS],
             count: AtomicU64::new(0),
@@ -23,9 +30,7 @@ impl Default for Histogram {
             max: AtomicU64::new(0),
         }
     }
-}
 
-impl Histogram {
     /// Counts `value`.
     pub fn record(&self, value: u64) {
         let bucket = (u64::BITS - value.leading_zeros()) as usize;

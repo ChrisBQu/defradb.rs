@@ -14,7 +14,7 @@ ignored = ["anyhow", "bytes", "libp2p", "multihash", "p2p", "rand", "serde", "se
 [features]
 default = ["p2p", "native", "wasmtime-runtime"]
 p2p = ["dep:libp2p", "p2p/libp2p-transport"]
-native = ["dep:tokio", "events/channel", "acp/native"]
+native = ["events/channel", "acp/native"]
 wasmtime-runtime = ["lens/wasmtime-runtime"]
 
 [lib]
@@ -61,6 +61,8 @@ kovan.workspace = true
 kovan-map.workspace = true
 kovan-queue.workspace = true
 regolith.workspace = true
+# The worker pool: periodic and detached jobs, deadlines.
+workers = { path = "../workers" }
 
 # Random number generation (for Counter CRDT nonces)
 rand.workspace = true
@@ -70,9 +72,6 @@ base64.workspace = true
 hex.workspace = true
 
 libp2p = { workspace = true, optional = true }
-
-# Native-only (optional)
-tokio = { workspace = true, features = ["rt", "fs", "sync", "time"], optional = true }
 
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
@@ -101,8 +100,6 @@ acp = { path = "../acp", default-features = false }
 crdt = { path = "../crdt" }
 events = { path = "../events", default-features = false }
 lens = { path = "../lens", default-features = false }
-# Explicit transactions live on the worker that owns them (txn/owner).
-workers = { path = "../workers" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 p2p = { path = "../p2p", default-features = false }
@@ -111,8 +108,6 @@ p2p = { path = "../p2p", default-features = false }
 # browser build.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 p2p = { path = "../p2p", default-features = false, features = ["iroh-transport"] }
-tokio = { workspace = true, features = ["sync"] }
-wasm-bindgen-futures = "0.4"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "sync", "time", "test-util"] }

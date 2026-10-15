@@ -9,7 +9,6 @@
 //! never fetched there: the statement ends undone, the edge fetches the
 //! input, and submits the request again with the input in its memo.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use identity::Did;
@@ -198,10 +197,11 @@ where
             // provider before the storage transaction commits. The mutator's
             // ordered hook registration will fail closed if it cannot retain
             // hooks.
-            scoped_runner.acp_registration_projection =
-                Some(txn_ctx.acp_registration_projection().unwrap_or_else(|| {
-                    Arc::new(crate::txn::AcpRegistrationProjection::detached())
-                }));
+            scoped_runner.acp_registration_projection = Some(
+                txn_ctx
+                    .acp_registration_projection()
+                    .unwrap_or_else(crate::txn::AcpRegistrationProjection::detached_shared),
+            );
         }
 
         let execution = async {

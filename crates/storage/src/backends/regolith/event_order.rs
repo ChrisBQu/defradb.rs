@@ -469,9 +469,10 @@ mod tests {
         let fixture = Fixture::new();
         let mut txn = fixture.db.begin(&TxnOptions::new());
         txn.put(b"a", b"v").unwrap();
-        let binding = fixture
-            .order
-            .bind(&mut txn, vec![fixture.event(10), fixture.event(11)], false);
+        let binding =
+            fixture
+                .order
+                .bind(&mut txn, vec![fixture.event(10), fixture.event(11)], false);
         txn.commit().unwrap();
         binding.hand_over(true);
         assert_eq!(fixture.out(), vec![10, 11]);

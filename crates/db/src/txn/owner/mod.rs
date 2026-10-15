@@ -19,7 +19,6 @@
 //! pool gone), so its holder's `Drop` discards it, every time.
 
 mod actor;
-mod fallback;
 mod id;
 mod table;
 #[cfg(test)]
@@ -30,14 +29,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use defra_core::thread_bounds::MaybeSend;
 use futures::future::LocalBoxFuture;
-use regolith::sync::{unbounded, Event};
-use workers::{Pool, Submit, Target};
+use regolith::sync::unbounded;
+#[cfg(not(target_family = "wasm"))]
+use regolith::sync::Event;
+use workers::Target;
+#[cfg(not(target_family = "wasm"))]
+use workers::{Pool, Submit};
 
 use actor::Message;
 use table::{Entry, Table};
 
-pub(crate) use fallback::one_worker;
 pub(crate) use id::TxnId;
 
 /// Why a request could not reach its transaction.
@@ -83,11 +86,15 @@ where
 /// kept with the key of the caller that may use it (`K`): a caller with
 /// another key is told the transaction does not exist, before anything is
 /// sent to its owner.
+///
+/// In a browser the page's thread is the one worker: every call already runs
+/// there, so the work runs in place, and nothing needs to be `Send`.
 pub(crate) struct Owners<T, K>
 where
     T: 'static,
     K: Clone + PartialEq + Send + Sync + 'static,
 {
+    #[cfg(not(target_family = "wasm"))]
     pool: Pool,
     shared: Arc<Shared<T, K>>,
 }
@@ -97,6 +104,8 @@ where
     T: 'static,
     K: Clone + PartialEq + Send + Sync + 'static,
 {
+    /// The transactions of a registry on the workers of `pool`.
+    #[cfg(not(target_family = "wasm"))]
     pub(crate) fn new(pool: Pool) -> Self {
         let tables = (0..pool.workers()).map(|_| Table::new()).collect();
         Self {
@@ -105,13 +114,71 @@ where
         }
     }
 
-    /// The pool the transactions live on.
-    pub(crate) fn pool(&self) -> &Pool {
-        &self.pool
+    /// The transactions of a registry on the page's one worker.
+    #[cfg(target_family = "wasm")]
+    pub(crate) fn here() -> Self {
+        Self {
+            shared: Arc::new(Shared {
+                tables: Box::new([Table::new()]),
+            }),
+        }
+    }
+
+    /// How many workers own transactions.
+    fn workers(&self) -> usize {
+        self.shared.tables.len()
     }
 
     fn table(&self, id: TxnId) -> &Table<T, K> {
-        &self.shared.tables[id.owner(self.pool.workers())]
+        &self.shared.tables[id.owner(self.workers())]
+    }
+
+    /// Runs the work `make` builds on `target`, a worker of the pool, and
+    /// gives back its output.
+    #[cfg(not(target_family = "wasm"))]
+    async fn place<F, Fut>(
+        &self,
+        target: Target,
+        name: &'static str,
+        make: F,
+    ) -> Result<Fut::Output, Unavailable>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future + 'static,
+        Fut::Output: Send + 'static,
+    {
+        let placed = self.pool.submit_with(target, named(name), make).await?;
+        Ok(placed.await?)
+    }
+
+    /// The page's one worker is the calling thread: the work runs in place.
+    #[cfg(target_family = "wasm")]
+    async fn place<F, Fut>(
+        &self,
+        _target: Target,
+        _name: &'static str,
+        make: F,
+    ) -> Result<Fut::Output, Unavailable>
+    where
+        F: FnOnce() -> Fut + 'static,
+        Fut: Future + 'static,
+    {
+        Ok(make().await)
+    }
+
+    /// Runs the work `make` builds on the least loaded worker, outside every
+    /// transaction (a standalone read), and gives back its output.
+    pub(crate) async fn run_anywhere<F, Fut>(
+        &self,
+        name: &'static str,
+        make: F,
+    ) -> Result<Fut::Output, Unavailable>
+    where
+        F: FnOnce() -> Fut + MaybeSend + 'static,
+        Fut: Future + 'static,
+        Fut::Output: MaybeSend + 'static,
+    {
+        self.place(Target::LeastLoaded, name, make).await
     }
 
     /// Opens a transaction with `open`, given its ID, on the least loaded
@@ -125,48 +192,37 @@ where
         open: O,
     ) -> Result<Result<TxnId, E>, Unavailable>
     where
-        O: FnOnce(TxnId) -> Fut + Send + 'static,
+        O: FnOnce(TxnId) -> Fut + MaybeSend + 'static,
         Fut: Future<Output = Result<T, E>> + 'static,
-        E: Send + 'static,
+        E: MaybeSend + 'static,
     {
         let shared = Arc::downgrade(&self.shared);
-        let workers = self.pool.workers();
-        let opened = self
-            .pool
-            .submit_with(
-                Target::LeastLoaded,
-                named("txn.begin"),
-                move || async move {
-                    let worker = workers::current_worker()
-                        .map(|worker| worker.index)
-                        .ok_or(Unavailable::Pool(workers::Error::NotOnWorker))?;
-                    let sequence = match shared.upgrade() {
-                        Some(tables) => tables.tables[worker].draw(),
-                        None => return Err(Unavailable::NotFound),
-                    };
-                    let id = TxnId::new(sequence, worker, workers).ok_or(Unavailable::Exhausted)?;
-                    let txn = match open(id).await {
-                        Ok(txn) => txn,
-                        Err(error) => return Ok(Err(error)),
-                    };
-                    let (mailbox, inbox) = unbounded();
-                    match shared.upgrade() {
-                        Some(tables) => tables.tables[worker].insert(id, Entry { mailbox, key }),
-                        None => return Err(Unavailable::NotFound),
-                    }
-                    if let Err(error) =
-                        workers::spawn_daemon(actor::own(txn, id, worker, inbox, shared.clone()))
-                    {
-                        if let Some(tables) = shared.upgrade() {
-                            tables.tables[worker].remove(id);
-                        }
-                        return Err(Unavailable::Pool(error));
-                    }
-                    Ok(Ok(id))
-                },
-            )
-            .await?;
-        opened.await?
+        let workers = self.workers();
+        self.place(Target::LeastLoaded, "txn.begin", move || async move {
+            let worker = here()?;
+            let sequence = match shared.upgrade() {
+                Some(tables) => tables.tables[worker].draw(),
+                None => return Err(Unavailable::NotFound),
+            };
+            let id = TxnId::new(sequence, worker, workers).ok_or(Unavailable::Exhausted)?;
+            let txn = match open(id).await {
+                Ok(txn) => txn,
+                Err(error) => return Ok(Err(error)),
+            };
+            let (mailbox, inbox) = unbounded();
+            match shared.upgrade() {
+                Some(tables) => tables.tables[worker].insert(id, Entry { mailbox, key }),
+                None => return Err(Unavailable::NotFound),
+            }
+            if let Err(error) = start(actor::own(txn, id, worker, inbox, shared.clone())) {
+                if let Some(tables) = shared.upgrade() {
+                    tables.tables[worker].remove(id);
+                }
+                return Err(Unavailable::Pool(error));
+            }
+            Ok(Ok(id))
+        })
+        .await?
     }
 
     /// Runs `work` on transaction `id`, on its owner, after every request for
@@ -175,8 +231,8 @@ where
     /// for a transaction that does not exist.
     pub(crate) async fn run<R, W>(&self, id: TxnId, key: &K, work: W) -> Result<R, Unavailable>
     where
-        R: Send + 'static,
-        W: for<'t> FnOnce(&'t mut T) -> LocalBoxFuture<'t, R> + Send + 'static,
+        R: MaybeSend + 'static,
+        W: for<'t> FnOnce(&'t mut T) -> LocalBoxFuture<'t, R> + MaybeSend + 'static,
     {
         if !self.table(id).admits(id, key) {
             return Err(Unavailable::NotFound);
@@ -199,8 +255,8 @@ where
     /// unfinished.
     pub(crate) async fn finish<R, L>(&self, id: TxnId, key: &K, last: L) -> Result<R, Unavailable>
     where
-        R: Send + 'static,
-        L: FnOnce(T) -> LocalBoxFuture<'static, R> + Send + 'static,
+        R: MaybeSend + 'static,
+        L: FnOnce(T) -> LocalBoxFuture<'static, R> + MaybeSend + 'static,
     {
         if !self.table(id).admits(id, key) {
             return Err(Unavailable::NotFound);
@@ -208,7 +264,7 @@ where
         let cancelled = Arc::new(AtomicBool::new(false));
         let abandon_on_drop = AbandonOnDrop {
             table: Arc::downgrade(&self.shared),
-            owner: id.owner(self.pool.workers()),
+            owner: id.owner(self.workers()),
             id,
             cancelled: Some(Arc::clone(&cancelled)),
         };
@@ -239,42 +295,33 @@ where
     /// each after the requests queued before this sweep reached it, and says
     /// how many ended.
     pub(crate) async fn expire_idle(&self, max_idle: Duration) -> Result<usize, Unavailable> {
-        let mut replies = Vec::with_capacity(self.pool.workers());
-        for worker in 0..self.pool.workers() {
+        let sweeps = (0..self.workers()).map(|worker| {
             let shared = Arc::downgrade(&self.shared);
-            let completion = self
-                .pool
-                .submit_with(
-                    Target::Worker(worker),
-                    named("txn.sweep"),
-                    move || async move {
-                        let Some(shared) = shared.upgrade() else {
-                            return 0;
-                        };
-                        let (reply, answers) = unbounded();
-                        let asked = shared.tables[worker].send_all(|| Message::Expire {
-                            max_idle,
-                            reply: Some(reply.clone()),
-                        });
-                        drop(reply);
-                        drop(shared);
-                        let mut ended = 0;
-                        for _ in 0..asked {
-                            match answers.recv_async().await {
-                                Some(true) => ended += 1,
-                                Some(false) => {}
-                                None => break,
-                            }
-                        }
-                        ended
-                    },
-                )
-                .await?;
-            replies.push(completion);
-        }
+            self.place(Target::Worker(worker), "txn.sweep", move || async move {
+                let Some(shared) = shared.upgrade() else {
+                    return 0;
+                };
+                let (reply, answers) = unbounded();
+                let asked = shared.tables[worker].send_all(|| Message::Expire {
+                    max_idle,
+                    reply: Some(reply.clone()),
+                });
+                drop(reply);
+                drop(shared);
+                let mut ended = 0;
+                for _ in 0..asked {
+                    match answers.recv_async().await {
+                        Some(true) => ended += 1,
+                        Some(false) => {}
+                        None => break,
+                    }
+                }
+                ended
+            })
+        });
         let mut ended = 0;
-        for reply in replies {
-            ended += reply.await?;
+        for swept in futures::future::join_all(sweeps).await {
+            ended += swept?;
         }
         Ok(ended)
     }
@@ -284,9 +331,10 @@ where
     /// it for `max_idle`. The ask is a message, queued behind the requests
     /// already there. Runs until [`Sweep::stop`], or the registry or the pool
     /// goes; dropping the handle leaves it running.
+    #[cfg(not(target_family = "wasm"))]
     pub(crate) fn sweep(&self, max_idle: Duration, every: Duration) -> Result<Sweep, Unavailable> {
         let stop = Arc::new(Event::new());
-        for worker in 0..self.pool.workers() {
+        for worker in 0..self.workers() {
             let shared = Arc::downgrade(&self.shared);
             let stopped = stop.clone();
             // The start runs on its worker by itself; nothing waits for it.
@@ -329,27 +377,25 @@ where
     /// was dropped, or never queued) means no such transaction.
     async fn send<R, B>(&self, id: TxnId, name: &'static str, build: B) -> Result<R, Unavailable>
     where
-        R: Send + 'static,
-        B: FnOnce(regolith::sync::UnboundedSender<R>) -> Message<T> + Send + 'static,
+        R: MaybeSend + 'static,
+        B: FnOnce(regolith::sync::UnboundedSender<R>) -> Message<T> + MaybeSend + 'static,
     {
         let shared = Arc::downgrade(&self.shared);
-        let owner = id.owner(self.pool.workers());
-        let replied = self
-            .pool
-            .submit_with(Target::Worker(owner), named(name), move || {
-                let (reply, answer) = unbounded();
-                let queued = shared
-                    .upgrade()
-                    .is_some_and(|shared| shared.tables[owner].send(id, build(reply)).is_ok());
-                async move {
-                    match queued {
-                        true => answer.recv_async().await,
-                        false => None,
-                    }
+        let owner = id.owner(self.workers());
+        self.place(Target::Worker(owner), name, move || {
+            let (reply, answer) = unbounded();
+            let queued = shared
+                .upgrade()
+                .is_some_and(|shared| shared.tables[owner].send(id, build(reply)).is_ok());
+            async move {
+                match queued {
+                    true => answer.recv_async().await,
+                    false => None,
                 }
-            })
-            .await?;
-        replied.await?.ok_or(Unavailable::NotFound)
+            }
+        })
+        .await?
+        .ok_or(Unavailable::NotFound)
     }
 }
 
@@ -405,10 +451,12 @@ where
 }
 
 /// The idle sweep's handle. Dropping it leaves the sweep running.
+#[cfg(not(target_family = "wasm"))]
 pub struct Sweep {
     stop: Arc<Event>,
 }
 
+#[cfg(not(target_family = "wasm"))]
 impl Sweep {
     /// A sweep that does not run.
     pub fn stopped() -> Self {
@@ -428,9 +476,51 @@ impl Sweep {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn named(name: &'static str) -> Submit {
     Submit {
         name: Some(name),
         bytes: None,
     }
+}
+
+/// The index of the calling worker, which owns what it begins.
+#[cfg(not(target_family = "wasm"))]
+fn here() -> Result<usize, Unavailable> {
+    workers::current_worker()
+        .map(|worker| worker.index)
+        .ok_or(Unavailable::Pool(workers::Error::NotOnWorker))
+}
+
+/// The page's thread is the one worker, whether or not it is driving the
+/// pool when a transaction begins.
+#[cfg(target_family = "wasm")]
+fn here() -> Result<usize, Unavailable> {
+    Ok(0)
+}
+
+/// Starts a transaction's actor on the calling worker, as a daemon: pool
+/// shutdown does not wait for it, and it is dropped (its transaction
+/// discarded) when the worker stops.
+#[cfg(not(target_family = "wasm"))]
+fn start<F>(actor: F) -> Result<(), workers::Error>
+where
+    F: Future<Output = ()> + 'static,
+{
+    workers::spawn_daemon(actor)
+}
+
+/// On the page's worker the actor is one of its daemons; called while the
+/// page itself runs (a test, a call that did not come through the pool) the
+/// browser's executor runs it, on the same thread.
+#[cfg(target_family = "wasm")]
+fn start<F>(actor: F) -> Result<(), workers::Error>
+where
+    F: Future<Output = ()> + 'static,
+{
+    if workers::on_worker() {
+        return workers::spawn_daemon(actor);
+    }
+    drop(n0_future::task::spawn(actor));
+    Ok(())
 }

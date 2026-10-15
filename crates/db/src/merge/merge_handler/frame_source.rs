@@ -6,14 +6,29 @@
 
 use super::*;
 
+// The frames that carry a source sit beside exit frames that hold a block and a
+// payload by value, so boxing the root would add an allocation per merge and
+// shrink nothing.
+#[allow(clippy::large_enum_variant)]
 pub(super) enum FrameSource<P> {
-    Root { block: Block, payload: P },
-    Parent { child_cid: Cid },
+    /// The walk's one root.
+    Root(Block, P),
+    Parent {
+        child_cid: Cid,
+    },
 }
 
 impl<P> FrameSource<P> {
+    /// The root frame of a walk over `block`, merging `payload`.
+    pub(super) fn root(block: &Block, payload: &P) -> Self
+    where
+        P: Clone,
+    {
+        Self::Root(block.clone(), payload.clone())
+    }
+
     pub(super) fn is_root(&self) -> bool {
-        matches!(self, Self::Root { .. })
+        matches!(self, Self::Root(..))
     }
 }
 
@@ -57,7 +72,7 @@ where
         P: FramePayload,
     {
         let child_cid = match source {
-            FrameSource::Root { block, payload } => return Some((block, payload)),
+            FrameSource::Root(block, payload) => return Some((block, payload)),
             FrameSource::Parent { child_cid } => child_cid,
         };
         let data = match self.blockstore.get(cid).await {

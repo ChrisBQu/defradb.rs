@@ -142,8 +142,12 @@ async fn updates_of_the_same_field_still_conflict() {
     let id = node.create(ANN).await;
     let outcome = node
         .commit_both(
-            &format!(r#"mutation {{ update_Users(docID: "{id}", input: {{age: 31}}) {{ _docID }} }}"#),
-            &format!(r#"mutation {{ update_Users(docID: "{id}", input: {{age: 32}}) {{ _docID }} }}"#),
+            &format!(
+                r#"mutation {{ update_Users(docID: "{id}", input: {{age: 31}}) {{ _docID }} }}"#
+            ),
+            &format!(
+                r#"mutation {{ update_Users(docID: "{id}", input: {{age: 32}}) {{ _docID }} }}"#
+            ),
         )
         .await;
     assert!(outcome.is_err(), "two writes of one field both committed");
@@ -233,8 +237,12 @@ async fn updates_of_a_downsample_source_both_commit() {
         .create(r#"mutation { add_Metric(input: {label: "cpu", note: "a", ts: "2026-01-01T00:00:00Z", value: 1}) { _docID } }"#)
         .await;
     node.both_commit(
-        &format!(r#"mutation {{ update_Metric(docID: "{id}", input: {{label: "gpu"}}) {{ _docID }} }}"#),
-        &format!(r#"mutation {{ update_Metric(docID: "{id}", input: {{note: "b"}}) {{ _docID }} }}"#),
+        &format!(
+            r#"mutation {{ update_Metric(docID: "{id}", input: {{label: "gpu"}}) {{ _docID }} }}"#
+        ),
+        &format!(
+            r#"mutation {{ update_Metric(docID: "{id}", input: {{note: "b"}}) {{ _docID }} }}"#
+        ),
     )
     .await;
     let metrics = node.query("{ Metric { label note } }").await;
@@ -254,7 +262,9 @@ async fn counter_updates_returning_the_counter_both_commit() {
         .await;
     node.both_commit(
         &format!(r#"mutation {{ update_Counted(docID: "{id}", input: {{hits: 1}}) {{ hits }} }}"#),
-        &format!(r#"mutation {{ update_Counted(docID: "{id}", input: {{hits: 2}}) {{ label hits }} }}"#),
+        &format!(
+            r#"mutation {{ update_Counted(docID: "{id}", input: {{hits: 2}}) {{ label hits }} }}"#
+        ),
     )
     .await;
     node.both_commit(

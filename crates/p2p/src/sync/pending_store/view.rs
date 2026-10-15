@@ -156,10 +156,7 @@ impl PersistedView {
     }
 
     /// The commit of a sweep that read `records`: the view becomes them.
-    pub(super) fn swept(
-        self: &Arc<Self>,
-        records: &[(Cid, PersistedPendingDag)],
-    ) -> TxnCallback {
+    pub(super) fn swept(self: &Arc<Self>, records: &[(Cid, PersistedPendingDag)]) -> TxnCallback {
         let view = Arc::clone(self);
         let roots: RapidHashSet<Cid> = records.iter().map(|(root, _)| *root).collect();
         let heads: Vec<(Scope, HeadVersion)> = records

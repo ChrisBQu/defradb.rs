@@ -29,7 +29,9 @@ struct MarkVerified(HopscotchMap<TransformId, (), RandomState>);
 #[async_trait]
 impl TransformStore for MarkVerified {
     fn new_isolated_store(&self) -> Arc<dyn TransformStore> {
-        Arc::new(MarkVerified(HopscotchMap::with_hasher(RandomState::default())))
+        Arc::new(MarkVerified(HopscotchMap::with_hasher(
+            RandomState::default(),
+        )))
     }
 
     async fn add(&self, config: LensConfig) -> lens::Result<TransformId> {

@@ -29,6 +29,7 @@ impl Node {
         zanzibar_store: Arc<dyn acp::ZanzibarStore>,
         node_identity: Option<Arc<identity::RawIdentity>>,
         se_key: Option<[u8; 32]>,
+        pool: &workers::Pool,
         edge: &edge::Edge,
     ) -> Result<ServerSetup> {
         let user_did = match &user_identity {
@@ -83,8 +84,9 @@ impl Node {
             info!("Stored node identity signing config for DID {}", did);
         }
 
-        let mut db_options =
-            db::DbOptions::new().with_max_txn_retries(config.datastore.max_txn_retries);
+        let mut db_options = db::DbOptions::new()
+            .with_max_txn_retries(config.datastore.max_txn_retries)
+            .with_pool(pool.clone());
         if let Some(identity) = node_identity.as_ref() {
             db_options = db_options.with_node_identity_arc(identity.clone());
             info!("Database configured with node identity");
@@ -337,7 +339,7 @@ impl Node {
         })?;
         #[cfg(feature = "postgres")]
         let pg_server = Self::build_pg_server(
-            database,
+            database.clone(),
             config,
             &query_setup,
             &acp_setup,
@@ -345,6 +347,7 @@ impl Node {
         )?;
 
         Ok(ServerSetup {
+            database,
             p2p_handle: p2p_setup.host_handle,
             p2p_tasks: p2p_setup.p2p_tasks,
             downsample_task,

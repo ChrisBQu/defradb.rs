@@ -59,6 +59,7 @@ impl Worker {
         if on_worker() {
             return Err(Error::OnWorker);
         }
+        shared.bind_thread();
         let unpark = Waker::from(shared.signal.clone());
         let budget = tuning.io_budget;
         let local = Rc::new(Local::new(shared, clock, tuning));

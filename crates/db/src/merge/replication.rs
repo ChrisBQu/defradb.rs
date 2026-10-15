@@ -9,10 +9,9 @@ use std::sync::Arc;
 use crate::database::DB;
 use blockstore::Blockstore;
 use cid::Cid;
-use p2p::sync::{DocumentHeadProvider, PushFailure, SyncCoordinator};
+use p2p::sync::{DocumentHeadProvider, PushFailureReceiver, SyncCoordinator};
 use p2p::transport::P2PTransport;
 use storage::corekv::Store;
-use tokio::sync::mpsc;
 
 use crate::event::emission::TxnBroadcaster;
 use crate::merge::acp_merge_handler::AcpMergeHandler;
@@ -34,6 +33,23 @@ pub struct ReplicationStack<
     /// `DbTransactionRegistry::with_broadcaster` so committed `/tx` mutations
     /// reach P2P peers just like single-mutation auto-commit writes do.
     pub txn_broadcaster: Arc<dyn TxnBroadcaster>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<S, B, T> ReplicationStack<S, B, T>
+where
+    S: Store + 'static,
+    B: Blockstore + defra_core::thread_bounds::MaybeSendSync + 'static,
+    T: P2PTransport,
+{
+    /// The merge handler the replication loop calls: each merge runs on the
+    /// database's worker pool, on its document's worker.
+    pub fn merge_handler_on_pool(&self) -> Arc<crate::merge::PooledMergeHandler<AcpMergeHandler<S, B>>> {
+        Arc::new(crate::merge::PooledMergeHandler::new(
+            Arc::clone(&self.merge_handler),
+            self.merge_handler_inner.db.pool().cloned(),
+        ))
+    }
 }
 
 pub fn create_head_provider<S: Store>(db: Arc<DB<S>>) -> DbHeadProvider<S> {
@@ -112,10 +128,8 @@ pub fn create_replication_stack_with_max_merge_depth<
 pub fn attach_failure_channel<B: Blockstore + 'static, T: P2PTransport>(
     coordinator: &mut SyncCoordinator<B, T>,
     capacity: usize,
-) -> mpsc::Receiver<PushFailure> {
-    let (failure_tx, failure_rx) = mpsc::channel::<PushFailure>(capacity);
-    coordinator.set_failure_channel(failure_tx);
-    failure_rx
+) -> PushFailureReceiver {
+    coordinator.attach_failure_channel(capacity)
 }
 
 pub async fn load_persisted_collections<B: Blockstore + 'static, T: P2PTransport>(

@@ -197,6 +197,11 @@ impl<S: Store + 'static> IrohPeer<S> {
         let manage_hooks = crate::manage::hooks::new_manage_hooks_cell();
 
         let replication_coordinator = Arc::clone(&coordinator);
+        // Natively each merge runs on the database's worker pool, on its
+        // document's worker; a browser's one worker is this thread.
+        #[cfg(not(target_arch = "wasm32"))]
+        let merge_handler = replication.merge_handler_on_pool();
+        #[cfg(target_arch = "wasm32")]
         let merge_handler = Arc::clone(&replication.merge_handler);
         let replication_bus = Arc::clone(&event_bus);
         let replication_peer = local_peer_id.clone();
@@ -241,16 +246,28 @@ impl<S: Store + 'static> IrohPeer<S> {
         // The fallback for a deferred verdict no arrival can release: one
         // named nothing, one past the index's capacity, and everything the
         // index held before this process started.
-        let sweep_handler = Arc::clone(&replication.merge_handler_inner);
-        let sweep_shutdown = coordinator.shutdown_handle();
-        coordinator.spawn_background_task("governance_sweep", async move {
-            db::merge::governance::run_governance_sweep(
-                sweep_handler,
-                db::merge::governance::SWEEP_INTERVAL,
-                sweep_shutdown,
-            )
-            .await;
-        });
+        // Natively it runs on the database's worker pool; in a browser the
+        // page's one worker is this thread, so the sweep is a task here.
+        // Either way it ends with the coordinator's shutdown.
+        #[cfg(not(target_arch = "wasm32"))]
+        drop(db::merge::governance::start_governance_sweep(
+            Arc::clone(&replication.merge_handler_inner),
+            db::merge::governance::SWEEP_INTERVAL,
+            coordinator.shutdown_handle(),
+        ));
+        #[cfg(target_arch = "wasm32")]
+        {
+            let sweep_handler = Arc::clone(&replication.merge_handler_inner);
+            let sweep_shutdown = coordinator.shutdown_handle();
+            coordinator.spawn_background_task("governance_sweep", async move {
+                db::merge::governance::run_governance_sweep(
+                    sweep_handler,
+                    db::merge::governance::SWEEP_INTERVAL,
+                    sweep_shutdown,
+                )
+                .await;
+            });
+        }
 
         let event_handler_task = spawn_event_handler(
             events,

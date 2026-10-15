@@ -9,11 +9,11 @@ use p2p::sync::{ReplicationConfig, ReplicationLoop};
 use crate::node::EmbeddedMergeHandler;
 
 pub struct BackgroundTasks {
-    tasks: SegQueue<tokio::task::JoinHandle<()>>,
+    tasks: SegQueue<workers::Background>,
 }
 
 impl BackgroundTasks {
-    pub(crate) fn new(tasks: impl IntoIterator<Item = tokio::task::JoinHandle<()>>) -> Self {
+    pub(crate) fn new(tasks: impl IntoIterator<Item = workers::Background>) -> Self {
         let queue = SegQueue::new();
         for task in tasks {
             queue.push(task);
@@ -23,9 +23,9 @@ impl BackgroundTasks {
 
     /// Stop and await all node-owned background tasks.
     ///
-    /// Awaiting cancellation is important for persistent stores: an aborted
-    /// task can retain the final database handle until Tokio next polls it,
-    /// which otherwise leaves the on-disk database lock held after close.
+    /// Awaiting the stop is important for persistent stores: a stopped task
+    /// holds the final database handle until its worker next polls it, which
+    /// otherwise leaves the on-disk database lock held after close.
     pub async fn shutdown(&self) {
         while let Some(task) = self.tasks.pop() {
             task.abort();
@@ -243,7 +243,7 @@ async fn handle_se_artifacts_received<S: storage::corekv::Store + 'static>(
 pub(crate) fn spawn_replication_loop<B, T, S>(
     coordinator: Arc<p2p::sync::SyncCoordinator<B, T>>,
     sync_events_rx: tokio::sync::mpsc::Receiver<p2p::sync::SyncEvent>,
-    merge_handler: Arc<EmbeddedMergeHandler<S>>,
+    merge_handler: Arc<db::merge::PooledMergeHandler<EmbeddedMergeHandler<S>>>,
     event_bus: Arc<dyn events::Bus>,
 ) -> tokio::task::JoinHandle<()>
 where

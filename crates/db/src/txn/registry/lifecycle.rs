@@ -5,7 +5,6 @@ use super::*;
 use async_trait::async_trait;
 use query::txn::{TransactionHandle, TransactionRegistry, TxnJob};
 use storage::corekv::MaybeSend;
-use workers::Target;
 
 /// Runs `job` until it finishes or `timeout` passes on the worker's clock:
 /// `None` then, and the job is dropped.
@@ -97,15 +96,11 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
     where
         T: MaybeSend + 'static,
     {
-        let pool = self
-            .owners()
-            .map_err(|error| TransactionError::execution(error.to_string()))?
-            .pool()
-            .clone();
         let db = self.db.clone();
         let scope = caller();
-        let done = pool
-            .submit(Target::LeastLoaded, move || {
+        self.owners()
+            .map_err(|error| TransactionError::execution(error.to_string()))?
+            .run_anywhere("txn.read", move || {
                 defra_core::current_identity::with_scoped_identity(scope, async move {
                     let txn = db.new_txn(true).await.map_err(|error| {
                         TransactionError::execution(format!("storage error: {}", error))
@@ -119,8 +114,6 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
                 })
             })
             .await
-            .map_err(|error| TransactionError::execution(error.to_string()))?;
-        done.await
             .map_err(|error| TransactionError::execution(error.to_string()))?
     }
 

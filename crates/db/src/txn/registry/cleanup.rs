@@ -32,6 +32,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
     /// worker ends the transactions it owns that no request has used for
     /// longer than `max_idle_age`. Runs until the returned handle is stopped,
     /// or the registry or its pool goes.
+    #[cfg(not(target_family = "wasm"))]
     pub fn start_stale_transaction_cleanup(
         &self,
         max_idle_age: Duration,

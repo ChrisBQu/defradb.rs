@@ -375,8 +375,7 @@ impl Ended {
 
     /// For an end whose caller cannot await, a discard or a drop: the async
     /// callbacks are spawned, one task running them in order, then the sync
-    /// ones run. Without a runtime there is nowhere to spawn them, and that
-    /// is said out loud rather than dropped quietly.
+    /// ones run.
     pub fn run_now(self) {
         if !self.asynchronous.is_empty() {
             spawn_in_order(self.asynchronous);
@@ -387,32 +386,28 @@ impl Ended {
     }
 }
 
-// Data-path work spawned on whichever runtime ended the transaction, not
-// network work: it goes when the data path runs on the worker pool.
-#[cfg(not(target_arch = "wasm32"))]
-#[allow(clippy::disallowed_methods)]
+/// Runs `callbacks` in order as one detached task: on the worker that ended
+/// the transaction, or, off the pool, on the fallback pool (a test, a tool).
 fn spawn_in_order(callbacks: Vec<AsyncTxnCallback>) {
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) => {
-            handle.spawn(async move {
-                for callback in callbacks {
-                    callback().await;
-                }
-            });
+    let count = callbacks.len();
+    let run = async move {
+        for callback in callbacks {
+            callback().await;
         }
-        Err(_) => tracing::warn!(
-            count = callbacks.len(),
-            "async abort callbacks dropped: the transaction ended outside a tokio runtime"
-        ),
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let spawned = workers::spawn_detached(None, "storage::abort_callbacks", move || run);
+    // The browser's one worker is the page's thread, where every transaction
+    // ends, and its callbacks are not `Send`.
+    #[cfg(target_arch = "wasm32")]
+    let spawned = workers::spawn_local(run).map(drop);
+    if let Err(error) = spawned {
+        tracing::error!(
+            count,
+            %error,
+            "async abort callbacks did not run: no worker pool could take them"
+        );
     }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn spawn_in_order(callbacks: Vec<AsyncTxnCallback>) {
-    tracing::warn!(
-        count = callbacks.len(),
-        "async abort callbacks dropped: no runtime to spawn them on"
-    );
 }
 
 /// Helper function to create a simple sync callback from a closure.

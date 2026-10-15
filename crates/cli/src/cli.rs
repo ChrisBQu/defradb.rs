@@ -3,7 +3,7 @@
 use clap::{Parser, Subcommand};
 
 use crate::commands::{
-    ClientArgs, IdentityArgs, KeyringArgs, SdlArgs, ServerDumpArgs, StartArgs, StorageArgs,
+    ClientArgs, IdentityArgs, KeyringArgs, SdlArgs, ServerDumpArgs, StartCommand, StorageArgs,
     VersionArgs,
 };
 use crate::config::Config;
@@ -191,7 +191,7 @@ pub struct Cli {
 #[non_exhaustive]
 pub enum Command {
     /// Start a DefraDB node
-    Start(StartArgs),
+    Start(StartCommand),
 
     /// Display the version information of DefraDB and its components
     Version(VersionArgs),

@@ -3509,7 +3509,10 @@ async fn gossip_block_conflict_is_reported_once_and_not_re_run() {
         SyncEvent::DagReady { sender_peer, .. } => {
             assert_eq!(sender_peer.as_deref(), Some(peer.as_str()));
         }
-        other => panic!("expected DagReady after the head arrived again, got {:?}", other),
+        other => panic!(
+            "expected DagReady after the head arrived again, got {:?}",
+            other
+        ),
     }
 }
 

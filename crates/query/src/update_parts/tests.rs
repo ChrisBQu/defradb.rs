@@ -75,14 +75,16 @@ fn a_written_embedding_source_brings_the_embedding() {
         "vector",
         FieldKind::float64_array(),
     ));
-    collection.vector_embeddings.push(VectorEmbeddingDescription {
-        field_name: "vector".to_string(),
-        fields: vec!["label".to_string(), "note".to_string()],
-        model: "model".to_string(),
-        provider: "openai".to_string(),
-        template: String::new(),
-        url: String::new(),
-    });
+    collection
+        .vector_embeddings
+        .push(VectorEmbeddingDescription {
+            field_name: "vector".to_string(),
+            fields: vec!["label".to_string(), "note".to_string()],
+            model: "model".to_string(),
+            provider: "openai".to_string(),
+            template: String::new(),
+            url: String::new(),
+        });
     assert_eq!(
         planned(&collection, &set(&["label"]), None),
         Some(set(&["label", "note", "vector"]))
@@ -112,7 +114,10 @@ fn a_filter_past_the_document_needs_the_whole_read() {
     let through_alias = filter(serde_json::json!({"_alias": {"total": {"_gt": 1}}}));
     let unknown = filter(serde_json::json!({"missing": {"_eq": 1}}));
     for selected in [through_relation, through_alias, unknown] {
-        assert_eq!(planned(&collection, &set(&["label"]), Some(&selected)), None);
+        assert_eq!(
+            planned(&collection, &set(&["label"]), Some(&selected)),
+            None
+        );
     }
 }
 

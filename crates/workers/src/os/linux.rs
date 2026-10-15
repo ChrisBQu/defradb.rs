@@ -5,7 +5,7 @@
 use std::io;
 use std::mem::size_of;
 
-use super::{MemoryMode, Os, Scheduling};
+use super::{ContextSwitches, MemoryMode, Os, Scheduling};
 use crate::config::{MemoryPolicy, QosClass, RealTimePolicy};
 use crate::topology::{CpuSet, MAX_CPUS};
 
@@ -68,7 +68,33 @@ struct Resource(libc::__rlimit_resource_t);
 #[cfg(not(target_env = "gnu"))]
 struct Resource(libc::c_int);
 
+/// The `voluntary_ctxt_switches` and `nonvoluntary_ctxt_switches` lines of a
+/// `/proc/<pid>/task/<tid>/status` file.
+pub(super) fn parse_switches(status: &str) -> io::Result<ContextSwitches> {
+    let field = |name: &str| {
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix(name))
+            .and_then(|rest| rest.trim().parse::<u64>().ok())
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, format!("no {name} in the thread status"))
+            })
+    };
+    Ok(ContextSwitches {
+        voluntary: field("voluntary_ctxt_switches:")?,
+        involuntary: field("nonvoluntary_ctxt_switches:")?,
+    })
+}
+
 impl Os for System {
+    fn thread_id(&self) -> Option<u64> {
+        Some(u64::from(tid()))
+    }
+
+    fn context_switches(&self, tid: u64) -> io::Result<ContextSwitches> {
+        parse_switches(&std::fs::read_to_string(format!("/proc/self/task/{tid}/status"))?)
+    }
+
     fn thread_affinity(&self) -> io::Result<CpuSet> {
         let mut words = vec![0 as Word; MAX_CPUS / WORD_BITS];
         // SAFETY: the buffer holds `len` bytes, which is what the kernel may

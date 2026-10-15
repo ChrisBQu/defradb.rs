@@ -44,6 +44,8 @@ pub mod fetcher;
 pub mod mutator;
 pub mod plan;
 pub mod planner;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod pooled;
 pub mod txn;
 pub mod update_parts;
 

@@ -10,14 +10,19 @@
 
 #[cfg(not(target_family = "wasm"))]
 mod blocking;
+mod deadline;
+mod detached;
 mod driven;
 mod env;
+mod background;
 mod monitor;
 mod placer;
 mod report;
 mod routing;
 #[cfg(not(target_family = "wasm"))]
 mod start;
+#[cfg(all(test, not(target_family = "wasm")))]
+mod datapath_tests;
 #[cfg(all(test, not(target_family = "wasm")))]
 mod tests;
 
@@ -28,8 +33,12 @@ use std::time::Duration;
 
 use regolith::sync::{Latch, LatchWait};
 
+pub use deadline::{delay, timeout};
+pub use detached::{fallback, spawn, spawn_detached};
 pub use driven::Driver;
 pub use env::PlacedEnv;
+pub use background::{spawn_background, Background};
+pub use monitor::{Monitor, MonitorDriver};
 pub use placer::ThreadPlacement;
 pub use report::{Report, TopologySummary, WorkerReport};
 pub use routing::Target;
@@ -146,6 +155,22 @@ impl PoolShared {
             #[cfg(not(target_family = "wasm"))]
             blocking: None,
         }
+    }
+
+    /// Room for a job of `bytes` on a worker `target` allows, taken now
+    /// without waiting; `None` when there is none.
+    pub(crate) fn admit_now(
+        &self,
+        target: Target,
+        bytes: usize,
+    ) -> Result<Option<crate::worker::Admitted>, Error> {
+        if self.closing.load(Ordering::Acquire) {
+            return Err(Error::ShutDown);
+        }
+        Ok(self
+            .route(target)?
+            .try_admit(bytes)
+            .or_else(|| self.admit_anywhere(target, bytes)))
     }
 
     fn tuning(config: &Config, monitored: bool) -> Tuning {
@@ -318,17 +343,10 @@ impl Pool {
         Fut::Output: Send + 'static,
     {
         let shared = &self.handle.shared;
-        if shared.closing.load(Ordering::Acquire) {
-            return Err(Error::ShutDown);
-        }
         let bytes = options.bytes.unwrap_or(std::mem::size_of::<F>());
-        let routed = shared.route(target)?;
-        let admitted = match routed
-            .try_admit(bytes)
-            .or_else(|| shared.admit_anywhere(target, bytes))
-        {
+        let admitted = match shared.admit_now(target, bytes)? {
             Some(admitted) => admitted,
-            None => routed.admit(bytes).await,
+            None => shared.route(target)?.admit(bytes).await,
         };
         Ok(Self::launch(target, options, admitted, make))
     }
@@ -347,21 +365,17 @@ impl Pool {
         Fut: Future + 'static,
         Fut::Output: Send + 'static,
     {
-        let shared = &self.handle.shared;
-        if shared.closing.load(Ordering::Acquire) {
-            return Err(Error::ShutDown);
-        }
         let bytes = options.bytes.unwrap_or(std::mem::size_of::<F>());
-        let admitted = shared
-            .route(target)?
-            .try_admit(bytes)
-            .or_else(|| shared.admit_anywhere(target, bytes))
+        let admitted = self
+            .handle
+            .shared
+            .admit_now(target, bytes)?
             .ok_or(Error::Full)?;
         Ok(Self::launch(target, options, admitted, make))
     }
 
     /// Hands an admitted job to the worker its admission belongs to.
-    fn launch<F, Fut>(
+    pub(crate) fn launch<F, Fut>(
         target: Target,
         options: Submit,
         admitted: crate::worker::Admitted,
@@ -457,6 +471,25 @@ impl Pool {
     /// [`Error::ShutDown`]. A worker inside a poll stops when the poll returns.
     pub fn abandon(&self) {
         self.handle.shared.abandon();
+    }
+
+    /// [`shutdown`](Self::shutdown), then completes once every worker has
+    /// stopped or the configured deadline passed, from any executor. Past
+    /// the deadline it abandons what is left and returns
+    /// [`Error::TimedOut`]. Called on a worker it returns
+    /// [`Error::OnWorker`] at once: a worker cannot wait for itself to stop.
+    pub async fn stop(&self) -> Result<(), Error> {
+        if crate::worker::on_worker() {
+            return Err(Error::OnWorker);
+        }
+        self.shutdown();
+        match crate::timeout(self.handle.shutdown_deadline, self.stopped()).await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.abandon();
+                Err(error)
+            }
+        }
     }
 
     /// [`shutdown`](Self::shutdown), then waits on a plain thread up to the

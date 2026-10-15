@@ -3,8 +3,9 @@
 //!
 //! The source is a [`TickSource`]: the engine hands it an [`EpochTick`] and the
 //! sandbox's period, and holds the guard it returns while any clone of the
-//! engine lives. Today a thread ticks ([`ThreadTicks`]); a worker pool's
-//! deadline queue can take over through the same trait.
+//! engine lives. On a worker pool the ticks are a periodic job of its deadline
+//! queue ([`PoolTicks`]); without one a thread of its own ticks
+//! ([`ThreadTicks`]).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -33,6 +34,33 @@ impl EpochTick {
     /// yields, and a call out of ticks traps.
     pub fn tick(&self) {
         self.0.increment_epoch();
+    }
+}
+
+/// Ticks from a background job on a worker of the pool: one timer on that
+/// worker's deadline queue per period, and no thread of its own.
+pub struct PoolTicks(pub workers::Pool);
+
+impl TickSource for PoolTicks {
+    fn start(&self, tick: EpochTick, period: Duration) -> Result<TickGuard> {
+        let job = workers::spawn_background(Some(&self.0), "lens::epoch", move || async move {
+            let Err(error) = workers::every(period, || {
+                tick.tick();
+                async {}
+            })
+            .await;
+            error!(%error, "lens epoch ticks stopped: they run only on a worker");
+        });
+        Ok(Box::new(StopOnDrop(job)))
+    }
+}
+
+/// Stops the tick job when the engine lets go of it.
+struct StopOnDrop(workers::Background);
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 

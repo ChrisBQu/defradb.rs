@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future::join_all;
-use regolith::sync::{Event, SegQueue};
+use regolith::sync::Event;
 use workers::{block_on, Config, Placement, Pool, Workers};
 
 use super::{Owners, TxnId, Unavailable};
@@ -258,22 +258,4 @@ fn abandoning_or_dropping_the_registry_ends_the_transaction() {
         std::thread::yield_now();
     }
     pool.shutdown_blocking().unwrap();
-}
-
-#[test]
-fn a_registry_without_a_pool_drives_one_worker_of_its_own() {
-    let pool = super::one_worker().unwrap();
-    assert_eq!(pool.workers(), 1);
-    let owners = Probes::new(pool);
-    let dropped = Arc::new(AtomicUsize::new(0));
-    let seen = Arc::new(SegQueue::new());
-    let id = begin(&owners, "alice", &dropped);
-    let log = seen.clone();
-    block_on(owners.run(id, &"alice", move |_| {
-        Box::pin(async move { log.push(workers::current_worker().unwrap().index) })
-    }))
-    .unwrap()
-    .unwrap();
-    assert_eq!(seen.pop(), Some(0));
-    drop(owners);
 }

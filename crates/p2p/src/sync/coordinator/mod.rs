@@ -94,6 +94,10 @@ pub(crate) use super::manager::{
     DEFAULT_MAX_DOC_SYNC_REQUEST_DOC_IDS,
 };
 
+/// Where a coordinator's push failures arrive
+/// ([`SyncCoordinator::attach_failure_channel`]).
+pub type PushFailureReceiver = tokio::sync::mpsc::Receiver<PushFailure>;
+
 /// A durable retry update emitted by outbound PushLog admission/workers.
 ///
 /// The runtime consumes observations to register scope markers before send,

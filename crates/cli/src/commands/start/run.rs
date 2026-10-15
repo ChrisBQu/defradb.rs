@@ -223,6 +223,14 @@ impl Node {
             }
         }
 
+        // Nothing reaches the data path any more: the pool finishes what it
+        // admitted and stops, then the store closes. The runtime is dropped
+        // after this returns, outside any async context.
+        info!("Stopping the worker pool and closing the database...");
+        if let Err(e) = self.database.close().await {
+            warn!("Database close encountered an issue: {}", e);
+        }
+
         defra_core::signing::clear_identity_store();
         info!("DefraDB node shutdown complete");
         Ok(())

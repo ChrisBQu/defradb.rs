@@ -21,7 +21,9 @@ pub use keyring;
 pub use keyring::Keyring;
 #[cfg(feature = "iroh")]
 pub use node::build_with_store_and_access_hooks;
-pub use node::{build_with_store, EmbeddedNode, NodeBuilder};
+pub use node::{
+    build_with_store, build_with_store_on_pool, start_node_pool, EmbeddedNode, NodeBuilder,
+};
 pub use node_tasks::BackgroundTasks;
 pub use peer_keyring::PeerKeyring;
 pub use zeroize::Zeroizing;

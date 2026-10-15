@@ -19,6 +19,7 @@
 //! and the worker runs them one at a time in the order they arrived. The
 //! registry is the workers' own tables, nothing shared besides.
 
+use defra_core::thread_bounds::MaybeSend;
 use futures::future::LocalBoxFuture;
 use query::error::TransactionError;
 use std::sync::Arc;
@@ -28,7 +29,9 @@ use storage::corekv::{IterOptions, Key, Store};
 use crate::collection::Collection;
 use crate::database::DB;
 use crate::error::{Error, Result};
-use crate::txn::owner::{Owners, Sweep, TxnId, Unavailable};
+#[cfg(not(target_family = "wasm"))]
+use crate::txn::owner::Sweep;
+use crate::txn::owner::{Owners, TxnId, Unavailable};
 
 mod blocks;
 mod cleanup;
@@ -74,8 +77,9 @@ impl CleanupResult {
 /// Transaction registry that manages database transactions for query execution.
 ///
 /// Implements `query::TransactionRegistry`. The transactions live on the
-/// workers of a [`workers::Pool`]: the one given at construction, or, without
-/// one, a pool of one worker driven by a thread of its own.
+/// workers of a [`workers::Pool`]: the one given at construction, else the
+/// database's, else the process-wide fallback pool. In a browser the page's
+/// one worker owns them all.
 pub struct DbTransactionRegistry<S: Store + 'static> {
     db: Arc<DB<S>>,
     /// The workers' tables; an error when no pool could be had, which every
@@ -85,12 +89,13 @@ pub struct DbTransactionRegistry<S: Store + 'static> {
 }
 
 impl<S: Store + 'static> DbTransactionRegistry<S> {
-    /// A registry whose transactions live on a pool of one worker of its own.
+    /// A registry whose transactions live on the database's pool.
     ///
     /// Use `with_broadcaster` when running with the P2P stack so that
     /// committed transactional writes are forwarded to peers.
     pub fn new(db: Arc<DB<S>>) -> Self {
-        Self::on(db, crate::txn::owner::one_worker(), None)
+        let pool = pool_of(&db);
+        Self::on(db, pool, None)
     }
 
     /// Create a transaction registry that forwards committed writes to a
@@ -101,7 +106,8 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         db: Arc<DB<S>>,
         broadcaster: Arc<dyn crate::event::emission::TxnBroadcaster>,
     ) -> Self {
-        Self::on(db, crate::txn::owner::one_worker(), Some(broadcaster))
+        let pool = pool_of(&db);
+        Self::on(db, pool, Some(broadcaster))
     }
 
     /// A registry whose transactions live on the workers of `pool`, each
@@ -119,12 +125,9 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         pool: std::result::Result<workers::Pool, workers::Error>,
         broadcaster: Option<Arc<dyn crate::event::emission::TxnBroadcaster>>,
     ) -> Self {
-        if let Err(error) = &pool {
-            tracing::error!(%error, "no worker can own transactions; every transaction request will fail");
-        }
         Self {
             db,
-            owners: pool.map(Owners::new),
+            owners: owners_on(pool),
             broadcaster,
         }
     }
@@ -165,8 +168,10 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
     /// every request for it that arrived earlier, as the caller.
     async fn in_txn<T, W>(&self, txn_id: &str, work: W) -> Result<T>
     where
-        T: Send + 'static,
-        W: for<'t> FnOnce(&'t mut OwnedTxn<S>) -> LocalBoxFuture<'t, Result<T>> + Send + 'static,
+        T: MaybeSend + 'static,
+        W: for<'t> FnOnce(&'t mut OwnedTxn<S>) -> LocalBoxFuture<'t, Result<T>>
+            + MaybeSend
+            + 'static,
     {
         let not_found = || Error::TransactionNotFound(txn_id.to_string());
         let id = TxnId::parse(txn_id).ok_or_else(not_found)?;
@@ -207,4 +212,39 @@ fn unavailable(error: Unavailable, handle: &query::txn::TransactionHandle) -> Tr
         }
         other => TransactionError::execution(other.to_string()),
     }
+}
+
+/// The pool a registry built without one runs on: the database's, else the
+/// process-wide fallback pool (a test, a one-shot tool).
+fn pool_of<S: Store>(db: &DB<S>) -> std::result::Result<workers::Pool, workers::Error> {
+    match db.pool() {
+        Some(pool) => Ok(pool.clone()),
+        None => workers::fallback().cloned(),
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn owners_on<T, K>(
+    pool: std::result::Result<workers::Pool, workers::Error>,
+) -> std::result::Result<Owners<T, K>, workers::Error>
+where
+    T: 'static,
+    K: Clone + PartialEq + Send + Sync + 'static,
+{
+    if let Err(error) = &pool {
+        tracing::error!(%error, "no worker can own transactions; every transaction request will fail");
+    }
+    pool.map(Owners::new)
+}
+
+/// The page's one worker owns every transaction, whichever pool drives it.
+#[cfg(target_family = "wasm")]
+fn owners_on<T, K>(
+    _pool: std::result::Result<workers::Pool, workers::Error>,
+) -> std::result::Result<Owners<T, K>, workers::Error>
+where
+    T: 'static,
+    K: Clone + PartialEq + Send + Sync + 'static,
+{
+    Ok(Owners::here())
 }

@@ -21,6 +21,8 @@ struct UpdateRetryAttempt<S: Store> {
     signing_config: Option<defra_core::signing::SigningConfig>,
     encryption_config: Option<defra_core::encryption::EncryptionConfig>,
     prepared_inputs: Option<query::prepared::PreparedInputMemo>,
+    /// Heads read before the transaction (`helpers::snapshot_heads`).
+    heads: rapidhash::RapidHashMap<u64, crate::block::builder::DocHeadsSnapshot>,
 }
 
 impl<S: Store + 'static> storage::corekv::RetryAttemptFn for UpdateRetryAttempt<S> {
@@ -148,6 +150,12 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         doc.set_id(DocID::from_string(&canonical_doc_id).map_err(|error| {
             query::error::QueryError::execution(format!("invalid canonical document ID: {error}"))
         })?);
+        let heads = super::helpers::snapshot_heads(
+            &self.db,
+            &collection,
+            std::slice::from_ref(&input_doc_id),
+        )
+        .await?;
 
         let attempt = UpdateRetryAttempt {
             db: Arc::clone(&self.db),
@@ -162,6 +170,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             signing_config: get_signing_config(),
             encryption_config: get_encryption_config(),
             prepared_inputs: Some(self.prepared_inputs.clone().unwrap_or_default()),
+            heads,
         };
         let result = self
             .db
@@ -341,7 +350,14 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     )
                     .await
                     .map_err(|error| query::error::QueryError::execution(error.to_string()))?;
-                let heads = super::helpers::load_update_heads(&datastore, doc_short_id).await?;
+                let loaded;
+                let heads = match attempt.heads.get(&doc_short_id) {
+                    Some(heads) => heads,
+                    None => {
+                        loaded = super::helpers::load_update_heads(&datastore, doc_short_id).await?;
+                        &loaded
+                    }
+                };
                 write_local_update(
                     &datastore,
                     &collection,
@@ -349,7 +365,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     doc_short_id,
                     &index_manager,
                     &mut modified_fields,
-                    &heads,
+                    heads,
                     &embedding_config,
                     &inputs,
                 )
@@ -365,7 +381,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     attempt.signing_config.as_ref(),
                     self.db.kms().as_ref(),
                     attempt.prepared_inputs.as_ref(),
-                    Some(&heads),
+                    Some(heads),
                 )
                 .await
                 .map_err(|error| {

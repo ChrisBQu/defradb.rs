@@ -45,7 +45,7 @@ impl<S: Store + 'static> BatchMutator<S> {
             db,
             prepared_inputs,
             txn: Held::none(),
-            acp_registration_projection: Arc::new(query::txn::AcpRegistrationProjection::detached()),
+            acp_registration_projection: query::txn::AcpRegistrationProjection::detached_shared(),
         }
     }
 
@@ -675,6 +675,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 schema_version_id,
                 sign_config.as_ref(),
                 self.prepared_inputs.as_ref(),
+                None,
             )
             .await
             .map_err(|error| {
