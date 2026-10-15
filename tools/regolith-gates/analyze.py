@@ -870,10 +870,26 @@ def validate(rec: dict) -> dict[str, Any]:
         errors.append('baseline_run has invalid/missing git revision')
     if run.get('load_guard', {}).get('passed') is not True:
         errors.append('baseline_run load guard did not pass')
+    embedded_guard = run.get('load_guard')
+    if isinstance(embedded_guard, dict) and 'detail' in embedded_guard:
+        detail = embedded_guard.get('detail')
+        if not isinstance(detail, dict):
+            errors.append('baseline_run load guard detail is missing or malformed')
+            embedded_guard_detail = None
+        else:
+            if (embedded_guard.get('passed') is not detail.get('passed')
+                    or embedded_guard.get('note') != detail.get('note')):
+                errors.append('baseline_run load guard wrapper flags differ from detail')
+            embedded_guard_detail = detail
+    else:
+        # Older frozen benchmark binaries emitted the raw load-guard verdict
+        # directly. Keep accepting that exact form while validating the
+        # current wrapper's flags and detail against the command artifact.
+        embedded_guard_detail = embedded_guard
     normalized = validate_samples(rec, errors)
     manifest = validate_manifest(rec, errors)
     write_command = manifest['commands'].get('write_baseline', {})
-    if write_command.get('guard') != run.get('load_guard'):
+    if write_command.get('guard') != embedded_guard_detail:
         errors.append('baseline_run load guard differs from write_baseline command guard')
     rec['manifest_validated'] = manifest
     rec['normalized'] = normalized
