@@ -149,26 +149,26 @@ impl Reader for FailingHeadTxn {
 
 #[async_trait]
 impl Writer for FailingHeadTxn {
-    async fn merge(&mut self, key: &[u8], operand: &[u8]) -> Result<()> {
-        self.inner.merge(key, operand).await
+    async fn merge_shared(&self, key: &[u8], operand: &[u8]) -> Result<()> {
+        self.inner.merge_shared(key, operand).await
     }
 
-    async fn append(
-        &mut self,
+    async fn append_shared(
+        &self,
         log: &storage::corekv::AppendLog,
         entry: &[u8],
         once_key: Option<&[u8]>,
     ) -> storage::Result<()> {
-        self.inner.append(log, entry, once_key).await
+        self.inner.append_shared(log, entry, once_key).await
     }
 
-    async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+    async fn set_shared(&self, key: &[u8], value: &[u8]) -> Result<()> {
         self.check(false, key)?;
-        self.inner.set(key, value).await
+        self.inner.set_shared(key, value).await
     }
-    async fn delete(&mut self, key: &[u8]) -> Result<()> {
+    async fn delete_shared(&self, key: &[u8]) -> Result<()> {
         self.check(true, key)?;
-        self.inner.delete(key).await
+        self.inner.delete_shared(key).await
     }
 }
 
