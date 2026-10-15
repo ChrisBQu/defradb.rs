@@ -44,6 +44,7 @@ pub struct RegolithTxn {
     ordered_events: Vec<Event>,
     ordered_async_callbacks: Vec<AsyncOrderedTxnCallback>,
     savepoints: Vec<SavepointState>,
+    has_writes: bool,
 }
 
 #[derive(Clone)]

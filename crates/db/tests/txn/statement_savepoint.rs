@@ -127,6 +127,20 @@ impl Txn for PauseAfterSetTxn {
         self.inner.on_success(callback)
     }
 
+    fn on_success_ordered(
+        &mut self,
+        callback: storage::corekv::OrderedTxnCallback,
+    ) -> StorageResult<()> {
+        self.inner.on_success_ordered(callback)
+    }
+
+    fn on_success_ordered_async(
+        &mut self,
+        callback: storage::corekv::AsyncOrderedTxnCallback,
+    ) -> StorageResult<()> {
+        self.inner.on_success_ordered_async(callback)
+    }
+
     fn on_success_async(&mut self, callback: AsyncTxnCallback) {
         self.inner.on_success_async(callback)
     }
