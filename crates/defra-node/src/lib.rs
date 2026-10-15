@@ -150,7 +150,7 @@ pub struct EmbeddedNode {
     #[cfg(not(target_arch = "wasm32"))]
     transaction_stats: Option<storage::TransactionStatsHandle>,
     #[cfg(feature = "http")]
-    txn_cleanup_task: Option<db::Sweep>,
+    txn_cleanup_task: kovan_queue::seg_queue::SegQueue<workers::Background>,
     #[cfg(feature = "p2p")]
     p2p_ops: Option<Arc<dyn defra_http::P2POperations>>,
     #[cfg(feature = "p2p")]
@@ -185,7 +185,7 @@ struct TransactionCleanupConfig {
     sweep_interval: Duration,
 }
 
-#[cfg(feature = "otel")]
+#[cfg(any(feature = "http", feature = "otel"))]
 fn single_slot<T: 'static>(value: Option<T>) -> kovan_queue::seg_queue::SegQueue<T> {
     let slot = kovan_queue::seg_queue::SegQueue::new();
     if let Some(value) = value {
@@ -668,8 +668,9 @@ impl EmbeddedNode {
     /// with no error surfaced. Drop the node after shutdown completes.
     pub async fn shutdown(&self) {
         #[cfg(feature = "http")]
-        if let Some(sweep) = &self.txn_cleanup_task {
-            sweep.stop();
+        if let Some(task) = self.txn_cleanup_task.pop() {
+            task.abort();
+            let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
         }
 
         // Stop accepting the node's network work (signed queries, the HTTP
@@ -1747,7 +1748,7 @@ impl NodeBuilder {
             #[cfg(not(target_arch = "wasm32"))]
             transaction_stats,
             #[cfg(feature = "http")]
-            txn_cleanup_task,
+            txn_cleanup_task: single_slot(txn_cleanup_task),
             #[cfg(feature = "p2p")]
             p2p_ops,
             #[cfg(feature = "p2p")]

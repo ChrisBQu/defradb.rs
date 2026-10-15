@@ -8,9 +8,9 @@
 //! actor's mailbox in the worker's own table (`table`) and queues there: the
 //! mailbox order is the transaction's order, so requests run one at a time,
 //! a commit or rollback runs after every request queued before it, and the
-//! idle sweep, a timer on each worker (`every`), ends a transaction only when
-//! the sweep's message is the next one and nothing admitted has run for the
-//! idle limit, so a request that arrived first keeps its transaction.
+//! idle sweep's ask (`expire_idle`) ends a transaction only when it is the
+//! next message and nothing admitted has run for the idle limit, so a request
+//! that arrived first keeps its transaction.
 //!
 //! Nothing here knows what a transaction is: the registry gives the value
 //! (`T`), how a request is admitted (its caller owns the transaction), what a
@@ -32,8 +32,6 @@ use std::time::Duration;
 use defra_core::thread_bounds::MaybeSend;
 use futures::future::LocalBoxFuture;
 use regolith::sync::unbounded;
-#[cfg(not(target_family = "wasm"))]
-use regolith::sync::Event;
 use workers::Target;
 #[cfg(not(target_family = "wasm"))]
 use workers::{Pool, Submit};
@@ -72,8 +70,8 @@ impl From<workers::Error> for Unavailable {
 }
 
 /// Every worker's table, shared by the registry and the requests on their
-/// way; actors and sweeps hold it weakly, so dropping the registry ends
-/// every transaction it owns.
+/// way; actors hold it weakly, so dropping the registry ends every
+/// transaction it owns.
 pub(super) struct Shared<T, K>
 where
     T: 'static,
@@ -326,47 +324,6 @@ where
         Ok(ended)
     }
 
-    /// Starts the idle sweep, a timer on each worker: every `every`, the
-    /// worker asks each of its own transactions to end if no request has used
-    /// it for `max_idle`. The ask is a message, queued behind the requests
-    /// already there. Runs until [`Sweep::stop`], or the registry or the pool
-    /// goes; dropping the handle leaves it running.
-    #[cfg(not(target_family = "wasm"))]
-    pub(crate) fn sweep(&self, max_idle: Duration, every: Duration) -> Result<Sweep, Unavailable> {
-        let stop = Arc::new(Event::new());
-        for worker in 0..self.workers() {
-            let shared = Arc::downgrade(&self.shared);
-            let stopped = stop.clone();
-            // The start runs on its worker by itself; nothing waits for it.
-            drop(self.pool.try_submit_with(
-                Target::Worker(worker),
-                named("txn.sweep.start"),
-                move || {
-                    std::future::ready(workers::spawn_daemon(async move {
-                        loop {
-                            let Ok(tick) = workers::sleep(every) else {
-                                return;
-                            };
-                            let woke =
-                                futures::future::select(tick, Box::pin(stopped.wait())).await;
-                            if matches!(woke, futures::future::Either::Right(_)) {
-                                return;
-                            }
-                            let Some(shared) = shared.upgrade() else {
-                                return;
-                            };
-                            shared.tables[worker].send_all(|| Message::Expire {
-                                max_idle,
-                                reply: None,
-                            });
-                        }
-                    }))
-                },
-            )?);
-        }
-        Ok(Sweep { stop })
-    }
-
     /// How many transactions are open now, on every worker.
     pub(crate) fn len(&self) -> usize {
         self.shared.tables.iter().map(Table::len).sum()
@@ -447,32 +404,6 @@ where
         if let Some(shared) = self.table.upgrade() {
             shared.tables[self.owner].abandon(self.id);
         }
-    }
-}
-
-/// The idle sweep's handle. Dropping it leaves the sweep running.
-#[cfg(not(target_family = "wasm"))]
-pub struct Sweep {
-    stop: Arc<Event>,
-}
-
-#[cfg(not(target_family = "wasm"))]
-impl Sweep {
-    /// A sweep that does not run.
-    pub fn stopped() -> Self {
-        let stop = Arc::new(Event::new());
-        stop.set();
-        Self { stop }
-    }
-
-    /// Stops the sweep on every worker.
-    pub fn stop(&self) {
-        self.stop.set();
-    }
-
-    /// [`stop`](Self::stop), under the name a spawned task's handle uses.
-    pub fn abort(&self) {
-        self.stop();
     }
 }
 

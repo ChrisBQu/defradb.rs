@@ -29,8 +29,6 @@ use storage::corekv::{IterOptions, Key, Store};
 use crate::collection::Collection;
 use crate::database::DB;
 use crate::error::{Error, Result};
-#[cfg(not(target_family = "wasm"))]
-use crate::txn::owner::Sweep;
 use crate::txn::owner::{Owners, TxnId, Unavailable};
 
 mod blocks;

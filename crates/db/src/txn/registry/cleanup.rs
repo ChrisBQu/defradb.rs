@@ -1,8 +1,7 @@
-//! The idle-transaction sweep: a timer on each worker that ends the
-//! transactions it owns once no request has used them for the idle limit.
-//! The sweep's ask is a message queued behind the requests already there, so
-//! a request that arrived first keeps its transaction. Subject of
-//! proofs/tla/TxnRegistry.tla.
+//! The idle-transaction sweep: each owner is asked to end its transactions
+//! that no request has used for the idle limit. The ask is a message queued
+//! behind the requests already there, so a request that arrived first keeps
+//! its transaction. Subject of proofs/tla/TxnRegistry.tla.
 
 use super::*;
 
@@ -28,29 +27,57 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         })
     }
 
-    /// Starts the periodic sweep on every worker: every `sweep_interval`, each
-    /// worker ends the transactions it owns that no request has used for
-    /// longer than `max_idle_age`. Runs until the returned handle is stopped,
-    /// or the registry or its pool goes.
-    #[cfg(not(target_family = "wasm"))]
+    /// Starts the sweep that cleans up transactions idle for longer than
+    /// `max_idle_age`: a background job of the database's worker pool, run
+    /// every `sweep_interval` on its worker's deadline queue until it is
+    /// aborted or its worker stops.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `sweep_interval` is zero.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn start_stale_transaction_cleanup(
-        &self,
+        self: &Arc<Self>,
         max_idle_age: Duration,
         sweep_interval: Duration,
-    ) -> Sweep {
-        if sweep_interval.is_zero() {
-            tracing::error!("transaction cleanup sweep interval must be above zero; no sweep runs");
-            return Sweep::stopped();
-        }
-        match self
-            .owners()
-            .and_then(|owners| owners.sweep(max_idle_age, sweep_interval))
-        {
-            Ok(sweep) => sweep,
-            Err(error) => {
-                tracing::error!(%error, "the idle transaction sweep could not start");
-                Sweep::stopped()
-            }
-        }
+    ) -> workers::Background {
+        assert!(
+            !sweep_interval.is_zero(),
+            "transaction cleanup sweep interval must be non-zero"
+        );
+
+        let registry = Arc::clone(self);
+        let pool = registry.db.pool().cloned();
+        workers::spawn_background(pool.as_ref(), "db::transaction_sweep", move || async move {
+            let Err(error) = workers::every(sweep_interval, || async {
+                match registry.cleanup_stale_transactions(max_idle_age).await {
+                    Ok(result) if result.attempted() > 0 && result.is_complete() => {
+                        tracing::info!(
+                            cleaned = result.cleaned,
+                            max_idle_age_secs = max_idle_age.as_secs(),
+                            "Cleaned up idle transactions"
+                        );
+                    }
+                    Ok(result) if result.attempted() > 0 => {
+                        tracing::warn!(
+                            cleaned = result.cleaned,
+                            failed = result.failed.len(),
+                            max_idle_age_secs = max_idle_age.as_secs(),
+                            "Idle transaction cleanup completed with failures"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            max_idle_age_secs = max_idle_age.as_secs(),
+                            "Idle transaction cleanup failed"
+                        );
+                    }
+                }
+            })
+            .await;
+            tracing::error!(%error, "the transaction sweep stopped: it runs only on a worker");
+        })
     }
 }

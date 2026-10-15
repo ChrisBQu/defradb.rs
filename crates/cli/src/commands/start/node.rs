@@ -42,7 +42,7 @@ pub(super) struct ServerSetup {
     pub p2p_tasks: Option<P2PTasks>,
     pub downsample_task: Option<workers::Background>,
     pub vector_rebuild_task: Option<workers::Background>,
-    pub txn_cleanup_task: Option<db::Sweep>,
+    pub txn_cleanup_task: Option<workers::Background>,
     pub http_server: defra_http::Server,
     #[cfg(feature = "postgres")]
     pub pg_server: Option<pg_compat::PgServer>,
@@ -59,7 +59,7 @@ pub struct Node {
     pub(super) p2p_tasks: Option<P2PTasks>,
     pub(super) downsample_task: Option<workers::Background>,
     pub(super) vector_rebuild_task: Option<workers::Background>,
-    pub(super) txn_cleanup_task: Option<db::Sweep>,
+    pub(super) txn_cleanup_task: Option<workers::Background>,
     pub(super) http_server: Option<defra_http::Server>,
     #[cfg(feature = "postgres")]
     pub(super) pg_server: Option<pg_compat::PgServer>,

@@ -172,28 +172,6 @@ fn the_sweep_never_takes_a_transaction_a_request_reached_first() {
 }
 
 #[test]
-fn the_periodic_sweep_runs_on_each_worker_until_it_is_stopped() {
-    let owners = Probes::new(pool(2));
-    let dropped = Arc::new(AtomicUsize::new(0));
-    let ids: Vec<_> = (0..6).map(|_| begin(&owners, "alice", &dropped)).collect();
-    let sweep = owners
-        .sweep(Duration::from_millis(20), Duration::from_millis(5))
-        .unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while dropped.load(Ordering::SeqCst) < ids.len() {
-        assert!(std::time::Instant::now() < deadline, "the sweep never ran");
-        std::thread::yield_now();
-    }
-    assert_eq!(owners.len(), 0);
-    sweep.stop();
-    let kept = begin(&owners, "alice", &dropped);
-    assert_eq!(
-        block_on(owners.run(kept, &"alice", |_| Box::pin(async {}))).unwrap(),
-        Ok(())
-    );
-}
-
-#[test]
 fn transactions_on_different_workers_run_side_by_side() {
     let owners = Arc::new(Probes::new(pool(2)));
     let dropped = Arc::new(AtomicUsize::new(0));
