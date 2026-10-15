@@ -164,12 +164,7 @@ impl Drop for RegolithTxn {
 pub(super) fn map_txn_error(error: TransactionError) -> Error {
     match error {
         TransactionError::Conflict(conflict) => {
-            Error::TxnConflictDetails(crate::corekv::TransactionConflict {
-                access: conflict.mine(),
-                winning_write: conflict.theirs(),
-                observed_seq: conflict.observed_seq(),
-                latest_seq: conflict.latest_seq(),
-            })
+            Error::TxnConflictDetails(crate::corekv::TransactionConflict::from(&conflict))
         }
         // Lock admission failure is not an optimistic validation conflict.
         // Keep it transient and typed as a backend failure so outer callers

@@ -51,12 +51,7 @@ pub(super) async fn transact(
                 previous.failed().await;
             }
             let mut retry_txn = RegolithRetryTxn {
-                previous_conflict: lost.map(|reason| crate::corekv::TransactionConflict {
-                    access: reason.mine(),
-                    winning_write: reason.theirs(),
-                    observed_seq: reason.observed_seq(),
-                    latest_seq: reason.latest_seq(),
-                }),
+                previous_conflict: lost.map(crate::corekv::TransactionConflict::from),
                 txn,
                 db: Arc::clone(db),
                 isolation,
@@ -100,12 +95,7 @@ pub(super) async fn transact(
         Ok((value, _receipt)) => Ok(value),
         Err(regolith::TransactError::Closure(error)) => Err(error),
         Err(regolith::TransactError::Exhausted(conflict)) => Err(RetryAttemptError::Exhausted(
-            crate::corekv::TransactionConflict {
-                access: conflict.mine(),
-                winning_write: conflict.theirs(),
-                observed_seq: conflict.observed_seq(),
-                latest_seq: conflict.latest_seq(),
-            },
+            crate::corekv::TransactionConflict::from(&conflict),
         )),
         Err(regolith::TransactError::Engine(error)) => Err(RetryAttemptError::Storage(
             super::transaction::map_txn_error(error),
