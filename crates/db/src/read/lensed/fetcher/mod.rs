@@ -56,6 +56,7 @@ pub struct LensedDocFetcher<S: Store> {
     /// Optional field projection used by mutation rebases whose dependencies
     /// are known. General query fetches leave this unset.
     projection: Option<rapidhash::RapidHashSet<String>>,
+    prepared_inputs: Option<query::prepared::PreparedInputMemo>,
 }
 
 impl<S: Store> LensedDocFetcher<S> {
@@ -83,7 +84,17 @@ impl<S: Store> LensedDocFetcher<S> {
             version_cache: Arc::new(async_lock::RwLock::new(RapidHashMap::new())),
             history_cache: async_lock::RwLock::new(RapidHashMap::new()),
             projection: None,
+            prepared_inputs: None,
         }
+    }
+
+    /// Resolve remote read keys through the request capsule outside retry attempts.
+    pub(crate) fn with_prepared_inputs(
+        mut self,
+        inputs: Option<query::prepared::PreparedInputMemo>,
+    ) -> Self {
+        self.prepared_inputs = inputs;
+        self
     }
 
     /// Create a fetcher for a mutation whose read dependencies are known.
@@ -109,6 +120,7 @@ impl<S: Store> LensedDocFetcher<S> {
             version_cache: self.version_cache.clone(),
             history_cache: async_lock::RwLock::new(RapidHashMap::new()),
             projection: self.projection.clone(),
+            prepared_inputs: self.prepared_inputs.clone(),
         }
     }
 
@@ -385,11 +397,15 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
         use crate::read::versioned::VersionedFetcher;
 
         let versioned_fetcher =
-            VersionedFetcher::with_kms(self.txn.clone(), self.db.kms(), caller_identity.cloned());
+            VersionedFetcher::with_kms(self.txn.clone(), self.db.kms(), caller_identity.cloned())
+                .with_prepared_inputs(self.prepared_inputs.clone());
         versioned_fetcher
             .get_document_at_cid(cid, expected_doc_id)
             .await
-            .map_err(|e| query::error::QueryError::execution(e.to_string()))
+            .map_err(|error| match error {
+                crate::error::Error::Query(error) => error,
+                error => query::error::QueryError::execution(error.to_string()),
+            })
     }
 
     async fn get_documents_at_cid(
@@ -402,11 +418,15 @@ impl<S: Store + 'static> DocFetcher for LensedDocFetcher<S> {
         use crate::read::versioned::VersionedFetcher;
 
         let versioned_fetcher =
-            VersionedFetcher::with_kms(self.txn.clone(), self.db.kms(), caller_identity.cloned());
+            VersionedFetcher::with_kms(self.txn.clone(), self.db.kms(), caller_identity.cloned())
+                .with_prepared_inputs(self.prepared_inputs.clone());
         versioned_fetcher
             .get_documents_at_cid(cid, expected_doc_id, Some(collection_short_id))
             .await
-            .map_err(|e| query::error::QueryError::execution(e.to_string()))
+            .map_err(|error| match error {
+                crate::error::Error::Query(error) => error,
+                error => query::error::QueryError::execution(error.to_string()),
+            })
     }
 
     async fn get_view_cache_items(&self, collection_id: u32) -> query::error::Result<Vec<Bytes>> {

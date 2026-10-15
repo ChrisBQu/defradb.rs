@@ -13,6 +13,10 @@ pub(crate) enum PreparedKmsOperation {
     Get {
         cid: String,
     },
+    GetForRead {
+        cid: String,
+        caller_identity: Option<String>,
+    },
     Generate {
         doc_id: String,
         field: Option<String>,

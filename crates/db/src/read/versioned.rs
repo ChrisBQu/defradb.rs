@@ -30,6 +30,7 @@ pub struct VersionedFetcher<S: Store> {
     txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
     kms: Option<Arc<dyn kms::KmsService>>,
     caller_identity: Option<identity::Did>,
+    prepared_inputs: Option<query::prepared::PreparedInputMemo>,
 }
 
 impl<S: Store> VersionedFetcher<S> {
@@ -39,6 +40,7 @@ impl<S: Store> VersionedFetcher<S> {
             txn,
             kms: None,
             caller_identity: None,
+            prepared_inputs: None,
         }
     }
 
@@ -52,7 +54,16 @@ impl<S: Store> VersionedFetcher<S> {
             txn,
             kms,
             caller_identity,
+            prepared_inputs: None,
         }
+    }
+
+    pub(crate) fn with_prepared_inputs(
+        mut self,
+        inputs: Option<query::prepared::PreparedInputMemo>,
+    ) -> Self {
+        self.prepared_inputs = inputs;
+        self
     }
 
     /// Reconstruct a document at the specified CID.
@@ -448,6 +459,30 @@ impl<S: Store> VersionedFetcher<S> {
     ) -> Result<Vec<u8>> {
         let key = if let Some(kms) = &self.kms {
             let request_context = self.kms_request_context();
+            if let Some(inputs) = &self.prepared_inputs {
+                let request = crate::write::prepare::kms_input_request(
+                    crate::write::prepare::PreparedKmsOperation::GetForRead {
+                        cid: encryption_cid.to_string(),
+                        caller_identity: request_context.user_identity().map(ToString::to_string),
+                    },
+                );
+                let response = inputs
+                    .get(&request)
+                    .ok_or_else(|| Error::Query(query::error::QueryError::NeedsInput(request)))?;
+                let response: crate::write::prepare::PreparedKmsResponse =
+                    serde_json::from_slice(&response).map_err(|error| {
+                        Error::Serialization(format!("invalid prepared read key: {error}"))
+                    })?;
+                if response.cid != encryption_cid.to_string() || response.key.len() != 32 {
+                    return Err(Error::Serialization(
+                        "prepared read key does not match encryption block".into(),
+                    ));
+                }
+                return crypto::encryption::aes::decrypt_aes(None, data, &response.key, &[])
+                    .map_err(|error| {
+                        Error::Serialization(format!("failed to decrypt versioned block: {error}"))
+                    });
+            }
             let results = kms
                 .get_keys(&request_context, std::slice::from_ref(encryption_cid))
                 .await
@@ -664,3 +699,7 @@ impl<S: Store> VersionedFetcher<S> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "versioned_retry_tests.rs"]
+mod retry_tests;

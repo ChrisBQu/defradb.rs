@@ -212,15 +212,26 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
                         "prepared KMS input has no configured KMS provider",
                     )
                 })?;
+                let context =
+                    match &operation {
+                        crate::write::prepare::PreparedKmsOperation::GetForRead {
+                            caller_identity: Some(did),
+                            ..
+                        } => kms::RequestContext::with_user(identity::Did::new(did).map_err(
+                            |error| query::error::QueryError::execution(error.to_string()),
+                        )?),
+                        _ => kms::RequestContext::anonymous(),
+                    };
                 let (cid, key) = match operation {
-                    crate::write::prepare::PreparedKmsOperation::Get { cid } => {
+                    crate::write::prepare::PreparedKmsOperation::Get { cid }
+                    | crate::write::prepare::PreparedKmsOperation::GetForRead { cid, .. } => {
                         let cid = cid::Cid::try_from(cid.as_str()).map_err(|error| {
                             query::error::QueryError::execution(format!(
                                 "invalid encryption CID in prepared KMS request: {error}"
                             ))
                         })?;
                         let key = kms
-                            .get_keys(&kms::RequestContext::anonymous(), &[cid])
+                            .get_keys(&context, &[cid])
                             .await
                             .map_err(|error| {
                                 query::error::QueryError::execution(format!(
