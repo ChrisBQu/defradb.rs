@@ -52,14 +52,10 @@ struct SavepointState {
 }
 
 impl RegolithTxn {
-    /// Open a snapshot of an existing on-disk database without modifying files.
-    pub fn open_read_only(path: impl AsRef<std::path::Path>) -> Result<Self> {
-        Self::open_read_only_with_options(path, super::RegolithStoreOptions::default())
-    }
-
-    /// Open a snapshot with the same engine options, including at-rest keys,
-    /// used by a writable store. This never rewrites a legacy store.
-    pub fn open_read_only_with_options(
+    /// Open a snapshot of an existing on-disk database without modifying files,
+    /// with the engine options, at-rest keys included, a writable store of it
+    /// uses. This never rewrites a legacy store.
+    pub fn open_read_only(
         path: impl AsRef<std::path::Path>,
         options: super::RegolithStoreOptions,
     ) -> Result<Self> {
