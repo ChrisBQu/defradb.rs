@@ -30,7 +30,6 @@ struct DocRegistrationKey {
 #[derive(Clone, Default)]
 struct AcpRegistrationState {
     projected_registrations: RapidHashMap<DocRegistrationKey, ProjectedDocRegistration>,
-    savepoints: Vec<AcpRegistrationSavepoint>,
 }
 
 /// Transaction or request scoped projection of external ACP registration writes.
