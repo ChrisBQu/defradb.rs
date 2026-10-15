@@ -61,20 +61,6 @@ impl<S: Store> DocShortIdAllocator<S> {
         }
     }
 
-    /// The id the next [`next`](Self::next) returns, left unallocated.
-    pub async fn peek(&self) -> Result<u64> {
-        loop {
-            let reserved = {
-                let range = self.range.load();
-                (range.remaining > 0).then_some(range.next)
-            };
-            if let Some(next) = reserved {
-                return Ok(next);
-            }
-            self.install_reservation().await?;
-        }
-    }
-
     fn take_reserved(&self) -> Result<Option<u64>> {
         loop {
             let range = self.range.load();

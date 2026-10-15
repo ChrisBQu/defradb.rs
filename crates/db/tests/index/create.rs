@@ -433,6 +433,35 @@ async fn create_index_fence_includes_old_schema_writes_before_definition_commit(
     assert_eq!(index_entries(&db, "Racing", index.id).await, 2);
 }
 
+#[tokio::test]
+async fn create_index_fence_covers_other_handles_reserved_id_range() {
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
+    let index_db = Arc::new(DB::from_arc(store.clone()).unwrap());
+    index_db
+        .create_collection(users_schema("Racing", "racing-v1", "col-index-handles"))
+        .await
+        .unwrap();
+
+    // Keep an early range open on the index creator. A later handle reserves
+    // and uses a higher range, which the creator's local `peek` cannot see.
+    index_db.next_doc_short_id().await.unwrap();
+    let writer_db = Arc::new(DB::open_from_arc(store).await.unwrap());
+    let writer = AutoCommitMutator::new(writer_db);
+    create_user(&writer, "Racing", "other-handle-document").await;
+
+    let (fields, kind) = by_name();
+    let index = index_db
+        .create_index("Racing", Some("by_name"), fields, kind)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        entries_for(&index_db, "Racing", "other-handle-document").await,
+        1
+    );
+    assert_eq!(index_entries(&index_db, "Racing", index.id).await, 1);
+}
+
 #[derive(Default)]
 struct DefinitionCommitGate {
     armed: AtomicBool,

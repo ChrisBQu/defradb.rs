@@ -191,7 +191,7 @@ impl<S: Store> DB<S> {
             };
             let (fence, last) = match progress {
                 Some(progress) => progress,
-                None => (self.peek_doc_short_id().await?, 0),
+                None => (self.reserve_doc_short_id_fence().await?, 0),
             };
             let lease = self.resume_action(
                 &execution.collection_id,

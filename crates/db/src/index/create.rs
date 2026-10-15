@@ -128,7 +128,7 @@ impl<S: Store> DB<S> {
         // the old schema; capturing the fence afterward guarantees its ID is
         // included in the scan. If the process stops before the first batch
         // persists progress, startup captures a fresh fence after publication.
-        let fence = self.peek_doc_short_id().await?;
+        let fence = self.reserve_doc_short_id_fence().await?;
         self.publish_started_action(&lease);
         let plan = BackfillPlan::new(collection_name, &collection_id, &index, fence, 0);
         Ok((index, lease, plan))

@@ -20,7 +20,7 @@ use lens::WasmTransformStore;
 use rapidhash::fast::RandomState;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use storage::corekv::Store;
+use storage::corekv::{Key, Store};
 
 pub mod action;
 pub(crate) mod dump;
@@ -401,9 +401,21 @@ impl<S: Store> DB<S> {
         self.doc_short_id_allocator.next().await
     }
 
-    /// The short ID the next allocation returns, left unallocated.
-    pub(crate) async fn peek_doc_short_id(&self) -> Result<u64> {
-        self.doc_short_id_allocator.peek().await
+    /// Reserve a process-independent upper fence for index backfill.
+    ///
+    /// A DB handle's cached short-ID range is not a global high-water mark:
+    /// another handle may already have reserved and used a later range. A
+    /// single global allocation gives backfill a fence above every ID handed
+    /// out before this call. The reserved ID is intentionally left unused.
+    pub(crate) async fn reserve_doc_short_id_fence(&self) -> Result<u64> {
+        storage::stores::Systemstore::new(self.store.clone())
+            .allocate(
+                &storage::keys::doc_id_index::DocShortIDSequenceKey::new().bytes(),
+                1,
+            )
+            .await
+            .map(|range| range.start)
+            .map_err(Error::Storage)
     }
 
     /// Resolve a document short ID or allocate and stage a new mapping.

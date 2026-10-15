@@ -154,29 +154,82 @@ pub(crate) async fn load_collection_for_write_attempt(
 /// all other persisted definition data must match the prepared schema. Keep
 /// this list aligned with `CollectionVersion` when adding schema fields.
 fn same_schema_except_indexes(left: &CollectionVersion, right: &CollectionVersion) -> bool {
-    left.name == right.name
-        && left.version_id == right.version_id
-        && left.collection_id == right.collection_id
-        && left.collection_set == right.collection_set
-        && left.query == right.query
-        && left.previous_version == right.previous_version
-        && left.fields == right.fields
-        && left.encrypted_indexes == right.encrypted_indexes
-        && left.fulltext_indexes == right.fulltext_indexes
-        && left.policy == right.policy
-        && left.policy_cid == right.policy_cid
-        && left.governance_root == right.governance_root
-        && left.is_active == right.is_active
-        && left.is_materialized == right.is_materialized
-        && left.downsample_interval == right.downsample_interval
-        && left.downsample_time_field == right.downsample_time_field
-        && left.downsample_retention == right.downsample_retention
-        && left.downsample_source == right.downsample_source
-        && left.is_branchable == right.is_branchable
-        && left.is_embedded_only == right.is_embedded_only
-        && left.is_placeholder == right.is_placeholder
-        && left.vector_embeddings == right.vector_embeddings
-        && left.root_id == right.root_id
+    let CollectionVersion {
+        name: left_name,
+        version_id: left_version_id,
+        collection_id: left_collection_id,
+        collection_set: left_collection_set,
+        query: left_query,
+        previous_version: left_previous_version,
+        fields: left_fields,
+        indexes: _,
+        encrypted_indexes: left_encrypted_indexes,
+        fulltext_indexes: left_fulltext_indexes,
+        policy: left_policy,
+        policy_cid: left_policy_cid,
+        governance_root: left_governance_root,
+        is_active: left_is_active,
+        is_materialized: left_is_materialized,
+        downsample_interval: left_downsample_interval,
+        downsample_time_field: left_downsample_time_field,
+        downsample_retention: left_downsample_retention,
+        downsample_source: left_downsample_source,
+        is_branchable: left_is_branchable,
+        is_embedded_only: left_is_embedded_only,
+        is_placeholder: left_is_placeholder,
+        vector_embeddings: left_vector_embeddings,
+        root_id: left_root_id,
+    } = left;
+    let CollectionVersion {
+        name: right_name,
+        version_id: right_version_id,
+        collection_id: right_collection_id,
+        collection_set: right_collection_set,
+        query: right_query,
+        previous_version: right_previous_version,
+        fields: right_fields,
+        indexes: _,
+        encrypted_indexes: right_encrypted_indexes,
+        fulltext_indexes: right_fulltext_indexes,
+        policy: right_policy,
+        policy_cid: right_policy_cid,
+        governance_root: right_governance_root,
+        is_active: right_is_active,
+        is_materialized: right_is_materialized,
+        downsample_interval: right_downsample_interval,
+        downsample_time_field: right_downsample_time_field,
+        downsample_retention: right_downsample_retention,
+        downsample_source: right_downsample_source,
+        is_branchable: right_is_branchable,
+        is_embedded_only: right_is_embedded_only,
+        is_placeholder: right_is_placeholder,
+        vector_embeddings: right_vector_embeddings,
+        root_id: right_root_id,
+    } = right;
+
+    left_name == right_name
+        && left_version_id == right_version_id
+        && left_collection_id == right_collection_id
+        && left_collection_set == right_collection_set
+        && left_query == right_query
+        && left_previous_version == right_previous_version
+        && left_fields == right_fields
+        && left_encrypted_indexes == right_encrypted_indexes
+        && left_fulltext_indexes == right_fulltext_indexes
+        && left_policy == right_policy
+        && left_policy_cid == right_policy_cid
+        && left_governance_root == right_governance_root
+        && left_is_active == right_is_active
+        && left_is_materialized == right_is_materialized
+        && left_downsample_interval == right_downsample_interval
+        && left_downsample_time_field == right_downsample_time_field
+        && left_downsample_retention == right_downsample_retention
+        && left_downsample_source == right_downsample_source
+        && left_is_branchable == right_is_branchable
+        && left_is_embedded_only == right_is_embedded_only
+        && left_is_placeholder == right_is_placeholder
+        && left_vector_embeddings == right_vector_embeddings
+        && left_root_id == right_root_id
 }
 
 /// Load a collection from the systemstore by name.
