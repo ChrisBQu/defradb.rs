@@ -62,16 +62,25 @@ pub fn spawn_failure_recorder<S: storage::corekv::Store + 'static>(
             let durable_tx = failure.durable_tx.take();
 
             if failure.admission_only {
-                let allowed = match peerstore.get_retry_info(&failure.peer_id).await {
-                    Ok(Some(bytes)) => storage::stores::RetryInfo::from_bytes(&bytes)
-                        .is_ok_and(|info| info.is_backpressure_elapsed()),
-                    Ok(None) => true,
-                    Err(error) => {
-                        tracing::warn!(%error, "failed to read live push admission deadline");
-                        false
-                    }
+                let generation = match failure.marker_generation {
+                    Some(expected_generation) => match peerstore
+                        .admit_push_scope(
+                            &failure.peer_id,
+                            &failure.doc_id,
+                            &failure.collection_id,
+                            expected_generation,
+                        )
+                        .await
+                    {
+                        Ok(true) => Some(expected_generation),
+                        Ok(false) => None,
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to validate live push admission marker");
+                            None
+                        }
+                    },
+                    None => None,
                 };
-                let generation = allowed.then_some(failure.marker_generation).flatten();
                 let _ = durable_tx.map(|tx| tx.send(generation));
                 continue;
             }

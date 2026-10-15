@@ -928,6 +928,45 @@ impl<S: Store> Peerstore<S> {
         txn.get(&key.bytes()).await
     }
 
+    /// Check whether a live push still owns the exact durable marker it was
+    /// admitted with, and whether the peer's backpressure deadline has elapsed.
+    ///
+    /// All three facts are read from one transaction snapshot so forgetting a
+    /// peer or replacing a scope marker fences queued jobs before transport I/O.
+    pub async fn admit_push_scope(
+        &self,
+        peer_id: &str,
+        doc_id: &str,
+        collection_id: &str,
+        expected_generation: u64,
+    ) -> Result<bool> {
+        let txn = self.store.new_txn(true).await?;
+        if !txn.has(&ReplicatorKey::new(peer_id).bytes()).await? {
+            return Ok(false);
+        }
+
+        let retry_info_key = ReplicatorRetryIDKey::new(peer_id);
+        let Some(retry_info_bytes) = txn.get(&retry_info_key.bytes()).await? else {
+            return Ok(false);
+        };
+        let Ok(retry_info) = super::RetryInfo::from_bytes(&retry_info_bytes) else {
+            return Ok(false);
+        };
+        if !retry_info.is_backpressure_elapsed() {
+            return Ok(false);
+        }
+
+        let marker_key = if doc_id.is_empty() {
+            ReplicatorRetryCollectionKey::new(peer_id, collection_id).bytes()
+        } else {
+            ReplicatorRetryDocIDKey::new(peer_id, doc_id).bytes()
+        };
+        let Some(marker) = txn.get(&marker_key).await? else {
+            return Ok(false);
+        };
+        Ok(decode_retry_marker_generation(&marker).unwrap_or(0) == expected_generation)
+    }
+
     /// Get all peers that have pending retries.
     ///
     /// Returns `(peer_id, retry_info_bytes)` pairs.
