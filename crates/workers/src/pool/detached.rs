@@ -1,27 +1,62 @@
-//! Detached work: a future that runs to its end with nobody awaiting it (a
-//! periodic job, a backfill, the callbacks of a transaction dropped where
-//! nothing can await).
+//! Spawning from anywhere: a future that runs to its end whether or not
+//! anyone awaits it (a periodic job, a backfill, the callbacks of a
+//! transaction dropped where nothing can await).
 //!
 //! Called on a worker, the work is a task of that worker: it stays on the
 //! core that started it. Called anywhere else, it goes to the pool the
 //! caller names, or, for code that runs where no pool was set up (a test, a
 //! one-shot tool), to a small process-wide fallback pool started on first
 //! use. A submission that finds no room waits for it on the calling plain
-//! thread, so detached work is never dropped.
+//! thread, so spawned work is never dropped.
 
 use std::future::Future;
 
 use super::{enqueue, Pool, Submit, Target};
 use crate::Error;
 
-/// Runs the future `make` builds to its end, detached: on the calling worker
-/// when called on one; otherwise on `pool`, or on the fallback pool when
-/// `pool` is `None`. Errors only when no pool can take it: the pool shut
-/// down, or no pool can start on this target.
+/// Runs the future `make` builds to its end: on the calling worker when
+/// called on one; otherwise on `pool`, or on the fallback pool when `pool` is
+/// `None`. Returns its completion; dropping it leaves the work running.
+/// Errors only when no pool can take it: the pool shut down, or no pool can
+/// start on this target.
+///
+/// ```no_run
+/// # async fn demo(pool: &workers::Pool) -> Result<(), workers::Error> {
+/// let done = workers::spawn(Some(pool), "backfill", || async { 7 })?;
+/// assert_eq!(done.await?, 7);
+/// # Ok(())
+/// # }
+/// ```
+pub fn spawn<F, Fut>(
+    pool: Option<&Pool>,
+    name: &'static str,
+    make: F,
+) -> Result<crate::Completion<Fut::Output>, Error>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future + 'static,
+    Fut::Output: Send + 'static,
+{
+    if crate::worker::on_worker() {
+        return crate::worker::spawn_named(name, make());
+    }
+    let pool = match pool {
+        Some(pool) => pool,
+        None => fallback()?,
+    };
+    let options = Submit {
+        name: Some(name),
+        bytes: None,
+    };
+    submit_now(pool, Target::LeastLoaded, options, make)
+}
+
+/// [`spawn`] for work nobody awaits (a periodic job, a backfill, the
+/// callbacks of a transaction dropped where nothing can await).
 ///
 /// ```no_run
 /// # fn demo(pool: &workers::Pool) -> Result<(), workers::Error> {
-/// workers::spawn_detached(Some(pool), "backfill", || async {
+/// workers::spawn_detached(Some(pool), "redrive", || async {
 ///     // one page per transaction, yielding between pages
 /// })?;
 /// # Ok(())
@@ -32,18 +67,7 @@ where
     F: FnOnce() -> Fut + Send + 'static,
     Fut: Future<Output = ()> + 'static,
 {
-    if crate::worker::on_worker() {
-        return crate::worker::spawn_named(name, make()).map(drop);
-    }
-    let pool = match pool {
-        Some(pool) => pool,
-        None => fallback()?,
-    };
-    let options = Submit {
-        name: Some(name),
-        bytes: None,
-    };
-    submit_now(pool, Target::LeastLoaded, options, make).map(drop)
+    spawn(pool, name, make).map(drop)
 }
 
 /// Submits `make` from a caller that cannot await (off any worker): with

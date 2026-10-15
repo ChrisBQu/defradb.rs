@@ -31,7 +31,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         }
         let ctx = Self::kms_request_context(Some(metadata));
         let prefetched_dek_cids = Arc::clone(&self.prefetched_dek_cids);
-        spawn_task(async move {
+        spawn_task(self.db.pool(), "db::dek_prefetch", async move {
             let result = match kms.get_keys(&ctx, std::slice::from_ref(&enc_cid)).await {
                 Ok(results) => results.wait_all().await.map(|_| ()),
                 Err(error) => Err(error),

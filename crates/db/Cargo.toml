@@ -61,6 +61,8 @@ kovan.workspace = true
 kovan-map.workspace = true
 kovan-queue.workspace = true
 regolith.workspace = true
+# The worker pool: periodic and detached jobs, deadlines.
+workers = { path = "../workers" }
 
 # Random number generation (for Counter CRDT nonces)
 rand.workspace = true

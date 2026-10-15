@@ -13,6 +13,7 @@ use crate::hook::HookFactory;
 use crate::pool::MonitorDriver;
 use crate::topology::CpuSet;
 
+mod parse;
 mod priority;
 
 pub use priority::{Priorities, Priority, QosClass, RealTimePolicy, ThreadClass};

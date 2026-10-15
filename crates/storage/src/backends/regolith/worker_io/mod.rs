@@ -70,6 +70,22 @@ pub fn with_worker_io(config: workers::Config) -> workers::Config {
     }
 }
 
+/// Starts the pool a database's data path runs on: `config` with the hook
+/// that gives each worker its regolith queues ([`with_worker_io`]), and with
+/// `monitor` (the network edge's timer) running its stuck-poll scan when one
+/// is given. What every node builder starts its pool with.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn start_pool(
+    config: workers::Config,
+    monitor: Option<workers::MonitorDriver>,
+) -> Result<workers::Pool, workers::Error> {
+    let config = workers::Config {
+        monitor: monitor.or(config.monitor.clone()),
+        ..config
+    };
+    workers::Pool::start(with_worker_io(config))
+}
+
 /// The calling worker's queue for `db`, opened on first use; `None` off a
 /// worker that polls regolith queues.
 pub(super) fn queue_for(db: &Arc<OptimisticTransactionDb>) -> Option<QueueId> {

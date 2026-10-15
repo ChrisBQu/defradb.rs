@@ -187,8 +187,8 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
     ///    iroh warning downstream embedders have been hitting.
     /// 2. **Background tasks** — aborts and awaits node-owned tasks.
     /// 3. **Database** — close-guards future transactions (new `begin_txn`
-    ///    calls will return `Error::DatabaseClosed`) and closes the
-    ///    underlying store.
+    ///    calls will return `Error::DatabaseClosed`), lets the worker pool
+    ///    finish what it admitted and stop, and closes the underlying store.
     ///
     /// This method is **idempotent** — the first caller performs the
     /// work, concurrent callers wait for that teardown to finish and
@@ -263,6 +263,7 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
 pub struct NodeBuilder {
     data_path: Option<PathBuf>,
     config: EmbeddedNodeConfig,
+    workers: Option<workers::Config>,
     at_rest_encryption_key: Option<[u8; 32]>,
     previous_at_rest_encryption_keys: Vec<[u8; 32]>,
     #[cfg(feature = "iroh")]
@@ -291,6 +292,13 @@ impl NodeBuilder {
     #[cfg(feature = "iroh")]
     pub fn with_iroh(mut self, config: IrohConfig) -> Self {
         self.config.transport = TransportConfig::Iroh(config);
+        self
+    }
+
+    /// The worker pool the node's data path runs on. Unset, the pool's own
+    /// defaults (`workers::Config::default()`).
+    pub fn with_workers(mut self, config: workers::Config) -> Self {
+        self.workers = Some(config);
         self
     }
 
@@ -385,6 +393,9 @@ impl NodeBuilder {
     }
 
     pub async fn build(mut self) -> Result<EmbeddedNode<EmbeddedStore>> {
+        // The data path's worker pool comes before the store, which places
+        // its compaction threads by the pool's plan.
+        let pool = start_node_pool(self.workers.take(), self.config.edge.as_ref())?;
         let (store, persistence) = if let Some(path) = self.data_path.take() {
             if let Some(parent) = path.parent() {
                 tokio::fs::create_dir_all(parent).await.with_context(|| {
@@ -408,7 +419,8 @@ impl NodeBuilder {
 
             // `Options::embedded` sizes the engine for a 1-4 MiB working
             // set, which is what an embedded node has to live inside.
-            let opts = self.with_at_rest_keys(storage::RegolithStoreOptions::embedded())?;
+            let opts = self
+                .with_at_rest_keys(storage::RegolithStoreOptions::embedded().placed_on(&pool))?;
             let store =
                 storage::RegolithStore::open_with_options(&path, opts).with_context(|| {
                     format!("failed to open regolith store at '{}'", path.display())
@@ -424,7 +436,9 @@ impl NodeBuilder {
                 EmbeddedStore::Regolith(
                     storage::RegolithStore::open_with_options(
                         "memory",
-                        self.with_at_rest_keys(storage::RegolithStoreOptions::memory())?,
+                        self.with_at_rest_keys(
+                            storage::RegolithStoreOptions::memory().placed_on(&pool),
+                        )?,
                     )
                     .context("failed to open in-memory regolith store")?,
                 ),
@@ -436,9 +450,11 @@ impl NodeBuilder {
 
         self.config.persistence = persistence;
         #[cfg(feature = "iroh")]
-        return build_with_store_and_access_hooks(store, self.config, self.access_hooks).await;
+        check_access_hooks(&self.config, self.access_hooks.as_ref())?;
+        #[cfg(feature = "iroh")]
+        return build_node(store, self.config, self.access_hooks, pool).await;
         #[cfg(not(feature = "iroh"))]
-        build_with_store(store, self.config).await
+        build_node(store, self.config, None, pool).await
     }
 }
 
@@ -519,6 +535,20 @@ async fn abort_and_join(tasks: &SegQueue<tokio::task::JoinHandle<()>>) {
     }
 }
 
+/// The worker pool a node's data path runs on: `config` (the pool's
+/// defaults when unset), with the network runtime's timer running its
+/// stuck-poll monitor when the node has one.
+pub fn start_node_pool(
+    config: Option<workers::Config>,
+    edge: Option<&edge::Edge>,
+) -> Result<workers::Pool> {
+    storage::start_pool(config.unwrap_or_default(), edge.map(edge::Edge::pool_monitor))
+        .map_err(|error| anyhow!("the worker pool did not start: {error}"))
+}
+
+/// A node over a store the application opened, on a worker pool of the
+/// pool's default configuration. The store's own threads are not placed by
+/// the pool: [`NodeBuilder`] opens the store on the pool and places them.
 pub async fn build_with_store<S>(
     store: Arc<S>,
     config: EmbeddedNodeConfig,
@@ -526,7 +556,34 @@ pub async fn build_with_store<S>(
 where
     S: storage::corekv::Store + 'static,
 {
-    build_node(store, config, None).await
+    let pool = start_node_pool(None, config.edge.as_ref())?;
+    build_node(store, config, None, pool).await
+}
+
+/// A node over a store the application opened on `pool`
+/// ([`storage::RegolithStoreOptions::placed_on`]), whose data path runs on
+/// it. Start the pool with [`start_node_pool`].
+pub async fn build_with_store_on_pool<S>(
+    store: Arc<S>,
+    config: EmbeddedNodeConfig,
+    pool: workers::Pool,
+) -> Result<EmbeddedNode<S>>
+where
+    S: storage::corekv::Store + 'static,
+{
+    build_node(store, config, None, pool).await
+}
+
+/// Access hooks need the iroh transport.
+#[cfg(feature = "iroh")]
+fn check_access_hooks(
+    config: &EmbeddedNodeConfig,
+    hooks: Option<&crate::AccessHooks>,
+) -> Result<()> {
+    if hooks.is_some() && !matches!(config.transport, TransportConfig::Iroh(_)) {
+        return Err(anyhow!("access hooks require the iroh transport"));
+    }
+    Ok(())
 }
 
 /// Build an iroh node whose access control the app supplies. Fails when
@@ -540,10 +597,9 @@ pub async fn build_with_store_and_access_hooks<S>(
 where
     S: storage::corekv::Store + 'static,
 {
-    if hooks.is_some() && !matches!(config.transport, TransportConfig::Iroh(_)) {
-        return Err(anyhow!("access hooks require the iroh transport"));
-    }
-    build_node(store, config, hooks).await
+    check_access_hooks(&config, hooks.as_ref())?;
+    let pool = start_node_pool(None, config.edge.as_ref())?;
+    build_node(store, config, hooks, pool).await
 }
 
 #[cfg(feature = "iroh")]
@@ -555,6 +611,7 @@ async fn build_node<S>(
     store: Arc<S>,
     config: EmbeddedNodeConfig,
     access_hooks: NodeAccessHooks,
+    pool: workers::Pool,
 ) -> Result<EmbeddedNode<S>>
 where
     S: storage::corekv::Store + 'static,
@@ -563,7 +620,7 @@ where
 
     let (raw_identity, node_identity_did) = create_node_identity(&config.signing)?;
     let raw_identity = raw_identity.map(Arc::new);
-    let mut db_options = db::DbOptions::default();
+    let mut db_options = db::DbOptions::default().with_pool(pool);
     if let Some(identity) = raw_identity.as_ref() {
         db_options = db_options.with_node_identity_arc(identity.clone());
     }

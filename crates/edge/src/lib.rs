@@ -41,6 +41,8 @@ pub use error::EdgeError;
 pub use handle::{Drained, Edge, Scope};
 pub use runtime::EdgeRuntime;
 pub use stats::EdgeStats;
+#[cfg(target_arch = "wasm32")]
+pub use pool::page_pool;
 pub use task::{Service, Task};
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

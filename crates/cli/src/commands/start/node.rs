@@ -36,6 +36,8 @@ pub(super) enum P2PTasks {
 
 /// Servers and background tasks produced by store/server initialization.
 pub(super) struct ServerSetup {
+    /// Closed last: it stops the worker pool, then closes the store.
+    pub database: Arc<db::DB<storage::DynStore>>,
     pub p2p_handle: Option<p2p::P2PHostHandle>,
     pub p2p_tasks: Option<P2PTasks>,
     pub downsample_task: Option<JoinHandle<()>>,
@@ -51,6 +53,8 @@ pub(super) struct ServerSetup {
 #[doc(hidden)]
 pub struct Node {
     pub(super) config: Config,
+    /// The database, whose close stops the worker pool and then the store.
+    pub(super) database: Arc<db::DB<storage::DynStore>>,
     pub(super) p2p_handle: Option<p2p::P2PHostHandle>,
     pub(super) p2p_tasks: Option<P2PTasks>,
     pub(super) downsample_task: Option<JoinHandle<()>>,
@@ -195,6 +199,7 @@ impl Node {
         user_identity: Option<std::sync::Arc<identity::RawIdentity>>,
         node_identity: Option<Arc<identity::RawIdentity>>,
         se_key: Option<[u8; 32]>,
+        pool: &workers::Pool,
         edge: &edge::Edge,
     ) -> Result<ServerSetup> {
         info!("Using unified ACP store (namespace isolated in main database)");
@@ -211,9 +216,23 @@ impl Node {
             zanzibar_store,
             node_identity,
             se_key,
+            pool,
             edge,
         )
         .await
+    }
+
+    /// The worker pool the node's data path runs on, from the config's
+    /// `workers` section: each worker polls its regolith queues, and the
+    /// edge's timer runs the stuck-poll monitor.
+    fn start_pool(config: &Config, edge: &edge::Edge) -> Result<workers::Pool> {
+        storage::start_pool(config.workers.pool_config()?, Some(edge.pool_monitor())).map_err(
+            |error| {
+                crate::error::Error::InvalidConfig(format!(
+                    "the worker pool did not start: {error}"
+                ))
+            },
+        )
     }
 
     /// Create a new node, serving on the network runtime `edge`.
@@ -274,13 +293,17 @@ impl Node {
             warn!("{message}");
         }
 
+        // The data path's worker pool comes before the store, which places
+        // its compaction threads by the pool's plan.
+        let pool = Self::start_pool(&config, &edge)?;
+
         // Initialize storage, database, and set up P2P and HTTP server
         let mut servers = match config.datastore.store {
             DatastoreType::Memory => {
                 info!("Using in-memory datastore");
                 let options = Self::encryption_options(
                     &config,
-                    storage::RegolithStoreOptions::memory(),
+                    storage::RegolithStoreOptions::memory().placed_on(&pool),
                     true,
                 )?;
                 let backend = storage::RegolithStore::open_with_options("memory", options)?;
@@ -300,6 +323,7 @@ impl Node {
                     zanzibar_store,
                     node_identity.clone(),
                     se_key,
+                    &pool,
                     &edge,
                 )
                 .await?
@@ -311,7 +335,11 @@ impl Node {
                 );
                 let backend = storage::RegolithStore::open_with_options(
                     config.data_path(),
-                    Self::encryption_options(&config, regolith_options(&config), true)?,
+                    Self::encryption_options(
+                        &config,
+                        regolith_options(&config).placed_on(&pool),
+                        true,
+                    )?,
                 )?;
                 let store = storage::DynStore::new(Arc::new(backend));
                 Self::init_persistent_store_and_server(
@@ -321,6 +349,7 @@ impl Node {
                     user_identity.clone(),
                     node_identity.clone(),
                     se_key,
+                    &pool,
                     &edge,
                 )
                 .await?
@@ -335,6 +364,7 @@ impl Node {
 
         Ok(Self {
             config,
+            database: servers.database,
             p2p_handle: servers.p2p_handle,
             p2p_tasks: servers.p2p_tasks,
             downsample_task: servers.downsample_task,

@@ -54,4 +54,6 @@ mod worker_io;
 pub use config::RegolithStoreOptions;
 pub use store::RegolithStore;
 pub use transaction::RegolithTxn;
+#[cfg(not(target_arch = "wasm32"))]
+pub use worker_io::start_pool;
 pub use worker_io::{with_worker_io, WorkerIo};
