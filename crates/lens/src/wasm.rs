@@ -37,8 +37,10 @@ pub struct WasmSandboxConfig {
     /// Epoch deadline ticks before interruption.
     pub epoch_deadline_ticks: Option<u64>,
 
-    /// Period at which the shared engine advances its epoch clock. The
-    /// restrictive default is provisional until lens-call measurements tune it.
+    /// Period at which the shared engine advances its epoch clock. The 100 ms
+    /// restrictive default is a measured provisional setting; tune it for the
+    /// workload with the ignored probe described in
+    /// `docs/benchmarks/lens-epoch-period/measurement.md`.
     pub epoch_tick_period: Option<Duration>,
 }
 
