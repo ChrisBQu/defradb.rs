@@ -13,7 +13,9 @@ use super::*;
 pub(super) enum FrameSource<P> {
     /// The walk's one root.
     Root(Block, P),
-    Parent { child_cid: Cid },
+    Parent {
+        child_cid: Cid,
+    },
 }
 
 impl<P> FrameSource<P> {
