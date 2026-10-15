@@ -154,6 +154,18 @@ impl From<crate::index::Error> for Error {
 }
 
 impl Error {
+    pub fn is_txn_retry_exhausted(&self) -> bool {
+        matches!(
+            self,
+            Error::Storage(storage::corekv::Error::TxnRetryExhausted(_))
+        ) || matches!(
+            self,
+            Error::Datastore(datastore::Error::Storage(
+                storage::corekv::Error::TxnRetryExhausted(_)
+            ))
+        )
+    }
+
     pub fn is_txn_conflict(&self) -> bool {
         matches!(self, Error::Storage(source) if source.is_txn_conflict())
             || matches!(
@@ -206,7 +218,9 @@ pub fn index_write_query_error(operation: &str, error: Error) -> query::error::Q
 
 pub fn commit_query_error(error: Error) -> query::error::QueryError {
     let message = format!("commit error: {error}");
-    if error.is_txn_conflict() {
+    if error.is_txn_retry_exhausted() {
+        query::error::QueryError::transaction_retry_exhausted(message)
+    } else if error.is_txn_conflict() {
         query::error::QueryError::transaction_conflict(message)
     } else {
         query::error::QueryError::execution(message)

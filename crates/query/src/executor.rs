@@ -14,6 +14,7 @@ use crate::txn::TransactionHandle;
 
 /// Stable GraphQL extension code for retryable transaction conflicts.
 pub const TXN_CONFLICT_ERROR_CODE: &str = "TXN_CONFLICT";
+pub const TXN_RETRY_EXHAUSTED_ERROR_CODE: &str = "TXN_RETRY_EXHAUSTED";
 
 /// Stable conflict message recognized by the remote DefraDB client.
 pub const TXN_CONFLICT_MESSAGE: &str = "transaction conflict. Please retry";
@@ -150,6 +151,14 @@ impl QueryResponse {
             && self.errors[0].code() == Some(TXN_CONFLICT_ERROR_CODE)
     }
 
+    /// Whether engine-owned transaction retries reached their limit. This is
+    /// final and must not be retried by the HTTP conflict loop.
+    pub fn is_transaction_retry_exhausted(&self) -> bool {
+        self.data.is_none()
+            && self.errors.len() == 1
+            && self.errors[0].code() == Some(TXN_RETRY_EXHAUSTED_ERROR_CODE)
+    }
+
     /// Attach warnings, dropping the member entirely when there are none so an
     /// empty `extensions` is never serialized.
     pub fn with_warnings(mut self, warnings: Vec<GqlWarning>) -> Self {
@@ -258,6 +267,10 @@ impl QueryResponseError {
     pub fn from_query_error(error: crate::error::QueryError) -> Self {
         let is_transaction_conflict =
             matches!(&error, crate::error::QueryError::TransactionConflict(_));
+        let is_transaction_retry_exhausted = matches!(
+            &error,
+            crate::error::QueryError::TransactionRetryExhausted(_)
+        );
         let retry_input = match &error {
             crate::error::QueryError::NeedsInput(request) => Some(request.clone()),
             _ => None,
@@ -265,6 +278,8 @@ impl QueryResponseError {
         let response_error = Self::new(error.to_string());
         let mut response_error = if is_transaction_conflict {
             response_error.with_code(TXN_CONFLICT_ERROR_CODE)
+        } else if is_transaction_retry_exhausted {
+            response_error.with_code(TXN_RETRY_EXHAUSTED_ERROR_CODE)
         } else {
             response_error
         };
@@ -495,6 +510,21 @@ mod tests {
         assert_eq!(
             serde_json::to_value(response).unwrap()["errors"][0]["extensions"]["code"],
             TXN_CONFLICT_ERROR_CODE
+        );
+    }
+
+    #[test]
+    fn engine_retry_exhaustion_has_stable_final_error_code() {
+        let response = QueryResponseError::from_query_error(
+            crate::error::QueryError::transaction_retry_exhausted("engine retries exhausted"),
+        );
+        let response = QueryResponse::error(response);
+
+        assert!(response.is_transaction_retry_exhausted());
+        assert!(!response.is_transaction_conflict());
+        assert_eq!(
+            serde_json::to_value(response).unwrap()["errors"][0]["extensions"]["code"],
+            TXN_RETRY_EXHAUSTED_ERROR_CODE
         );
     }
 

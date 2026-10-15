@@ -128,6 +128,10 @@ pub enum QueryError {
     #[error("{0}")]
     TransactionConflict(String),
 
+    /// Engine-owned retries reached their limit; this request is final.
+    #[error("{0}")]
+    TransactionRetryExhausted(String),
+
     /// A transaction attempt needs a remote input. The caller must end the
     /// attempt, resolve this exact request outside the transaction, memoize
     /// the response for the logical request, and execute again.
@@ -241,6 +245,10 @@ impl QueryError {
     /// Create a retryable transaction conflict error.
     pub fn transaction_conflict(msg: impl Into<String>) -> Self {
         Self::TransactionConflict(msg.into())
+    }
+
+    pub fn transaction_retry_exhausted(msg: impl Into<String>) -> Self {
+        Self::TransactionRetryExhausted(msg.into())
     }
 
     /// Create an internal error

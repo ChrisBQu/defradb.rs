@@ -73,6 +73,7 @@ pub struct Measurement {
     pub latencies: Vec<Duration>,
     pub commits: u64,
     pub exhaustions: u64,
+    pub engine_exhaustions: u64,
     pub storage_conflicts: u64,
     pub retries_before: ConflictMetricsSnapshot,
     pub retries_after: ConflictMetricsSnapshot,
@@ -173,6 +174,8 @@ pub async fn run(scenario: Scenario, writers: usize, operations: usize) -> Measu
         tasks.spawn(async move {
             let mut latencies = Vec::with_capacity(operations);
             let mut successes = Vec::with_capacity(operations);
+            let mut engine_exhaustions = 0u64;
+            let mut http_exhaustions = 0u64;
             for operation in 0..operations {
                 let request = QueryRequest::new(scenario.mutation(writer, operation, &ids));
                 let start = Instant::now();
@@ -183,7 +186,15 @@ pub async fn run(scenario: Scenario, writers: usize, operations: usize) -> Measu
                 )
                 .await;
                 latencies.push(start.elapsed());
-                if !response.is_transaction_conflict() {
+                if response.is_transaction_retry_exhausted() {
+                    engine_exhaustions += 1;
+                    continue;
+                }
+                if response.is_transaction_conflict() {
+                    http_exhaustions += 1;
+                    continue;
+                }
+                {
                     assert!(
                         response.errors.is_empty(),
                         "{}: {:?}",
@@ -210,15 +221,19 @@ pub async fn run(scenario: Scenario, writers: usize, operations: usize) -> Measu
                     successes.push((writer, operation));
                 }
             }
-            (latencies, successes)
+            (latencies, successes, http_exhaustions, engine_exhaustions)
         });
     }
     let mut latencies = Vec::with_capacity(writers * operations);
     let mut successes = Vec::with_capacity(writers * operations);
+    let mut http_exhaustions = 0u64;
+    let mut engine_exhaustions = 0u64;
     while let Some(result) = tasks.join_next().await {
-        let (samples, succeeded) = result.unwrap();
+        let (samples, succeeded, http_failed, engine_failed) = result.unwrap();
         latencies.extend(samples);
         successes.extend(succeeded);
+        http_exhaustions += http_failed;
+        engine_exhaustions += engine_failed;
     }
     let elapsed = start.elapsed();
     let commits = successes.len() as u64;
@@ -226,7 +241,8 @@ pub async fn run(scenario: Scenario, writers: usize, operations: usize) -> Measu
         elapsed,
         latencies,
         commits,
-        exhaustions: (writers * operations) as u64 - commits,
+        exhaustions: http_exhaustions,
+        engine_exhaustions,
         storage_conflicts: stats.snapshot().conflicts - storage_before.conflicts,
         retries_before,
         retries_after: telemetry::conflict_metrics_snapshot(),

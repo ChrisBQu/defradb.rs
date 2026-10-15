@@ -1,7 +1,7 @@
 #[tokio::test]
 #[should_panic(expected = "not a final successful write")]
 async fn verification_rejects_an_acknowledged_update_that_was_not_persisted() {
-    use super::{verify, Fixture, Scenario};
+    use super::{Fixture, Scenario, verify};
 
     let fixture = Fixture::new(Scenario::SharedUpdates).await;
     verify::check(&fixture, Scenario::SharedUpdates, &[(0, 0)]).await;
@@ -10,7 +10,7 @@ async fn verification_rejects_an_acknowledged_update_that_was_not_persisted() {
 #[tokio::test]
 #[should_panic(expected = "not a final successful write")]
 async fn verification_rejects_an_increment_without_its_label_update() {
-    use super::{verify, Fixture, Scenario};
+    use super::{Fixture, Scenario, verify};
     use query::QueryRequest;
 
     let fixture = Fixture::new(Scenario::CountersIndexes).await;
@@ -31,7 +31,7 @@ async fn verification_rejects_an_increment_without_its_label_update() {
 async fn verification_rejects_an_obsolete_index_entry() {
     use document::{DocID, NormalValue};
 
-    use super::{verify, Fixture, Scenario, COLLECTION};
+    use super::{COLLECTION, Fixture, Scenario, verify};
 
     let fixture = Fixture::new(Scenario::CountersIndexes).await;
     let collection = fixture.db.get_collection(COLLECTION).unwrap().unwrap();
@@ -63,4 +63,16 @@ async fn verification_rejects_an_obsolete_index_entry() {
     }
     txn.commit().await.unwrap();
     verify::check(&fixture, Scenario::CountersIndexes, &[]).await;
+}
+
+#[tokio::test]
+async fn measured_engine_exhaustions_are_failures_not_commits() {
+    use super::{Scenario, run};
+
+    let sample = run(Scenario::SharedUpdates, 2, 4).await;
+    assert_eq!(
+        sample.commits + sample.exhaustions + sample.engine_exhaustions,
+        8
+    );
+    assert_eq!(sample.engine_exhaustions, 0);
 }

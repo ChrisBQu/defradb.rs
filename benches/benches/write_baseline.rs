@@ -89,10 +89,16 @@ fn metrics(sample: &Measurement) -> Vec<(&'static str, &'static str, bool, f64)>
             (after.push_marker.attempts - before.push_marker.attempts) as f64 / commits,
         ),
         (
-            "exhausted requests",
+            "HTTP exhausted requests",
             "requests",
             true,
             sample.exhaustions as f64,
+        ),
+        (
+            "engine exhausted requests",
+            "requests",
+            true,
+            sample.engine_exhaustions as f64,
         ),
         ("latency p50", "ms", true, percentile(&sample.latencies, 50)),
         ("latency p99", "ms", true, percentile(&sample.latencies, 99)),
@@ -172,6 +178,8 @@ fn main() {
                         "baseline_sample": {
                             "workload": scenario.name(), "writers": count, "repetition": repetition,
                             "requests": sample.latencies.len(), "commits": sample.commits,
+                            "http_exhaustions": sample.exhaustions,
+                            "engine_exhaustions": sample.engine_exhaustions,
                             "elapsed_seconds": sample.elapsed.as_secs_f64(),
                             "metrics": metrics.iter().map(|(name, _, _, value)| (*name, *value)).collect::<std::collections::BTreeMap<_, _>>(),
                         }
