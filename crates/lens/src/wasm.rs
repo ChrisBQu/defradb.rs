@@ -700,7 +700,7 @@ mod tests {
         ];
         let module_bytes = IDENTITY_PASSTHROUGH_WASM;
 
-        println!("epoch ticker probe: samples={samples}, light_ms/sample={light_sample_ms}, docs/batch={docs_per_batch}");
+        println!("epoch ticker probe: profile={}, samples={samples}, light_ms/sample={light_sample_ms}, docs/batch={docs_per_batch}, fuel=u64::MAX, epoch_deadline_ticks=2", if cfg!(debug_assertions) { "debug" } else { "release" });
         println!("period_ms,light_median_ns_per_doc,light_p95_ns_per_doc,light_epoch_traps,trap_median_ms,trap_p95_ms,trap_min_ms,trap_max_ms");
         println!("CPU time/context switches: not measured by this portable harness; optionally wrap the test process in platform-specific perf tooling.");
 
@@ -734,9 +734,11 @@ mod tests {
 
             let mut light_ns_per_doc = Vec::with_capacity(samples);
             let mut light_epoch_traps = 0usize;
+            let mut light_traps_per_sample = Vec::with_capacity(samples);
             for _ in 0..samples {
                 let started = std::time::Instant::now();
                 let mut doc_count = 0usize;
+                let mut sample_traps = 0usize;
                 while started.elapsed() < Duration::from_millis(light_sample_ms as u64) {
                     let docs = (0..docs_per_batch)
                         .map(|index| input_docs[index % input_docs.len()].clone())
@@ -753,13 +755,16 @@ mod tests {
                         Ok(result) => doc_count += result.len(),
                         Err(error) if error.to_string().to_lowercase().contains("interrupt") => {
                             light_epoch_traps += 1;
+                            sample_traps += 1;
                         }
                         Err(error) => panic!("light transform failed unexpectedly: {error}"),
                     }
                 }
                 light_ns_per_doc
                     .push(started.elapsed().as_nanos() as f64 / doc_count.max(1) as f64);
+                light_traps_per_sample.push(sample_traps);
             }
+            let raw_light_ns_per_doc = light_ns_per_doc.clone();
             light_ns_per_doc.sort_by(f64::total_cmp);
 
             let module = Module::new(&wasm_store.engine, INFINITE_LOOP_WASM).unwrap();
@@ -796,6 +801,7 @@ mod tests {
                 );
                 trap_ms.push(completed.0);
             }
+            let raw_trap_ms = trap_ms.clone();
             trap_ms.sort_by(f64::total_cmp);
 
             println!(
@@ -807,6 +813,14 @@ mod tests {
                 trap_ms[0],
                 trap_ms[trap_ms.len() - 1],
             );
+            for sample_index in 0..samples {
+                println!(
+                    "raw_sample,{period_ms},{sample_index},{:.1},{},{:.3}",
+                    raw_light_ns_per_doc[sample_index],
+                    light_traps_per_sample[sample_index],
+                    raw_trap_ms[sample_index],
+                );
+            }
         }
     }
 
