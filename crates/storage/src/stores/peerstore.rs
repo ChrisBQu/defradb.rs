@@ -13,7 +13,6 @@ use async_trait::async_trait;
 /// The Peerstore handles storage of replicator configuration, replication
 /// retry tracking, and search engine retry tracking for P2P operations.
 use bytes::Bytes;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing;
 
@@ -36,24 +35,6 @@ pub struct Peerstore<S: Store> {
     store: NamespacedStore<S>,
     retry_schedule: super::RetrySchedule,
     retry: RetryOptions,
-}
-
-/// A push retry-state transaction, counted under the push-marker retry layer:
-/// each re-run after a conflict is an attempt, and `retried` tells the caller
-/// whether the sequence it ends was retried.
-struct PushMarkerRetry {
-    inner: crate::corekv::RetryAttempt,
-    retried: Arc<AtomicBool>,
-}
-
-impl RetryAttemptFn for PushMarkerRetry {
-    fn run<'a>(&'a mut self, txn: &'a mut dyn RetryTxn) -> RetryAttemptFuture<'a> {
-        if txn.previous_conflict().is_some() {
-            telemetry::record_retry_attempt(telemetry::RetryLayer::PushMarker);
-            self.retried.store(true, Ordering::Relaxed);
-        }
-        self.inner.run(txn)
-    }
 }
 
 struct RegisterScopeMarkerAttempt {
@@ -631,32 +612,20 @@ impl RetryAttemptFn for SetReplicatorIfIncarnationAttempt {
 }
 
 impl<S: Store> Peerstore<S> {
-    /// Every peerstore transaction runs here, under the engine retry and the
-    /// push-marker retry telemetry.
+    /// Every peerstore transaction runs here: one engine transaction, its
+    /// re-runs counted in the push-marker retry layer.
     async fn transact_conflicts<T>(&self, attempt: crate::corekv::RetryAttempt) -> Result<T>
     where
         T: Send + 'static,
     {
-        let retried = Arc::new(AtomicBool::new(false));
-        let attempt = Box::new(PushMarkerRetry {
-            inner: attempt,
-            retried: Arc::clone(&retried),
-        });
-        let outcome = self.store.transact_retry(self.retry, attempt).await;
-        match &outcome {
-            Err(crate::corekv::RetryAttemptError::Exhausted(_)) => {
-                telemetry::record_retry_exhaustion(telemetry::RetryLayer::PushMarker);
-            }
-            Ok(_) if retried.load(Ordering::Relaxed) => {
-                telemetry::record_retry_success(telemetry::RetryLayer::PushMarker);
-            }
-            _ => {}
-        }
-        outcome
-            .map_err(crate::corekv::RetryAttemptError::into_storage)?
-            .downcast::<T>()
-            .map(|value| *value)
-            .map_err(|_| crate::corekv::Error::Other("invalid peer retry result".into()))
+        crate::corekv::transact(
+            &self.store,
+            self.retry,
+            Some(telemetry::RetryLayer::PushMarker),
+            attempt,
+        )
+        .await
+        .map_err(crate::corekv::RetryAttemptError::into_storage)
     }
 
     /// Create a new Peerstore

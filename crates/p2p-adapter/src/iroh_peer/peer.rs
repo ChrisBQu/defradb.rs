@@ -86,7 +86,10 @@ impl<S: Store + 'static> IrohPeer<S> {
                 sync,
                 access_mode,
                 replicators,
-                Arc::new(p2p::sync::P2PCollectionStore::new(Arc::clone(&store))),
+                Arc::new(
+                    p2p::sync::P2PCollectionStore::new(Arc::clone(&store))
+                        .with_max_txn_retries(database.options().max_txn_retries()),
+                ),
                 Arc::new(db::merge::create_head_provider(Arc::clone(&database))),
                 Arc::new(replication_filter::QueryReplicationFilterMatcher::new()),
                 DbBlockClassifier::new_arc(Arc::clone(&database)),

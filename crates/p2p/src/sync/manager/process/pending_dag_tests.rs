@@ -150,13 +150,15 @@ async fn pending_dag_wakeup_requires_registration_and_preserves_backoff() {
     assert!(!manager.try_claim_pending_dag_dispatch(&root, now));
 }
 
+/// Holds the first removal before its transaction until the test releases
+/// it, and counts the transitions in flight at once.
 struct BlockingRemoveStore {
     inner: crate::sync::pending_store::PendingDagStore<RegolithStore>,
     remove_calls: std::sync::atomic::AtomicUsize,
     active_writers: std::sync::atomic::AtomicUsize,
     max_active_writers: std::sync::atomic::AtomicUsize,
-    first_remove_entered: tokio::sync::Notify,
-    release_first_remove: tokio::sync::Notify,
+    first_remove_entered: regolith::sync::Notify,
+    release_first_remove: regolith::sync::Notify,
 }
 
 impl BlockingRemoveStore {
@@ -166,8 +168,8 @@ impl BlockingRemoveStore {
             remove_calls: std::sync::atomic::AtomicUsize::new(0),
             active_writers: std::sync::atomic::AtomicUsize::new(0),
             max_active_writers: std::sync::atomic::AtomicUsize::new(0),
-            first_remove_entered: tokio::sync::Notify::new(),
-            release_first_remove: tokio::sync::Notify::new(),
+            first_remove_entered: regolith::sync::Notify::new(),
+            release_first_remove: regolith::sync::Notify::new(),
         }
     }
 
@@ -175,10 +177,69 @@ impl BlockingRemoveStore {
         self.max_active_writers
             .load(std::sync::atomic::Ordering::SeqCst)
     }
+
+    fn enter(&self) {
+        let active = self
+            .active_writers
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        self.max_active_writers
+            .fetch_max(active, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn leave(&self) {
+        self.active_writers
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 #[async_trait::async_trait]
 impl crate::sync::pending_store::PendingDagStorage for BlockingRemoveStore {
+    async fn register(
+        &self,
+        registration: crate::sync::pending_store::Registration<'_>,
+        view: &Arc<crate::sync::pending_store::PersistedView>,
+    ) -> crate::error::Result<crate::sync::pending_store::Admission> {
+        self.inner.register(registration, view).await
+    }
+
+    async fn remove(
+        &self,
+        root_cid: &Cid,
+        view: &Arc<crate::sync::pending_store::PersistedView>,
+    ) -> crate::error::Result<bool> {
+        let call = self
+            .remove_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.enter();
+        if call == 0 {
+            self.first_remove_entered.notify_one();
+            self.release_first_remove.notified().await;
+        }
+        let result = self.inner.remove(root_cid, view).await;
+        self.leave();
+        result
+    }
+
+    async fn quarantine(
+        &self,
+        root_cid: &Cid,
+        entry: &crate::sync::pending_store::PersistedQuarantinedDag,
+        view: &Arc<crate::sync::pending_store::PersistedView>,
+    ) -> crate::error::Result<bool> {
+        self.enter();
+        let result = self.inner.quarantine(root_cid, entry, view).await;
+        self.leave();
+        result
+    }
+
+    async fn sweep(
+        &self,
+        view: &Arc<crate::sync::pending_store::PersistedView>,
+    ) -> crate::error::Result<Vec<(Cid, crate::sync::pending_store::PersistedPendingDag)>> {
+        self.inner.sweep(view).await
+    }
+
     async fn put(
         &self,
         root_cid: &Cid,
@@ -187,58 +248,10 @@ impl crate::sync::pending_store::PendingDagStorage for BlockingRemoveStore {
         self.inner.put(root_cid, record).await
     }
 
-    async fn replace_scope_head(
-        &self,
-        superseded_root: Option<&Cid>,
-        root_cid: &Cid,
-        record: &crate::sync::pending_store::PersistedPendingDag,
-    ) -> crate::error::Result<()> {
-        self.inner
-            .replace_scope_head(superseded_root, root_cid, record)
-            .await
-    }
-
-    async fn remove(&self, root_cid: &Cid) -> crate::error::Result<()> {
-        let call = self
-            .remove_calls
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let active = self
-            .active_writers
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            + 1;
-        self.max_active_writers
-            .fetch_max(active, std::sync::atomic::Ordering::SeqCst);
-        if call == 0 {
-            self.first_remove_entered.notify_one();
-            self.release_first_remove.notified().await;
-        }
-        let result = self.inner.remove(root_cid).await;
-        self.active_writers
-            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-        result
-    }
-
     async fn load_all(
         &self,
     ) -> crate::error::Result<Vec<(Cid, crate::sync::pending_store::PersistedPendingDag)>> {
         self.inner.load_all().await
-    }
-
-    async fn quarantine(
-        &self,
-        root_cid: &Cid,
-        entry: &crate::sync::pending_store::PersistedQuarantinedDag,
-    ) -> crate::error::Result<()> {
-        let active = self
-            .active_writers
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            + 1;
-        self.max_active_writers
-            .fetch_max(active, std::sync::atomic::Ordering::SeqCst);
-        let result = self.inner.quarantine(root_cid, entry).await;
-        self.active_writers
-            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-        result
     }
 
     async fn is_quarantined(&self, root_cid: &Cid) -> crate::error::Result<bool> {
@@ -256,8 +269,12 @@ impl crate::sync::pending_store::PendingDagStorage for BlockingRemoveStore {
     }
 }
 
+/// Terminal transitions of one root wait for no lock: while one removal is
+/// held, a second removal and a quarantine of the same root run and commit,
+/// and the engine settles them. The store ends with the root quarantined and
+/// no live record, and the view agrees.
 #[tokio::test]
-async fn terminal_remove_and_quarantine_share_one_durable_metadata_writer() {
+async fn terminal_transitions_of_one_root_run_concurrently_and_settle_in_the_engine() {
     use crate::sync::pending_store::{PendingDagStorage, PendingDagStore, PersistedPendingDag};
 
     let manager = Arc::new(test_manager());
@@ -282,6 +299,7 @@ async fn terminal_remove_and_quarantine_share_one_durable_metadata_writer() {
         .await
         .expect("seed pending record");
     manager.install_pending_dag_store(store.clone()).await;
+    assert_eq!(manager.persisted_pending_count(), 1);
 
     let first = n0_future::task::spawn({
         let manager = Arc::clone(&manager);
@@ -289,45 +307,25 @@ async fn terminal_remove_and_quarantine_share_one_durable_metadata_writer() {
     });
     store.first_remove_entered.notified().await;
 
-    let second_started = Arc::new(tokio::sync::Notify::new());
-    let second = n0_future::task::spawn({
-        let manager = Arc::clone(&manager);
-        let second_started = Arc::clone(&second_started);
-        async move {
-            second_started.notify_one();
-            manager.remove_persisted_pending(&root).await;
-        }
-    });
-    second_started.notified().await;
-
-    let quarantine_started = Arc::new(tokio::sync::Notify::new());
-    let quarantine = n0_future::task::spawn({
-        let manager = Arc::clone(&manager);
-        let quarantine_started = Arc::clone(&quarantine_started);
-        async move {
-            quarantine_started.notify_one();
-            manager
-                .quarantine_pending_dag(&root, "deterministic rejection")
-                .await;
-        }
-    });
-    quarantine_started.notified().await;
-    for _ in 0..32 {
-        tokio::task::yield_now().await;
-    }
-
-    assert_eq!(
-        store.max_active_writers(),
-        1,
-        "same-root terminal observations must not enter concurrent store transactions"
-    );
+    n0_future::time::timeout(Duration::from_secs(5), async {
+        assert!(manager.remove_persisted_pending(&root).await);
+        manager
+            .quarantine_pending_dag(&root, "deterministic rejection")
+            .await;
+    })
+    .await
+    .expect("terminal transitions must not wait for the held removal");
+    assert!(store.max_active_writers() >= 2);
 
     store.release_first_remove.notify_one();
-    first.await.expect("first terminal task");
-    second.await.expect("second terminal task");
-    quarantine.await.expect("quarantine terminal task");
+    assert!(
+        !first.await.expect("first terminal task"),
+        "the record was gone when the held removal ran"
+    );
     assert!(store.load_all().await.unwrap().is_empty());
     assert!(store.is_quarantined(&root).await.unwrap());
+    assert_eq!(manager.persisted_pending_count(), 0);
+    assert_eq!(manager.quarantined_pending_count(), 1);
 }
 
 #[tokio::test]
@@ -886,7 +884,7 @@ async fn quarantine_pending_dag_moves_live_record_and_clears_in_memory_entry() {
         .await
         .expect("persist live pending dag record");
 
-    // Hydrates persisted_roots from the store (put must happen first, see
+    // Loads the view from the store (put must happen first, see
     // install_pending_dag_store's hydration-at-install contract).
     manager
         .install_pending_dag_store(pending_store.clone())
@@ -1065,13 +1063,9 @@ async fn resync_deletes_live_leftover_of_quarantined_root_without_redriving() {
         explicit_replay_authorization: None,
     };
 
-    // Simulate the crash window inside `quarantine_pending_dag` between
-    // writing the quarantine record and deleting the live one: both
-    // records exist on disk simultaneously.
-    pending_store
-        .put(&root, &record)
-        .await
-        .expect("persist live leftover record");
+    // A store an earlier build wrote may hold both records after a crash
+    // between its two quarantine writes: the quarantine record, and the live
+    // record it had not deleted yet.
     pending_store
         .quarantine(
             &root,
@@ -1080,9 +1074,14 @@ async fn resync_deletes_live_leftover_of_quarantined_root_without_redriving() {
                 reason: "unique constraint violation".to_string(),
                 quarantined_at_unix_secs: PersistedQuarantinedDag::now_unix_secs(),
             },
+            &Arc::new(crate::sync::pending_store::PersistedView::default()),
         )
         .await
         .expect("persist quarantine record");
+    pending_store
+        .put(&root, &record)
+        .await
+        .expect("persist live leftover record");
 
     manager
         .install_pending_dag_store(pending_store.clone())

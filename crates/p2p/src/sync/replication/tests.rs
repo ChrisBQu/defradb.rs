@@ -1301,7 +1301,7 @@ async fn test_retryable_skip_remains_unmerged_until_replayed() {
         crate::sync::SyncConfig::default(),
         AccessMode::Open,
         Arc::new(crate::ReplicatorRegistry::new()),
-        Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+        Arc::new(crate::sync::collection_store::MemoryCollectionStorage::default()),
         Arc::new(EqOnlyFilterMatcher),
     )
     .await
@@ -1373,7 +1373,7 @@ async fn coordinator_with_live_pending_dag(
         crate::sync::SyncConfig::default(),
         AccessMode::Open,
         Arc::new(crate::ReplicatorRegistry::new()),
-        Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+        Arc::new(crate::sync::collection_store::MemoryCollectionStorage::default()),
         Arc::new(EqOnlyFilterMatcher),
     )
     .await
@@ -1399,7 +1399,7 @@ async fn coordinator_with_live_pending_dag(
         .await
         .expect("persist live pending dag record");
 
-    // install_pending_dag_store hydrates persisted_roots from the store
+    // install_pending_dag_store loads the persisted view from the store
     // at install time, so the record must already be `put` above.
     coordinator
         .manager()
@@ -1722,7 +1722,7 @@ async fn test_batch_rejected_block_not_marked_merged_while_sibling_merges() {
         crate::sync::SyncConfig::default(),
         AccessMode::Open,
         Arc::new(crate::ReplicatorRegistry::new()),
-        Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+        Arc::new(crate::sync::collection_store::MemoryCollectionStorage::default()),
         Arc::new(EqOnlyFilterMatcher),
     )
     .await
@@ -1801,7 +1801,7 @@ async fn test_recovery_refuses_blocks_without_recovered_metadata() {
         crate::sync::SyncConfig::default(),
         AccessMode::Open,
         Arc::new(crate::ReplicatorRegistry::new()),
-        Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+        Arc::new(crate::sync::collection_store::MemoryCollectionStorage::default()),
         Arc::new(EqOnlyFilterMatcher),
     )
     .await
@@ -1846,7 +1846,7 @@ async fn two_stream_pushlog_merge_denial_leaves_block_unmerged() {
         crate::sync::SyncConfig::default(),
         AccessMode::Controlled,
         Arc::new(crate::ReplicatorRegistry::new()),
-        Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+        Arc::new(crate::sync::collection_store::MemoryCollectionStorage::default()),
         Arc::new(EqOnlyFilterMatcher),
     )
     .await
@@ -1893,7 +1893,7 @@ async fn test_recovery_forwards_handler_recovered_metadata() {
         crate::sync::SyncConfig::default(),
         AccessMode::Open,
         Arc::new(crate::ReplicatorRegistry::new()),
-        Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+        Arc::new(crate::sync::collection_store::MemoryCollectionStorage::default()),
         Arc::new(EqOnlyFilterMatcher),
     )
     .await
@@ -1956,7 +1956,7 @@ async fn test_pushlog_dag_needs_fetch_uses_poll_fetcher_when_sender_known() {
         crate::sync::SyncConfig::default(),
         AccessMode::Open,
         Arc::new(crate::ReplicatorRegistry::new()),
-        Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+        Arc::new(crate::sync::collection_store::MemoryCollectionStorage::default()),
         Arc::new(EqOnlyFilterMatcher),
     )
     .await
@@ -2098,7 +2098,7 @@ async fn dead_bitswap_publisher_is_dropped_and_converges_on_redial() {
         crate::sync::SyncConfig::default(),
         AccessMode::Open,
         Arc::new(crate::ReplicatorRegistry::new()),
-        Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+        Arc::new(crate::sync::collection_store::MemoryCollectionStorage::default()),
         Arc::new(EqOnlyFilterMatcher),
     )
     .await
@@ -2316,7 +2316,7 @@ async fn run_receiver_ownership_arm(expand_dag: bool) -> ReceiverOwnershipArm {
         config,
         AccessMode::Open,
         Arc::new(crate::ReplicatorRegistry::new()),
-        Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+        Arc::new(crate::sync::collection_store::MemoryCollectionStorage::default()),
         Arc::new(EqOnlyFilterMatcher),
     )
     .await
@@ -2645,7 +2645,7 @@ async fn test_run_serializes_duplicate_cids() {
         crate::sync::SyncConfig::default(),
         AccessMode::Open,
         Arc::new(crate::ReplicatorRegistry::new()),
-        Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+        Arc::new(crate::sync::collection_store::MemoryCollectionStorage::default()),
         Arc::new(EqOnlyFilterMatcher),
     )
     .await
@@ -2728,7 +2728,7 @@ async fn a_merge_does_not_wait_for_the_owner_of_the_cid_fetch() {
         crate::sync::SyncConfig::default(),
         AccessMode::Open,
         Arc::new(crate::ReplicatorRegistry::new()),
-        Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+        Arc::new(crate::sync::collection_store::MemoryCollectionStorage::default()),
         Arc::new(EqOnlyFilterMatcher),
     )
     .await
@@ -2788,7 +2788,7 @@ async fn test_run_uses_one_observable_batch_merge_pipeline() {
         crate::sync::SyncConfig::default(),
         AccessMode::Open,
         Arc::new(crate::ReplicatorRegistry::new()),
-        Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+        Arc::new(crate::sync::collection_store::MemoryCollectionStorage::default()),
         Arc::new(EqOnlyFilterMatcher),
     )
     .await
@@ -2845,7 +2845,7 @@ async fn test_process_next_batch_caps_drain_at_config_batch_size() {
         crate::sync::SyncConfig::default(),
         AccessMode::Open,
         Arc::new(crate::ReplicatorRegistry::new()),
-        Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+        Arc::new(crate::sync::collection_store::MemoryCollectionStorage::default()),
         Arc::new(EqOnlyFilterMatcher),
     )
     .await
@@ -2900,7 +2900,7 @@ async fn test_process_merge_batch_rebroadcasts_when_config_enabled() {
         crate::sync::SyncConfig::default(),
         AccessMode::Open,
         Arc::new(crate::ReplicatorRegistry::new()),
-        Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+        Arc::new(crate::sync::collection_store::MemoryCollectionStorage::default()),
         Arc::new(EqOnlyFilterMatcher),
     )
     .await
@@ -2958,7 +2958,7 @@ async fn merged_head_forwards_to_configured_replicator_without_gossip_rebroadcas
             crate::sync::SyncConfig::default(),
             AccessMode::Open,
             Arc::new(crate::ReplicatorRegistry::new()),
-            Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+            Arc::new(crate::sync::collection_store::MemoryCollectionStorage::default()),
             Arc::new(EqOnlyFilterMatcher),
         )
         .await
@@ -3026,7 +3026,7 @@ async fn rapid_collection_commits_publish_only_the_current_head() {
         crate::sync::SyncConfig::default(),
         AccessMode::Open,
         Arc::new(crate::ReplicatorRegistry::new()),
-        Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+        Arc::new(crate::sync::collection_store::MemoryCollectionStorage::default()),
         Arc::new(EqOnlyFilterMatcher),
     )
     .await
@@ -3078,7 +3078,7 @@ async fn test_batch_validates_explicit_replay_before_merge() {
         crate::sync::SyncConfig::default(),
         AccessMode::Open,
         Arc::new(crate::ReplicatorRegistry::new()),
-        Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+        Arc::new(crate::sync::collection_store::MemoryCollectionStorage::default()),
         Arc::new(EqOnlyFilterMatcher),
     )
     .await

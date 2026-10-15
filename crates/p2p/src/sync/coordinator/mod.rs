@@ -49,6 +49,7 @@ pub(crate) mod dag_context;
 pub(crate) mod dag_fetcher;
 pub(crate) mod dag_retry;
 mod event_handler;
+mod merge_state;
 #[cfg(feature = "libp2p-transport")]
 mod pubsub_client;
 #[cfg(feature = "libp2p-transport")]
@@ -82,7 +83,6 @@ use crate::tracked_task::{TrackedAbort, TrackedTask};
 use crate::transport::{P2PTransport, PeerId};
 
 use super::broadcaster::Broadcaster;
-use super::collection_store::P2PCollectionStorage;
 use super::head_provider::DocumentHeadProvider;
 use super::manager::{PendingDag, SyncManager};
 use super::peer_state::PeerStateTracker;
@@ -713,32 +713,14 @@ pub(super) struct SyncAccessState {
     pub(super) gossip_direction_filtered: AtomicU64,
 }
 
-/// Collection-ID set shared between the coordinator and its retry tasks.
-pub(super) type CollectionSet = HopscotchMap<String, (), rapidhash::fast::RandomState>;
-
-pub(super) fn collection_set() -> Arc<CollectionSet> {
-    Arc::new(HopscotchMap::with_hasher(
-        rapidhash::fast::RandomState::default(),
-    ))
-}
-
 /// Subscription and document head support state for the coordinator.
-pub(super) struct SyncSubscriptionState {
-    /// Serializes durable subscription mutations without blocking readers of
-    /// the live installed-topic set while transport I/O is in flight.
-    pub(super) mutation: Arc<tokio::sync::Mutex<()>>,
-
-    /// Set of subscribed collection IDs for P2P sync (in-memory cache).
-    pub(super) subscribed_collections: Arc<CollectionSet>,
-
-    /// Desired topics with one background installation retry owner.
-    pub(super) retrying_subscribes: Arc<CollectionSet>,
-
-    /// Undesired live topics with one background removal retry owner.
-    pub(super) retrying_unsubscribes: Arc<CollectionSet>,
-
-    /// Persistent storage for P2P collection subscriptions.
-    pub(super) collection_store: Arc<dyn P2PCollectionStorage>,
+pub(super) struct SyncSubscriptionState<T>
+where
+    T: P2PTransport,
+{
+    /// Collection topic subscriptions: the durable desired set and the live
+    /// topics.
+    collections: subscriptions::CollectionSubscriptions<T>,
 
     /// Document head provider for DocSync responses.
     pub(super) head_provider: Arc<dyn DocumentHeadProvider>,
@@ -759,7 +741,7 @@ pub struct SyncCoordinator<B: Blockstore, T: P2PTransport> {
     pub(super) access: SyncAccessState,
 
     /// Subscription and doc-sync support state.
-    pub(super) subscriptions: SyncSubscriptionState,
+    pub(super) subscriptions: SyncSubscriptionState<T>,
 
     /// Shared peer-authorization backend. Used by both the two-stream
     /// access helpers and the `pubsub_rpc` handlers so both paths make
@@ -1262,32 +1244,38 @@ mod shutdown_tests {
         }
     }
 
+    /// Its first sweep, at install, finds nothing; every later one waits.
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     impl crate::sync::pending_store::PendingDagStorage for BlockingResyncStore {
-        async fn put(
+        async fn register(
+            &self,
+            _registration: crate::sync::pending_store::Registration<'_>,
+            _view: &Arc<crate::sync::pending_store::PersistedView>,
+        ) -> crate::Result<crate::sync::pending_store::Admission> {
+            unreachable!()
+        }
+
+        async fn remove(
             &self,
             _root_cid: &Cid,
-            _record: &crate::sync::pending_store::PersistedPendingDag,
-        ) -> crate::Result<()> {
+            _view: &Arc<crate::sync::pending_store::PersistedView>,
+        ) -> crate::Result<bool> {
             unreachable!()
         }
 
-        async fn replace_scope_head(
+        async fn quarantine(
             &self,
-            _superseded_root: Option<&Cid>,
             _root_cid: &Cid,
-            _record: &crate::sync::pending_store::PersistedPendingDag,
-        ) -> crate::Result<()> {
+            _entry: &crate::sync::pending_store::PersistedQuarantinedDag,
+            _view: &Arc<crate::sync::pending_store::PersistedView>,
+        ) -> crate::Result<bool> {
             unreachable!()
         }
 
-        async fn remove(&self, _root_cid: &Cid) -> crate::Result<()> {
-            unreachable!()
-        }
-
-        async fn load_all(
+        async fn sweep(
             &self,
+            _view: &Arc<crate::sync::pending_store::PersistedView>,
         ) -> crate::Result<Vec<(Cid, crate::sync::pending_store::PersistedPendingDag)>> {
             if self.load_calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 return Ok(Vec::new());
@@ -1296,11 +1284,17 @@ mod shutdown_tests {
             std::future::pending().await
         }
 
-        async fn quarantine(
+        async fn put(
             &self,
             _root_cid: &Cid,
-            _entry: &crate::sync::pending_store::PersistedQuarantinedDag,
+            _record: &crate::sync::pending_store::PersistedPendingDag,
         ) -> crate::Result<()> {
+            unreachable!()
+        }
+
+        async fn load_all(
+            &self,
+        ) -> crate::Result<Vec<(Cid, crate::sync::pending_store::PersistedPendingDag)>> {
             unreachable!()
         }
 

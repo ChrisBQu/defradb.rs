@@ -27,7 +27,7 @@ use crate::message::{
     DocSyncRequest, PushLogBroadcast, PushLogReply, PushLogRequest,
 };
 use crate::sync::broadcaster::Broadcaster;
-use crate::sync::collection_store::NoOpCollectionStorage;
+use crate::sync::collection_store::MemoryCollectionStorage;
 use crate::sync::head_provider::{DocumentHeadProvider, NoOpHeadProvider};
 use crate::sync::manager::{SyncConfig, SyncEvent, SyncManager};
 use crate::sync::peer_state::PeerStateTracker;
@@ -355,10 +355,11 @@ fn create_test_coordinator_with_blockstore_and_head_provider<B: Blockstore + 'st
         access_mode,
     ));
 
+    let shutdown = SyncShutdownHandle::new(DEFAULT_MAX_CONCURRENT_DAG_FETCHES);
     let coordinator = SyncCoordinator {
         runtime: SyncRuntime {
             transport,
-            broadcaster,
+            broadcaster: broadcaster.clone(),
             failure_tx: Arc::new(AtomOption::none()),
             dag_fetch_limiter: DagFetchLimiter::new(DEFAULT_MAX_CONCURRENT_DAG_FETCHES),
             push_backlog: crate::sync::push_backlog::PushBacklog::new(
@@ -376,7 +377,7 @@ fn create_test_coordinator_with_blockstore_and_head_provider<B: Blockstore + 'st
             rate_limiter,
             request_rate_limiter,
             max_doc_sync_request_doc_ids: DEFAULT_MAX_DOC_SYNC_REQUEST_DOC_IDS,
-            shutdown: SyncShutdownHandle::new(DEFAULT_MAX_CONCURRENT_DAG_FETCHES),
+            shutdown: shutdown.clone(),
             dispatch_diagnostics: Arc::new(crate::sync::DispatchDiagnostics::default()),
             filter_matcher: Arc::new(crate::replicator::EqOnlyFilterMatcher),
         },
@@ -389,11 +390,11 @@ fn create_test_coordinator_with_blockstore_and_head_provider<B: Blockstore + 'st
             gossip_direction_filtered: std::sync::atomic::AtomicU64::new(0),
         },
         subscriptions: SyncSubscriptionState {
-            mutation: Arc::new(tokio::sync::Mutex::new(())),
-            subscribed_collections: super::collection_set(),
-            retrying_subscribes: super::collection_set(),
-            retrying_unsubscribes: super::collection_set(),
-            collection_store: Arc::new(NoOpCollectionStorage),
+            collections: super::subscriptions::CollectionSubscriptions::new(
+                Arc::new(MemoryCollectionStorage::default()),
+                broadcaster.clone(),
+                shutdown.clone(),
+            ),
             head_provider,
         },
         authorizer,
@@ -1670,7 +1671,7 @@ async fn car_fetch_allows_relayed_receiver_via_authenticated_defra_identity() {
         SyncConfig::default(),
         AccessMode::Controlled,
         Arc::new(ReplicatorRegistry::new()),
-        Arc::new(NoOpCollectionStorage),
+        Arc::new(MemoryCollectionStorage::default()),
         Arc::new(crate::replicator::EqOnlyFilterMatcher),
         Arc::new(StaticDataClassifier {
             collection_id: "collection1".to_string(),
@@ -1754,7 +1755,7 @@ async fn derived_selective_car_authority_is_peer_and_root_scoped() {
         SyncConfig::default(),
         AccessMode::Controlled,
         replicators,
-        Arc::new(NoOpCollectionStorage),
+        Arc::new(MemoryCollectionStorage::default()),
         Arc::new(crate::replicator::EqOnlyFilterMatcher),
         Arc::new(StaticDataClassifier {
             collection_id: "collection1".to_string(),
@@ -1910,7 +1911,7 @@ async fn car_authorization_timeout_preserves_only_independent_grants() {
             SyncConfig::default(),
             AccessMode::Controlled,
             registry,
-            Arc::new(NoOpCollectionStorage),
+            Arc::new(MemoryCollectionStorage::default()),
             Arc::new(crate::replicator::EqOnlyFilterMatcher),
             Arc::new(StaticDataClassifier {
                 collection_id: "collection1".to_string(),
@@ -1967,7 +1968,7 @@ async fn filtered_car_recovers_descendant_beyond_first_response_limit() {
         SyncConfig::default(),
         AccessMode::Controlled,
         filtered_replicator_registry(&receiver, "collection1"),
-        Arc::new(NoOpCollectionStorage),
+        Arc::new(MemoryCollectionStorage::default()),
         Arc::new(crate::replicator::EqOnlyFilterMatcher),
         Arc::new(StaticDataClassifier {
             collection_id: "collection1".to_string(),
@@ -2057,7 +2058,7 @@ async fn filtered_car_authority_is_rederived_after_sender_restart() {
         SyncConfig::default(),
         AccessMode::Controlled,
         replicators,
-        Arc::new(NoOpCollectionStorage),
+        Arc::new(MemoryCollectionStorage::default()),
         Arc::new(crate::replicator::EqOnlyFilterMatcher),
         Arc::new(StaticDataClassifier {
             collection_id: "collection1".to_string(),
@@ -2143,7 +2144,7 @@ async fn filtered_car_authority_is_rederived_after_sender_restart() {
         SyncConfig::default(),
         AccessMode::Controlled,
         restarted_replicators,
-        Arc::new(NoOpCollectionStorage),
+        Arc::new(MemoryCollectionStorage::default()),
         Arc::new(crate::replicator::EqOnlyFilterMatcher),
         Arc::new(StaticDataClassifier {
             collection_id: "collection1".to_string(),
@@ -2232,7 +2233,7 @@ async fn collection_head_car_authority_is_rederived_from_transport_after_restart
         SyncConfig::default(),
         AccessMode::Controlled,
         Arc::new(ReplicatorRegistry::new()),
-        Arc::new(NoOpCollectionStorage),
+        Arc::new(MemoryCollectionStorage::default()),
         Arc::new(crate::replicator::EqOnlyFilterMatcher),
         Arc::new(CollectionHeadClassifier {
             collection_id: "collection1".to_string(),
@@ -2320,7 +2321,7 @@ async fn gossip_car_authority_is_rederived_from_acp_without_subscription_event_a
         SyncConfig::default(),
         AccessMode::Controlled,
         Arc::new(ReplicatorRegistry::new()),
-        Arc::new(NoOpCollectionStorage),
+        Arc::new(MemoryCollectionStorage::default()),
         Arc::new(crate::replicator::EqOnlyFilterMatcher),
         Arc::new(StaticDataClassifier {
             collection_id: "collection1".to_string(),
@@ -2653,8 +2654,8 @@ async fn gossip_subscribed_collection_accepts_without_peer_connection_cache() {
 
     coordinator
         .subscriptions
-        .subscribed_collections
-        .insert("collection1".to_string(), ());
+        .collections
+        .insert_live("collection1");
 
     let result = coordinator
         .handle_transport_event(gossip_event(peer.clone(), "collection1"))
@@ -2751,8 +2752,8 @@ async fn pushlog_controlled_mode_allows_locally_subscribed_collection() {
 
     coordinator
         .subscriptions
-        .subscribed_collections
-        .insert("collection1".to_string(), ());
+        .collections
+        .insert_live("collection1");
 
     coordinator
         .handle_transport_event(pushlog_event(peer.clone(), "collection1"))
@@ -2880,8 +2881,8 @@ async fn two_stream_controlled_mode_allows_locally_subscribed_collection() {
 
     coordinator
         .subscriptions
-        .subscribed_collections
-        .insert("collection1".to_string(), ());
+        .collections
+        .insert_live("collection1");
 
     coordinator
         .handle_transport_event(two_stream_event(peer.clone(), "collection1", false))
@@ -2936,8 +2937,8 @@ async fn gossip_controlled_mode_allows_subscribed_collection() {
 
     coordinator
         .subscriptions
-        .subscribed_collections
-        .insert("collection1".to_string(), ());
+        .collections
+        .insert_live("collection1");
 
     let result = coordinator
         .handle_transport_event(gossip_event(peer, "collection1"))
@@ -2963,8 +2964,8 @@ async fn gossip_relay_cannot_confer_explicit_replicator_trust_on_origin() {
         create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
     coordinator
         .subscriptions
-        .subscribed_collections
-        .insert("collection1".to_string(), ());
+        .collections
+        .insert_live("collection1");
 
     let mut event = gossip_event(relay.clone(), "collection1");
     let TransportEvent::GossipMessage { message, .. } = &mut event else {
@@ -3019,8 +3020,8 @@ async fn gossip_controlled_mode_rejects_mismatched_topic_and_payload_collection(
 
     coordinator
         .subscriptions
-        .subscribed_collections
-        .insert("collection1".to_string(), ());
+        .collections
+        .insert_live("collection1");
 
     let result = coordinator
         .handle_transport_event(gossip_event_on_topic(peer, "collection2", "collection1"))
@@ -3068,8 +3069,8 @@ async fn gossip_controlled_mode_allows_subscribed_outbound_replicator_target() {
 
     coordinator
         .subscriptions
-        .subscribed_collections
-        .insert("collection1".to_string(), ());
+        .collections
+        .insert_live("collection1");
 
     let result = coordinator
         .handle_transport_event(gossip_event(peer, "collection1"))
@@ -3110,8 +3111,8 @@ async fn gossip_allows_doc_less_collection_commit_from_outbound_replicator_targe
 
     coordinator
         .subscriptions
-        .subscribed_collections
-        .insert("collection1".to_string(), ());
+        .collections
+        .insert_live("collection1");
 
     let result = coordinator
         .handle_transport_event(collection_commit_gossip_event(peer, "collection1"))

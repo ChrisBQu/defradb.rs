@@ -68,6 +68,7 @@ pub mod errors;
 pub mod iterator;
 pub mod retry_policy;
 pub mod traits;
+pub mod transact;
 pub mod types;
 
 // Re-export commonly used types and traits for convenience
@@ -84,4 +85,5 @@ pub use traits::{
     RetryAttemptValue, RetryCallbackCounts, RetryCallbackParts, RetryCallbacks, RetryOptions,
     RetryTxn, RetryWriteInterceptor, Store, Txn, TxnCallback, TxnStore, Writer,
 };
+pub use transact::transact;
 pub use types::{AppendLog, IterOptions, Key};

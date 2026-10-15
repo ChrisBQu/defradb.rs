@@ -51,7 +51,10 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
             if self.db.migration_generation() != generation {
                 continue;
             }
-            if !self.migration_cache.publish(generation, &cache_key, &context) {
+            if !self
+                .migration_cache
+                .publish(generation, &cache_key, &context)
+            {
                 continue;
             }
 
