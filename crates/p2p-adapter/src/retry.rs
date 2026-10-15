@@ -1290,7 +1290,7 @@ mod tests {
             .unwrap();
 
         let (tx, rx) = tokio::sync::mpsc::channel(8);
-        let recorder = spawn_failure_recorder(peerstore.clone(), rx);
+        let recorder = spawn_failure_recorder(storage::stores::Peerstore::new(store.clone()), rx);
 
         // A normal first push is admitted only while its exact marker is live.
         assert_eq!(check_live_admission(&tx, old_generation).await, Some(old_generation));
