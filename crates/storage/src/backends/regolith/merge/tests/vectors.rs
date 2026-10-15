@@ -1,6 +1,9 @@
+//! HNSW nodes and metadata: link additions and counts.
+
 use regolith::MergeOperator;
-use storage::merge::{vector, DefraMergeOperator};
-use storage::vector::{decode_meta, decode_node, encode_meta, encode_node, Meta, Node, NodeId};
+
+use crate::merge::{vector, DefraMergeOperator};
+use crate::vector::{decode_meta, decode_node, encode_meta, encode_node, Meta, Node, NodeId};
 
 #[test]
 fn links_preserve_structure_and_counts_preserve_routing() {
@@ -64,7 +67,6 @@ fn malformed_vector_operands_fail_without_allocating_from_unchecked_lengths() {
     assert!(decode_node(&corrupt).is_err());
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn vector_operator_folding_and_touches_obey_engine_contracts() {
     use regolith::testing::proptest::prelude::*;
@@ -90,11 +92,11 @@ fn vector_operator_folding_and_touches_obey_engine_contracts() {
 
 #[tokio::test]
 async fn encrypted_links_reopen_and_structural_put_terminates_operands() {
-    use storage::corekv::Store;
+    use crate::corekv::Store;
     let dir = tempfile::tempdir().unwrap();
-    let options = storage::RegolithStoreOptions::default().with_encryption_key([29; 32]);
+    let options = crate::RegolithStoreOptions::default().with_encryption_key([29; 32]);
     {
-        let store = storage::RegolithStore::open_with_options(dir.path(), options.clone()).unwrap();
+        let store = crate::RegolithStore::open_with_options(dir.path(), options.clone()).unwrap();
         let mut seed = store.new_txn(false).await.unwrap();
         seed.set(b"node", &encode_node(&Node::new(NodeId(0), vec![1.0], 0)))
             .await
@@ -105,7 +107,7 @@ async fn encrypted_links_reopen_and_structural_put_terminates_operands() {
         update.commit().await.unwrap();
         store.close().await.unwrap();
     }
-    let store = storage::RegolithStore::open_with_options(dir.path(), options).unwrap();
+    let store = crate::RegolithStore::open_with_options(dir.path(), options).unwrap();
     let mut txn = store.new_txn(false).await.unwrap();
     assert_eq!(
         decode_node(&txn.get(b"node").await.unwrap().unwrap())

@@ -1,5 +1,15 @@
-//! Versioned merge operands owned by Defra. Base values retain their typed
-//! big-endian representation; operands are never exposed as materialized values.
+//! The store's merge operator: every value a blind merge writes, and how
+//! regolith folds it.
+//!
+//! A database has one operator, so [`DefraMergeOperator`] serves every
+//! operand kind: standalone counters and full-text statistics (sums), document
+//! values (part operands, `document::stored`), and HNSW nodes and metadata
+//! (link additions and counts, [`vector`]). Each operand names its kind after a
+//! versioned magic, so the operator dispatches on the operand itself. Base
+//! values keep their typed big-endian representation; operands are never
+//! exposed as materialized values. The store installs it when it opens, and
+//! its contract is checked beside it with regolith's `check_merge_operator`
+//! and `check_touches`.
 use regolith::MergeOperator;
 
 const MAGIC: &[u8] = b"DM\x01";
@@ -177,3 +187,6 @@ impl MergeOperator for DefraMergeOperator {
     // Floats and checked i128 stats retain their operand order. Folding a pair
     // could change rounding or hide an overflow against a later-supplied base.
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests;

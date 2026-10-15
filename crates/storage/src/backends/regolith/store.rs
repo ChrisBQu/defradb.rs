@@ -81,7 +81,7 @@ impl RegolithStore {
             .statistics(Some(engine_stats))
             .add_listener(Arc::new(StoreListener(stats.clone())))
             .transaction_hooks(Arc::new(StoreHooks))
-            .merge_operator(Some(Arc::new(crate::merge::DefraMergeOperator)));
+            .merge_operator(Some(Arc::new(super::merge::DefraMergeOperator)));
         #[cfg(not(target_arch = "wasm32"))]
         let db = super::rewrite::open(&path, engine, &options)?;
         #[cfg(target_arch = "wasm32")]

@@ -1,9 +1,12 @@
+//! Document values: part operands, their CRDT order and the parts they touch.
+
 use document::stored::{StoredDocument, StoredField, ValueKind};
 use document::NormalValue;
 use regolith::MergeOperator;
-use storage::corekv::Store;
-use storage::merge::{document_parts, DefraMergeOperator};
-use storage::RegolithStore;
+
+use crate::corekv::Store;
+use crate::merge::{document_parts, DefraMergeOperator};
+use crate::RegolithStore;
 
 fn field(id: u32, priority: u64, value: NormalValue) -> StoredDocument {
     StoredDocument {
@@ -44,7 +47,6 @@ fn priorities_ties_and_tombstones_survive_materialization() {
     );
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn document_folds_and_touches_obey_engine_contracts() {
     use regolith::testing::proptest::prelude::*;
@@ -73,7 +75,6 @@ fn document_folds_and_touches_obey_engine_contracts() {
 
 /// Parts 0 to 2 are counters of `kind`, part 3 an LWW field; each part keeps
 /// one name, as a document value's parts do.
-#[cfg(not(target_arch = "wasm32"))]
 fn mixed_parts(
     kind: ValueKind,
 ) -> impl regolith::testing::proptest::strategy::Strategy<Value = StoredDocument> + Clone {
@@ -99,7 +100,6 @@ fn mixed_parts(
 
 /// Integer counter parts fold exactly in any grouping, alone or beside LWW
 /// parts, and a folded operand touches exactly the parts its operands touch.
-#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn integer_counter_parts_fold_exactly_and_touch_only_their_parts() {
     let documents = mixed_parts(ValueKind::Int64);
@@ -153,7 +153,6 @@ fn integer_counter_parts_fold_exactly_and_touch_only_their_parts() {
 
 /// Floating-point counter parts keep their order: no early fold, and
 /// `full_merge` agrees with applying the operands one at a time.
-#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn float_counter_parts_are_not_folded_early() {
     use regolith::testing::proptest::prelude::*;
@@ -312,7 +311,7 @@ fn corrupt_encodings_are_refused_without_trusting_lengths() {
 #[tokio::test]
 async fn encrypted_document_operands_survive_reopen_and_schema_put_terminates_old_operands() {
     let dir = tempfile::tempdir().unwrap();
-    let options = storage::RegolithStoreOptions::default().with_encryption_key([23; 32]);
+    let options = crate::RegolithStoreOptions::default().with_encryption_key([23; 32]);
     {
         let store = RegolithStore::open_with_options(dir.path(), options.clone()).unwrap();
         let mut seed = store.new_txn(false).await.unwrap();

@@ -1,9 +1,11 @@
-use regolith::MergeOperator;
-use storage::corekv::Store;
-use storage::merge::{counter_i64, DefraMergeOperator};
-use storage::{RegolithStore, RegolithStoreOptions};
+//! Standalone counters and full-text statistics: sums.
 
-#[cfg(not(target_arch = "wasm32"))]
+use regolith::MergeOperator;
+
+use crate::corekv::Store;
+use crate::merge::{counter_i64, DefraMergeOperator};
+use crate::{RegolithStore, RegolithStoreOptions};
+
 #[test]
 fn integer_operand_folding_obeys_the_engine_contract() {
     use regolith::testing::proptest::prelude::*;
@@ -19,8 +21,8 @@ fn integer_operand_folding_obeys_the_engine_contract() {
 
 #[test]
 fn floating_point_operands_are_not_folded() {
-    let left = storage::merge::counter_f64(1e20);
-    let right = storage::merge::counter_f64(-1e20);
+    let left = crate::merge::counter_f64(1e20);
+    let right = crate::merge::counter_f64(-1e20);
     assert!(DefraMergeOperator
         .partial_merge(b"counter", &left, &right)
         .is_none());
@@ -55,7 +57,6 @@ async fn encrypted_concurrent_operands_survive_reopen() {
     );
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn non_folding_operators_obey_the_engine_contract() {
     use regolith::testing::proptest::prelude::*;
@@ -72,9 +73,9 @@ fn non_folding_operators_obey_the_engine_contract() {
             }),
             any::<i32>().prop_map(move |value| {
                 if single {
-                    storage::merge::counter_f32(value as f32)
+                    crate::merge::counter_f32(value as f32)
                 } else {
-                    storage::merge::counter_f64(f64::from(value))
+                    crate::merge::counter_f64(f64::from(value))
                 }
             }),
         )
@@ -91,7 +92,7 @@ fn non_folding_operators_obey_the_engine_contract() {
             .concat()
         }),
         (any::<i32>(), any::<i32>()).prop_map(|(documents, length)| {
-            storage::merge::stats_delta(documents.into(), length.into())
+            crate::merge::stats_delta(documents.into(), length.into())
         }),
     )
     .unwrap();
@@ -100,7 +101,7 @@ fn non_folding_operators_obey_the_engine_contract() {
 #[test]
 fn malformed_operands_and_stats_overflow_are_rejected() {
     let integer = counter_i64(1);
-    let float = storage::merge::counter_f64(1.0);
+    let float = crate::merge::counter_f64(1.0);
     assert!(DefraMergeOperator
         .full_merge(b"key", None, &[&integer, &float])
         .is_none());
@@ -108,7 +109,7 @@ fn malformed_operands_and_stats_overflow_are_rejected() {
         .full_merge(b"key", None, &[b"DM\x01\x01"])
         .is_none());
     let stats = [i128::MAX.to_be_bytes(), 0i128.to_be_bytes()].concat();
-    let delta = storage::merge::stats_delta(1, 0);
+    let delta = crate::merge::stats_delta(1, 0);
     assert!(DefraMergeOperator
         .full_merge(b"key", Some(&stats), &[&delta])
         .is_none());

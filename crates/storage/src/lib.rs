@@ -117,5 +117,7 @@ pub use dyn_store::DynStore;
 
 pub use backends::{TransactionStatsHandle, TransactionStatsSnapshot};
 
-pub mod merge;
+/// The store's merge operator and the operands it folds, kept with the
+/// regolith adapter that installs it.
+pub use backends::regolith::merge;
 pub mod vector;

@@ -8,6 +8,7 @@ mod handle;
 mod hooks;
 pub(crate) mod iterator;
 mod listener;
+pub mod merge;
 mod post_commit;
 mod slots;
 #[cfg(not(target_arch = "wasm32"))]
