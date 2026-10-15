@@ -344,7 +344,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         let result = self
             .db
             .store()
-            .transact_retry(storage::corekv::RetryOptions::new(4), Box::new(attempt))
+            .transact_retry(self.db.options().retry_options(), Box::new(attempt))
             .await;
         let (doc_id, cid, block, col_data) = match result {
             Ok(value) => *value
@@ -757,7 +757,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         let result = self
             .db
             .store()
-            .transact_retry(storage::corekv::RetryOptions::new(4), Box::new(attempt))
+            .transact_retry(self.db.options().retry_options(), Box::new(attempt))
             .await;
         let results = match result {
             Ok(value) => *value

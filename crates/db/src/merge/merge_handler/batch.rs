@@ -285,7 +285,6 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
         &self,
         blocks: &[MergeBlock],
     ) -> Result<Vec<Result<MergeOutcome, MergeError>>, MergeError> {
-        const MAX_TXN_RETRIES: u32 = 5;
         const MAX_KMS_INPUT_MISSES_PER_BLOCK: usize = 64;
 
         if blocks.is_empty() {
@@ -330,10 +329,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
             match self
                 .db
                 .store()
-                .transact_retry(
-                    storage::corekv::RetryOptions::new(MAX_TXN_RETRIES),
-                    Box::new(attempt),
-                )
+                .transact_retry(self.db.options().retry_options(), Box::new(attempt))
                 .await
             {
                 Ok(value) => {

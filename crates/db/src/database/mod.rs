@@ -27,8 +27,7 @@ pub(crate) mod dump;
 pub(crate) mod spawn;
 pub mod storage_stats;
 
-/// Default maximum number of retries after an auto-commit transaction conflict.
-pub const DEFAULT_MAX_TXN_RETRIES: u32 = 5;
+pub use storage::corekv::DEFAULT_MAX_TXN_RETRIES;
 
 /// Database options.
 #[derive(Clone, Default)]
@@ -102,6 +101,11 @@ impl DbOptions {
     /// Returns the maximum number of transaction retries.
     pub fn max_txn_retries(&self) -> u32 {
         self.max_txn_retries.unwrap_or(DEFAULT_MAX_TXN_RETRIES)
+    }
+
+    /// The engine retry policy every write of this database runs under.
+    pub fn retry_options(&self) -> storage::corekv::RetryOptions {
+        storage::corekv::engine_retry_options(self.max_txn_retries())
     }
 
     /// Sets the chunk size for large values.

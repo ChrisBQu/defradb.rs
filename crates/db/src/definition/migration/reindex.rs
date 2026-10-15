@@ -119,7 +119,7 @@ impl<S: Store> DB<S> {
         };
         match self
             .store()
-            .transact_retry(storage::corekv::RetryOptions::new(4), Box::new(attempt))
+            .transact_retry(self.options().retry_options(), Box::new(attempt))
             .await
         {
             Ok(value) => value

@@ -222,7 +222,6 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
         block_data: &[u8],
         metadata: BlockMetadata<'_>,
     ) -> Result<MergeOutcome, MergeError> {
-        const MAX_TXN_RETRIES: usize = 5;
         let recovered = if metadata.is_recovery {
             self.recover_metadata_from_block(cid, block_data).await?
         } else {
@@ -276,10 +275,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
             let result = self
                 .db
                 .store()
-                .transact_retry(
-                    storage::corekv::RetryOptions::new(MAX_TXN_RETRIES as u32),
-                    Box::new(attempt),
-                )
+                .transact_retry(self.db.options().retry_options(), Box::new(attempt))
                 .await;
             match result {
                 Ok(value) => {

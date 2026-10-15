@@ -151,7 +151,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         let result = self
             .db
             .store()
-            .transact_retry(storage::corekv::RetryOptions::new(4), Box::new(attempt))
+            .transact_retry(self.db.options().retry_options(), Box::new(attempt))
             .await;
         let (canonical_doc_id, commit_result, doc_short_id) = match result {
             Ok(value) => *value
@@ -390,7 +390,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         let result = self
             .db
             .store()
-            .transact_retry(storage::corekv::RetryOptions::new(4), Box::new(attempt))
+            .transact_retry(self.db.options().retry_options(), Box::new(attempt))
             .await;
         let results = match result {
             Ok(value) => *value.downcast::<Vec<DeleteAttemptResult>>().map_err(|_| {
