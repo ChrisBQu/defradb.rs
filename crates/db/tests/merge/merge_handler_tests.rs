@@ -1007,6 +1007,60 @@ async fn counter_merge_of_an_unmaterialized_document_waits_for_its_composite() {
     assert!(stored.is_none(), "no partial document value was written");
 }
 
+/// The counter block a standalone merge left to its composite is applied by
+/// that composite, once, and marked merged: the document holds its value.
+#[tokio::test]
+async fn counter_merge_marks_cid_merged() {
+    let (handler, blockstore) = make_handler_with_counter_schema().await;
+    let mut doc = Document::new();
+    doc.set_with_crdt("score", CType::PnCounter, NormalValue::Int(5))
+        .unwrap();
+    doc.set_schema_version_id("v1");
+    let built = db::block::builder::build_blocks_from_document(&doc, "v1", &blockstore)
+        .await
+        .unwrap();
+    let [counter_cid] = built.field_cids[..] else {
+        panic!("one counter field block, got {:?}", built.field_cids);
+    };
+    let counter_block =
+        Block::from_dag_cbor(&blockstore.get(&counter_cid).await.unwrap().unwrap()).unwrap();
+    let CrdtDelta::Counter(payload) = counter_block.delta else {
+        panic!("the counter field block carries a counter delta");
+    };
+    let collection_short_id = handler
+        .db()
+        .get_collection("Counters")
+        .unwrap()
+        .unwrap()
+        .resolved_root_id();
+    register_test_block_owner(&handler, collection_short_id, &built.doc_id, &counter_cid).await;
+    let metadata = BlockMetadata::normal(
+        &built.doc_id,
+        "col-counters",
+        "did:key:z6MkrCounterMergeTest",
+        None,
+        false,
+    );
+
+    let outcome = handler
+        .process_counter_delta(&counter_cid, &payload, &metadata)
+        .await
+        .unwrap();
+    assert!(outcome.is_terminal_skip(), "{outcome:?}");
+    assert!(!blockstore.is_merged(&counter_cid).await.unwrap());
+
+    let outcome = handler
+        .handle_block(&built.cid, &built.block, metadata)
+        .await
+        .unwrap();
+    assert_eq!(outcome, MergeOutcome::Merged);
+    assert!(blockstore.is_merged(&counter_cid).await.unwrap());
+    assert_eq!(
+        read_counter_value(handler.db(), &built.doc_id, "score").await,
+        5
+    );
+}
+
 /// A counter's committed value: its part of the document value, the counter's
 /// only stored copy, read through a fresh read txn on `db`.
 async fn read_counter_value(db: &Arc<DB<RegolithStore>>, doc_id: &str, field: &str) -> i64 {
@@ -1302,6 +1356,73 @@ async fn shared_counter_block_is_applied_once_per_document() {
         if index == 0 {
             blockstore.mark_as_merged(&cid).await.unwrap();
         }
+    }
+}
+
+/// A counter block two stored documents share lands once on each of them,
+/// also after the first one marked it merged: each counter ends at its own
+/// value plus 5.
+#[tokio::test]
+async fn a_shared_counter_block_lands_once_on_each_stored_document() {
+    let (handler, blockstore) = make_handler_with_counter_schema().await;
+    let db = Arc::clone(handler.db());
+    let registry = DbTransactionRegistry::new(Arc::clone(&db));
+    let mut docs = Vec::new();
+    for seed in [0_i64, 10] {
+        let handle = registry.begin(false).await.expect("begin seed");
+        let ctx = registry.get(&handle).into_result().unwrap().unwrap();
+        let mutator = ctx.doc_mutator().expect("mutator");
+        let created = mutator
+            .create(
+                "Counters",
+                Document::from_json_str(&format!(r#"{{"score": {seed}}}"#)).unwrap(),
+            )
+            .await
+            .expect("create seed");
+        docs.push((created.doc_id.to_string(), seed));
+        drop(mutator);
+        drop(ctx);
+        registry.commit(&handle).await.expect("commit seed");
+    }
+    let (cid, payload) = put_counter_delta_block(&blockstore, &docs[0].0, 5, 1, 7).await;
+
+    for (index, (doc_id, _)) in docs.iter().enumerate() {
+        let txn = db.new_txn(false).await.unwrap();
+        let doc_short_id = {
+            let systemstore = txn.systemstore().unwrap();
+            db::docid::map::get_doc_ref(&systemstore, doc_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .doc_short_id
+        };
+        {
+            let mut datastore = txn.datastore().unwrap();
+            let headstore = txn.headstore().unwrap();
+            for attempt in 0..2 {
+                let result = handler
+                    .process_counter_delta_in_txn(
+                        &mut datastore,
+                        &headstore,
+                        &cid,
+                        &payload,
+                        Some("col-counters"),
+                        doc_id,
+                        doc_short_id,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(result.applied(), attempt == 0, "{doc_id}");
+            }
+        }
+        txn.force_commit().await.unwrap();
+        if index == 0 {
+            blockstore.mark_as_merged(&cid).await.unwrap();
+        }
+    }
+
+    for (doc_id, seed) in &docs {
+        assert_eq!(read_counter_value(&db, doc_id, "score").await, seed + 5);
     }
 }
 

@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use storage::backends::regolith::RegolithStore;
-use storage::corekv::{OnCommit, Store, Writer};
+use storage::corekv::{OnCommit, Reader, Store, Writer};
 
 #[tokio::test]
 async fn eventful_empty_commit_commits_and_dispatches_its_events() {
@@ -89,4 +89,13 @@ async fn failed_ordered_hook_keeps_the_commit_its_events_and_later_commits() {
         .expect("second event");
     second.commit().await.expect("second commit");
     assert_eq!(published.load(Ordering::SeqCst), 2);
+
+    let reader = store.new_txn(true).await.expect("read txn");
+    for key in [b"first".as_slice(), b"second"] {
+        assert_eq!(
+            reader.get(key).await.expect("read").as_deref(),
+            Some(b"value".as_slice()),
+            "both commits stand"
+        );
+    }
 }
