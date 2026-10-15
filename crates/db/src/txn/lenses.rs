@@ -31,6 +31,14 @@ impl TxnLensStore {
     fn initialized_local(&self) -> Option<&Arc<dyn TransformStore>> {
         self.local.get()
     }
+
+    /// The store that holds `id`: this transaction's registrations first, then
+    /// the committed store.
+    fn holder(&self, id: &TransformId) -> &Arc<dyn TransformStore> {
+        self.initialized_local()
+            .filter(|local| local.has_transform(id))
+            .unwrap_or(&self.base)
+    }
 }
 
 #[async_trait]
@@ -60,25 +68,11 @@ impl TransformStore for TxnLensStore {
         id: &TransformId,
         docs: LensDocStream,
     ) -> lens::Result<LensDocResultStream> {
-        if self
-            .initialized_local()
-            .is_some_and(|local| local.has_transform(id))
-        {
-            self.initialized_local().unwrap().transform(id, docs)
-        } else {
-            self.base.transform(id, docs)
-        }
+        self.holder(id).transform(id, docs)
     }
 
     fn inverse(&self, id: &TransformId, docs: LensDocStream) -> lens::Result<LensDocResultStream> {
-        if self
-            .initialized_local()
-            .is_some_and(|local| local.has_transform(id))
-        {
-            self.initialized_local().unwrap().inverse(id, docs)
-        } else {
-            self.base.inverse(id, docs)
-        }
+        self.holder(id).inverse(id, docs)
     }
 
     fn has_transform(&self, id: &TransformId) -> bool {
@@ -88,14 +82,7 @@ impl TransformStore for TxnLensStore {
     }
 
     async fn remove(&self, id: &TransformId) -> lens::Result<()> {
-        if self
-            .initialized_local()
-            .is_some_and(|local| local.has_transform(id))
-        {
-            self.initialized_local().unwrap().remove(id).await
-        } else {
-            self.base.remove(id).await
-        }
+        self.holder(id).remove(id).await
     }
 }
 
@@ -124,5 +111,46 @@ mod tests {
         assert!(store.has_transform(&id));
         assert!(!base.has_transform(&id));
         assert_eq!(store.list().await.unwrap().len(), 1);
+    }
+
+    fn no_docs() -> LensDocStream {
+        Box::pin(futures::stream::empty())
+    }
+
+    fn config() -> LensConfig {
+        LensConfig::new("v1", "v2", lens::LensModule::default())
+    }
+
+    #[tokio::test]
+    async fn calls_reach_the_store_that_holds_the_transform() {
+        let base = Arc::new(lens::MemoryTransformStore::new());
+        let committed = TransformId::new("committed");
+        base.add_with_id(committed.clone(), config()).await.unwrap();
+        let store = TxnLensStore::new(base.clone());
+        let missing = TransformId::new("missing");
+
+        // Before any registration every call reaches the committed store.
+        assert!(store.transform(&committed, no_docs()).is_ok());
+        assert!(matches!(
+            store.transform(&missing, no_docs()),
+            Err(lens::Error::TransformNotFound(_))
+        ));
+
+        let local = TransformId::new("local");
+        store.add_with_id(local.clone(), config()).await.unwrap();
+        assert!(store.transform(&local, no_docs()).is_ok());
+        assert!(store.inverse(&local, no_docs()).is_ok());
+        assert!(store.inverse(&committed, no_docs()).is_ok());
+        assert!(!base.has_transform(&local));
+
+        store.remove(&local).await.unwrap();
+        assert!(!store.has_transform(&local));
+        assert!(base.has_transform(&committed));
+        store.remove(&committed).await.unwrap();
+        assert!(!base.has_transform(&committed));
+        assert!(matches!(
+            store.remove(&missing).await,
+            Err(lens::Error::TransformNotFound(_))
+        ));
     }
 }

@@ -16,7 +16,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use wasmtime::{Config, Engine, Module, StoreLimits, StoreLimitsBuilder};
 
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::store::{LensDocResultStream, LensDocStream, TransformId, TransformStore};
 use crate::wasm_runtime::execute_batch_transform;
@@ -96,7 +96,9 @@ impl Drop for EpochTicker {
         self.stop.store(true, Ordering::Release);
         if let Some(worker) = self.worker.take() {
             worker.thread().unpark();
-            let _ = worker.join();
+            if worker.join().is_err() {
+                error!("lens epoch clock thread panicked; lens time limits stopped at the panic");
+            }
         }
     }
 }
