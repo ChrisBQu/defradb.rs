@@ -38,6 +38,11 @@ impl TxnId {
     pub(crate) fn get(self) -> u64 {
         self.0
     }
+
+    /// The ID a table stored.
+    pub(super) fn from_raw(id: u64) -> TxnId {
+        TxnId(id)
+    }
 }
 
 impl fmt::Display for TxnId {

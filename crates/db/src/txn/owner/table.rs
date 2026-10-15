@@ -1,7 +1,12 @@
 //! A worker's own transactions: the mailbox of each, by ID, and the
-//! sequence its IDs are drawn from. Only that worker reads or writes its
-//! table; the map is the lock-free one only because the registry that holds
-//! every worker's table is shared.
+//! sequence its IDs are drawn from. The worker inserts, looks up and removes
+//! its own entries; the one write from elsewhere is an abandon, which takes a
+//! mailbox out at once (so no later request finds it) and queues the abandon
+//! for the worker behind what is already there.
+//!
+//! The map drops a removed mailbox only when its reclamation runs, so nothing
+//! here relies on a mailbox closing: the end of a transaction is always a
+//! message.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -58,6 +63,21 @@ where
 
     pub(super) fn remove(&self, id: TxnId) {
         self.mailboxes.remove(&id.get());
+    }
+
+    /// Takes transaction `id` out of the table and tells its task, behind
+    /// the requests already queued, that it was let go.
+    pub(super) fn abandon(&self, id: TxnId) {
+        if let Some(mailbox) = self.mailboxes.remove(&id.get()) {
+            let _ = mailbox.try_send(Message::Abandon);
+        }
+    }
+
+    /// [`abandon`](Self::abandon) for every transaction here.
+    pub(super) fn abandon_all(&self) {
+        for id in self.mailboxes.keys() {
+            self.abandon(TxnId::from_raw(id));
+        }
     }
 
     pub(super) fn len(&self) -> usize {

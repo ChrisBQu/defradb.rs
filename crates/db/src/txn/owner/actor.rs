@@ -55,7 +55,7 @@ where
 }
 
 /// Runs the transaction `txn` named `id` on worker `worker` until a message
-/// ends it or every sender of its mailbox is gone (the registry was dropped).
+/// ends it or every sender of its mailbox is gone.
 /// Dropping `txn` is how it ends without a commit: its holder discards it
 /// then. The task holds its registry weakly, so a dropped registry ends every
 /// transaction it owned.

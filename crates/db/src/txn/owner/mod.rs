@@ -194,24 +194,13 @@ where
         .await
     }
 
-    /// Lets go of transaction `id` without finishing it: it ends, unfinished,
-    /// after every request queued before this. Never waits; when the owner
-    /// has no room for the message now, the idle sweep ends the transaction
-    /// instead.
+    /// Lets go of transaction `id` without finishing it, at once and without
+    /// waiting: it leaves its owner's table, so no later request finds it and
+    /// it no longer counts, and its owner ends it unfinished after the
+    /// requests already queued for it. Safe from any thread and with no
+    /// runtime (a guard's destructor).
     pub(crate) fn abandon(&self, id: TxnId) {
-        let shared = Arc::downgrade(&self.shared);
-        let owner = id.owner(self.pool.workers());
-        let sent = self
-            .pool
-            .try_submit_with(Target::Worker(owner), named("txn.abandon"), move || {
-                if let Some(shared) = shared.upgrade() {
-                    let _ = shared.tables[owner].send(id, Message::Abandon);
-                }
-                std::future::ready(())
-            });
-        if let Err(error) = sent {
-            tracing::debug!(txn_id = %id, %error, "abandoned transaction left to the idle sweep");
-        }
+        self.shared.tables[id.owner(self.pool.workers())].abandon(id);
     }
 
     /// Ends every transaction no admitted request has used for at least
@@ -325,6 +314,16 @@ where
             })
             .await?;
         replied.await?.ok_or(Unavailable::NotFound)
+    }
+}
+
+impl<T> Drop for Owners<T>
+where
+    T: 'static,
+{
+    /// A registry that goes ends every transaction it owns.
+    fn drop(&mut self) {
+        self.shared.tables.iter().for_each(Table::abandon_all);
     }
 }
 
