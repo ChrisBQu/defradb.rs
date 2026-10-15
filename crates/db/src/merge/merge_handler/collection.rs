@@ -44,10 +44,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     ) -> std::result::Result<MergeOutcome, MergeError> {
         let mut frames = vec![CollectionMergeFrame::Enter {
             cid: *cid,
-            source: FrameSource::Root {
-                block: block.clone(),
-                payload: payload.clone(),
-            },
+            source: FrameSource::root(block, payload),
             depth,
         }];
 
@@ -389,10 +386,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     ) -> std::result::Result<MergeOutcome, MergeError> {
         let mut frames = vec![CollectionMergeFrame::Enter {
             cid: *cid,
-            source: FrameSource::Root {
-                block: block.clone(),
-                payload: payload.clone(),
-            },
+            source: FrameSource::root(block, payload),
             depth,
         }];
 

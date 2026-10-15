@@ -275,10 +275,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         let doc_id_for_index = doc_id_str.clone();
         let mut frames = vec![CompositeMergeFrame::Enter {
             cid: *cid,
-            source: FrameSource::Root {
-                block: block.clone(),
-                payload: payload.clone(),
-            },
+            source: FrameSource::root(block, payload),
             depth,
         }];
 
@@ -685,10 +682,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         let doc_id_for_index = doc_id.clone();
         let mut frames = vec![CompositeMergeFrame::Enter {
             cid: *cid,
-            source: FrameSource::Root {
-                block: block.clone(),
-                payload: payload.clone(),
-            },
+            source: FrameSource::root(block, payload),
             depth,
         }];
 

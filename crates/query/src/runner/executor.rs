@@ -548,10 +548,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
             // projection must never fall back to mutating an external provider
             // before the storage transaction commits. The mutator's ordered
             // hook registration will fail closed if it cannot retain hooks.
-            scoped_runner.acp_registration_projection =
-                Some(txn_ctx.acp_registration_projection().unwrap_or_else(|| {
-                    Arc::new(crate::txn::AcpRegistrationProjection::detached())
-                }));
+            // The projection is not Sync in the single-threaded browser build.
+            #[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
+            let projection = txn_ctx.acp_registration_projection().unwrap_or_else(|| {
+                Arc::new(crate::txn::AcpRegistrationProjection::detached())
+            });
+            scoped_runner.acp_registration_projection = Some(projection);
         }
 
         let statement_guard = if !txn_ctx.is_readonly()
