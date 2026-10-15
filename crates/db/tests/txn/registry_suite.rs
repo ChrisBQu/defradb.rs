@@ -1,3 +1,4 @@
+use crate::common::owned::in_txn;
 use db::database::DB;
 use db::txn::registry::*;
 use document::Document;
@@ -5,7 +6,6 @@ use document::NormalValue;
 use lens::LensConfig;
 use lens::LensModule;
 use query::mutator::DocMutator;
-use crate::common::owned::in_txn;
 use query::txn::txn_job;
 use query::txn::TransactionHandle;
 use query::txn::TransactionRegistry;
@@ -69,7 +69,10 @@ async fn seed_committed_user(
 }
 
 /// Whether a request for `txn_id` still reaches its transaction.
-async fn found(registry: &DbTransactionRegistry<RegolithStore>, txn_id: &TransactionHandle) -> bool {
+async fn found(
+    registry: &DbTransactionRegistry<RegolithStore>,
+    txn_id: &TransactionHandle,
+) -> bool {
     registry
         .run(txn_id, None, txn_job(|_| Box::pin(async {})))
         .await
@@ -107,7 +110,12 @@ async fn test_begin_readonly_transaction() {
     let registry = DbTransactionRegistry::new(db);
 
     let txn_id = registry.begin(true).await.unwrap();
-    assert!(in_txn(&registry, &txn_id, |ctx| Box::pin(async move { ctx.is_readonly() })).await);
+    assert!(
+        in_txn(&registry, &txn_id, |ctx| Box::pin(async move {
+            ctx.is_readonly()
+        }))
+        .await
+    );
 }
 
 #[tokio::test]
@@ -116,7 +124,12 @@ async fn test_begin_readwrite_transaction() {
     let registry = DbTransactionRegistry::new(db);
 
     let txn_id = registry.begin(false).await.unwrap();
-    assert!(!in_txn(&registry, &txn_id, |ctx| Box::pin(async move { ctx.is_readonly() })).await);
+    assert!(
+        !in_txn(&registry, &txn_id, |ctx| Box::pin(async move {
+            ctx.is_readonly()
+        }))
+        .await
+    );
 }
 
 #[tokio::test]
@@ -155,7 +168,10 @@ async fn test_transaction_id_matches() {
     let registry = DbTransactionRegistry::new(db);
 
     let txn_id = registry.begin(false).await.unwrap();
-    let id = in_txn(&registry, &txn_id, |ctx| Box::pin(async move { ctx.id().to_owned() })).await;
+    let id = in_txn(&registry, &txn_id, |ctx| {
+        Box::pin(async move { ctx.id().to_owned() })
+    })
+    .await;
     assert_eq!(id, txn_id.as_str());
 }
 
@@ -349,8 +365,8 @@ async fn test_doc_fetcher_get_all_empty_collection() {
         Box::pin(async move {
             let fetcher = ctx.doc_fetcher();
 
-                let docs = fetcher.get_all("Users").await.unwrap();
-                assert!(docs.is_empty());
+            let docs = fetcher.get_all("Users").await.unwrap();
+            assert!(docs.is_empty());
         })
     })
     .await;
@@ -368,9 +384,9 @@ async fn test_doc_fetcher_get_all_unknown_collection() {
         Box::pin(async move {
             let fetcher = ctx.doc_fetcher();
 
-                let result = fetcher.get_all("NonExistent").await;
-                assert!(result.is_err());
-                assert!(result.unwrap_err().to_string().contains("NonExistent"));
+            let result = fetcher.get_all("NonExistent").await;
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("NonExistent"));
         })
     })
     .await;
@@ -388,9 +404,9 @@ async fn test_doc_fetcher_get_by_ids_empty() {
         Box::pin(async move {
             let fetcher = ctx.doc_fetcher();
 
-                let result = fetcher.get_by_ids("Users", &[]).await.unwrap();
-                assert!(result.docs().is_empty());
-                assert!(result.missing_ids().is_empty());
+            let result = fetcher.get_by_ids("Users", &[]).await.unwrap();
+            assert!(result.docs().is_empty());
+            assert!(result.missing_ids().is_empty());
         })
     })
     .await;
@@ -410,13 +426,13 @@ async fn test_doc_fetcher_get_by_ids_invalid_id_treated_as_not_found() {
         Box::pin(async move {
             let fetcher = ctx.doc_fetcher();
 
-                let result = fetcher
-                    .get_by_ids("Users", &["not-a-valid-docid".to_string()])
-                    .await
-                    .unwrap();
-                // Invalid doc ID is treated as not found, not an error
-                assert!(result.docs().is_empty());
-                assert_eq!(result.missing_ids(), &["not-a-valid-docid".to_string()]);
+            let result = fetcher
+                .get_by_ids("Users", &["not-a-valid-docid".to_string()])
+                .await
+                .unwrap();
+            // Invalid doc ID is treated as not found, not an error
+            assert!(result.docs().is_empty());
+            assert_eq!(result.missing_ids(), &["not-a-valid-docid".to_string()]);
         })
     })
     .await;
@@ -493,9 +509,9 @@ async fn test_transaction_sees_committed_data() {
         Box::pin(async move {
             let fetcher = ctx.doc_fetcher();
 
-                let docs = fetcher.get_all("Users").await.unwrap();
-                assert_eq!(docs.len(), 1);
-                assert_eq!(docs[0].get("name").unwrap().as_str(), Some("Alice"));
+            let docs = fetcher.get_all("Users").await.unwrap();
+            assert_eq!(docs.len(), 1);
+            assert_eq!(docs[0].get("name").unwrap().as_str(), Some("Alice"));
         })
     })
     .await;
@@ -518,13 +534,13 @@ async fn test_get_by_ids_returns_matching_docs() {
         Box::pin(async move {
             let fetcher = ctx.doc_fetcher();
 
-                let result = fetcher.get_by_ids("Users", &[doc1_id]).await.unwrap();
-                assert_eq!(result.docs().len(), 1);
-                assert!(result.missing_ids().is_empty());
-                assert_eq!(
-                    result.docs()[0].get("name").unwrap().as_str(),
-                    Some("Alice")
-                );
+            let result = fetcher.get_by_ids("Users", &[doc1_id]).await.unwrap();
+            assert_eq!(result.docs().len(), 1);
+            assert!(result.missing_ids().is_empty());
+            assert_eq!(
+                result.docs()[0].get("name").unwrap().as_str(),
+                Some("Alice")
+            );
         })
     })
     .await;
@@ -667,11 +683,11 @@ async fn test_doc_fetcher_get_by_ids_unknown_collection() {
         Box::pin(async move {
             let fetcher = ctx.doc_fetcher();
 
-                let result = fetcher
-                    .get_by_ids("NonExistent", &["some-id".to_string()])
-                    .await;
-                assert!(result.is_err());
-                assert!(result.unwrap_err().to_string().contains("NonExistent"));
+            let result = fetcher
+                .get_by_ids("NonExistent", &["some-id".to_string()])
+                .await;
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("NonExistent"));
         })
     })
     .await;
@@ -696,29 +712,29 @@ async fn test_get_by_ids_with_nonexistent_valid_id() {
         Box::pin(async move {
             let fetcher = ctx.doc_fetcher();
 
-                let result = fetcher
-                    .get_by_ids("Users", &[existing_id, nonexistent_id.clone()])
-                    .await
-                    .unwrap();
+            let result = fetcher
+                .get_by_ids("Users", &[existing_id, nonexistent_id.clone()])
+                .await
+                .unwrap();
 
-                assert_eq!(
-                    result.docs().len(),
-                    1,
-                    "Should only return existing document"
-                );
-                assert_eq!(
-                    result.docs()[0].get("name").unwrap().as_str(),
-                    Some("Exists")
-                );
+            assert_eq!(
+                result.docs().len(),
+                1,
+                "Should only return existing document"
+            );
+            assert_eq!(
+                result.docs()[0].get("name").unwrap().as_str(),
+                Some("Exists")
+            );
 
-                // Verify missing IDs are reported
-                assert_eq!(
-                    result.missing_ids().len(),
-                    1,
-                    "Should report one missing ID"
-                );
-                assert_eq!(result.missing_ids()[0], nonexistent_id);
-                assert!(!result.is_complete(), "Result should not be complete");
+            // Verify missing IDs are reported
+            assert_eq!(
+                result.missing_ids().len(),
+                1,
+                "Should report one missing ID"
+            );
+            assert_eq!(result.missing_ids()[0], nonexistent_id);
+            assert!(!result.is_complete(), "Result should not be complete");
         })
     })
     .await;
@@ -980,7 +996,9 @@ async fn test_snapshot_isolation_after_external_commit() {
     // Step 4: A NEW transaction started after commit SHOULD see the data
     let new_reader_txn_id = registry.begin(true).await.unwrap();
 
-    let new_docs = get_all(&registry, &new_reader_txn_id, "Users").await.unwrap();
+    let new_docs = get_all(&registry, &new_reader_txn_id, "Users")
+        .await
+        .unwrap();
     assert_eq!(
         new_docs.len(),
         1,
