@@ -46,6 +46,39 @@ impl<S: Store> NodeAccessChecker for DbNodeAccessChecker<S> {
     }
 }
 
+/// `checker` serving the request `context` serves: its context-free
+/// [`NodeAccessChecker::check_node_access`] checks the identity acting in
+/// `context`.
+pub fn bound_node_access_checker(
+    checker: std::sync::Arc<dyn NodeAccessChecker>,
+    context: RequestContext,
+) -> std::sync::Arc<dyn NodeAccessChecker> {
+    std::sync::Arc::new(RequestNodeAccessChecker { checker, context })
+}
+
+struct RequestNodeAccessChecker {
+    checker: std::sync::Arc<dyn NodeAccessChecker>,
+    context: RequestContext,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl NodeAccessChecker for RequestNodeAccessChecker {
+    async fn check_node_access(&self, permission: NodePermission) -> Result<()> {
+        self.checker
+            .check_node_access_as(&self.context, permission)
+            .await
+    }
+
+    async fn check_node_access_as(
+        &self,
+        context: &RequestContext,
+        permission: NodePermission,
+    ) -> Result<()> {
+        self.checker.check_node_access_as(context, permission).await
+    }
+}
+
 /// Build a type-erased NAC checker from a database handle.
 pub fn node_access_checker<S: Store + 'static>(
     db: std::sync::Arc<DB<S>>,

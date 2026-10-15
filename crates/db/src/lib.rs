@@ -74,7 +74,7 @@ pub use crate::search::{
 pub use access::kms::{
     DbBlockDocIDResolver, DbDocCollectionLookup, DbEncBlockStore, DbNodeAcpRead,
 };
-pub use access::node::{node_access_checker, NodeAccessChecker};
+pub use access::node::{bound_node_access_checker, node_access_checker, NodeAccessChecker};
 pub use collection::acp::{
     block_unsafe_policy_transition, check_doc_permission, check_policy_transition,
     register_collection_if_needed, register_doc_if_needed, unregister_doc_if_needed,
