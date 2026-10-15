@@ -242,8 +242,6 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         Ok(None)
     }
 
-    /// The per-document write queue serialising merges.
-
     /// Collection-definition blocks already merged in this process.
     pub fn merged_collections(&self) -> &CidSet {
         &self.merged_collections
