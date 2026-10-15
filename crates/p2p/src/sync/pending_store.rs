@@ -32,8 +32,6 @@ use web_time::{SystemTime, UNIX_EPOCH};
 use crate::error::{Error, Result};
 use crate::ExplicitReplayAuthorization;
 
-const PENDING_STORE_TXN_MAX_ATTEMPTS: u32 = 3;
-
 /// Maximum number of same-root announcers retained in addition to the
 /// immutable origin provider. Each unavailable provider consumes a bounded
 /// selective-CAR attempt, so this durable list must remain bounded too.
@@ -190,6 +188,7 @@ pub trait PendingDagStorage: MaybeSendSync {
 pub struct PendingDagStore<S: Store> {
     store: Arc<S>,
     systemstore: Systemstore<S>,
+    retry: RetryOptions,
 }
 
 impl<S: Store> PendingDagStore<S> {
@@ -197,7 +196,15 @@ impl<S: Store> PendingDagStore<S> {
         Self {
             systemstore: Systemstore::new(Arc::clone(&store)),
             store,
+            retry: storage::corekv::engine_retry_options(storage::corekv::DEFAULT_MAX_TXN_RETRIES),
         }
+    }
+
+    /// Re-run a conflicting write up to `max_txn_retries` times, the node's
+    /// `datastore.max_txn_retries`.
+    pub fn with_max_txn_retries(mut self, max_txn_retries: u32) -> Self {
+        self.retry = storage::corekv::engine_retry_options(max_txn_retries);
+        self
     }
 
     async fn write_value(
@@ -218,10 +225,7 @@ impl<S: Store> PendingDagStore<S> {
         let attempt = PendingStoreWriteAttempt { writes };
         match self
             .store
-            .transact_retry(
-                RetryOptions::new(PENDING_STORE_TXN_MAX_ATTEMPTS),
-                Box::new(attempt),
-            )
+            .transact_retry(self.retry, Box::new(attempt))
             .await
         {
             Ok(_) => Ok(()),
@@ -229,7 +233,7 @@ impl<S: Store> PendingDagStore<S> {
                 if matches!(error, storage::corekv::RetryAttemptError::Exhausted(_)) {
                     tracing::warn!(
                         operation,
-                        max_attempts = PENDING_STORE_TXN_MAX_ATTEMPTS,
+                        max_attempts = self.retry.max_attempts,
                         "Pending-DAG transaction conflicts exhausted"
                     );
                 }
@@ -574,17 +578,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_store_preserves_three_attempt_conflict_bound() {
-        let (root, attempts) = conflict_injecting_store(PENDING_STORE_TXN_MAX_ATTEMPTS as usize);
-        let store = PendingDagStore::new(root);
+    async fn pending_store_conflicts_run_under_the_configured_retry_budget() {
+        let (root, attempts) = conflict_injecting_store(2);
+        let store = PendingDagStore::new(root).with_max_txn_retries(1);
         let root_cid = cid(b"bounded retry test");
 
         let error = store.put(&root_cid, &record("doc-a")).await.unwrap_err();
 
-        assert_eq!(
-            attempts.load(Ordering::SeqCst),
-            PENDING_STORE_TXN_MAX_ATTEMPTS as usize
-        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
         assert!(
             matches!(error, Error::Storage(ref message) if message.contains("retry")),
             "unexpected terminal error: {error:?}"

@@ -15,10 +15,12 @@ type Events =
 /// Dispatch every transport event. Peer lifecycle is published to the event
 /// bus and re-arms retries; searchable-encryption and management traffic is
 /// served here; everything else goes to the coordinator.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_event_handler<S, B>(
     events: Events,
     coordinator: Arc<IrohSyncCoordinator<B>>,
     store: Arc<S>,
+    max_txn_retries: u32,
     event_bus: Arc<dyn events::Bus>,
     transport: IrohTransport,
     manage_hooks: ManageHooksCell,
@@ -40,7 +42,8 @@ where
                 #[cfg(not(target_arch = "wasm32"))]
                 let se_correlator = se_correlator.clone();
                 async move {
-                    publish_peer_lifecycle(&event, event_bus.as_ref(), &store).await;
+                    publish_peer_lifecycle(&event, event_bus.as_ref(), &store, max_txn_retries)
+                        .await;
 
                     if admission == DispatchAdmission::Saturated {
                         if let Err(error) = coordinator
@@ -145,11 +148,12 @@ async fn publish_peer_lifecycle<T, S: Store>(
     event: &TransportEvent<T>,
     event_bus: &dyn events::Bus,
     store: &Arc<S>,
+    max_txn_retries: u32,
 ) {
     match event {
         TransportEvent::PeerConnected(peer_id) => {
             tracing::info!("Peer connected (iroh): {peer_id}");
-            crate::activate_retry_peer(Arc::clone(store), peer_id).await;
+            crate::activate_retry_peer(Arc::clone(store), max_txn_retries, peer_id).await;
         }
         TransportEvent::PeerDisconnected(peer_id) => {
             tracing::info!("Peer disconnected (iroh): {peer_id}");

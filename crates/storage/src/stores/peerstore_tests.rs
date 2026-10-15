@@ -216,86 +216,166 @@ impl crate::corekv::RetryAttemptFn for ScopedRetryIoAttempt {
     }
 }
 
-#[tokio::test]
-async fn transient_marker_io_failure_recovers_durable_scopes() {
-    let store = Arc::new(RegolithStore::in_memory().unwrap());
+/// A store whose engine-owned transactions fail with an I/O error a given
+/// number of times, or lose a conflict a given number of times, before they
+/// reach the real store. Plain transactions pass straight through.
+struct FaultyTransactStore {
+    inner: Arc<RegolithStore>,
+    io_failures: AtomicUsize,
+    conflicts: AtomicUsize,
+    attempts: Arc<AtomicUsize>,
+}
+
+impl FaultyTransactStore {
+    fn new(io_failures: usize, conflicts: usize) -> Arc<Self> {
+        Arc::new(Self {
+            inner: Arc::new(RegolithStore::in_memory().unwrap()),
+            io_failures: AtomicUsize::new(io_failures),
+            conflicts: AtomicUsize::new(conflicts),
+            attempts: Arc::new(AtomicUsize::new(0)),
+        })
+    }
+
+    fn take(counter: &AtomicUsize) -> bool {
+        counter
+            .try_update(AtomicOrdering::SeqCst, AtomicOrdering::SeqCst, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok()
+    }
+}
+
+impl crate::corekv::private::Sealed for FaultyTransactStore {}
+
+#[async_trait]
+impl Store for FaultyTransactStore {
+    async fn allocate(&self, key: &[u8], count: u64) -> Result<std::ops::Range<u64>> {
+        self.inner.allocate(key, count).await
+    }
+
+    async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>> {
+        self.inner.new_txn(readonly).await
+    }
+
+    async fn transact_retry(
+        &self,
+        options: RetryOptions,
+        attempt: crate::corekv::RetryAttempt,
+    ) -> std::result::Result<crate::corekv::RetryAttemptValue, crate::corekv::RetryAttemptError>
+    {
+        if Self::take(&self.io_failures) {
+            return Err(crate::corekv::RetryAttemptError::Storage(
+                crate::corekv::Error::Io("injected marker write failure".into()),
+            ));
+        }
+        let conflicts = Self::take(&self.conflicts).then(|| Arc::clone(&self.inner));
+        let attempt = Box::new(LosingAttempt {
+            inner: attempt,
+            competitor: conflicts,
+            attempts: Arc::clone(&self.attempts),
+        });
+        self.inner.transact_retry(options, attempt).await
+    }
+
+    async fn close(&self) -> Result<()> {
+        self.inner.close().await
+    }
+}
+
+/// Runs the real attempt, then, while a conflict is still owed, commits a
+/// write of the replicator key the attempt read, so every one of its commits
+/// loses.
+struct LosingAttempt {
+    inner: crate::corekv::RetryAttempt,
+    competitor: Option<Arc<RegolithStore>>,
+    attempts: Arc<AtomicUsize>,
+}
+
+impl crate::corekv::RetryAttemptFn for LosingAttempt {
+    fn run<'a>(
+        &'a mut self,
+        txn: &'a mut dyn crate::corekv::RetryTxn,
+    ) -> crate::corekv::RetryAttemptFuture<'a> {
+        Box::pin(async move {
+            self.attempts.fetch_add(1, AtomicOrdering::SeqCst);
+            let output = self.inner.run(txn).await?;
+            if let Some(store) = &self.competitor {
+                let peers = NamespacedStore::new(Arc::clone(store), Namespace::Peerstore);
+                let mut competitor = peers.new_txn(false).await?;
+                competitor
+                    .set(&ReplicatorKey::new("peer").bytes(), b"replicator-rewritten")
+                    .await?;
+                competitor.commit().await?;
+            }
+            Ok(output)
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn marker_write_io_failure_is_returned_not_slept_on() {
+    let store = FaultyTransactStore::new(1, 0);
     let peerstore = Peerstore::new(store.clone());
     peerstore
         .create_replicator("peer", b"replicator")
         .await
         .unwrap();
     let retry_info = super::super::RetryInfo::new_initial().to_bytes().unwrap();
-    let incarnation_key = crate::keys::peerstore::ReplicatorIncarnationKey::new("peer");
-    let incarnation_txn = peerstore.store.new_txn(true).await.unwrap();
-    let incarnation = decode_retry_marker_generation(
-        &incarnation_txn
-            .get(&incarnation_key.bytes())
-            .await
-            .unwrap()
-            .unwrap(),
-    )
-    .unwrap();
-    incarnation_txn.discard();
 
-    for (doc_id, collection_id, error) in [
-        (
-            "doc",
-            "collection",
-            crate::corekv::Error::Io("injected transient marker failure".to_string()),
-        ),
-        (
-            "",
-            "collection",
-            crate::corekv::Error::Backend("injected transient marker failure".to_string()),
-        ),
-    ] {
-        let attempts = AtomicUsize::new(0);
-        retry_scope_marker_write(|| async {
-            if attempts.fetch_add(1, AtomicOrdering::Relaxed) == 0 {
-                Err(error.clone())
-            } else {
-                peerstore
-                    .register_scope_marker_once(
-                        "peer",
-                        doc_id,
-                        collection_id,
-                        &retry_info,
-                        incarnation,
-                    )
-                    .await
-            }
-        })
+    let error = peerstore
+        .record_push_failure("peer", "doc", "collection", &retry_info)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, crate::corekv::Error::Io(_)), "{error:?}");
+    assert!(peerstore
+        .get_retry_documents("peer")
+        .await
+        .unwrap()
+        .is_empty());
+
+    peerstore
+        .record_push_failure("peer", "doc", "collection", &retry_info)
         .await
         .unwrap();
-        assert_eq!(attempts.load(AtomicOrdering::Relaxed), 2);
-    }
-
-    let restarted = Peerstore::new(store);
-    assert!(restarted.get_retry_info("peer").await.unwrap().is_some());
-    let markers = restarted.get_retry_documents("peer").await.unwrap();
-    assert_eq!(markers.len(), 2);
-    assert!(markers.iter().any(|marker| marker.doc_id == "doc"));
-    assert!(markers.iter().any(|marker| marker.is_collection_commit()));
+    let markers = Peerstore::new(store.inner.clone())
+        .get_retry_documents("peer")
+        .await
+        .unwrap();
+    assert_eq!(markers.len(), 1);
+    assert_eq!(markers[0].doc_id, "doc");
 }
 
-#[tokio::test]
-async fn marker_io_failures_stop_at_bound() {
-    let attempts = AtomicUsize::new(0);
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn marker_conflicts_run_under_the_configured_retry_budget() {
+    let store = FaultyTransactStore::new(0, 1);
+    let peerstore = Peerstore::new(store.clone()).with_max_txn_retries(0);
+    peerstore
+        .create_replicator("peer", b"replicator")
+        .await
+        .unwrap();
+    let retry_info = super::super::RetryInfo::new_initial().to_bytes().unwrap();
 
-    let error = retry_scope_marker_write(|| async {
-        attempts.fetch_add(1, AtomicOrdering::Relaxed);
-        Err::<(), _>(crate::corekv::Error::Backend(
-            "injected persistent marker failure".to_string(),
-        ))
-    })
-    .await
-    .unwrap_err();
-
-    assert!(matches!(error, crate::corekv::Error::Backend(_)));
-    assert_eq!(
-        attempts.load(AtomicOrdering::Relaxed),
-        PUSH_RETRY_TXN_MAX_ATTEMPTS
+    let error = peerstore
+        .record_push_failure("peer", "doc", "collection", &retry_info)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, crate::corekv::Error::TxnRetryExhausted(_)),
+        "{error:?}"
     );
+    assert_eq!(store.attempts.load(AtomicOrdering::SeqCst), 1);
+
+    let store = FaultyTransactStore::new(0, 1);
+    let peerstore = Peerstore::new(store.clone()).with_max_txn_retries(1);
+    peerstore
+        .create_replicator("peer", b"replicator")
+        .await
+        .unwrap();
+    peerstore
+        .record_push_failure("peer", "doc", "collection", &retry_info)
+        .await
+        .unwrap();
+    assert_eq!(store.attempts.load(AtomicOrdering::SeqCst), 2);
 }
 
 #[tokio::test]

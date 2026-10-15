@@ -760,6 +760,13 @@ impl<S: Store> DB<S> {
         &self.options
     }
 
+    /// The peerstore over this database's store, running its conflicts under
+    /// the database's retry policy.
+    pub fn peerstore(&self) -> storage::stores::Peerstore<S> {
+        storage::stores::Peerstore::new(self.store.clone())
+            .with_max_txn_retries(self.options.max_txn_retries())
+    }
+
     /// Returns the node identity, if one was configured.
     ///
     /// The node identity is used for:

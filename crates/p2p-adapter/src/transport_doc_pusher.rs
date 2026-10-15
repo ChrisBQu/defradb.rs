@@ -149,7 +149,8 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
     for DbTransportDocPusher<S, T>
 {
     async fn push_retry_marker_stats(&self) -> P2PResult<storage::stores::PushRetryMarkerStats> {
-        storage::stores::Peerstore::new(self.db.store().clone())
+        self.db
+            .peerstore()
             .push_retry_marker_stats()
             .await
             .map_err(|error| P2PError::internal(error.to_string()))
@@ -191,7 +192,7 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
         docs: &[(String, String)],
     ) -> P2PResult<()> {
         let peer_id_str = peer_id.to_string();
-        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
+        let peerstore = self.db.peerstore();
         let filters = match peerstore.get_replicator(&peer_id_str).await {
             Ok(Some(bytes)) => p2p::ReplicatorInfo::from_bytes(&bytes)
                 .map(|info| info.filters)
@@ -225,7 +226,7 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
         generation: u64,
     ) -> P2PResult<()> {
         let peer_id_str = peer_id.to_string();
-        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
+        let peerstore = self.db.peerstore();
         let filters = match peerstore.get_replicator(&peer_id_str).await {
             Ok(Some(bytes)) => p2p::ReplicatorInfo::from_bytes(&bytes)
                 .map(|info| info.filters)
@@ -362,7 +363,7 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
     }
 
     async fn persist_replicator(&self, peer_id: &str, collections: &[String]) -> P2PResult<()> {
-        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
+        let peerstore = self.db.peerstore();
         let mut info = match peerstore.get_replicator(peer_id).await.map_err(|error| {
             P2PError::persistence(format!("failed to load persisted replicator: {error}"))
         })? {
@@ -388,7 +389,7 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
 
     async fn persist_replicator_info(&self, info: &p2p::ReplicatorInfo) -> P2PResult<()> {
         let peer_id = info.peer_id_str();
-        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
+        let peerstore = self.db.peerstore();
         let mut info = info.clone();
         info.id = peer_id.to_string();
         let bytes = info.to_bytes().map_err(|error| {
@@ -403,35 +404,35 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
     }
 
     async fn delete_persisted_replicator(&self, peer_id: &str) -> P2PResult<()> {
-        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
+        let peerstore = self.db.peerstore();
         peerstore.delete_replicator(peer_id).await.map_err(|error| {
             P2PError::persistence(format!("failed to delete persisted replicator: {error}"))
         })
     }
 
     async fn load_persisted_replicators(&self) -> P2PResult<Option<Vec<p2p::ReplicatorInfo>>> {
-        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
+        let peerstore = self.db.peerstore();
         crate::load_persisted_replicators(&peerstore)
             .await
             .map(Some)
     }
 
     async fn persist_p2p_documents(&self, doc_ids: &[String]) -> P2PResult<()> {
-        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
+        let peerstore = self.db.peerstore();
         peerstore.persist_documents(doc_ids).await.map_err(|error| {
             P2PError::persistence(format!("failed to persist P2P documents: {error}"))
         })
     }
 
     async fn load_p2p_documents(&self) -> P2PResult<Vec<String>> {
-        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
+        let peerstore = self.db.peerstore();
         peerstore.load_documents().await.map_err(|error| {
             P2PError::persistence(format!("failed to load P2P documents: {error}"))
         })
     }
 
     async fn persist_p2p_collections(&self, collections: &[String]) -> P2PResult<()> {
-        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
+        let peerstore = self.db.peerstore();
         peerstore
             .persist_collections(collections)
             .await

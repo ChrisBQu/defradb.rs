@@ -48,6 +48,7 @@ pub(crate) fn spawn_libp2p_event_handler<B: blockstore::Blockstore + 'static>(
     events: tokio::sync::mpsc::Receiver<p2p::HostEvent>,
     coordinator: Arc<p2p::sync::Libp2pSyncCoordinator<B>>,
     store: Arc<impl storage::corekv::Store + 'static>,
+    max_txn_retries: u32,
     event_bus: Arc<dyn events::Bus>,
     handle: p2p::P2PHostHandle,
     se_correlator: p2p::SeQueryCorrelator,
@@ -67,6 +68,7 @@ pub(crate) fn spawn_libp2p_event_handler<B: blockstore::Blockstore + 'static>(
                 p2p::HostEvent::PeerConnected(peer_id) => {
                     defra_p2p_adapter::activate_retry_peer(
                         store.clone(),
+                        max_txn_retries,
                         &p2p::transport::PeerId::from(*peer_id),
                     )
                     .await;

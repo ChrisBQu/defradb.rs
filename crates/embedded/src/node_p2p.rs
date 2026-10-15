@@ -91,6 +91,8 @@ where
     use p2p::sync::DocumentHeadProvider;
     use storage::stores::Peerstore;
 
+    let max_txn_retries = database.options().max_txn_retries();
+
     let listen_addr = config
         .listen_addr
         .parse()
@@ -98,9 +100,12 @@ where
     let blockstore = Arc::new(EmbeddedBlockstore::new(store.clone(), true));
     let bitswap_store = BitswapStoreAdapter::new(blockstore.clone());
 
-    let mut seed =
-        crate::node_peer_key::load_with_keyring(&Peerstore::new(store.clone()), None, peer_keyring)
-            .await?;
+    let mut seed = crate::node_peer_key::load_with_keyring(
+        &Peerstore::new(store.clone()).with_max_txn_retries(max_txn_retries),
+        None,
+        peer_keyring,
+    )
+    .await?;
     let p2p_keypair = libp2p::identity::Keypair::ed25519_from_bytes(&mut *seed)
         .map_err(|error| anyhow!("invalid peer key: {error}"))?;
 
@@ -165,7 +170,9 @@ where
     let failure_rx = db::merge::attach_failure_channel(&mut coordinator, 1024);
     let coordinator = Arc::new(coordinator);
     coordinator
-        .install_pending_dag_store(Arc::new(p2p::sync::PendingDagStore::new(store.clone())))
+        .install_pending_dag_store(Arc::new(
+            p2p::sync::PendingDagStore::new(store.clone()).with_max_txn_retries(max_txn_retries),
+        ))
         .await;
     let replication = db::merge::create_replication_stack(
         database.clone(),
@@ -253,6 +260,7 @@ where
         event_rx,
         coordinator.clone(),
         store.clone(),
+        max_txn_retries,
         event_bus.clone(),
         handle.clone(),
         se_correlator,
@@ -264,8 +272,10 @@ where
         replication.merge_handler.clone(),
         event_bus.clone(),
     );
-    let failure_recorder_task =
-        defra_p2p_adapter::spawn_failure_recorder(Peerstore::new(store.clone()), failure_rx);
+    let failure_recorder_task = defra_p2p_adapter::spawn_failure_recorder(
+        Peerstore::new(store.clone()).with_max_txn_retries(max_txn_retries),
+        failure_rx,
+    );
 
     let doc_pusher_impl = Arc::new(DbTransportDocPusher::new(
         database.clone(),
@@ -288,13 +298,13 @@ where
     let retry_doc_pusher = doc_pusher.clone();
     let retry_se_repusher = se_repusher.clone();
     let retry_loop_task = defra_p2p_adapter::spawn_retry_loop(
-        Peerstore::new(store.clone()),
+        Peerstore::new(store.clone()).with_max_txn_retries(max_txn_retries),
         p2p::Libp2pTransport::new(handle.clone()),
         doc_pusher.clone(),
         Some(se_repusher),
     );
 
-    let restore_peerstore = storage::stores::Peerstore::new(store.clone());
+    let restore_peerstore = Peerstore::new(store.clone()).with_max_txn_retries(max_txn_retries);
     restore_libp2p_replicators(&handle, &restore_peerstore).await;
     let restored_doc_ids = restore_libp2p_documents(&handle, &restore_peerstore).await;
 
@@ -361,7 +371,7 @@ where
         let se_repusher = retry_se_repusher.clone();
         Box::pin(async move {
             defra_p2p_adapter::run_retry_pass(
-                &Peerstore::new(store),
+                &Peerstore::new(store).with_max_txn_retries(max_txn_retries),
                 &transport,
                 &doc_pusher,
                 Some(&se_repusher),
@@ -453,8 +463,10 @@ where
     use defra_p2p_adapter::{IrohPeer, IrohPeerConfig, TransportDocPusher};
     use storage::stores::Peerstore;
 
+    let max_txn_retries = database.options().max_txn_retries();
+
     let seed = crate::node_peer_key::load_with_keyring(
-        &Peerstore::new(store.clone()),
+        &Peerstore::new(store.clone()).with_max_txn_retries(max_txn_retries),
         config.secret_key_path.as_deref(),
         peer_keyring,
     )
@@ -513,7 +525,7 @@ where
         let se_repusher = retry_se_repusher.clone();
         Box::pin(async move {
             defra_p2p_adapter::run_retry_pass(
-                &Peerstore::new(store),
+                &Peerstore::new(store).with_max_txn_retries(max_txn_retries),
                 &transport,
                 &doc_pusher,
                 Some(&se_repusher),
