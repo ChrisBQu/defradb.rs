@@ -17,6 +17,7 @@ use storage::keys::systemstore::{CollectionKey, CollectionNameKey};
 
 mod catalog;
 pub mod context;
+pub(crate) mod held;
 pub(crate) mod lenses;
 pub(crate) mod owner;
 pub mod registry;
@@ -96,6 +97,20 @@ pub struct DbTxn<S: Store> {
     statement_savepoint: Option<catalog::Snapshot>,
     /// Phantom data for the store type.
     _marker: std::marker::PhantomData<S>,
+}
+
+/// A transaction lent to the handles of one request (its fetcher, mutator and
+/// collection provider). They share it through `&self`, with no lock;
+/// whoever lent it takes it back with [`reclaim`] once they are gone.
+pub type LentTxn<S> = Arc<DbTxn<S>>;
+
+/// Takes a lent transaction back, by value. A handle that still holds it (an
+/// open stream, a component kept past its request) is an error, never a wait.
+pub fn reclaim<S>(txn: LentTxn<S>) -> Result<DbTxn<S>>
+where
+    S: Store,
+{
+    Arc::try_unwrap(txn).map_err(|_| Error::TxnInUse)
 }
 
 /// A transaction is lent to the handles of one request as a shared value, so

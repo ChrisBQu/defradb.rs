@@ -1,140 +1,55 @@
-//! The stale-transaction cleanup sweep. Subject of proofs/tla/TxnRegistry.tla.
+//! The idle-transaction sweep: a timer on each worker that ends the
+//! transactions it owns once no request has used them for the idle limit.
+//! The sweep's ask is a message queued behind the requests already there, so
+//! a request that arrived first keeps its transaction. Subject of
+//! proofs/tla/TxnRegistry.tla.
 
 use super::*;
 
 impl<S: Store + 'static> DbTransactionRegistry<S> {
-    /// Cleanup transactions idle for longer than the given duration.
+    /// Ends every transaction no request has used for longer than
+    /// `max_idle_age`, each after the requests queued for it before this, and
+    /// says how many ended.
     ///
-    /// This method finds all transactions whose last observed request was more
-    /// than `max_idle_age` ago and rolls them back, freeing resources. This
-    /// can be called periodically for orphaned, non-owning transaction handles.
     /// Owning `TransactionGuard`s clean up on drop without waiting for a sweep.
-    ///
-    /// Returns a `CleanupResult` containing both successfully cleaned transactions
-    /// and any failures. Check `result.is_complete()` to verify all cleanups succeeded.
     pub async fn cleanup_stale_transactions(
         &self,
         max_idle_age: Duration,
     ) -> Result<CleanupResult> {
-        let now = Instant::now();
-
-        // Collect stale transaction candidates. Each candidate is re-checked
-        // after acquiring the transaction action lock so a request that arrives
-        // during cleanup can refresh the idle clock.
-        let stale_candidates: Vec<(String, Arc<DbTransactionContext<S>>)> = self
-            .transactions
-            .iter()
-            .filter_map(|(txn_id, slot)| slot.ctx().map(|ctx| (txn_id, ctx)))
-            .filter(|(_, ctx)| ctx.idle_for(now) > max_idle_age)
-            .collect();
-
-        let mut result = CleanupResult::default();
-        for (txn_id, candidate_ctx) in stale_candidates {
-            let action_lock = candidate_ctx.action_lock();
-            let _action_guard = action_lock.lock().await;
-            if let Err(error) = candidate_ctx.recover_pending_statement_sync() {
-                tracing::warn!(txn_id, %error, "Failed to recover cancelled transaction statement during cleanup");
-            }
-
-            // Claiming the idle clock and removing the entry is what makes this
-            // safe against a concurrent request: a request that touched the
-            // context first wins the claim and keeps its transaction.
-            if !candidate_ctx.try_claim_stale(Instant::now(), max_idle_age) {
-                continue;
-            }
-            let ctx = match self.transactions.remove(&txn_id) {
-                Some(slot) => match slot.ctx() {
-                    Some(current) if Arc::ptr_eq(&current, &candidate_ctx) => {
-                        slot.owner.pop().map(RemovedTransaction)
-                    }
-                    Some(_) => {
-                        self.transactions.insert(txn_id.clone(), slot);
-                        None
-                    }
-                    None => None,
-                },
-                None => None,
-            };
-
-            if let Some(ctx) = ctx {
-                let idle_secs = ctx.idle_for(Instant::now()).as_secs();
-                warn!(
-                    txn_id = %txn_id,
-                    idle_secs,
-                    "Cleaning up idle transaction"
-                );
-
-                // Try to take and discard the transaction
-                if let Some(txn) = ctx.take_txn().await {
-                    if let Err(e) = txn.force_discard() {
-                        error!(
-                            txn_id = %txn_id,
-                            error = %e,
-                            "Failed to discard stale transaction during cleanup"
-                        );
-                        result.failed.push((txn_id.clone(), e.to_string()));
-                    } else {
-                        result.cleaned += 1;
-                    }
-                } else {
-                    // Transaction was already consumed (committed/rolled back)
-                    result.cleaned += 1;
-                }
-            }
-        }
-
-        Ok(result)
+        let cleaned = self
+            .owners()
+            .map_err(|error| Error::Other(error.to_string()))?
+            .expire_idle(max_idle_age)
+            .await
+            .map_err(|error| Error::Other(error.to_string()))?;
+        Ok(CleanupResult {
+            cleaned,
+            failed: Vec::new(),
+        })
     }
 
-    /// Start a periodic task that cleans up transactions idle for longer than
-    /// `max_idle_age`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `sweep_interval` is zero.
-    #[cfg(all(not(target_arch = "wasm32"), feature = "native"))]
+    /// Starts the periodic sweep on every worker: every `sweep_interval`, each
+    /// worker ends the transactions it owns that no request has used for
+    /// longer than `max_idle_age`. Runs until the returned handle is stopped,
+    /// or the registry or its pool goes.
     pub fn start_stale_transaction_cleanup(
-        self: &Arc<Self>,
+        &self,
         max_idle_age: Duration,
         sweep_interval: Duration,
-    ) -> tokio::task::JoinHandle<()> {
-        assert!(
-            !sweep_interval.is_zero(),
-            "transaction cleanup sweep interval must be non-zero"
-        );
-
-        let registry = Arc::clone(self);
-
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(sweep_interval).await;
-
-                match registry.cleanup_stale_transactions(max_idle_age).await {
-                    Ok(result) if result.attempted() > 0 && result.is_complete() => {
-                        tracing::info!(
-                            cleaned = result.cleaned,
-                            max_idle_age_secs = max_idle_age.as_secs(),
-                            "Cleaned up idle transactions"
-                        );
-                    }
-                    Ok(result) if result.attempted() > 0 => {
-                        tracing::warn!(
-                            cleaned = result.cleaned,
-                            failed = result.failed.len(),
-                            max_idle_age_secs = max_idle_age.as_secs(),
-                            "Idle transaction cleanup completed with failures"
-                        );
-                    }
-                    Ok(_) => {}
-                    Err(error) => {
-                        tracing::warn!(
-                            error = %error,
-                            max_idle_age_secs = max_idle_age.as_secs(),
-                            "Idle transaction cleanup failed"
-                        );
-                    }
-                }
+    ) -> Sweep {
+        if sweep_interval.is_zero() {
+            tracing::error!("transaction cleanup sweep interval must be above zero; no sweep runs");
+            return Sweep::stopped();
+        }
+        match self
+            .owners()
+            .and_then(|owners| owners.sweep(max_idle_age, sweep_interval))
+        {
+            Ok(sweep) => sweep,
+            Err(error) => {
+                tracing::error!(%error, "the idle transaction sweep could not start");
+                Sweep::stopped()
             }
-        })
+        }
     }
 }

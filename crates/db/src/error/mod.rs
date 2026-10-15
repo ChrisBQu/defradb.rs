@@ -68,6 +68,11 @@ pub enum Error {
     #[error("transaction not active")]
     TxnNotActive,
 
+    #[error(
+        "the transaction is still in use by an open reader, writer or iterator; close it first"
+    )]
+    TxnInUse,
+
     #[error("explicit transaction must use force_commit/force_discard")]
     ExplicitTxnMustUseForce,
 

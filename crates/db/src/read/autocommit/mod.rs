@@ -5,7 +5,6 @@
 //! without explicit transaction management while still providing proper
 //! transactional semantics.
 
-use async_lock::Mutex as TokioMutex;
 use async_trait::async_trait;
 use bytes::Bytes;
 use document::Document;
@@ -375,27 +374,18 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
         expected_doc_id: Option<&str>,
         caller_identity: Option<&identity::Did>,
     ) -> query::error::Result<Document> {
-        // Create a read-only transaction for the versioned fetcher
-        let txn = self.db.new_txn(true).await.map_err(|e| {
-            query::error::QueryError::execution(format!("failed to create txn: {}", e))
-        })?;
-
-        // Wrap in Arc<Mutex<Option>> for VersionedFetcher
-        let txn_holder: Arc<TokioMutex<Option<DbTxn<S>>>> = Arc::new(TokioMutex::new(Some(txn)));
-
-        let versioned_fetcher =
-            VersionedFetcher::with_kms(txn_holder.clone(), self.db.kms(), caller_identity.cloned());
-        let result = versioned_fetcher
-            .get_document_at_cid(cid, expected_doc_id)
+        let kms = self.db.kms();
+        self.db
+            .read_lent(|txn| async move {
+                VersionedFetcher::with_kms(Some(txn), kms, caller_identity.cloned())
+                    .get_document_at_cid(cid, expected_doc_id)
+                    .await
+            })
             .await
-            .map_err(|e| query::error::QueryError::execution(e.to_string()));
-
-        // Clean up transaction
-        if let Some(txn) = txn_holder.lock().await.take() {
-            let _ = txn.discard();
-        }
-
-        result
+            .map_err(|e| {
+                query::error::QueryError::execution(format!("failed to create txn: {}", e))
+            })?
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))
     }
 
     async fn get_documents_at_cid(
@@ -405,24 +395,18 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
         expected_doc_id: Option<&str>,
         caller_identity: Option<&identity::Did>,
     ) -> query::error::Result<Vec<Document>> {
-        let txn = self.db.new_txn(true).await.map_err(|e| {
-            query::error::QueryError::execution(format!("failed to create txn: {}", e))
-        })?;
-
-        let txn_holder: Arc<TokioMutex<Option<DbTxn<S>>>> = Arc::new(TokioMutex::new(Some(txn)));
-
-        let versioned_fetcher =
-            VersionedFetcher::with_kms(txn_holder.clone(), self.db.kms(), caller_identity.cloned());
-        let result = versioned_fetcher
-            .get_documents_at_cid(cid, expected_doc_id, Some(collection_short_id))
+        let kms = self.db.kms();
+        self.db
+            .read_lent(|txn| async move {
+                VersionedFetcher::with_kms(Some(txn), kms, caller_identity.cloned())
+                    .get_documents_at_cid(cid, expected_doc_id, Some(collection_short_id))
+                    .await
+            })
             .await
-            .map_err(|e| query::error::QueryError::execution(e.to_string()));
-
-        if let Some(txn) = txn_holder.lock().await.take() {
-            let _ = txn.discard();
-        }
-
-        result
+            .map_err(|e| {
+                query::error::QueryError::execution(format!("failed to create txn: {}", e))
+            })?
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))
     }
 
     async fn get_view_cache_items(&self, collection_id: u32) -> query::error::Result<Vec<Bytes>> {

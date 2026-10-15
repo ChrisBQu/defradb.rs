@@ -41,7 +41,7 @@ fn pool(workers: usize) -> Pool {
 
 fn begin(owners: &Owners<Probe>, owner: &'static str, dropped: &Arc<AtomicUsize>) -> TxnId {
     let dropped = dropped.clone();
-    block_on(owners.begin(move || async move {
+    block_on(owners.begin(move |_| async move {
         Ok::<_, ()>(Probe {
             owner,
             opened_on: workers::current_worker().unwrap().index,

@@ -1,165 +1,173 @@
-//! Transaction begin, commit and rollback.
+//! Transaction begin, requests, commit, rollback and abandon, each a message
+//! to the worker that owns the transaction.
 
 use super::*;
+use async_trait::async_trait;
+use query::txn::{TransactionHandle, TransactionRegistry, TxnJob};
+use storage::corekv::MaybeSend;
+use workers::Target;
 
-impl<S: Store + 'static> DbTransactionRegistry<S> {
-    fn take_owned_ctx(
-        &self,
-        handle: &TransactionHandle,
-    ) -> std::result::Result<RemovedTransaction<S>, TransactionError> {
-        self.transactions
-            .get(handle.as_str())
-            .and_then(|slot| slot.ctx())
-            .filter(|ctx| ctx.is_owned_by_caller())
-            .and_then(|_| self.take_registered(handle))
-            .ok_or_else(|| {
-                TransactionError::not_found(format!("transaction '{}' not found", handle))
-            })
+/// Runs `job` until it finishes or `timeout` passes on the worker's clock:
+/// `None` then, and the job is dropped.
+async fn within<F>(timeout: Option<Duration>, job: F) -> Option<F::Output>
+where
+    F: std::future::Future,
+{
+    let Some(sleep) = timeout.and_then(|limit| workers::sleep(limit).ok()) else {
+        return Some(job.await);
+    };
+    match futures::future::select(Box::pin(job), sleep).await {
+        futures::future::Either::Left((output, _)) => Some(output),
+        futures::future::Either::Right(_) => None,
     }
+}
 
-    async fn begin_with_options(
-        &self,
-        readonly: bool,
-    ) -> std::result::Result<TransactionHandle, TransactionError> {
-        let txn_id = self.id_counter.fetch_add(1, Ordering::SeqCst).to_string();
-
-        let mut db_txn = self
-            .db
-            .new_txn(readonly)
-            .await
-            .map_err(|e| TransactionError::execution(format!("storage error: {}", e)))?;
-        db_txn.make_explicit();
-        // Owed registrations are this transaction's own writes. Remote ACP
-        // effects are registered as ordered callbacks with the mutation itself.
-        let acp_registration_projection = db_txn.acp_registration_projection();
-
-        // Transaction-scoped collection caching: collections are loaded lazily
-        // from the SystemStore on first access within the transaction. Once loaded,
-        // the collection metadata is cached for the transaction's duration.
-        let lens_store = Arc::new(TxnLensStore::new(self.db.lens_store().clone()));
-        let fetcher = Arc::new(LensedDocFetcher::new(self.db.clone(), db_txn, lens_store));
-        let ctx = Arc::new(DbTransactionContext::new_with_broadcaster(
-            self.db.clone(),
-            txn_id.clone(),
-            readonly,
-            fetcher,
-            acp_registration_projection,
-            self.broadcaster.clone(),
-        ));
-
-        // Registration and returning the handle must be one poll: cancellation
-        // before the caller can construct its guard must not orphan an entry.
-        self.transactions
-            .insert(txn_id.clone(), Arc::new(TransactionSlot::new(ctx)));
-
-        Ok(TransactionHandle::new(txn_id))
-    }
+fn timed_out(timeout: Option<Duration>) -> TransactionError {
+    TransactionError::execution(format!(
+        "query execution timed out after {} seconds",
+        timeout.map_or(0, |limit| limit.as_secs())
+    ))
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
     fn abandon(&self, handle: &TransactionHandle) {
-        drop(self.take_registered(handle));
+        if let (Ok(owners), Some(id)) = (self.owners(), TxnId::parse(handle)) {
+            owners.abandon(id);
+        }
     }
 
     async fn begin(
         &self,
         readonly: bool,
     ) -> std::result::Result<TransactionHandle, TransactionError> {
-        self.begin_with_options(readonly).await
+        let owner = caller();
+        let db = self.db.clone();
+        let broadcaster = self.broadcaster.clone();
+        let opened = self
+            .owners()
+            .map_err(|error| TransactionError::execution(error.to_string()))?
+            .begin(move |id| async move {
+                let mut txn = db.new_txn(readonly).await?;
+                txn.make_explicit();
+                OwnedTxn::new(id, owner, txn, db, broadcaster)
+            })
+            .await
+            .map_err(|error| TransactionError::execution(error.to_string()))?;
+        let id = opened
+            .map_err(|error| TransactionError::execution(format!("storage error: {}", error)))?;
+        Ok(TransactionHandle::new(id.to_string()))
     }
 
-    async fn begin_implicit_read(
+    async fn run<T>(
         &self,
-    ) -> std::result::Result<TransactionHandle, TransactionError> {
-        self.begin_with_options(true).await
+        handle: &TransactionHandle,
+        timeout: Option<Duration>,
+        job: TxnJob<T>,
+    ) -> std::result::Result<T, TransactionError>
+    where
+        T: MaybeSend + 'static,
+    {
+        let id = TxnId::parse(handle).ok_or_else(|| {
+            TransactionError::not_found(format!("transaction '{handle}' not found"))
+        })?;
+        let caller = caller();
+        let scope = caller.clone();
+        self.owners()
+            .map_err(|error| unavailable(error, handle))?
+            .run(id, admit(caller), move |owned| {
+                Box::pin(defra_core::current_identity::with_scoped_identity(
+                    scope,
+                    async move {
+                        let ran = within(timeout, job(owned)).await;
+                        owned.after_request();
+                        ran.ok_or_else(|| timed_out(timeout))
+                    },
+                ))
+            })
+            .await
+            .map_err(|error| unavailable(error, handle))?
     }
 
-    fn get(&self, handle: &TransactionHandle) -> GetTransactionResult {
-        match self
-            .transactions
-            .get(handle.as_str())
-            .and_then(|slot| slot.ctx())
-        {
-            Some(ctx) if ctx.is_owned_by_caller() && ctx.touch() => {
-                GetTransactionResult::Found(ctx as Arc<dyn TransactionContext>)
-            }
-            _ => GetTransactionResult::NotFound,
-        }
+    async fn read<T>(
+        &self,
+        timeout: Option<Duration>,
+        job: TxnJob<T>,
+    ) -> std::result::Result<T, TransactionError>
+    where
+        T: MaybeSend + 'static,
+    {
+        let pool = self
+            .owners()
+            .map_err(|error| TransactionError::execution(error.to_string()))?
+            .pool()
+            .clone();
+        let db = self.db.clone();
+        let scope = caller();
+        let done = pool
+            .submit(Target::LeastLoaded, move || {
+                defra_core::current_identity::with_scoped_identity(scope, async move {
+                    let txn = db.new_txn(true).await.map_err(|error| {
+                        TransactionError::execution(format!("storage error: {}", error))
+                    })?;
+                    // A snapshot of its own, never registered: no ID names it.
+                    let mut owned = OwnedTxn::new(TxnId::unnamed(), None, txn, db, None)
+                        .map_err(|error| TransactionError::execution(error.to_string()))?;
+                    within(timeout, job(&mut owned))
+                        .await
+                        .ok_or_else(|| timed_out(timeout))
+                })
+            })
+            .await
+            .map_err(|error| TransactionError::execution(error.to_string()))?;
+        done.await
+            .map_err(|error| TransactionError::execution(error.to_string()))?
     }
 
     async fn commit(
         &self,
         handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError> {
-        let ctx = self.take_owned_ctx(handle)?;
-        let action_lock = ctx.action_lock();
-        let _action_guard = action_lock.lock().await;
-        ctx.recover_pending_statement_sync()
-            .map_err(TransactionError::execution)?;
-
-        let txn = ctx.take_txn().await.ok_or_else(|| {
-            TransactionError::already_finalized(format!(
-                "transaction '{}' was already consumed (double commit/rollback?)",
-                handle
-            ))
+        let id = TxnId::parse(handle).ok_or_else(|| {
+            TransactionError::not_found(format!("transaction '{handle}' not found"))
         })?;
-
-        txn.force_commit().await.map_err(|error| {
-            TransactionError::execution(format!("commit error for transaction '{handle}': {error}"))
-        })
+        let label = handle.to_string();
+        self.owners()
+            .map_err(|error| unavailable(error, handle))?
+            .finish(id, admit(caller()), move |owned| {
+                Box::pin(async move {
+                    owned.commit().await.map_err(|error| {
+                        TransactionError::execution(format!(
+                            "commit error for transaction '{label}': {error}"
+                        ))
+                    })
+                })
+            })
+            .await
+            .map_err(|error| unavailable(error, handle))?
     }
 
     async fn rollback(
         &self,
         handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError> {
-        let ctx = self.take_owned_ctx(handle)?;
-        let action_lock = ctx.action_lock();
-        let _action_guard = action_lock.lock().await;
-        ctx.recover_pending_statement_sync()
-            .map_err(TransactionError::execution)?;
-
-        let txn = ctx.take_txn().await.ok_or_else(|| {
-            TransactionError::already_finalized(format!(
-                "transaction '{}' was already consumed (double commit/rollback?)",
-                handle
-            ))
+        let id = TxnId::parse(handle).ok_or_else(|| {
+            TransactionError::not_found(format!("transaction '{handle}' not found"))
         })?;
-
-        txn.force_discard().map_err(|e| {
-            TransactionError::execution(format!(
-                "rollback error for transaction '{}': {}",
-                handle, e
-            ))
-        })
-    }
-
-    async fn finish_implicit_read(
-        &self,
-        handle: &TransactionHandle,
-        _apply_read_effects: bool,
-    ) -> std::result::Result<(), TransactionError> {
-        let ctx = self.take_owned_ctx(handle)?;
-        let action_lock = ctx.action_lock();
-        let _action_guard = action_lock.lock().await;
-        ctx.recover_pending_statement_sync()
-            .map_err(TransactionError::execution)?;
-
-        let txn = ctx.take_txn().await.ok_or_else(|| {
-            TransactionError::already_finalized(format!(
-                "transaction '{}' was already consumed",
-                handle
-            ))
-        })?;
-        txn.force_discard().map_err(|e| {
-            TransactionError::execution(format!(
-                "failed to close implicit read transaction '{}': {}",
-                handle, e
-            ))
-        })?;
-
-        Ok(())
+        let label = handle.to_string();
+        self.owners()
+            .map_err(|error| unavailable(error, handle))?
+            .finish(id, admit(caller()), move |owned| {
+                Box::pin(async move {
+                    owned.rollback().map_err(|error| {
+                        TransactionError::execution(format!(
+                            "rollback error for transaction '{label}': {error}"
+                        ))
+                    })
+                })
+            })
+            .await
+            .map_err(|error| unavailable(error, handle))?
     }
 }

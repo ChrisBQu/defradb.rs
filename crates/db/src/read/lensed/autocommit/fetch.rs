@@ -2,7 +2,6 @@
 
 use bytes::Bytes;
 
-use async_lock::Mutex as TokioMutex;
 use document::Document;
 use query::fetcher::CommitsQueryOptions;
 use query::runner::FetchByIdsResult;
@@ -11,7 +10,6 @@ use tracing::{debug, trace};
 
 use crate::read::commits::{CommitsFetcher, CommitsQueryOptions as DbCommitsOptions};
 use crate::read::versioned::VersionedFetcher;
-use crate::txn::DbTxn;
 
 use super::LensedAutoCommitFetcher;
 
@@ -277,13 +275,6 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
         &self,
         options: &CommitsQueryOptions,
     ) -> query::error::Result<Vec<Document>> {
-        let txn = self.db.new_txn(true).await.map_err(|e| {
-            query::error::QueryError::execution(format!("failed to create txn: {}", e))
-        })?;
-
-        let txn_holder: std::sync::Arc<TokioMutex<Option<DbTxn<S>>>> =
-            std::sync::Arc::new(TokioMutex::new(Some(txn)));
-
         let db_options = DbCommitsOptions {
             doc_id: options.doc_id.clone(),
             cid: options.cid.clone(),
@@ -293,19 +284,15 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
             field_name: options.field_name.clone(),
         };
 
-        let commits_fetcher = CommitsFetcher::new(txn_holder.clone());
-        let result = commits_fetcher
-            .fetch_commits(&db_options)
+        self.db
+            .read_lent(
+                |txn| async move { CommitsFetcher::new(txn).fetch_commits(&db_options).await },
+            )
             .await
             .map_err(|e| {
-                query::error::QueryError::execution(format!("commits fetch error: {}", e))
-            });
-
-        if let Some(txn) = txn_holder.lock().await.take() {
-            let _ = txn.discard();
-        }
-
-        result
+                query::error::QueryError::execution(format!("failed to create txn: {}", e))
+            })?
+            .map_err(|e| query::error::QueryError::execution(format!("commits fetch error: {}", e)))
     }
 
     pub(super) async fn get_document_at_cid_impl(
@@ -314,25 +301,18 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
         expected_doc_id: Option<&str>,
         caller_identity: Option<&identity::Did>,
     ) -> query::error::Result<Document> {
-        let txn = self.db.new_txn(true).await.map_err(|e| {
-            query::error::QueryError::execution(format!("failed to create txn: {}", e))
-        })?;
-
-        let txn_holder: std::sync::Arc<TokioMutex<Option<DbTxn<S>>>> =
-            std::sync::Arc::new(TokioMutex::new(Some(txn)));
-
-        let versioned_fetcher =
-            VersionedFetcher::with_kms(txn_holder.clone(), self.db.kms(), caller_identity.cloned());
-        let result = versioned_fetcher
-            .get_document_at_cid(cid, expected_doc_id)
+        let kms = self.db.kms();
+        self.db
+            .read_lent(|txn| async move {
+                VersionedFetcher::with_kms(Some(txn), kms, caller_identity.cloned())
+                    .get_document_at_cid(cid, expected_doc_id)
+                    .await
+            })
             .await
-            .map_err(|e| query::error::QueryError::execution(e.to_string()));
-
-        if let Some(txn) = txn_holder.lock().await.take() {
-            let _ = txn.discard();
-        }
-
-        result
+            .map_err(|e| {
+                query::error::QueryError::execution(format!("failed to create txn: {}", e))
+            })?
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))
     }
 
     pub(super) async fn get_documents_at_cid_impl(
@@ -342,25 +322,18 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
         expected_doc_id: Option<&str>,
         caller_identity: Option<&identity::Did>,
     ) -> query::error::Result<Vec<Document>> {
-        let txn = self.db.new_txn(true).await.map_err(|e| {
-            query::error::QueryError::execution(format!("failed to create txn: {}", e))
-        })?;
-
-        let txn_holder: std::sync::Arc<TokioMutex<Option<DbTxn<S>>>> =
-            std::sync::Arc::new(TokioMutex::new(Some(txn)));
-
-        let versioned_fetcher =
-            VersionedFetcher::with_kms(txn_holder.clone(), self.db.kms(), caller_identity.cloned());
-        let result = versioned_fetcher
-            .get_documents_at_cid(cid, expected_doc_id, Some(collection_short_id))
+        let kms = self.db.kms();
+        self.db
+            .read_lent(|txn| async move {
+                VersionedFetcher::with_kms(Some(txn), kms, caller_identity.cloned())
+                    .get_documents_at_cid(cid, expected_doc_id, Some(collection_short_id))
+                    .await
+            })
             .await
-            .map_err(|e| query::error::QueryError::execution(e.to_string()));
-
-        if let Some(txn) = txn_holder.lock().await.take() {
-            let _ = txn.discard();
-        }
-
-        result
+            .map_err(|e| {
+                query::error::QueryError::execution(format!("failed to create txn: {}", e))
+            })?
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))
     }
 
     pub(super) async fn get_view_cache_items_impl(

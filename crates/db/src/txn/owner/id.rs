@@ -39,6 +39,12 @@ impl TxnId {
         self.0
     }
 
+    /// The ID of a transaction no table holds and no request can name (a
+    /// standalone query's snapshot), for its log lines.
+    pub(crate) fn unnamed() -> TxnId {
+        TxnId(u64::MAX)
+    }
+
     /// The ID a table stored.
     pub(super) fn from_raw(id: u64) -> TxnId {
         TxnId(id)

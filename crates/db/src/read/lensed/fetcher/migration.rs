@@ -18,7 +18,7 @@ use crate::definition::migration::helpers::{
 
 use super::LensedDocFetcher;
 
-impl<S: Store> LensedDocFetcher<S> {
+impl<S: Store + 'static> LensedDocFetcher<S> {
     /// Check if any version in a list of collection versions has migrations registered.
     ///
     /// A collection has migrations if any version in its history has a transform
@@ -120,11 +120,8 @@ impl<S: Store> LensedDocFetcher<S> {
         let collection_id = &collection.schema().collection_id;
 
         // Load all versions from systemstore
-        let txn_guard = self.txn.lock().await;
         let (readonly, systemstore) = {
-            let txn = txn_guard.as_ref().ok_or_else(|| {
-                query::error::QueryError::execution("transaction not available for version lookup")
-            })?;
+            let txn = &*self.shared_txn()?;
             let readonly = txn
                 .is_readonly()
                 .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
@@ -156,7 +153,6 @@ impl<S: Store> LensedDocFetcher<S> {
                 .await
                 .insert(collection_id.clone(), facts.clone());
         }
-        drop(txn_guard);
         Ok(facts)
     }
 
@@ -326,10 +322,7 @@ impl<S: Store> LensedDocFetcher<S> {
         _source_doc: &Document,
         migrated_doc: &Document,
     ) -> query::error::Result<()> {
-        let txn_guard = self.txn.lock().await;
-        let txn = txn_guard.as_ref().ok_or_else(|| {
-            query::error::QueryError::execution("transaction not available for lens write-back")
-        })?;
+        let txn = &*self.shared_txn()?;
         if txn.is_readonly().map_err(|e| {
             query::error::QueryError::execution(format!(
                 "failed to inspect lens write-back transaction: {}",

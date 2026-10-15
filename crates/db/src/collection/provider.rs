@@ -8,7 +8,6 @@
 //! - `TxnCollectionProvider`: reads from a transaction's systemstore first,
 //!   falling back to the process-wide cache for schemas not yet in the transaction
 
-use async_lock::Mutex as AsyncMutex;
 use async_trait::async_trait;
 use query::error::{QueryError, Result as QueryResult};
 use query::fetcher::CollectionProvider;
@@ -18,7 +17,7 @@ use storage::corekv::{Key, Store};
 
 use crate::collection;
 use crate::database::DB;
-use crate::txn::DbTxn;
+use crate::txn::LentTxn;
 
 /// Wrapper around `Arc<DB>` that implements `CollectionProvider`.
 ///
@@ -79,12 +78,12 @@ impl<S: Store + 'static> CollectionProvider for DbCollectionProvider<S> {
 /// writes like newly added schemas), then falls back to the process-wide cache.
 pub struct TxnCollectionProvider<S: Store + 'static> {
     db: Arc<DB<S>>,
-    shared_txn: Arc<AsyncMutex<Option<DbTxn<S>>>>,
+    shared_txn: LentTxn<S>,
 }
 
 impl<S: Store + 'static> TxnCollectionProvider<S> {
     /// Create a new transaction-aware collection provider.
-    pub fn new(db: Arc<DB<S>>, shared_txn: Arc<AsyncMutex<Option<DbTxn<S>>>>) -> Self {
+    pub fn new(db: Arc<DB<S>>, shared_txn: LentTxn<S>) -> Self {
         Self { db, shared_txn }
     }
 }
@@ -93,9 +92,9 @@ impl<S: Store + 'static> TxnCollectionProvider<S> {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store + 'static> CollectionProvider for TxnCollectionProvider<S> {
     async fn get_collection(&self, name: &str) -> QueryResult<Option<Arc<CollectionVersion>>> {
-        let txn_guard = self.shared_txn.lock().await;
-        if let Some(txn) = txn_guard.as_ref() {
-            let systemstore = txn
+        {
+            let systemstore = self
+                .shared_txn
                 .systemstore()
                 .map_err(|e| QueryError::execution(e.to_string()))?;
 
@@ -147,7 +146,6 @@ impl<S: Store + 'static> CollectionProvider for TxnCollectionProvider<S> {
                 }
             }
         }
-        drop(txn_guard);
 
         Ok(self.db.query_schema(name))
     }
@@ -160,9 +158,9 @@ impl<S: Store + 'static> CollectionProvider for TxnCollectionProvider<S> {
             .into_iter()
             .collect();
 
-        let txn_guard = self.shared_txn.lock().await;
-        if let Some(txn) = txn_guard.as_ref() {
-            let systemstore = txn
+        {
+            let systemstore = self
+                .shared_txn
                 .systemstore()
                 .map_err(|e| QueryError::execution(e.to_string()))?;
 

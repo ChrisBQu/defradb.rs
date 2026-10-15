@@ -298,11 +298,8 @@ impl<S: Store> crate::database::DB<S> {
         );
 
         // Execute the view query
-        let txn = self.new_txn(true).await?;
-        let fetcher = crate::read::doc::DbDocFetcher::new(txn);
-
-        // Keep a handle to the transaction mutex so we can discard it after the query
-        let txn_handle = fetcher.shared_txn();
+        let txn = Arc::new(self.new_txn(true).await?);
+        let fetcher = crate::read::doc::DbDocFetcher::lent(Arc::clone(&txn));
 
         // Build query runner with modified collection (is_materialized=false)
         let query_runner = query::QueryRunner::new(fetcher, modified_collections)
@@ -318,7 +315,7 @@ impl<S: Store> crate::database::DB<S> {
 
         // Explicitly discard the read transaction before starting write transaction
         // This releases all references to the underlying read transaction
-        if let Some(read_txn) = txn_handle.lock().await.take() {
+        if let Ok(read_txn) = crate::txn::reclaim(txn) {
             let _ = read_txn.force_discard();
         }
 

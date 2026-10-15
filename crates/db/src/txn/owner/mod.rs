@@ -18,9 +18,6 @@
 //! a transaction ends without a commit (abandoned, swept, the registry or the
 //! pool gone), so its holder's `Drop` discards it, every time.
 
-// The registry is moved onto these owners in the commits that follow.
-#![allow(dead_code)]
-
 mod actor;
 mod fallback;
 mod id;
@@ -39,7 +36,6 @@ use workers::{Pool, Submit, Target};
 use actor::Message;
 use table::Table;
 
-#[allow(unused_imports)]
 pub(crate) use fallback::one_worker;
 pub(crate) use id::TxnId;
 
@@ -102,18 +98,18 @@ where
         }
     }
 
-    /// The transaction ID `text` names, when it is one.
-    pub(crate) fn parse(text: &str) -> Option<TxnId> {
-        TxnId::parse(text)
+    /// The pool the transactions live on.
+    pub(crate) fn pool(&self) -> &Pool {
+        &self.pool
     }
 
-    /// Opens a transaction with `open` on the least loaded worker, which owns
-    /// it from then on, and returns its ID. An error from `open` comes back
-    /// as is. A caller that stops waiting leaves a transaction nobody knows
-    /// the ID of; the idle sweep ends it.
+    /// Opens a transaction with `open`, given its ID, on the least loaded
+    /// worker, which owns it from then on, and returns the ID. An error from
+    /// `open` comes back as is. A caller that stops waiting leaves a
+    /// transaction nobody knows the ID of; the idle sweep ends it.
     pub(crate) async fn begin<O, Fut, E>(&self, open: O) -> Result<Result<TxnId, E>, Unavailable>
     where
-        O: FnOnce() -> Fut + Send + 'static,
+        O: FnOnce(TxnId) -> Fut + Send + 'static,
         Fut: Future<Output = Result<T, E>> + 'static,
         E: Send + 'static,
     {
@@ -128,19 +124,20 @@ where
                     let worker = workers::current_worker()
                         .map(|worker| worker.index)
                         .ok_or(Unavailable::Pool(workers::Error::NotOnWorker))?;
-                    let txn = match open().await {
+                    let sequence = match shared.upgrade() {
+                        Some(tables) => tables.tables[worker].draw(),
+                        None => return Err(Unavailable::NotFound),
+                    };
+                    let id = TxnId::new(sequence, worker, workers).ok_or(Unavailable::Exhausted)?;
+                    let txn = match open(id).await {
                         Ok(txn) => txn,
                         Err(error) => return Ok(Err(error)),
                     };
-                    let Some(tables) = shared.upgrade() else {
-                        return Err(Unavailable::NotFound);
-                    };
-                    let table = &tables.tables[worker];
-                    let id =
-                        TxnId::new(table.draw(), worker, workers).ok_or(Unavailable::Exhausted)?;
                     let (mailbox, inbox) = unbounded();
-                    table.insert(id, mailbox);
-                    drop(tables);
+                    match shared.upgrade() {
+                        Some(tables) => tables.tables[worker].insert(id, mailbox),
+                        None => return Err(Unavailable::NotFound),
+                    }
                     if let Err(error) =
                         workers::spawn_daemon(actor::own(txn, id, worker, inbox, shared.clone()))
                     {
@@ -340,12 +337,19 @@ where
     }
 }
 
-/// The idle sweep's handle.
+/// The idle sweep's handle. Dropping it leaves the sweep running.
 pub struct Sweep {
     stop: Arc<Event>,
 }
 
 impl Sweep {
+    /// A sweep that does not run.
+    pub fn stopped() -> Self {
+        let stop = Arc::new(Event::new());
+        stop.set();
+        Self { stop }
+    }
+
     /// Stops the sweep on every worker.
     pub fn stop(&self) {
         self.stop.set();

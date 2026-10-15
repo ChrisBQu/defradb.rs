@@ -5,7 +5,6 @@
 //! 2. Collecting all blocks in the path
 //! 3. Replaying CRDT deltas forward to reconstruct document state
 
-use async_lock::Mutex as TokioMutex;
 use cid::Cid;
 use defra_core::block::{Block, CrdtDelta, Encryption};
 use document::{Document, NormalValue};
@@ -16,7 +15,7 @@ use std::sync::Arc;
 use storage::corekv::Store;
 
 use crate::error::{Error, Result};
-use crate::txn::DbTxn;
+use crate::txn::{DbTxn, LentTxn};
 
 const BLOCK_NOT_FOUND: &str =
     "seek failed: (version fetcher) failed to get block in blockstore: ipld: could not find";
@@ -27,7 +26,9 @@ const BLOCK_NOT_FOUND: &str =
 /// collects all blocks from the target CID to genesis, then replays
 /// the CRDT deltas in forward order to reconstruct the document state.
 pub struct VersionedFetcher<S: Store> {
-    txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
+    /// The transaction it reads, when it has one; a fetcher without one only
+    /// decrypts through a transaction it is given.
+    txn: Option<LentTxn<S>>,
     kms: Option<Arc<dyn kms::KmsService>>,
     caller_identity: Option<identity::Did>,
     prepared_inputs: Option<query::prepared::PreparedInputMemo>,
@@ -35,9 +36,9 @@ pub struct VersionedFetcher<S: Store> {
 
 impl<S: Store> VersionedFetcher<S> {
     /// Create a new versioned fetcher with a shared transaction
-    pub fn new(txn: Arc<TokioMutex<Option<DbTxn<S>>>>) -> Self {
+    pub fn new(txn: LentTxn<S>) -> Self {
         Self {
-            txn,
+            txn: Some(txn),
             kms: None,
             caller_identity: None,
             prepared_inputs: None,
@@ -46,7 +47,7 @@ impl<S: Store> VersionedFetcher<S> {
 
     /// Create a versioned fetcher that resolves encrypted deltas through the KMS.
     pub fn with_kms(
-        txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
+        txn: Option<LentTxn<S>>,
         kms: Option<Arc<dyn kms::KmsService>>,
         caller_identity: Option<identity::Did>,
     ) -> Self {
@@ -97,8 +98,7 @@ impl<S: Store> VersionedFetcher<S> {
         expected_doc_id: Option<&str>,
         collection_short_id: Option<u32>,
     ) -> Result<Vec<Document>> {
-        let mut guard = self.txn.lock().await;
-        let txn = guard.as_mut().ok_or(Error::TxnNotActive)?;
+        let txn = self.txn.as_deref().ok_or(Error::TxnNotActive)?;
 
         // Parse the CID
         let target_cid = Self::parse_cid(cid_str)?;
@@ -175,7 +175,7 @@ impl<S: Store> VersionedFetcher<S> {
     /// Whether `doc_id` belongs to `collection_short_id` (`None` skips the gate).
     async fn is_member(
         &self,
-        txn: &mut DbTxn<S>,
+        txn: &DbTxn<S>,
         collection_short_id: Option<u32>,
         doc_id: &str,
     ) -> Result<bool> {
@@ -197,7 +197,7 @@ impl<S: Store> VersionedFetcher<S> {
     /// the target collection state.
     async fn get_documents_at_collection_cid(
         &self,
-        txn: &mut DbTxn<S>,
+        txn: &DbTxn<S>,
         start_cid: &Cid,
         start_block: &Block,
         collection_short_id: Option<u32>,
@@ -325,7 +325,7 @@ impl<S: Store> VersionedFetcher<S> {
     /// index (`/d/b`). Deltas no longer carry docIDs (Go #4838).
     async fn resolve_doc_ids(
         &self,
-        txn: &mut DbTxn<S>,
+        txn: &DbTxn<S>,
         cid: &Cid,
         block: &Block,
     ) -> Result<Option<Vec<String>>> {
@@ -333,7 +333,7 @@ impl<S: Store> VersionedFetcher<S> {
         crate::docid::map::resolve_block_doc_ids(&systemstore, cid, block).await
     }
 
-    async fn canonical_doc_id(&self, txn: &mut DbTxn<S>, doc_id: &str) -> Result<String> {
+    async fn canonical_doc_id(&self, txn: &DbTxn<S>, doc_id: &str) -> Result<String> {
         let systemstore = txn.systemstore()?;
         let Some(doc_ref) = crate::docid::map::get_doc_ref(&systemstore, doc_id).await? else {
             return Ok(doc_id.to_string());
@@ -353,7 +353,7 @@ impl<S: Store> VersionedFetcher<S> {
     /// Returns a map of CID -> Block for all blocks in the history.
     async fn collect_blocks_to_genesis(
         &self,
-        txn: &mut DbTxn<S>,
+        txn: &DbTxn<S>,
         start_cid: &Cid,
         start_block: &Block,
     ) -> Result<RapidHashMap<Cid, Block>> {
@@ -418,7 +418,7 @@ impl<S: Store> VersionedFetcher<S> {
     }
 
     /// Load a block from blockstore by CID.
-    async fn load_block(&self, txn: &mut DbTxn<S>, cid: &Cid) -> Result<Block> {
+    async fn load_block(&self, txn: &DbTxn<S>, cid: &Cid) -> Result<Block> {
         let blockstore = txn.blockstore()?;
 
         let key = cid.to_bytes();
@@ -453,7 +453,7 @@ impl<S: Store> VersionedFetcher<S> {
 
     async fn decrypt_block_data(
         &self,
-        txn: &mut DbTxn<S>,
+        txn: &DbTxn<S>,
         data: &[u8],
         encryption_cid: &Cid,
     ) -> Result<Vec<u8>> {
