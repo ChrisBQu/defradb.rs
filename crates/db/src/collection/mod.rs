@@ -147,7 +147,7 @@ pub(super) const DELETED_MARKER: u8 = 0x01;
 #[derive(Debug, Clone)]
 pub struct Collection {
     /// The collection schema definition.
-    def: CollectionVersion,
+    def: Arc<CollectionVersion>,
     write_indexes: Vec<IndexDescription>,
     queryable_indexes: Vec<IndexDescription>,
     /// `def` with the queryable index set substituted, built once here
@@ -159,10 +159,13 @@ pub struct Collection {
 
 /// `def` with the queryable index set substituted in.
 fn query_schema_of(
-    def: &CollectionVersion,
+    def: &Arc<CollectionVersion>,
     queryable_indexes: &[IndexDescription],
 ) -> Arc<CollectionVersion> {
-    let mut schema = def.clone();
+    if def.indexes == queryable_indexes {
+        return Arc::clone(def);
+    }
+    let mut schema = def.as_ref().clone();
     schema.indexes = queryable_indexes.to_vec();
     Arc::new(schema)
 }
@@ -179,6 +182,7 @@ impl Collection {
 
     /// Create a new collection with the given schema definition.
     pub fn new(def: CollectionVersion) -> Self {
+        let def = Arc::new(def);
         let indexes = def.indexes.clone();
         let query_schema = query_schema_of(&def, &indexes);
         Self {
@@ -205,6 +209,7 @@ impl Collection {
             .filter(|index| !actions.contains_key(&index.id))
             .cloned()
             .collect();
+        let def = Arc::new(def);
         let query_schema = query_schema_of(&def, &queryable_indexes);
         Self {
             def,
