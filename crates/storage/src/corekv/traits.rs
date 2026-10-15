@@ -120,7 +120,12 @@ pub trait RetryTxn: MaybeSendSync + private::Sealed {
     /// Why the previous commit lost, without exposing user key bytes.
     fn previous_conflict(&self) -> Option<super::errors::TransactionConflict>;
 
+    /// A plain validated read, as `Reader::get`: checked at commit when the
+    /// attempt writes, so an identical rewrite of the key is not a conflict
+    /// and an attempt that ends up writing nothing commits at its snapshot.
+    /// Projected and unvalidated reads go through `begin_attempt_io`.
     async fn get(&self, key: &[u8]) -> Result<Option<Bytes>>;
+    /// Whether `key` holds a value, read as `get` reads it.
     async fn has(&self, key: &[u8]) -> Result<bool>;
     async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()>;
     async fn delete(&mut self, key: &[u8]) -> Result<()>;

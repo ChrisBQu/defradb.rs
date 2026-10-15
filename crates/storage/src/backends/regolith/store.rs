@@ -484,9 +484,9 @@ impl RetryTxn for RegolithRetryTxn<'_> {
             return Err(Error::EmptyKey);
         }
         let txn: &regolith::Transaction = self.txn;
-        regolith::ready(|| txn.get_for_update(key))
+        regolith::ready(|| txn.get_slice(key))
             .await
-            .map(|value| value.map(bytes::Bytes::from))
+            .map(|value| value.map(bytes::Bytes::from_owner))
             .map_err(super::transaction::map_txn_error)
     }
 
@@ -496,7 +496,7 @@ impl RetryTxn for RegolithRetryTxn<'_> {
             return Err(Error::EmptyKey);
         }
         let txn: &regolith::Transaction = self.txn;
-        regolith::ready(|| txn.get_for_update(key))
+        regolith::ready(|| txn.get_slice(key))
             .await
             .map(|value| value.is_some())
             .map_err(super::transaction::map_txn_error)
@@ -661,6 +661,55 @@ mod retry_cold_io_tests {
         );
         txn.discard();
         store.close().await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod retry_read_tests {
+    use super::*;
+
+    /// A compare-and-set whose condition finds nothing to change, while
+    /// another writer updates the key it read before it commits.
+    struct ConditionalNoop {
+        store: RegolithStore,
+    }
+    impl crate::corekv::RetryAttemptFn for ConditionalNoop {
+        fn run<'a>(
+            &'a mut self,
+            retry: &'a mut dyn RetryTxn,
+        ) -> crate::corekv::RetryAttemptFuture<'a> {
+            Box::pin(async move {
+                assert_eq!(retry.get(b"flag").await?.as_deref(), Some(&b"old"[..]));
+                assert!(retry.has(b"flag").await?);
+                let other = self.store.inner.db.begin(&TxnOptions::new());
+                other.put(b"flag", b"new").unwrap();
+                other.commit().unwrap();
+                Ok(Box::new(()) as RetryAttemptValue)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_write_free_attempt_and_an_update_of_what_it_read_both_commit() {
+        let store = RegolithStore::in_memory().unwrap();
+        let mut seed = store.new_txn(false).await.unwrap();
+        seed.set(b"flag", b"old").await.unwrap();
+        seed.commit().await.unwrap();
+        store
+            .transact_retry(
+                RetryOptions::new(1),
+                Box::new(ConditionalNoop {
+                    store: store.clone(),
+                }),
+            )
+            .await
+            .unwrap();
+        let read = store.new_txn(true).await.unwrap();
+        assert_eq!(
+            read.get(b"flag").await.unwrap().as_deref(),
+            Some(&b"new"[..])
+        );
+        read.discard();
     }
 }
 
