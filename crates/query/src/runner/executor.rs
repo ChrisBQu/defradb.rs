@@ -17,37 +17,39 @@ use crate::txn::{TransactionHandle, TransactionRegistry};
 use super::turn::answered;
 use super::{DocFetcher, QueryRunner};
 
-/// Await a future with an optional timeout (native only, WASM always awaits
-/// directly). The deadline is a timer of the worker pool's deadline queue:
-/// the calling worker's, or the fallback pool's off the pool.
-#[cfg(not(target_arch = "wasm32"))]
-async fn await_with_timeout<T, F: Future<Output = Result<T>>>(
+/// `future`'s output, or why its deadline ended it first: `limit` passed, or
+/// the deadline could not be kept. The deadline is a timer of the worker
+/// pool's deadline queue: the calling worker's, or the fallback pool's off
+/// the pool. A browser keeps no deadline: the future runs to its end.
+pub async fn within_deadline<F: Future>(
+    limit: Option<std::time::Duration>,
     future: F,
-    timeout_secs: u64,
-) -> Result<T> {
-    if timeout_secs > 0 {
-        let timeout = std::time::Duration::from_secs(timeout_secs);
-        match workers::timeout(timeout, future).await {
-            Ok(r) => r,
-            Err(workers::Error::TimedOut) => Err(crate::error::QueryError::execution(format!(
-                "query execution timed out after {} seconds",
-                timeout_secs
-            ))),
-            Err(error) => Err(crate::error::QueryError::execution(format!(
-                "the query's deadline could not be kept: {error}"
-            ))),
-        }
-    } else {
-        future.await
+) -> std::result::Result<F::Output, String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(limit) = limit {
+        return workers::timeout(limit, future)
+            .await
+            .map_err(|error| match error {
+                workers::Error::TimedOut => format!(
+                    "query execution timed out after {} seconds",
+                    limit.as_secs()
+                ),
+                error => format!("the query's deadline could not be kept: {error}"),
+            });
     }
+    #[cfg(target_arch = "wasm32")]
+    let _ = limit;
+    Ok(future.await)
 }
 
-#[cfg(target_arch = "wasm32")]
+/// [`within_deadline`] for a query's own result.
 async fn await_with_timeout<T, F: Future<Output = Result<T>>>(
     future: F,
-    _timeout_secs: u64,
+    limit: Option<std::time::Duration>,
 ) -> Result<T> {
-    future.await
+    within_deadline(limit, future)
+        .await
+        .map_err(crate::error::QueryError::execution)?
 }
 
 /// Map a parsed operation to the required NAC permission.
@@ -117,7 +119,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         &self,
         request: &QueryRequest,
     ) -> Result<Option<std::sync::Arc<crate::prepared::PreparedMutations>>> {
-        await_with_timeout(self.prepare_mutations(request), self.query_timeout).await
+        await_with_timeout(self.prepare_mutations(request), self.deadline()).await
     }
 
     async fn execute_prepared(
@@ -291,7 +293,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
             acting_identity,
             defra_core::signing::scope_broadcast_creator_did(
                 creator_did,
-                await_with_timeout(execution, self.query_timeout),
+                await_with_timeout(execution, self.deadline()),
             ),
         )
         .await;

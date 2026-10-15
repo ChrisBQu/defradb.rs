@@ -6,26 +6,15 @@ use async_trait::async_trait;
 use query::txn::{TransactionHandle, TransactionRegistry, TxnJob};
 use storage::corekv::MaybeSend;
 
-/// Runs `job` until it finishes or `timeout` passes on the worker's clock:
-/// `None` then, and the job is dropped.
-async fn within<F>(timeout: Option<Duration>, job: F) -> Option<F::Output>
-where
-    F: std::future::Future,
-{
-    let Some(sleep) = timeout.and_then(|limit| workers::sleep(limit).ok()) else {
-        return Some(job.await);
-    };
-    match futures::future::select(Box::pin(job), sleep).await {
-        futures::future::Either::Left((output, _)) => Some(output),
-        futures::future::Either::Right(_) => None,
-    }
-}
-
-fn timed_out(timeout: Option<Duration>) -> TransactionError {
-    TransactionError::execution(format!(
-        "query execution timed out after {} seconds",
-        timeout.map_or(0, |limit| limit.as_secs())
-    ))
+/// Runs `job` until it finishes or `timeout` passes, when the job is dropped
+/// and the request fails.
+async fn within<F: std::future::Future>(
+    timeout: Option<Duration>,
+    job: F,
+) -> std::result::Result<F::Output, TransactionError> {
+    query::runner::within_deadline(timeout, job)
+        .await
+        .map_err(TransactionError::execution)
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -80,7 +69,7 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
                     async move {
                         let ran = within(timeout, job(owned)).await;
                         owned.after_request();
-                        ran.ok_or_else(|| timed_out(timeout))
+                        ran
                     },
                 ))
             })
@@ -108,9 +97,7 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
                     // A snapshot of its own, never registered: no ID names it.
                     let mut owned = OwnedTxn::new(TxnId::unnamed(), txn, db, None)
                         .map_err(|error| TransactionError::execution(error.to_string()))?;
-                    within(timeout, job(&mut owned))
-                        .await
-                        .ok_or_else(|| timed_out(timeout))
+                    within(timeout, job(&mut owned)).await
                 })
             })
             .await

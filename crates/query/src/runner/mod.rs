@@ -43,6 +43,7 @@ mod turn;
 mod version;
 
 pub use se_transport::SeQueryTransport;
+pub use executor::within_deadline;
 
 use acp::nac::NodePermission;
 use acp::{DocumentACP, Identity as AcpIdentity};
