@@ -297,8 +297,8 @@ impl WasmTransformStore {
 
 #[async_trait]
 impl TransformStore for WasmTransformStore {
-    fn new_isolated_store(&self) -> Option<Arc<dyn TransformStore>> {
-        Some(Arc::new(self.empty_with_shared_engine()))
+    fn new_isolated_store(&self) -> Arc<dyn TransformStore> {
+        Arc::new(self.empty_with_shared_engine())
     }
 
     async fn add(&self, config: LensConfig) -> Result<TransformId> {
