@@ -720,12 +720,17 @@ where
             None => vec![],
         };
 
-        Arc::new(kms::DefraKms::new(
+        Arc::new(kms::DefraKms::with_inputs(
             store,
             transports,
             policy as Arc<dyn kms::AccessPolicy>,
             Arc::new(db::DbBlockDocIDResolver::new(database.clone())),
             node_did,
+            config
+                .edge
+                .as_ref()
+                .map(kms::KmsInputs::on)
+                .unwrap_or_default(),
         ))
     };
 

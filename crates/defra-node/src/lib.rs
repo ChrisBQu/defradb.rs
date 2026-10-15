@@ -1571,12 +1571,16 @@ impl NodeBuilder {
                     .expect("static anonymous DID parses")
             });
 
-            let kms_service: Arc<dyn kms::KmsService> = Arc::new(kms::DefraKms::new(
+            let kms_service: Arc<dyn kms::KmsService> = Arc::new(kms::DefraKms::with_inputs(
                 key_store,
                 vec![p2p.kms_transport.clone()],
                 policy as Arc<dyn kms::AccessPolicy>,
                 Arc::new(db::DbBlockDocIDResolver::new(database.clone())),
                 kms_node_did,
+                network
+                    .as_ref()
+                    .map(|network| kms::KmsInputs::on(network.edge()))
+                    .unwrap_or_default(),
             ));
 
             // Bind this node's transport peer id into the KMS so served
