@@ -680,10 +680,8 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
 }
 
 /// Add a replicated collection block to its collection's head set, in the
-/// caller's transaction: record the heads it supersedes (markers, never a
-/// delete of the parent's key, so peers replicating siblings both commit),
-/// write its own head key, and reclaim what is superseded, as a local append
-/// does. Both merge paths call this, and a failed write fails the merge.
+/// caller's transaction, as one blind merge: peers replicating siblings both
+/// commit. Both merge paths call this, and a failed write fails the merge.
 async fn append_merged_collection_head(
     headstore: &NamespaceView,
     short_id: u32,
@@ -691,25 +689,18 @@ async fn append_merged_collection_head(
     cid: &Cid,
     priority: u64,
 ) -> std::result::Result<(), MergeError> {
-    if let Some(heads) = &block.heads {
-        crate::block::heads::record_supersedes(headstore, short_id, heads, *cid)
-            .await
-            .map_err(|e| MergeError::Storage(e.to_string()))?;
-    }
-    let col_key = storage::keys::headstore::HeadstoreColKey::new(short_id, *cid);
-    headstore
-        .set(
-            &<storage::keys::headstore::HeadstoreColKey as storage::corekv::Key>::bytes(&col_key),
-            &encode_priority_varint(priority),
-        )
+    let storage_error = |e: storage::corekv::Error| MergeError::Storage(e.to_string());
+    let set = crate::block::heads::collection_set(headstore, short_id)
         .await
-        .map_err(|e| MergeError::Storage(e.to_string()))?;
-    crate::block::heads::prune_superseded_heads(
+        .map_err(storage_error)?;
+    crate::block::heads::publish_collection_block(
         headstore,
         short_id,
-        crate::block::heads::RECLAIM_MAX_KEYS,
+        &set,
+        *cid,
+        priority,
+        block.heads.as_deref().unwrap_or_default(),
     )
     .await
-    .map_err(|e| MergeError::Storage(e.to_string()))?;
-    Ok(())
+    .map_err(storage_error)
 }

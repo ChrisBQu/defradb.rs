@@ -10,15 +10,22 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         context: &CompositeMergeContext<'_, '_>,
         state: &CompositeMergeState,
     ) -> std::result::Result<(), MergeError> {
+        let storage_error = |e: storage::corekv::Error| MergeError::Storage(e.to_string());
+        let set = crate::block::heads::document::load(headstore, context.doc_short_id)
+            .await
+            .map_err(storage_error)?;
+        let mut write = storage::merge::head_set::Write::default();
         let head = HeadstoreDocKey::new(context.doc_short_id, "C", *context.cid);
         crate::block::heads::document::publish(
             headstore,
+            &set,
+            &mut write,
             &head,
-            &encode_priority_varint(context.payload.priority),
+            context.payload.priority,
             context.block.heads.as_deref().unwrap_or_default(),
         )
         .await
-        .map_err(|e| MergeError::Storage(e.to_string()))?;
+        .map_err(storage_error)?;
         headstore
             .set(
                 &HeadstorePriorityKey::new(
@@ -41,8 +48,10 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                 let head = HeadstoreDocKey::new(context.doc_short_id, &link.name, link.link);
                 crate::block::heads::document::publish(
                     headstore,
+                    &set,
+                    &mut write,
                     &head,
-                    &encode_priority_varint(priority),
+                    priority,
                     state
                         .field_block_heads
                         .get(&link.name)
@@ -61,9 +70,8 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                     .map_err(|e| MergeError::Storage(e.to_string()))?;
             }
         }
-        crate::block::heads::document::reclaim(headstore, context.doc_short_id)
+        crate::block::heads::document::commit(headstore, context.doc_short_id, &write)
             .await
-            .map_err(|e| MergeError::Storage(e.to_string()))?;
-        Ok(())
+            .map_err(storage_error)
     }
 }

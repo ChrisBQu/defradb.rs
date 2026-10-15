@@ -1,80 +1,83 @@
-//! The collection head set: the tips of a branchable collection's DAG.
+//! Head sets: the tips of a document's or a branchable collection's DAG.
 //!
-//! A head is a stored block that nothing else names as a parent. Maintaining
-//! that set by deleting a parent's head key when a child appears is the obvious
-//! encoding and it is the one this module replaces: two writers appending
-//! concurrently observe the same parent and both issue the same delete, which
-//! is a write-write conflict the engine refuses at every isolation level. The
-//! set stops forming siblings, which is a change to the data structure and not
-//! to its speed.
+//! A set is one key whose value regolith folds with the store's merge operator
+//! (`storage::merge::head_set`). A writer never reads to decide and never
+//! deletes: it merges one operand per set per transaction (an `add` for each
+//! block it publishes, a `supersede` for each parent), so concurrent writers
+//! of one set never conflict, and a reader is one unvalidated point read
+//! (`get_parts(key, &[])`). A parent whose head has not arrived yet is held
+//! ahead until its own `add` consumes it; the writer chooses between
+//! `supersede` and `supersede_ahead` from a validated read of the parent's
+//! publication guard, so an ahead name is only ever written for a parent that
+//! is truly unpublished.
 //!
-//! Here a writer only ever writes keys that name its own block: its head key,
-//! and one `/cs/{collection}/{parent}/{child}` marker per parent. Two writers
-//! therefore cannot write the same key, and the head set becomes a query: a
-//! stored head key is live exactly when no marker names it.
-//!
-//! `proofs/tla/HeadSet.tla` checks both strategies, with
-//! `MC_HeadSet_Red_EagerDelete.cfg` failing on the delete and
-//! `MC_HeadSet_Green.cfg` passing on this one. `proofs/lean/HeadSet/Core.lean`
-//! carries the algebra: `derived_writeSets_disjoint` for why nothing collides,
-//! and `applyDerived_parents_not_head` for why the answer is unchanged.
-//!
-//! # Reclamation
-//!
-//! Markers are garbage once their parent's head key goes, which is inherent:
-//! every conflict-free set carries tombstones. Every writer that appends to a
-//! head set reclaims what it finds superseded at its snapshot, in its own
-//! transaction ([`reclaim`]), so the backlog of a set is what the writes since
-//! the last append left, never its history. The deletes are blind writes
-//! inside a commutative prefix: two writers reclaiming the same group both
-//! commit, because a delete of a key a newer delete already removed is no
-//! change. Nothing writes a superseded head key or its markers again (a
-//! document head is published once, `document::publication_key`; a collection
-//! block is merged once, behind the merge handler's merged-block guard), so a
-//! reclaiming writer conflicts with no one.
-//!
-//! The deletes leave tombstones in the two families. Regolith's
-//! deletion-density compaction rewrites a range once most of what it would
-//! read is dead and retires the tombstones, which is what bounds the bytes a
-//! head scan walks. A compaction filter cannot do this reclamation: whether a
-//! head key or a marker is garbage depends on another key (a marker naming
-//! the head, a head key naming the marker's parent), and a filter sees one
-//! entry at a time.
+//! Documents are in [`document`]; the collection set and its publication
+//! guard are here.
 
 use cid::Cid;
 use datastore::NamespaceView;
-use storage::corekv::{Reader, Result};
+use storage::corekv::{Error, IterOptions, Iterator, Key, Reader, Result};
+use storage::keys::headstore::{HeadstoreColPublishedKey, HeadstoreColSetKey};
+use storage::merge::head_set::{Set, Write};
 
 pub mod document;
-mod reclamation;
-mod walk;
-use reclamation::Reclamation;
-use storage::corekv::IterOptions;
-use storage::keys::headstore::{HeadstoreColKey, HeadstoreColSuperseded};
-use walk::HeadWalk;
 
-/// Keys one reclamation may delete. A write supersedes about one head per
-/// field it touches, so this is many writes' worth: the steady backlog of a
-/// set clears in one pass, and a backlog left from before inline reclamation
-/// clears over a few writes instead of in one oversized transaction.
-pub(crate) const RECLAIM_MAX_KEYS: usize = 512;
+/// The head set stored under `key`: empty when the key is absent.
+pub(crate) async fn read_set<R>(reader: &R, key: &[u8]) -> Result<Set>
+where
+    R: Reader + ?Sized,
+{
+    match reader.get_parts(key, &[]).await? {
+        None => Ok(Set::default()),
+        Some(bytes) => Set::read(&bytes)
+            .ok_or_else(|| Error::Other("a stored head set is malformed".into())),
+    }
+}
 
-/// What one pass over the head prefix found.
+/// Merge `write` into the set under `key`; nothing when it changes nothing.
+pub(crate) async fn merge_set(writer: &NamespaceView, key: &[u8], write: &Write) -> Result<()> {
+    if write.is_empty() {
+        return Ok(());
+    }
+    writer.merge(key, &write.operand()).await
+}
+
+/// The live tips of a collection and the highest priority among them.
 #[derive(Debug, Default)]
 pub struct CollectionHeads {
     /// The live tips, ascending by CID text.
     pub live: Vec<Cid>,
     /// The highest priority among the live tips, or 0 when there are none.
     pub max_priority: u64,
-    /// Head keys that a marker superseded, still stored.
-    pub superseded: usize,
+}
+
+/// A collection's head set: one point read.
+pub async fn collection_set<R>(reader: &R, collection_short_id: u32) -> Result<Set>
+where
+    R: Reader + ?Sized,
+{
+    read_set(reader, &HeadstoreColSetKey::new(collection_short_id).bytes()).await
+}
+
+impl CollectionHeads {
+    /// The live tips of `set`.
+    pub fn of(set: &Set) -> Self {
+        let mut found = Self::default();
+        for (name, priority) in set.live() {
+            let Some(cid) = std::str::from_utf8(name)
+                .ok()
+                .and_then(|text| text.parse::<Cid>().ok())
+            else {
+                continue;
+            };
+            found.max_priority = found.max_priority.max(priority);
+            found.live.push(cid);
+        }
+        found
+    }
 }
 
 /// The collection's live heads.
-///
-/// Walks the head prefix and the marker prefix together. Both are sorted by
-/// the CID text they carry, so one pass over each answers the whole question
-/// and neither range is ever held in memory.
 pub async fn live_collection_heads<R>(
     reader: &R,
     collection_short_id: u32,
@@ -82,139 +85,64 @@ pub async fn live_collection_heads<R>(
 where
     R: Reader + ?Sized,
 {
-    let head_prefix = HeadstoreColKey::collection_prefix(collection_short_id);
-    let marker_prefix = HeadstoreColSuperseded::collection_prefix(collection_short_id);
-    let head_name_at = head_prefix.len();
-    let parent_name_at = marker_prefix.len();
-    let heads = reader
-        .iterator(IterOptions::new().with_prefix(head_prefix))
-        .await?;
-    let markers = reader
+    Ok(CollectionHeads::of(
+        &collection_set(reader, collection_short_id).await?,
+    ))
+}
+
+/// The short IDs of the collections that have a head set, ascending.
+pub async fn collections_with_heads<R>(reader: &R) -> Result<Vec<u32>>
+where
+    R: Reader + ?Sized,
+{
+    let mut iter = reader
         .iterator(
             IterOptions::new()
-                .with_prefix(marker_prefix)
+                .with_prefix(HeadstoreColSetKey::family_prefix())
                 .with_keys_only(true),
         )
         .await?;
-    let mut walk = HeadWalk::new(heads, markers, head_name_at, parent_name_at, false);
-    let mut found = CollectionHeads::default();
-    while let Some(head) = walk.next().await? {
-        if head.superseded {
-            found.superseded += 1;
-            continue;
-        }
-        let Some(cid) = std::str::from_utf8(&head.pair.key[head_name_at..])
-            .ok()
-            .and_then(|text| text.parse::<Cid>().ok())
-        else {
-            continue;
-        };
-        found.max_priority = found
-            .max_priority
-            .max(crate::block::builder::decode_priority_varint(
-                &head.pair.value,
-            ));
-        found.live.push(cid);
+    let mut ids = Vec::new();
+    while let Some(pair) = iter.next().await? {
+        ids.extend(HeadstoreColSetKey::parse(&pair.key).map(|key| key.collection_id));
     }
-    walk.close().await?;
-    Ok(found)
+    iter.close().await?;
+    Ok(ids)
 }
 
-/// Record that `child` superseded each of `parents`.
-///
-/// Every key written names `child`, so this is safe to run concurrently with
-/// any other writer: `HeadSet.derived_writeSets_disjoint`.
-pub async fn record_supersedes(
-    headstore: &NamespaceView,
+/// Publish a collection block once, in the caller's transaction: it becomes a
+/// head at `priority` and each of `parents` stops being one. `set` is the
+/// collection's set as the caller read it. A parent live in `set` or with a
+/// publication guard is superseded; any other has not arrived, and is held
+/// ahead until it does. The guard reads are validated.
+pub async fn publish_collection_block(
+    writer: &NamespaceView,
     collection_short_id: u32,
+    set: &Set,
+    cid: Cid,
+    priority: u64,
     parents: &[Cid],
-    child: Cid,
 ) -> Result<()> {
+    let guard = HeadstoreColPublishedKey::new(collection_short_id, cid).bytes();
+    if writer.has(&guard).await? {
+        return Ok(());
+    }
+    let mut write = Write::default();
     for parent in parents {
-        let marker = HeadstoreColSuperseded::new(collection_short_id, *parent, child);
-        headstore
-            .set(&storage::corekv::Key::bytes(&marker), &[])
-            .await?;
+        let name = parent.to_string().into_bytes();
+        let published = HeadstoreColPublishedKey::new(collection_short_id, *parent).bytes();
+        if set.is_live(&name) || writer.has(&published).await? {
+            write.supersede(&name);
+        } else {
+            write.supersede_ahead(&name);
+        }
     }
-    Ok(())
-}
-
-/// What one reclamation removed.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct PruneOutcome {
-    /// Head keys removed. Each came with its markers.
-    pub heads_removed: usize,
-    /// Marker keys removed with their head.
-    pub markers_removed: usize,
-    /// Markers removed whose head key had already gone.
-    pub orphans_removed: usize,
-    /// True when the pass stopped on its key budget rather than on the end of
-    /// the range, so a caller can see that more is left rather than read the
-    /// result as "clean".
-    pub more_remaining: bool,
-}
-
-/// Reclaim the collection's superseded head keys, each with its markers, in
-/// the caller's transaction. Every branchable append calls this.
-pub async fn prune_superseded_heads(
-    headstore: &NamespaceView,
-    collection_short_id: u32,
-    max_keys: usize,
-) -> Result<PruneOutcome> {
-    let head_prefix = HeadstoreColKey::collection_prefix(collection_short_id);
-    let marker_prefix = HeadstoreColSuperseded::collection_prefix(collection_short_id);
-    let names = (head_prefix.len(), marker_prefix.len());
-    reclaim(headstore, head_prefix, marker_prefix, names, None, max_keys).await
-}
-
-/// Delete superseded head keys, each together with the markers against it,
-/// with blind deletes in the caller's transaction.
-///
-/// A head key and its markers go in one transaction, so no reader can observe
-/// a head whose markers were already removed. Deleting them separately would
-/// resurrect the head, which is why `max_keys` bounds a *pass* and not a
-/// single head's key group: a group wider than the budget still leaves whole,
-/// on a pass of its own.
-///
-/// A marker whose parent has no head key is not necessarily garbage: a block
-/// replicated ahead of its parent records the marker first, and the parent's
-/// head key arrives afterwards. When the family records publication
-/// (`publication`, the prefix of the publication keys, named like the heads),
-/// a parent that was published and has no head key was reclaimed, and its
-/// late markers are deleted too. Without that record they stay.
-///
-/// Nothing here is read with validation: the scans lie inside the families'
-/// commutative prefixes and the publication check reads no parts, so the only
-/// effect on the caller's commit is its own blind deletes.
-pub(crate) async fn reclaim(
-    headstore: &NamespaceView,
-    head_prefix: Vec<u8>,
-    marker_prefix: Vec<u8>,
-    (head_name_at, parent_name_at): (usize, usize),
-    publication: Option<&[u8]>,
-    max_keys: usize,
-) -> Result<PruneOutcome> {
-    let heads = headstore
-        .iterator(IterOptions::new().with_prefix(head_prefix))
-        .await?;
-    let markers = headstore
-        .iterator(
-            IterOptions::new()
-                .with_prefix(marker_prefix)
-                .with_keys_only(true),
-        )
-        .await?;
-    let mut walk = HeadWalk::new(heads, markers, head_name_at, parent_name_at, false);
-    if publication.is_some() {
-        walk = walk.collect_orphans(max_keys);
-    }
-    // Collected rather than deleted in place: deleting from under an iterator
-    // that is rebuilt from its last key would skip entries. The budget is what
-    // keeps this bounded.
-    let gathered = Reclamation::gather(&mut walk, max_keys, true, |_| {}).await?;
-    let orphans = walk.take_orphans();
-    walk.close().await?;
-    gathered
-        .finish(headstore, orphans, publication, parent_name_at, max_keys)
-        .await
+    write.add(cid.to_string().as_bytes(), priority);
+    writer.set(&guard, &[]).await?;
+    merge_set(
+        writer,
+        &HeadstoreColSetKey::new(collection_short_id).bytes(),
+        &write,
+    )
+    .await
 }

@@ -5,8 +5,8 @@ use proptest::prelude::*;
 use super::{entity_len, family_of, keys, Class};
 use crate::keys::utils::InstanceType;
 use crate::keys::{
-    deleted_doc_key, doc_key, encode_doc_short_id, DataStoreKey, HeadstoreColKey,
-    HeadstoreColSuperseded, HeadstoreDocKey, HeadstorePriorityKey, IndexDataStoreKey,
+    deleted_doc_key, doc_key, encode_doc_short_id, DataStoreKey, HeadstorePriorityKey,
+    IndexDataStoreKey,
 };
 
 /// `namespace` and a key's bytes, as a store namespace writes them.
@@ -21,15 +21,10 @@ fn every_entity_ends_where_its_key_builder_ends_it() {
     let mut entities: Vec<Vec<u8>> = Vec::new();
     for id in [1u64, 47, 239, 240, 287, 2287, 2288, u64::MAX] {
         let document = encode_doc_short_id(id);
-        entities.push(stored(b"h", &HeadstoreDocKey::document_prefix(id)));
         entities.push(stored(b"h", &HeadstorePriorityKey::document_prefix(id)));
-        for family in [b"h/ds/".as_slice(), b"h/r/"] {
-            entities.push([family, &document, b"/"].concat());
-        }
+        entities.push([b"h/r/".as_slice(), &document, b"/"].concat());
     }
     for id in [0u32, 7, 47, 300, u32::MAX] {
-        entities.push(stored(b"h", &HeadstoreColKey::collection_prefix(id)));
-        entities.push(stored(b"h", &HeadstoreColSuperseded::collection_prefix(id)));
         entities.push(stored(b"d", &IndexDataStoreKey::index_prefix(id, 47)));
         entities.push(stored(b"d", &IndexDataStoreKey::index_prefix(7, id)));
         entities.push(stored(
@@ -61,14 +56,13 @@ fn every_entity_ends_where_its_key_builder_ends_it() {
 /// with is the key's family.
 #[test]
 fn the_first_family_a_key_starts_with_is_its_family() {
-    let cases: [(&[u8], Class); 15] = [
+    let cases: [(&[u8], Class); 14] = [
         (b"bm\x01\x55", Class::Ordinary),
         (b"b\x01\x55", Class::ContentAddressed),
         (b"s/arrival/7/head", Class::Log),
-        (b"h/d/\x01/", Class::CommutativeSet),
-        (b"h/ds/\x01/", Class::CommutativeSet),
-        (b"h/c/1/", Class::CommutativeSet),
-        (b"h/cs/1/", Class::CommutativeSet),
+        (b"h/hd/\x01", Class::Ordinary),
+        (b"h/hc/1", Class::Ordinary),
+        (b"h/rc/1/cid", Class::Ordinary),
         (b"h/p/\x01/", Class::Ordinary),
         (b"h/r/\x01/", Class::Ordinary),
         (b"d/d/users/", Class::Ordinary),
@@ -106,15 +100,14 @@ fn keys_without_an_entity_name_none() {
         b"b\x01\x55\x00\x03abc".as_slice(),
         b"bm\x01\x55\x00\x03abc",
         b"s/arrival/7/row/00000000000000000001",
-        b"h/d/",
-        b"h/d/\x00/field/cid",
-        b"h/d/\xf0",
-        b"h/d/\x01",
-        b"h/d/\x01x/",
-        b"h/c/",
-        b"h/c//cid",
-        b"h/c/1x/cid",
-        b"h/c/1",
+        b"h/p/",
+        b"h/p/\x00/field/cid",
+        b"h/p/\xf0",
+        b"h/p/\x01",
+        b"h/p/\x01x/",
+        b"h/hd/\x01",
+        b"h/hc/1",
+        b"h/rc/1/cid",
         b"d/d/",
         b"d/d//\x01",
         b"d/",
