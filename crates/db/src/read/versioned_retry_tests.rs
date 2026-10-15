@@ -45,7 +45,7 @@ async fn historical_read_key_miss_exits_attempt_and_is_scoped_to_caller() {
     db.set_kms(kms.clone());
     let memo = query::prepared::PreparedInputMemo::default();
     let fetcher = VersionedFetcher::with_kms(
-        Arc::new(TokioMutex::new(None)),
+        None,
         Some(kms.clone()),
         Some(identity::Did::new("did:key:reader").unwrap()),
     )
@@ -79,7 +79,7 @@ async fn historical_read_key_miss_exits_attempt_and_is_scoped_to_caller() {
     assert_eq!(kms.0.load(Ordering::SeqCst), 1);
 
     let other = VersionedFetcher::with_kms(
-        Arc::new(TokioMutex::new(None)),
+        None,
         Some(kms.clone()),
         Some(identity::Did::new("did:key:other").unwrap()),
     )

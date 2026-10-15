@@ -80,7 +80,7 @@ pub struct DbTransactionRegistry<S: Store + 'static> {
     db: Arc<DB<S>>,
     /// The workers' tables; an error when no pool could be had, which every
     /// request then reports.
-    owners: std::result::Result<Owners<OwnedTxn<S>>, workers::Error>,
+    owners: std::result::Result<Owners<OwnedTxn<S>, Caller>, workers::Error>,
     broadcaster: Option<Arc<dyn crate::event::emission::TxnBroadcaster>>,
 }
 
@@ -155,7 +155,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         Ok(self.owners.as_ref().map_or(0, Owners::len))
     }
 
-    fn owners(&self) -> std::result::Result<&Owners<OwnedTxn<S>>, Unavailable> {
+    fn owners(&self) -> std::result::Result<&Owners<OwnedTxn<S>, Caller>, Unavailable> {
         self.owners
             .as_ref()
             .map_err(|error| Unavailable::Pool(error.clone()))
@@ -175,7 +175,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         let ran = self
             .owners()
             .map_err(|error| Error::Other(error.to_string()))?
-            .run(id, admit(caller), move |owned| {
+            .run(id, &caller, move |owned| {
                 Box::pin(defra_core::current_identity::with_scoped_identity(
                     scope,
                     work(owned),
@@ -190,18 +190,13 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
     }
 }
 
+/// Who began a transaction, and so may use it: the request's identity.
+type Caller = Option<String>;
+
 /// The identity of the request calling, read where the request runs (its
 /// own task), before anything moves to a worker.
-fn caller() -> Option<String> {
+fn caller() -> Caller {
     defra_core::current_identity::get_effective_identity()
-}
-
-/// Admits only the caller that began the transaction.
-fn admit<S>(caller: Option<String>) -> impl FnOnce(&OwnedTxn<S>) -> bool + Send + 'static
-where
-    S: Store + 'static,
-{
-    move |owned| owned.is_owned_by(&caller)
 }
 
 /// A registry error, as the query layer reports it.

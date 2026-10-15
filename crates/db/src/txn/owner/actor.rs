@@ -11,7 +11,8 @@
 //! transaction ends, so a request either finds the mailbox and is queued
 //! before the end, or finds nothing.
 
-use std::sync::Weak;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use futures::future::LocalBoxFuture;
@@ -26,19 +27,18 @@ pub(super) type Work<T> = Box<dyn for<'t> FnOnce(&'t mut T) -> LocalBoxFuture<'t
 /// The work that ends the transaction, given it by value.
 pub(super) type Last<T> = Box<dyn FnOnce(T) -> LocalBoxFuture<'static, ()> + Send>;
 
-/// Whether a request may use the transaction (its caller owns it). A refused
-/// request is dropped unrun, and its caller is told the transaction is not
-/// found; it does not count as activity.
-pub(super) type Admit<T> = Box<dyn FnOnce(&T) -> bool + Send>;
-
 pub(super) enum Message<T> {
     /// A request.
-    Run { admit: Admit<T>, work: Work<T> },
-    /// The transaction's end: commit or rollback.
-    Finish { admit: Admit<T>, last: Last<T> },
+    Run(Work<T>),
+    /// The transaction's end: commit or rollback. A caller that stopped
+    /// waiting before its end began (`cancelled`) gets an abandon instead.
+    Finish {
+        last: Last<T>,
+        cancelled: Arc<AtomicBool>,
+    },
     /// The caller let go of the transaction without finishing it.
     Abandon,
-    /// End the transaction if no admitted request has finished for at least
+    /// End the transaction if no request has finished for at least
     /// this long; the reply says whether it ended.
     Expire {
         max_idle: Duration,
@@ -59,14 +59,15 @@ where
 /// Dropping `txn` is how it ends without a commit: its holder discards it
 /// then. The task holds its registry weakly, so a dropped registry ends every
 /// transaction it owned.
-pub(super) async fn own<T>(
+pub(super) async fn own<T, K>(
     mut txn: T,
     id: TxnId,
     worker: usize,
     mailbox: UnboundedReceiver<Message<T>>,
-    shared: Weak<Shared<T>>,
+    shared: Weak<Shared<T, K>>,
 ) where
     T: 'static,
+    K: Clone + PartialEq + 'static,
 {
     let mut active = Instant::now();
     let leave = || {
@@ -76,18 +77,17 @@ pub(super) async fn own<T>(
     };
     while let Some(message) = mailbox.recv_async().await {
         match message {
-            Message::Run { admit, work } => {
-                if admit(&txn) {
-                    work(&mut txn).await;
-                    active = Instant::now();
-                }
+            Message::Run(work) => {
+                work(&mut txn).await;
+                active = Instant::now();
             }
-            Message::Finish { admit, last } => {
-                if admit(&txn) {
-                    leave();
-                    last(txn).await;
-                    return;
+            Message::Finish { last, cancelled } => {
+                if cancelled.load(Ordering::Acquire) {
+                    break;
                 }
+                leave();
+                last(txn).await;
+                return;
             }
             Message::Abandon => break,
             Message::Expire { max_idle, reply } => {

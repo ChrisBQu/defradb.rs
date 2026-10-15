@@ -40,8 +40,6 @@ where
     S: Store + 'static,
 {
     id: TxnId,
-    /// The identity that began it; only that caller may use it.
-    owner: Option<String>,
     readonly: bool,
     txn: Lending<S>,
     db: Arc<DB<S>>,
@@ -58,7 +56,6 @@ where
 {
     pub(crate) fn new(
         id: TxnId,
-        owner: Option<String>,
         txn: DbTxn<S>,
         db: Arc<DB<S>>,
         broadcaster: Option<Arc<dyn TxnBroadcaster>>,
@@ -66,7 +63,6 @@ where
         let readonly = txn.is_readonly()?;
         Ok(Self {
             id,
-            owner,
             readonly,
             lens_store: Arc::new(TxnLensStore::new(db.lens_store().clone())),
             txn: Lending::Held(txn),
@@ -75,11 +71,6 @@ where
             broadcaster,
             statement_open: false,
         })
-    }
-
-    /// Whether `caller` may use this transaction.
-    pub(crate) fn is_owned_by(&self, caller: &Option<String>) -> bool {
-        &self.owner == caller
     }
 
     /// The transaction for a request's handles to share.

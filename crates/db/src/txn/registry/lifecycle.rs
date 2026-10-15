@@ -42,16 +42,15 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
         &self,
         readonly: bool,
     ) -> std::result::Result<TransactionHandle, TransactionError> {
-        let owner = caller();
         let db = self.db.clone();
         let broadcaster = self.broadcaster.clone();
         let opened = self
             .owners()
             .map_err(|error| TransactionError::execution(error.to_string()))?
-            .begin(move |id| async move {
+            .begin(caller(), move |id| async move {
                 let mut txn = db.new_txn(readonly).await?;
                 txn.make_explicit();
-                OwnedTxn::new(id, owner, txn, db, broadcaster)
+                OwnedTxn::new(id, txn, db, broadcaster)
             })
             .await
             .map_err(|error| TransactionError::execution(error.to_string()))?;
@@ -76,7 +75,7 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
         let scope = caller.clone();
         self.owners()
             .map_err(|error| unavailable(error, handle))?
-            .run(id, admit(caller), move |owned| {
+            .run(id, &caller, move |owned| {
                 Box::pin(defra_core::current_identity::with_scoped_identity(
                     scope,
                     async move {
@@ -112,7 +111,7 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
                         TransactionError::execution(format!("storage error: {}", error))
                     })?;
                     // A snapshot of its own, never registered: no ID names it.
-                    let mut owned = OwnedTxn::new(TxnId::unnamed(), None, txn, db, None)
+                    let mut owned = OwnedTxn::new(TxnId::unnamed(), txn, db, None)
                         .map_err(|error| TransactionError::execution(error.to_string()))?;
                     within(timeout, job(&mut owned))
                         .await
@@ -135,7 +134,7 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
         let label = handle.to_string();
         self.owners()
             .map_err(|error| unavailable(error, handle))?
-            .finish(id, admit(caller()), move |owned| {
+            .finish(id, &caller(), move |owned| {
                 Box::pin(async move {
                     owned.commit().await.map_err(|error| {
                         TransactionError::execution(format!(
@@ -158,7 +157,7 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
         let label = handle.to_string();
         self.owners()
             .map_err(|error| unavailable(error, handle))?
-            .finish(id, admit(caller()), move |owned| {
+            .finish(id, &caller(), move |owned| {
                 Box::pin(async move {
                     owned.rollback().map_err(|error| {
                         TransactionError::execution(format!(

@@ -26,6 +26,7 @@ mod table;
 mod tests;
 
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,7 +35,7 @@ use regolith::sync::{unbounded, Event};
 use workers::{Pool, Submit, Target};
 
 use actor::Message;
-use table::Table;
+use table::{Entry, Table};
 
 pub(crate) use fallback::one_worker;
 pub(crate) use id::TxnId;
@@ -70,25 +71,31 @@ impl From<workers::Error> for Unavailable {
 /// Every worker's table, shared by the registry and the requests on their
 /// way; actors and sweeps hold it weakly, so dropping the registry ends
 /// every transaction it owns.
-pub(super) struct Shared<T>
+pub(super) struct Shared<T, K>
 where
     T: 'static,
+    K: 'static,
 {
-    tables: Box<[Table<T>]>,
+    tables: Box<[Table<T, K>]>,
 }
 
-/// The transactions of one registry, spread over the pool's workers.
-pub(crate) struct Owners<T>
+/// The transactions of one registry, spread over the pool's workers. Each is
+/// kept with the key of the caller that may use it (`K`): a caller with
+/// another key is told the transaction does not exist, before anything is
+/// sent to its owner.
+pub(crate) struct Owners<T, K>
 where
     T: 'static,
+    K: Clone + PartialEq + Send + Sync + 'static,
 {
     pool: Pool,
-    shared: Arc<Shared<T>>,
+    shared: Arc<Shared<T, K>>,
 }
 
-impl<T> Owners<T>
+impl<T, K> Owners<T, K>
 where
     T: 'static,
+    K: Clone + PartialEq + Send + Sync + 'static,
 {
     pub(crate) fn new(pool: Pool) -> Self {
         let tables = (0..pool.workers()).map(|_| Table::new()).collect();
@@ -103,11 +110,20 @@ where
         &self.pool
     }
 
+    fn table(&self, id: TxnId) -> &Table<T, K> {
+        &self.shared.tables[id.owner(self.pool.workers())]
+    }
+
     /// Opens a transaction with `open`, given its ID, on the least loaded
-    /// worker, which owns it from then on, and returns the ID. An error from
-    /// `open` comes back as is. A caller that stops waiting leaves a
-    /// transaction nobody knows the ID of; the idle sweep ends it.
-    pub(crate) async fn begin<O, Fut, E>(&self, open: O) -> Result<Result<TxnId, E>, Unavailable>
+    /// worker, which owns it from then on for the caller `key` names, and
+    /// returns the ID. An error from `open` comes back as is. A caller that
+    /// stops waiting leaves a transaction nobody knows the ID of; the idle
+    /// sweep ends it.
+    pub(crate) async fn begin<O, Fut, E>(
+        &self,
+        key: K,
+        open: O,
+    ) -> Result<Result<TxnId, E>, Unavailable>
     where
         O: FnOnce(TxnId) -> Fut + Send + 'static,
         Fut: Future<Output = Result<T, E>> + 'static,
@@ -135,7 +151,7 @@ where
                     };
                     let (mailbox, inbox) = unbounded();
                     match shared.upgrade() {
-                        Some(tables) => tables.tables[worker].insert(id, mailbox),
+                        Some(tables) => tables.tables[worker].insert(id, Entry { mailbox, key }),
                         None => return Err(Unavailable::NotFound),
                     }
                     if let Err(error) =
@@ -154,50 +170,60 @@ where
     }
 
     /// Runs `work` on transaction `id`, on its owner, after every request for
-    /// it that arrived earlier and before every one that arrives later.
-    /// `admit` decides first whether the caller may use it; a refused caller
-    /// gets [`Unavailable::NotFound`], as for a transaction that does not
-    /// exist.
-    pub(crate) async fn run<R, A, W>(&self, id: TxnId, admit: A, work: W) -> Result<R, Unavailable>
+    /// it that arrived earlier and before every one that arrives later. A
+    /// caller whose `key` does not own it gets [`Unavailable::NotFound`], as
+    /// for a transaction that does not exist.
+    pub(crate) async fn run<R, W>(&self, id: TxnId, key: &K, work: W) -> Result<R, Unavailable>
     where
         R: Send + 'static,
-        A: FnOnce(&T) -> bool + Send + 'static,
         W: for<'t> FnOnce(&'t mut T) -> LocalBoxFuture<'t, R> + Send + 'static,
     {
-        self.send(id, "txn.request", move |reply| Message::Run {
-            admit: Box::new(admit),
-            work: actor::work(move |txn| {
+        if !self.table(id).admits(id, key) {
+            return Err(Unavailable::NotFound);
+        }
+        self.send(id, "txn.request", move |reply| {
+            Message::Run(actor::work(move |txn| {
                 Box::pin(async move {
                     let _ = reply.try_send(work(txn).await);
                 })
-            }),
+            }))
         })
         .await
     }
 
     /// Ends transaction `id` with `last`, which gets it by value, after every
-    /// request for it that arrived earlier. Requests that arrive later find
-    /// no transaction. A caller `admit` refuses leaves it as it was.
-    pub(crate) async fn finish<R, A, L>(
-        &self,
-        id: TxnId,
-        admit: A,
-        last: L,
-    ) -> Result<R, Unavailable>
+    /// request for it that arrived earlier; requests that arrive later find
+    /// no transaction. A caller whose `key` does not own it is told it does
+    /// not exist, and the transaction stays. A caller that stops waiting
+    /// before the end begins abandons the transaction instead: it ends
+    /// unfinished.
+    pub(crate) async fn finish<R, L>(&self, id: TxnId, key: &K, last: L) -> Result<R, Unavailable>
     where
         R: Send + 'static,
-        A: FnOnce(&T) -> bool + Send + 'static,
         L: FnOnce(T) -> LocalBoxFuture<'static, R> + Send + 'static,
     {
-        self.send(id, "txn.finish", move |reply| Message::Finish {
-            admit: Box::new(admit),
-            last: Box::new(move |txn| {
-                Box::pin(async move {
-                    let _ = reply.try_send(last(txn).await);
-                })
-            }),
-        })
-        .await
+        if !self.table(id).admits(id, key) {
+            return Err(Unavailable::NotFound);
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let abandon_on_drop = AbandonOnDrop {
+            table: Arc::downgrade(&self.shared),
+            owner: id.owner(self.pool.workers()),
+            id,
+            cancelled: Some(Arc::clone(&cancelled)),
+        };
+        let ended = self
+            .send(id, "txn.finish", move |reply| Message::Finish {
+                last: Box::new(move |txn| {
+                    Box::pin(async move {
+                        let _ = reply.try_send(last(txn).await);
+                    })
+                }),
+                cancelled,
+            })
+            .await;
+        abandon_on_drop.disarm();
+        ended
     }
 
     /// Lets go of transaction `id` without finishing it, at once and without
@@ -206,12 +232,12 @@ where
     /// requests already queued for it. Safe from any thread and with no
     /// runtime (a guard's destructor).
     pub(crate) fn abandon(&self, id: TxnId) {
-        self.shared.tables[id.owner(self.pool.workers())].abandon(id);
+        self.table(id).abandon(id);
     }
 
-    /// Ends every transaction no admitted request has used for at least
-    /// `max_idle`, each after the requests queued before this sweep reached
-    /// it, and says how many ended.
+    /// Ends every transaction no request has used for at least `max_idle`,
+    /// each after the requests queued before this sweep reached it, and says
+    /// how many ended.
     pub(crate) async fn expire_idle(&self, max_idle: Duration) -> Result<usize, Unavailable> {
         let mut replies = Vec::with_capacity(self.pool.workers());
         for worker in 0..self.pool.workers() {
@@ -254,10 +280,10 @@ where
     }
 
     /// Starts the idle sweep, a timer on each worker: every `every`, the
-    /// worker asks each of its own transactions to end if no admitted request
-    /// has used it for `max_idle`. The ask is a message, queued behind the
-    /// requests already there. Runs until [`Sweep::stop`], or the registry or
-    /// the pool goes; dropping the handle leaves it running.
+    /// worker asks each of its own transactions to end if no request has used
+    /// it for `max_idle`. The ask is a message, queued behind the requests
+    /// already there. Runs until [`Sweep::stop`], or the registry or the pool
+    /// goes; dropping the handle leaves it running.
     pub(crate) fn sweep(&self, max_idle: Duration, every: Duration) -> Result<Sweep, Unavailable> {
         let stop = Arc::new(Event::new());
         for worker in 0..self.pool.workers() {
@@ -300,7 +326,7 @@ where
 
     /// Queues the message `build` makes for transaction `id` on its owner and
     /// waits for the reply the message carries back. No reply (the message
-    /// was refused or never queued) means no such transaction.
+    /// was dropped, or never queued) means no such transaction.
     async fn send<R, B>(&self, id: TxnId, name: &'static str, build: B) -> Result<R, Unavailable>
     where
         R: Send + 'static,
@@ -327,13 +353,54 @@ where
     }
 }
 
-impl<T> Drop for Owners<T>
+impl<T, K> Drop for Owners<T, K>
 where
     T: 'static,
+    K: Clone + PartialEq + Send + Sync + 'static,
 {
     /// A registry that goes ends every transaction it owns.
     fn drop(&mut self) {
         self.shared.tables.iter().for_each(Table::abandon_all);
+    }
+}
+
+/// While a finish waits: if its caller stops waiting, the transaction is
+/// abandoned instead of finished, and leaves its owner's table at once.
+struct AbandonOnDrop<T, K>
+where
+    T: 'static,
+    K: Clone + PartialEq + 'static,
+{
+    table: std::sync::Weak<Shared<T, K>>,
+    owner: usize,
+    id: TxnId,
+    cancelled: Option<Arc<AtomicBool>>,
+}
+
+impl<T, K> AbandonOnDrop<T, K>
+where
+    T: 'static,
+    K: Clone + PartialEq + 'static,
+{
+    /// The finish got its answer: nothing to abandon.
+    fn disarm(mut self) {
+        self.cancelled = None;
+    }
+}
+
+impl<T, K> Drop for AbandonOnDrop<T, K>
+where
+    T: 'static,
+    K: Clone + PartialEq + 'static,
+{
+    fn drop(&mut self) {
+        let Some(cancelled) = self.cancelled.take() else {
+            return;
+        };
+        cancelled.store(true, Ordering::Release);
+        if let Some(shared) = self.table.upgrade() {
+            shared.tables[self.owner].abandon(self.id);
+        }
     }
 }
 

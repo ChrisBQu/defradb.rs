@@ -14,9 +14,8 @@ use workers::{block_on, Config, Placement, Pool, Workers};
 
 use super::{Owners, TxnId, Unavailable};
 
-/// A transaction that names its owner and its worker, and records its drop.
+/// A transaction that names its worker and records its drop.
 struct Probe {
-    owner: &'static str,
     opened_on: usize,
     log: Vec<String>,
     dropped: Arc<AtomicUsize>,
@@ -39,11 +38,12 @@ fn pool(workers: usize) -> Pool {
     .unwrap()
 }
 
-fn begin(owners: &Owners<Probe>, owner: &'static str, dropped: &Arc<AtomicUsize>) -> TxnId {
+type Probes = Owners<Probe, &'static str>;
+
+fn begin(owners: &Probes, owner: &'static str, dropped: &Arc<AtomicUsize>) -> TxnId {
     let dropped = dropped.clone();
-    block_on(owners.begin(move |_| async move {
+    block_on(owners.begin(owner, move |_| async move {
         Ok::<_, ()>(Probe {
-            owner,
             opened_on: workers::current_worker().unwrap().index,
             log: Vec::new(),
             dropped,
@@ -54,17 +54,13 @@ fn begin(owners: &Owners<Probe>, owner: &'static str, dropped: &Arc<AtomicUsize>
     .unwrap()
 }
 
-fn mine(owner: &'static str) -> impl FnOnce(&Probe) -> bool + Send + 'static {
-    move |probe| probe.owner == owner
-}
-
 #[test]
 fn a_request_runs_on_the_worker_its_id_names() {
-    let owners = Owners::new(pool(3));
+    let owners = Probes::new(pool(3));
     let dropped = Arc::new(AtomicUsize::new(0));
     for _ in 0..12 {
         let id = begin(&owners, "alice", &dropped);
-        let (ran_on, opened_on) = block_on(owners.run(id, mine("alice"), |probe| {
+        let (ran_on, opened_on) = block_on(owners.run(id, &"alice", |probe| {
             Box::pin(async move { (workers::current_worker().unwrap().index, probe.opened_on) })
         }))
         .unwrap()
@@ -77,11 +73,11 @@ fn a_request_runs_on_the_worker_its_id_names() {
 
 #[test]
 fn requests_for_one_transaction_run_one_at_a_time_in_arrival_order() {
-    let owners = Owners::new(pool(2));
+    let owners = Probes::new(pool(2));
     let dropped = Arc::new(AtomicUsize::new(0));
     let id = begin(&owners, "alice", &dropped);
     let requests = (0..16).map(|i| {
-        owners.run(id, mine("alice"), move |probe| {
+        owners.run(id, &"alice", move |probe| {
             Box::pin(async move {
                 probe.log.push(format!("start {i}"));
                 workers::yield_now().await;
@@ -92,7 +88,7 @@ fn requests_for_one_transaction_run_one_at_a_time_in_arrival_order() {
     for done in block_on(join_all(requests)).unwrap() {
         done.unwrap();
     }
-    let log = block_on(owners.run(id, mine("alice"), |probe| {
+    let log = block_on(owners.run(id, &"alice", |probe| {
         Box::pin(async move { std::mem::take(&mut probe.log) })
     }))
     .unwrap()
@@ -105,21 +101,19 @@ fn requests_for_one_transaction_run_one_at_a_time_in_arrival_order() {
 
 #[test]
 fn a_caller_that_does_not_own_the_transaction_finds_nothing_and_changes_nothing() {
-    let owners = Owners::new(pool(1));
+    let owners = Probes::new(pool(1));
     let dropped = Arc::new(AtomicUsize::new(0));
     let id = begin(&owners, "alice", &dropped);
-    let foreign = block_on(owners.run(id, mine("bob"), |probe| {
+    let foreign = block_on(owners.run(id, &"bob", |probe| {
         Box::pin(async move { probe.log.push("bob".into()) })
     }))
     .unwrap();
     assert_eq!(foreign, Err(Unavailable::NotFound));
-    let finished = block_on(owners.finish(id, mine("bob"), |probe| {
-        Box::pin(async move { drop(probe) })
-    }))
-    .unwrap();
+    let finished =
+        block_on(owners.finish(id, &"bob", |probe| Box::pin(async move { drop(probe) }))).unwrap();
     assert_eq!(finished, Err(Unavailable::NotFound));
     assert_eq!(dropped.load(Ordering::SeqCst), 0);
-    let log = block_on(owners.finish(id, mine("alice"), |mut probe| {
+    let log = block_on(owners.finish(id, &"alice", |mut probe| {
         Box::pin(async move { std::mem::take(&mut probe.log) })
     }))
     .unwrap()
@@ -127,7 +121,7 @@ fn a_caller_that_does_not_own_the_transaction_finds_nothing_and_changes_nothing(
     assert!(log.is_empty(), "the refused request never ran: {log:?}");
     assert_eq!(dropped.load(Ordering::SeqCst), 1);
     assert_eq!(owners.len(), 0);
-    let after = block_on(owners.run(id, mine("alice"), |_| Box::pin(async {}))).unwrap();
+    let after = block_on(owners.run(id, &"alice", |_| Box::pin(async {}))).unwrap();
     assert_eq!(
         after,
         Err(Unavailable::NotFound),
@@ -137,7 +131,7 @@ fn a_caller_that_does_not_own_the_transaction_finds_nothing_and_changes_nothing(
 
 #[test]
 fn the_sweep_never_takes_a_transaction_a_request_reached_first() {
-    let owners = Arc::new(Owners::new(pool(1)));
+    let owners = Arc::new(Probes::new(pool(1)));
     let dropped = Arc::new(AtomicUsize::new(0));
     let id = begin(&owners, "alice", &dropped);
     let max_idle = Duration::from_millis(50);
@@ -149,7 +143,7 @@ fn the_sweep_never_takes_a_transaction_a_request_reached_first() {
     let request = {
         let (owners, gate, entered) = (owners.clone(), gate.clone(), entered.clone());
         std::thread::spawn(move || {
-            block_on(owners.run(id, mine("alice"), move |probe| {
+            block_on(owners.run(id, &"alice", move |probe| {
                 Box::pin(async move {
                     entered.set();
                     gate.wait().await;
@@ -173,13 +167,13 @@ fn the_sweep_never_takes_a_transaction_a_request_reached_first() {
     std::thread::sleep(max_idle + Duration::from_millis(20));
     assert_eq!(block_on(owners.expire_idle(max_idle)).unwrap(), Ok(1));
     assert_eq!(dropped.load(Ordering::SeqCst), 1);
-    let after = block_on(owners.run(id, mine("alice"), |_| Box::pin(async {}))).unwrap();
+    let after = block_on(owners.run(id, &"alice", |_| Box::pin(async {}))).unwrap();
     assert_eq!(after, Err(Unavailable::NotFound));
 }
 
 #[test]
 fn the_periodic_sweep_runs_on_each_worker_until_it_is_stopped() {
-    let owners = Owners::new(pool(2));
+    let owners = Probes::new(pool(2));
     let dropped = Arc::new(AtomicUsize::new(0));
     let ids: Vec<_> = (0..6).map(|_| begin(&owners, "alice", &dropped)).collect();
     let sweep = owners
@@ -194,14 +188,14 @@ fn the_periodic_sweep_runs_on_each_worker_until_it_is_stopped() {
     sweep.stop();
     let kept = begin(&owners, "alice", &dropped);
     assert_eq!(
-        block_on(owners.run(kept, mine("alice"), |_| Box::pin(async {}))).unwrap(),
+        block_on(owners.run(kept, &"alice", |_| Box::pin(async {}))).unwrap(),
         Ok(())
     );
 }
 
 #[test]
 fn transactions_on_different_workers_run_side_by_side() {
-    let owners = Arc::new(Owners::new(pool(2)));
+    let owners = Arc::new(Probes::new(pool(2)));
     let dropped = Arc::new(AtomicUsize::new(0));
     let mut by_worker: [Option<TxnId>; 2] = [None, None];
     for _ in 0..256 {
@@ -219,7 +213,7 @@ fn transactions_on_different_workers_run_side_by_side() {
     let blocked = {
         let (owners, gate, entered) = (owners.clone(), gate.clone(), entered.clone());
         std::thread::spawn(move || {
-            block_on(owners.run(first, mine("alice"), move |_| {
+            block_on(owners.run(first, &"alice", move |_| {
                 Box::pin(async move {
                     entered.set();
                     gate.wait().await;
@@ -228,7 +222,7 @@ fn transactions_on_different_workers_run_side_by_side() {
         })
     };
     block_on(entered.wait()).unwrap();
-    let other = block_on(owners.run(second, mine("alice"), |probe| {
+    let other = block_on(owners.run(second, &"alice", |probe| {
         Box::pin(async move { probe.opened_on })
     }))
     .unwrap();
@@ -244,11 +238,11 @@ fn transactions_on_different_workers_run_side_by_side() {
 #[test]
 fn abandoning_or_dropping_the_registry_ends_the_transaction() {
     let pool = pool(1);
-    let owners = Owners::new(pool.clone());
+    let owners = Probes::new(pool.clone());
     let dropped = Arc::new(AtomicUsize::new(0));
     let abandoned = begin(&owners, "alice", &dropped);
     owners.abandon(abandoned);
-    let after = block_on(owners.run(abandoned, mine("alice"), |_| Box::pin(async {}))).unwrap();
+    let after = block_on(owners.run(abandoned, &"alice", |_| Box::pin(async {}))).unwrap();
     assert_eq!(after, Err(Unavailable::NotFound), "the abandon came first");
     assert_eq!(dropped.load(Ordering::SeqCst), 1);
 
@@ -270,12 +264,12 @@ fn abandoning_or_dropping_the_registry_ends_the_transaction() {
 fn a_registry_without_a_pool_drives_one_worker_of_its_own() {
     let pool = super::one_worker().unwrap();
     assert_eq!(pool.workers(), 1);
-    let owners = Owners::new(pool);
+    let owners = Probes::new(pool);
     let dropped = Arc::new(AtomicUsize::new(0));
     let seen = Arc::new(SegQueue::new());
     let id = begin(&owners, "alice", &dropped);
     let log = seen.clone();
-    block_on(owners.run(id, mine("alice"), move |_| {
+    block_on(owners.run(id, &"alice", move |_| {
         Box::pin(async move { log.push(workers::current_worker().unwrap().index) })
     }))
     .unwrap()
