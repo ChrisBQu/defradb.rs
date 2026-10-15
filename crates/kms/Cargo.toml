@@ -40,6 +40,9 @@ identity = { path = "../identity" }
 orbis = { path = "../orbis", optional = true }
 vera = { path = "../vera", optional = true }
 
+# Peer key requests: single-flight per CID, one request per batch, a
+# deadline, retries and metrics.
+inputs = { path = "../inputs" }
 async-trait.workspace = true
 kovan.workspace = true
 kovan-map.workspace = true

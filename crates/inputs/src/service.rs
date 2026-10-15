@@ -128,6 +128,22 @@ where
         inner.wait(slots, start).await
     }
 
+    /// Starts the round trips `keys` need, without waiting for them: their
+    /// answers land in the cache (where the source allows), and a later
+    /// [`get_many`](Self::get_many) of a key still in flight joins it.
+    pub fn prefetch(&self, keys: Vec<S::Key>) {
+        let inner = &self.inner;
+        let now = inner.runtime.now();
+        Stats::add(&inner.stats.requests, keys.len() as u64);
+        let mut touched: Vec<(S::Group, LaneOf<S>)> = Vec::new();
+        for key in keys {
+            inner.slot(key, now, &mut touched);
+        }
+        for (group, lane) in touched {
+            inner.pump(group, lane);
+        }
+    }
+
     /// `key`'s cached answer, without asking the remote side.
     pub fn cached(&self, key: &S::Key) -> Option<S::Value> {
         self.inner.cache.get(key, self.inner.runtime.now())

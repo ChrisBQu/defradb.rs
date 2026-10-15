@@ -7308,6 +7308,7 @@ dependencies = [
  "defra-core",
  "futures",
  "identity 0.5.0",
+ "inputs",
  "kovan",
  "kovan-map",
  "kovan-queue",
