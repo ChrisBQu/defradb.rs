@@ -22,9 +22,7 @@ impl Node {
     async fn new(sdl: &str) -> Self {
         let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
         for schema in query::parse_sdl(sdl).unwrap() {
-            db.create_collection(&defra_core::RequestContext::default(), schema)
-                .await
-                .unwrap();
+            db.create_collection(schema).await.unwrap();
         }
         let registry = Arc::new(DbTransactionRegistry::new(Arc::clone(&db)));
         let queries: Arc<dyn QueryExecutor> =
@@ -38,20 +36,13 @@ impl Node {
 
     /// Run `mutation` in a transaction of its own and commit it.
     async fn commit(&self, mutation: &str) -> Value {
-        let txn = self
-            .queries
-            .begin_txn(&defra_core::RequestContext::default(), false)
-            .await
-            .unwrap();
+        let txn = self.queries.begin_txn(false).await.unwrap();
         let response = self
             .queries
             .execute_in_txn(QueryRequest::new(mutation), &txn)
             .await;
         assert!(!response.has_errors(), "{mutation}: {:?}", response.errors);
-        self.queries
-            .commit_txn(&defra_core::RequestContext::default(), &txn)
-            .await
-            .unwrap();
+        self.queries.commit_txn(&txn).await.unwrap();
         response.data.unwrap()
     }
 
@@ -66,16 +57,8 @@ impl Node {
     /// Run `first` and `second` in transactions that both begin before
     /// either writes, then commit them in that order.
     async fn commit_both(&self, first: &str, second: &str) -> Result<(), String> {
-        let one = self
-            .queries
-            .begin_txn(&defra_core::RequestContext::default(), false)
-            .await
-            .unwrap();
-        let two = self
-            .queries
-            .begin_txn(&defra_core::RequestContext::default(), false)
-            .await
-            .unwrap();
+        let one = self.queries.begin_txn(false).await.unwrap();
+        let two = self.queries.begin_txn(false).await.unwrap();
         for (txn, mutation) in [(&one, first), (&two, second)] {
             let response = self
                 .queries
@@ -83,12 +66,9 @@ impl Node {
                 .await;
             assert!(!response.has_errors(), "{mutation}: {:?}", response.errors);
         }
+        self.queries.commit_txn(&one).await.unwrap();
         self.queries
-            .commit_txn(&defra_core::RequestContext::default(), &one)
-            .await
-            .unwrap();
-        self.queries
-            .commit_txn(&defra_core::RequestContext::default(), &two)
+            .commit_txn(&two)
             .await
             .map_err(|error| format!("{error:?}"))
     }
@@ -162,12 +142,8 @@ async fn updates_of_the_same_field_still_conflict() {
     let id = node.create(ANN).await;
     let outcome = node
         .commit_both(
-            &format!(
-                r#"mutation {{ update_Users(docID: "{id}", input: {{age: 31}}) {{ _docID }} }}"#
-            ),
-            &format!(
-                r#"mutation {{ update_Users(docID: "{id}", input: {{age: 32}}) {{ _docID }} }}"#
-            ),
+            &format!(r#"mutation {{ update_Users(docID: "{id}", input: {{age: 31}}) {{ _docID }} }}"#),
+            &format!(r#"mutation {{ update_Users(docID: "{id}", input: {{age: 32}}) {{ _docID }} }}"#),
         )
         .await;
     assert!(outcome.is_err(), "two writes of one field both committed");
@@ -200,7 +176,12 @@ async fn updates_of_a_migrated_collection_both_commit() {
         lens::LensModule::from_bytes(b"\0asm\x01\0\0\0".to_vec()),
     );
     node.db
-        .patch_collection_with_migration(&defra_core::RequestContext::default(), "Users", r#"[{"op": "add", "path": "/Users/Fields/-", "value": {"Name": "nickname", "Kind": "String"}}]"#, Some(migration))
+        .patch_collection_with_migration(
+            "Users",
+            r#"[{"op": "add", "path": "/Users/Fields/-", "value": {"Name": "nickname", "Kind": "String"}}]"#,
+            Some(migration),
+            None,
+        )
         .await
         .unwrap();
     let id = node.create(ANN).await;
@@ -246,21 +227,14 @@ async fn updates_of_a_downsample_source_both_commit() {
             &source[0],
         )));
         node.db.validate_downsample_collection(&rollup).unwrap();
-        node.db
-            .create_collection(&defra_core::RequestContext::default(), rollup)
-            .await
-            .unwrap();
+        node.db.create_collection(rollup).await.unwrap();
     }
     let id = node
         .create(r#"mutation { add_Metric(input: {label: "cpu", note: "a", ts: "2026-01-01T00:00:00Z", value: 1}) { _docID } }"#)
         .await;
     node.both_commit(
-        &format!(
-            r#"mutation {{ update_Metric(docID: "{id}", input: {{label: "gpu"}}) {{ _docID }} }}"#
-        ),
-        &format!(
-            r#"mutation {{ update_Metric(docID: "{id}", input: {{note: "b"}}) {{ _docID }} }}"#
-        ),
+        &format!(r#"mutation {{ update_Metric(docID: "{id}", input: {{label: "gpu"}}) {{ _docID }} }}"#),
+        &format!(r#"mutation {{ update_Metric(docID: "{id}", input: {{note: "b"}}) {{ _docID }} }}"#),
     )
     .await;
     let metrics = node.query("{ Metric { label note } }").await;
@@ -280,9 +254,7 @@ async fn counter_updates_returning_the_counter_both_commit() {
         .await;
     node.both_commit(
         &format!(r#"mutation {{ update_Counted(docID: "{id}", input: {{hits: 1}}) {{ hits }} }}"#),
-        &format!(
-            r#"mutation {{ update_Counted(docID: "{id}", input: {{hits: 2}}) {{ label hits }} }}"#
-        ),
+        &format!(r#"mutation {{ update_Counted(docID: "{id}", input: {{hits: 2}}) {{ label hits }} }}"#),
     )
     .await;
     node.both_commit(

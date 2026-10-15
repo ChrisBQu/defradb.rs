@@ -83,12 +83,9 @@ async fn a_name_precedes_an_unknown_version_id() {
     let db = db::DB::open(storage::backends::RegolithStore::in_memory().unwrap())
         .await
         .expect("open");
-    db.create_collection(
-        &defra_core::RequestContext::default(),
-        materialized("OrdersView"),
-    )
-    .await
-    .expect("store view");
+    db.create_collection(materialized("OrdersView"))
+        .await
+        .expect("store view");
 
     db.refresh_views(CollectionSelector {
         names: Some(vec!["OrdersView".to_string()]),
@@ -140,7 +137,7 @@ async fn refreshing_a_selected_inactive_view_is_refused() {
         .expect("open");
     let mut inactive_view = materialized("InactiveView");
     inactive_view.is_active = false;
-    db.create_collection(&defra_core::RequestContext::default(), inactive_view)
+    db.create_collection(inactive_view)
         .await
         .expect("store inactive view");
 

@@ -454,53 +454,6 @@ async fn compute_fulltext_path_scores_lifts_parent_relation_scores() {
 }
 
 #[tokio::test]
-async fn the_dac_bypass_in_a_request_reads_documents_dac_hides() {
-    use crate::executor::{QueryExecutor, QueryRequest, QueryResponse};
-
-    let owner = Did::new("did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw").unwrap();
-    let admin = Did::new("did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH").unwrap();
-    let mut company = CollectionVersion::new(
-        "Company",
-        "v1",
-        "coll-company",
-        vec![
-            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
-            FieldDescription::new("2", "name", FieldKind::string()),
-        ],
-    );
-    company.policy = Some(PolicyDescription::new("policy", "companies"));
-    let private = "bae-47bd7c29-69cc-5b8a-856f-caaa93d9ace0";
-    let fetcher = crate::test_utils::MockFetcher::new();
-    fetcher.add_doc(
-        "Company",
-        doc(&format!(r#"{{"_docID":"{private}","name":"Private"}}"#)),
-    );
-    let acp = Arc::new(MockDocumentAcp {
-        private_docs: RapidHashMap::from_iter([(private.to_string(), owner)]),
-    });
-    let runner = QueryRunner::new(fetcher, vec![company]).with_acp(acp);
-    let visible = |response: QueryResponse| {
-        assert!(!response.has_errors(), "{:?}", response.errors);
-        response.data.unwrap()["Company"].as_array().unwrap().len()
-    };
-    let read = |identity: Option<Did>, bypass: bool| {
-        runner.execute(
-            QueryRequest::new("{ Company { name } }")
-                .with_identity(identity)
-                .with_context(defra_core::RequestContext::default().with_dac_bypass(bypass)),
-        )
-    };
-
-    assert_eq!(visible(read(Some(admin.clone()), true).await), 1);
-    assert_eq!(visible(read(Some(admin), false).await), 0);
-    assert_eq!(
-        visible(read(None, true).await),
-        0,
-        "the bypass never lets an anonymous request read a private document"
-    );
-}
-
-#[tokio::test]
 async fn nested_acp_relations_keep_public_join_targets() {
     let employee_owner =
         Did::new("did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw").unwrap();

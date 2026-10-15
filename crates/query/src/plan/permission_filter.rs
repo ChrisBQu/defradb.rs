@@ -340,7 +340,6 @@ mod tests {
     use std::time::Duration;
 
     use async_lock::Barrier;
-    use identity::Did;
 
     use super::*;
 
@@ -528,7 +527,10 @@ mod tests {
         let memo = crate::prepared::PreparedInputMemo::default();
         let node = PermissionFilterNode::new(
             Box::new(MockSource::new(&["doc-1".to_string()], yielded)),
-            anonymous_read(acp.clone()),
+            acp.clone(),
+            Identity::Anonymous,
+            "policy",
+            "User",
         )
         .with_retry_inputs(Some(memo.clone()));
         let doc = Doc::default();
@@ -557,18 +559,11 @@ mod tests {
     ) -> PermissionFilterNode {
         PermissionFilterNode::new(
             Box::new(MockSource::new(doc_ids, yielded)),
-            anonymous_read(acp),
-        )
-    }
-
-    fn anonymous_read(acp: Arc<MockAcp>) -> AcpRead {
-        AcpRead {
             acp,
-            identity: Identity::Anonymous,
-            dac_bypass: false,
-            policy_id: "policy".to_string(),
-            resource_name: "User".to_string(),
-        }
+            Identity::Anonymous,
+            "policy",
+            "User",
+        )
     }
 
     #[tokio::test]

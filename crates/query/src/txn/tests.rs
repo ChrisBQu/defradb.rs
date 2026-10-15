@@ -53,7 +53,6 @@ impl crate::QueryExecutor for MockExecutor {
 
     async fn begin_txn(
         &self,
-        _context: &defra_core::RequestContext,
         _readonly: bool,
     ) -> std::result::Result<TransactionHandle, TransactionError> {
         let id = self.txn_counter.fetch_add(1, Ordering::SeqCst);
@@ -62,7 +61,6 @@ impl crate::QueryExecutor for MockExecutor {
 
     async fn commit_txn(
         &self,
-        _context: &defra_core::RequestContext,
         _handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError> {
         self.committed.store(true, Ordering::SeqCst);
@@ -71,7 +69,6 @@ impl crate::QueryExecutor for MockExecutor {
 
     async fn rollback_txn(
         &self,
-        _context: &defra_core::RequestContext,
         _handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError> {
         self.rolled_back.store(true, Ordering::SeqCst);
@@ -115,7 +112,6 @@ impl crate::QueryExecutor for FailingCommitExecutor {
 
     async fn begin_txn(
         &self,
-        _context: &defra_core::RequestContext,
         _readonly: bool,
     ) -> std::result::Result<TransactionHandle, TransactionError> {
         let id = self.txn_counter.fetch_add(1, Ordering::SeqCst);
@@ -124,7 +120,6 @@ impl crate::QueryExecutor for FailingCommitExecutor {
 
     async fn commit_txn(
         &self,
-        _context: &defra_core::RequestContext,
         _handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError> {
         Err(TransactionError::execution("simulated storage failure"))
@@ -132,7 +127,6 @@ impl crate::QueryExecutor for FailingCommitExecutor {
 
     async fn rollback_txn(
         &self,
-        _context: &defra_core::RequestContext,
         _handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError> {
         Ok(())
@@ -146,9 +140,7 @@ impl crate::QueryExecutor for FailingCommitExecutor {
 #[tokio::test]
 async fn test_guard_begin_creates_transaction() {
     let executor = MockExecutor::new();
-    let guard = TransactionGuard::begin(&executor, defra_core::RequestContext::default(), false)
-        .await
-        .unwrap();
+    let guard = TransactionGuard::begin(&executor, false).await.unwrap();
     assert!(guard.handle().is_some());
     assert!(guard.handle().unwrap().as_str().starts_with("mock-txn-"));
     guard.rollback().await.unwrap();
@@ -157,9 +149,7 @@ async fn test_guard_begin_creates_transaction() {
 #[tokio::test]
 async fn test_guard_execute_runs_in_transaction() {
     let executor = MockExecutor::new();
-    let guard = TransactionGuard::begin(&executor, defra_core::RequestContext::default(), false)
-        .await
-        .unwrap();
+    let guard = TransactionGuard::begin(&executor, false).await.unwrap();
 
     let request = crate::QueryRequest::new("{ test }");
     let response = guard.execute(request).await;
@@ -173,9 +163,7 @@ async fn test_guard_execute_runs_in_transaction() {
 #[tokio::test]
 async fn test_guard_commit_consumes_guard() {
     let executor = MockExecutor::new();
-    let guard = TransactionGuard::begin(&executor, defra_core::RequestContext::default(), false)
-        .await
-        .unwrap();
+    let guard = TransactionGuard::begin(&executor, false).await.unwrap();
     assert!(!executor.was_committed());
     guard.commit().await.unwrap();
     assert!(executor.was_committed());
@@ -185,9 +173,7 @@ async fn test_guard_commit_consumes_guard() {
 #[tokio::test]
 async fn test_guard_rollback_consumes_guard() {
     let executor = MockExecutor::new();
-    let guard = TransactionGuard::begin(&executor, defra_core::RequestContext::default(), false)
-        .await
-        .unwrap();
+    let guard = TransactionGuard::begin(&executor, false).await.unwrap();
     assert!(!executor.was_rolled_back());
     guard.rollback().await.unwrap();
     assert!(executor.was_rolled_back());
@@ -196,9 +182,7 @@ async fn test_guard_rollback_consumes_guard() {
 #[tokio::test]
 async fn test_guard_multiple_executes_before_commit() {
     let executor = MockExecutor::new();
-    let guard = TransactionGuard::begin(&executor, defra_core::RequestContext::default(), false)
-        .await
-        .unwrap();
+    let guard = TransactionGuard::begin(&executor, false).await.unwrap();
 
     for _ in 0..3 {
         let request = crate::QueryRequest::new("{ test }");
@@ -214,10 +198,7 @@ async fn test_guard_multiple_executes_before_commit() {
 async fn test_guard_drop_without_finalization_abandons_transaction() {
     let executor = MockExecutor::new();
     {
-        let _guard =
-            TransactionGuard::begin(&executor, defra_core::RequestContext::default(), false)
-                .await
-                .unwrap();
+        let _guard = TransactionGuard::begin(&executor, false).await.unwrap();
     }
     assert!(
         !executor.was_committed(),
@@ -232,10 +213,7 @@ async fn test_guard_drop_without_finalization_abandons_transaction() {
 #[tokio::test]
 async fn test_guard_execute_after_commit_returns_error() {
     let executor = MockExecutor::new();
-    let mut guard =
-        TransactionGuard::begin(&executor, defra_core::RequestContext::default(), false)
-            .await
-            .unwrap();
+    let mut guard = TransactionGuard::begin(&executor, false).await.unwrap();
     let handle = guard.handle.take();
     assert!(handle.is_some());
 
@@ -247,9 +225,7 @@ async fn test_guard_execute_after_commit_returns_error() {
 #[tokio::test]
 async fn test_guard_commit_failure_returns_error_and_consumes_handle() {
     let executor = FailingCommitExecutor::new();
-    let guard = TransactionGuard::begin(&executor, defra_core::RequestContext::default(), false)
-        .await
-        .unwrap();
+    let guard = TransactionGuard::begin(&executor, false).await.unwrap();
     assert!(guard.handle().is_some());
 
     let result = guard.commit().await;
@@ -261,9 +237,7 @@ async fn test_guard_commit_failure_returns_error_and_consumes_handle() {
 #[tokio::test]
 async fn test_guard_commit_failure_is_retryable() {
     let executor = FailingCommitExecutor::new();
-    let guard = TransactionGuard::begin(&executor, defra_core::RequestContext::default(), false)
-        .await
-        .unwrap();
+    let guard = TransactionGuard::begin(&executor, false).await.unwrap();
 
     let result = guard.commit().await;
     assert!(result.is_err());
@@ -278,9 +252,7 @@ async fn test_guard_commit_failure_is_retryable() {
 #[tokio::test]
 async fn test_noop_registry_begin_returns_error() {
     let registry = NoOpTransactionRegistry;
-    let result = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await;
+    let result = registry.begin(false).await;
     assert!(result.is_err());
 }
 
@@ -289,7 +261,7 @@ async fn test_noop_registry_get_returns_not_found() {
     let registry = NoOpTransactionRegistry;
     let handle: TransactionHandle = "any-id".parse().unwrap();
     assert!(matches!(
-        registry.get(&defra_core::RequestContext::default(), &handle),
+        registry.get(&handle),
         GetTransactionResult::NotFound
     ));
 }
@@ -298,9 +270,7 @@ async fn test_noop_registry_get_returns_not_found() {
 async fn test_noop_registry_commit_returns_error() {
     let registry = NoOpTransactionRegistry;
     let handle: TransactionHandle = "any-id".parse().unwrap();
-    let result = registry
-        .commit(&defra_core::RequestContext::default(), &handle)
-        .await;
+    let result = registry.commit(&handle).await;
     assert!(result.is_err());
 }
 
@@ -308,9 +278,7 @@ async fn test_noop_registry_commit_returns_error() {
 async fn test_noop_registry_rollback_returns_error() {
     let registry = NoOpTransactionRegistry;
     let handle: TransactionHandle = "any-id".parse().unwrap();
-    let result = registry
-        .rollback(&defra_core::RequestContext::default(), &handle)
-        .await;
+    let result = registry.rollback(&handle).await;
     assert!(result.is_err());
 }
 

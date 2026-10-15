@@ -14,19 +14,14 @@ use storage::RegolithStore;
 /// named `user-0`..`user-{n-1}` in insertion order.
 async fn fixture_with_docs(n: usize) -> (Arc<DB<RegolithStore>>, String) {
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
-    db.create_collection(&defra_core::RequestContext::default(), test_schema())
-        .await
-        .unwrap();
+    db.create_collection(test_schema()).await.unwrap();
 
     for i in 0..n {
         let txn = db.new_txn(false).await.unwrap();
         let mutator = DbDocMutator::new(db.clone(), txn);
         let mut doc = Document::new();
         doc.set("name", NormalValue::String(format!("user-{i}")));
-        mutator
-            .create(&defra_core::RequestContext::default(), "Users", doc)
-            .await
-            .unwrap();
+        mutator.create("Users", doc).await.unwrap();
         let txn = mutator.take_txn().await.unwrap();
         txn.commit().await.unwrap();
     }
@@ -48,14 +43,7 @@ async fn delete_nth_document(db: &Arc<DB<RegolithStore>>, collection_name: &str,
 
     let txn = db.new_txn(false).await.unwrap();
     let mutator = DbDocMutator::new(db.clone(), txn);
-    mutator
-        .delete(
-            &defra_core::RequestContext::default(),
-            collection_name,
-            &doc_id,
-        )
-        .await
-        .unwrap();
+    mutator.delete(collection_name, &doc_id).await.unwrap();
     let txn = mutator.take_txn().await.unwrap();
     txn.commit().await.unwrap();
 }

@@ -1122,17 +1122,12 @@ mod tests {
 
         async fn begin(
             &self,
-            _context: &defra_core::RequestContext,
             _readonly: bool,
         ) -> std::result::Result<TransactionHandle, TransactionError> {
             Ok(TransactionHandle::new(self.ctx.id.clone()))
         }
 
-        fn get(
-            &self,
-            _context: &defra_core::RequestContext,
-            handle: &TransactionHandle,
-        ) -> GetTransactionResult {
+        fn get(&self, handle: &TransactionHandle) -> GetTransactionResult {
             if handle.as_str() == self.ctx.id {
                 GetTransactionResult::Found(self.ctx.clone())
             } else {
@@ -1142,7 +1137,6 @@ mod tests {
 
         async fn commit(
             &self,
-            _context: &defra_core::RequestContext,
             _handle: &TransactionHandle,
         ) -> std::result::Result<(), TransactionError> {
             Ok(())
@@ -1150,7 +1144,6 @@ mod tests {
 
         async fn rollback(
             &self,
-            _context: &defra_core::RequestContext,
             _handle: &TransactionHandle,
         ) -> std::result::Result<(), TransactionError> {
             Ok(())
@@ -1167,10 +1160,7 @@ mod tests {
             collections,
             SerialTxnRegistry::new(txn_fetcher),
         );
-        let handle = runner
-            .begin_txn(&defra_core::RequestContext::default(), true)
-            .await
-            .expect("begin txn");
+        let handle = runner.begin_txn(true).await.expect("begin txn");
 
         let (first, second) = tokio::join!(
             runner.execute_in_txn(QueryRequest::new("query { Users { name } }"), &handle),

@@ -403,7 +403,8 @@ mod tests {
 
     const OWNER_DID: &str = "did:key:z6MkTestNodeOwner";
 
-    /// Records the DAC bypass the executor received in its request.
+    /// Records the `dac_bypass` thread-local as observed by the executor, which
+    /// is the only place the fast path's effect is visible.
     #[derive(Default)]
     struct DacBypassRecorder {
         observed: std::sync::atomic::AtomicBool,
@@ -414,20 +415,20 @@ mod tests {
     impl QueryExecutor for DacBypassRecorder {
         fn abandon_txn(&self, _handle: &TransactionHandle) {}
 
-        async fn execute(&self, request: QueryRequest) -> QueryResponse {
+        async fn execute(&self, _request: QueryRequest) -> QueryResponse {
             self.observed
-                .store(request.context.dac_bypass(), Ordering::SeqCst);
+                .store(defra_core::dac_bypass::get_dac_bypass(), Ordering::SeqCst);
             *self.bearer.lock().unwrap() = defra_core::signing::get_request_bearer_token(OWNER_DID);
             QueryResponse::success(serde_json::json!({}))
         }
 
         async fn execute_in_txn(
             &self,
-            request: QueryRequest,
+            _request: QueryRequest,
             _handle: &TransactionHandle,
         ) -> QueryResponse {
             self.observed
-                .store(request.context.dac_bypass(), Ordering::SeqCst);
+                .store(defra_core::dac_bypass::get_dac_bypass(), Ordering::SeqCst);
             *self.bearer.lock().unwrap() = defra_core::signing::get_request_bearer_token(OWNER_DID);
             QueryResponse::success(serde_json::json!({}))
         }
@@ -499,46 +500,6 @@ mod tests {
 
         assert!(!executor.observed.load(Ordering::SeqCst));
     }
-
-    #[tokio::test]
-    async fn a_nac_admin_with_bypass_dac_carries_the_bypass_in_its_request() {
-        let admin = identity::Did::new_unchecked("did:key:z6MkDacBypassAdmin".to_string());
-        let executor = Arc::new(DacBypassRecorder::default());
-        let state = AppStateBuilder::new(executor.clone(), edge::testing::edge())
-            .with_signing_enabled(false)
-            .with_nac(Arc::new(
-                crate::MockNodeAcpOperations::enabled_with_owner(identity::Did::new_unchecked(
-                    OWNER_DID.to_string(),
-                ))
-                .with_grant(admin.clone(), acp::nac::NodePermission::DacBypass),
-            ))
-            .build();
-        let caller = ExtractIdentity::from_did(Some(admin));
-
-        execute_with_context(&state, &caller, QueryRequest::new("{ __typename }")).await;
-        assert!(executor.observed.swap(false, Ordering::SeqCst));
-
-        execute_in_txn_with_context(
-            &state,
-            &caller,
-            QueryRequest::new("{ __typename }"),
-            TransactionHandle::new("txn".into()),
-        )
-        .await;
-        assert!(executor.observed.swap(false, Ordering::SeqCst));
-
-        execute_with_resolved_context(
-            &state.edge,
-            executor.clone(),
-            QueryRequest::new("{ __typename }"),
-            None,
-            true,
-            None,
-        )
-        .await;
-        assert!(executor.observed.load(Ordering::SeqCst));
-    }
-
     #[tokio::test]
     async fn bearer_scope_crosses_each_blocking_execution_boundary() {
         let executor = Arc::new(DacBypassRecorder::default());

@@ -65,9 +65,7 @@ fn schema() -> CollectionVersion {
 
 async fn seeded_db() -> Arc<DB<CountingStore<RegolithStore>>> {
     let db = Arc::new(DB::new(CountingStore::new(RegolithStore::in_memory().unwrap())).unwrap());
-    db.create_collection(&defra_core::RequestContext::default(), schema())
-        .await
-        .unwrap();
+    db.create_collection(schema()).await.unwrap();
     let docs = (0..COLLECTION_SIZE)
         .map(|i| {
             let mut doc = Document::new();
@@ -79,7 +77,7 @@ async fn seeded_db() -> Arc<DB<CountingStore<RegolithStore>>> {
         })
         .collect();
     AutoCommitMutator::new(db.clone())
-        .create_many(&defra_core::RequestContext::default(), "Events", docs)
+        .create_many("Events", docs)
         .await
         .unwrap();
     db
@@ -190,9 +188,7 @@ async fn estimation_skips_vector_indexes() {
     )
     .unwrap();
     assert_eq!(selected.name, "Events_market_ASC");
-    db.create_collection(&defra_core::RequestContext::default(), version)
-        .await
-        .unwrap();
+    db.create_collection(version).await.unwrap();
     let runner = query::QueryRunner::with_provider(
         LensedAutoCommitFetcher::new(db.clone()),
         db::DbCollectionProvider::new_arc(db.clone()),
@@ -273,9 +269,7 @@ async fn empty_in_probes_share_the_estimation_budget() {
     let mut index = single_field_index(3, "seq");
     index.unique = true;
     collection.indexes.push(index);
-    db.create_collection(&defra_core::RequestContext::default(), collection)
-        .await
-        .unwrap();
+    db.create_collection(collection).await.unwrap();
     let fetcher = LensedAutoCommitFetcher::new(db.clone());
     let mut params = IndexScanParams {
         index_name: "Events_seq_ASC".into(),

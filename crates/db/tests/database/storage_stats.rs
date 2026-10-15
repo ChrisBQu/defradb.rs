@@ -66,18 +66,15 @@ async fn live_scan_accounts_for_every_byte_without_exposing_values() {
 #[tokio::test]
 async fn signed_branchable_documents_classify_collection_and_signature_blocks() {
     use crypto::{Key, PrivateKey};
-    use defra_core::signing::{SigningConfig, SigningKeyType};
+    use defra_core::signing::{set_signing_config, SigningConfig, SigningKeyType};
 
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
-    db.create_collection(
-        &defra_core::RequestContext::default(),
-        crate::common::schema::test_schema().as_branchable(),
-    )
-    .await
-    .unwrap();
+    db.create_collection(crate::common::schema::test_schema().as_branchable())
+        .await
+        .unwrap();
     let key = crypto::generate_ed25519().unwrap();
     let public_key = key.public_key();
-    let signed = defra_core::RequestContext::default().with_signing(Some(SigningConfig {
+    set_signing_config(Some(SigningConfig {
         key_type: SigningKeyType::Ed25519,
         private_key_bytes: key.raw_owned(),
         public_key_bytes: public_key.raw_owned(),
@@ -85,14 +82,14 @@ async fn signed_branchable_documents_classify_collection_and_signature_blocks() 
         remote_signer: None,
         signing_authorization: None,
     }));
-    db::AutoCommitMutator::new(db.clone())
+    let created = db::AutoCommitMutator::new(db.clone())
         .create(
-            &signed,
             "Users",
             Document::from_json_str(r#"{"name":"private name"}"#).unwrap(),
         )
-        .await
-        .unwrap();
+        .await;
+    set_signing_config(None);
+    created.unwrap();
 
     let stats = db.storage_stats(false).await.unwrap();
     assert_eq!(stats.block_kinds["collection"].keys, 1);
@@ -338,19 +335,13 @@ async fn offline_scan_is_read_only_and_matches_the_live_snapshot() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("data");
     let db = Arc::new(DB::new(RegolithStore::open(&path).unwrap()).unwrap());
-    db.create_collection(
-        &defra_core::RequestContext::default(),
-        crate::common::schema::test_schema(),
-    )
-    .await
-    .unwrap();
+    db.create_collection(crate::common::schema::test_schema())
+        .await
+        .unwrap();
     let mutator = DbDocMutator::new(db.clone(), db.new_txn(false).await.unwrap());
     let mut doc = Document::new();
     doc.set("name", NormalValue::String("private value".into()));
-    mutator
-        .create(&defra_core::RequestContext::default(), "Users", doc)
-        .await
-        .unwrap();
+    mutator.create("Users", doc).await.unwrap();
     mutator.take_txn().await.unwrap().commit().await.unwrap();
     drop(mutator);
     let live = db.storage_stats(true).await.unwrap();
@@ -484,22 +475,14 @@ async fn shared_blocks_count_each_document_history_once() {
         "other",
         schema::FieldKind::string(),
     ));
-    db.create_collection(&defra_core::RequestContext::default(), schema)
-        .await
-        .unwrap();
+    db.create_collection(schema).await.unwrap();
     let mut ids = Vec::new();
     for other in ["first", "second"] {
         let mutator = DbDocMutator::new(db.clone(), db.new_txn(false).await.unwrap());
         let mut doc = Document::new();
         doc.set("name", NormalValue::String("shared".into()));
         doc.set("other", NormalValue::String(other.into()));
-        ids.push(
-            mutator
-                .create(&defra_core::RequestContext::default(), "Users", doc)
-                .await
-                .unwrap()
-                .doc_id,
-        );
+        ids.push(mutator.create("Users", doc).await.unwrap().doc_id);
         mutator.take_txn().await.unwrap().commit().await.unwrap();
     }
     let stats = db.storage_stats(true).await.unwrap();
@@ -513,12 +496,7 @@ async fn shared_blocks_count_each_document_history_once() {
     doc.set_id(ids[0].clone());
     doc.set("name", NormalValue::String("changed".into()));
     mutator
-        .update(
-            &defra_core::RequestContext::default(),
-            "Users",
-            doc,
-            ["name".to_string()].into_iter().collect(),
-        )
+        .update("Users", doc, ["name".to_string()].into_iter().collect())
         .await
         .unwrap();
     mutator.take_txn().await.unwrap().commit().await.unwrap();

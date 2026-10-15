@@ -28,10 +28,7 @@ async fn action_lifecycle_retains_only_incomplete_executions() {
         .register_action("collection", Action::TRUNCATE)
         .await
         .unwrap();
-    let actions = db
-        .list_actions(&defra_core::RequestContext::default())
-        .await
-        .unwrap();
+    let actions = db.list_actions().await.unwrap();
     assert_eq!(actions.len(), 1);
     assert_eq!(actions[0].status, ActionStatus::IN_PROGRESS);
     assert_eq!(
@@ -51,10 +48,7 @@ async fn action_lifecycle_retains_only_incomplete_executions() {
     assert!(events.try_recv().is_err());
 
     db.fail_action(lease, "failed").await.unwrap();
-    let actions = db
-        .list_actions(&defra_core::RequestContext::default())
-        .await
-        .unwrap();
+    let actions = db.list_actions().await.unwrap();
     assert_eq!(actions[0].status, ActionStatus::ERRORED);
     assert_eq!(actions[0].reason, "failed");
     let event = events.try_recv().unwrap();
@@ -66,12 +60,7 @@ async fn action_lifecycle_retains_only_incomplete_executions() {
         .register_action("collection", Action::TRUNCATE)
         .await
         .unwrap();
-    assert!(db
-        .list_actions(&defra_core::RequestContext::default(),)
-        .await
-        .unwrap()[0]
-        .reason
-        .is_empty());
+    assert!(db.list_actions().await.unwrap()[0].reason.is_empty());
     assert_eq!(
         events
             .try_recv()
@@ -83,11 +72,7 @@ async fn action_lifecycle_retains_only_incomplete_executions() {
     );
 
     db.complete_action(lease).await.unwrap();
-    assert!(db
-        .list_actions(&defra_core::RequestContext::default(),)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(db.list_actions().await.unwrap().is_empty());
     assert_eq!(
         events
             .try_recv()

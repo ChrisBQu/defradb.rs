@@ -42,7 +42,6 @@ async fn node() -> (
     let mut did = FieldDescription::new("2", "did", FieldKind::string());
     did.immutable = true;
     db.create_collection(
-        &defra_core::RequestContext::default(),
         CollectionVersion::new(
             "Agent",
             "col-agent",
@@ -263,9 +262,7 @@ async fn a_patched_definition_keeps_what_the_delta_cannot_carry() {
     )
     .unwrap()
     .remove(0);
-    db.create_collection(&defra_core::RequestContext::default(), defined)
-        .await
-        .unwrap();
+    db.create_collection(defined).await.unwrap();
     let blockstore = Arc::new(DefraBlockstore::new(store, false));
     let handler = DbMergeHandler::new(db.clone(), blockstore.clone());
 
@@ -351,9 +348,7 @@ async fn a_patched_definition_does_not_unmake_a_view() {
     );
     view.query = Some(schema::QuerySource::new(serde_json::json!({})));
     view.is_materialized = false;
-    db.create_collection(&defra_core::RequestContext::default(), view)
-        .await
-        .unwrap();
+    db.create_collection(view).await.unwrap();
     let blockstore = Arc::new(DefraBlockstore::new(store, false));
     let handler = DbMergeHandler::new(db.clone(), blockstore.clone());
 

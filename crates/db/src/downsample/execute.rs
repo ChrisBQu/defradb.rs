@@ -648,9 +648,7 @@ mod tests {
                 FieldDescription::new("6", "count", FieldKind::int()),
             ],
         );
-        db.create_collection(&defra_core::RequestContext::default(), target)
-            .await
-            .unwrap();
+        db.create_collection(target).await.unwrap();
         let target = db
             .get_collection("Window")
             .unwrap()
@@ -685,24 +683,23 @@ mod tests {
                 .fixed_offset(),
             source_height: height,
         };
-        let context = RequestContext::default();
         let id = db
-            .persist_window_update(&context, &plan, &source, "series", None, &window(1))
+            .persist_window_update(&plan, &source, "series", None, &window(1))
             .await
             .unwrap();
         let high = window(10);
         let middle = window(9);
         let low = window(8);
         let (a, b, c) = tokio::join!(
-            db.persist_window_update(&context, &plan, &source, "series", Some(&id), &high),
-            db.persist_window_update(&context, &plan, &source, "series", Some(&id), &middle),
-            db.persist_window_update(&context, &plan, &source, "series", Some(&id), &low),
+            db.persist_window_update(&plan, &source, "series", Some(&id), &high),
+            db.persist_window_update(&plan, &source, "series", Some(&id), &middle),
+            db.persist_window_update(&plan, &source, "series", Some(&id), &low),
         );
         for result in [a, b, c] {
             assert_eq!(result.unwrap(), id);
         }
         // A delayed processor must also be harmless after all races finish.
-        db.persist_window_update(&context, &plan, &source, "series", Some(&id), &window(2))
+        db.persist_window_update(&plan, &source, "series", Some(&id), &window(2))
             .await
             .unwrap();
         let actual = crate::AutoCommitMutator::new(db)

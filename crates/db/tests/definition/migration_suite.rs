@@ -296,7 +296,7 @@ async fn seed_user(db: &Arc<DB<RegolithStore>>) -> document::DocID {
     let mut doc = document::Document::new();
     doc.set("name", document::NormalValue::String("Alice".to_string()));
     AutoCommitMutator::new(db.clone())
-        .create(&defra_core::RequestContext::default(), "Users", doc)
+        .create("Users", doc)
         .await
         .unwrap()
         .doc_id
@@ -304,9 +304,9 @@ async fn seed_user(db: &Arc<DB<RegolithStore>>) -> document::DocID {
 
 async fn add_verified_version(db: &Arc<DB<RegolithStore>>) -> String {
     db.patch_collection(
-        &defra_core::RequestContext::default(),
         "Users",
         r#"[{"op":"add","path":"/Users/Fields/-","value":{"Name":"verified","Kind":"Boolean"}}]"#,
+        None,
     )
     .await
     .unwrap()
@@ -314,9 +314,13 @@ async fn add_verified_version(db: &Arc<DB<RegolithStore>>) -> String {
 }
 
 async fn add_placeholder_version(db: &Arc<DB<RegolithStore>>, field_name: &str) -> String {
-    db.patch_collection(&defra_core::RequestContext::default(), "Users", &format!(
+    db.patch_collection(
+        "Users",
+        &format!(
             r#"[{{"op":"add","path":"/Users/Fields/-","value":{{"Name":"{field_name}","Kind":"String"}}}}]"#
-        ))
+        ),
+        None,
+    )
     .await
     .unwrap()
     .version_id
@@ -454,9 +458,7 @@ async fn lazy_lensed_read_leaves_storage_unchanged() {
     raw_db.set_lens_store(transform_store.clone());
     let db = Arc::new(raw_db);
 
-    db.create_collection(&defra_core::RequestContext::default(), users_schema())
-        .await
-        .unwrap();
+    db.create_collection(users_schema()).await.unwrap();
     let v1 = db
         .get_collection("Users")
         .unwrap()
@@ -470,12 +472,12 @@ async fn lazy_lensed_read_leaves_storage_unchanged() {
     assert_eq!(before_migration[0].get("verified"), None);
 
     db.set_migration(
-        &defra_core::RequestContext::default(),
         LensConfig::new(
             &v1,
             &v2,
             LensModule::from_bytes(b"\0asm\x01\0\0\0".to_vec()),
         ),
+        None,
     )
     .await
     .unwrap();
@@ -518,9 +520,7 @@ async fn eager_materialize_restamps_transformless_paths() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = Arc::new(DB::from_arc(store).unwrap());
 
-    db.create_collection(&defra_core::RequestContext::default(), users_schema())
-        .await
-        .unwrap();
+    db.create_collection(users_schema()).await.unwrap();
     let doc_id = seed_user(&db).await;
     let v2 = add_verified_version(&db).await;
     assert_ne!(
@@ -530,12 +530,7 @@ async fn eager_materialize_restamps_transformless_paths() {
 
     let before_counts = namespace_counts(&db).await;
     let before_blob = load_user_blob(&db, &doc_id).await;
-    assert_eq!(
-        db.materialize_collection(&defra_core::RequestContext::default(), "Users")
-            .await
-            .unwrap(),
-        1
-    );
+    assert_eq!(db.materialize_collection("Users").await.unwrap(), 1);
     assert_eq!(
         load_user(&db, &doc_id).await.schema_version_id(),
         Some(v2.as_str())
@@ -545,12 +540,7 @@ async fn eager_materialize_restamps_transformless_paths() {
         before_blob,
         "identity materialization must update only the version key"
     );
-    assert_eq!(
-        db.materialize_collection(&defra_core::RequestContext::default(), "Users")
-            .await
-            .unwrap(),
-        0
-    );
+    assert_eq!(db.materialize_collection("Users").await.unwrap(), 0);
     assert_eq!(namespace_counts(&db).await, before_counts);
 }
 
@@ -561,9 +551,7 @@ async fn migration_context_cache_invalidates_when_graph_changes_without_version_
     raw_db.set_lens_store(transform_store);
     let db = Arc::new(raw_db);
 
-    db.create_collection(&defra_core::RequestContext::default(), users_schema())
-        .await
-        .unwrap();
+    db.create_collection(users_schema()).await.unwrap();
     let v1 = db
         .get_collection("Users")
         .unwrap()
@@ -574,12 +562,12 @@ async fn migration_context_cache_invalidates_when_graph_changes_without_version_
     let v3 = add_placeholder_version(&db, "latest").await;
 
     db.set_migration(
-        &defra_core::RequestContext::default(),
         LensConfig::new(
             &v2,
             &v3,
             LensModule::from_bytes(b"\0asm\x01\0\0\0".to_vec()),
         ),
+        None,
     )
     .await
     .unwrap();
@@ -588,12 +576,12 @@ async fn migration_context_cache_invalidates_when_graph_changes_without_version_
     assert!(fetcher.get_all("Users").await.unwrap().is_empty());
 
     db.set_migration(
-        &defra_core::RequestContext::default(),
         LensConfig::new(
             &v1,
             &v2,
             LensModule::from_bytes(b"\0asm\x01\0\0\0".to_vec()),
         ),
+        None,
     )
     .await
     .unwrap();
@@ -623,12 +611,7 @@ async fn lazy_read_leaves_secondary_indexes_unchanged() {
     raw_db.set_lens_store(transform_store);
     let db = Arc::new(raw_db);
 
-    db.create_collection(
-        &defra_core::RequestContext::default(),
-        indexed_users_schema(),
-    )
-    .await
-    .unwrap();
+    db.create_collection(indexed_users_schema()).await.unwrap();
     let v1 = db
         .get_collection("Users")
         .unwrap()
@@ -637,12 +620,12 @@ async fn lazy_read_leaves_secondary_indexes_unchanged() {
         .to_string();
     let v2 = add_placeholder_version(&db, "placeholder").await;
     db.set_migration(
-        &defra_core::RequestContext::default(),
         LensConfig::new(
             &v1,
             &v2,
             LensModule::from_bytes(b"\0asm\x01\0\0\0".to_vec()),
         ),
+        None,
     )
     .await
     .unwrap();
@@ -674,12 +657,7 @@ async fn lazy_full_scan_is_write_free_even_when_paused() {
     raw_db.set_lens_store(transform_store.clone());
     let db = Arc::new(raw_db);
 
-    db.create_collection(
-        &defra_core::RequestContext::default(),
-        indexed_users_schema(),
-    )
-    .await
-    .unwrap();
+    db.create_collection(indexed_users_schema()).await.unwrap();
     let v1 = db
         .get_collection("Users")
         .unwrap()
@@ -688,12 +666,12 @@ async fn lazy_full_scan_is_write_free_even_when_paused() {
         .to_string();
     let v2 = add_placeholder_version(&db, "placeholder").await;
     db.set_migration(
-        &defra_core::RequestContext::default(),
         LensConfig::new(
             &v1,
             &v2,
             LensModule::from_bytes(b"\0asm\x01\0\0\0".to_vec()),
         ),
+        None,
     )
     .await
     .unwrap();
@@ -746,12 +724,7 @@ async fn implicit_full_scan_transforms_without_writes() {
     raw_db.set_lens_store(transform_store.clone());
     let db = Arc::new(raw_db);
 
-    db.create_collection(
-        &defra_core::RequestContext::default(),
-        indexed_users_schema(),
-    )
-    .await
-    .unwrap();
+    db.create_collection(indexed_users_schema()).await.unwrap();
     let v1 = db
         .get_collection("Users")
         .unwrap()
@@ -760,12 +733,12 @@ async fn implicit_full_scan_transforms_without_writes() {
         .to_string();
     let v2 = add_placeholder_version(&db, "placeholder").await;
     db.set_migration(
-        &defra_core::RequestContext::default(),
         LensConfig::new(
             &v1,
             &v2,
             LensModule::from_bytes(b"\0asm\x01\0\0\0".to_vec()),
         ),
+        None,
     )
     .await
     .unwrap();
@@ -796,12 +769,7 @@ async fn implicit_query_leaves_storage_unchanged_after_snapshot_closes() {
     raw_db.set_lens_store(transform_store);
     let db = Arc::new(raw_db);
 
-    db.create_collection(
-        &defra_core::RequestContext::default(),
-        indexed_users_schema(),
-    )
-    .await
-    .unwrap();
+    db.create_collection(indexed_users_schema()).await.unwrap();
     let v1 = db
         .get_collection("Users")
         .unwrap()
@@ -810,12 +778,12 @@ async fn implicit_query_leaves_storage_unchanged_after_snapshot_closes() {
         .to_string();
     let v2 = add_placeholder_version(&db, "placeholder").await;
     db.set_migration(
-        &defra_core::RequestContext::default(),
         LensConfig::new(
             &v1,
             &v2,
             LensModule::from_bytes(b"\0asm\x01\0\0\0".to_vec()),
         ),
+        None,
     )
     .await
     .unwrap();
@@ -824,11 +792,8 @@ async fn implicit_query_leaves_storage_unchanged_after_snapshot_closes() {
     let registry = Arc::new(db::DbTransactionRegistry::new(db.clone()));
 
     // A user-managed read-only transaction remains side-effect free.
-    let explicit = registry
-        .begin(&defra_core::RequestContext::default(), true)
-        .await
-        .unwrap();
-    let explicit_ctx = match registry.get(&defra_core::RequestContext::default(), &explicit) {
+    let explicit = registry.begin(true).await.unwrap();
+    let explicit_ctx = match registry.get(&explicit) {
         GetTransactionResult::Found(context) => context,
         other => panic!("expected explicit transaction context, got {other:?}"),
     };
@@ -842,10 +807,7 @@ async fn implicit_query_leaves_storage_unchanged_after_snapshot_closes() {
         explicit_docs[0].get("verified"),
         Some(&document::NormalValue::Bool(true))
     );
-    registry
-        .rollback(&defra_core::RequestContext::default(), &explicit)
-        .await
-        .unwrap();
+    registry.rollback(&explicit).await.unwrap();
     assert_eq!(verified_index_count(&db).await, 0);
 
     let fetcher = db::LensedAutoCommitFetcher::new(db.clone());
@@ -896,9 +858,7 @@ async fn field_value_fetch_filters_after_lens_transform() {
     raw_db.set_lens_store(transform_store);
     let db = Arc::new(raw_db);
 
-    db.create_collection(&defra_core::RequestContext::default(), users_schema())
-        .await
-        .unwrap();
+    db.create_collection(users_schema()).await.unwrap();
     let v1 = db
         .get_collection("Users")
         .unwrap()
@@ -907,12 +867,12 @@ async fn field_value_fetch_filters_after_lens_transform() {
         .to_string();
     let v2 = add_placeholder_version(&db, "latest").await;
     db.set_migration(
-        &defra_core::RequestContext::default(),
         LensConfig::new(
             &v1,
             &v2,
             LensModule::from_bytes(b"\0asm\x01\0\0\0".to_vec()),
         ),
+        None,
     )
     .await
     .unwrap();
@@ -934,12 +894,7 @@ async fn concurrent_lazy_reads_of_same_document_are_idempotent() {
     raw_db.set_lens_store(transform_store.clone());
     let db = Arc::new(raw_db);
 
-    db.create_collection(
-        &defra_core::RequestContext::default(),
-        indexed_users_schema(),
-    )
-    .await
-    .unwrap();
+    db.create_collection(indexed_users_schema()).await.unwrap();
     let v1 = db
         .get_collection("Users")
         .unwrap()
@@ -948,12 +903,12 @@ async fn concurrent_lazy_reads_of_same_document_are_idempotent() {
         .to_string();
     let v2 = add_placeholder_version(&db, "placeholder").await;
     db.set_migration(
-        &defra_core::RequestContext::default(),
         LensConfig::new(
             &v1,
             &v2,
             LensModule::from_bytes(b"\0asm\x01\0\0\0".to_vec()),
         ),
+        None,
     )
     .await
     .unwrap();
@@ -1011,12 +966,7 @@ async fn concurrent_update_wins_over_stale_lazy_write_back() {
     raw_db.set_lens_store(transform_store.clone());
     let db = Arc::new(raw_db);
 
-    db.create_collection(
-        &defra_core::RequestContext::default(),
-        indexed_users_schema(),
-    )
-    .await
-    .unwrap();
+    db.create_collection(indexed_users_schema()).await.unwrap();
     let v1 = db
         .get_collection("Users")
         .unwrap()
@@ -1025,12 +975,12 @@ async fn concurrent_update_wins_over_stale_lazy_write_back() {
         .to_string();
     let v2 = add_placeholder_version(&db, "placeholder").await;
     db.set_migration(
-        &defra_core::RequestContext::default(),
         LensConfig::new(
             &v1,
             &v2,
             LensModule::from_bytes(b"\0asm\x01\0\0\0".to_vec()),
         ),
+        None,
     )
     .await
     .unwrap();
@@ -1057,7 +1007,6 @@ async fn concurrent_update_wins_over_stale_lazy_write_back() {
     update.set("name", document::NormalValue::String("Bob".to_string()));
     AutoCommitMutator::new(db.clone())
         .update(
-            &defra_core::RequestContext::default(),
             "Users",
             update,
             RapidHashSet::from_iter(["name".to_string()]),
@@ -1089,12 +1038,7 @@ async fn streaming_lensed_read_keeps_source_documents_unchanged() {
     raw_db.set_lens_store(transform_store.clone());
     let db = Arc::new(raw_db);
 
-    db.create_collection(
-        &defra_core::RequestContext::default(),
-        indexed_users_schema(),
-    )
-    .await
-    .unwrap();
+    db.create_collection(indexed_users_schema()).await.unwrap();
     let v1 = db
         .get_collection("Users")
         .unwrap()
@@ -1103,12 +1047,12 @@ async fn streaming_lensed_read_keeps_source_documents_unchanged() {
         .to_string();
     let v2 = add_placeholder_version(&db, "placeholder").await;
     db.set_migration(
-        &defra_core::RequestContext::default(),
         LensConfig::new(
             &v1,
             &v2,
             LensModule::from_bytes(b"\0asm\x01\0\0\0".to_vec()),
         ),
+        None,
     )
     .await
     .unwrap();
@@ -1153,9 +1097,7 @@ async fn streaming_auto_commit_read_transforms_without_persisting() {
     raw_db.set_lens_store(transform_store.clone());
     let db = Arc::new(raw_db);
 
-    db.create_collection(&defra_core::RequestContext::default(), users_schema())
-        .await
-        .unwrap();
+    db.create_collection(users_schema()).await.unwrap();
     let v1 = db
         .get_collection("Users")
         .unwrap()
@@ -1166,12 +1108,12 @@ async fn streaming_auto_commit_read_transforms_without_persisting() {
     let v2 = add_verified_version(&db).await;
 
     db.set_migration(
-        &defra_core::RequestContext::default(),
         LensConfig::new(
             &v1,
             &v2,
             LensModule::from_bytes(b"\0asm\x01\0\0\0".to_vec()),
         ),
+        None,
     )
     .await
     .unwrap();
@@ -1208,9 +1150,7 @@ async fn streaming_auto_commit_read_is_write_free_after_partial_consumption() {
     raw_db.set_lens_store(transform_store.clone());
     let db = Arc::new(raw_db);
 
-    db.create_collection(&defra_core::RequestContext::default(), users_schema())
-        .await
-        .unwrap();
+    db.create_collection(users_schema()).await.unwrap();
     let v1 = db
         .get_collection("Users")
         .unwrap()
@@ -1220,12 +1160,12 @@ async fn streaming_auto_commit_read_is_write_free_after_partial_consumption() {
     let v2 = add_verified_version(&db).await;
 
     db.set_migration(
-        &defra_core::RequestContext::default(),
         LensConfig::new(
             &v1,
             &v2,
             LensModule::from_bytes(b"\0asm\x01\0\0\0".to_vec()),
         ),
+        None,
     )
     .await
     .unwrap();
@@ -1269,9 +1209,7 @@ async fn readonly_snapshot_history_reuse_preserves_migrated_values() {
     let mut raw_db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     raw_db.set_lens_store(Arc::new(SetVerifiedStore::default()));
     let db = Arc::new(raw_db);
-    db.create_collection(&defra_core::RequestContext::default(), users_schema())
-        .await
-        .unwrap();
+    db.create_collection(users_schema()).await.unwrap();
     let v1 = db
         .get_collection("Users")
         .unwrap()
@@ -1281,12 +1219,12 @@ async fn readonly_snapshot_history_reuse_preserves_migrated_values() {
     let doc_id = seed_user(&db).await;
     let v2 = add_verified_version(&db).await;
     db.set_migration(
-        &defra_core::RequestContext::default(),
         LensConfig::new(
             &v1,
             &v2,
             LensModule::from_bytes(b"\0asm\x01\0\0\0".to_vec()),
         ),
+        None,
     )
     .await
     .unwrap();
@@ -1321,9 +1259,7 @@ async fn eager_materialization_retries_from_the_concurrent_document() {
     let mut raw_db = DB::from_arc(Arc::new(RegolithStore::in_memory().unwrap())).unwrap();
     raw_db.set_lens_store(transforms.clone());
     let db = Arc::new(raw_db);
-    db.create_collection(&defra_core::RequestContext::default(), users_schema())
-        .await
-        .unwrap();
+    db.create_collection(users_schema()).await.unwrap();
     let v1 = db
         .get_collection("Users")
         .unwrap()
@@ -1333,12 +1269,12 @@ async fn eager_materialization_retries_from_the_concurrent_document() {
     let doc_id = seed_user(&db).await;
     let v2 = add_verified_version(&db).await;
     db.set_migration(
-        &defra_core::RequestContext::default(),
         LensConfig::new(
             &v1,
             &v2,
             LensModule::from_bytes(b"\0asm\x01\0\0\0".to_vec()),
         ),
+        None,
     )
     .await
     .unwrap();
@@ -1376,12 +1312,7 @@ async fn eager_materialization_retries_from_the_concurrent_document() {
         .join()
         .unwrap();
     }));
-    assert_eq!(
-        db.materialize_collection(&defra_core::RequestContext::default(), "Users")
-            .await
-            .unwrap(),
-        1
-    );
+    assert_eq!(db.materialize_collection("Users").await.unwrap(), 1);
     let persisted = load_user(&db, &doc_id).await;
     assert_eq!(
         persisted.get("name"),

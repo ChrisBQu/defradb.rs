@@ -227,9 +227,7 @@ async fn fixture() -> Fixture {
         let mut schema = schema;
         schema.version_id = "v1".to_string();
         schema.collection_id = "col-users".to_string();
-        db.create_collection(&defra_core::RequestContext::default(), schema)
-            .await
-            .unwrap();
+        db.create_collection(schema).await.unwrap();
     }
     let blocks = Arc::new(DefraBlockstore::new(inner, false));
     let handler = DbMergeHandler::new(db, blocks.clone());

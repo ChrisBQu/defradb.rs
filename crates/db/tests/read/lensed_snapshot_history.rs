@@ -29,9 +29,7 @@ struct MarkVerified(HopscotchMap<TransformId, (), RandomState>);
 #[async_trait]
 impl TransformStore for MarkVerified {
     fn new_isolated_store(&self) -> Arc<dyn TransformStore> {
-        Arc::new(MarkVerified(HopscotchMap::with_hasher(
-            RandomState::default(),
-        )))
+        Arc::new(MarkVerified(HopscotchMap::with_hasher(RandomState::default())))
     }
 
     async fn add(&self, config: LensConfig) -> lens::Result<TransformId> {
@@ -86,12 +84,9 @@ async fn verified_collection<S: Store + 'static>(store: S) -> (Arc<DB<S>>, Strin
         RandomState::default(),
     ))));
     let db = Arc::new(raw);
-    db.create_collections_atomic(
-        &defra_core::RequestContext::default(),
-        query::parse_sdl("type Probe { name: String }").unwrap(),
-    )
-    .await
-    .unwrap();
+    db.create_collections_atomic(query::parse_sdl("type Probe { name: String }").unwrap())
+        .await
+        .unwrap();
     let v1 = db
         .get_collection("Probe")
         .unwrap()
@@ -101,11 +96,15 @@ async fn verified_collection<S: Store + 'static>(store: S) -> (Arc<DB<S>>, Strin
     let mut doc = Document::new();
     doc.set("name", NormalValue::String("Ada".to_string()));
     db::AutoCommitMutator::new(db.clone())
-        .create_many(&defra_core::RequestContext::default(), "Probe", vec![doc])
+        .create_many("Probe", vec![doc])
         .await
         .unwrap();
     let v2 = db
-        .patch_collection(&defra_core::RequestContext::default(), "Probe", r#"[{"op":"add","path":"/Probe/Fields/-","value":{"Name":"verified","Kind":"Boolean"}}]"#)
+        .patch_collection(
+            "Probe",
+            r#"[{"op":"add","path":"/Probe/Fields/-","value":{"Name":"verified","Kind":"Boolean"}}]"#,
+            None,
+        )
         .await
         .unwrap()
         .version_id;
@@ -114,7 +113,7 @@ async fn verified_collection<S: Store + 'static>(store: S) -> (Arc<DB<S>>, Strin
 
 async fn deepen_history<S: Store + 'static>(db: &DB<S>) {
     for index in 0..HISTORY_DEPTH {
-        db.patch_collection(&defra_core::RequestContext::default(), "Probe", &format!(r#"[{{"op":"add","path":"/Probe/Fields/-","value":{{"Name":"extra{index}","Kind":"String"}}}}]"#)).await.unwrap();
+        db.patch_collection("Probe", &format!(r#"[{{"op":"add","path":"/Probe/Fields/-","value":{{"Name":"extra{index}","Kind":"String"}}}}]"#), None).await.unwrap();
     }
 }
 
@@ -133,9 +132,7 @@ async fn readonly_snapshot_keeps_its_history_while_a_new_snapshot_observes_a_mig
     let old = readonly_fetcher(&db, db.new_txn(true).await.unwrap());
     assert_eq!(verified(&old.get_all("Probe").await.unwrap()), None);
 
-    db.set_migration(&defra_core::RequestContext::default(), migration(&v1, &v2))
-        .await
-        .unwrap();
+    db.set_migration(migration(&v1, &v2), None).await.unwrap();
 
     assert_eq!(verified(&old.get_all("Probe").await.unwrap()), None);
     let mut stream = old.stream_all_with_deleted("Probe", false).await.unwrap();
@@ -156,12 +153,9 @@ async fn readonly_snapshot_keeps_its_history_while_a_new_snapshot_observes_a_mig
 async fn writable_transaction_observes_its_own_migration_registration() {
     let (db, v1, v2) = verified_collection(RegolithStore::in_memory().unwrap()).await;
     let registry = db::DbTransactionRegistry::new(db.clone());
-    let txn_id = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .unwrap();
+    let txn_id = registry.begin(false).await.unwrap();
     let fetcher = registry
-        .get(&defra_core::RequestContext::default(), &txn_id)
+        .get(&txn_id)
         .into_result()
         .unwrap()
         .unwrap()
@@ -169,11 +163,7 @@ async fn writable_transaction_observes_its_own_migration_registration() {
     assert_eq!(verified(&fetcher.get_all("Probe").await.unwrap()), None);
 
     registry
-        .set_migration_in_txn(
-            &defra_core::RequestContext::default(),
-            &txn_id,
-            migration(&v1, &v2),
-        )
+        .set_migration_in_txn(&txn_id, migration(&v1, &v2), None)
         .await
         .unwrap();
 
@@ -184,10 +174,7 @@ async fn writable_transaction_observes_its_own_migration_registration() {
         error.contains("lens migration failed"),
         "the read ignored its transaction's migration: {error}"
     );
-    registry
-        .rollback(&defra_core::RequestContext::default(), &txn_id)
-        .await
-        .unwrap();
+    registry.rollback(&txn_id).await.unwrap();
 }
 
 #[tokio::test]
@@ -215,9 +202,7 @@ async fn writable_reads_reload_schema_history() {
 async fn stream_migrates_documents_without_rescanning_schema_history() {
     let (db, v1, v2) =
         verified_collection(CountingStore::new(RegolithStore::in_memory().unwrap())).await;
-    db.set_migration(&defra_core::RequestContext::default(), migration(&v1, &v2))
-        .await
-        .unwrap();
+    db.set_migration(migration(&v1, &v2), None).await.unwrap();
     deepen_history(&db).await;
     let fetcher = readonly_fetcher(&db, db.new_txn(true).await.unwrap());
     assert_eq!(

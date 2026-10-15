@@ -35,6 +35,47 @@ struct Fields {
 }
 
 impl RequestContext {
+    /// The context a call that arrives without one runs in: the default
+    /// anonymous context. Built for tests with the `ambient` feature, it
+    /// carries what the test set through the thread-local API instead (see
+    /// the `ambient` module).
+    pub fn ambient() -> Self {
+        #[cfg(any(test, feature = "ambient"))]
+        return crate::ambient::context();
+        #[cfg(not(any(test, feature = "ambient")))]
+        Self::default()
+    }
+
+    /// This context with every field it leaves unset taken from
+    /// [`RequestContext::ambient`]; unchanged outside tests.
+    #[must_use]
+    pub fn or_ambient(self) -> Self {
+        #[cfg(any(test, feature = "ambient"))]
+        {
+            let ambient = Self::ambient();
+            let mut context = self;
+            let fields = Arc::make_mut(&mut context.0);
+            fields.identity = fields
+                .identity
+                .take()
+                .or_else(|| ambient.0.identity.clone());
+            fields.dac_bypass |= ambient.0.dac_bypass;
+            fields.encryption = fields
+                .encryption
+                .take()
+                .or_else(|| ambient.0.encryption.clone());
+            fields.signing = fields.signing.take().or_else(|| ambient.0.signing.clone());
+            fields.batch_session = fields
+                .batch_session
+                .take()
+                .or_else(|| ambient.0.batch_session.clone());
+            fields.creator = fields.creator.take().or_else(|| ambient.0.creator.clone());
+            context
+        }
+        #[cfg(not(any(test, feature = "ambient")))]
+        self
+    }
+
     /// The DID acting in this request: the identity node access control
     /// checks and an explicit transaction belongs to. `None` for an anonymous
     /// request.

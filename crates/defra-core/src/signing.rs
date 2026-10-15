@@ -12,6 +12,12 @@ use kovan_map::HopscotchMap;
 use rapidhash::fast::RandomState;
 use zeroize::Zeroize;
 
+#[cfg(any(test, feature = "ambient"))]
+pub use crate::ambient::{
+    get_broadcast_creator_did, get_signing_config, scope_broadcast_creator_did,
+    set_broadcast_creator_did, set_signing_config,
+};
+
 /// Remote signing delegate (e.g. Orbis, Secure Enclave host callbacks).
 ///
 /// Implementations call an external service to produce signatures.
@@ -626,5 +632,43 @@ mod tests {
     fn signing_key_type_from_str_rejects_invalid_values() {
         let error = "invalid".parse::<SigningKeyType>().unwrap_err();
         assert_eq!(error, "unsupported signing key type: invalid");
+    }
+}
+
+#[cfg(test)]
+mod broadcast_creator_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn async_creator_scopes_are_isolated_from_each_other_and_thread_state() {
+        set_broadcast_creator_did(Some("did:key:stale-thread".to_string()));
+
+        let alice = scope_broadcast_creator_did(Some("did:key:alice".to_string()), async {
+            tokio::task::yield_now().await;
+            get_broadcast_creator_did()
+        });
+        let anonymous = scope_broadcast_creator_did(None, async {
+            tokio::task::yield_now().await;
+            get_broadcast_creator_did()
+        });
+
+        let (alice_creator, anonymous_creator) = tokio::join!(alice, anonymous);
+        assert_eq!(alice_creator.as_deref(), Some("did:key:alice"));
+        assert_eq!(anonymous_creator, None);
+
+        set_broadcast_creator_did(None);
+    }
+
+    #[tokio::test]
+    async fn completed_creator_scope_cannot_contaminate_next_anonymous_mutation() {
+        let owner = scope_broadcast_creator_did(Some("did:key:owner".to_string()), async {
+            get_broadcast_creator_did()
+        })
+        .await;
+        assert_eq!(owner.as_deref(), Some("did:key:owner"));
+
+        let anonymous =
+            scope_broadcast_creator_did(None, async { get_broadcast_creator_did() }).await;
+        assert_eq!(anonymous, None);
     }
 }

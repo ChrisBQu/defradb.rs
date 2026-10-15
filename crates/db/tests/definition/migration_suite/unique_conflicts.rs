@@ -21,9 +21,7 @@ async fn unique_migration_db_with_value(
     if is_array {
         schema.fields[2].kind = FieldKind::bool_array();
     }
-    db.create_collection(&defra_core::RequestContext::default(), schema)
-        .await
-        .unwrap();
+    db.create_collection(schema).await.unwrap();
     let v1 = db
         .get_collection("Users")
         .unwrap()
@@ -32,12 +30,12 @@ async fn unique_migration_db_with_value(
         .to_string();
     let v2 = add_placeholder_version(&db, "placeholder").await;
     db.set_migration(
-        &defra_core::RequestContext::default(),
         LensConfig::new(
             &v1,
             &v2,
             LensModule::from_bytes(b"\0asm\x01\0\0\0".to_vec()),
         ),
+        None,
     )
     .await
     .unwrap();
@@ -65,10 +63,7 @@ async fn materialize_rejects_new_unique_collision_and_rolls_back() {
     seed_old_user(&db, &v1, "Bob").await;
     let before = stored_entries(&db).await;
 
-    let err = db
-        .materialize_collection(&defra_core::RequestContext::default(), "Users")
-        .await
-        .unwrap_err();
+    let err = db.materialize_collection("Users").await.unwrap_err();
     assert!(err.is_unique_constraint_violation(), "{err}");
     assert_eq!(stored_entries(&db).await, before);
 }
@@ -137,12 +132,7 @@ async fn materialize_preserves_preexisting_unique_collision_across_transform() {
     set_stored_verified(&db, &first, false).await;
     set_stored_verified(&db, &second, false).await;
 
-    assert_eq!(
-        db.materialize_collection(&defra_core::RequestContext::default(), "Users")
-            .await
-            .unwrap(),
-        2
-    );
+    assert_eq!(db.materialize_collection("Users").await.unwrap(), 2);
     assert_eq!(verified_index_count(&db).await, 1);
     let collection = db.get_collection("Users").unwrap().unwrap();
     for id in [&first, &second] {
@@ -211,9 +201,7 @@ async fn materialize_checks_array_conflicts_per_value() {
         .await;
         let before = stored_entries(&db).await;
 
-        let result = db
-            .materialize_collection(&defra_core::RequestContext::default(), "Users")
-            .await;
+        let result = db.materialize_collection("Users").await;
         if introduces_collision {
             let err = result.unwrap_err();
             assert!(err.is_unique_constraint_violation(), "{err}");

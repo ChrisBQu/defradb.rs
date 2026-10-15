@@ -75,22 +75,17 @@ impl Blockstore for MergeStateUnreadable {
 async fn unreadable_merge_state_fails_the_counter_merge() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let database = Arc::new(DB::from_arc(store.clone()).unwrap());
-    database
-        .create_collection(
-            &defra_core::RequestContext::default(),
-            CollectionVersion::new(
-                "Counters",
-                "v1",
-                "col-counters",
-                vec![
-                    FieldDescription::new("1", "_docID", FieldKind::doc_id()),
-                    FieldDescription::new("2", "score", FieldKind::int())
-                        .with_crdt_type(CType::PnCounter),
-                ],
-            ),
-        )
-        .await
-        .unwrap();
+    database.create_collection(CollectionVersion::new(
+        "Counters",
+        "v1",
+        "col-counters",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "score", FieldKind::int()).with_crdt_type(CType::PnCounter),
+        ],
+    ))
+    .await
+    .unwrap();
     let blocks = Arc::new(MergeStateUnreadable(DefraBlockstore::new(store, true)));
     let handler = DbMergeHandler::new(database.clone(), blocks.clone());
 
@@ -111,10 +106,7 @@ async fn unreadable_merge_state_fails_the_counter_merge() {
         signature: None,
     };
     let cid = block.generate_cid().unwrap();
-    blocks
-        .put(&cid, &block.to_dag_cbor().unwrap())
-        .await
-        .unwrap();
+    blocks.put(&cid, &block.to_dag_cbor().unwrap()).await.unwrap();
 
     let doc_id = DocID::new_v0(
         "bafyreihgg6a5auqhikq4nvw6fj3kbreovdbazlisbs5kerkahoqwwiz75i"

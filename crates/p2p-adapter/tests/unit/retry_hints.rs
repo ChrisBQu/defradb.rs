@@ -32,7 +32,6 @@ async fn assert_hint_prevents_resend(path: PushPath) {
     .unwrap();
     let created = db::AutoCommitMutator::new(db.clone())
         .create(
-            &defra_core::RequestContext::default(),
             "Users",
             document::Document::from_json_str(r#"{"name":"Alice"}"#).unwrap(),
         )

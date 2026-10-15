@@ -53,12 +53,9 @@ pub(super) async fn open_with_collection(
 ) -> (Arc<RegolithStore>, Arc<DB<RegolithStore>>) {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = Arc::new(DB::from_arc(store.clone()).unwrap());
-    db.create_collection(
-        &defra_core::RequestContext::default(),
-        users_schema(name, version_id, collection_id),
-    )
-    .await
-    .unwrap();
+    db.create_collection(users_schema(name, version_id, collection_id))
+        .await
+        .unwrap();
     (store, db)
 }
 
@@ -72,11 +69,7 @@ where
 {
     let mut doc = Document::new();
     doc.set("name", NormalValue::String(name.to_owned()));
-    mutator
-        .create(&defra_core::RequestContext::default(), collection, doc)
-        .await
-        .unwrap()
-        .doc_id
+    mutator.create(collection, doc).await.unwrap().doc_id
 }
 
 /// Run `attempt` until it succeeds or fails for a reason other than a
@@ -178,10 +171,7 @@ async fn create_index_indexes_the_documents_that_already_exist() {
 
     // A completed backfill clears its action; only an errored or running one
     // is listed.
-    let actions = db
-        .list_index_actions(&defra_core::RequestContext::default(), "col-index-backfill")
-        .await
-        .unwrap();
+    let actions = db.list_index_actions("col-index-backfill").await.unwrap();
     assert!(
         !actions.contains_key(&index.id),
         "the backfill did not complete: {:?}",
@@ -216,7 +206,7 @@ async fn create_index_backfills_more_documents_than_a_batch_holds() {
 
     assert_eq!(index_entries(&db, "Batched", index.id).await, total);
     assert!(!db
-        .list_index_actions(&defra_core::RequestContext::default(), "col-index-batched")
+        .list_index_actions("col-index-batched")
         .await
         .unwrap()
         .contains_key(&index.id));
@@ -256,10 +246,7 @@ async fn autocommit_writes_refresh_index_state_from_the_attempt_snapshot() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let stale_db = Arc::new(DB::from_arc(store.clone()).unwrap());
     stale_db
-        .create_collection(
-            &defra_core::RequestContext::default(),
-            users_schema("Racing", "racing-v1", "col-index-racing"),
-        )
+        .create_collection(users_schema("Racing", "racing-v1", "col-index-racing"))
         .await
         .unwrap();
     let mutator = AutoCommitMutator::new(stale_db.clone());
@@ -285,21 +272,13 @@ async fn autocommit_writes_refresh_index_state_from_the_attempt_snapshot() {
     );
     mutator
         .update(
-            &defra_core::RequestContext::default(),
             "Racing",
             update,
             RapidHashSet::from_iter(["name".to_string()]),
         )
         .await
         .unwrap();
-    mutator
-        .delete(
-            &defra_core::RequestContext::default(),
-            "Racing",
-            &deleted_id,
-        )
-        .await
-        .unwrap();
+    mutator.delete("Racing", &deleted_id).await.unwrap();
 
     assert_eq!(index_entries(&index_db, "Racing", index.id).await, 2);
     assert_eq!(
@@ -344,12 +323,7 @@ async fn create_index_keeps_pace_with_concurrent_writers() {
                     doc.set_id(ids[i].clone());
                     doc.set("name", NormalValue::String(format!("upd-{i}")));
                     mutator
-                        .update(
-                            &defra_core::RequestContext::default(),
-                            "Racing",
-                            doc,
-                            RapidHashSet::from_iter(["name".to_string()]),
-                        )
+                        .update("Racing", doc, RapidHashSet::from_iter(["name".to_string()]))
                         .await
                 })
                 .await;
@@ -361,9 +335,8 @@ async fn create_index_keeps_pace_with_concurrent_writers() {
         let ids = ids.clone();
         let deleted = deleted.clone();
         tokio::spawn(async move {
-            let context = defra_core::RequestContext::default();
             for i in deleted {
-                retrying(|| mutator.delete(&context, "Racing", &ids[i])).await;
+                retrying(|| mutator.delete("Racing", &ids[i])).await;
             }
         })
     };
@@ -375,9 +348,7 @@ async fn create_index_keeps_pace_with_concurrent_writers() {
                 retrying(|| async {
                     let mut doc = Document::new();
                     doc.set("name", NormalValue::String(format!("new-{i}")));
-                    mutator
-                        .create(&defra_core::RequestContext::default(), "Racing", doc)
-                        .await
+                    mutator.create("Racing", doc).await
                 })
                 .await;
             }
@@ -388,10 +359,7 @@ async fn create_index_keeps_pace_with_concurrent_writers() {
     deleter.await.unwrap();
     inserter.await.unwrap();
 
-    let actions = db
-        .list_index_actions(&defra_core::RequestContext::default(), "col-index-racing")
-        .await
-        .unwrap();
+    let actions = db.list_index_actions("col-index-racing").await.unwrap();
     assert!(
         !actions.contains_key(&index.id),
         "the backfill did not complete: {:?}",
@@ -428,7 +396,7 @@ async fn create_index_keeps_pace_with_concurrent_writers() {
         existing - deleted.len() + created.len()
     );
     assert!(!db
-        .list_index_actions(&defra_core::RequestContext::default(), "col-index-racing")
+        .list_index_actions("col-index-racing")
         .await
         .unwrap()
         .contains_key(&index.id));
@@ -443,12 +411,9 @@ async fn create_index_fence_includes_old_schema_writes_before_definition_commit(
         gate: Arc::clone(&gate),
     });
     let db = Arc::new(DB::from_arc(store).unwrap());
-    db.create_collection(
-        &defra_core::RequestContext::default(),
-        users_schema("Racing", "racing-v1", "col-index-gate"),
-    )
-    .await
-    .unwrap();
+    db.create_collection(users_schema("Racing", "racing-v1", "col-index-gate"))
+        .await
+        .unwrap();
     let mutator = Arc::new(AutoCommitMutator::new(db.clone()));
     create_user(&mutator, "Racing", "before").await;
 
@@ -481,10 +446,7 @@ async fn create_index_fence_covers_other_handles_reserved_id_range() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let index_db = Arc::new(DB::from_arc(store.clone()).unwrap());
     index_db
-        .create_collection(
-            &defra_core::RequestContext::default(),
-            users_schema("Racing", "racing-v1", "col-index-handles"),
-        )
+        .create_collection(users_schema("Racing", "racing-v1", "col-index-handles"))
         .await
         .unwrap();
 
@@ -701,7 +663,6 @@ async fn backfill_batch_aborts_when_a_document_it_read_changes() {
     doc.set("name", NormalValue::String("grace-hopper".to_string()));
     mutator
         .update(
-            &defra_core::RequestContext::default(),
             "Observed",
             doc,
             RapidHashSet::from_iter(["name".to_string()]),
@@ -831,7 +792,7 @@ async fn index_backfill_resumes_after_a_restart() {
     assert_eq!(entries_for(&db, "Resumed", "user-0").await, 1);
     assert_eq!(entries_for(&db, "Resumed", "user-299").await, 1);
     assert!(!db
-        .list_index_actions(&defra_core::RequestContext::default(), COLLECTION_ID)
+        .list_index_actions(COLLECTION_ID)
         .await
         .unwrap()
         .contains_key(&index.id));

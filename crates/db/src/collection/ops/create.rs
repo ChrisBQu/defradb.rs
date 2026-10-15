@@ -517,9 +517,7 @@ mod tests {
         txn.discard().unwrap();
         assert!(db.schema_heads.get("HeadPublicationProbe").is_none());
 
-        db.create_collection(&defra_core::RequestContext::default(), schema)
-            .await
-            .unwrap();
+        db.create_collection(schema).await.unwrap();
         assert!(db.schema_heads.get("HeadPublicationProbe").is_some());
     }
 }

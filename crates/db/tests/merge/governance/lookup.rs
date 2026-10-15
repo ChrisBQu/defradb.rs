@@ -147,34 +147,28 @@ impl Node {
             field.immutable = true;
             field
         };
-        db.create_collection(
-            &defra_core::RequestContext::default(),
-            CollectionVersion::new(
-                "Grants",
-                "col-grants",
-                "col-grants",
-                vec![
-                    FieldDescription::new("1", "_docID", FieldKind::doc_id()),
-                    immutable("2", "writer"),
-                    immutable("3", "twin"),
-                    FieldDescription::new("4", "holder", FieldKind::string()),
-                ],
-            ),
-        )
+        db.create_collection(CollectionVersion::new(
+            "Grants",
+            "col-grants",
+            "col-grants",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                immutable("2", "writer"),
+                immutable("3", "twin"),
+                FieldDescription::new("4", "holder", FieldKind::string()),
+            ],
+        ))
         .await
         .unwrap();
-        db.create_collection(
-            &defra_core::RequestContext::default(),
-            CollectionVersion::new(
-                "Notes",
-                "col-notes",
-                "col-notes",
-                vec![
-                    FieldDescription::new("1", "_docID", FieldKind::doc_id()),
-                    FieldDescription::new("2", "grant", FieldKind::string()),
-                ],
-            ),
-        )
+        db.create_collection(CollectionVersion::new(
+            "Notes",
+            "col-notes",
+            "col-notes",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "grant", FieldKind::string()),
+            ],
+        ))
         .await
         .unwrap();
         db.create_index(

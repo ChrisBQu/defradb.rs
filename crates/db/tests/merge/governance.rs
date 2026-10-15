@@ -146,18 +146,15 @@ impl Node {
                 ("Grants", "col-grants", "writer"),
                 ("Notes", "col-notes", "grant"),
             ] {
-                db.create_collection(
-                    &defra_core::RequestContext::default(),
-                    CollectionVersion::new(
-                        name,
-                        id,
-                        id,
-                        vec![
-                            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
-                            FieldDescription::new("2", field, FieldKind::string()),
-                        ],
-                    ),
-                )
+                db.create_collection(CollectionVersion::new(
+                    name,
+                    id,
+                    id,
+                    vec![
+                        FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                        FieldDescription::new("2", field, FieldKind::string()),
+                    ],
+                ))
                 .await
                 .unwrap();
             }
@@ -177,33 +174,27 @@ impl Node {
         );
         let mut writer_field = FieldDescription::new("2", "writer", FieldKind::string());
         writer_field.immutable = true;
-        db.create_collection(
-            &defra_core::RequestContext::default(),
-            CollectionVersion::new(
-                "Grants",
-                "col-grants",
-                "col-grants",
-                vec![
-                    FieldDescription::new("1", "_docID", FieldKind::doc_id()),
-                    writer_field,
-                    FieldDescription::new("3", "label", FieldKind::string()),
-                ],
-            ),
-        )
+        db.create_collection(CollectionVersion::new(
+            "Grants",
+            "col-grants",
+            "col-grants",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                writer_field,
+                FieldDescription::new("3", "label", FieldKind::string()),
+            ],
+        ))
         .await
         .unwrap();
-        db.create_collection(
-            &defra_core::RequestContext::default(),
-            CollectionVersion::new(
-                "Notes",
-                "col-notes",
-                "col-notes",
-                vec![
-                    FieldDescription::new("1", "_docID", FieldKind::doc_id()),
-                    FieldDescription::new("2", "grant", FieldKind::string()),
-                ],
-            ),
-        )
+        db.create_collection(CollectionVersion::new(
+            "Notes",
+            "col-notes",
+            "col-notes",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "grant", FieldKind::string()),
+            ],
+        ))
         .await
         .unwrap();
         db.set_merge_governance(MergeGovernance::new(["Notes"]).with_validator(validator));
@@ -249,18 +240,15 @@ impl Node {
             ("Grants", "col-grants", "col-grants", "writer"),
             ("Notes", "col-notes", "ver-notes", "grant"),
         ] {
-            db.create_collection(
-                &defra_core::RequestContext::default(),
-                CollectionVersion::new(
-                    name,
-                    id,
-                    version,
-                    vec![
-                        FieldDescription::new("1", "_docID", FieldKind::doc_id()),
-                        FieldDescription::new("2", field, FieldKind::string()),
-                    ],
-                ),
-            )
+            db.create_collection(CollectionVersion::new(
+                name,
+                id,
+                version,
+                vec![
+                    FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                    FieldDescription::new("2", field, FieldKind::string()),
+                ],
+            ))
             .await
             .unwrap();
         }
@@ -271,11 +259,7 @@ impl Node {
     /// Delete a document the way a client mutation does, index cleanup included.
     async fn delete_locally(&self, collection: &str, doc_id: &str) {
         AutoCommitMutator::new(self.db.clone())
-            .delete(
-                &defra_core::RequestContext::default(),
-                collection,
-                &doc_id.parse().unwrap(),
-            )
+            .delete(collection, &doc_id.parse().unwrap())
             .await
             .unwrap();
     }
@@ -287,11 +271,7 @@ impl Node {
         let mutator =
             BatchMutator::new(self.db.clone(), Arc::new(async_lock::Mutex::new(Some(txn)))).await;
         let created = mutator
-            .create(
-                &defra_core::RequestContext::default(),
-                collection,
-                Document::from_json_str(json).unwrap(),
-            )
+            .create(collection, Document::from_json_str(json).unwrap())
             .await
             .unwrap();
         mutator.commit().await.unwrap();

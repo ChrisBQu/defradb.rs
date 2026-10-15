@@ -63,7 +63,7 @@ fn schema() -> CollectionVersion {
 /// Returns (rank, doc_id) per seeded document, in insertion order.
 async fn populated() -> (Arc<DB<RegolithStore>>, Vec<(i64, String)>) {
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).expect("a database"));
-    db.create_collection(&defra_core::RequestContext::default(), schema())
+    db.create_collection(schema())
         .await
         .expect("the collection must register");
 
@@ -76,7 +76,7 @@ async fn populated() -> (Arc<DB<RegolithStore>>, Vec<(i64, String)>) {
         doc.set("rank", NormalValue::Int(rank));
         doc.set("name", NormalValue::String(name.to_string()));
         let created = mutator
-            .create(&defra_core::RequestContext::default(), COLLECTION, doc)
+            .create(COLLECTION, doc)
             .await
             .expect("the document must be created");
         seeded.push((rank, created.doc_id.to_string()));

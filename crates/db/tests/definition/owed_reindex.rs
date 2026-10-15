@@ -24,16 +24,12 @@ async fn node(sdl: &str) -> (Arc<DB<RegolithStore>>, Arc<RefusingStore>) {
     let store = RefusingStore::refusing();
     let mut db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     db.set_lens_store(store.clone());
-    db.create_collections_atomic(
-        &defra_core::RequestContext::default(),
-        query::parse_sdl(sdl).unwrap(),
-    )
-    .await
-    .unwrap();
+    db.create_collections_atomic(query::parse_sdl(sdl).unwrap())
+        .await
+        .unwrap();
     let db = Arc::new(db);
     db::AutoCommitMutator::new(db.clone())
         .create(
-            &defra_core::RequestContext::default(),
             "Users",
             Document::from_json_str(r#"{"name": "Ada"}"#).unwrap(),
         )
@@ -50,12 +46,7 @@ fn migration() -> LensConfig {
 async fn a_reindex_that_fails_after_a_patch_stays_owed_until_it_succeeds() {
     let (db, store) = node("type Users { name: String @index }").await;
     let patched = db
-        .patch_collection_with_migration(
-            &defra_core::RequestContext::default(),
-            "Users",
-            ADD_AGE_PATCH,
-            Some(migration()),
-        )
+        .patch_collection_with_migration("Users", ADD_AGE_PATCH, Some(migration()), None)
         .await
         .expect("the patch stands when the reindex after it fails");
 
@@ -86,14 +77,9 @@ async fn a_reindex_that_fails_after_a_patch_stays_owed_until_it_succeeds() {
 #[tokio::test]
 async fn a_schema_change_with_nothing_to_rebuild_owes_nothing_once_it_commits() {
     let (db, _store) = node("type Users { name: String }").await;
-    db.patch_collection_with_migration(
-        &defra_core::RequestContext::default(),
-        "Users",
-        ADD_AGE_PATCH,
-        Some(migration()),
-    )
-    .await
-    .unwrap();
+    db.patch_collection_with_migration("Users", ADD_AGE_PATCH, Some(migration()), None)
+        .await
+        .unwrap();
 
     assert!(
         db.owed_reindexes().await.unwrap().is_empty(),

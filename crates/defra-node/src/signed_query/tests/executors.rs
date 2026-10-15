@@ -64,7 +64,7 @@ pub(super) fn test_signing_config() -> SigningConfig {
 impl QueryExecutor for TestExecution {
     fn abandon_txn(&self, _handle: &TransactionHandle) {}
 
-    async fn execute(&self, request: QueryRequest) -> query::QueryResponse {
+    async fn execute(&self, _request: QueryRequest) -> query::QueryResponse {
         match self {
             Self::Slow { started, completed } => {
                 started.store(true, Ordering::SeqCst);
@@ -87,13 +87,15 @@ impl QueryExecutor for TestExecution {
                 expected_public_key_hex,
             } => {
                 for _ in 0..3 {
-                    let signing_config = request.context.signing();
+                    let signing_config = defra_core::signing::get_signing_config();
                     let current_identity = defra_core::current_identity::get_current_identity();
-                    let batch_session_key = request.context.batch_session();
-                    if signing_config.map(|config| config.public_key_hex.as_str())
+                    let batch_session_key = defra_core::batch_signing::get_batch_session_key();
+                    if signing_config
+                        .as_ref()
+                        .map(|config| config.public_key_hex.as_str())
                         != Some(expected_public_key_hex.as_str())
                         || current_identity.as_deref() != Some(expected_did.as_str())
-                        || batch_session_key != Some(expected_public_key_hex.as_str())
+                        || batch_session_key.as_deref() != Some(expected_public_key_hex.as_str())
                     {
                         return query::QueryResponse::error(
                             "signed query context did not survive an await boundary",

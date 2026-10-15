@@ -30,19 +30,10 @@ async fn assert_store_released(name: &str, finish: Finish) {
     let db = Arc::new(DB::new(RegolithStore::open(&dir).unwrap()).unwrap());
     let registry = DbTransactionRegistry::new(db.clone());
 
-    let handle = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .unwrap();
+    let handle = registry.begin(false).await.unwrap();
     match finish {
-        Finish::Commit => registry
-            .commit(&defra_core::RequestContext::default(), &handle)
-            .await
-            .unwrap(),
-        Finish::Rollback => registry
-            .rollback(&defra_core::RequestContext::default(), &handle)
-            .await
-            .unwrap(),
+        Finish::Commit => registry.commit(&handle).await.unwrap(),
+        Finish::Rollback => registry.rollback(&handle).await.unwrap(),
         Finish::Abandon => registry.abandon(&handle),
     }
 

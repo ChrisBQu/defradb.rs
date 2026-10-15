@@ -34,14 +34,11 @@ fn is_version_key(key: &[u8]) -> bool {
 #[tokio::test]
 async fn an_update_at_the_same_version_does_not_rewrite_the_version_key() {
     let db = Arc::new(DB::new(CountingStore::new(RegolithStore::in_memory().unwrap())).unwrap());
-    db.create_collection(&defra_core::RequestContext::default(), collection())
-        .await
-        .unwrap();
+    db.create_collection(collection()).await.unwrap();
 
     let creator = DbDocMutator::new(Arc::clone(&db), db.new_txn(false).await.unwrap());
     let created = creator
         .create(
-            &defra_core::RequestContext::default(),
             "Versioned",
             Document::from_json_str(r#"{"left": 0, "right": 0}"#).unwrap(),
         )
@@ -49,10 +46,7 @@ async fn an_update_at_the_same_version_does_not_rewrite_the_version_key() {
         .unwrap();
     creator.take_txn().await.unwrap().commit().await.unwrap();
     assert!(
-        db.store()
-            .take_written_keys()
-            .iter()
-            .any(|key| is_version_key(key)),
+        db.store().take_written_keys().iter().any(|key| is_version_key(key)),
         "a create writes its version key"
     );
 
@@ -65,7 +59,6 @@ async fn an_update_at_the_same_version_does_not_rewrite_the_version_key() {
     doc.set("left", NormalValue::Int(1));
     updater
         .update(
-            &defra_core::RequestContext::default(),
             "Versioned",
             doc,
             RapidHashSet::from_iter(["left".to_string()]),

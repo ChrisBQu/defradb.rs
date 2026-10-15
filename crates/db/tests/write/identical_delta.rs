@@ -35,14 +35,13 @@ fn snap_collection() -> CollectionVersion {
 #[tokio::test]
 async fn identical_field_writes_to_distinct_documents_do_not_conflict() {
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).expect("create db"));
-    db.create_collection(&defra_core::RequestContext::default(), snap_collection())
+    db.create_collection(snap_collection())
         .await
         .expect("create collection");
 
     let auto = AutoCommitMutator::new(Arc::clone(&db));
     let first = auto
         .create(
-            &defra_core::RequestContext::default(),
             "Snap",
             Document::from_json_str(r#"{"status": "idle", "content": "a"}"#).expect("doc a"),
         )
@@ -50,7 +49,6 @@ async fn identical_field_writes_to_distinct_documents_do_not_conflict() {
         .expect("create a");
     let second = auto
         .create(
-            &defra_core::RequestContext::default(),
             "Snap",
             Document::from_json_str(r#"{"status": "idle", "content": "b"}"#).expect("doc b"),
         )
@@ -76,12 +74,7 @@ async fn identical_field_writes_to_distinct_documents_do_not_conflict() {
         // The same field, the same value, in two different documents.
         doc.set("status", NormalValue::String("streaming".to_string()));
         mutator
-            .update(
-                &defra_core::RequestContext::default(),
-                "Snap",
-                doc,
-                RapidHashSet::from_iter(["status".to_string()]),
-            )
+            .update("Snap", doc, RapidHashSet::from_iter(["status".to_string()]))
             .await
             .expect("update");
     }

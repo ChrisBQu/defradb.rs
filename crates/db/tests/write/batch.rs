@@ -27,7 +27,7 @@ fn branchable_test_collection() -> CollectionVersion {
 #[tokio::test]
 async fn batch_create_publishes_event_on_commit() {
     let (db, bus) = make_test_db_with_bus().await;
-    db.create_collection(&defra_core::RequestContext::default(), test_collection())
+    db.create_collection(test_collection())
         .await
         .expect("schema");
 
@@ -38,10 +38,7 @@ async fn batch_create_publishes_event_on_commit() {
     let mutator = BatchMutator::new(Arc::clone(&db), Arc::clone(&txn_arc)).await;
 
     let doc = Document::from_json_str(r#"{"x": 1}"#).expect("doc");
-    let result = mutator
-        .create(&defra_core::RequestContext::default(), "TestDoc", doc)
-        .await
-        .expect("create");
+    let result = mutator.create("TestDoc", doc).await.expect("create");
 
     // Before commit: no event should have fired
     assert!(
@@ -70,7 +67,6 @@ async fn batch_create_publishes_event_on_commit() {
 async fn batch_create_registers_external_acp_before_ordered_event() {
     let (db, bus) = make_test_db_with_bus().await;
     db.create_collection(
-        &defra_core::RequestContext::default(),
         test_collection().with_policy(schema::PolicyDescription::new("policy1", "test-docs")),
     )
     .await
@@ -86,14 +82,15 @@ async fn batch_create_registers_external_acp_before_ordered_event() {
     mutator.set_document_acp(acp.clone());
     let mut sub = bus.subscribe(&[EventName::Update]);
     let owner = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
-    let result = mutator
-        .create(
-            &defra_core::RequestContext::default().with_creator(Some(owner.to_string())),
+    let result = defra_core::signing::scope_broadcast_creator_did(
+        Some(owner.to_string()),
+        mutator.create(
             "TestDoc",
             Document::from_json_str(r#"{"x": 1}"#).expect("doc"),
-        )
-        .await
-        .expect("create");
+        ),
+    )
+    .await
+    .expect("create");
 
     let commit = tokio::spawn(async move { mutator.commit().await });
     let message = tokio::time::timeout(std::time::Duration::from_secs(1), sub.recv())
@@ -114,7 +111,7 @@ async fn batch_delete_missing_doc_publishes_no_event_and_writes_no_block() {
     // DeleteNode treats existed==false as a no-op; the mutator must not
     // create a tombstone commit or fire an Update event for a missing doc.
     let (db, bus) = make_test_db_with_bus().await;
-    db.create_collection(&defra_core::RequestContext::default(), test_collection())
+    db.create_collection(test_collection())
         .await
         .expect("schema");
 
@@ -127,11 +124,7 @@ async fn batch_delete_missing_doc_publishes_no_event_and_writes_no_block() {
     let missing_doc_id = document::DocID::new_v0_from_seed("missing-doc");
 
     let result = mutator
-        .delete(
-            &defra_core::RequestContext::default(),
-            "TestDoc",
-            &missing_doc_id,
-        )
+        .delete("TestDoc", &missing_doc_id)
         .await
         .expect("delete should succeed even on missing doc");
     assert!(!result.existed, "doc should not have existed");
@@ -152,34 +145,20 @@ async fn batch_delete_branchable_surfaces_collection_block_for_broadcast() {
     // collection block so BroadcastMutator can re-broadcast it (matches
     // create/update's broadcast_cid/broadcast_block plumbing).
     let (db, _bus) = make_test_db_with_bus().await;
-    db.create_collection(
-        &defra_core::RequestContext::default(),
-        branchable_test_collection(),
-    )
-    .await
-    .expect("schema");
+    db.create_collection(branchable_test_collection())
+        .await
+        .expect("schema");
 
     let txn = db.new_txn(false).await.expect("new_txn");
     let txn_arc = Arc::new(TokioMutex::new(Some(txn)));
     let mutator = BatchMutator::new(Arc::clone(&db), Arc::clone(&txn_arc)).await;
 
     let doc = Document::from_json_str(r#"{"x": 1}"#).expect("doc");
-    let create_result = mutator
-        .create(
-            &defra_core::RequestContext::default(),
-            "TestBranchable",
-            doc,
-        )
-        .await
-        .expect("create");
+    let create_result = mutator.create("TestBranchable", doc).await.expect("create");
     let doc_id = create_result.doc_id.clone();
 
     let delete_result = mutator
-        .delete(
-            &defra_core::RequestContext::default(),
-            "TestBranchable",
-            &doc_id,
-        )
+        .delete("TestBranchable", &doc_id)
         .await
         .expect("delete");
 

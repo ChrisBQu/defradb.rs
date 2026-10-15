@@ -113,9 +113,7 @@ impl Fixture {
             gate: Arc::clone(&gate),
         };
         let db = Arc::new(DB::new(store).unwrap());
-        db.create_collection(&defra_core::RequestContext::default(), collection)
-            .await
-            .unwrap();
+        db.create_collection(collection).await.unwrap();
         Self { db, gate }
     }
 
@@ -167,11 +165,7 @@ fn fields(names: &[&str]) -> RapidHashSet<String> {
 async fn create(fixture: &Fixture, json: &str) -> Document {
     let created = fixture
         .mutator()
-        .create(
-            &defra_core::RequestContext::default(),
-            "Patch",
-            Document::from_json_str(json).unwrap(),
-        )
+        .create("Patch", Document::from_json_str(json).unwrap())
         .await
         .unwrap();
     fixture
@@ -199,16 +193,8 @@ async fn a_delete_that_loses_to_a_delete_is_a_no_op() {
     let paused_id = id.clone();
     let (loser, winner) = fixture
         .race(
-            |mutator| async move {
-                mutator
-                    .delete(&defra_core::RequestContext::default(), "Patch", &paused_id)
-                    .await
-            },
-            |mutator| async move {
-                mutator
-                    .delete(&defra_core::RequestContext::default(), "Patch", &id)
-                    .await
-            },
+            |mutator| async move { mutator.delete("Patch", &paused_id).await },
+            |mutator| async move { mutator.delete("Patch", &id).await },
         )
         .await;
 
@@ -227,21 +213,8 @@ async fn an_update_that_loses_to_a_delete_reports_not_found() {
     patched.set("left", NormalValue::Int(2));
     let (loser, winner) = fixture
         .race(
-            |mutator| async move {
-                mutator
-                    .update(
-                        &defra_core::RequestContext::default(),
-                        "Patch",
-                        patched,
-                        fields(&["left"]),
-                    )
-                    .await
-            },
-            |mutator| async move {
-                mutator
-                    .delete(&defra_core::RequestContext::default(), "Patch", &id)
-                    .await
-            },
+            |mutator| async move { mutator.update("Patch", patched, fields(&["left"])).await },
+            |mutator| async move { mutator.delete("Patch", &id).await },
         )
         .await;
 
@@ -266,26 +239,8 @@ async fn an_update_of_a_field_another_update_changed_writes_again_on_top_of_it()
     second.set("left", NormalValue::Int(2));
     let (loser, winner) = fixture
         .race(
-            |mutator| async move {
-                mutator
-                    .update(
-                        &defra_core::RequestContext::default(),
-                        "Patch",
-                        first,
-                        fields(&["left"]),
-                    )
-                    .await
-            },
-            |mutator| async move {
-                mutator
-                    .update(
-                        &defra_core::RequestContext::default(),
-                        "Patch",
-                        second,
-                        fields(&["left"]),
-                    )
-                    .await
-            },
+            |mutator| async move { mutator.update("Patch", first, fields(&["left"])).await },
+            |mutator| async move { mutator.update("Patch", second, fields(&["left"])).await },
         )
         .await;
 
@@ -323,15 +278,11 @@ async fn a_create_that_loses_a_unique_index_race_reports_the_violation() {
         .race(
             |mutator| async move {
                 let doc = Document::from_json_str(r#"{"left": 7, "right": 1}"#).unwrap();
-                mutator
-                    .create(&defra_core::RequestContext::default(), "Patch", doc)
-                    .await
+                mutator.create("Patch", doc).await
             },
             |mutator| async move {
                 let doc = Document::from_json_str(r#"{"left": 7, "right": 2}"#).unwrap();
-                mutator
-                    .create(&defra_core::RequestContext::default(), "Patch", doc)
-                    .await
+                mutator.create("Patch", doc).await
             },
         )
         .await;
@@ -361,25 +312,10 @@ async fn a_compare_and_set_that_loses_reports_the_conflict_with_its_reason() {
         .race(
             |mutator| async move {
                 mutator
-                    .update_if_unchanged(
-                        &defra_core::RequestContext::default(),
-                        "Patch",
-                        expected,
-                        compared,
-                        fields(&["right"]),
-                    )
+                    .update_if_unchanged("Patch", expected, compared, fields(&["right"]))
                     .await
             },
-            |mutator| async move {
-                mutator
-                    .update(
-                        &defra_core::RequestContext::default(),
-                        "Patch",
-                        other,
-                        fields(&["left"]),
-                    )
-                    .await
-            },
+            |mutator| async move { mutator.update("Patch", other, fields(&["left"])).await },
         )
         .await;
 

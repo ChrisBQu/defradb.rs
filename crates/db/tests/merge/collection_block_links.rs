@@ -35,7 +35,6 @@ async fn node() -> (
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = Arc::new(DB::from_arc(store.clone()).unwrap());
     db.create_collection(
-        &defra_core::RequestContext::default(),
         CollectionVersion::new(
             "Ledger",
             COLLECTION_ID,

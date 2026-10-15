@@ -20,9 +20,7 @@ async fn a_patch_waits_for_the_full_predecessor_instead_of_rebuilding_it() {
     )
     .unwrap()
     .remove(0);
-    db.create_collection(&defra_core::RequestContext::default(), defined)
-        .await
-        .unwrap();
+    db.create_collection(defined).await.unwrap();
     let blockstore = Arc::new(DefraBlockstore::new(store, false));
     let handler = DbMergeHandler::new(db.clone(), blockstore.clone());
     let held = db.get_collection("Agent").unwrap().unwrap();

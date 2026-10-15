@@ -13,6 +13,9 @@ use kovan_queue::seg_queue::SegQueue;
 use rapidhash::fast::RandomState;
 use sha2::{Digest, Sha256};
 
+#[cfg(any(test, feature = "ambient"))]
+pub use crate::ambient::{get_batch_session_key, set_batch_session_key};
+
 // ---------------------------------------------------------------------------
 // Merkle root computation
 // ---------------------------------------------------------------------------
@@ -164,5 +167,13 @@ mod tests {
         let c = make_cid(b"stray");
         batch_collect_cid(key, c);
         assert!(batch_take_cids(key).is_none());
+    }
+
+    #[test]
+    fn thread_local_session_key() {
+        set_batch_session_key(Some("my-key".to_string()));
+        assert_eq!(get_batch_session_key(), Some("my-key".to_string()));
+        set_batch_session_key(None);
+        assert_eq!(get_batch_session_key(), None);
     }
 }

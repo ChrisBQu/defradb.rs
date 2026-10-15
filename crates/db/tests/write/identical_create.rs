@@ -27,7 +27,7 @@ fn collection() -> CollectionVersion {
 
 async fn open() -> Arc<DB<RegolithStore>> {
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).expect("create db"));
-    db.create_collection(&defra_core::RequestContext::default(), collection())
+    db.create_collection(collection())
         .await
         .expect("create collection");
     db
@@ -41,19 +41,11 @@ async fn two_identical_creates_exactly_one_commits() {
     let second = DbDocMutator::new(Arc::clone(&db), db.new_txn(false).await.expect("txn two"));
 
     let one = first
-        .create(
-            &defra_core::RequestContext::default(),
-            "Twin",
-            Document::from_json_str(DOC).unwrap(),
-        )
+        .create("Twin", Document::from_json_str(DOC).unwrap())
         .await
         .expect("first create");
     let two = second
-        .create(
-            &defra_core::RequestContext::default(),
-            "Twin",
-            Document::from_json_str(DOC).unwrap(),
-        )
+        .create("Twin", Document::from_json_str(DOC).unwrap())
         .await
         .expect("second create");
     assert_eq!(
@@ -96,11 +88,7 @@ async fn concurrent_identical_autocommit_creates_exactly_one_commits() {
             tokio::spawn(async move {
                 barrier.wait().await;
                 mutator
-                    .create(
-                        &defra_core::RequestContext::default(),
-                        "Twin",
-                        Document::from_json_str(DOC).unwrap(),
-                    )
+                    .create("Twin", Document::from_json_str(DOC).unwrap())
                     .await
             })
         })

@@ -341,24 +341,20 @@ async fn every_write_path_keeps_a_documents_stored_heads_to_its_live_heads() {
     use query::mutator::DocMutator;
     const WRITES: i64 = 24;
     let db = std::sync::Arc::new(db::DB::new(RegolithStore::in_memory().unwrap()).unwrap());
-    db.create_collection(
-        &defra_core::RequestContext::default(),
-        schema::CollectionVersion::new(
-            "Rewritten",
-            "rewritten-v1",
-            "col-rewritten",
-            vec![
-                schema::FieldDescription::new("1", "_docID", schema::FieldKind::doc_id()),
-                schema::FieldDescription::new("2", "value", schema::FieldKind::int()),
-            ],
-        ),
-    )
+    db.create_collection(schema::CollectionVersion::new(
+        "Rewritten",
+        "rewritten-v1",
+        "col-rewritten",
+        vec![
+            schema::FieldDescription::new("1", "_docID", schema::FieldKind::doc_id()),
+            schema::FieldDescription::new("2", "value", schema::FieldKind::int()),
+        ],
+    ))
     .await
     .unwrap();
     let autocommit = db::AutoCommitMutator::new(db.clone());
     let doc_id = autocommit
         .create(
-            &defra_core::RequestContext::default(),
             "Rewritten",
             document::Document::from_json_str(r#"{"value": 0}"#).unwrap(),
         )
@@ -374,12 +370,7 @@ async fn every_write_path_keeps_a_documents_stored_heads_to_its_live_heads() {
             .unwrap();
         doc.set("value", document::NormalValue::Int(value));
         autocommit
-            .update(
-                &defra_core::RequestContext::default(),
-                "Rewritten",
-                doc,
-                modified(),
-            )
+            .update("Rewritten", doc, modified())
             .await
             .unwrap();
     }
@@ -395,15 +386,7 @@ async fn every_write_path_keeps_a_documents_stored_heads_to_its_live_heads() {
             .unwrap()
             .unwrap();
         doc.set("value", document::NormalValue::Int(value));
-        explicit
-            .update(
-                &defra_core::RequestContext::default(),
-                "Rewritten",
-                doc,
-                modified(),
-            )
-            .await
-            .unwrap();
+        explicit.update("Rewritten", doc, modified()).await.unwrap();
         explicit.take_txn().await.unwrap().commit().await.unwrap();
     }
     assert_eq!(stored(&db, b"/d/").await, 2);

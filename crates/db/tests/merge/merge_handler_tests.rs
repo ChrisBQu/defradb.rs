@@ -237,19 +237,16 @@ pub(super) async fn make_handler_with_schema_and_bus() -> (
     db.set_event_bus(bus.clone());
     let db = Arc::new(db);
 
-    db.create_collection(
-        &defra_core::RequestContext::default(),
-        CollectionVersion::new(
-            "Users",
-            "v1",
-            "col-users",
-            vec![
-                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
-                FieldDescription::new("2", "name", FieldKind::string()),
-                FieldDescription::new("3", "age", FieldKind::int()),
-            ],
-        ),
-    )
+    db.create_collection(CollectionVersion::new(
+        "Users",
+        "v1",
+        "col-users",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "name", FieldKind::string()),
+            FieldDescription::new("3", "age", FieldKind::int()),
+        ],
+    ))
     .await
     .unwrap();
 
@@ -265,15 +262,12 @@ async fn make_counting_handler_with_schema() -> (
 ) {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = Arc::new(DB::from_arc(store.clone()).unwrap());
-    db.create_collection(
-        &defra_core::RequestContext::default(),
-        CollectionVersion::new(
-            "Users",
-            "v1",
-            "col-users",
-            vec![FieldDescription::new("1", "_docID", FieldKind::doc_id())],
-        ),
-    )
+    db.create_collection(CollectionVersion::new(
+        "Users",
+        "v1",
+        "col-users",
+        vec![FieldDescription::new("1", "_docID", FieldKind::doc_id())],
+    ))
     .await
     .unwrap();
 
@@ -290,19 +284,15 @@ async fn make_handler_with_counter_schema() -> (
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = Arc::new(DB::from_arc(store.clone()).unwrap());
 
-    db.create_collection(
-        &defra_core::RequestContext::default(),
-        CollectionVersion::new(
-            "Counters",
-            "v1",
-            "col-counters",
-            vec![
-                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
-                FieldDescription::new("2", "score", FieldKind::int())
-                    .with_crdt_type(CType::PnCounter),
-            ],
-        ),
-    )
+    db.create_collection(CollectionVersion::new(
+        "Counters",
+        "v1",
+        "col-counters",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "score", FieldKind::int()).with_crdt_type(CType::PnCounter),
+        ],
+    ))
     .await
     .unwrap();
 
@@ -1080,19 +1070,11 @@ async fn interactive_counter_increment_and_concurrent_same_doc_merge_both_commit
     let registry = DbTransactionRegistry::new(Arc::clone(&db));
 
     // (1) Seed the doc with score = 10.
-    let handle = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .expect("begin seed");
-    let ctx = registry
-        .get(&defra_core::RequestContext::default(), &handle)
-        .into_result()
-        .unwrap()
-        .unwrap();
+    let handle = registry.begin(false).await.expect("begin seed");
+    let ctx = registry.get(&handle).into_result().unwrap().unwrap();
     let mutator = ctx.doc_mutator().expect("mutator");
     let created = mutator
         .create(
-            &defra_core::RequestContext::default(),
             "Counters",
             Document::from_json_str(r#"{"score": 10}"#).unwrap(),
         )
@@ -1101,10 +1083,7 @@ async fn interactive_counter_increment_and_concurrent_same_doc_merge_both_commit
     let doc_id = created.doc_id.to_string();
     drop(mutator);
     drop(ctx);
-    registry
-        .commit(&defra_core::RequestContext::default(), &handle)
-        .await
-        .expect("commit seed");
+    registry.commit(&handle).await.expect("commit seed");
     assert_eq!(
         read_counter_value(&db, &doc_id, "score").await,
         10,
@@ -1113,15 +1092,8 @@ async fn interactive_counter_increment_and_concurrent_same_doc_merge_both_commit
 
     // (2) Begin an EXPLICIT txn and increment +3 through the interactive
     // mutator. Its operand and document update belong to the open snapshot.
-    let handle = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .expect("begin interactive");
-    let ctx = registry
-        .get(&defra_core::RequestContext::default(), &handle)
-        .into_result()
-        .unwrap()
-        .unwrap();
+    let handle = registry.begin(false).await.expect("begin interactive");
+    let ctx = registry.get(&handle).into_result().unwrap().unwrap();
     let mutator = ctx.doc_mutator().expect("mutator");
     let mut update_doc = Document::from_json_str(r#"{"score": 13}"#).unwrap();
     update_doc.set_id(document::DocID::from_string(&doc_id).unwrap());
@@ -1129,12 +1101,7 @@ async fn interactive_counter_increment_and_concurrent_same_doc_merge_both_commit
     let mut modified = rapidhash::RapidHashSet::new();
     modified.insert("score".to_string());
     mutator
-        .update(
-            &defra_core::RequestContext::default(),
-            "Counters",
-            update_doc,
-            modified,
-        )
+        .update("Counters", update_doc, modified)
         .await
         .expect("interactive update +3");
     drop(mutator);
@@ -1167,7 +1134,7 @@ async fn interactive_counter_increment_and_concurrent_same_doc_merge_both_commit
     // (4) Now COMMIT the interactive txn. Its snapshot predates the merge, and
     // both are blind operands on one part: it commits, and nothing is lost.
     registry
-        .commit(&defra_core::RequestContext::default(), &handle)
+        .commit(&handle)
         .await
         .expect("an increment never conflicts with a concurrent increment");
     assert_eq!(
@@ -1441,19 +1408,16 @@ async fn make_handler_with_immutable_schema() -> (
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = Arc::new(DB::from_arc(store.clone()).unwrap());
 
-    db.create_collection(
-        &defra_core::RequestContext::default(),
-        CollectionVersion::new(
-            "AgentDocs",
-            "v1",
-            "col-agentdocs",
-            vec![
-                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
-                FieldDescription::new("2", "agent_did", FieldKind::string()).as_immutable(),
-                FieldDescription::new("3", "body", FieldKind::string()),
-            ],
-        ),
-    )
+    db.create_collection(CollectionVersion::new(
+        "AgentDocs",
+        "v1",
+        "col-agentdocs",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "agent_did", FieldKind::string()).as_immutable(),
+            FieldDescription::new("3", "body", FieldKind::string()),
+        ],
+    ))
     .await
     .unwrap();
 
@@ -3065,7 +3029,6 @@ async fn make_handler_with_unique_index_schema() -> (
     let db = Arc::new(DB::from_arc(store.clone()).unwrap());
 
     db.create_collection(
-        &defra_core::RequestContext::default(),
         CollectionVersion::new(
             "Sessions",
             "v1",
@@ -3171,7 +3134,7 @@ async fn remote_composite_merge_with_unique_index_twin_conflict_merges_via_canon
 
     handler
         .db()
-        .materialize_collection(&defra_core::RequestContext::default(), "Sessions")
+        .materialize_collection("Sessions")
         .await
         .expect("reindexing must preserve the merge-time canonical unique winner");
 
@@ -3813,7 +3776,7 @@ async fn first_materialization_and_local_create_arrive_in_commit_order() {
     let mut document = document::Document::new();
     document.set("name", "local");
     let local_id = local
-        .create(&defra_core::RequestContext::default(), "Users", document)
+        .create("Users", document)
         .await
         .unwrap()
         .doc_id

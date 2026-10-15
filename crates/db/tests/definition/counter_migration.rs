@@ -36,11 +36,7 @@ fn tally() -> CollectionVersion {
 
 async fn create(db: &Arc<DB<RegolithStore>>, json: &str) -> DocID {
     AutoCommitMutator::new(db.clone())
-        .create(
-            &defra_core::RequestContext::default(),
-            "Tally",
-            Document::from_json_str(json).unwrap(),
-        )
+        .create("Tally", Document::from_json_str(json).unwrap())
         .await
         .unwrap()
         .doc_id
@@ -106,9 +102,7 @@ async fn values(db: &Arc<DB<RegolithStore>>) -> RapidHashMap<String, Document> {
 async fn accumulators_move_into_their_documents_once() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = Arc::new(DB::from_arc(store.clone()).unwrap());
-    db.create_collection(&defra_core::RequestContext::default(), tally())
-        .await
-        .unwrap();
+    db.create_collection(tally()).await.unwrap();
     let behind = create(&db, r#"{"up": 5, "name": "behind"}"#)
         .await
         .to_string();
@@ -177,7 +171,6 @@ async fn accumulators_move_into_their_documents_once() {
     increment.set_counter_delta("up".to_string(), NormalValue::Int(1));
     AutoCommitMutator::new(reopened.clone())
         .update(
-            &defra_core::RequestContext::default(),
             "Tally",
             increment,
             RapidHashSet::from_iter(["up".to_string()]),
@@ -205,9 +198,7 @@ async fn accumulators_move_into_their_documents_once() {
 async fn a_store_without_accumulators_only_records_completion() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = Arc::new(DB::from_arc(store.clone()).unwrap());
-    db.create_collection(&defra_core::RequestContext::default(), tally())
-        .await
-        .unwrap();
+    db.create_collection(tally()).await.unwrap();
     let doc = create(&db, r#"{"up": 3}"#).await.to_string();
     let reopened = Arc::new(DB::open_from_arc(store.clone()).await.unwrap());
     assert_eq!(

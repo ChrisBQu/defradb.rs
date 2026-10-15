@@ -453,7 +453,6 @@ mod tests {
             acp: &acp,
             projection: Some(&projection),
             identity: &Identity::Anonymous,
-            dac_bypass: false,
         };
         let absent = checker
             .object_access("policy", "User", "doc-1")
@@ -520,7 +519,6 @@ mod tests {
             &NoopDocumentAcp(true),
             Some(&projection),
             &Identity::Anonymous,
-            false,
             "policy",
             "User",
             "collection-1",

@@ -385,9 +385,7 @@ async fn implicit_batch_replays_atomically_inside_engine_attempt() {
     let mut db = DB::new(store.clone()).unwrap();
     db.set_event_bus(bus.clone());
     let db = Arc::new(db);
-    db.create_collection(&defra_core::RequestContext::default(), test_collection())
-        .await
-        .unwrap();
+    db.create_collection(test_collection()).await.unwrap();
 
     let runner = query::QueryRunner::with_provider(
         LensedAutoCommitFetcher::new(db.clone()),
@@ -452,13 +450,9 @@ async fn implicit_single_update_is_prepared_for_engine_owned_retry() {
         race_operation: Arc::new(Mutex::new(None)),
     };
     let store_db = Arc::new(DB::new(store.clone()).unwrap());
-    store_db
-        .create_collection(&defra_core::RequestContext::default(), test_collection())
-        .await
-        .unwrap();
+    store_db.create_collection(test_collection()).await.unwrap();
     let created = db::write::autocommit::AutoCommitMutator::new(store_db.clone())
         .create(
-            &defra_core::RequestContext::default(),
             "TestDoc",
             document::Document::from_json_str(r#"{"x": 1}"#).unwrap(),
         )
@@ -479,7 +473,6 @@ async fn implicit_single_update_is_prepared_for_engine_owned_retry() {
             doc.set("x", 3_i64);
             mutator
                 .update(
-                    &defra_core::RequestContext::default(),
                     "TestDoc",
                     doc,
                     rapidhash::RapidHashSet::from_iter(["x".to_string()]),
@@ -551,9 +544,7 @@ async fn direct_mutation_api_replays_atomically_inside_engine_attempt() {
     let mut db = DB::new(store.clone()).unwrap();
     db.set_event_bus(bus.clone());
     let db = Arc::new(db);
-    db.create_collection(&defra_core::RequestContext::default(), test_collection())
-        .await
-        .unwrap();
+    db.create_collection(test_collection()).await.unwrap();
 
     let runner = query::QueryRunner::with_provider(
         LensedAutoCommitFetcher::new(db.clone()),
@@ -617,13 +608,10 @@ async fn single_create_replays_after_engine_conflict_with_consistent_identity_an
         race_operation: Arc::new(Mutex::new(None)),
     };
     let db = Arc::new(DB::new(store.clone()).unwrap());
-    db.create_collection(&defra_core::RequestContext::default(), test_collection())
-        .await
-        .unwrap();
+    db.create_collection(test_collection()).await.unwrap();
 
     let result = db::write::autocommit::AutoCommitMutator::new(db.clone())
         .create(
-            &defra_core::RequestContext::default(),
             "TestDoc",
             document::Document::from_json_str(r#"{"x":7}"#).unwrap(),
         )
@@ -665,7 +653,6 @@ async fn transactional_acp_revoke_conflicts_and_denies_batch_update() {
     };
     let db = Arc::new(DB::new(store.clone()).unwrap());
     db.create_collection(
-        &defra_core::RequestContext::default(),
         test_collection().with_policy(schema::PolicyDescription::new("policy", "test-docs")),
     )
     .await
@@ -673,7 +660,6 @@ async fn transactional_acp_revoke_conflicts_and_denies_batch_update() {
 
     let original = db::write::autocommit::AutoCommitMutator::new(db.clone())
         .create(
-            &defra_core::RequestContext::default(),
             "TestDoc",
             document::Document::from_json_str(r#"{"x":1}"#).unwrap(),
         )
@@ -750,7 +736,6 @@ async fn remote_acp_batch_replays_with_attempt_local_registration_projection() {
     let owner =
         identity::Did::new("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK").unwrap();
     db.create_collection(
-        &defra_core::RequestContext::default(),
         test_collection().with_policy(schema::PolicyDescription::new("policy1", "test-docs")),
     )
     .await
@@ -782,21 +767,28 @@ async fn remote_acp_batch_replays_with_attempt_local_registration_projection() {
             second: add_TestDoc(input: {x: 2}) { _docID }
         }"#,
     )
-    .with_identity(Some(owner.clone()))
-    .with_context(defra_core::RequestContext::default().with_identity(Some(owner.to_string())));
-    let response = defra_core::signing::scope_request_bearer_token(
-        Some(owner.to_string()),
-        Some("batch-request-token".to_string()),
-        async {
-            let prepared = runner.prepare_request(&request).await.unwrap();
-            assert!(
-                prepared.is_some(),
-                "remote ACP batches are request-prepared"
-            );
-            runner.execute_prepared(request, prepared).await
-        },
-    )
-    .await;
+    .with_identity(Some(owner.clone()));
+    let response =
+        defra_core::current_identity::with_scoped_identity(Some(owner.to_string()), async {
+            defra_core::signing::scope_request_bearer_token(
+                Some(owner.to_string()),
+                Some("batch-request-token".to_string()),
+                async {
+                    let prepared = runner.prepare_request(&request).await.unwrap();
+                    assert!(
+                        prepared.is_some(),
+                        "remote ACP batches are request-prepared"
+                    );
+                    defra_core::signing::scope_broadcast_creator_did(
+                        Some(owner.to_string()),
+                        runner.execute_prepared(request, prepared),
+                    )
+                    .await
+                },
+            )
+            .await
+        })
+        .await;
     assert!(!response.has_errors(), "{:?}", response.errors);
     assert_eq!(store.attempts.load(Ordering::SeqCst), 2);
     let winner_ids = {

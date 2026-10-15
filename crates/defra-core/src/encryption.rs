@@ -50,6 +50,9 @@ use rand::RngCore;
 use std::sync::atomic::{AtomicBool, Ordering};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+#[cfg(any(test, feature = "ambient"))]
+pub use crate::ambient::{get_encryption_config, set_encryption_config};
+
 const DETERMINISTIC_TEST_CRYPTO_ENV: &str = "DEFRA_ALLOW_DETERMINISTIC_TEST_CRYPTO";
 
 /// Wrapper for encryption key bytes with zeroization on drop.

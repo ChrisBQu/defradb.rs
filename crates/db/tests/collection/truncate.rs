@@ -36,30 +36,20 @@ async fn create_user(mutator: &AutoCommitMutator<RegolithStore>, name: &str, age
     let mut doc = Document::new();
     doc.set("name", NormalValue::String(name.to_owned()));
     doc.set("age", NormalValue::Int(age));
-    mutator
-        .create(&defra_core::RequestContext::default(), "Users", doc)
-        .await
-        .unwrap()
-        .doc_id
+    mutator.create("Users", doc).await.unwrap().doc_id
 }
 
 #[tokio::test]
 async fn filtered_truncate_removes_only_matching_documents_and_indexes() {
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
-    db.create_collection(&defra_core::RequestContext::default(), users_schema())
-        .await
-        .unwrap();
+    db.create_collection(users_schema()).await.unwrap();
     let mutator = AutoCommitMutator::new(db.clone());
     let alice = create_user(&mutator, "Alice", 30).await;
     create_user(&mutator, "Bob", 40).await;
 
-    db.truncate_collection_with_filter(
-        &defra_core::RequestContext::default(),
-        "Users",
-        age_filter(30),
-    )
-    .await
-    .unwrap();
+    db.truncate_collection_with_filter("Users", age_filter(30), None)
+        .await
+        .unwrap();
 
     let docs = AutoCommitFetcher::new(db.clone())
         .get_all("Users")
@@ -86,34 +76,18 @@ async fn filtered_truncate_removes_only_matching_documents_and_indexes() {
 #[tokio::test]
 async fn filtered_truncate_includes_soft_deleted_documents() {
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
-    db.create_collection(&defra_core::RequestContext::default(), users_schema())
-        .await
-        .unwrap();
+    db.create_collection(users_schema()).await.unwrap();
     let mutator = AutoCommitMutator::new(db.clone());
 
     let mut doc = Document::new();
     doc.set("name", NormalValue::String("Alice".into()));
     doc.set("age", NormalValue::Int(30));
-    let created = mutator
-        .create(&defra_core::RequestContext::default(), "Users", doc)
-        .await
-        .unwrap();
-    mutator
-        .delete(
-            &defra_core::RequestContext::default(),
-            "Users",
-            &created.doc_id,
-        )
-        .await
-        .unwrap();
+    let created = mutator.create("Users", doc).await.unwrap();
+    mutator.delete("Users", &created.doc_id).await.unwrap();
 
-    db.truncate_collection_with_filter(
-        &defra_core::RequestContext::default(),
-        "Users",
-        age_filter(30),
-    )
-    .await
-    .unwrap();
+    db.truncate_collection_with_filter("Users", age_filter(30), None)
+        .await
+        .unwrap();
     create_user(&mutator, "Alice", 31).await;
 
     assert_eq!(
@@ -129,19 +103,12 @@ async fn filtered_truncate_includes_soft_deleted_documents() {
 #[tokio::test]
 async fn filtered_truncate_rejects_branchable_collections() {
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
-    db.create_collection(
-        &defra_core::RequestContext::default(),
-        users_schema().as_branchable(),
-    )
-    .await
-    .unwrap();
+    db.create_collection(users_schema().as_branchable())
+        .await
+        .unwrap();
 
     let error = db
-        .truncate_collection_with_filter(
-            &defra_core::RequestContext::default(),
-            "Users",
-            age_filter(30),
-        )
+        .truncate_collection_with_filter("Users", age_filter(30), None)
         .await
         .unwrap_err();
 
@@ -154,9 +121,7 @@ async fn filtered_truncate_rejects_branchable_collections() {
 #[tokio::test]
 async fn filtered_truncate_removes_only_matching_searchable_encryption_records() {
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
-    db.create_collection(&defra_core::RequestContext::default(), users_schema())
-        .await
-        .unwrap();
+    db.create_collection(users_schema()).await.unwrap();
     let mutator = AutoCommitMutator::new(db.clone());
     let alice = create_user(&mutator, "Alice", 30).await;
     let bob = create_user(&mutator, "Bob", 40).await;
@@ -172,13 +137,9 @@ async fn filtered_truncate_removes_only_matching_searchable_encryption_records()
     drop(datastore);
     txn.commit().await.unwrap();
 
-    db.truncate_collection_with_filter(
-        &defra_core::RequestContext::default(),
-        "Users",
-        age_filter(30),
-    )
-    .await
-    .unwrap();
+    db.truncate_collection_with_filter("Users", age_filter(30), None)
+        .await
+        .unwrap();
 
     let txn = db.new_txn(true).await.unwrap();
     let datastore = txn.datastore().unwrap();
@@ -199,27 +160,18 @@ async fn filtered_truncate_processes_more_than_one_chunk() {
             FieldDescription::new("3", "seq", FieldKind::int()),
         ],
     );
-    db.create_collection(&defra_core::RequestContext::default(), schema)
-        .await
-        .unwrap();
+    db.create_collection(schema).await.unwrap();
     let mutator = AutoCommitMutator::new(db.clone());
     for seq in 0..=1000 {
         let mut doc = Document::new();
         doc.set("age", NormalValue::Int(30));
         doc.set("seq", NormalValue::Int(seq));
-        mutator
-            .create(&defra_core::RequestContext::default(), "Users", doc)
-            .await
-            .unwrap();
+        mutator.create("Users", doc).await.unwrap();
     }
 
-    db.truncate_collection_with_filter(
-        &defra_core::RequestContext::default(),
-        "Users",
-        age_filter(30),
-    )
-    .await
-    .unwrap();
+    db.truncate_collection_with_filter("Users", age_filter(30), None)
+        .await
+        .unwrap();
 
     assert!(AutoCommitFetcher::new(db)
         .get_all("Users")

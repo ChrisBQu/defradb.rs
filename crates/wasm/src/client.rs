@@ -640,8 +640,10 @@ mod tests {
     }
 
     /// `mutate` takes `&self`, so a page can start a second one before the
-    /// first resolves. Each carries the signing config in its own request
-    /// context, so neither can take it from the other.
+    /// first resolves, and the signing config they share is a thread-local.
+    /// The mutation lock is what keeps one from taking it away from the other;
+    /// this pins the outcome, since each mutation runs to completion without
+    /// yielding here and the interleaving cannot be provoked from a test.
     #[wasm_bindgen_test]
     async fn concurrent_mutations_are_each_signed() {
         let (mut client, _) = client_with_identity("signing_concurrent").await;

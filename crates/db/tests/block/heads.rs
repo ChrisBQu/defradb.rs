@@ -344,7 +344,6 @@ async fn appends_through_the_db_store_only_the_live_head() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = Arc::new(db::DB::from_arc(store.clone()).unwrap());
     db.create_collection(
-        &defra_core::RequestContext::default(),
         schema::CollectionVersion::new(
             "Segment",
             "v1",
@@ -362,14 +361,9 @@ async fn appends_through_the_db_store_only_the_live_head() {
     for index in 0..APPENDS {
         let mut doc = document::Document::new();
         doc.set("body", format!("segment {index}"));
-        query::mutator::DocMutator::create(
-            &mutator,
-            &defra_core::RequestContext::default(),
-            "Segment",
-            doc,
-        )
-        .await
-        .unwrap();
+        query::mutator::DocMutator::create(&mutator, "Segment", doc)
+            .await
+            .unwrap();
     }
     let collection_id = {
         let mut txn = db.new_txn(true).await.unwrap();

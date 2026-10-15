@@ -13,6 +13,12 @@ ignored = ["tracing"]
 [lib]
 bench = false
 
+[features]
+# Test-only: keeps the thread-local request state tests set the old way and
+# lets a call that arrives without a RequestContext run in it. Enable it from
+# dev-dependencies only, never from a production dependency.
+ambient = []
+
 [dependencies]
 # Error handling
 thiserror.workspace = true

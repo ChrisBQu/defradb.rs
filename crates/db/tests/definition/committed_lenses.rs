@@ -20,12 +20,9 @@ async fn node() -> (Arc<DB<RegolithStore>>, Arc<RefusingStore>) {
     let store = RefusingStore::refusing();
     let mut db = DB::new(RegolithStore::in_memory().unwrap()).unwrap();
     db.set_lens_store(store.clone());
-    db.create_collections_atomic(
-        &defra_core::RequestContext::default(),
-        query::parse_sdl("type Users { name: String }").unwrap(),
-    )
-    .await
-    .unwrap();
+    db.create_collections_atomic(query::parse_sdl("type Users { name: String }").unwrap())
+        .await
+        .unwrap();
     (Arc::new(db), store)
 }
 
@@ -81,21 +78,14 @@ async fn assert_owed_until_used(db: &DB<RegolithStore>, store: &RefusingStore, i
 async fn a_transaction_migration_commits_when_its_registration_fails() {
     let (db, store) = node().await;
     let registry = DbTransactionRegistry::new(db.clone());
-    let txn_id = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .unwrap();
+    let txn_id = registry.begin(false).await.unwrap();
     let id = registry
-        .set_migration_in_txn(
-            &defra_core::RequestContext::default(),
-            &txn_id,
-            config("users-v1", "users-v2"),
-        )
+        .set_migration_in_txn(&txn_id, config("users-v1", "users-v2"), None)
         .await
         .unwrap();
 
     registry
-        .commit(&defra_core::RequestContext::default(), &txn_id)
+        .commit(&txn_id)
         .await
         .expect("the commit stands when the registration after it fails");
 
@@ -106,7 +96,12 @@ async fn a_transaction_migration_commits_when_its_registration_fails() {
 async fn a_patch_migration_commits_when_its_registration_fails() {
     let (db, store) = node().await;
     let patched = db
-        .patch_collection_with_migration(&defra_core::RequestContext::default(), "Users", r#"[{"op": "add", "path": "/Users/Fields/-", "value": {"Name": "age", "Kind": "Int"}}]"#, Some(config("", "")))
+        .patch_collection_with_migration(
+            "Users",
+            r#"[{"op": "add", "path": "/Users/Fields/-", "value": {"Name": "age", "Kind": "Int"}}]"#,
+            Some(config("", "")),
+            None,
+        )
         .await
         .expect("the patch stands when the registration after it fails");
     let id = TransformId::new(
@@ -171,13 +166,9 @@ async fn a_lens_added_in_a_transaction_is_durable_with_its_commit() {
     let path = dir.path().join("lens.wasm");
     std::fs::write(&path, b"\0asm\x01\0\0\0").unwrap();
     let registry = DbTransactionRegistry::new(db.clone());
-    let txn_id = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .unwrap();
+    let txn_id = registry.begin(false).await.unwrap();
     let id = registry
         .add_lens_in_txn(
-            &defra_core::RequestContext::default(),
             &txn_id,
             LensConfig::new(
                 "",
@@ -189,10 +180,7 @@ async fn a_lens_added_in_a_transaction_is_durable_with_its_commit() {
         .unwrap();
 
     std::fs::remove_file(&path).unwrap();
-    registry
-        .commit(&defra_core::RequestContext::default(), &txn_id)
-        .await
-        .unwrap();
+    registry.commit(&txn_id).await.unwrap();
 
     let txn = db.new_txn(true).await.unwrap();
     assert!(

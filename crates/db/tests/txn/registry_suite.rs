@@ -32,9 +32,7 @@ fn test_schema() -> Vec<CollectionVersion> {
 async fn test_db_with_collections() -> Arc<DB<RegolithStore>> {
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     for schema in test_schema() {
-        db.create_collection(&defra_core::RequestContext::default(), schema)
-            .await
-            .unwrap();
+        db.create_collection(schema).await.unwrap();
     }
     db
 }
@@ -53,10 +51,7 @@ async fn seed_user_in_txn(
     if let Some(age) = age {
         doc.set("age", NormalValue::Int(age));
     }
-    let result = mutator
-        .create(&defra_core::RequestContext::default(), "Users", doc)
-        .await
-        .unwrap();
+    let result = mutator.create("Users", doc).await.unwrap();
     let txn = mutator.take_txn().await.unwrap();
     (txn, result.doc_id)
 }
@@ -82,10 +77,7 @@ async fn test_begin_transaction() {
     let db = test_db_with_collections().await;
     let registry = DbTransactionRegistry::new(db);
 
-    let txn_id = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .unwrap();
+    let txn_id = registry.begin(false).await.unwrap();
     assert!(!txn_id.as_str().is_empty());
 }
 
@@ -94,15 +86,8 @@ async fn test_begin_readonly_transaction() {
     let db = test_db_with_collections().await;
     let registry = DbTransactionRegistry::new(db);
 
-    let txn_id = registry
-        .begin(&defra_core::RequestContext::default(), true)
-        .await
-        .unwrap();
-    let ctx = registry
-        .get(&defra_core::RequestContext::default(), &txn_id)
-        .into_result()
-        .unwrap()
-        .unwrap();
+    let txn_id = registry.begin(true).await.unwrap();
+    let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
     assert!(ctx.is_readonly());
 }
 
@@ -111,15 +96,8 @@ async fn test_begin_readwrite_transaction() {
     let db = test_db_with_collections().await;
     let registry = DbTransactionRegistry::new(db);
 
-    let txn_id = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .unwrap();
-    let ctx = registry
-        .get(&defra_core::RequestContext::default(), &txn_id)
-        .into_result()
-        .unwrap()
-        .unwrap();
+    let txn_id = registry.begin(false).await.unwrap();
+    let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
     assert!(!ctx.is_readonly());
 }
 
@@ -127,14 +105,10 @@ async fn test_begin_readwrite_transaction() {
 async fn add_schema_in_txn_rejects_an_unpaired_relation() {
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     let registry = DbTransactionRegistry::new(db);
-    let txn_id = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .unwrap();
+    let txn_id = registry.begin(false).await.unwrap();
 
     let error = registry
         .add_schema_in_txn(
-            &defra_core::RequestContext::default(),
             txn_id.as_str(),
             r#"
                 type User {
@@ -162,15 +136,8 @@ async fn test_transaction_id_matches() {
     let db = test_db_with_collections().await;
     let registry = DbTransactionRegistry::new(db);
 
-    let txn_id = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .unwrap();
-    let ctx = registry
-        .get(&defra_core::RequestContext::default(), &txn_id)
-        .into_result()
-        .unwrap()
-        .unwrap();
+    let txn_id = registry.begin(false).await.unwrap();
+    let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
     assert_eq!(ctx.id(), txn_id.as_str());
 }
 
@@ -179,13 +146,8 @@ async fn test_begin_and_commit() {
     let db = test_db_with_collections().await;
     let registry = DbTransactionRegistry::new(db);
 
-    let txn_id = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .unwrap();
-    let result = registry
-        .commit(&defra_core::RequestContext::default(), &txn_id)
-        .await;
+    let txn_id = registry.begin(false).await.unwrap();
+    let result = registry.commit(&txn_id).await;
     assert!(result.is_ok());
 }
 
@@ -194,13 +156,8 @@ async fn test_begin_and_rollback() {
     let db = test_db_with_collections().await;
     let registry = DbTransactionRegistry::new(db);
 
-    let txn_id = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .unwrap();
-    let result = registry
-        .rollback(&defra_core::RequestContext::default(), &txn_id)
-        .await;
+    let txn_id = registry.begin(false).await.unwrap();
+    let result = registry.rollback(&txn_id).await;
     assert!(result.is_ok());
 }
 
@@ -210,9 +167,7 @@ async fn test_commit_nonexistent_returns_error() {
     let registry = DbTransactionRegistry::new(db);
 
     let nonexistent: TransactionHandle = "nonexistent".parse().unwrap();
-    let result = registry
-        .commit(&defra_core::RequestContext::default(), &nonexistent)
-        .await;
+    let result = registry.commit(&nonexistent).await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("not found"));
 }
@@ -223,9 +178,7 @@ async fn test_rollback_nonexistent_returns_error() {
     let registry = DbTransactionRegistry::new(db);
 
     let nonexistent: TransactionHandle = "nonexistent".parse().unwrap();
-    let result = registry
-        .rollback(&defra_core::RequestContext::default(), &nonexistent)
-        .await;
+    let result = registry.rollback(&nonexistent).await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("not found"));
 }
@@ -237,7 +190,7 @@ async fn test_get_nonexistent_returns_not_found() {
 
     let nonexistent: TransactionHandle = "nonexistent".parse().unwrap();
     assert!(matches!(
-        registry.get(&defra_core::RequestContext::default(), &nonexistent),
+        registry.get(&nonexistent),
         GetTransactionResult::NotFound
     ));
 }
@@ -247,18 +200,10 @@ async fn test_double_commit_returns_error() {
     let db = test_db_with_collections().await;
     let registry = DbTransactionRegistry::new(db);
 
-    let txn_id = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .unwrap();
-    registry
-        .commit(&defra_core::RequestContext::default(), &txn_id)
-        .await
-        .unwrap();
+    let txn_id = registry.begin(false).await.unwrap();
+    registry.commit(&txn_id).await.unwrap();
 
-    let result = registry
-        .commit(&defra_core::RequestContext::default(), &txn_id)
-        .await;
+    let result = registry.commit(&txn_id).await;
     assert!(result.is_err());
 }
 
@@ -267,18 +212,10 @@ async fn test_double_rollback_returns_error() {
     let db = test_db_with_collections().await;
     let registry = DbTransactionRegistry::new(db);
 
-    let txn_id = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .unwrap();
-    registry
-        .rollback(&defra_core::RequestContext::default(), &txn_id)
-        .await
-        .unwrap();
+    let txn_id = registry.begin(false).await.unwrap();
+    registry.rollback(&txn_id).await.unwrap();
 
-    let result = registry
-        .rollback(&defra_core::RequestContext::default(), &txn_id)
-        .await;
+    let result = registry.rollback(&txn_id).await;
     assert!(result.is_err());
 }
 
@@ -287,18 +224,10 @@ async fn test_commit_after_rollback_returns_error() {
     let db = test_db_with_collections().await;
     let registry = DbTransactionRegistry::new(db);
 
-    let txn_id = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .unwrap();
-    registry
-        .rollback(&defra_core::RequestContext::default(), &txn_id)
-        .await
-        .unwrap();
+    let txn_id = registry.begin(false).await.unwrap();
+    registry.rollback(&txn_id).await.unwrap();
 
-    let result = registry
-        .commit(&defra_core::RequestContext::default(), &txn_id)
-        .await;
+    let result = registry.commit(&txn_id).await;
     assert!(result.is_err());
 }
 
@@ -307,18 +236,10 @@ async fn test_rollback_after_commit_returns_error() {
     let db = test_db_with_collections().await;
     let registry = DbTransactionRegistry::new(db);
 
-    let txn_id = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .unwrap();
-    registry
-        .commit(&defra_core::RequestContext::default(), &txn_id)
-        .await
-        .unwrap();
+    let txn_id = registry.begin(false).await.unwrap();
+    registry.commit(&txn_id).await.unwrap();
 
-    let result = registry
-        .rollback(&defra_core::RequestContext::default(), &txn_id)
-        .await;
+    let result = registry.rollback(&txn_id).await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("not found"));
 }
@@ -328,20 +249,12 @@ async fn test_get_returns_not_found_after_commit() {
     let db = test_db_with_collections().await;
     let registry = DbTransactionRegistry::new(db);
 
-    let txn_id = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .unwrap();
-    assert!(registry
-        .get(&defra_core::RequestContext::default(), &txn_id)
-        .is_found());
+    let txn_id = registry.begin(false).await.unwrap();
+    assert!(registry.get(&txn_id).is_found());
 
-    registry
-        .commit(&defra_core::RequestContext::default(), &txn_id)
-        .await
-        .unwrap();
+    registry.commit(&txn_id).await.unwrap();
     assert!(matches!(
-        registry.get(&defra_core::RequestContext::default(), &txn_id),
+        registry.get(&txn_id),
         GetTransactionResult::NotFound
     ));
 }
@@ -351,20 +264,12 @@ async fn test_get_returns_not_found_after_rollback() {
     let db = test_db_with_collections().await;
     let registry = DbTransactionRegistry::new(db);
 
-    let txn_id = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .unwrap();
-    assert!(registry
-        .get(&defra_core::RequestContext::default(), &txn_id)
-        .is_found());
+    let txn_id = registry.begin(false).await.unwrap();
+    assert!(registry.get(&txn_id).is_found());
 
-    registry
-        .rollback(&defra_core::RequestContext::default(), &txn_id)
-        .await
-        .unwrap();
+    registry.rollback(&txn_id).await.unwrap();
     assert!(matches!(
-        registry.get(&defra_core::RequestContext::default(), &txn_id),
+        registry.get(&txn_id),
         GetTransactionResult::NotFound
     ));
 }
@@ -374,14 +279,11 @@ async fn test_set_migration_in_txn_is_only_visible_inside_transaction() {
     let db = test_db_with_collections().await;
     let registry = DbTransactionRegistry::new(db.clone());
 
-    let txn_id = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .unwrap();
+    let txn_id = registry.begin(false).await.unwrap();
     let config = LensConfig::new("users-v1", "users-v2", empty_wasm_module());
 
     let transform_id = registry
-        .set_migration_in_txn(&defra_core::RequestContext::default(), &txn_id, config)
+        .set_migration_in_txn(&txn_id, config, None)
         .await
         .unwrap();
 
@@ -391,19 +293,13 @@ async fn test_set_migration_in_txn_is_only_visible_inside_transaction() {
         "uncommitted migration leaked into global lens list"
     );
 
-    let txn_lenses = registry
-        .list_lenses_in_txn(&defra_core::RequestContext::default(), &txn_id)
-        .await
-        .unwrap();
+    let txn_lenses = registry.list_lenses_in_txn(&txn_id).await.unwrap();
     assert!(
         txn_lenses.contains_key(&transform_id.to_string()),
         "transaction-local migration should be visible inside the transaction"
     );
 
-    registry
-        .rollback(&defra_core::RequestContext::default(), &txn_id)
-        .await
-        .unwrap();
+    registry.rollback(&txn_id).await.unwrap();
 
     let global_after_rollback = db.lens_store().list().await.unwrap();
     assert!(
@@ -417,21 +313,15 @@ async fn test_set_migration_in_txn_promotes_transform_on_commit() {
     let db = test_db_with_collections().await;
     let registry = DbTransactionRegistry::new(db.clone());
 
-    let txn_id = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .unwrap();
+    let txn_id = registry.begin(false).await.unwrap();
     let config = LensConfig::new("users-v1", "users-v2", empty_wasm_module());
 
     let transform_id = registry
-        .set_migration_in_txn(&defra_core::RequestContext::default(), &txn_id, config)
+        .set_migration_in_txn(&txn_id, config, None)
         .await
         .unwrap();
 
-    registry
-        .commit(&defra_core::RequestContext::default(), &txn_id)
-        .await
-        .unwrap();
+    registry.commit(&txn_id).await.unwrap();
 
     let global_lenses = db.lens_store().list().await.unwrap();
     assert!(
@@ -445,24 +335,14 @@ async fn test_doc_fetcher_get_all_empty_collection() {
     let db = test_db_with_collections().await;
     let registry = DbTransactionRegistry::new(db);
 
-    let txn_id = registry
-        .begin(&defra_core::RequestContext::default(), true)
-        .await
-        .unwrap();
-    let ctx = registry
-        .get(&defra_core::RequestContext::default(), &txn_id)
-        .into_result()
-        .unwrap()
-        .unwrap();
+    let txn_id = registry.begin(true).await.unwrap();
+    let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
     let fetcher = ctx.doc_fetcher();
 
     let docs = fetcher.get_all("Users").await.unwrap();
     assert!(docs.is_empty());
 
-    registry
-        .rollback(&defra_core::RequestContext::default(), &txn_id)
-        .await
-        .unwrap();
+    registry.rollback(&txn_id).await.unwrap();
 }
 
 #[tokio::test]
@@ -470,25 +350,15 @@ async fn test_doc_fetcher_get_all_unknown_collection() {
     let db = test_db_with_collections().await;
     let registry = DbTransactionRegistry::new(db);
 
-    let txn_id = registry
-        .begin(&defra_core::RequestContext::default(), true)
-        .await
-        .unwrap();
-    let ctx = registry
-        .get(&defra_core::RequestContext::default(), &txn_id)
-        .into_result()
-        .unwrap()
-        .unwrap();
+    let txn_id = registry.begin(true).await.unwrap();
+    let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
     let fetcher = ctx.doc_fetcher();
 
     let result = fetcher.get_all("NonExistent").await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("NonExistent"));
 
-    registry
-        .rollback(&defra_core::RequestContext::default(), &txn_id)
-        .await
-        .unwrap();
+    registry.rollback(&txn_id).await.unwrap();
 }
 
 #[tokio::test]
@@ -496,25 +366,15 @@ async fn test_doc_fetcher_get_by_ids_empty() {
     let db = test_db_with_collections().await;
     let registry = DbTransactionRegistry::new(db);
 
-    let txn_id = registry
-        .begin(&defra_core::RequestContext::default(), true)
-        .await
-        .unwrap();
-    let ctx = registry
-        .get(&defra_core::RequestContext::default(), &txn_id)
-        .into_result()
-        .unwrap()
-        .unwrap();
+    let txn_id = registry.begin(true).await.unwrap();
+    let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
     let fetcher = ctx.doc_fetcher();
 
     let result = fetcher.get_by_ids("Users", &[]).await.unwrap();
     assert!(result.docs().is_empty());
     assert!(result.missing_ids().is_empty());
 
-    registry
-        .rollback(&defra_core::RequestContext::default(), &txn_id)
-        .await
-        .unwrap();
+    registry.rollback(&txn_id).await.unwrap();
 }
 
 #[tokio::test]
@@ -524,15 +384,8 @@ async fn test_doc_fetcher_get_by_ids_invalid_id_treated_as_not_found() {
     let db = test_db_with_collections().await;
     let registry = DbTransactionRegistry::new(db);
 
-    let txn_id = registry
-        .begin(&defra_core::RequestContext::default(), true)
-        .await
-        .unwrap();
-    let ctx = registry
-        .get(&defra_core::RequestContext::default(), &txn_id)
-        .into_result()
-        .unwrap()
-        .unwrap();
+    let txn_id = registry.begin(true).await.unwrap();
+    let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
     let fetcher = ctx.doc_fetcher();
 
     let result = fetcher
@@ -543,10 +396,7 @@ async fn test_doc_fetcher_get_by_ids_invalid_id_treated_as_not_found() {
     assert!(result.docs().is_empty());
     assert_eq!(result.missing_ids(), &["not-a-valid-docid".to_string()]);
 
-    registry
-        .rollback(&defra_core::RequestContext::default(), &txn_id)
-        .await
-        .unwrap();
+    registry.rollback(&txn_id).await.unwrap();
 }
 
 #[tokio::test]
@@ -554,24 +404,15 @@ async fn test_is_consumed_returns_false_before_take() {
     let db = test_db_with_collections().await;
     let registry = DbTransactionRegistry::new(db);
 
-    let txn_id = registry
-        .begin(&defra_core::RequestContext::default(), true)
-        .await
-        .unwrap();
-    let ctx = registry
-        .get_ctx(&defra_core::RequestContext::default(), &txn_id)
-        .unwrap()
-        .unwrap();
+    let txn_id = registry.begin(true).await.unwrap();
+    let ctx = registry.get_ctx(&txn_id).unwrap().unwrap();
 
     assert!(
         !ctx.is_consumed().await,
         "Transaction should not be consumed before take_txn"
     );
 
-    registry
-        .rollback(&defra_core::RequestContext::default(), &txn_id)
-        .await
-        .unwrap();
+    registry.rollback(&txn_id).await.unwrap();
 }
 
 #[tokio::test]
@@ -579,14 +420,8 @@ async fn test_is_consumed_returns_true_after_take() {
     let db = test_db_with_collections().await;
     let registry = DbTransactionRegistry::new(db);
 
-    let txn_id = registry
-        .begin(&defra_core::RequestContext::default(), true)
-        .await
-        .unwrap();
-    let ctx = registry
-        .get_ctx(&defra_core::RequestContext::default(), &txn_id)
-        .unwrap()
-        .unwrap();
+    let txn_id = registry.begin(true).await.unwrap();
+    let ctx = registry.get_ctx(&txn_id).unwrap().unwrap();
 
     // Take the transaction
     let _txn = ctx.take_txn().await;
@@ -602,14 +437,8 @@ async fn test_doc_fetcher_after_txn_consumed_returns_error() {
     let db = test_db_with_collections().await;
     let registry = DbTransactionRegistry::new(db);
 
-    let txn_id = registry
-        .begin(&defra_core::RequestContext::default(), true)
-        .await
-        .unwrap();
-    let ctx = registry
-        .get_ctx(&defra_core::RequestContext::default(), &txn_id)
-        .unwrap()
-        .unwrap();
+    let txn_id = registry.begin(true).await.unwrap();
+    let ctx = registry.get_ctx(&txn_id).unwrap().unwrap();
     let fetcher = ctx.doc_fetcher();
 
     // Manually take the transaction to simulate commit/rollback having consumed it
@@ -633,25 +462,15 @@ async fn test_transaction_sees_committed_data() {
     seed_committed_user(&db, "Alice", Some(30)).await;
 
     // Read via registry
-    let txn_id = registry
-        .begin(&defra_core::RequestContext::default(), true)
-        .await
-        .unwrap();
-    let ctx = registry
-        .get(&defra_core::RequestContext::default(), &txn_id)
-        .into_result()
-        .unwrap()
-        .unwrap();
+    let txn_id = registry.begin(true).await.unwrap();
+    let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
     let fetcher = ctx.doc_fetcher();
 
     let docs = fetcher.get_all("Users").await.unwrap();
     assert_eq!(docs.len(), 1);
     assert_eq!(docs[0].get("name").unwrap().as_str(), Some("Alice"));
 
-    registry
-        .rollback(&defra_core::RequestContext::default(), &txn_id)
-        .await
-        .unwrap();
+    registry.rollback(&txn_id).await.unwrap();
 }
 
 #[tokio::test]
@@ -664,15 +483,8 @@ async fn test_get_by_ids_returns_matching_docs() {
     seed_committed_user(&db, "Bob", None).await;
 
     // Query for just one document
-    let txn_id = registry
-        .begin(&defra_core::RequestContext::default(), true)
-        .await
-        .unwrap();
-    let ctx = registry
-        .get(&defra_core::RequestContext::default(), &txn_id)
-        .into_result()
-        .unwrap()
-        .unwrap();
+    let txn_id = registry.begin(true).await.unwrap();
+    let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
     let fetcher = ctx.doc_fetcher();
 
     let result = fetcher.get_by_ids("Users", &[doc1_id]).await.unwrap();
@@ -683,10 +495,7 @@ async fn test_get_by_ids_returns_matching_docs() {
         Some("Alice")
     );
 
-    registry
-        .rollback(&defra_core::RequestContext::default(), &txn_id)
-        .await
-        .unwrap();
+    registry.rollback(&txn_id).await.unwrap();
 }
 
 #[tokio::test]
@@ -694,44 +503,20 @@ async fn test_multiple_concurrent_transactions() {
     let db = test_db_with_collections().await;
     let registry = DbTransactionRegistry::new(db);
 
-    let txn1 = registry
-        .begin(&defra_core::RequestContext::default(), true)
-        .await
-        .unwrap();
-    let txn2 = registry
-        .begin(&defra_core::RequestContext::default(), true)
-        .await
-        .unwrap();
-    let txn3 = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .unwrap();
+    let txn1 = registry.begin(true).await.unwrap();
+    let txn2 = registry.begin(true).await.unwrap();
+    let txn3 = registry.begin(false).await.unwrap();
 
-    assert!(registry
-        .get(&defra_core::RequestContext::default(), &txn1)
-        .is_found());
-    assert!(registry
-        .get(&defra_core::RequestContext::default(), &txn2)
-        .is_found());
-    assert!(registry
-        .get(&defra_core::RequestContext::default(), &txn3)
-        .is_found());
+    assert!(registry.get(&txn1).is_found());
+    assert!(registry.get(&txn2).is_found());
+    assert!(registry.get(&txn3).is_found());
 
     assert_ne!(txn1, txn2);
     assert_ne!(txn2, txn3);
 
-    registry
-        .rollback(&defra_core::RequestContext::default(), &txn1)
-        .await
-        .unwrap();
-    registry
-        .rollback(&defra_core::RequestContext::default(), &txn2)
-        .await
-        .unwrap();
-    registry
-        .rollback(&defra_core::RequestContext::default(), &txn3)
-        .await
-        .unwrap();
+    registry.rollback(&txn1).await.unwrap();
+    registry.rollback(&txn2).await.unwrap();
+    registry.rollback(&txn3).await.unwrap();
 }
 
 #[tokio::test]
@@ -741,19 +526,13 @@ async fn test_transaction_ids_are_unique() {
 
     let mut ids = Vec::new();
     for _ in 0..10 {
-        let txn_id = registry
-            .begin(&defra_core::RequestContext::default(), true)
-            .await
-            .unwrap();
+        let txn_id = registry.begin(true).await.unwrap();
         assert!(!ids.contains(&txn_id), "Duplicate ID: {}", txn_id);
         ids.push(txn_id);
     }
 
     for id in ids {
-        registry
-            .rollback(&defra_core::RequestContext::default(), &id)
-            .await
-            .unwrap();
+        registry.rollback(&id).await.unwrap();
     }
 }
 
@@ -792,15 +571,8 @@ async fn test_transaction_does_not_see_uncommitted_writes() {
     let registry = DbTransactionRegistry::new(db.clone());
 
     // Start a reader transaction FIRST
-    let reader_txn_id = registry
-        .begin(&defra_core::RequestContext::default(), true)
-        .await
-        .unwrap();
-    let reader_ctx = registry
-        .get(&defra_core::RequestContext::default(), &reader_txn_id)
-        .into_result()
-        .unwrap()
-        .unwrap();
+    let reader_txn_id = registry.begin(true).await.unwrap();
+    let reader_ctx = registry.get(&reader_txn_id).into_result().unwrap().unwrap();
     let reader_fetcher = reader_ctx.doc_fetcher();
 
     // Start a writer transaction and write WITHOUT committing
@@ -815,10 +587,7 @@ async fn test_transaction_does_not_see_uncommitted_writes() {
     );
 
     write_txn.force_discard().unwrap();
-    registry
-        .rollback(&defra_core::RequestContext::default(), &reader_txn_id)
-        .await
-        .unwrap();
+    registry.rollback(&reader_txn_id).await.unwrap();
 }
 
 #[tokio::test]
@@ -830,27 +599,20 @@ async fn test_concurrent_parallel_transaction_operations() {
         .map(|i| {
             let reg = registry.clone();
             tokio::spawn(async move {
-                let txn_id = reg
-                    .begin(&defra_core::RequestContext::default(), true)
-                    .await
-                    .unwrap();
+                let txn_id = reg.begin(true).await.unwrap();
                 tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 
                 assert!(
-                    reg.get(&defra_core::RequestContext::default(), &txn_id)
-                        .is_found(),
+                    reg.get(&txn_id).is_found(),
                     "Task {} should find its transaction",
                     i
                 );
 
                 tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-                reg.rollback(&defra_core::RequestContext::default(), &txn_id)
-                    .await
-                    .unwrap();
+                reg.rollback(&txn_id).await.unwrap();
 
                 assert!(
-                    !reg.get(&defra_core::RequestContext::default(), &txn_id)
-                        .is_found(),
+                    !reg.get(&txn_id).is_found(),
                     "Task {} transaction should be gone after rollback",
                     i
                 );
@@ -868,15 +630,8 @@ async fn test_doc_fetcher_get_by_ids_unknown_collection() {
     let db = test_db_with_collections().await;
     let registry = DbTransactionRegistry::new(db);
 
-    let txn_id = registry
-        .begin(&defra_core::RequestContext::default(), true)
-        .await
-        .unwrap();
-    let ctx = registry
-        .get(&defra_core::RequestContext::default(), &txn_id)
-        .into_result()
-        .unwrap()
-        .unwrap();
+    let txn_id = registry.begin(true).await.unwrap();
+    let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
     let fetcher = ctx.doc_fetcher();
 
     let result = fetcher
@@ -885,10 +640,7 @@ async fn test_doc_fetcher_get_by_ids_unknown_collection() {
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("NonExistent"));
 
-    registry
-        .rollback(&defra_core::RequestContext::default(), &txn_id)
-        .await
-        .unwrap();
+    registry.rollback(&txn_id).await.unwrap();
 }
 
 #[tokio::test]
@@ -903,15 +655,8 @@ async fn test_get_by_ids_with_nonexistent_valid_id() {
     let nonexistent_id = document::DocID::new_v0_from_seed("ghost-user").to_string();
 
     // Query for both
-    let txn_id = registry
-        .begin(&defra_core::RequestContext::default(), true)
-        .await
-        .unwrap();
-    let ctx = registry
-        .get(&defra_core::RequestContext::default(), &txn_id)
-        .into_result()
-        .unwrap()
-        .unwrap();
+    let txn_id = registry.begin(true).await.unwrap();
+    let ctx = registry.get(&txn_id).into_result().unwrap().unwrap();
     let fetcher = ctx.doc_fetcher();
 
     let result = fetcher
@@ -938,10 +683,7 @@ async fn test_get_by_ids_with_nonexistent_valid_id() {
     assert_eq!(result.missing_ids()[0], nonexistent_id);
     assert!(!result.is_complete(), "Result should not be complete");
 
-    registry
-        .rollback(&defra_core::RequestContext::default(), &txn_id)
-        .await
-        .unwrap();
+    registry.rollback(&txn_id).await.unwrap();
 }
 
 #[tokio::test]
@@ -949,25 +691,16 @@ async fn test_concurrent_commit_same_transaction() {
     let db = test_db_with_collections().await;
     let registry = Arc::new(DbTransactionRegistry::new(db));
 
-    let txn_id = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .unwrap();
+    let txn_id = registry.begin(false).await.unwrap();
 
     // Spawn two tasks trying to commit the same transaction
     let reg1 = registry.clone();
     let txn1 = txn_id.clone();
-    let handle1 = tokio::spawn(async move {
-        reg1.commit(&defra_core::RequestContext::default(), &txn1)
-            .await
-    });
+    let handle1 = tokio::spawn(async move { reg1.commit(&txn1).await });
 
     let reg2 = registry.clone();
     let txn2 = txn_id.clone();
-    let handle2 = tokio::spawn(async move {
-        reg2.commit(&defra_core::RequestContext::default(), &txn2)
-            .await
-    });
+    let handle2 = tokio::spawn(async move { reg2.commit(&txn2).await });
 
     let (r1, r2) = tokio::join!(handle1, handle2);
     let results = [r1.unwrap(), r2.unwrap()];
@@ -984,25 +717,16 @@ async fn test_concurrent_rollback_same_transaction() {
     let db = test_db_with_collections().await;
     let registry = Arc::new(DbTransactionRegistry::new(db));
 
-    let txn_id = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .unwrap();
+    let txn_id = registry.begin(false).await.unwrap();
 
     // Spawn two tasks trying to rollback the same transaction
     let reg1 = registry.clone();
     let txn1 = txn_id.clone();
-    let handle1 = tokio::spawn(async move {
-        reg1.rollback(&defra_core::RequestContext::default(), &txn1)
-            .await
-    });
+    let handle1 = tokio::spawn(async move { reg1.rollback(&txn1).await });
 
     let reg2 = registry.clone();
     let txn2 = txn_id.clone();
-    let handle2 = tokio::spawn(async move {
-        reg2.rollback(&defra_core::RequestContext::default(), &txn2)
-            .await
-    });
+    let handle2 = tokio::spawn(async move { reg2.rollback(&txn2).await });
 
     let (r1, r2) = tokio::join!(handle1, handle2);
     let results = [r1.unwrap(), r2.unwrap()];
@@ -1019,25 +743,16 @@ async fn test_concurrent_commit_and_rollback_same_transaction() {
     let db = test_db_with_collections().await;
     let registry = Arc::new(DbTransactionRegistry::new(db));
 
-    let txn_id = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .unwrap();
+    let txn_id = registry.begin(false).await.unwrap();
 
     // Spawn one task trying to commit, another trying to rollback
     let reg1 = registry.clone();
     let txn1 = txn_id.clone();
-    let handle1 = tokio::spawn(async move {
-        reg1.commit(&defra_core::RequestContext::default(), &txn1)
-            .await
-    });
+    let handle1 = tokio::spawn(async move { reg1.commit(&txn1).await });
 
     let reg2 = registry.clone();
     let txn2 = txn_id.clone();
-    let handle2 = tokio::spawn(async move {
-        reg2.rollback(&defra_core::RequestContext::default(), &txn2)
-            .await
-    });
+    let handle2 = tokio::spawn(async move { reg2.rollback(&txn2).await });
 
     let (r1, r2) = tokio::join!(handle1, handle2);
     let results = [r1.unwrap(), r2.unwrap()];
@@ -1055,14 +770,8 @@ async fn test_cleanup_stale_transactions() {
     let registry = DbTransactionRegistry::new(db);
 
     // Begin some transactions
-    let _txn1 = registry
-        .begin(&defra_core::RequestContext::default(), true)
-        .await
-        .unwrap();
-    let _txn2 = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .unwrap();
+    let _txn1 = registry.begin(true).await.unwrap();
+    let _txn2 = registry.begin(false).await.unwrap();
 
     assert_eq!(registry.active_transaction_count().unwrap(), 2);
 
@@ -1090,19 +799,13 @@ async fn test_cleanup_only_old_transactions() {
     let registry = DbTransactionRegistry::new(db);
 
     // Begin an "old" transaction
-    let _old_txn = registry
-        .begin(&defra_core::RequestContext::default(), true)
-        .await
-        .unwrap();
+    let _old_txn = registry.begin(true).await.unwrap();
 
     // Wait a bit
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     // Begin a "new" transaction
-    let new_txn = registry
-        .begin(&defra_core::RequestContext::default(), true)
-        .await
-        .unwrap();
+    let new_txn = registry.begin(true).await.unwrap();
 
     assert_eq!(registry.active_transaction_count().unwrap(), 2);
 
@@ -1124,13 +827,8 @@ async fn test_cleanup_only_old_transactions() {
     );
 
     // The new transaction should still be usable
-    assert!(registry
-        .get(&defra_core::RequestContext::default(), &new_txn)
-        .is_found());
-    registry
-        .rollback(&defra_core::RequestContext::default(), &new_txn)
-        .await
-        .unwrap();
+    assert!(registry.get(&new_txn).is_found());
+    registry.rollback(&new_txn).await.unwrap();
 }
 
 #[tokio::test]
@@ -1138,15 +836,10 @@ async fn test_cleanup_uses_idle_age_not_creation_age() {
     let db = test_db_with_collections().await;
     let registry = DbTransactionRegistry::new(db);
 
-    let txn = registry
-        .begin(&defra_core::RequestContext::default(), true)
-        .await
-        .unwrap();
+    let txn = registry.begin(true).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(30)).await;
 
-    assert!(registry
-        .get(&defra_core::RequestContext::default(), &txn)
-        .is_found());
+    assert!(registry.get(&txn).is_found());
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
     let result = registry
@@ -1158,9 +851,7 @@ async fn test_cleanup_uses_idle_age_not_creation_age() {
         result.cleaned, 0,
         "Recently used transaction should not be cleaned by creation age"
     );
-    assert!(registry
-        .get(&defra_core::RequestContext::default(), &txn)
-        .is_found());
+    assert!(registry.get(&txn).is_found());
 
     tokio::time::sleep(std::time::Duration::from_millis(45)).await;
 
@@ -1181,10 +872,7 @@ async fn test_periodic_cleanup_task_removes_idle_transactions() {
     let db = test_db_with_collections().await;
     let registry = Arc::new(DbTransactionRegistry::new(db));
 
-    let _txn = registry
-        .begin(&defra_core::RequestContext::default(), true)
-        .await
-        .unwrap();
+    let _txn = registry.begin(true).await.unwrap();
     assert_eq!(registry.active_transaction_count().unwrap(), 1);
 
     let cleanup_task = registry.start_stale_transaction_cleanup(
@@ -1205,28 +893,16 @@ async fn test_active_transaction_count() {
 
     assert_eq!(registry.active_transaction_count().unwrap(), 0);
 
-    let txn1 = registry
-        .begin(&defra_core::RequestContext::default(), true)
-        .await
-        .unwrap();
+    let txn1 = registry.begin(true).await.unwrap();
     assert_eq!(registry.active_transaction_count().unwrap(), 1);
 
-    let txn2 = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .unwrap();
+    let txn2 = registry.begin(false).await.unwrap();
     assert_eq!(registry.active_transaction_count().unwrap(), 2);
 
-    registry
-        .commit(&defra_core::RequestContext::default(), &txn1)
-        .await
-        .unwrap();
+    registry.commit(&txn1).await.unwrap();
     assert_eq!(registry.active_transaction_count().unwrap(), 1);
 
-    registry
-        .rollback(&defra_core::RequestContext::default(), &txn2)
-        .await
-        .unwrap();
+    registry.rollback(&txn2).await.unwrap();
     assert_eq!(registry.active_transaction_count().unwrap(), 0);
 }
 
@@ -1238,15 +914,8 @@ async fn test_snapshot_isolation_after_external_commit() {
     let registry = DbTransactionRegistry::new(db.clone());
 
     // Step 1: Start reader transaction A FIRST (gets snapshot at this point)
-    let reader_txn_id = registry
-        .begin(&defra_core::RequestContext::default(), true)
-        .await
-        .unwrap();
-    let reader_ctx = registry
-        .get(&defra_core::RequestContext::default(), &reader_txn_id)
-        .into_result()
-        .unwrap()
-        .unwrap();
+    let reader_txn_id = registry.begin(true).await.unwrap();
+    let reader_ctx = registry.get(&reader_txn_id).into_result().unwrap().unwrap();
     let reader_fetcher = reader_ctx.doc_fetcher();
 
     // Verify initially empty
@@ -1268,18 +937,12 @@ async fn test_snapshot_isolation_after_external_commit() {
         after_commit_docs.len()
     );
 
-    registry
-        .rollback(&defra_core::RequestContext::default(), &reader_txn_id)
-        .await
-        .unwrap();
+    registry.rollback(&reader_txn_id).await.unwrap();
 
     // Step 4: A NEW transaction started after commit SHOULD see the data
-    let new_reader_txn_id = registry
-        .begin(&defra_core::RequestContext::default(), true)
-        .await
-        .unwrap();
+    let new_reader_txn_id = registry.begin(true).await.unwrap();
     let new_reader_ctx = registry
-        .get(&defra_core::RequestContext::default(), &new_reader_txn_id)
+        .get(&new_reader_txn_id)
         .into_result()
         .unwrap()
         .unwrap();
@@ -1296,10 +959,7 @@ async fn test_snapshot_isolation_after_external_commit() {
         Some("CommittedData")
     );
 
-    registry
-        .rollback(&defra_core::RequestContext::default(), &new_reader_txn_id)
-        .await
-        .unwrap();
+    registry.rollback(&new_reader_txn_id).await.unwrap();
 }
 
 #[tokio::test]
@@ -1309,33 +969,24 @@ async fn test_new_transaction_sees_recently_created_collection() {
     let registry = DbTransactionRegistry::new(db.clone());
 
     // Create collection after registry is created
-    db.create_collection(
-        &defra_core::RequestContext::default(),
-        CollectionVersion::new(
-            "NewCollection",
-            "v1",
-            "col-new",
-            vec![FieldDescription::new("1", "_docID", FieldKind::doc_id())],
-        ),
-    )
+    db.create_collection(CollectionVersion::new(
+        "NewCollection",
+        "v1",
+        "col-new",
+        vec![FieldDescription::new("1", "_docID", FieldKind::doc_id())],
+    ))
     .await
     .unwrap();
 
     // New transaction should see the collection
-    let txn_id = registry
-        .begin(&defra_core::RequestContext::default(), true)
-        .await
-        .unwrap();
+    let txn_id = registry.begin(true).await.unwrap();
     let collection_names = registry.collection_names().unwrap();
     assert!(
         collection_names.contains(&"NewCollection".to_string()),
         "New transaction should see recently created collection"
     );
 
-    registry
-        .rollback(&defra_core::RequestContext::default(), &txn_id)
-        .await
-        .unwrap();
+    registry.rollback(&txn_id).await.unwrap();
 }
 
 #[tokio::test]
@@ -1349,15 +1000,8 @@ async fn test_collection_snapshot_isolation_during_deletion() {
     seed_committed_user(&db, "Alice", Some(30)).await;
 
     // Start a transaction BEFORE deletion
-    let reader_txn_id = registry
-        .begin(&defra_core::RequestContext::default(), true)
-        .await
-        .unwrap();
-    let reader_ctx = registry
-        .get(&defra_core::RequestContext::default(), &reader_txn_id)
-        .into_result()
-        .unwrap()
-        .unwrap();
+    let reader_txn_id = registry.begin(true).await.unwrap();
+    let reader_ctx = registry.get(&reader_txn_id).into_result().unwrap().unwrap();
     let reader_fetcher = reader_ctx.doc_fetcher();
 
     // Verify reader can see the collection with data
@@ -1369,9 +1013,7 @@ async fn test_collection_snapshot_isolation_during_deletion() {
     );
 
     // Now delete the collection from the DB
-    db.delete_collection(&defra_core::RequestContext::default(), "Users")
-        .await
-        .unwrap();
+    db.delete_collection("Users").await.unwrap();
 
     // The reader transaction should STILL be able to query the collection
     // because it has a snapshot from before the deletion
@@ -1393,21 +1035,11 @@ async fn test_collection_snapshot_isolation_during_deletion() {
         "DB should report collection as deleted"
     );
 
-    registry
-        .rollback(&defra_core::RequestContext::default(), &reader_txn_id)
-        .await
-        .unwrap();
+    registry.rollback(&reader_txn_id).await.unwrap();
 
     // A NEW transaction should NOT see the deleted collection
-    let new_txn_id = registry
-        .begin(&defra_core::RequestContext::default(), true)
-        .await
-        .unwrap();
-    let new_ctx = registry
-        .get(&defra_core::RequestContext::default(), &new_txn_id)
-        .into_result()
-        .unwrap()
-        .unwrap();
+    let new_txn_id = registry.begin(true).await.unwrap();
+    let new_ctx = registry.get(&new_txn_id).into_result().unwrap().unwrap();
     let new_fetcher = new_ctx.doc_fetcher();
 
     let result = new_fetcher.get_all("Users").await;
@@ -1420,10 +1052,7 @@ async fn test_collection_snapshot_isolation_during_deletion() {
         "Error should mention the collection name"
     );
 
-    registry
-        .rollback(&defra_core::RequestContext::default(), &new_txn_id)
-        .await
-        .unwrap();
+    registry.rollback(&new_txn_id).await.unwrap();
 }
 
 #[tokio::test]
@@ -1439,15 +1068,12 @@ async fn test_collections_snapshot_is_isolated_from_modifications() {
     // wraps an Arc and doesn't expose mutable methods)
 
     // Adding a new collection should not affect existing snapshots
-    db.create_collection(
-        &defra_core::RequestContext::default(),
-        CollectionVersion::new(
-            "Posts",
-            "v1",
-            "col-posts",
-            vec![FieldDescription::new("1", "_docID", FieldKind::doc_id())],
-        ),
-    )
+    db.create_collection(CollectionVersion::new(
+        "Posts",
+        "v1",
+        "col-posts",
+        vec![FieldDescription::new("1", "_docID", FieldKind::doc_id())],
+    ))
     .await
     .unwrap();
 

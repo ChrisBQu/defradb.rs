@@ -703,18 +703,12 @@ mod prepared_target_tests {
 
     #[async_trait]
     impl DocMutator for RecordingMutator {
-        async fn create(
-            &self,
-            _context: &RequestContext,
-            _collection: &str,
-            _doc: Document,
-        ) -> Result<CreateResult> {
+        async fn create(&self, _collection: &str, _doc: Document) -> Result<CreateResult> {
             Err(QueryError::execution("unused in update target test"))
         }
 
         async fn update(
             &self,
-            _context: &RequestContext,
             _collection: &str,
             doc: Document,
             fields: RapidHashSet<String>,
@@ -726,12 +720,7 @@ mod prepared_target_tests {
             Ok(UpdateResult::new(doc, fields.len()))
         }
 
-        async fn delete(
-            &self,
-            _context: &RequestContext,
-            _collection: &str,
-            id: &DocID,
-        ) -> Result<DeleteResult> {
+        async fn delete(&self, _collection: &str, id: &DocID) -> Result<DeleteResult> {
             Ok(DeleteResult::new(id.clone(), false))
         }
 
@@ -764,17 +753,11 @@ mod prepared_target_tests {
         let mut mapping = DocumentMapping::new();
         mapping.add(0, "_docID");
         mapping.add(1, "value");
-        UpdateNode::new(
-            "Things",
-            mutator,
-            RequestContext::default(),
-            fetcher,
-            mapping,
-        )
-        .with_doc_ids(ids.iter().map(ToString::to_string).collect())
-        .with_input(UpdateInput::new().with_field("value", serde_json::json!("after")))
-        .with_prepared_writes(Some(writes))
-        .with_prepared_update_targets(Some(targets))
+        UpdateNode::new("Things", mutator, fetcher, mapping)
+            .with_doc_ids(ids.iter().map(ToString::to_string).collect())
+            .with_input(UpdateInput::new().with_field("value", serde_json::json!("after")))
+            .with_prepared_writes(Some(writes))
+            .with_prepared_update_targets(Some(targets))
     }
 
     #[test]

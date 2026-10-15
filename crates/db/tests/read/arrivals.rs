@@ -8,9 +8,7 @@ use storage::RegolithStore;
 #[tokio::test]
 async fn graphql_creation_cursor_pages_and_docid_lookup() {
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
-    db.create_collection(&defra_core::RequestContext::default(), users_schema())
-        .await
-        .unwrap();
+    db.create_collection(users_schema()).await.unwrap();
     let mutator = AutoCommitMutator::new(db.clone());
     let mut ids = Vec::new();
     for name in ["one", "two", "three"] {
@@ -18,7 +16,7 @@ async fn graphql_creation_cursor_pages_and_docid_lookup() {
         doc.set("name", name);
         ids.push(
             mutator
-                .create(&defra_core::RequestContext::default(), "Users", doc)
+                .create("Users", doc)
                 .await
                 .unwrap()
                 .doc_id
@@ -50,13 +48,11 @@ async fn hidden_arrivals_advance_page_without_disclosing_document_ids() {
     let mut schema = users_schema();
     schema.policy = Some(schema::PolicyDescription::new("arrival-policy", "users"));
     schema.is_branchable = false;
-    db.create_collection(&defra_core::RequestContext::default(), schema)
-        .await
-        .unwrap();
+    db.create_collection(schema).await.unwrap();
     let mut doc = Document::new();
     doc.set("name", "secret");
     let id = AutoCommitMutator::new(db.clone())
-        .create(&defra_core::RequestContext::default(), "Users", doc)
+        .create("Users", doc)
         .await
         .unwrap()
         .doc_id
@@ -95,17 +91,11 @@ async fn hidden_arrivals_advance_page_without_disclosing_document_ids() {
 async fn explicit_transaction_arrival_is_invisible_and_rollback_discards_it() {
     use query::fetcher::{DocFetcher, DocumentArrivalOptions};
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
-    db.create_collection(&defra_core::RequestContext::default(), users_schema())
-        .await
-        .unwrap();
+    db.create_collection(users_schema()).await.unwrap();
     let mutator = db::DbDocMutator::new(db.clone(), db.new_txn(false).await.unwrap());
     let mut doc = Document::new();
     doc.set("name", "pending");
-    let id = mutator
-        .create(&defra_core::RequestContext::default(), "Users", doc)
-        .await
-        .unwrap()
-        .doc_id;
+    let id = mutator.create("Users", doc).await.unwrap().doc_id;
     let reader = db::DbDocFetcher::new(mutator.take_txn().await.unwrap());
     let options = DocumentArrivalOptions {
         collection: "Users".into(),
@@ -134,18 +124,14 @@ async fn explicit_transaction_arrival_is_invisible_and_rollback_discards_it() {
 async fn concurrent_autocommit_arrivals_are_contiguous() {
     use query::fetcher::{DocFetcher, DocumentArrivalOptions};
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
-    db.create_collection(&defra_core::RequestContext::default(), users_schema())
-        .await
-        .unwrap();
+    db.create_collection(users_schema()).await.unwrap();
     let mut creates = tokio::task::JoinSet::new();
     for index in 0..64 {
         let db = db.clone();
         creates.spawn(async move {
             let mut doc = Document::new();
             doc.set("name", format!("arrival-{index}"));
-            AutoCommitMutator::new(db)
-                .create(&defra_core::RequestContext::default(), "Users", doc)
-                .await
+            AutoCommitMutator::new(db).create("Users", doc).await
         });
     }
     let mut ids = std::collections::HashSet::new();
@@ -175,23 +161,16 @@ async fn concurrent_autocommit_arrivals_are_contiguous() {
 async fn overlapping_explicit_transaction_creates_both_commit() {
     use query::fetcher::{DocFetcher, DocumentArrivalOptions};
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
-    db.create_collection(&defra_core::RequestContext::default(), users_schema())
-        .await
-        .unwrap();
+    db.create_collection(users_schema()).await.unwrap();
     let first = db::DbDocMutator::new(db.clone(), db.new_txn(false).await.unwrap());
     let second = db::DbDocMutator::new(db.clone(), db.new_txn(false).await.unwrap());
     let mut one = Document::new();
     one.set("name", "first");
     let mut two = Document::new();
     two.set("name", "second");
-    let first_id = first
-        .create(&defra_core::RequestContext::default(), "Users", one)
-        .await
-        .unwrap()
-        .doc_id
-        .to_string();
+    let first_id = first.create("Users", one).await.unwrap().doc_id.to_string();
     let second_id = second
-        .create(&defra_core::RequestContext::default(), "Users", two)
+        .create("Users", two)
         .await
         .unwrap()
         .doc_id
@@ -217,14 +196,12 @@ async fn overlapping_explicit_transaction_creates_both_commit() {
 async fn explicit_transaction_arrival_gets_a_cursor_only_on_commit() {
     use query::fetcher::{DocFetcher, DocumentArrivalOptions};
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
-    db.create_collection(&defra_core::RequestContext::default(), users_schema())
-        .await
-        .unwrap();
+    db.create_collection(users_schema()).await.unwrap();
     let mutator = db::DbDocMutator::new(db.clone(), db.new_txn(false).await.unwrap());
     let mut doc = Document::new();
     doc.set("name", "pending");
     let id = mutator
-        .create(&defra_core::RequestContext::default(), "Users", doc)
+        .create("Users", doc)
         .await
         .unwrap()
         .doc_id

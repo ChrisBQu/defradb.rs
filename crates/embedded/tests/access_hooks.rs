@@ -112,40 +112,29 @@ async fn merge_validator_accepts_rejects_and_defers_replicated_notes() -> Result
         .node_identity_did
         .clone()
         .context("author has a signing identity")?;
-    let signed = defra_core::RequestContext::default()
-        .with_signing(defra_core::signing::get_identity(&writer));
+    defra_core::signing::set_signing_config(defra_core::signing::get_identity(&writer));
 
     let (held_grant, held_grant_cid) = create(
         &author,
-        &signed,
         "Grant",
         &format!(r#"writer: "{writer}", label: "held""#),
     )
     .await?;
     let (late_grant, late_grant_cid) = create(
         &author,
-        &signed,
         "Grant",
         &format!(r#"writer: "{writer}", label: "late""#),
     )
     .await?;
     let (accepted, _) = create(
         &author,
-        &signed,
         "Note",
         &format!(r#"grant: "{held_grant_cid}", body: "ok""#),
     )
     .await?;
-    let (rejected, _) = create(
-        &author,
-        &signed,
-        "Note",
-        r#"grant: "nothing", body: "no grant""#,
-    )
-    .await?;
+    let (rejected, _) = create(&author, "Note", r#"grant: "nothing", body: "no grant""#).await?;
     let (deferred, _) = create(
         &author,
-        &signed,
         "Note",
         &format!(r#"grant: "{late_grant_cid}", body: "later""#),
     )
@@ -195,13 +184,7 @@ async fn read_and_write_validators_narrow_local_clients() -> Result<()> {
         refused.errors
     );
 
-    create(
-        &node,
-        &defra_core::RequestContext::default(),
-        "Note",
-        r#"body: "kept""#,
-    )
-    .await?;
+    create(&node, "Note", r#"body: "kept""#).await?;
     let anonymous = node.execute("query { Note { _docID } }").await;
     assert_eq!(
         anonymous.data.as_ref().and_then(|data| data.get("Note")),
@@ -256,20 +239,11 @@ fn iroh_config() -> IrohConfig {
 }
 
 /// Create a document and return its ID and its genesis composite's CID.
-async fn create(
-    node: &Node,
-    context: &defra_core::RequestContext,
-    collection: &str,
-    input: &str,
-) -> Result<(String, String)> {
+async fn create(node: &Node, collection: &str, input: &str) -> Result<(String, String)> {
     let response = node
-        .query_runner
-        .execute(
-            query::QueryRequest::new(format!(
-                "mutation {{ add_{collection}(input: {{{input}}}) {{ _docID _version {{ cid }} }} }}"
-            ))
-            .with_context(context.clone()),
-        )
+        .execute(&format!(
+            "mutation {{ add_{collection}(input: {{{input}}}) {{ _docID _version {{ cid }} }} }}"
+        ))
         .await;
     if response.has_errors() {
         bail!("add_{collection} failed: {:?}", response.errors);

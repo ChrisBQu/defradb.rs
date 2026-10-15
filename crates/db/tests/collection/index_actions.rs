@@ -11,7 +11,6 @@ use storage::{corekv::Key, keys::systemstore::ActionStatusKey, RegolithStore};
 async fn recaching_and_activation_preserve_pending_index_restrictions() {
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     db.create_collection(
-        &defra_core::RequestContext::default(),
         CollectionVersion::new(
             "Note",
             "v1",
@@ -71,12 +70,9 @@ async fn recaching_and_activation_preserve_pending_index_restrictions() {
             .unwrap()
             .indexes
             .is_empty());
-        db.set_active_collection_version(
-            &defra_core::RequestContext::default(),
-            &schema.version_id,
-        )
-        .await
-        .unwrap();
+        db.set_active_collection_version(&schema.version_id)
+            .await
+            .unwrap();
         assert!(provider
             .get_collection("Note")
             .await
@@ -85,23 +81,12 @@ async fn recaching_and_activation_preserve_pending_index_restrictions() {
             .indexes
             .is_empty());
         let registry = db::txn::registry::DbTransactionRegistry::new(db.clone());
-        let handle = registry
-            .begin(&defra_core::RequestContext::default(), false)
-            .await
-            .unwrap();
+        let handle = registry.begin(false).await.unwrap();
         registry
-            .set_collection_active_in_txn(
-                &defra_core::RequestContext::default(),
-                handle.as_str(),
-                &schema.version_id,
-                true,
-            )
+            .set_collection_active_in_txn(handle.as_str(), &schema.version_id, true)
             .await
             .unwrap();
-        registry
-            .commit(&defra_core::RequestContext::default(), &handle)
-            .await
-            .unwrap();
+        registry.commit(&handle).await.unwrap();
         assert!(provider
             .get_collection("Note")
             .await
@@ -112,9 +97,9 @@ async fn recaching_and_activation_preserve_pending_index_restrictions() {
     }
     let patched = db
         .patch_collection(
-            &defra_core::RequestContext::default(),
             "Note",
             r#"[{"op":"add","path":"/Note/Fields/-","value":{"Name":"extra","Kind":"String"}}]"#,
+            None,
         )
         .await
         .unwrap();

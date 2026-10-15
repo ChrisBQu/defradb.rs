@@ -24,19 +24,14 @@ pub fn next_test_doc_short_id() -> u64 {
 
 pub async fn fixture_with_docs(n: usize) -> Arc<DB<RegolithStore>> {
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
-    db.create_collection(&defra_core::RequestContext::default(), test_schema())
-        .await
-        .unwrap();
+    db.create_collection(test_schema()).await.unwrap();
 
     for i in 0..n {
         let txn = db.new_txn(false).await.unwrap();
         let mutator = DbDocMutator::new(db.clone(), txn);
         let mut doc = Document::new();
         doc.set("name", NormalValue::String(format!("user-{i}")));
-        mutator
-            .create(&defra_core::RequestContext::default(), "Users", doc)
-            .await
-            .unwrap();
+        mutator.create("Users", doc).await.unwrap();
         let txn = mutator.take_txn().await.unwrap();
         txn.commit().await.unwrap();
     }

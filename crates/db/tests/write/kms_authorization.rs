@@ -13,7 +13,6 @@ async fn prepared_upsert_keeps_hidden_matches_out_of_its_target_set() {
         fixture
             .db
             .create_collection(
-                &defra_core::RequestContext::default(),
                 CollectionVersion::new(
                     "Protected",
                     "protected-v1",
@@ -40,7 +39,6 @@ async fn prepared_upsert_keeps_hidden_matches_out_of_its_target_set() {
             }
             let doc = mutator
                 .create(
-                    &defra_core::RequestContext::default(),
                     "Protected",
                     Document::from_json_str(&format!(r#"{{"left":"match","right":"{value}"}}"#))
                         .unwrap(),

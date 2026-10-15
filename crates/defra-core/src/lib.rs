@@ -4,6 +4,8 @@
 //! used throughout the DefraDB ecosystem.
 
 pub mod action;
+#[cfg(any(test, feature = "ambient"))]
+pub mod ambient;
 pub mod batch_signing;
 pub mod block;
 pub mod block_delta;
@@ -11,6 +13,11 @@ pub mod block_signature;
 pub mod cbor;
 pub mod collection;
 pub mod current_identity;
+/// The DAC bypass flag tests set the old way (see [`ambient`]).
+#[cfg(any(test, feature = "ambient"))]
+pub mod dac_bypass {
+    pub use crate::ambient::{get_dac_bypass, set_dac_bypass};
+}
 pub mod doc_id;
 pub mod document;
 pub mod encryption;

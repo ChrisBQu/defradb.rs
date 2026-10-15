@@ -57,36 +57,31 @@ impl defra_core::signing::RemoteSigner for FailingCollectionSigner {
     }
 }
 
-/// A request signing through a remote signer that fails on collection blocks.
-fn failing_collection_signing() -> defra_core::RequestContext {
-    defra_core::RequestContext::default().with_signing(Some(defra_core::signing::SigningConfig {
+fn failing_collection_signing_config() -> defra_core::signing::SigningConfig {
+    defra_core::signing::SigningConfig {
         key_type: defra_core::signing::SigningKeyType::Ed25519,
         private_key_bytes: Vec::new(),
         public_key_bytes: Vec::new(),
         public_key_hex: "test".to_string(),
         remote_signer: Some(Arc::new(FailingCollectionSigner)),
         signing_authorization: None,
-    }))
+    }
 }
 
 #[tokio::test]
 async fn branchable_create_rolls_back_when_collection_block_fails() {
     let (db, _bus) = make_test_db_with_bus().await;
-    db.create_collection(
-        &defra_core::RequestContext::default(),
-        branchable_collection(),
-    )
-    .await
-    .unwrap();
+    db.create_collection(branchable_collection()).await.unwrap();
     let mutator = db::AutoCommitMutator::new(Arc::clone(&db));
 
+    defra_core::signing::set_signing_config(Some(failing_collection_signing_config()));
     let result = mutator
         .create(
-            &failing_collection_signing(),
             "Branchable",
             Document::from_json_str(r#"{"x": 1}"#).unwrap(),
         )
         .await;
+    defra_core::signing::set_signing_config(None);
 
     let error = result.expect_err("collection block failure must fail create");
     assert!(error
@@ -100,16 +95,10 @@ async fn branchable_create_rolls_back_when_collection_block_fails() {
 #[tokio::test]
 async fn branchable_update_rolls_back_when_collection_block_fails() {
     let (db, _bus) = make_test_db_with_bus().await;
-    db.create_collection(
-        &defra_core::RequestContext::default(),
-        branchable_collection(),
-    )
-    .await
-    .unwrap();
+    db.create_collection(branchable_collection()).await.unwrap();
     let mutator = db::AutoCommitMutator::new(Arc::clone(&db));
     let created = mutator
         .create(
-            &defra_core::RequestContext::default(),
             "Branchable",
             Document::from_json_str(r#"{"x": 1}"#).unwrap(),
         )
@@ -122,14 +111,15 @@ async fn branchable_update_rolls_back_when_collection_block_fails() {
         .unwrap();
     doc.set("x", NormalValue::Int(2));
 
+    defra_core::signing::set_signing_config(Some(failing_collection_signing_config()));
     let result = mutator
         .update(
-            &failing_collection_signing(),
             "Branchable",
             doc,
             std::iter::once("x".to_string()).collect(),
         )
         .await;
+    defra_core::signing::set_signing_config(None);
 
     let error = result.expect_err("collection block failure must fail update");
     assert!(error
@@ -185,21 +175,14 @@ async fn read_counter_store(
 #[tokio::test]
 async fn auto_commit_float32_counter_accumulates_with_float32_precision() {
     let (db, _bus) = make_test_db_with_bus().await;
-    db.create_collection(
-        &defra_core::RequestContext::default(),
-        float32_counter_collection(),
-    )
-    .await
-    .unwrap();
+    db.create_collection(float32_counter_collection())
+        .await
+        .unwrap();
     let mutator = db::AutoCommitMutator::new(Arc::clone(&db));
 
     let mut doc = Document::new();
     doc.set("points", NormalValue::Float32(0.0));
-    let doc_id = mutator
-        .create(&defra_core::RequestContext::default(), "FloatCounters", doc)
-        .await
-        .unwrap()
-        .doc_id;
+    let doc_id = mutator.create("FloatCounters", doc).await.unwrap().doc_id;
 
     for (value, delta) in [(10.1f32, 10.1f32), (10.1f32 + 10.2f32, 10.2f32)] {
         let mut doc = mutator
@@ -211,7 +194,6 @@ async fn auto_commit_float32_counter_accumulates_with_float32_precision() {
         doc.set_counter_delta("points".into(), NormalValue::Float32(delta));
         mutator
             .update(
-                &defra_core::RequestContext::default(),
                 "FloatCounters",
                 doc,
                 std::iter::once("points".to_string()).collect(),
@@ -235,16 +217,11 @@ async fn auto_commit_float32_counter_accumulates_with_float32_precision() {
 #[tokio::test]
 async fn alias_reads_and_mutations_use_the_canonical_doc_id() {
     let (db, _bus) = make_test_db_with_bus().await;
-    db.create_collection(&defra_core::RequestContext::default(), test_collection())
-        .await
-        .unwrap();
+    db.create_collection(test_collection()).await.unwrap();
     let mutator = db::AutoCommitMutator::new(db.clone());
     let mut doc = Document::new();
     doc.set("x", NormalValue::Int(1));
-    let created = mutator
-        .create(&defra_core::RequestContext::default(), "TestDoc", doc)
-        .await
-        .unwrap();
+    let created = mutator.create("TestDoc", doc).await.unwrap();
     let canonical_doc_id = created.doc_id;
     let alias =
         DocID::new_v0(defra_core::block::generate_cid_from_bytes(b"imported-alias").unwrap());
@@ -277,7 +254,6 @@ async fn alias_reads_and_mutations_use_the_canonical_doc_id() {
     fetched.set("x", NormalValue::Int(2));
     let updated = mutator
         .update(
-            &defra_core::RequestContext::default(),
             "TestDoc",
             fetched,
             std::iter::once("x".to_string()).collect(),
@@ -286,10 +262,7 @@ async fn alias_reads_and_mutations_use_the_canonical_doc_id() {
         .unwrap();
     assert_eq!(updated.document.id(), Some(&canonical_doc_id));
 
-    let deleted = mutator
-        .delete(&defra_core::RequestContext::default(), "TestDoc", &alias)
-        .await
-        .unwrap();
+    let deleted = mutator.delete("TestDoc", &alias).await.unwrap();
     assert!(deleted.existed);
     assert_eq!(deleted.doc_id, canonical_doc_id);
     let txn = db.new_txn(true).await.unwrap();
@@ -309,38 +282,24 @@ async fn explicit_txn_counter_increment_advances_the_counter() {
     // reach the counter's committed value, driven through the registry commit.
 
     let (db, _bus) = make_test_db_with_bus().await;
-    db.create_collection(&defra_core::RequestContext::default(), counter_collection())
+    db.create_collection(counter_collection())
         .await
         .expect("schema");
     let registry = DbTransactionRegistry::new(Arc::clone(&db));
 
     // Create the doc (count = 5) in an explicit txn, commit via the registry.
-    let handle = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .expect("begin");
-    let ctx = registry
-        .get(&defra_core::RequestContext::default(), &handle)
-        .into_result()
-        .unwrap()
-        .unwrap();
+    let handle = registry.begin(false).await.expect("begin");
+    let ctx = registry.get(&handle).into_result().unwrap().unwrap();
     let mutator = ctx.doc_mutator().expect("mutator");
     let create_doc = Document::from_json_str(r#"{"count": 5}"#).expect("doc");
     let created = mutator
-        .create(
-            &defra_core::RequestContext::default(),
-            "Counters",
-            create_doc,
-        )
+        .create("Counters", create_doc)
         .await
         .expect("create");
     let doc_id = created.doc_id.to_string();
     drop(mutator);
     drop(ctx);
-    registry
-        .commit(&defra_core::RequestContext::default(), &handle)
-        .await
-        .expect("commit");
+    registry.commit(&handle).await.expect("commit");
 
     assert_eq!(
         read_counter_store(&db, "Counters", &doc_id, "count").await,
@@ -349,15 +308,8 @@ async fn explicit_txn_counter_increment_advances_the_counter() {
     );
 
     // Increment by 3 in a fresh explicit txn, commit via the registry.
-    let handle = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .expect("begin");
-    let ctx = registry
-        .get(&defra_core::RequestContext::default(), &handle)
-        .into_result()
-        .unwrap()
-        .unwrap();
+    let handle = registry.begin(false).await.expect("begin");
+    let ctx = registry.get(&handle).into_result().unwrap().unwrap();
     let mutator = ctx.doc_mutator().expect("mutator");
     let mut update_doc = Document::from_json_str(r#"{"count": 8}"#).expect("doc");
     update_doc.set_id(document::DocID::from_string(&doc_id).expect("doc id"));
@@ -365,20 +317,12 @@ async fn explicit_txn_counter_increment_advances_the_counter() {
     let mut modified = rapidhash::RapidHashSet::new();
     modified.insert("count".to_string());
     mutator
-        .update(
-            &defra_core::RequestContext::default(),
-            "Counters",
-            update_doc,
-            modified,
-        )
+        .update("Counters", update_doc, modified)
         .await
         .expect("update");
     drop(mutator);
     drop(ctx);
-    registry
-        .commit(&defra_core::RequestContext::default(), &handle)
-        .await
-        .expect("commit");
+    registry.commit(&handle).await.expect("commit");
 
     assert_eq!(
         read_counter_store(&db, "Counters", &doc_id, "count").await,
@@ -407,41 +351,24 @@ fn pcounter_collection() -> CollectionVersion {
 #[tokio::test]
 async fn explicit_txn_pcounter_increment_no_double_apply() {
     let (db, _bus) = make_test_db_with_bus().await;
-    db.create_collection(
-        &defra_core::RequestContext::default(),
-        pcounter_collection(),
-    )
-    .await
-    .expect("schema");
+    db.create_collection(pcounter_collection())
+        .await
+        .expect("schema");
     let registry = DbTransactionRegistry::new(Arc::clone(&db));
 
     // Create the doc (count = 5) in an explicit txn, commit via the registry.
-    let handle = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .expect("begin");
-    let ctx = registry
-        .get(&defra_core::RequestContext::default(), &handle)
-        .into_result()
-        .unwrap()
-        .unwrap();
+    let handle = registry.begin(false).await.expect("begin");
+    let ctx = registry.get(&handle).into_result().unwrap().unwrap();
     let mutator = ctx.doc_mutator().expect("mutator");
     let create_doc = Document::from_json_str(r#"{"count": 5}"#).expect("doc");
     let created = mutator
-        .create(
-            &defra_core::RequestContext::default(),
-            "PCounters",
-            create_doc,
-        )
+        .create("PCounters", create_doc)
         .await
         .expect("create");
     let doc_id = created.doc_id.to_string();
     drop(mutator);
     drop(ctx);
-    registry
-        .commit(&defra_core::RequestContext::default(), &handle)
-        .await
-        .expect("commit");
+    registry.commit(&handle).await.expect("commit");
 
     assert_eq!(
         read_counter_store(&db, "PCounters", &doc_id, "count").await,
@@ -450,15 +377,8 @@ async fn explicit_txn_pcounter_increment_no_double_apply() {
     );
 
     // Increment by 3 in a fresh explicit txn (provisional blob = 8).
-    let handle = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .expect("begin");
-    let ctx = registry
-        .get(&defra_core::RequestContext::default(), &handle)
-        .into_result()
-        .unwrap()
-        .unwrap();
+    let handle = registry.begin(false).await.expect("begin");
+    let ctx = registry.get(&handle).into_result().unwrap().unwrap();
     let mutator = ctx.doc_mutator().expect("mutator");
     let mut update_doc = Document::from_json_str(r#"{"count": 8}"#).expect("doc");
     update_doc.set_id(document::DocID::from_string(&doc_id).expect("doc id"));
@@ -466,20 +386,12 @@ async fn explicit_txn_pcounter_increment_no_double_apply() {
     let mut modified = rapidhash::RapidHashSet::new();
     modified.insert("count".to_string());
     mutator
-        .update(
-            &defra_core::RequestContext::default(),
-            "PCounters",
-            update_doc,
-            modified,
-        )
+        .update("PCounters", update_doc, modified)
         .await
         .expect("update");
     drop(mutator);
     drop(ctx);
-    registry
-        .commit(&defra_core::RequestContext::default(), &handle)
-        .await
-        .expect("commit");
+    registry.commit(&handle).await.expect("commit");
 
     assert_eq!(
         read_counter_store(&db, "PCounters", &doc_id, "count").await,
@@ -493,25 +405,17 @@ async fn explicit_txn_pcounter_increment_no_double_apply() {
 #[tokio::test]
 async fn explicit_txn_multi_doc_counter_increments_advance_both() {
     let (db, _bus) = make_test_db_with_bus().await;
-    db.create_collection(&defra_core::RequestContext::default(), counter_collection())
+    db.create_collection(counter_collection())
         .await
         .expect("schema");
     let registry = DbTransactionRegistry::new(Arc::clone(&db));
 
     // Seed two docs (count = 10 and count = 20) in one explicit txn.
-    let handle = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .expect("begin");
-    let ctx = registry
-        .get(&defra_core::RequestContext::default(), &handle)
-        .into_result()
-        .unwrap()
-        .unwrap();
+    let handle = registry.begin(false).await.expect("begin");
+    let ctx = registry.get(&handle).into_result().unwrap().unwrap();
     let mutator = ctx.doc_mutator().expect("mutator");
     let doc_a = mutator
         .create(
-            &defra_core::RequestContext::default(),
             "Counters",
             Document::from_json_str(r#"{"count": 10}"#).unwrap(),
         )
@@ -521,7 +425,6 @@ async fn explicit_txn_multi_doc_counter_increments_advance_both() {
         .to_string();
     let doc_b = mutator
         .create(
-            &defra_core::RequestContext::default(),
             "Counters",
             Document::from_json_str(r#"{"count": 20}"#).unwrap(),
         )
@@ -531,21 +434,11 @@ async fn explicit_txn_multi_doc_counter_increments_advance_both() {
         .to_string();
     drop(mutator);
     drop(ctx);
-    registry
-        .commit(&defra_core::RequestContext::default(), &handle)
-        .await
-        .expect("commit creates");
+    registry.commit(&handle).await.expect("commit creates");
 
     // Increment BOTH docs in a single explicit txn.
-    let handle = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .expect("begin");
-    let ctx = registry
-        .get(&defra_core::RequestContext::default(), &handle)
-        .into_result()
-        .unwrap()
-        .unwrap();
+    let handle = registry.begin(false).await.expect("begin");
+    let ctx = registry.get(&handle).into_result().unwrap().unwrap();
     let mutator = ctx.doc_mutator().expect("mutator");
 
     let mut up_a = Document::from_json_str(r#"{"count": 11}"#).unwrap();
@@ -554,12 +447,7 @@ async fn explicit_txn_multi_doc_counter_increments_advance_both() {
     let mut mod_a = rapidhash::RapidHashSet::new();
     mod_a.insert("count".to_string());
     mutator
-        .update(
-            &defra_core::RequestContext::default(),
-            "Counters",
-            up_a,
-            mod_a,
-        )
+        .update("Counters", up_a, mod_a)
         .await
         .expect("update a");
 
@@ -569,21 +457,13 @@ async fn explicit_txn_multi_doc_counter_increments_advance_both() {
     let mut mod_b = rapidhash::RapidHashSet::new();
     mod_b.insert("count".to_string());
     mutator
-        .update(
-            &defra_core::RequestContext::default(),
-            "Counters",
-            up_b,
-            mod_b,
-        )
+        .update("Counters", up_b, mod_b)
         .await
         .expect("update b");
 
     drop(mutator);
     drop(ctx);
-    registry
-        .commit(&defra_core::RequestContext::default(), &handle)
-        .await
-        .expect("commit updates");
+    registry.commit(&handle).await.expect("commit updates");
 
     assert_eq!(
         read_counter_store(&db, "Counters", &doc_a, "count").await,
@@ -637,28 +517,17 @@ async fn read_committed_doc(
 #[tokio::test]
 async fn explicit_txn_pcounter_create_then_update_same_txn() {
     let (db, _bus) = make_test_db_with_bus().await;
-    db.create_collection(
-        &defra_core::RequestContext::default(),
-        pcounter_collection(),
-    )
-    .await
-    .expect("schema");
+    db.create_collection(pcounter_collection())
+        .await
+        .expect("schema");
     let registry = DbTransactionRegistry::new(Arc::clone(&db));
 
-    let handle = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .expect("begin");
-    let ctx = registry
-        .get(&defra_core::RequestContext::default(), &handle)
-        .into_result()
-        .unwrap()
-        .unwrap();
+    let handle = registry.begin(false).await.expect("begin");
+    let ctx = registry.get(&handle).into_result().unwrap().unwrap();
     let mutator = ctx.doc_mutator().expect("mutator");
 
     let created = mutator
         .create(
-            &defra_core::RequestContext::default(),
             "PCounters",
             Document::from_json_str(r#"{"count": 5}"#).unwrap(),
         )
@@ -672,21 +541,13 @@ async fn explicit_txn_pcounter_create_then_update_same_txn() {
     let mut modified = rapidhash::RapidHashSet::new();
     modified.insert("count".to_string());
     mutator
-        .update(
-            &defra_core::RequestContext::default(),
-            "PCounters",
-            update_doc,
-            modified,
-        )
+        .update("PCounters", update_doc, modified)
         .await
         .expect("update");
 
     drop(mutator);
     drop(ctx);
-    registry
-        .commit(&defra_core::RequestContext::default(), &handle)
-        .await
-        .expect("commit");
+    registry.commit(&handle).await.expect("commit");
 
     assert_eq!(
         read_counter_store(&db, "PCounters", &doc_id, "count").await,
@@ -701,7 +562,7 @@ async fn explicit_txn_pcounter_create_then_update_same_txn() {
 #[tokio::test]
 async fn an_increment_lands_on_a_directly_written_counter_value() {
     let (db, _bus) = make_test_db_with_bus().await;
-    db.create_collection(&defra_core::RequestContext::default(), counter_collection())
+    db.create_collection(counter_collection())
         .await
         .expect("schema");
 
@@ -752,15 +613,8 @@ async fn an_increment_lands_on_a_directly_written_counter_value() {
 
     // Interactive UPDATE +3, commit via the registry.
     let registry = DbTransactionRegistry::new(Arc::clone(&db));
-    let handle = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .expect("begin");
-    let ctx = registry
-        .get(&defra_core::RequestContext::default(), &handle)
-        .into_result()
-        .unwrap()
-        .unwrap();
+    let handle = registry.begin(false).await.expect("begin");
+    let ctx = registry.get(&handle).into_result().unwrap().unwrap();
     let mutator = ctx.doc_mutator().expect("mutator");
     let mut update_doc = Document::from_json_str(r#"{"count": 8}"#).expect("doc");
     update_doc.set_id(document::DocID::from_string(&doc_id).expect("doc id"));
@@ -768,20 +622,12 @@ async fn an_increment_lands_on_a_directly_written_counter_value() {
     let mut modified = rapidhash::RapidHashSet::new();
     modified.insert("count".to_string());
     mutator
-        .update(
-            &defra_core::RequestContext::default(),
-            "Counters",
-            update_doc,
-            modified,
-        )
+        .update("Counters", update_doc, modified)
         .await
         .expect("update");
     drop(mutator);
     drop(ctx);
-    registry
-        .commit(&defra_core::RequestContext::default(), &handle)
-        .await
-        .expect("commit");
+    registry.commit(&handle).await.expect("commit");
 
     assert_eq!(
         read_counter_store(&db, "Counters", &doc_id, "count").await,
@@ -796,25 +642,17 @@ async fn an_increment_lands_on_a_directly_written_counter_value() {
 #[tokio::test]
 async fn explicit_txn_pncounter_create_then_decrement_same_txn() {
     let (db, _bus) = make_test_db_with_bus().await;
-    db.create_collection(&defra_core::RequestContext::default(), counter_collection())
+    db.create_collection(counter_collection())
         .await
         .expect("schema");
     let registry = DbTransactionRegistry::new(Arc::clone(&db));
 
-    let handle = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .expect("begin");
-    let ctx = registry
-        .get(&defra_core::RequestContext::default(), &handle)
-        .into_result()
-        .unwrap()
-        .unwrap();
+    let handle = registry.begin(false).await.expect("begin");
+    let ctx = registry.get(&handle).into_result().unwrap().unwrap();
     let mutator = ctx.doc_mutator().expect("mutator");
 
     let created = mutator
         .create(
-            &defra_core::RequestContext::default(),
             "Counters",
             Document::from_json_str(r#"{"count": 3}"#).unwrap(),
         )
@@ -828,21 +666,13 @@ async fn explicit_txn_pncounter_create_then_decrement_same_txn() {
     let mut modified = rapidhash::RapidHashSet::new();
     modified.insert("count".to_string());
     mutator
-        .update(
-            &defra_core::RequestContext::default(),
-            "Counters",
-            update_doc,
-            modified,
-        )
+        .update("Counters", update_doc, modified)
         .await
         .expect("update");
 
     drop(mutator);
     drop(ctx);
-    registry
-        .commit(&defra_core::RequestContext::default(), &handle)
-        .await
-        .expect("commit");
+    registry.commit(&handle).await.expect("commit");
 
     assert_eq!(
         read_counter_store(&db, "Counters", &doc_id, "count").await,
@@ -857,25 +687,17 @@ async fn explicit_txn_pncounter_create_then_decrement_same_txn() {
 #[tokio::test]
 async fn explicit_txn_discard_drops_pending_counter_ops() {
     let (db, _bus) = make_test_db_with_bus().await;
-    db.create_collection(&defra_core::RequestContext::default(), counter_collection())
+    db.create_collection(counter_collection())
         .await
         .expect("schema");
     let registry = DbTransactionRegistry::new(Arc::clone(&db));
 
-    let handle = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .expect("begin");
-    let ctx = registry
-        .get(&defra_core::RequestContext::default(), &handle)
-        .into_result()
-        .unwrap()
-        .unwrap();
+    let handle = registry.begin(false).await.expect("begin");
+    let ctx = registry.get(&handle).into_result().unwrap().unwrap();
     let mutator = ctx.doc_mutator().expect("mutator");
 
     let created = mutator
         .create(
-            &defra_core::RequestContext::default(),
             "Counters",
             Document::from_json_str(r#"{"count": 7}"#).unwrap(),
         )
@@ -889,21 +711,13 @@ async fn explicit_txn_discard_drops_pending_counter_ops() {
     let mut modified = rapidhash::RapidHashSet::new();
     modified.insert("count".to_string());
     mutator
-        .update(
-            &defra_core::RequestContext::default(),
-            "Counters",
-            update_doc,
-            modified,
-        )
+        .update("Counters", update_doc, modified)
         .await
         .expect("update");
 
     drop(mutator);
     drop(ctx);
-    registry
-        .rollback(&defra_core::RequestContext::default(), &handle)
-        .await
-        .expect("rollback");
+    registry.rollback(&handle).await.expect("rollback");
 
     assert_eq!(
         read_counter_store_opt(&db, "Counters", &doc_id, "count").await,
@@ -922,25 +736,17 @@ async fn explicit_txn_discard_drops_pending_counter_ops() {
 #[tokio::test]
 async fn explicit_txn_multiple_updates_same_field_sum_once() {
     let (db, _bus) = make_test_db_with_bus().await;
-    db.create_collection(&defra_core::RequestContext::default(), counter_collection())
+    db.create_collection(counter_collection())
         .await
         .expect("schema");
     let registry = DbTransactionRegistry::new(Arc::clone(&db));
 
     // Seed a doc at 0 in its own committed txn.
-    let handle = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .expect("begin");
-    let ctx = registry
-        .get(&defra_core::RequestContext::default(), &handle)
-        .into_result()
-        .unwrap()
-        .unwrap();
+    let handle = registry.begin(false).await.expect("begin");
+    let ctx = registry.get(&handle).into_result().unwrap().unwrap();
     let mutator = ctx.doc_mutator().expect("mutator");
     let created = mutator
         .create(
-            &defra_core::RequestContext::default(),
             "Counters",
             Document::from_json_str(r#"{"count": 0}"#).unwrap(),
         )
@@ -949,21 +755,11 @@ async fn explicit_txn_multiple_updates_same_field_sum_once() {
     let doc_id = created.doc_id.to_string();
     drop(mutator);
     drop(ctx);
-    registry
-        .commit(&defra_core::RequestContext::default(), &handle)
-        .await
-        .expect("commit create");
+    registry.commit(&handle).await.expect("commit create");
 
     // Two updates to the same field in ONE txn: +3 then +2.
-    let handle = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .expect("begin");
-    let ctx = registry
-        .get(&defra_core::RequestContext::default(), &handle)
-        .into_result()
-        .unwrap()
-        .unwrap();
+    let handle = registry.begin(false).await.expect("begin");
+    let ctx = registry.get(&handle).into_result().unwrap().unwrap();
     let mutator = ctx.doc_mutator().expect("mutator");
 
     let mut up1 = Document::from_json_str(r#"{"count": 3}"#).unwrap();
@@ -971,20 +767,14 @@ async fn explicit_txn_multiple_updates_same_field_sum_once() {
     up1.set_counter_delta("count".to_string(), document::NormalValue::Int(3));
     let mut m1 = rapidhash::RapidHashSet::new();
     m1.insert("count".to_string());
-    mutator
-        .update(&defra_core::RequestContext::default(), "Counters", up1, m1)
-        .await
-        .expect("update 1");
+    mutator.update("Counters", up1, m1).await.expect("update 1");
 
     let mut up2 = Document::from_json_str(r#"{"count": 5}"#).unwrap();
     up2.set_id(document::DocID::from_string(&doc_id).unwrap());
     up2.set_counter_delta("count".to_string(), document::NormalValue::Int(2));
     let mut m2 = rapidhash::RapidHashSet::new();
     m2.insert("count".to_string());
-    mutator
-        .update(&defra_core::RequestContext::default(), "Counters", up2, m2)
-        .await
-        .expect("update 2");
+    mutator.update("Counters", up2, m2).await.expect("update 2");
 
     let visible = ctx
         .doc_fetcher()
@@ -1004,10 +794,7 @@ async fn explicit_txn_multiple_updates_same_field_sum_once() {
 
     drop(mutator);
     drop(ctx);
-    registry
-        .commit(&defra_core::RequestContext::default(), &handle)
-        .await
-        .expect("commit updates");
+    registry.commit(&handle).await.expect("commit updates");
 
     assert_eq!(
         read_counter_store(&db, "Counters", &doc_id, "count").await,
@@ -1040,25 +827,15 @@ fn indexed_counter_collection() -> CollectionVersion {
 async fn explicit_txn_indexed_counter_index_reflects_the_incremented_value() {
     let (db, _bus) = make_test_db_with_bus().await;
     let col_version = indexed_counter_collection();
-    db.create_collection(&defra_core::RequestContext::default(), col_version)
-        .await
-        .expect("schema");
+    db.create_collection(col_version).await.expect("schema");
     let registry = DbTransactionRegistry::new(Arc::clone(&db));
 
     // Create at 5, commit.
-    let handle = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .expect("begin");
-    let ctx = registry
-        .get(&defra_core::RequestContext::default(), &handle)
-        .into_result()
-        .unwrap()
-        .unwrap();
+    let handle = registry.begin(false).await.expect("begin");
+    let ctx = registry.get(&handle).into_result().unwrap().unwrap();
     let mutator = ctx.doc_mutator().expect("mutator");
     let created = mutator
         .create(
-            &defra_core::RequestContext::default(),
             "IdxCounters",
             Document::from_json_str(r#"{"count": 5}"#).unwrap(),
         )
@@ -1067,21 +844,11 @@ async fn explicit_txn_indexed_counter_index_reflects_the_incremented_value() {
     let doc_id = created.doc_id.to_string();
     drop(mutator);
     drop(ctx);
-    registry
-        .commit(&defra_core::RequestContext::default(), &handle)
-        .await
-        .expect("commit create");
+    registry.commit(&handle).await.expect("commit create");
 
     // Increment +3 in an interactive txn, commit.
-    let handle = registry
-        .begin(&defra_core::RequestContext::default(), false)
-        .await
-        .expect("begin");
-    let ctx = registry
-        .get(&defra_core::RequestContext::default(), &handle)
-        .into_result()
-        .unwrap()
-        .unwrap();
+    let handle = registry.begin(false).await.expect("begin");
+    let ctx = registry.get(&handle).into_result().unwrap().unwrap();
     let mutator = ctx.doc_mutator().expect("mutator");
     let mut update_doc = Document::from_json_str(r#"{"count": 8}"#).unwrap();
     update_doc.set_id(document::DocID::from_string(&doc_id).unwrap());
@@ -1089,20 +856,12 @@ async fn explicit_txn_indexed_counter_index_reflects_the_incremented_value() {
     let mut modified = rapidhash::RapidHashSet::new();
     modified.insert("count".to_string());
     mutator
-        .update(
-            &defra_core::RequestContext::default(),
-            "IdxCounters",
-            update_doc,
-            modified,
-        )
+        .update("IdxCounters", update_doc, modified)
         .await
         .expect("update");
     drop(mutator);
     drop(ctx);
-    registry
-        .commit(&defra_core::RequestContext::default(), &handle)
-        .await
-        .expect("commit update");
+    registry.commit(&handle).await.expect("commit update");
 
     // Authoritative store advanced to 8.
     assert_eq!(
@@ -1149,7 +908,7 @@ async fn explicit_txn_indexed_counter_index_reflects_the_incremented_value() {
 #[tokio::test]
 async fn create_in_tx_publishes_event_on_commit() {
     let (db, bus) = make_test_db_with_bus().await;
-    db.create_collection(&defra_core::RequestContext::default(), test_collection())
+    db.create_collection(test_collection())
         .await
         .expect("schema");
 
@@ -1159,10 +918,7 @@ async fn create_in_tx_publishes_event_on_commit() {
     let mutator = DbDocMutator::new(Arc::clone(&db), txn);
 
     let doc = Document::from_json_str(r#"{"x": 1}"#).expect("doc");
-    let result = mutator
-        .create(&defra_core::RequestContext::default(), "TestDoc", doc)
-        .await
-        .expect("create");
+    let result = mutator.create("TestDoc", doc).await.expect("create");
 
     // Before commit: no event should have fired
     assert!(
@@ -1192,7 +948,6 @@ async fn create_in_tx_publishes_event_on_commit() {
 async fn auto_commit_create_registers_acp_before_publishing_update() {
     let (db, bus) = make_test_db_with_bus().await;
     db.create_collection(
-        &defra_core::RequestContext::default(),
         test_collection().with_policy(PolicyDescription::new("policy1", "test-docs")),
     )
     .await
@@ -1206,13 +961,14 @@ async fn auto_commit_create_registers_acp_before_publishing_update() {
     let mut sub = bus.subscribe(&[EventName::Update]);
     let owner = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
     let create = tokio::spawn(async move {
-        mutator
-            .create(
-                &defra_core::RequestContext::default().with_creator(Some(owner.to_string())),
+        defra_core::signing::scope_broadcast_creator_did(
+            Some(owner.to_string()),
+            mutator.create(
                 "TestDoc",
                 Document::from_json_str(r#"{"x": 1}"#).expect("doc"),
-            )
-            .await
+            ),
+        )
+        .await
     });
 
     let message = tokio::time::timeout(std::time::Duration::from_secs(1), sub.recv())
@@ -1235,7 +991,7 @@ async fn auto_commit_create_registers_acp_before_publishing_update() {
 #[tokio::test]
 async fn create_in_tx_publishes_no_event_on_discard() {
     let (db, bus) = make_test_db_with_bus().await;
-    db.create_collection(&defra_core::RequestContext::default(), test_collection())
+    db.create_collection(test_collection())
         .await
         .expect("schema");
 
@@ -1245,10 +1001,7 @@ async fn create_in_tx_publishes_no_event_on_discard() {
     let mutator = DbDocMutator::new(Arc::clone(&db), txn);
 
     let doc = Document::from_json_str(r#"{"x": 1}"#).expect("doc");
-    mutator
-        .create(&defra_core::RequestContext::default(), "TestDoc", doc)
-        .await
-        .expect("create");
+    mutator.create("TestDoc", doc).await.expect("create");
 
     let txn = mutator.take_txn().await.expect("take txn");
     txn.discard().expect("discard");
@@ -1263,7 +1016,7 @@ async fn delete_missing_doc_publishes_no_event_and_writes_no_block() {
     // DeleteNode treats existed==false as a no-op; the mutator must not
     // create a tombstone commit or fire an Update event for a missing doc.
     let (db, bus) = make_test_db_with_bus().await;
-    db.create_collection(&defra_core::RequestContext::default(), test_collection())
+    db.create_collection(test_collection())
         .await
         .expect("schema");
 
@@ -1275,11 +1028,7 @@ async fn delete_missing_doc_publishes_no_event_and_writes_no_block() {
     let missing_doc_id = document::DocID::new_v0_from_seed("missing-doc");
 
     let result = mutator
-        .delete(
-            &defra_core::RequestContext::default(),
-            "TestDoc",
-            &missing_doc_id,
-        )
+        .delete("TestDoc", &missing_doc_id)
         .await
         .expect("delete should succeed even on missing doc");
     assert!(!result.existed, "doc should not have existed");
@@ -1328,7 +1077,7 @@ impl db::merge::governance::LocalCommitRelease for CapturingRelease {
 #[tokio::test]
 async fn transactional_broadcasts_and_releases_follow_commit_receipts() {
     let (db, _bus) = make_test_db_with_bus().await;
-    db.create_collection(&defra_core::RequestContext::default(), test_collection())
+    db.create_collection(test_collection())
         .await
         .expect("schema");
     let captured: Arc<SegQueue<db::event::emission::TxnBroadcastEvent>> = Arc::new(SegQueue::new());
@@ -1360,7 +1109,6 @@ async fn transactional_broadcasts_and_releases_follow_commit_receipts() {
     );
     let first_doc = first
         .create(
-            &defra_core::RequestContext::default(),
             "TestDoc",
             Document::from_json_str(r#"{"x": 1}"#).expect("doc"),
         )
@@ -1381,7 +1129,6 @@ async fn transactional_broadcasts_and_releases_follow_commit_receipts() {
     );
     let second_doc = second
         .create(
-            &defra_core::RequestContext::default(),
             "TestDoc",
             Document::from_json_str(r#"{"x": 2}"#).expect("doc"),
         )
@@ -1424,7 +1171,7 @@ async fn create_in_tx_forwards_to_broadcaster_on_commit() {
     // broadcast_update for each committed mutation so P2P peers see
     // transactional writes (Go: db.sendUpdate → p2p.SendUpdate).
     let (db, _bus) = make_test_db_with_bus().await;
-    db.create_collection(&defra_core::RequestContext::default(), test_collection())
+    db.create_collection(test_collection())
         .await
         .expect("schema");
 
@@ -1440,10 +1187,7 @@ async fn create_in_tx_forwards_to_broadcaster_on_commit() {
         DbDocMutator::from_shared_txn_with_broadcaster(Arc::clone(&db), txn_arc, Some(broadcaster));
 
     let doc = Document::from_json_str(r#"{"x": 1}"#).expect("doc");
-    let result = mutator
-        .create(&defra_core::RequestContext::default(), "TestDoc", doc)
-        .await
-        .expect("create");
+    let result = mutator.create("TestDoc", doc).await.expect("create");
 
     // Broadcaster must NOT see anything before commit
     assert!(captured.is_empty(), "no broadcast before commit");
@@ -1471,7 +1215,7 @@ async fn create_in_tx_forwards_to_broadcaster_on_commit() {
 #[tokio::test]
 async fn create_in_tx_does_not_broadcast_on_discard() {
     let (db, _bus) = make_test_db_with_bus().await;
-    db.create_collection(&defra_core::RequestContext::default(), test_collection())
+    db.create_collection(test_collection())
         .await
         .expect("schema");
 
@@ -1487,10 +1231,7 @@ async fn create_in_tx_does_not_broadcast_on_discard() {
         DbDocMutator::from_shared_txn_with_broadcaster(Arc::clone(&db), txn_arc, Some(broadcaster));
 
     let doc = Document::from_json_str(r#"{"x": 1}"#).expect("doc");
-    mutator
-        .create(&defra_core::RequestContext::default(), "TestDoc", doc)
-        .await
-        .expect("create");
+    mutator.create("TestDoc", doc).await.expect("create");
 
     let txn = mutator.take_txn().await.expect("take txn");
     txn.discard().expect("discard");

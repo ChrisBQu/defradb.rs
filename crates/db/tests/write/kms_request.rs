@@ -5,7 +5,6 @@ use std::sync::{
 
 use async_trait::async_trait;
 use db::AutoCommitMutator;
-use defra_core::RequestContext;
 use document::{DocID, Document};
 use query::{
     mutator::{CreateResult, DeleteResult, DocMutator, UpdateResult},
@@ -21,39 +20,33 @@ struct ConflictOnce {
 
 #[async_trait]
 impl DocMutator for ConflictOnce {
-    fn requires_write_preparation(&self, _context: &RequestContext) -> bool {
+    fn requires_write_preparation(&self) -> bool {
         true
     }
 
     async fn prepare_write(
         &self,
-        context: &RequestContext,
         collection: &str,
         doc: Document,
         fields: Option<RapidHashSet<String>>,
+        config: Option<defra_core::encryption::EncryptionConfig>,
     ) -> query::error::Result<Document> {
         self.inner
-            .prepare_write(context, collection, doc, fields)
+            .prepare_write(collection, doc, fields, config)
             .await
     }
 
-    async fn create(
-        &self,
-        context: &RequestContext,
-        collection: &str,
-        doc: Document,
-    ) -> query::error::Result<CreateResult> {
+    async fn create(&self, collection: &str, doc: Document) -> query::error::Result<CreateResult> {
         if self.first.swap(false, Ordering::SeqCst) {
             return Err(query::error::QueryError::transaction_conflict(
                 "injected conflict",
             ));
         }
-        self.inner.create(context, collection, doc).await
+        self.inner.create(collection, doc).await
     }
 
     async fn update(
         &self,
-        context: &RequestContext,
         collection: &str,
         doc: Document,
         fields: RapidHashSet<String>,
@@ -63,16 +56,11 @@ impl DocMutator for ConflictOnce {
                 "injected conflict",
             ));
         }
-        self.inner.update(context, collection, doc, fields).await
+        self.inner.update(collection, doc, fields).await
     }
 
-    async fn delete(
-        &self,
-        context: &RequestContext,
-        collection: &str,
-        id: &DocID,
-    ) -> query::error::Result<DeleteResult> {
-        self.inner.delete(context, collection, id).await
+    async fn delete(&self, collection: &str, id: &DocID) -> query::error::Result<DeleteResult> {
+        self.inner.delete(collection, id).await
     }
 
     async fn exists(&self, collection: &str, id: &DocID) -> query::error::Result<bool> {
@@ -119,7 +107,6 @@ async fn retried_update_reuses_prepared_kms_keys() {
     let inner = AutoCommitMutator::new(Arc::clone(&fixture.db));
     let created = inner
         .create(
-            &defra_core::RequestContext::default(),
             "Secrets",
             Document::from_json_str(r#"{"left":"one","right":"two"}"#).unwrap(),
         )
@@ -262,7 +249,6 @@ async fn prepared_delete_and_upsert_recheck_their_filters() {
         let mutator = AutoCommitMutator::new(Arc::clone(&fixture.db));
         let created = mutator
             .create(
-                &defra_core::RequestContext::default(),
                 "Secrets",
                 Document::from_json_str(r#"{"left":"one"}"#).unwrap(),
             )
@@ -278,12 +264,7 @@ async fn prepared_delete_and_upsert_recheck_their_filters() {
         let mut doc = created.document;
         doc.set("left", "two");
         mutator
-            .update(
-                &defra_core::RequestContext::default(),
-                "Secrets",
-                doc,
-                ["left".to_string()].into_iter().collect(),
-            )
+            .update("Secrets", doc, ["left".to_string()].into_iter().collect())
             .await
             .unwrap();
         let response = runner.execute_prepared(request, prepared).await;
@@ -318,7 +299,6 @@ async fn preparation_does_not_project_an_update_skipped_by_its_filter() {
     let mutator = AutoCommitMutator::new(Arc::clone(&fixture.db));
     let created = mutator
         .create(
-            &defra_core::RequestContext::default(),
             "Secrets",
             Document::from_json_str(r#"{"left":"one"}"#).unwrap(),
         )

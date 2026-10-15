@@ -32,12 +32,9 @@ fn collection() -> CollectionVersion {
 
 async fn seeded() -> (CountingDb, DocID) {
     let db = Arc::new(DB::new(CountingStore::new(RegolithStore::in_memory().unwrap())).unwrap());
-    db.create_collection(&defra_core::RequestContext::default(), collection())
-        .await
-        .unwrap();
+    db.create_collection(collection()).await.unwrap();
     let created = AutoCommitMutator::new(Arc::clone(&db))
         .create(
-            &defra_core::RequestContext::default(),
             "Parted",
             Document::from_json_str(r#"{"left": 0, "right": 0}"#).unwrap(),
         )
@@ -55,12 +52,7 @@ async fn update_in_explicit_txn(db: &CountingDb, doc_id: &DocID, field: &str, va
         .unwrap();
     doc.set(field, NormalValue::Int(value));
     mutator
-        .update(
-            &defra_core::RequestContext::default(),
-            "Parted",
-            doc,
-            RapidHashSet::from_iter([field.to_string()]),
-        )
+        .update("Parted", doc, RapidHashSet::from_iter([field.to_string()]))
         .await
         .unwrap();
     mutator.take_txn().await.unwrap().commit().await.unwrap();
@@ -69,12 +61,7 @@ async fn update_in_explicit_txn(db: &CountingDb, doc_id: &DocID, field: &str, va
 #[tokio::test]
 async fn an_update_reads_its_part_id_map_at_most_once() {
     let (db, doc_id) = seeded().await;
-    let version = db
-        .get_collection("Parted")
-        .unwrap()
-        .unwrap()
-        .version_id()
-        .to_string();
+    let version = db.get_collection("Parted").unwrap().unwrap().version_id().to_string();
     let mut part_key = vec![Namespace::Systemstore.prefix()];
     part_key.extend_from_slice(format!("/parts/{version}").as_bytes());
 
@@ -116,8 +103,5 @@ async fn an_update_scans_the_document_heads_once() {
         .iter()
         .filter(|prefix| **prefix == heads_prefix)
         .count();
-    assert_eq!(
-        scans, 1,
-        "an update scanned its document's heads {scans} times"
-    );
+    assert_eq!(scans, 1, "an update scanned its document's heads {scans} times");
 }

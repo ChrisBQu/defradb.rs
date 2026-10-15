@@ -26,11 +26,7 @@ async fn an_explicit_create_spanning_index_creation_conflicts() {
     let (_store, db) = open_with_collection("SpanCreate", "span-create-v1", "col-span-c").await;
     let writer = DbDocMutator::new(db.clone(), db.new_txn(false).await.unwrap());
     writer
-        .create(
-            &defra_core::RequestContext::default(),
-            "SpanCreate",
-            named("spanning"),
-        )
+        .create("SpanCreate", named("spanning"))
         .await
         .unwrap();
 
@@ -76,7 +72,6 @@ async fn an_explicit_update_spanning_index_creation_conflicts() {
     doc.set("name", NormalValue::String("after".to_owned()));
     writer
         .update(
-            &defra_core::RequestContext::default(),
             "SpanUpdate",
             doc,
             RapidHashSet::from_iter(["name".to_owned()]),
@@ -118,14 +113,7 @@ async fn a_snapshot_before_the_definition_never_commits_above_the_fence_unindexe
         .await
         .unwrap();
 
-    let committed = match writer
-        .create(
-            &defra_core::RequestContext::default(),
-            "SpanLate",
-            named("late"),
-        )
-        .await
-    {
+    let committed = match writer.create("SpanLate", named("late")).await {
         Ok(_) => writer.take_txn().await.unwrap().commit().await.is_ok(),
         Err(_) => false,
     };

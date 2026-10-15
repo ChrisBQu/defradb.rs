@@ -4,21 +4,19 @@
 use crate::common::{fixture::make_test_db_with_bus, schema::test_collection};
 use crypto::{Key, PrivateKey};
 use db::AutoCommitMutator;
-use defra_core::signing::{SigningConfig, SigningKeyType};
-use defra_core::{Block, RequestContext};
+use defra_core::signing::{set_signing_config, SigningConfig, SigningKeyType};
+use defra_core::Block;
 use document::Document;
 use query::mutator::DocMutator;
 
 #[tokio::test]
 async fn a_signed_create_without_a_kms_commits_the_blocks_prepared_for_it() {
     let (db, _) = make_test_db_with_bus().await;
-    db.create_collection(&defra_core::RequestContext::default(), test_collection())
-        .await
-        .unwrap();
+    db.create_collection(test_collection()).await.unwrap();
     let mutator = AutoCommitMutator::new(db);
     let key = crypto::generate_ed25519().unwrap();
     let public_key = key.public_key();
-    let signed = RequestContext::default().with_signing(Some(SigningConfig {
+    set_signing_config(Some(SigningConfig {
         key_type: SigningKeyType::Ed25519,
         private_key_bytes: key.raw_owned(),
         public_key_bytes: public_key.raw_owned(),
@@ -28,21 +26,19 @@ async fn a_signed_create_without_a_kms_commits_the_blocks_prepared_for_it() {
     }));
     let prepared = mutator
         .prepare_write(
-            &signed,
             "TestDoc",
             Document::from_json_str(r#"{"x":1}"#).unwrap(),
             None,
+            None,
         )
-        .await
-        .unwrap();
+        .await;
+    set_signing_config(None);
+    let prepared = prepared.unwrap();
     assert!(prepared.write_preparation().is_some());
 
-    // The create carries no signing, so a signed commit block can only come
-    // from the blocks prepared above.
-    let created = mutator
-        .create(&RequestContext::default(), "TestDoc", prepared)
-        .await
-        .unwrap();
+    // Signing is off now, so a signed commit block can only come from the
+    // blocks prepared above.
+    let created = mutator.create("TestDoc", prepared).await.unwrap();
     let block = Block::from_dag_cbor(created.commit_block.as_ref().unwrap()).unwrap();
     assert!(block.signature.is_some(), "{block:?}");
 }

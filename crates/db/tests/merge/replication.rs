@@ -13,29 +13,22 @@ use storage::RegolithStore;
 async fn load_document_head_blocks_returns_current_composite_block() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = Arc::new(DB::from_arc(store).unwrap());
-    db.create_collection(
-        &defra_core::RequestContext::default(),
-        CollectionVersion::new(
-            "Transcript",
-            "v1",
-            "col-transcript",
-            vec![
-                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
-                FieldDescription::new("2", "body", FieldKind::string()),
-                FieldDescription::new("3", "idx", FieldKind::int()),
-            ],
-        ),
-    )
+    db.create_collection(CollectionVersion::new(
+        "Transcript",
+        "v1",
+        "col-transcript",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "body", FieldKind::string()),
+            FieldDescription::new("3", "idx", FieldKind::int()),
+        ],
+    ))
     .await
     .unwrap();
 
     let mutator = AutoCommitMutator::new(db.clone());
     let result = mutator
-        .create_many(
-            &defra_core::RequestContext::default(),
-            "Transcript",
-            vec![make_transcript("first", 1)],
-        )
+        .create_many("Transcript", vec![make_transcript("first", 1)])
         .await
         .unwrap()
         .pop()

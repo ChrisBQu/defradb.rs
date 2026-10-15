@@ -21,19 +21,16 @@ use storage::RegolithStore;
 async fn batch_create_docs_expose_composite_heads() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = Arc::new(DB::from_arc(store).unwrap());
-    db.create_collection(
-        &defra_core::RequestContext::default(),
-        CollectionVersion::new(
-            "Transcript",
-            "v1",
-            "col-transcript",
-            vec![
-                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
-                FieldDescription::new("2", "body", FieldKind::string()),
-                FieldDescription::new("3", "idx", FieldKind::int()),
-            ],
-        ),
-    )
+    db.create_collection(CollectionVersion::new(
+        "Transcript",
+        "v1",
+        "col-transcript",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "body", FieldKind::string()),
+            FieldDescription::new("3", "idx", FieldKind::int()),
+        ],
+    ))
     .await
     .unwrap();
 
@@ -43,10 +40,7 @@ async fn batch_create_docs_expose_composite_heads() {
         make_transcript("second", 2),
         make_transcript("third", 3),
     ];
-    let results = mutator
-        .create_many(&defra_core::RequestContext::default(), "Transcript", docs)
-        .await
-        .unwrap();
+    let results = mutator.create_many("Transcript", docs).await.unwrap();
     assert_eq!(results.len(), 3);
 
     let provider = DbHeadProvider::new(db);
@@ -65,29 +59,22 @@ async fn batch_create_docs_expose_composite_heads() {
 async fn falls_back_to_priority_index_when_composite_head_entry_is_missing() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = Arc::new(DB::from_arc(store).unwrap());
-    db.create_collection(
-        &defra_core::RequestContext::default(),
-        CollectionVersion::new(
-            "Transcript",
-            "v1",
-            "col-transcript",
-            vec![
-                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
-                FieldDescription::new("2", "body", FieldKind::string()),
-                FieldDescription::new("3", "idx", FieldKind::int()),
-            ],
-        ),
-    )
+    db.create_collection(CollectionVersion::new(
+        "Transcript",
+        "v1",
+        "col-transcript",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "body", FieldKind::string()),
+            FieldDescription::new("3", "idx", FieldKind::int()),
+        ],
+    ))
     .await
     .unwrap();
 
     let mutator = AutoCommitMutator::new(db.clone());
     let result = mutator
-        .create_many(
-            &defra_core::RequestContext::default(),
-            "Transcript",
-            vec![make_transcript("first", 1)],
-        )
+        .create_many("Transcript", vec![make_transcript("first", 1)])
         .await
         .unwrap()
         .pop()
@@ -113,29 +100,22 @@ async fn falls_back_to_priority_index_when_composite_head_entry_is_missing() {
 async fn falls_back_to_blockstore_scan_when_head_indexes_are_missing() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = Arc::new(DB::from_arc(store).unwrap());
-    db.create_collection(
-        &defra_core::RequestContext::default(),
-        CollectionVersion::new(
-            "Transcript",
-            "v1",
-            "col-transcript",
-            vec![
-                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
-                FieldDescription::new("2", "body", FieldKind::string()),
-                FieldDescription::new("3", "idx", FieldKind::int()),
-            ],
-        ),
-    )
+    db.create_collection(CollectionVersion::new(
+        "Transcript",
+        "v1",
+        "col-transcript",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "body", FieldKind::string()),
+            FieldDescription::new("3", "idx", FieldKind::int()),
+        ],
+    ))
     .await
     .unwrap();
 
     let mutator = AutoCommitMutator::new(db.clone());
     let result = mutator
-        .create_many(
-            &defra_core::RequestContext::default(),
-            "Transcript",
-            vec![make_transcript("first", 1)],
-        )
+        .create_many("Transcript", vec![make_transcript("first", 1)])
         .await
         .unwrap()
         .pop()

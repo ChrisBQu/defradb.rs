@@ -17,19 +17,32 @@ fn test_looks_like_cidv1() {
     assert!(!VersionedFetcher::<storage::RegolithStore>::looks_like_cidv1("fhbnjfahfhfhanfhga"));
     assert!(!VersionedFetcher::<storage::RegolithStore>::looks_like_cidv1("short"));
 }
-#[test]
-fn kms_reads_act_as_the_reader_and_no_one_else() {
+#[tokio::test]
+async fn kms_identity_prefers_caller_then_task_then_thread() {
     let txn = Arc::new(TokioMutex::new(None));
-    let reader = identity::Did::new("did:key:reader").unwrap();
+    let caller = identity::Did::new("did:key:caller").unwrap();
     let fetcher = VersionedFetcher::<storage::RegolithStore>::with_kms(
         txn.clone(),
         None,
-        Some(reader.clone()),
+        Some(caller.clone()),
     );
-    let anonymous = VersionedFetcher::<storage::RegolithStore>::with_kms(txn, None, None);
+    let ambient = VersionedFetcher::<storage::RegolithStore>::with_kms(txn, None, None);
+    let _thread =
+        defra_core::current_identity::scoped_current_identity(Some("did:key:thread".into()));
 
-    assert_eq!(fetcher.kms_request_context().user_identity(), Some(&reader));
-    assert_eq!(anonymous.kms_request_context().user_identity(), None);
+    defra_core::current_identity::with_scoped_identity(Some("did:key:task".into()), async {
+        assert_eq!(fetcher.kms_request_context().user_identity(), Some(&caller));
+        assert_eq!(
+            ambient.kms_request_context().user_identity(),
+            Some(&identity::Did::new("did:key:task").unwrap())
+        );
+    })
+    .await;
+
+    assert_eq!(
+        ambient.kms_request_context().user_identity(),
+        Some(&identity::Did::new("did:key:thread").unwrap())
+    );
 }
 
 #[tokio::test]

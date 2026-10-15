@@ -180,9 +180,7 @@ async fn cancelling_a_statement_rolls_back_only_that_statement_before_commit() {
         .unwrap(),
     );
     for schema in query::parse_sdl("type Users { name: String }").unwrap() {
-        db.create_collection(&defra_core::RequestContext::default(), schema)
-            .await
-            .unwrap();
+        db.create_collection(schema).await.unwrap();
     }
     let registry = Arc::new(DbTransactionRegistry::new(Arc::clone(&db)));
     let runner = Arc::new(query::QueryRunner::with_arc_registry_and_provider(
@@ -191,10 +189,7 @@ async fn cancelling_a_statement_rolls_back_only_that_statement_before_commit() {
         Arc::clone(&registry),
     ));
 
-    let handle = runner
-        .begin_txn(&defra_core::RequestContext::default(), false)
-        .await
-        .unwrap();
+    let handle = runner.begin_txn(false).await.unwrap();
     let first = runner
         .execute_in_txn(
             QueryRequest::new(r#"mutation { add_Users(input: {name: "kept"}) { _docID } }"#),
@@ -220,10 +215,7 @@ async fn cancelling_a_statement_rolls_back_only_that_statement_before_commit() {
     mutation.abort();
     assert!(mutation.await.unwrap_err().is_cancelled());
 
-    runner
-        .commit_txn(&defra_core::RequestContext::default(), &handle)
-        .await
-        .unwrap();
+    runner.commit_txn(&handle).await.unwrap();
     let response = runner
         .execute(QueryRequest::new("{ Users { name } }"))
         .await;
@@ -247,9 +239,7 @@ async fn timing_out_a_statement_rolls_back_only_that_statement_before_commit() {
     db.set_event_bus(bus.clone());
     let db = Arc::new(db);
     for schema in query::parse_sdl("type Users { name: String }").unwrap() {
-        db.create_collection(&defra_core::RequestContext::default(), schema)
-            .await
-            .unwrap();
+        db.create_collection(schema).await.unwrap();
     }
     let registry = Arc::new(DbTransactionRegistry::new(Arc::clone(&db)));
     let runner = Arc::new(
@@ -261,10 +251,7 @@ async fn timing_out_a_statement_rolls_back_only_that_statement_before_commit() {
         .with_query_timeout(1),
     );
 
-    let handle = runner
-        .begin_txn(&defra_core::RequestContext::default(), false)
-        .await
-        .unwrap();
+    let handle = runner.begin_txn(false).await.unwrap();
     let mut events = bus.subscribe(&[EventName::Update]);
     let prior = runner
         .execute_in_txn(
@@ -292,10 +279,7 @@ async fn timing_out_a_statement_rolls_back_only_that_statement_before_commit() {
     assert!(timed_out.has_errors(), "expected query timeout");
     assert!(timed_out.errors[0].message.contains("timed out"));
 
-    runner
-        .commit_txn(&defra_core::RequestContext::default(), &handle)
-        .await
-        .unwrap();
+    runner.commit_txn(&handle).await.unwrap();
     let response = runner
         .execute(QueryRequest::new("{ Users { name } }"))
         .await;
@@ -329,9 +313,7 @@ async fn failed_partial_batch_keeps_prior_statements_and_discards_its_own_writes
     db.set_event_bus(bus.clone());
     let db = Arc::new(db);
     for schema in query::parse_sdl("type Users { email: String @index(unique: true) }").unwrap() {
-        db.create_collection(&defra_core::RequestContext::default(), schema)
-            .await
-            .unwrap();
+        db.create_collection(schema).await.unwrap();
     }
     let after_schema = gate.block_keys.lock().unwrap().len();
     let registry = Arc::new(DbTransactionRegistry::new(Arc::clone(&db)));
@@ -341,10 +323,7 @@ async fn failed_partial_batch_keeps_prior_statements_and_discards_its_own_writes
         Arc::clone(&registry),
     ));
 
-    let handle = runner
-        .begin_txn(&defra_core::RequestContext::default(), false)
-        .await
-        .unwrap();
+    let handle = runner.begin_txn(false).await.unwrap();
     let mut events = bus.subscribe(&[EventName::Update]);
     let prior = runner
         .execute_in_txn(
@@ -388,10 +367,7 @@ async fn failed_partial_batch_keeps_prior_statements_and_discards_its_own_writes
         !failed_block_keys.is_empty(),
         "the failed statement must have written distinct blobstore blocks before its unique-index error"
     );
-    runner
-        .commit_txn(&defra_core::RequestContext::default(), &handle)
-        .await
-        .unwrap();
+    runner.commit_txn(&handle).await.unwrap();
     let inspect = inner.new_txn(true).await.unwrap();
     for key in &prior_block_keys {
         assert!(

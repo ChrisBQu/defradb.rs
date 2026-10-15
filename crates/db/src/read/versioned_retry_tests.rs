@@ -65,10 +65,7 @@ async fn historical_read_key_miss_exits_attempt_and_is_scoped_to_caller() {
     txn.discard().unwrap();
 
     let resolver = crate::AutoCommitMutator::new(db.clone());
-    let response = resolver
-        .resolve_prepared_input(&defra_core::RequestContext::default(), &request)
-        .await
-        .unwrap();
+    let response = resolver.resolve_prepared_input(&request).await.unwrap();
     memo.insert(request, response);
     assert_eq!(kms.0.load(Ordering::SeqCst), 1);
     let mut txn = db.new_txn(false).await.unwrap();

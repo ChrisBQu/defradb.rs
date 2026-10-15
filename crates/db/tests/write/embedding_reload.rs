@@ -71,9 +71,7 @@ async fn fixture_with_counter(counter: bool) -> Fixture {
             template: String::new(),
             url: format!("http://{address}"),
         });
-    db.create_collection(&defra_core::RequestContext::default(), collection)
-        .await
-        .unwrap();
+    db.create_collection(collection).await.unwrap();
     Fixture { db, server }
 }
 
@@ -92,21 +90,13 @@ fn assert_vector(doc: &Document, values: Vec<f64>) {
 async fn update_regenerates_embedding_from_reloaded_document() {
     let fixture = fixture_with_counter(false).await;
     let mutator = AutoCommitMutator::new(Arc::clone(&fixture.db));
-    let created = mutator
-        .create(
-            &defra_core::RequestContext::default(),
-            "Texts",
-            document("first"),
-        )
-        .await
-        .unwrap();
+    let created = mutator.create("Texts", document("first")).await.unwrap();
     let mut stale = created.document.clone();
     stale.set("text", "second");
     let mut concurrent = created.document;
     concurrent.set("suffix", "new");
     mutator
         .update(
-            &defra_core::RequestContext::default(),
             "Texts",
             concurrent,
             ["suffix".to_string()].into_iter().collect(),
@@ -114,12 +104,7 @@ async fn update_regenerates_embedding_from_reloaded_document() {
         .await
         .unwrap();
     let updated = mutator
-        .update(
-            &defra_core::RequestContext::default(),
-            "Texts",
-            stale,
-            ["text".to_string()].into_iter().collect(),
-        )
+        .update("Texts", stale, ["text".to_string()].into_iter().collect())
         .await
         .unwrap();
     assert_eq!(
@@ -142,16 +127,12 @@ async fn update_embeds_the_applied_counter_value() {
     let mut doc = Document::new();
     doc.set("text", 5_i64);
     doc.set("suffix", "old");
-    let created = mutator
-        .create(&defra_core::RequestContext::default(), "Texts", doc)
-        .await
-        .unwrap();
+    let created = mutator.create("Texts", doc).await.unwrap();
     let mut concurrent = created.document.clone();
     concurrent.set("text", 6_i64);
     concurrent.set_counter_delta("text".to_string(), NormalValue::Int(1));
     mutator
         .update(
-            &defra_core::RequestContext::default(),
             "Texts",
             concurrent,
             ["text".to_string()].into_iter().collect(),
@@ -162,12 +143,7 @@ async fn update_embeds_the_applied_counter_value() {
     stale.set("text", 7_i64);
     stale.set_counter_delta("text".to_string(), NormalValue::Int(2));
     let updated = mutator
-        .update(
-            &defra_core::RequestContext::default(),
-            "Texts",
-            stale,
-            ["text".to_string()].into_iter().collect(),
-        )
+        .update("Texts", stale, ["text".to_string()].into_iter().collect())
         .await
         .unwrap();
     assert_eq!(updated.document.get("text"), Some(&NormalValue::Int(8)));
