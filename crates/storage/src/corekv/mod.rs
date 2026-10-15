@@ -68,12 +68,14 @@ pub mod errors;
 pub mod iterator;
 pub mod retry_policy;
 pub mod traits;
+pub mod transact;
 pub mod types;
 
 // Re-export commonly used types and traits for convenience
 pub use errors::{Error, Result, TransactionConflict, UNIQUE_CONSTRAINT_VIOLATION_MESSAGE};
 pub use iterator::{Iterator, KvPair};
 pub use retry_policy::{engine_retry_options, DEFAULT_MAX_TXN_RETRIES};
+pub use transact::transact;
 pub use traits::private;
 pub(crate) use traits::truncate_queue;
 pub use traits::{

@@ -39,12 +39,14 @@
 pub mod error;
 pub mod multistore;
 pub mod traits;
+pub mod transact;
 pub mod txn;
 
 // Re-export commonly used types
 pub use error::{Error, Result};
 pub use multistore::{NamespaceView, RootView, SharedTxn, WeakNamespaceView};
 pub use traits::Txn;
+pub use transact::transact;
 pub use txn::{AsyncCallback, BasicTxn};
 
 // Re-export storage types for convenience
