@@ -505,3 +505,130 @@ async fn an_update_and_a_delete_each_sign_in_one_wave() {
     );
     assert_eq!(signer.signatures.load(Ordering::SeqCst), 2);
 }
+
+/// A store that lets one other write commit inside the next retried
+/// transaction's first attempt, after that attempt's reads and before its
+/// commit, so the attempt's commit loses and the engine retries it.
+struct WinnerDuringFirstAttempt {
+    inner: RegolithStore,
+    winner: regolith::sync::SegQueue<MaybeBoxFuture<'static, ()>>,
+}
+
+impl storage::corekv::private::Sealed for WinnerDuringFirstAttempt {}
+
+#[async_trait]
+impl storage::corekv::Store for WinnerDuringFirstAttempt {
+    async fn allocate(&self, key: &[u8], count: u64) -> storage::Result<std::ops::Range<u64>> {
+        self.inner.allocate(key, count).await
+    }
+
+    async fn new_txn(&self, readonly: bool) -> storage::Result<Box<dyn storage::Txn>> {
+        self.inner.new_txn(readonly).await
+    }
+
+    async fn transact_retry(
+        &self,
+        options: storage::corekv::RetryOptions,
+        attempt: storage::corekv::RetryAttempt,
+    ) -> Result<storage::corekv::RetryAttemptValue, storage::corekv::RetryAttemptError> {
+        let attempt = match self.winner.pop() {
+            Some(winner) => Box::new(WinnerAfterReads {
+                attempt,
+                winner: Some(winner),
+            }),
+            None => attempt,
+        };
+        self.inner.transact_retry(options, attempt).await
+    }
+
+    async fn close(&self) -> storage::Result<()> {
+        self.inner.close().await
+    }
+}
+
+/// Runs the winner's write after the first attempt's own work, before the
+/// engine commits it.
+struct WinnerAfterReads {
+    attempt: storage::corekv::RetryAttempt,
+    winner: Option<MaybeBoxFuture<'static, ()>>,
+}
+
+impl storage::corekv::RetryAttemptFn for WinnerAfterReads {
+    fn run<'a>(
+        &'a mut self,
+        txn: &'a mut dyn storage::corekv::RetryTxn,
+    ) -> storage::corekv::RetryAttemptFuture<'a> {
+        Box::pin(async move {
+            let value = self.attempt.run(txn).await?;
+            if let Some(winner) = self.winner.take() {
+                winner.await;
+            }
+            Ok(value)
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_retry_after_a_conflict_builds_on_the_winner() {
+    let store = Arc::new(WinnerDuringFirstAttempt {
+        inner: RegolithStore::in_memory().unwrap(),
+        winner: regolith::sync::SegQueue::new(),
+    });
+    let db = Arc::new(DB::open_from_arc(store.clone()).await.unwrap());
+    let mut fields = vec![FieldDescription::new("1", "_docID", FieldKind::doc_id())];
+    for (index, name) in FIELDS.iter().enumerate() {
+        fields.push(FieldDescription::new(
+            (index + 2).to_string(),
+            *name,
+            FieldKind::string(),
+        ));
+    }
+    db.create_collection(CollectionVersion::new("Things", "v1", "col-things", fields))
+        .await
+        .unwrap();
+    let mutator = AutoCommitMutator::new(Arc::clone(&db));
+    let created = mutator
+        .create("Things", documents(1).remove(0))
+        .await
+        .unwrap();
+    let field: rapidhash::RapidHashSet<String> = ["a".to_string()].into_iter().collect();
+
+    // The winner writes field `a` while the loser's first attempt is open.
+    let winner = Arc::new(regolith::sync::OnceCell::new());
+    {
+        let (winner, mutator, field) = (
+            Arc::clone(&winner),
+            AutoCommitMutator::new(Arc::clone(&db)),
+            field.clone(),
+        );
+        let mut doc = created.document.clone();
+        doc.set("a", "winner");
+        store.winner.push(Box::pin(async move {
+            let result = mutator.update("Things", doc, field).await.unwrap();
+            let _ = winner.set(result);
+        }));
+    }
+    let mut doc = created.document.clone();
+    doc.set("a", "loser");
+    let loser = mutator.update("Things", doc, field).await.unwrap();
+    let winner = winner
+        .get()
+        .expect("the winner committed during the first attempt");
+
+    // The loser retried on fresh heads: its composite is the winner's child,
+    // one priority above it, not a sibling at the same priority.
+    let winner_block = Block::from_dag_cbor(winner.commit_block.as_ref().unwrap()).unwrap();
+    let loser_block = Block::from_dag_cbor(loser.commit_block.as_ref().unwrap()).unwrap();
+    assert_eq!(loser_block.heads, Some(vec![winner.commit_cid.unwrap()]));
+    assert_eq!(
+        loser_block.delta.priority(),
+        winner_block.delta.priority() + 1
+    );
+    // The last write's value wins.
+    let stored = mutator
+        .get_for_update("Things", &created.doc_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.get("a"), Some(&NormalValue::String("loser".into())));
+}
