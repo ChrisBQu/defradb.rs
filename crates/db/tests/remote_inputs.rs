@@ -305,3 +305,167 @@ async fn a_create_of_n_documents_signs_in_two_waves_and_takes_two_round_trips() 
         "two waves of {latency:?}, not one per block: {elapsed:?}"
     );
 }
+
+/// An OpenAI-compatible embedding endpoint that counts its requests and the
+/// texts in them, and answers in reverse order with each entry's index, so a
+/// caller that placed vectors by position would mix them up. A text's vector
+/// is `[its length, its first byte]`.
+async fn embedding_server() -> (
+    String,
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
+    tokio::task::JoinHandle<()>,
+) {
+    use axum::{routing::post, Json, Router};
+    use serde_json::{json, Value};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let texts = Arc::new(AtomicUsize::new(0));
+    let (counted_requests, counted_texts) = (Arc::clone(&requests), Arc::clone(&texts));
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route(
+                "/embeddings",
+                post(move |Json(request): Json<Value>| {
+                    let (requests, texts) =
+                        (Arc::clone(&counted_requests), Arc::clone(&counted_texts));
+                    async move {
+                        requests.fetch_add(1, Ordering::SeqCst);
+                        let inputs: Vec<String> = match &request["input"] {
+                            Value::Array(inputs) => inputs
+                                .iter()
+                                .map(|input| input.as_str().unwrap().to_string())
+                                .collect(),
+                            input => vec![input.as_str().unwrap().to_string()],
+                        };
+                        texts.fetch_add(inputs.len(), Ordering::SeqCst);
+                        let data: Vec<Value> = inputs
+                            .iter()
+                            .enumerate()
+                            .rev()
+                            .map(|(index, text)| {
+                                json!({
+                                    "index": index,
+                                    "embedding": [text.len() as f64, f64::from(text.as_bytes()[0])],
+                                })
+                            })
+                            .collect();
+                        Json(json!({ "data": data }))
+                    }
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    });
+    (format!("http://{address}"), requests, texts, server)
+}
+
+async fn embedded_database(url: &str) -> Arc<DB<RegolithStore>> {
+    let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
+    let mut collection = CollectionVersion::new(
+        "Texts",
+        "texts-v1",
+        "col-texts",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "text", FieldKind::string()),
+            FieldDescription::new("3", "vector", FieldKind::float64_array()),
+            FieldDescription::new("4", "tag", FieldKind::string()),
+        ],
+    );
+    collection
+        .vector_embeddings
+        .push(schema::VectorEmbeddingDescription {
+            field_name: "vector".to_string(),
+            fields: vec!["text".to_string()],
+            model: "test-model".to_string(),
+            provider: "openai".to_string(),
+            template: String::new(),
+            url: url.to_string(),
+        });
+    db.create_collection(collection).await.unwrap();
+    db
+}
+
+fn text_document(text: &str) -> Document {
+    tagged_document(text, "")
+}
+
+/// A document whose tag, which nothing embeds, tells it apart from another
+/// with the same text.
+fn tagged_document(text: &str, tag: &str) -> Document {
+    let mut doc = Document::new();
+    doc.set("text", text);
+    doc.set("tag", tag);
+    doc
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_create_of_n_documents_embeds_them_in_one_request() {
+    let (url, requests, texts, server) = embedding_server().await;
+    let db = embedded_database(&url).await;
+    let words = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"];
+
+    let created = AutoCommitMutator::new(Arc::clone(&db))
+        .create_many(
+            "Texts",
+            words.iter().map(|word| text_document(word)).collect(),
+        )
+        .await
+        .unwrap();
+    server.abort();
+
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        1,
+        "one request for the wave"
+    );
+    assert_eq!(texts.load(Ordering::SeqCst), words.len());
+    for (word, created) in words.iter().zip(&created) {
+        // The text's own vector, the source text plus a newline.
+        let text = format!("{word}\n");
+        assert_eq!(
+            created.document.get("vector"),
+            Some(&NormalValue::Float64Array(vec![
+                text.len() as f64,
+                f64::from(text.as_bytes()[0])
+            ])),
+            "{word}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn identical_texts_are_embedded_once() {
+    let (url, requests, texts, server) = embedding_server().await;
+    let db = embedded_database(&url).await;
+    let mutator = AutoCommitMutator::new(Arc::clone(&db));
+
+    let first = mutator
+        .create_many(
+            "Texts",
+            vec![tagged_document("same", "1"), tagged_document("same", "2")],
+        )
+        .await
+        .unwrap();
+    let later = mutator
+        .create("Texts", tagged_document("same", "3"))
+        .await
+        .unwrap();
+    server.abort();
+
+    assert_eq!(texts.load(Ordering::SeqCst), 1, "one text, embedded once");
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        1,
+        "the later create hits the cache"
+    );
+    let expected = NormalValue::Float64Array(vec![5.0, f64::from(b's')]);
+    for created in first.iter().chain(std::iter::once(&later)) {
+        assert_eq!(created.document.get("vector"), Some(&expected));
+    }
+}
