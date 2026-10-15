@@ -362,6 +362,9 @@ impl<S: Store> DB<S> {
         self.load_collections().await?;
         self.initialize_migrations().await?;
         self.migrate_document_parts().await?;
+        // Counters move into their document part, so they need the part IDs the step above gives
+        // collections written before part IDs existed.
+        self.maybe_migrate_counter_accumulators().await?;
         self.migrate_index_format().await?;
         self.resume_index_backfills().await
     }
