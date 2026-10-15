@@ -232,6 +232,7 @@ pub async fn check_doc_read_access_with_prepared_inputs(
     acp: &dyn DocumentACP,
     projection: Option<&AcpRegistrationProjection>,
     identity: &Identity,
+    dac_bypass: bool,
     policy_id: &str,
     resource_name: &str,
     collection_id: &str,
@@ -246,6 +247,7 @@ pub async fn check_doc_read_access_with_prepared_inputs(
             acp,
             projection,
             identity,
+            dac_bypass,
         };
         return acp::read_access::check_doc_read_access(
             &checker,
@@ -322,7 +324,7 @@ pub async fn check_doc_read_access_with_prepared_inputs(
         })
     }
 
-    if identity.is_authenticated() && defra_core::dac_bypass::get_dac_bypass() {
+    if identity.is_authenticated() && dac_bypass {
         return Ok(true);
     }
     if !doc_id.is_empty() {
@@ -451,6 +453,7 @@ mod tests {
             acp: &acp,
             projection: Some(&projection),
             identity: &Identity::Anonymous,
+            dac_bypass: false,
         };
         let absent = checker
             .object_access("policy", "User", "doc-1")
@@ -517,6 +520,7 @@ mod tests {
             &NoopDocumentAcp(true),
             Some(&projection),
             &Identity::Anonymous,
+            false,
             "policy",
             "User",
             "collection-1",

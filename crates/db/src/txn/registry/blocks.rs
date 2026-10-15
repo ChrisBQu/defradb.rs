@@ -12,6 +12,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         public_key_hex: &str,
         key_type: crypto::KeyType,
         caller_identity: &acp::Identity,
+        dac_bypass: bool,
     ) -> Result<()> {
         let ctx = self
             .get_ctx(txn_id)?
@@ -32,6 +33,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
             public_key_hex,
             key_type,
             caller_identity,
+            dac_bypass,
         )
         .await
         .map_err(Error::Other)
@@ -45,6 +47,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         document_acp: &dyn acp::DocumentACP,
         cid_str: &str,
         caller_identity: &acp::Identity,
+        dac_bypass: bool,
     ) -> Result<String> {
         let ctx = self
             .get_ctx(txn_id)?
@@ -67,6 +70,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
             systemstore,
             cid_str,
             caller_identity,
+            dac_bypass,
         )
         .await
         .map_err(Error::Other)

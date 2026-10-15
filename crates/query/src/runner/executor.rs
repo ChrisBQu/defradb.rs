@@ -140,10 +140,150 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         &self,
         request: &QueryRequest,
     ) -> Result<Option<std::sync::Arc<crate::prepared::PreparedMutations>>> {
-        await_with_timeout(self.prepare_mutations(request), self.query_timeout).await
+        let runner = self.for_request(request.context.clone());
+        await_with_timeout(runner.prepare_mutations(request), self.query_timeout).await
     }
 
     async fn execute_prepared(
+        &self,
+        request: QueryRequest,
+        prepared: Option<std::sync::Arc<crate::prepared::PreparedMutations>>,
+    ) -> QueryResponse {
+        self.for_request(request.context.clone())
+            .run_prepared(request, prepared)
+            .await
+    }
+
+    async fn resolve_retry_input(
+        &self,
+        request: &QueryRequest,
+        prepared: Option<std::sync::Arc<crate::prepared::PreparedMutations>>,
+        input: &crate::prepared::PreparedInputRequest,
+    ) -> Result<Option<std::sync::Arc<crate::prepared::PreparedMutations>>> {
+        let runner = self.for_request(request.context.clone());
+        let Some(prepared) = prepared else {
+            return Err(crate::error::QueryError::execution(
+                "retry input has no request preparation capsule",
+            ));
+        };
+        prepared
+            .inputs
+            .answer_miss(input, || async {
+                match input.kind() {
+                    crate::prepared::PreparedInputKind::AcpDecision => {
+                        runner.resolve_acp_decision_input(input).await
+                    }
+                    crate::prepared::PreparedInputKind::WriteValidation => {
+                        runner.resolve_write_validation_input(input).await
+                    }
+                    crate::prepared::PreparedInputKind::ReadValidation => {
+                        runner.resolve_read_validation_input(input).await
+                    }
+                    crate::prepared::PreparedInputKind::EncryptedSearch => {
+                        runner.resolve_encrypted_search_input(input).await
+                    }
+                    _ => {
+                        let mutator = runner.mutator.as_ref().ok_or_else(|| {
+                            crate::error::QueryError::execution(
+                                "retry input has no document mutator",
+                            )
+                        })?;
+                        mutator.resolve_prepared_input(input).await
+                    }
+                }
+            })
+            .await?;
+        Ok(Some(prepared))
+    }
+
+    #[instrument(name = "query.execute_request", skip(self, request), fields(query_len = request.query.len() as i64))]
+    async fn execute(&self, request: QueryRequest) -> QueryResponse {
+        let mut prepared = match self.prepare_request(&request).await {
+            Ok(prepared) => prepared,
+            Err(error) => return QueryResponse::error(QueryResponseError::from_query_error(error)),
+        };
+        loop {
+            let response = self
+                .execute_prepared(request.clone(), prepared.clone())
+                .await;
+            let Some(input) = response.retry_input().cloned() else {
+                return response;
+            };
+            match self
+                .resolve_retry_input(&request, prepared.clone(), &input)
+                .await
+            {
+                Ok(Some(updated)) => prepared = Some(updated),
+                Ok(None) => {
+                    return QueryResponse::error(
+                        "retry input resolution returned no preparation capsule",
+                    )
+                }
+                Err(error) => {
+                    return QueryResponse::error(QueryResponseError::from_query_error(error))
+                }
+            }
+        }
+    }
+
+    #[instrument(
+        name = "query.execute_in_txn",
+        skip(self, request),
+        fields(query_len = request.query.len() as i64, txn_id = %handle)
+    )]
+    async fn execute_in_txn(
+        &self,
+        request: QueryRequest,
+        handle: &TransactionHandle,
+    ) -> QueryResponse {
+        self.for_request(request.context.clone())
+            .run_in_txn(request, handle)
+            .await
+    }
+
+    async fn begin_txn(
+        &self,
+        readonly: bool,
+    ) -> std::result::Result<TransactionHandle, TransactionError> {
+        self.registry.begin(readonly).await
+    }
+
+    async fn commit_txn(
+        &self,
+        handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError> {
+        self.registry.commit(handle).await
+    }
+
+    async fn rollback_txn(
+        &self,
+        handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError> {
+        self.registry.rollback(handle).await
+    }
+
+    fn abandon_txn(&self, handle: &TransactionHandle) {
+        self.registry.abandon(handle);
+    }
+
+    async fn schema(&self) -> Result<String> {
+        let collections = self.collections_map().await?;
+        let mut schema_str = String::new();
+        for collection in collections.values() {
+            schema_str.push_str(&format!("type {} {{\n", collection.name));
+            for field in &collection.fields {
+                let gql_type = field.kind.graphql_type_name();
+                schema_str.push_str(&format!("  {}: {}\n", field.name, gql_type));
+            }
+            schema_str.push_str("}\n\n");
+        }
+        Ok(schema_str)
+    }
+}
+
+impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
+    /// [`QueryExecutor::execute_prepared`] on a runner bound to the request.
+    async fn run_prepared(
         &self,
         request: QueryRequest,
         prepared: Option<std::sync::Arc<crate::prepared::PreparedMutations>>,
@@ -177,7 +317,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         if matches!(&parsed, ParsedOperation::Query { .. }) {
             match self.registry.begin_implicit_read().await {
                 Ok(handle) => {
-                    let response = self.execute_in_txn(request.clone(), &handle).await;
+                    let response = self.run_in_txn(request.clone(), &handle).await;
                     let apply_read_effects = response.errors.is_empty();
                     if let Err(error) = self
                         .registry
@@ -356,87 +496,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         }
     }
 
-    async fn resolve_retry_input(
-        &self,
-        _request: &QueryRequest,
-        prepared: Option<std::sync::Arc<crate::prepared::PreparedMutations>>,
-        input: &crate::prepared::PreparedInputRequest,
-    ) -> Result<Option<std::sync::Arc<crate::prepared::PreparedMutations>>> {
-        let Some(prepared) = prepared else {
-            return Err(crate::error::QueryError::execution(
-                "retry input has no request preparation capsule",
-            ));
-        };
-        prepared
-            .inputs
-            .answer_miss(input, || async {
-                match input.kind() {
-                    crate::prepared::PreparedInputKind::AcpDecision => {
-                        self.resolve_acp_decision_input(input).await
-                    }
-                    crate::prepared::PreparedInputKind::WriteValidation => {
-                        self.resolve_write_validation_input(input).await
-                    }
-                    crate::prepared::PreparedInputKind::ReadValidation => {
-                        self.resolve_read_validation_input(input).await
-                    }
-                    crate::prepared::PreparedInputKind::EncryptedSearch => {
-                        self.resolve_encrypted_search_input(input).await
-                    }
-                    _ => {
-                        let mutator = self.mutator.as_ref().ok_or_else(|| {
-                            crate::error::QueryError::execution(
-                                "retry input has no document mutator",
-                            )
-                        })?;
-                        mutator.resolve_prepared_input(input).await
-                    }
-                }
-            })
-            .await?;
-        Ok(Some(prepared))
-    }
-
-    #[instrument(name = "query.execute_request", skip(self, request), fields(query_len = request.query.len() as i64))]
-    async fn execute(&self, request: QueryRequest) -> QueryResponse {
-        let mut prepared = match self.prepare_request(&request).await {
-            Ok(prepared) => prepared,
-            Err(error) => return QueryResponse::error(QueryResponseError::from_query_error(error)),
-        };
-        loop {
-            let response = self
-                .execute_prepared(request.clone(), prepared.clone())
-                .await;
-            let Some(input) = response.retry_input().cloned() else {
-                return response;
-            };
-            match self
-                .resolve_retry_input(&request, prepared.clone(), &input)
-                .await
-            {
-                Ok(Some(updated)) => prepared = Some(updated),
-                Ok(None) => {
-                    return QueryResponse::error(
-                        "retry input resolution returned no preparation capsule",
-                    )
-                }
-                Err(error) => {
-                    return QueryResponse::error(QueryResponseError::from_query_error(error))
-                }
-            }
-        }
-    }
-
-    #[instrument(
-        name = "query.execute_in_txn",
-        skip(self, request),
-        fields(query_len = request.query.len() as i64, txn_id = %handle)
-    )]
-    async fn execute_in_txn(
-        &self,
-        request: QueryRequest,
-        handle: &TransactionHandle,
-    ) -> QueryResponse {
+    /// [`QueryExecutor::execute_in_txn`] on a runner bound to the request.
+    async fn run_in_txn(&self, request: QueryRequest, handle: &TransactionHandle) -> QueryResponse {
         let txn_ctx = match self.registry.get(handle) {
             GetTransactionResult::Found(ctx) => ctx,
             GetTransactionResult::NotFound => {
@@ -710,47 +771,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         response
     }
 
-    async fn begin_txn(
-        &self,
-        readonly: bool,
-    ) -> std::result::Result<TransactionHandle, TransactionError> {
-        self.registry.begin(readonly).await
-    }
-
-    async fn commit_txn(
-        &self,
-        handle: &TransactionHandle,
-    ) -> std::result::Result<(), TransactionError> {
-        self.registry.commit(handle).await
-    }
-
-    async fn rollback_txn(
-        &self,
-        handle: &TransactionHandle,
-    ) -> std::result::Result<(), TransactionError> {
-        self.registry.rollback(handle).await
-    }
-
-    fn abandon_txn(&self, handle: &TransactionHandle) {
-        self.registry.abandon(handle);
-    }
-
-    async fn schema(&self) -> Result<String> {
-        let collections = self.collections_map().await?;
-        let mut schema_str = String::new();
-        for collection in collections.values() {
-            schema_str.push_str(&format!("type {} {{\n", collection.name));
-            for field in &collection.fields {
-                let gql_type = field.kind.graphql_type_name();
-                schema_str.push_str(&format!("  {}: {}\n", field.name, gql_type));
-            }
-            schema_str.push_str("}\n\n");
-        }
-        Ok(schema_str)
-    }
-}
-
-impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     async fn resolve_write_validation_input(
         &self,
         input: &crate::prepared::PreparedInputRequest,

@@ -619,6 +619,7 @@ async fn unregistered_read_rules_follow_provider_and_preserve_proof_errors() {
         let checker = DirectChecker {
             acp: &acp,
             identity: &Identity::Anonymous,
+            dac_bypass: false,
         };
         let access = checker
             .object_access("policy", "users", "doc")
@@ -639,6 +640,7 @@ async fn unregistered_read_rules_follow_provider_and_preserve_proof_errors() {
     let checker = DirectChecker {
         acp: &acp,
         identity: &Identity::Anonymous,
+        dac_bypass: false,
     };
     assert!(
         check_doc_read_access(&checker, "policy", "users", "collection", false, "doc")

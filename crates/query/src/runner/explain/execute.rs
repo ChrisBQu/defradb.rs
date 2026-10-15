@@ -279,7 +279,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             )
             .with_query_limits(self.query_limits)
             .with_fetcher(Arc::new(fetcher_arc))
-            .with_acp(self.acp.clone(), caller_identity.clone())
+            .with_acp(
+                self.acp.clone(),
+                caller_identity.clone(),
+                self.request.dac_bypass(),
+            )
             .with_read_validator(self.read_validator.clone())
             .with_retry_inputs(self.retry_inputs.clone())
             .with_index_estimates(index_estimates);
@@ -298,14 +302,16 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 let app_read = self.app_read_check(caller_identity.clone(), &collection);
                 plan = PermissionFilterNode::wrap(
                     plan,
-                    collection.policy.as_ref().map(|policy| {
-                        (
-                            self.acp.clone(),
-                            Identity::from(caller_identity),
-                            policy.id.clone(),
-                            policy.resource_name.clone(),
-                        )
-                    }),
+                    collection
+                        .policy
+                        .as_ref()
+                        .map(|policy| crate::plan::AcpRead {
+                            acp: self.acp.clone(),
+                            identity: Identity::from(caller_identity),
+                            dac_bypass: self.request.dac_bypass(),
+                            policy_id: policy.id.clone(),
+                            resource_name: policy.resource_name.clone(),
+                        }),
                     app_read,
                     self.retry_inputs.clone(),
                 );
@@ -370,6 +376,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             let acp_filter = collection.policy.as_ref().map(|policy| plan::AcpFilter {
                 acp: self.acp.clone(),
                 identity: Identity::from(caller_identity),
+                dac_bypass: self.request.dac_bypass(),
                 policy_id: policy.id.clone(),
                 resource_name: policy.resource_name.clone(),
                 retry_inputs: self.retry_inputs.clone(),

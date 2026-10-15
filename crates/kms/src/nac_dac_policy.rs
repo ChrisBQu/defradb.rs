@@ -71,9 +71,12 @@ impl NacDacPolicy {
         }
 
         let actor_id: acp::Identity = actor.into();
+        // A peer asking for a key acts as itself; NAC grants a remote peer no
+        // DAC bypass.
         let checker = acp::read_access::DirectChecker {
             acp: self.doc_acp.as_ref(),
             identity: &actor_id,
+            dac_bypass: false,
         };
         let allowed = acp::read_access::check_doc_read_access(
             &checker,

@@ -157,6 +157,7 @@ async fn test_no_policy_allows_all() {
     let allowed = check_doc_permission(
         &acp,
         &Identity::Anonymous,
+        false,
         DocumentPermission::Read,
         &collection,
         "doc1",
@@ -288,6 +289,7 @@ async fn unpermissioned_branchable_is_fully_public() {
     assert!(check_doc_permission(
         &acp,
         &Identity::Anonymous,
+        false,
         DocumentPermission::Read,
         &collection,
         &collection.collection_id,
@@ -387,6 +389,7 @@ async fn test_owner_has_update_permission() {
     let allowed = check_doc_permission(
         &acp,
         &Identity::Authenticated(owner.clone()),
+        false,
         DocumentPermission::Update,
         &collection,
         "doc1",
@@ -414,6 +417,7 @@ async fn test_non_owner_denied_update_permission() {
     let allowed = check_doc_permission(
         &acp,
         &Identity::Authenticated(stranger.clone()),
+        false,
         DocumentPermission::Update,
         &collection,
         "doc1",
@@ -613,6 +617,7 @@ async fn test_policy_change_mid_transaction_permission_check() {
     let allowed = check_doc_permission(
         &acp,
         &Identity::Authenticated(owner.clone()),
+        false,
         DocumentPermission::Read,
         &collection_v1,
         "doc1",
@@ -626,6 +631,7 @@ async fn test_policy_change_mid_transaction_permission_check() {
     let allowed = check_doc_permission(
         &acp,
         &Identity::Authenticated(stranger.clone()),
+        false,
         DocumentPermission::Read,
         &collection_v1,
         "doc1",
@@ -645,6 +651,7 @@ async fn test_policy_change_mid_transaction_permission_check() {
     let allowed = check_doc_permission(
         &acp,
         &Identity::Authenticated(stranger.clone()),
+        false,
         DocumentPermission::Read,
         &collection_v2,
         "doc1",
@@ -674,6 +681,7 @@ async fn test_policy_removal_mid_transaction_makes_docs_public() {
     let allowed = check_doc_permission(
         &acp,
         &Identity::Authenticated(stranger.clone()),
+        false,
         DocumentPermission::Update,
         &collection_with_pol,
         "doc1",
@@ -690,6 +698,7 @@ async fn test_policy_removal_mid_transaction_makes_docs_public() {
     let allowed = check_doc_permission(
         &acp,
         &Identity::Authenticated(stranger.clone()),
+        false,
         DocumentPermission::Update,
         &collection_no_pol,
         "doc1",
@@ -704,6 +713,7 @@ async fn test_policy_removal_mid_transaction_makes_docs_public() {
     let allowed = check_doc_permission(
         &acp,
         &Identity::Anonymous,
+        false,
         DocumentPermission::Update,
         &collection_no_pol,
         "doc1",
@@ -738,6 +748,7 @@ async fn test_node_identity_bypass_grants_full_access() {
     let allowed = check_doc_permission(
         &acp,
         &Identity::Authenticated(node_identity.clone()),
+        false,
         DocumentPermission::Read,
         &collection,
         "doc1",
@@ -751,6 +762,7 @@ async fn test_node_identity_bypass_grants_full_access() {
     let allowed = check_doc_permission(
         &acp,
         &Identity::Authenticated(node_identity.clone()),
+        false,
         DocumentPermission::Update,
         &collection,
         "doc1",
@@ -764,6 +776,7 @@ async fn test_node_identity_bypass_grants_full_access() {
     let allowed = check_doc_permission(
         &acp,
         &Identity::Authenticated(node_identity.clone()),
+        false,
         DocumentPermission::Delete,
         &collection,
         "doc1",
@@ -791,6 +804,7 @@ async fn test_non_node_identity_still_denied() {
     let allowed = check_doc_permission(
         &acp,
         &Identity::Authenticated(stranger),
+        false,
         DocumentPermission::Read,
         &collection,
         "doc1",
@@ -820,6 +834,7 @@ async fn test_node_identity_none_falls_through() {
     let allowed = check_doc_permission(
         &acp,
         &Identity::Authenticated(stranger),
+        false,
         DocumentPermission::Read,
         &collection,
         "doc1",
@@ -834,12 +849,11 @@ async fn test_node_identity_none_falls_through() {
 }
 
 #[tokio::test]
-async fn test_dac_bypass_thread_local_grants_full_access() {
-    // The thread-local `dac_bypass` flag (set by HTTP/FFI entry points after
-    // resolving NAC `bypass-dac` permission via `should_bypass_dac`) must
-    // grant access on the mutation path too.
-    // This covers #738 — the previous gap was that the mutation path
-    // (`check_doc_permission`) ignored this flag.
+async fn test_dac_bypass_grants_full_access() {
+    // The request's DAC bypass (resolved by HTTP/FFI entry points from NAC
+    // `bypass-dac` via `should_bypass_dac`) must grant access on the mutation
+    // path too. This covers #738: the mutation path (`check_doc_permission`)
+    // once ignored it.
     let acp = LocalDocumentACP::new(Arc::new(MemoryAcpStore::new()));
     let collection = collection_with_policy();
     let owner = test_did();
@@ -849,11 +863,11 @@ async fn test_dac_bypass_thread_local_grants_full_access() {
         .await
         .unwrap();
 
-    // Without the flag, admin is denied.
-    defra_core::dac_bypass::set_dac_bypass(false);
+    // Without the bypass, admin is denied.
     let allowed = check_doc_permission(
         &acp,
         &Identity::Authenticated(admin.clone()),
+        false,
         DocumentPermission::Update,
         &collection,
         "doc1",
@@ -863,11 +877,11 @@ async fn test_dac_bypass_thread_local_grants_full_access() {
     .unwrap();
     assert!(!allowed, "admin without bypass flag must be denied");
 
-    // With the flag set, admin is granted access regardless of DAC.
-    defra_core::dac_bypass::set_dac_bypass(true);
+    // With the bypass, admin is granted access regardless of DAC.
     let allowed = check_doc_permission(
         &acp,
         &Identity::Authenticated(admin.clone()),
+        true,
         DocumentPermission::Update,
         &collection,
         "doc1",
@@ -880,6 +894,7 @@ async fn test_dac_bypass_thread_local_grants_full_access() {
     let allowed = check_doc_permission(
         &acp,
         &Identity::Anonymous,
+        true,
         DocumentPermission::Update,
         &collection,
         "doc1",
@@ -888,9 +903,6 @@ async fn test_dac_bypass_thread_local_grants_full_access() {
     .await
     .unwrap();
     assert!(!allowed, "dac_bypass must not grant anonymous access");
-
-    // Reset the thread-local so it doesn't leak into other tests.
-    defra_core::dac_bypass::set_dac_bypass(false);
 }
 
 // =========================================================================
@@ -924,6 +936,7 @@ async fn test_writer_relation_is_not_recognized() {
     let allowed = check_doc_permission(
         &acp,
         &Identity::Authenticated(granted_user.clone()),
+        false,
         DocumentPermission::Update,
         &collection,
         "doc1",
@@ -940,6 +953,7 @@ async fn test_writer_relation_is_not_recognized() {
     let allowed = check_doc_permission(
         &acp,
         &Identity::Authenticated(granted_user.clone()),
+        false,
         DocumentPermission::Read,
         &collection,
         "doc1",
@@ -962,6 +976,7 @@ async fn test_writer_relation_is_not_recognized() {
     let allowed = check_doc_permission(
         &acp,
         &Identity::Authenticated(granted_user.clone()),
+        false,
         DocumentPermission::Update,
         &collection,
         "doc1",
@@ -974,6 +989,7 @@ async fn test_writer_relation_is_not_recognized() {
     let allowed = check_doc_permission(
         &acp,
         &Identity::Authenticated(granted_user),
+        false,
         DocumentPermission::Read,
         &collection,
         "doc1",

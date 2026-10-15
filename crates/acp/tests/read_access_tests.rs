@@ -169,6 +169,7 @@ async fn local_unregistered_document_keeps_public_read_access() {
     let checker = DirectChecker {
         acp: &acp,
         identity: &Identity::Anonymous,
+        dac_bypass: false,
     };
     let access = checker
         .object_access("policy", "resource", "doc")

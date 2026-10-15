@@ -4,6 +4,7 @@
 //! The HTTP crate depends on this trait, allowing parallel development of HTTP and query execution.
 
 use async_trait::async_trait;
+use defra_core::RequestContext;
 use identity::Did;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -53,6 +54,10 @@ pub struct QueryRequest {
     /// This is set by the HTTP layer from the Authorization header.
     #[serde(skip)]
     pub identity: Option<Did>,
+
+    /// The request's context, built by the boundary that received it.
+    #[serde(skip)]
+    pub context: RequestContext,
 }
 
 impl QueryRequest {
@@ -63,6 +68,7 @@ impl QueryRequest {
             operation_name: None,
             variables: None,
             identity: None,
+            context: RequestContext::default(),
         }
     }
 
@@ -81,6 +87,12 @@ impl QueryRequest {
     /// Set the identity for ACP permission checks.
     pub fn with_identity(mut self, identity: Option<Did>) -> Self {
         self.identity = identity;
+        self
+    }
+
+    /// Set the request's context.
+    pub fn with_context(mut self, context: RequestContext) -> Self {
+        self.context = context;
         self
     }
 }

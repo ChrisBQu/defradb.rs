@@ -1,3 +1,9 @@
+//! Block signature verification, gated by the caller's read access.
+//!
+//! Every entry point checks document ACP as `caller_identity`, honouring
+//! `dac_bypass`, the request's DAC bypass (`RequestContext::dac_bypass`).
+//! The block boundaries resolve no bypass and pass `false`.
+
 use std::sync::Arc;
 
 use datastore::NamespaceView;
@@ -16,6 +22,7 @@ pub async fn verified_block_signer_did<S: Store>(
     document_acp: &dyn acp::DocumentACP,
     cid_str: &str,
     caller_identity: &acp::Identity,
+    dac_bypass: bool,
 ) -> Result<String, String> {
     let txn = database
         .new_txn(true)
@@ -35,6 +42,7 @@ pub async fn verified_block_signer_did<S: Store>(
         systemstore,
         cid_str,
         caller_identity,
+        dac_bypass,
     )
     .await
 }
@@ -47,6 +55,7 @@ pub async fn authorized_signed_block_bytes<S: Store>(
     document_acp: &dyn acp::DocumentACP,
     cid_str: &str,
     caller_identity: &acp::Identity,
+    dac_bypass: bool,
 ) -> Result<(Vec<u8>, Vec<u8>), String> {
     let txn = database
         .new_txn(true)
@@ -65,6 +74,7 @@ pub async fn authorized_signed_block_bytes<S: Store>(
         systemstore,
         cid_str,
         caller_identity,
+        dac_bypass,
     )
     .await?;
     Ok((block_bytes, signature_bytes))
@@ -77,6 +87,7 @@ pub async fn verified_block_signer_did_in_txn<S: Store>(
     txn: &DbTxn<S>,
     cid_str: &str,
     caller_identity: &acp::Identity,
+    dac_bypass: bool,
 ) -> Result<String, String> {
     let blockstore = txn
         .blockstore()
@@ -92,6 +103,7 @@ pub async fn verified_block_signer_did_in_txn<S: Store>(
         systemstore,
         cid_str,
         caller_identity,
+        dac_bypass,
     )
     .await
 }
@@ -103,6 +115,7 @@ pub(crate) async fn verified_block_signer_did_with_blockstore<S: Store>(
     systemstore: NamespaceView,
     cid_str: &str,
     caller_identity: &acp::Identity,
+    dac_bypass: bool,
 ) -> Result<String, String> {
     let (block, signature, _, _) = load_authorized_block_signature(
         database,
@@ -111,6 +124,7 @@ pub(crate) async fn verified_block_signer_did_with_blockstore<S: Store>(
         systemstore,
         cid_str,
         caller_identity,
+        dac_bypass,
     )
     .await?;
     verified_signature_signer_did(&block, &signature)
@@ -152,6 +166,7 @@ pub async fn verify_block_signature<S: Store>(
     public_key_hex: &str,
     key_type: crypto::KeyType,
     caller_identity: &acp::Identity,
+    dac_bypass: bool,
 ) -> Result<(), String> {
     let pub_key = crypto::public_key_from_string(key_type, public_key_hex)
         .map_err(|e| format!("invalid public key: {}", e))?;
@@ -176,6 +191,7 @@ pub async fn verify_block_signature<S: Store>(
         pub_key.as_ref(),
         public_key_hex,
         caller_identity,
+        dac_bypass,
     )
     .await
 }
@@ -188,6 +204,7 @@ pub async fn verify_block_signature_in_txn<S: Store>(
     public_key_hex: &str,
     key_type: crypto::KeyType,
     caller_identity: &acp::Identity,
+    dac_bypass: bool,
 ) -> Result<(), String> {
     let pub_key = crypto::public_key_from_string(key_type, public_key_hex)
         .map_err(|e| format!("invalid public key: {}", e))?;
@@ -208,6 +225,7 @@ pub async fn verify_block_signature_in_txn<S: Store>(
         pub_key.as_ref(),
         public_key_hex,
         caller_identity,
+        dac_bypass,
     )
     .await
 }
@@ -222,6 +240,7 @@ async fn verify_block_signature_with_blockstore<S: Store>(
     pub_key: &dyn crypto::PublicKey,
     public_key_hex: &str,
     caller_identity: &acp::Identity,
+    dac_bypass: bool,
 ) -> Result<(), String> {
     let (block, signature, _, _) = load_authorized_block_signature(
         database,
@@ -230,6 +249,7 @@ async fn verify_block_signature_with_blockstore<S: Store>(
         systemstore,
         cid_str,
         caller_identity,
+        dac_bypass,
     )
     .await?;
 
@@ -249,6 +269,7 @@ async fn load_authorized_block_signature<S: Store>(
     systemstore: NamespaceView,
     cid_str: &str,
     caller_identity: &acp::Identity,
+    dac_bypass: bool,
 ) -> Result<
     (
         defra_core::block::Block,
@@ -301,6 +322,7 @@ async fn load_authorized_block_signature<S: Store>(
                 let checker = acp::read_access::DirectChecker {
                     acp: document_acp,
                     identity: caller_identity,
+                    dac_bypass,
                 };
 
                 let candidates = if owning_doc_ids.is_empty() {

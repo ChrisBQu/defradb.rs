@@ -25,6 +25,8 @@ pub trait ObjectAccessChecker: MaybeSendSync {
 pub struct DirectChecker<'a> {
     pub acp: &'a dyn DocumentACP,
     pub identity: &'a Identity,
+    /// The request's DAC bypass (`RequestContext::dac_bypass`).
+    pub dac_bypass: bool,
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -36,7 +38,7 @@ impl ObjectAccessChecker for DirectChecker<'_> {
         resource_name: &str,
         object_id: &str,
     ) -> Result<DocAccess> {
-        if self.identity.is_authenticated() && defra_core::dac_bypass::get_dac_bypass() {
+        if self.identity.is_authenticated() && self.dac_bypass {
             return Ok(DocAccess {
                 has_access: true,
                 explicit: true,

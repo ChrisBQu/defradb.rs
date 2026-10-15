@@ -18,15 +18,17 @@ use crate::router::AppState;
 pub async fn execute_with_context(
     state: &AppState,
     identity: &ExtractIdentity,
-    request: QueryRequest,
+    mut request: QueryRequest,
 ) -> QueryResponse {
     let signing_config = resolve_signing_config(state, identity);
 
-    let dac_bypass = resolve_dac_bypass(state, identity).await;
+    request.context = request
+        .context
+        .with_dac_bypass(resolve_dac_bypass(state, identity).await);
 
     // Fast path: when there is nothing to put on the thread-locals, skip
     // spawn_blocking entirely.
-    if signing_config.is_none() && state.nac.is_none() && !dac_bypass {
+    if signing_config.is_none() && state.nac.is_none() {
         return execute_prepared_request(state, request).await;
     }
     let executor = state.executor.clone();
@@ -43,7 +45,6 @@ pub async fn execute_with_context(
             defra_core::current_identity::scoped_current_identity(acting_did.clone());
         defra_core::signing::set_signing_config(signing_config);
         defra_core::batch_signing::set_batch_session_key(batch_session_key);
-        defra_core::dac_bypass::set_dac_bypass(dac_bypass);
         handle.block_on(defra_core::signing::scope_request_bearer_token(
             acting_did,
             bearer,
@@ -114,15 +115,17 @@ async fn execute_prepared_request_resolving_inputs(
 pub async fn execute_in_txn_with_context(
     state: &AppState,
     identity: &ExtractIdentity,
-    request: QueryRequest,
+    mut request: QueryRequest,
     txn_handle: TransactionHandle,
 ) -> QueryResponse {
     let signing_config = resolve_signing_config(state, identity);
 
-    let dac_bypass = resolve_dac_bypass(state, identity).await;
+    request.context = request
+        .context
+        .with_dac_bypass(resolve_dac_bypass(state, identity).await);
 
     // Fast path: see the note in `execute_with_context`.
-    if signing_config.is_none() && state.nac.is_none() && !dac_bypass {
+    if signing_config.is_none() && state.nac.is_none() {
         return state.executor.execute_in_txn(request, &txn_handle).await;
     }
 
@@ -140,7 +143,6 @@ pub async fn execute_in_txn_with_context(
             defra_core::current_identity::scoped_current_identity(acting_did.clone());
         defra_core::signing::set_signing_config(signing_config);
         defra_core::batch_signing::set_batch_session_key(batch_session_key);
-        defra_core::dac_bypass::set_dac_bypass(dac_bypass);
         handle.block_on(defra_core::signing::scope_request_bearer_token(
             acting_did,
             bearer,
@@ -160,12 +162,13 @@ pub async fn execute_in_txn_with_context(
 /// at subscription setup time, then reused for each per-event query.
 pub async fn execute_with_resolved_context(
     executor: Arc<dyn QueryExecutor>,
-    request: QueryRequest,
+    mut request: QueryRequest,
     signing_config: Option<defra_core::signing::SigningConfig>,
     dac_bypass: bool,
     acting_did: Option<String>,
 ) -> QueryResponse {
     let handle = tokio::runtime::Handle::current();
+    request.context = request.context.with_dac_bypass(dac_bypass);
 
     let batch_session_key = signing_config.as_ref().map(|s| s.public_key_hex.clone());
 
@@ -177,7 +180,6 @@ pub async fn execute_with_resolved_context(
             defra_core::current_identity::scoped_current_identity(acting_did.clone());
         defra_core::signing::set_signing_config(signing_config);
         defra_core::batch_signing::set_batch_session_key(batch_session_key);
-        defra_core::dac_bypass::set_dac_bypass(dac_bypass);
         handle.block_on(defra_core::signing::scope_request_bearer_token(
             acting_did,
             bearer,
@@ -408,8 +410,7 @@ mod tests {
 
     const OWNER_DID: &str = "did:key:z6MkTestNodeOwner";
 
-    /// Records the `dac_bypass` thread-local as observed by the executor, which
-    /// is the only place the fast path's effect is visible.
+    /// Records the DAC bypass the executor received in its request.
     #[derive(Default)]
     struct DacBypassRecorder {
         observed: std::sync::atomic::AtomicBool,
@@ -420,20 +421,20 @@ mod tests {
     impl QueryExecutor for DacBypassRecorder {
         fn abandon_txn(&self, _handle: &TransactionHandle) {}
 
-        async fn execute(&self, _request: QueryRequest) -> QueryResponse {
+        async fn execute(&self, request: QueryRequest) -> QueryResponse {
             self.observed
-                .store(defra_core::dac_bypass::get_dac_bypass(), Ordering::SeqCst);
+                .store(request.context.dac_bypass(), Ordering::SeqCst);
             *self.bearer.lock().unwrap() = defra_core::signing::get_request_bearer_token(OWNER_DID);
             QueryResponse::success(serde_json::json!({}))
         }
 
         async fn execute_in_txn(
             &self,
-            _request: QueryRequest,
+            request: QueryRequest,
             _handle: &TransactionHandle,
         ) -> QueryResponse {
             self.observed
-                .store(defra_core::dac_bypass::get_dac_bypass(), Ordering::SeqCst);
+                .store(request.context.dac_bypass(), Ordering::SeqCst);
             *self.bearer.lock().unwrap() = defra_core::signing::get_request_bearer_token(OWNER_DID);
             QueryResponse::success(serde_json::json!({}))
         }
@@ -505,6 +506,45 @@ mod tests {
 
         assert!(!executor.observed.load(Ordering::SeqCst));
     }
+
+    #[tokio::test]
+    async fn a_nac_admin_with_bypass_dac_carries_the_bypass_in_its_request() {
+        let admin = identity::Did::new_unchecked("did:key:z6MkDacBypassAdmin".to_string());
+        let executor = Arc::new(DacBypassRecorder::default());
+        let state = AppStateBuilder::new(executor.clone())
+            .with_signing_enabled(false)
+            .with_nac(Arc::new(
+                crate::MockNodeAcpOperations::enabled_with_owner(identity::Did::new_unchecked(
+                    OWNER_DID.to_string(),
+                ))
+                .with_grant(admin.clone(), acp::nac::NodePermission::DacBypass),
+            ))
+            .build();
+        let caller = ExtractIdentity::from_did(Some(admin));
+
+        execute_with_context(&state, &caller, QueryRequest::new("{ __typename }")).await;
+        assert!(executor.observed.swap(false, Ordering::SeqCst));
+
+        execute_in_txn_with_context(
+            &state,
+            &caller,
+            QueryRequest::new("{ __typename }"),
+            TransactionHandle::new("txn".into()),
+        )
+        .await;
+        assert!(executor.observed.swap(false, Ordering::SeqCst));
+
+        execute_with_resolved_context(
+            executor.clone(),
+            QueryRequest::new("{ __typename }"),
+            None,
+            true,
+            None,
+        )
+        .await;
+        assert!(executor.observed.load(Ordering::SeqCst));
+    }
+
     #[tokio::test]
     async fn bearer_scope_crosses_each_blocking_execution_boundary() {
         let executor = Arc::new(DacBypassRecorder::default());

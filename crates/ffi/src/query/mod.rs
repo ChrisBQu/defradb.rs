@@ -40,38 +40,31 @@ pub(crate) fn nac_permission_for_query(query_str: &str) -> NodePermission {
     }
 }
 
-/// Check if the identity has DAC bypass permission (NAC admin/owner).
-///
-/// Sets the thread-local `dac_bypass` flag when the identity has the
-/// `DacBypass` NAC permission.
-pub(crate) fn check_and_set_dac_bypass(
+/// Whether the identity has the `DacBypass` NAC permission (NAC
+/// admin/owner), the request's DAC bypass.
+pub(crate) fn resolve_dac_bypass(
     rt: &tokio::runtime::Runtime,
     node_ptr: usize,
     identity_did: *const c_char,
-) {
-    defra_core::dac_bypass::set_dac_bypass(false);
-
+) -> bool {
     // SAFETY: `identity_did` is either null or a valid C string from the FFI caller.
     let identity_str = unsafe { c_str_to_string(identity_did) };
     let did = match identity_str {
         Some(s) if !s.is_empty() => match identity::Did::new(&s) {
             Ok(d) => Some(d),
-            Err(_) => return,
+            Err(_) => return false,
         },
         _ => None,
     };
 
-    let nac_manager = match NODES.get(node_ptr, |state| state.nac_manager.clone()) {
-        Some(m) => m,
-        None => return,
+    let Some(nac_manager) = NODES.get(node_ptr, |state| state.nac_manager.clone()) else {
+        return false;
     };
 
     let status = rt.block_on(nac_manager.status());
-    let bypass = rt.block_on(acp::nac::should_bypass_dac(
+    rt.block_on(acp::nac::should_bypass_dac(
         status,
         did.as_ref(),
         |d, p| async move { nac_manager.check_permission(d, p).await.unwrap_or(false) },
-    ));
-
-    defra_core::dac_bypass::set_dac_bypass(bypass);
+    ))
 }

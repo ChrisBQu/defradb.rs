@@ -89,6 +89,7 @@ pub unsafe extern "C" fn block_verify_signature(
                 &pub_key_str,
                 crypto_key_type,
                 &caller_identity,
+                false,
             )
             .await
         });
@@ -170,6 +171,7 @@ pub unsafe extern "C" fn block_verify_signature_in_txn(
                     &pub_key_str,
                     crypto_key_type,
                     &caller_identity,
+                    false,
                 )
                 .await
                 .map_err(|e| e.to_string())?;

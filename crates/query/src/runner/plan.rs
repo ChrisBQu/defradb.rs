@@ -12,7 +12,7 @@ use crate::fetcher::DocFetcher;
 use crate::limits::QueryLimits;
 use crate::mapper::{AggregateType, Filter, Requestable, Select};
 use crate::plan::{
-    AllDocsNode, ChildSelectMeta, GroupAlias, GroupByNode, LimitNode, OrderByNode,
+    AcpRead, AllDocsNode, ChildSelectMeta, GroupAlias, GroupByNode, LimitNode, OrderByNode,
     PermissionFilterNode, ScanNode, SelectNode,
 };
 use crate::planner::{Doc, PlanNode};
@@ -24,6 +24,7 @@ pub(crate) use super::plan_validation::validate_select;
 pub(crate) struct AcpFilter {
     pub acp: Arc<dyn DocumentACP>,
     pub identity: Identity,
+    pub dac_bypass: bool,
     pub policy_id: String,
     pub resource_name: String,
     pub retry_inputs: Option<crate::prepared::PreparedInputMemo>,
@@ -319,7 +320,13 @@ pub(crate) fn build_plan(
         .and_then(|filter| filter.retry_inputs.clone());
     plan = PermissionFilterNode::wrap(
         plan,
-        acp_filter.map(|acf| (acf.acp, acf.identity, acf.policy_id, acf.resource_name)),
+        acp_filter.map(|acf| AcpRead {
+            acp: acf.acp,
+            identity: acf.identity,
+            dac_bypass: acf.dac_bypass,
+            policy_id: acf.policy_id,
+            resource_name: acf.resource_name,
+        }),
         app_read,
         retry_inputs,
     );

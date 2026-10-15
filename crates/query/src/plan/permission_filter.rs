@@ -9,7 +9,6 @@ use acp::{DocumentACP, DocumentPermission, Identity};
 use async_trait::async_trait;
 use defra_core::thread_bounds::MaybeBoxFuture;
 use futures::{stream::FuturesOrdered, FutureExt, StreamExt};
-use identity::Did;
 use sync_wrapper::SyncWrapper;
 
 use crate::access_hooks::read::app_allows;
@@ -25,10 +24,21 @@ const MAX_IN_FLIGHT_PERMISSION_CHECKS: usize = 16;
 
 type PermissionCheck = MaybeBoxFuture<'static, Result<(Doc, bool)>>;
 
+/// Who reads, through which ACP, under which policy.
+pub struct AcpRead {
+    pub acp: Arc<dyn DocumentACP>,
+    pub identity: Identity,
+    /// The request's DAC bypass (`RequestContext::dac_bypass`).
+    pub dac_bypass: bool,
+    pub policy_id: String,
+    pub resource_name: String,
+}
+
 #[derive(Clone)]
 struct AcpReadCheck {
     acp: Arc<dyn DocumentACP>,
     identity: Arc<Identity>,
+    dac_bypass: bool,
     policy_id: Arc<str>,
     resource_name: Arc<str>,
     retry_inputs: Option<crate::prepared::PreparedInputMemo>,
@@ -66,29 +76,18 @@ pub struct PermissionFilterNode {
 }
 
 impl PermissionFilterNode {
-    /// Create a new permission filter node.
-    ///
-    /// # Arguments
-    /// * `source` - The source node to filter
-    /// * `acp` - Document ACP for permission checks
-    /// * `identity` - The identity requesting access
-    /// * `policy_id` - Policy ID from the collection
-    /// * `resource_name` - Resource name from the policy
-    pub fn new(
-        source: Box<dyn PlanNode>,
-        acp: Arc<dyn DocumentACP>,
-        identity: Identity,
-        policy_id: impl Into<String>,
-        resource_name: impl Into<String>,
-    ) -> Self {
+    /// Create a permission filter node that passes the documents `read`
+    /// allows of those `source` yields.
+    pub fn new(source: Box<dyn PlanNode>, read: AcpRead) -> Self {
         let document_mapping = source.document_map().clone();
         Self {
             source,
             acp: Some(AcpReadCheck {
-                acp,
-                identity: Arc::new(identity),
-                policy_id: Arc::from(policy_id.into()),
-                resource_name: Arc::from(resource_name.into()),
+                acp: read.acp,
+                identity: Arc::new(read.identity),
+                dac_bypass: read.dac_bypass,
+                policy_id: Arc::from(read.policy_id),
+                resource_name: Arc::from(read.resource_name),
                 retry_inputs: None,
                 projection: None,
             }),
@@ -98,17 +97,6 @@ impl PermissionFilterNode {
             pending: SyncWrapper::new(FuturesOrdered::new()),
             source_exhausted: false,
         }
-    }
-
-    /// Create from an optional DID for backward compatibility.
-    pub fn from_optional_did(
-        source: Box<dyn PlanNode>,
-        acp: Arc<dyn DocumentACP>,
-        did: Option<Did>,
-        policy_id: impl Into<String>,
-        resource_name: impl Into<String>,
-    ) -> Self {
-        Self::new(source, acp, Identity::from(did), policy_id, resource_name)
     }
 
     /// A filter that applies only an app read check.
@@ -155,7 +143,7 @@ impl PermissionFilterNode {
     /// it unchanged when neither does.
     pub fn wrap(
         source: Box<dyn PlanNode>,
-        acp: Option<(Arc<dyn DocumentACP>, Identity, String, String)>,
+        acp: Option<AcpRead>,
         app: Option<AppReadCheck>,
         retry_inputs: Option<crate::prepared::PreparedInputMemo>,
     ) -> Box<dyn PlanNode> {
@@ -164,7 +152,7 @@ impl PermissionFilterNode {
 
     pub fn wrap_with_projection(
         source: Box<dyn PlanNode>,
-        acp: Option<(Arc<dyn DocumentACP>, Identity, String, String)>,
+        acp: Option<AcpRead>,
         app: Option<AppReadCheck>,
         projection: Option<Arc<AcpRegistrationProjection>>,
     ) -> Box<dyn PlanNode> {
@@ -173,14 +161,14 @@ impl PermissionFilterNode {
 
     pub fn wrap_with_projection_and_inputs(
         source: Box<dyn PlanNode>,
-        acp: Option<(Arc<dyn DocumentACP>, Identity, String, String)>,
+        acp: Option<AcpRead>,
         app: Option<AppReadCheck>,
         projection: Option<Arc<AcpRegistrationProjection>>,
         retry_inputs: Option<crate::prepared::PreparedInputMemo>,
     ) -> Box<dyn PlanNode> {
         match (acp, app) {
-            (Some((acp, identity, policy_id, resource_name)), app) => Box::new(
-                Self::new(source, acp, identity, policy_id, resource_name)
+            (Some(read), app) => Box::new(
+                Self::new(source, read)
                     .with_app_check(app)
                     .with_projection(projection)
                     .with_retry_inputs(retry_inputs),
@@ -198,6 +186,7 @@ impl PermissionFilterNode {
             let Some(AcpReadCheck {
                 acp,
                 identity,
+                dac_bypass,
                 policy_id,
                 resource_name,
                 retry_inputs,
@@ -207,8 +196,7 @@ impl PermissionFilterNode {
                 let allowed = app_allows(app.as_ref(), &doc_id).await?;
                 return Ok((doc, allowed));
             };
-            let allowed = if identity.is_authenticated() && defra_core::dac_bypass::get_dac_bypass()
-            {
+            let allowed = if identity.is_authenticated() && dac_bypass {
                 true
             } else {
                 match crate::txn::check_doc_access_with_prepared_inputs(
@@ -352,6 +340,7 @@ mod tests {
     use std::time::Duration;
 
     use async_lock::Barrier;
+    use identity::Did;
 
     use super::*;
 
@@ -539,10 +528,7 @@ mod tests {
         let memo = crate::prepared::PreparedInputMemo::default();
         let node = PermissionFilterNode::new(
             Box::new(MockSource::new(&["doc-1".to_string()], yielded)),
-            acp.clone(),
-            Identity::Anonymous,
-            "policy",
-            "User",
+            anonymous_read(acp.clone()),
         )
         .with_retry_inputs(Some(memo.clone()));
         let doc = Doc::default();
@@ -571,11 +557,18 @@ mod tests {
     ) -> PermissionFilterNode {
         PermissionFilterNode::new(
             Box::new(MockSource::new(doc_ids, yielded)),
-            acp,
-            Identity::Anonymous,
-            "policy",
-            "User",
+            anonymous_read(acp),
         )
+    }
+
+    fn anonymous_read(acp: Arc<MockAcp>) -> AcpRead {
+        AcpRead {
+            acp,
+            identity: Identity::Anonymous,
+            dac_bypass: false,
+            policy_id: "policy".to_string(),
+            resource_name: "User".to_string(),
+        }
     }
 
     #[tokio::test]

@@ -8,7 +8,7 @@ use crate::types::{c_str_to_string, FfiResult};
 use crate::{ffi_async, try_ffi, ERR_INVALID_NODE_HANDLE};
 
 use super::{
-    check_and_set_dac_bypass, nac_permission_for_query, subscription_accepts_doc_id,
+    nac_permission_for_query, resolve_dac_bypass, subscription_accepts_doc_id,
     subscription_doc_ids, subscription_to_scoped_query,
 };
 
@@ -125,8 +125,9 @@ pub unsafe extern "C" fn exec_request_with_signing(
             identity_str.as_ref().filter(|s| !s.is_empty()).cloned(),
         );
 
-        // Check if identity has DAC bypass (NAC admin/owner can read all documents)
-        check_and_set_dac_bypass(rt, node_ptr, identity_did);
+        // NAC admin/owner can read all documents.
+        let context = defra_core::RequestContext::default()
+            .with_dac_bypass(resolve_dac_bypass(rt, node_ptr, identity_did));
 
         // Check if this is a subscription query - handle it separately from regular queries/mutations.
         // Subscriptions return status=2 with a handle that the Go side polls via poll_graphql_subscription.
@@ -179,7 +180,6 @@ pub unsafe extern "C" fn exec_request_with_signing(
             // The thread-locals were set on this thread (lines 63-116) but the
             // spawned task runs on a different tokio thread.
             let sub_signing_config = defra_core::signing::get_signing_config();
-            let sub_dac_bypass = defra_core::dac_bypass::get_dac_bypass();
             let sub_acting_did = defra_core::current_identity::get_current_identity();
 
             // Spawn background task that processes events and executes queries at event time.
@@ -210,7 +210,8 @@ pub unsafe extern "C" fn exec_request_with_signing(
                             }
                         };
 
-                        let mut request = query::QueryRequest::new(query_text);
+                        let mut request =
+                            query::QueryRequest::new(query_text).with_context(context.clone());
                         if sub_identity.is_some() {
                             request = request.with_identity(sub_identity.clone());
                         }
@@ -225,14 +226,12 @@ pub unsafe extern "C" fn exec_request_with_signing(
                         // HTTP's execute_with_resolved_context pattern.
                         let runner = query_runner.clone();
                         let config = sub_signing_config.clone();
-                        let bypass = sub_dac_bypass;
                         let acting_did = sub_acting_did.clone();
                         let handle = tokio::runtime::Handle::current();
                         let response = match tokio::task::spawn_blocking(move || {
                             let _identity_guard =
                                 defra_core::current_identity::scoped_current_identity(acting_did);
                             defra_core::signing::set_signing_config(config);
-                            defra_core::dac_bypass::set_dac_bypass(bypass);
                             handle.block_on(async { runner.execute(request).await })
                         })
                         .await
@@ -294,7 +293,7 @@ pub unsafe extern "C" fn exec_request_with_signing(
 
         ffi_async!(rt, {
             // Build request
-            let mut request = query::QueryRequest::new(query_str);
+            let mut request = query::QueryRequest::new(query_str).with_context(context);
             if did.is_some() {
                 request = request.with_identity(did);
             }

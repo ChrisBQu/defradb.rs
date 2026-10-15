@@ -74,6 +74,7 @@ impl<S: storage::corekv::Store + 'static> BlockOps for DbBlockOps<S> {
             self.document_acp.as_ref(),
             cid,
             &caller_identity,
+            false,
         )
         .await
         .map_err(anyhow::Error::msg)
@@ -85,6 +86,7 @@ impl<S: storage::corekv::Store + 'static> BlockOps for DbBlockOps<S> {
             self.document_acp.as_ref(),
             cid,
             &self.caller_identity,
+            false,
         )
         .await
         .map_err(anyhow::Error::msg)
@@ -101,6 +103,7 @@ impl<S: storage::corekv::Store + 'static> BlockOps for DbBlockOps<S> {
                 self.document_acp.as_ref(),
                 cid,
                 &self.caller_identity,
+                false,
             )
             .await
             .map_err(anyhow::Error::new)

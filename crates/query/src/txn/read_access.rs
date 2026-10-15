@@ -12,6 +12,8 @@ pub struct OverlayChecker<'a> {
     pub acp: &'a dyn DocumentACP,
     pub projection: Option<&'a AcpRegistrationProjection>,
     pub identity: &'a Identity,
+    /// The request's DAC bypass (`RequestContext::dac_bypass`).
+    pub dac_bypass: bool,
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -25,7 +27,7 @@ impl ObjectAccessChecker for OverlayChecker<'_> {
     ) -> acp::Result<DocAccess> {
         // NAC `bypass-dac` privilege grants full access, exactly as DirectChecker
         // and Go's checkDocAccess (canDACBypass is the first check on every path).
-        if self.identity.is_authenticated() && defra_core::dac_bypass::get_dac_bypass() {
+        if self.identity.is_authenticated() && self.dac_bypass {
             return Ok(DocAccess {
                 has_access: true,
                 explicit: true,

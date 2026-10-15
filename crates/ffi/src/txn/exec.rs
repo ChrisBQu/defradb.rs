@@ -116,8 +116,9 @@ pub unsafe extern "C" fn exec_request_in_txn_with_signing(
             identity_str.as_ref().filter(|s| !s.is_empty()).cloned(),
         );
 
-        // Check if identity has DAC bypass (NAC admin/owner can read all documents)
-        crate::query::check_and_set_dac_bypass(rt, node_ptr, identity_did);
+        // NAC admin/owner can read all documents.
+        let context = defra_core::RequestContext::default()
+            .with_dac_bypass(crate::query::resolve_dac_bypass(rt, node_ptr, identity_did));
 
         let runner = try_ffi!(get_node_runner(node_ptr));
 
@@ -127,7 +128,7 @@ pub unsafe extern "C" fn exec_request_in_txn_with_signing(
                 .map_err(|e| format!("invalid transaction ID: {}", e))?;
 
             // Build request
-            let mut request = query::QueryRequest::new(query_str);
+            let mut request = query::QueryRequest::new(query_str).with_context(context);
             if did.is_some() {
                 request = request.with_identity(did);
             }

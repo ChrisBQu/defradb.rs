@@ -41,6 +41,7 @@ impl<S: Store + 'static> BlockOperations for BlockAdapter<S> {
             self.document_acp.as_ref(),
             cid,
             &caller_identity,
+            false,
         )
         .await
     }
@@ -72,6 +73,7 @@ impl<S: Store + 'static> BlockOperations for BlockAdapter<S> {
             public_key,
             crypto_key_type,
             &caller_identity,
+            false,
         )
         .await
     }

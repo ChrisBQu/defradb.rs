@@ -46,6 +46,7 @@ pub use se_transport::SeQueryTransport;
 use acp::nac::NodePermission;
 use acp::{DocumentACP, Identity as AcpIdentity};
 use async_trait::async_trait;
+use defra_core::RequestContext;
 use identity::Did;
 use rapidhash::{HashMapExt, RapidHashMap};
 use schema::CollectionVersion;
@@ -197,9 +198,41 @@ pub struct QueryRunner<F: DocFetcher, R: TransactionRegistry = NoOpTransactionRe
     pub(crate) read_validator: Option<Arc<dyn crate::access_hooks::ReadValidator>>,
     /// App write validator, checked before ACP on every mutation.
     pub(crate) write_validator: Option<Arc<dyn crate::access_hooks::WriteValidator>>,
-    /// Request-bound external answers for an engine-owned retry attempt.
-    /// Cache of built introspection schemas.
-    pub(crate) introspection_cache: introspection::cache::IntrospectionSchemaCache,
+    /// Cache of built introspection schemas, shared by the runners bound to
+    /// requests from this one.
+    pub(crate) introspection_cache: Arc<introspection::cache::IntrospectionSchemaCache>,
+    /// The context of the request this runner serves; the default for a
+    /// runner bound to none (see [`QueryRunner::for_request`]).
+    pub(crate) request: RequestContext,
+}
+
+impl<F, R> Clone for QueryRunner<F, R>
+where
+    F: DocFetcher,
+    R: TransactionRegistry,
+{
+    fn clone(&self) -> Self {
+        Self {
+            fetcher: self.fetcher.clone(),
+            collection_provider: self.collection_provider.clone(),
+            registry: self.registry.clone(),
+            mutator: self.mutator.clone(),
+            collection_truncator: self.collection_truncator.clone(),
+            acp: self.acp.clone(),
+            acp_registration_projection: self.acp_registration_projection.clone(),
+            default_identity: self.default_identity.clone(),
+            lens_store: self.lens_store.clone(),
+            nac: self.nac.clone(),
+            query_timeout: self.query_timeout,
+            query_limits: self.query_limits,
+            se_transport: self.se_transport.clone(),
+            retry_inputs: self.retry_inputs.clone(),
+            read_validator: self.read_validator.clone(),
+            write_validator: self.write_validator.clone(),
+            introspection_cache: self.introspection_cache.clone(),
+            request: self.request.clone(),
+        }
+    }
 }
 
 impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
@@ -226,6 +259,7 @@ impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
             retry_inputs: None,
             se_transport: None,
             introspection_cache: Default::default(),
+            request: RequestContext::default(),
         }
     }
 
@@ -252,6 +286,7 @@ impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
             retry_inputs: None,
             se_transport: None,
             introspection_cache: Default::default(),
+            request: RequestContext::default(),
         }
     }
 }
@@ -280,6 +315,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             retry_inputs: None,
             se_transport: None,
             introspection_cache: Default::default(),
+            request: RequestContext::default(),
         }
     }
 
@@ -311,6 +347,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             write_validator: None,
             se_transport: None,
             introspection_cache: Default::default(),
+            request: RequestContext::default(),
         }
     }
 
@@ -341,6 +378,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             write_validator: None,
             se_transport: None,
             introspection_cache: Default::default(),
+            request: RequestContext::default(),
         }
     }
 
@@ -364,23 +402,20 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     /// Collections with a policy will have ACP enforced; others are unaffected.
     pub(crate) fn scoped_runner(&self, acp: Arc<dyn DocumentACP>) -> Self {
         Self {
-            fetcher: self.fetcher.clone(),
-            collection_provider: self.collection_provider.clone(),
-            registry: self.registry.clone(),
-            mutator: self.mutator.clone(),
-            collection_truncator: self.collection_truncator.clone(),
             acp,
-            acp_registration_projection: self.acp_registration_projection.clone(),
-            default_identity: self.default_identity.clone(),
-            lens_store: self.lens_store.clone(),
-            nac: self.nac.clone(),
-            query_timeout: self.query_timeout,
-            query_limits: self.query_limits,
-            se_transport: self.se_transport.clone(),
-            read_validator: self.read_validator.clone(),
-            write_validator: self.write_validator.clone(),
-            retry_inputs: self.retry_inputs.clone(),
-            introspection_cache: introspection::cache::IntrospectionSchemaCache::new(false),
+            introspection_cache: Arc::new(introspection::cache::IntrospectionSchemaCache::new(
+                false,
+            )),
+            ..self.clone()
+        }
+    }
+
+    /// This runner serving one request: everything it runs reads `request`
+    /// for that request's own state.
+    pub fn for_request(&self, request: RequestContext) -> Self {
+        Self {
+            request,
+            ..self.clone()
         }
     }
 
@@ -534,7 +569,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
     /// Enable or disable the introspection schema cache.
     pub fn with_introspection_cache(mut self, enabled: bool) -> Self {
-        self.introspection_cache = introspection::cache::IntrospectionSchemaCache::new(enabled);
+        self.introspection_cache =
+            Arc::new(introspection::cache::IntrospectionSchemaCache::new(enabled));
         self
     }
 

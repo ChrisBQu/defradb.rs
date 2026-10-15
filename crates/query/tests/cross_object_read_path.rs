@@ -148,6 +148,7 @@ async fn overlay_checker_applies_branchable_collection_fallback() {
         acp: &acp,
         projection: None,
         identity: &identity,
+        dac_bypass: false,
     };
 
     let public_doc_allowed =

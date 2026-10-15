@@ -11,7 +11,6 @@ pub mod block_signature;
 pub mod cbor;
 pub mod collection;
 pub mod current_identity;
-pub mod dac_bypass;
 pub mod doc_id;
 pub mod document;
 pub mod encryption;
@@ -19,6 +18,7 @@ pub mod error;
 pub mod ipld;
 pub mod lens_block;
 pub mod merge;
+pub mod request_context;
 pub mod signing;
 pub mod store;
 pub mod thread_bounds;
@@ -43,6 +43,7 @@ pub use lens_block::{
     build_lens_ipld_blocks, is_lens_block, CidBlock, LensConfigBlock, LensKeyValue,
     LensModuleBlock, LensWasmBlock,
 };
+pub use request_context::RequestContext;
 pub use signing::SigningKeyType;
 
 /// Version information for DefraDB

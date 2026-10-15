@@ -184,9 +184,12 @@ impl BlockReadGate for DbBlockReadGate {
             return true;
         };
 
+        // A peer reading blocks acts as itself; NAC grants a remote peer no
+        // DAC bypass.
         let checker = acp::read_access::DirectChecker {
             acp: self.acp.as_ref(),
             identity,
+            dac_bypass: false,
         };
 
         if meta.doc_ids.is_empty() {
