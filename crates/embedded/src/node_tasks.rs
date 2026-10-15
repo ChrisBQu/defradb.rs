@@ -243,7 +243,7 @@ async fn handle_se_artifacts_received<S: storage::corekv::Store + 'static>(
 pub(crate) fn spawn_replication_loop<B, T, S>(
     coordinator: Arc<p2p::sync::SyncCoordinator<B, T>>,
     sync_events_rx: tokio::sync::mpsc::Receiver<p2p::sync::SyncEvent>,
-    merge_handler: Arc<EmbeddedMergeHandler<S>>,
+    merge_handler: Arc<db::merge::PooledMergeHandler<EmbeddedMergeHandler<S>>>,
     event_bus: Arc<dyn events::Bus>,
 ) -> tokio::task::JoinHandle<()>
 where

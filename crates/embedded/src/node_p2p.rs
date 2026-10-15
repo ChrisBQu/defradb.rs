@@ -275,7 +275,7 @@ where
     let replication_task = spawn_replication_loop(
         coordinator.clone(),
         sync_events_rx,
-        replication.merge_handler.clone(),
+        replication.merge_handler_on_pool(),
         event_bus.clone(),
     );
     let failure_recorder_task = defra_p2p_adapter::spawn_failure_recorder(

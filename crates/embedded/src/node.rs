@@ -876,7 +876,10 @@ where
     #[cfg(not(feature = "iroh"))]
     let _ = access_hooks;
 
-    let query_runner: Arc<dyn query::QueryExecutor> = Arc::new(query_runner);
+    // GraphQL requests run on the database's worker pool, routed there once
+    // at the boundary.
+    let query_runner =
+        query::pooled::PooledExecutor::wrap(Arc::new(query_runner), database.pool());
 
     Ok(EmbeddedNode {
         database,

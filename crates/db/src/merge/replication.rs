@@ -35,6 +35,23 @@ pub struct ReplicationStack<
     pub txn_broadcaster: Arc<dyn TxnBroadcaster>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+impl<S, B, T> ReplicationStack<S, B, T>
+where
+    S: Store + 'static,
+    B: Blockstore + defra_core::thread_bounds::MaybeSendSync + 'static,
+    T: P2PTransport,
+{
+    /// The merge handler the replication loop calls: each merge runs on the
+    /// database's worker pool, on its document's worker.
+    pub fn merge_handler_on_pool(&self) -> Arc<crate::merge::PooledMergeHandler<AcpMergeHandler<S, B>>> {
+        Arc::new(crate::merge::PooledMergeHandler::new(
+            Arc::clone(&self.merge_handler),
+            self.merge_handler_inner.db.pool().cloned(),
+        ))
+    }
+}
+
 pub fn create_head_provider<S: Store>(db: Arc<DB<S>>) -> DbHeadProvider<S> {
     DbHeadProvider::new(db)
 }

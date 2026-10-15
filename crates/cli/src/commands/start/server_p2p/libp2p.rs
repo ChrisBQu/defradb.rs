@@ -138,7 +138,9 @@ impl Node {
             coordinator.clone(),
             config.datastore.max_merge_depth,
         );
-        let merge_handler_for_loop = replication.merge_handler.clone();
+        // Each merge runs on the database's worker pool, on its document's
+        // worker; the loop itself stays on the network runtime.
+        let merge_handler_for_loop = replication.merge_handler_on_pool();
         let merge_handler_inner_for_syncer = replication.merge_handler_inner.clone();
         let merge_handler_inner_for_kms = replication.merge_handler_inner.clone();
         let broadcast_mutator = replication.broadcast_mutator.clone();

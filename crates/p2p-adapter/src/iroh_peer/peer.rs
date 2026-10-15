@@ -197,6 +197,11 @@ impl<S: Store + 'static> IrohPeer<S> {
         let manage_hooks = crate::manage::hooks::new_manage_hooks_cell();
 
         let replication_coordinator = Arc::clone(&coordinator);
+        // Natively each merge runs on the database's worker pool, on its
+        // document's worker; a browser's one worker is this thread.
+        #[cfg(not(target_arch = "wasm32"))]
+        let merge_handler = replication.merge_handler_on_pool();
+        #[cfg(target_arch = "wasm32")]
         let merge_handler = Arc::clone(&replication.merge_handler);
         let replication_bus = Arc::clone(&event_bus);
         let replication_peer = local_peer_id.clone();

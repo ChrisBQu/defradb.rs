@@ -7,6 +7,8 @@ pub mod head_provider;
 pub mod merge_handler;
 #[cfg(all(not(target_arch = "wasm32"), feature = "p2p"))]
 pub mod peer_identity;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod pooled;
 pub mod push_docs;
 pub mod push_docs_common;
 pub mod push_docs_creator;
@@ -21,6 +23,8 @@ pub mod se_query_transport;
 pub mod txn_broadcaster;
 
 pub use acp_merge_handler::{AcpMergeError, AcpMergeHandler};
+#[cfg(not(target_arch = "wasm32"))]
+pub use pooled::PooledMergeHandler;
 pub use broadcast_mutator::{BroadcastMutator, BroadcastSeOptions, SeArtifactRepusher};
 pub use head_provider::DbHeadProvider;
 pub use merge_handler::{DbMergeHandler, MergeError, DEFAULT_MAX_MERGE_DEPTH};

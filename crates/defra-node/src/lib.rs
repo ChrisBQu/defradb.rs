@@ -1677,7 +1677,9 @@ impl NodeBuilder {
             query_runner
         };
 
-        let runner: Arc<dyn QueryExecutor> = Arc::new(query_runner);
+        // GraphQL requests run on the database's worker pool, routed there
+        // once at the boundary.
+        let runner = query::pooled::PooledExecutor::wrap(Arc::new(query_runner), database.pool());
         #[cfg(feature = "vera")]
         let policy_lookup =
             acp_ops::PolicyLookup::new(acp_setup.local_zanzibar_store, acp_setup.vera_acp);
