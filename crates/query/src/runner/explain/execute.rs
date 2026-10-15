@@ -307,6 +307,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         )
                     }),
                     app_read,
+                    self.retry_inputs.clone(),
                 );
             }
 
@@ -371,6 +372,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 identity: Identity::from(caller_identity),
                 policy_id: policy.id.clone(),
                 resource_name: policy.resource_name.clone(),
+                retry_inputs: self.retry_inputs.clone(),
             });
 
             // Build the plan (ACP filter is inserted inside, after Select but before aggregates)

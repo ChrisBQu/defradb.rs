@@ -26,6 +26,7 @@ pub(crate) struct AcpFilter {
     pub identity: Identity,
     pub policy_id: String,
     pub resource_name: String,
+    pub retry_inputs: Option<crate::prepared::PreparedInputMemo>,
 }
 
 /// Build the document mapping for a select operation.
@@ -313,10 +314,14 @@ pub(crate) fn build_plan(
 
     // Insert ACP permission filter after Select, before OrderBy/Limit/Aggregates.
     // This ensures aggregates (count, average, etc.) operate on filtered documents.
+    let retry_inputs = acp_filter
+        .as_ref()
+        .and_then(|filter| filter.retry_inputs.clone());
     plan = PermissionFilterNode::wrap(
         plan,
         acp_filter.map(|acf| (acf.acp, acf.identity, acf.policy_id, acf.resource_name)),
         app_read,
+        retry_inputs,
     );
 
     // Check if we have GROUP BY

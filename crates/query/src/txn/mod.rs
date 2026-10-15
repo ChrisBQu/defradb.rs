@@ -18,8 +18,9 @@ mod tests;
 
 // Re-export all public types
 pub use context::{
-    check_doc_access_with_overlay, current_deferred_acp_mutations, is_doc_registered_with_overlay,
-    scope_deferred_acp_mutations, DeferredAcpMutations, TransactionContext,
+    check_doc_access_with_overlay, check_doc_access_with_prepared_inputs,
+    current_deferred_acp_mutations, is_doc_registered_with_overlay, scope_deferred_acp_mutations,
+    DeferredAcpMutations, TransactionContext,
 };
 pub use guard::TransactionGuard;
 pub use handle::TransactionHandle;

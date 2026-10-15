@@ -224,7 +224,7 @@ impl Planner {
             collection,
         )
         .map(|check| check.with_retry_inputs(self.retry_inputs.clone()));
-        PermissionFilterNode::wrap(plan, acp, app)
+        PermissionFilterNode::wrap(plan, acp, app, self.retry_inputs.clone())
     }
 
     /// Get a collection by name or CollectionID.

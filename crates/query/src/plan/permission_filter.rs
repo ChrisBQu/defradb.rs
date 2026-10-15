@@ -17,7 +17,6 @@ use crate::access_hooks::AppReadCheck;
 use crate::document::DocumentMapping;
 use crate::error::Result;
 use crate::planner::{index_selection::CursorSeek, Doc, PlanNode};
-use crate::txn::check_doc_access_with_overlay;
 
 // Keep enough remote checks moving to hide latency without letting one query
 // exhaust the ACP provider's connection pool.
@@ -31,6 +30,7 @@ struct AcpReadCheck {
     identity: Arc<Identity>,
     policy_id: Arc<str>,
     resource_name: Arc<str>,
+    retry_inputs: Option<crate::prepared::PreparedInputMemo>,
 }
 
 /// PermissionFilterNode filters documents based on ACP permissions.
@@ -87,6 +87,7 @@ impl PermissionFilterNode {
                 identity: Arc::new(identity),
                 policy_id: Arc::from(policy_id.into()),
                 resource_name: Arc::from(resource_name.into()),
+                retry_inputs: None,
             }),
             app: None,
             current_doc: Doc::default(),
@@ -127,16 +128,29 @@ impl PermissionFilterNode {
         self
     }
 
+    pub(crate) fn with_retry_inputs(
+        mut self,
+        inputs: Option<crate::prepared::PreparedInputMemo>,
+    ) -> Self {
+        if let Some(acp) = &mut self.acp {
+            acp.retry_inputs = inputs;
+        }
+        self
+    }
+
     /// Wrap `source` in whichever of the ACP and app checks apply, or return
     /// it unchanged when neither does.
     pub fn wrap(
         source: Box<dyn PlanNode>,
         acp: Option<(Arc<dyn DocumentACP>, Identity, String, String)>,
         app: Option<AppReadCheck>,
+        retry_inputs: Option<crate::prepared::PreparedInputMemo>,
     ) -> Box<dyn PlanNode> {
         match (acp, app) {
             (Some((acp, identity, policy_id, resource_name)), app) => Box::new(
-                Self::new(source, acp, identity, policy_id, resource_name).with_app_check(app),
+                Self::new(source, acp, identity, policy_id, resource_name)
+                    .with_app_check(app)
+                    .with_retry_inputs(retry_inputs),
             ),
             (None, Some(app)) => Box::new(Self::app_only(source, app)),
             (None, None) => source,
@@ -153,6 +167,7 @@ impl PermissionFilterNode {
                 identity,
                 policy_id,
                 resource_name,
+                retry_inputs,
             }) = acp
             else {
                 let allowed = app_allows(app.as_ref(), &doc_id).await?;
@@ -162,26 +177,31 @@ impl PermissionFilterNode {
             {
                 true
             } else {
-                check_doc_access_with_overlay(
+                match crate::txn::check_doc_access_with_prepared_inputs(
                     acp.as_ref(),
                     identity.as_ref(),
                     DocumentPermission::Read,
                     policy_id.as_ref(),
                     resource_name.as_ref(),
                     &doc_id,
+                    retry_inputs.as_ref(),
                 )
                 .await
-                .unwrap_or_else(|error| {
-                    tracing::warn!(
-                        %doc_id,
-                        policy_id = %policy_id,
-                        resource_name = %resource_name,
-                        identity = %identity,
-                        %error,
-                        "Permission check failed, denying access to document"
-                    );
-                    false
-                })
+                {
+                    Ok(allowed) => allowed,
+                    Err(error @ crate::error::QueryError::NeedsInput(_)) => return Err(error),
+                    Err(error) => {
+                        tracing::warn!(
+                            %doc_id,
+                            policy_id = %policy_id,
+                            resource_name = %resource_name,
+                            identity = %identity,
+                            %error,
+                            "Permission check failed, denying access to document"
+                        );
+                        false
+                    }
+                }
             };
             let allowed = allowed && app_allows(app.as_ref(), &doc_id).await?;
 

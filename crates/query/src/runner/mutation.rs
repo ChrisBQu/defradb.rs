@@ -56,40 +56,16 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
         resource_name: &str,
         doc_id: &str,
     ) -> Result<bool> {
-        let Some(inputs) = &self.retry_inputs else {
-            return crate::txn::check_doc_access_with_overlay(
-                self.acp.as_ref(),
-                identity,
-                permission,
-                policy_id,
-                resource_name,
-                doc_id,
-            )
-            .await
-            .map_err(|error| QueryError::execution(error.to_string()));
-        };
-        let bearer = identity
-            .did()
-            .and_then(|did| defra_core::signing::get_request_bearer_token(did.as_str()));
-        let exact_request = serde_json::to_vec(&(
-            identity.did().map(Did::as_str).unwrap_or("anonymous"),
-            permission.as_str(),
+        crate::txn::check_doc_access_with_prepared_inputs(
+            self.acp.as_ref(),
+            identity,
+            permission,
             policy_id,
             resource_name,
             doc_id,
-            bearer,
-        ))
-        .map_err(|error| QueryError::execution(error.to_string()))?;
-        let request = crate::prepared::PreparedInputRequest::new(
-            crate::prepared::PreparedInputKind::AcpDecision,
-            exact_request,
-        );
-        let Some(response) = inputs.get(&request) else {
-            return Err(QueryError::NeedsInput(request));
-        };
-        serde_json::from_slice(&response).map_err(|error| {
-            QueryError::execution(format!("cached ACP response is invalid: {error}"))
-        })
+            self.retry_inputs.as_ref(),
+        )
+        .await
     }
 
     /// Execute a GraphQL mutation and return JSON results.

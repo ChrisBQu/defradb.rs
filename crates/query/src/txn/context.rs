@@ -377,6 +377,54 @@ pub async fn check_doc_access_with_overlay(
         .await
 }
 
+/// Resolve a document permission through the request memo when running inside
+/// an engine retry attempt. A cache miss exits the attempt so the caller can
+/// ask the external ACP provider and re-enter with the exact answer.
+pub async fn check_doc_access_with_prepared_inputs(
+    acp: &dyn DocumentACP,
+    identity: &Identity,
+    permission: DocumentPermission,
+    policy_id: &str,
+    resource_name: &str,
+    doc_id: &str,
+    inputs: Option<&crate::prepared::PreparedInputMemo>,
+) -> crate::error::Result<bool> {
+    let Some(inputs) = inputs else {
+        return check_doc_access_with_overlay(
+            acp,
+            identity,
+            permission,
+            policy_id,
+            resource_name,
+            doc_id,
+        )
+        .await
+        .map_err(|error| crate::error::QueryError::execution(error.to_string()));
+    };
+    let bearer = identity
+        .did()
+        .and_then(|did| defra_core::signing::get_request_bearer_token(did.as_str()));
+    let exact_request = serde_json::to_vec(&(
+        identity.did().map(Did::as_str).unwrap_or("anonymous"),
+        permission.as_str(),
+        policy_id,
+        resource_name,
+        doc_id,
+        bearer,
+    ))
+    .map_err(|error| crate::error::QueryError::execution(error.to_string()))?;
+    let request = crate::prepared::PreparedInputRequest::new(
+        crate::prepared::PreparedInputKind::AcpDecision,
+        exact_request,
+    );
+    let Some(response) = inputs.get(&request) else {
+        return Err(crate::error::QueryError::NeedsInput(request));
+    };
+    serde_json::from_slice(&response).map_err(|error| {
+        crate::error::QueryError::execution(format!("cached ACP response is invalid: {error}"))
+    })
+}
+
 /// Transaction context that provides storage access within a transaction.
 ///
 /// This is implemented by the database layer to provide transaction-scoped
