@@ -35,9 +35,9 @@ impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S>
         if !self.supports_transactions() {
             return None;
         }
-        Some(std::sync::Arc::new(ZanzibarDocumentACP::new(
-            std::sync::Arc::new(crate::zanzibar::store::TransactionZanzibarStore::new(view)),
-        )))
+        Some(std::sync::Arc::new(self.scoped(std::sync::Arc::new(
+            crate::zanzibar::store::TransactionZanzibarStore::new(view),
+        ))))
     }
 
     async fn register_doc_object(
@@ -48,7 +48,7 @@ impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S>
         doc_id: &str,
     ) -> Result<()> {
         if let Some(scope) = self.store.begin_scope(false).await? {
-            let scoped = ZanzibarDocumentACP::new(scope.store());
+            let scoped = self.scoped(scope.store());
             let result = scoped
                 .register_doc_object(identity, policy_id, resource_name, doc_id)
                 .await?;
@@ -57,12 +57,13 @@ impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S>
             return Ok(result);
         }
 
-        if self.store.get_policy(policy_id).await?.is_none() {
+        let known = self.engine.snapshot().lookup.has_policy(policy_id)
+            || self.store.has_policy(policy_id).await?;
+        if !known {
             self.store
                 .store_policy(&Self::create_default_policy(policy_id, resource_name))
                 .await?;
         }
-        self.ensure_policy(policy_id, resource_name).await?;
 
         let subjects = self
             .store
@@ -111,7 +112,7 @@ impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S>
         doc_id: &str,
     ) -> Result<bool> {
         if let Some(scope) = self.store.begin_scope(true).await? {
-            let scoped = ZanzibarDocumentACP::new(scope.store());
+            let scoped = self.scoped(scope.store());
             let result = scoped
                 .is_doc_registered(policy_id, resource_name, doc_id)
                 .await?;
@@ -135,7 +136,7 @@ impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S>
         doc_id: &str,
     ) -> Result<Option<Did>> {
         if let Some(scope) = self.store.begin_scope(true).await? {
-            let scoped = ZanzibarDocumentACP::new(scope.store());
+            let scoped = self.scoped(scope.store());
             let result = scoped
                 .get_doc_owner(policy_id, resource_name, doc_id)
                 .await?;
@@ -163,7 +164,7 @@ impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S>
         doc_id: &str,
     ) -> Result<bool> {
         if let Some(scope) = self.store.begin_scope(true).await? {
-            let scoped = ZanzibarDocumentACP::new(scope.store());
+            let scoped = self.scoped(scope.store());
             let result = scoped
                 .check_doc_access(identity, permission, policy_id, resource_name, doc_id)
                 .await?;
@@ -184,12 +185,11 @@ impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S>
             Identity::Anonymous => Did::wildcard(),
         };
 
-        self.ensure_policy(policy_id, resource_name).await?;
+        let engine = self.ensure_policy(policy_id, resource_name).await?;
 
         let granted = if permission == DocumentPermission::Read {
             // Read access is granted if the caller has any of the
             // implies-read permissions — matches Go's ImplyDocumentReadPerm.
-            let engine = self.engine.snapshot();
             let mut result = false;
             for perm in DocumentPermission::implies_read_permissions() {
                 match engine
@@ -207,7 +207,6 @@ impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S>
             result
         } else {
             let relation = Self::permission_to_relation(permission);
-            let engine = self.engine.snapshot();
             engine
                 .check(policy_id, resource_name, doc_id, relation, &subject)
                 .await?
@@ -273,7 +272,7 @@ impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S>
         _managing_relations: &[String],
     ) -> Result<bool> {
         if let Some(scope) = self.store.begin_scope(false).await? {
-            let scoped = ZanzibarDocumentACP::new(scope.store());
+            let scoped = self.scoped(scope.store());
             let result = scoped
                 .add_relationship(
                     requestor,
@@ -382,7 +381,7 @@ impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S>
         _managing_relations: &[String],
     ) -> Result<bool> {
         if let Some(scope) = self.store.begin_scope(false).await? {
-            let scoped = ZanzibarDocumentACP::new(scope.store());
+            let scoped = self.scoped(scope.store());
             let result = scoped
                 .delete_relationship(
                     requestor,
@@ -456,7 +455,7 @@ impl<S: ZanzibarStore + ?Sized + 'static> DocumentACP for ZanzibarDocumentACP<S>
         doc_id: &str,
     ) -> Result<()> {
         if let Some(scope) = self.store.begin_scope(false).await? {
-            let scoped = ZanzibarDocumentACP::new(scope.store());
+            let scoped = self.scoped(scope.store());
             let result = scoped
                 .unregister_doc_object(policy_id, resource_name, doc_id)
                 .await?;

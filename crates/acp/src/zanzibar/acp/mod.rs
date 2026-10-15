@@ -32,6 +32,18 @@ impl<S: ZanzibarStore + ?Sized + 'static> ZanzibarDocumentACP<S> {
         }
     }
 
+    /// An ACP over `store` (a transaction or a scope) that shares this one's
+    /// policy snapshot, so a policy is read and parsed once per process.
+    fn scoped<T>(&self, store: Arc<T>) -> ZanzibarDocumentACP<T>
+    where
+        T: ZanzibarStore + ?Sized + 'static,
+    {
+        ZanzibarDocumentACP {
+            engine: self.engine.sharing(store.clone()),
+            store,
+        }
+    }
+
     pub fn create_default_policy(policy_id: &str, resource_name: &str) -> Policy {
         Policy::new(policy_id, format!("Policy for {}", resource_name)).with_resource(
             Resource::new(resource_name)
@@ -82,21 +94,34 @@ impl<S: ZanzibarStore + ?Sized + 'static> ZanzibarDocumentACP<S> {
         )
     }
 
-    async fn ensure_policy(&self, policy_id: &str, resource_name: &str) -> Result<()> {
+    /// An engine holding `policy_id`. A committed policy is published to the
+    /// shared snapshot (a policy ID never changes its body); a policy only
+    /// this transaction wrote, or the default for a missing one, is used for
+    /// this decision and published nowhere.
+    async fn ensure_policy(
+        &self,
+        policy_id: &str,
+        resource_name: &str,
+    ) -> Result<zanzibar::PermissionEngine<S>> {
         loop {
             let before = self.engine.snapshot();
             if before.lookup.has_policy(policy_id) {
-                return Ok(());
+                return Ok(before);
             }
-            let policy = self
-                .store
-                .get_policy(policy_id)
-                .await?
-                .unwrap_or_else(|| Self::create_default_policy(policy_id, resource_name));
+            let Some(policy) = self.engine.committed_policy(policy_id).await? else {
+                let policy = self
+                    .store
+                    .get_policy(policy_id)
+                    .await?
+                    .unwrap_or_else(|| Self::create_default_policy(policy_id, resource_name));
+                let mut local = before;
+                local.add_policy(&policy);
+                return Ok(local);
+            };
             let mut next = before.clone();
             next.add_policy(&policy);
-            if self.engine.publish_if_current(&before, next) {
-                return Ok(());
+            if self.engine.publish_if_current(&before, next.clone()) {
+                return Ok(next);
             }
         }
     }

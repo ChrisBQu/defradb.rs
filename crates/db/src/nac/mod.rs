@@ -115,6 +115,18 @@ impl<S: ZanzibarStore + ?Sized + 'static> NacManager<S> {
         }
     }
 
+    /// A manager over `store` (a transaction or a scope) that shares this
+    /// one's policy snapshot.
+    fn scoped<T>(&self, store: Arc<T>) -> NacManager<T>
+    where
+        T: ZanzibarStore + ?Sized + 'static,
+    {
+        NacManager {
+            nac: self.nac.scoped(store),
+            config: self.config.clone(),
+        }
+    }
+
     /// Initialize NAC from config and possibly enable it.
     ///
     /// This should be called during node startup. If NAC is configured to be
@@ -126,7 +138,7 @@ impl<S: ZanzibarStore + ?Sized + 'static> NacManager<S> {
             .await
             .map_err(|error| Error::Acp(error.to_string()))?
         {
-            let scoped = NacManager::new(scope.store(), self.config.clone());
+            let scoped = self.scoped(scope.store());
             scoped
                 .nac
                 .load()
@@ -224,7 +236,7 @@ impl<S: ZanzibarStore + ?Sized + 'static> NacManager<S> {
             .await
             .map_err(|error| Error::Acp(error.to_string()))?
         {
-            let scoped = NacManager::new(scope.store(), self.config.clone());
+            let scoped = self.scoped(scope.store());
             scoped
                 .nac
                 .load()
@@ -254,7 +266,7 @@ impl<S: ZanzibarStore + ?Sized + 'static> NacManager<S> {
             .await
             .map_err(|error| Error::Acp(error.to_string()))?
         {
-            let scoped = NacManager::new(scope.store(), self.config.clone());
+            let scoped = self.scoped(scope.store());
             scoped
                 .nac
                 .load()
@@ -284,7 +296,7 @@ impl<S: ZanzibarStore + ?Sized + 'static> NacManager<S> {
             .await
             .map_err(|error| Error::Acp(error.to_string()))?
         {
-            let scoped = NacManager::new(scope.store(), self.config.clone());
+            let scoped = self.scoped(scope.store());
             scoped
                 .nac
                 .load()
@@ -319,7 +331,7 @@ impl<S: ZanzibarStore + ?Sized + 'static> NacManager<S> {
             .await
             .map_err(|error| Error::Acp(error.to_string()))?
         {
-            let scoped = NacManager::new(scope.store(), self.config.clone());
+            let scoped = self.scoped(scope.store());
             scoped
                 .nac
                 .load()
@@ -353,7 +365,7 @@ impl<S: ZanzibarStore + ?Sized + 'static> NacManager<S> {
             .await
             .map_err(|error| Error::Acp(error.to_string()))?
         {
-            let scoped = NacManager::new(scope.store(), self.config.clone());
+            let scoped = self.scoped(scope.store());
             scoped
                 .nac
                 .load()
@@ -391,7 +403,7 @@ impl<S: ZanzibarStore + ?Sized + 'static> NacManager<S> {
             .await
             .map_err(|error| Error::Acp(error.to_string()))?
         {
-            let scoped = NacManager::new(scope.store(), self.config.clone());
+            let scoped = self.scoped(scope.store());
             scoped
                 .nac
                 .load()
@@ -429,7 +441,7 @@ impl<S: ZanzibarStore + ?Sized + 'static> NacManager<S> {
             .await
             .map_err(|error| Error::Acp(error.to_string()))?
         {
-            let scoped = NacManager::new(scope.store(), self.config.clone());
+            let scoped = self.scoped(scope.store());
             scoped
                 .nac
                 .load()
@@ -471,7 +483,7 @@ impl<S: ZanzibarStore + ?Sized + 'static> NacManager<S> {
             .await
             .map_err(|error| Error::Acp(error.to_string()))?
         {
-            let scoped = NacManager::new(scope.store(), self.config.clone());
+            let scoped = self.scoped(scope.store());
             scoped
                 .nac
                 .load()
@@ -505,7 +517,7 @@ impl<S: ZanzibarStore + ?Sized + 'static> NacManager<S> {
             .await
             .map_err(|error| Error::Acp(error.to_string()))?
         {
-            let scoped = NacManager::new(scope.store(), self.config.clone());
+            let scoped = self.scoped(scope.store());
             scoped
                 .nac
                 .load()
@@ -544,7 +556,7 @@ impl<S: ZanzibarStore + ?Sized + 'static> NacManager<S> {
             .await
             .map_err(|error| Error::Acp(error.to_string()))?
         {
-            let scoped = NacManager::new(scope.store(), self.config.clone());
+            let scoped = self.scoped(scope.store());
             scoped
                 .nac
                 .load()
@@ -585,7 +597,7 @@ impl<S: ZanzibarStore + ?Sized + 'static> NacManager<S> {
             .await
             .map_err(|error| Error::Acp(error.to_string()))?
         {
-            let scoped = NacManager::new(scope.store(), self.config.clone());
+            let scoped = self.scoped(scope.store());
             scoped
                 .nac
                 .load()

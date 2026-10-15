@@ -131,3 +131,62 @@ async fn policy_identity_cannot_be_overwritten() {
     drop(scoped);
     txn.discard().unwrap();
 }
+
+/// Every transaction bound from one ACP decides with one shared policy
+/// snapshot: the policy is read and parsed once, not per bound transaction. A
+/// body that no longer parses proves no later transaction re-reads it.
+#[tokio::test]
+async fn bound_transactions_share_one_policy_snapshot() {
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
+    let persistent = Arc::new(PersistentZanzibarStore::from_store(store.clone()));
+    persistent
+        .store_policy(
+            &ZanzibarDocumentACP::<PersistentZanzibarStore<RegolithStore>>::create_default_policy(
+                "p", "items",
+            ),
+        )
+        .await
+        .unwrap();
+    let acp = ZanzibarDocumentACP::new(persistent);
+    acp.register_doc_object(&did("alice"), "p", "items", "doc")
+        .await
+        .unwrap();
+    let alice = Identity::Authenticated(did("alice"));
+    let first = BasicTxn::new(store.as_ref(), 1, true).await.unwrap();
+    let first_acp = acp.bind_transaction(first.acpstore()).unwrap();
+    assert!(first_acp
+        .check_doc_access(&alice, DocumentPermission::Update, "p", "items", "doc")
+        .await
+        .unwrap());
+    drop(first_acp);
+    first.discard().unwrap();
+
+    let corrupt = BasicTxn::new(store.as_ref(), 2, false).await.unwrap();
+    corrupt
+        .acpstore()
+        .set(b"/zanzibar/policy/p", b"not a policy")
+        .await
+        .unwrap();
+    corrupt.commit().await.unwrap();
+
+    for id in 3..5 {
+        let txn = BasicTxn::new(store.as_ref(), id, true).await.unwrap();
+        let bound = acp.bind_transaction(txn.acpstore()).unwrap();
+        assert!(bound
+            .check_doc_access(&alice, DocumentPermission::Update, "p", "items", "doc")
+            .await
+            .unwrap());
+        assert!(!bound
+            .check_doc_access(
+                &Identity::Authenticated(did("mallory")),
+                DocumentPermission::Update,
+                "p",
+                "items",
+                "doc",
+            )
+            .await
+            .unwrap());
+        drop(bound);
+        txn.discard().unwrap();
+    }
+}

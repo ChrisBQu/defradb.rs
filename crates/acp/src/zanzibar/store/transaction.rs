@@ -87,6 +87,13 @@ impl ZanzibarStore for TransactionZanzibarStore {
         }
     }
 
+    async fn has_policy(&self, policy_id: &str) -> Result<bool> {
+        self.view
+            .has(Self::policy_key(policy_id).as_bytes())
+            .await
+            .map_err(|e| Error::Serialization(format!("has_policy: {}", e)))
+    }
+
     async fn list_policies(&self) -> Result<Vec<Policy>> {
         let txn = &self.view;
 

@@ -180,6 +180,16 @@ impl<S: Store> ZanzibarStore for PersistentZanzibarStore<S> {
         }
     }
 
+    async fn has_policy(&self, policy_id: &str) -> Result<bool> {
+        let txn =
+            self.store.new_txn(true).await.map_err(|e| {
+                Error::Serialization(format!("has_policy: create transaction: {}", e))
+            })?;
+        txn.has(Self::policy_key(policy_id).as_bytes())
+            .await
+            .map_err(|e| Error::Serialization(format!("has_policy: {}", e)))
+    }
+
     async fn list_policies(&self) -> Result<Vec<Policy>> {
         let txn = self.store.new_txn(true).await.map_err(|e| {
             Error::Serialization(format!("list_policies: create transaction: {}", e))
