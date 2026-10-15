@@ -4,6 +4,7 @@ mod classifier;
 mod config;
 mod encryption;
 mod event_order;
+mod families;
 mod handle;
 mod hooks;
 pub(crate) mod iterator;
