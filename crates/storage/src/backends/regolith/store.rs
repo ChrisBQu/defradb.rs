@@ -357,23 +357,20 @@ impl AttemptWork {
         txn: &mut regolith::Transaction,
         callbacks: RetryCallbacks,
     ) -> Self {
-        let (sync, asynchronous, ordered, hooks) = callbacks.into_parts();
-        fn take<T>(cell: std::sync::Arc<std::sync::Mutex<Option<T>>>) -> Option<T> {
-            cell.lock().ok().and_then(|mut slot| slot.take())
-        }
-        let events: Vec<Event> = ordered
+        let parts = callbacks.into_parts();
+        let events: Vec<Event> = parts
+            .ordered
             .into_iter()
-            .filter_map(take)
-            .map(|callback| Box::new(callback) as Event)
+            .map(|callback| callback as Event)
             .collect();
-        let hooks: Vec<AsyncOrderedRetryCallback> = hooks.into_iter().filter_map(take).collect();
+        let hooks = parts.ordered_async;
         let binding = (!events.is_empty() || !hooks.is_empty())
             .then(|| order.bind(txn, events, !hooks.is_empty()));
         Self {
             binding,
             hooks,
-            sync: sync.into_iter().filter_map(take).collect(),
-            asynchronous: asynchronous.into_iter().filter_map(take).collect(),
+            sync: parts.sync,
+            asynchronous: parts.asynchronous,
         }
     }
 
