@@ -931,10 +931,10 @@ mod post_commit_tests {
     async fn an_eventful_transaction_that_only_appends_dispatches_its_events() {
         let store = RegolithStore::in_memory().unwrap();
         let out = Out::default();
-        let log = AppendLog {
-            head_key: b"s/arrival/c1/head".to_vec(),
-            entry_prefix: b"s/arrival/c1/row/".to_vec(),
-        };
+        let log = AppendLog::new(
+            b"s/arrival/c1/head".to_vec(),
+            b"s/arrival/c1/row/".to_vec(),
+        );
         for value in [1, 2] {
             // The second append names a once key that already holds a
             // position, so regolith appends nothing for it.

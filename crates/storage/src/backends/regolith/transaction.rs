@@ -299,7 +299,7 @@ impl Writer for RegolithTxn {
         entry: &[u8],
         once_key: Option<&[u8]>,
     ) -> Result<()> {
-        let layout: Arc<dyn regolith::LogLayout> = Arc::new(log.clone());
+        let layout: Arc<dyn regolith::LogLayout> = log.keys().clone();
         let txn = self.writable()?;
         regolith::ready(|| txn.append(&layout, entry, once_key))
             .await
@@ -487,5 +487,24 @@ impl Txn for RegolithTxn {
 
     fn callback_count(&self) -> usize {
         self.callbacks.total()
+    }
+}
+
+#[cfg(test)]
+mod append_tests {
+    use crate::backends::RegolithStore;
+    use crate::corekv::{AppendLog, Store, Writer};
+
+    /// A pending append holds the layout its log already shares, not a copy.
+    #[tokio::test]
+    async fn an_append_shares_its_log_layout() {
+        let store = RegolithStore::in_memory().unwrap();
+        let log = AppendLog::new(b"s/arrival/c1/head".to_vec(), b"s/arrival/c1/row/".to_vec());
+        let mut txn = store.new_txn(false).await.unwrap();
+        txn.append(&log, b"doc-1", Some(b"s/arrival/c1/doc/doc-1"))
+            .await
+            .unwrap();
+        assert_eq!(std::sync::Arc::strong_count(log.keys()), 2);
+        txn.discard();
     }
 }

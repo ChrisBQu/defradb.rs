@@ -478,7 +478,7 @@ impl Writer for InterceptingRetryAttemptIO {
         entry: &[u8],
         once_key: Option<&[u8]>,
     ) -> Result<()> {
-        (self.interceptor)(&log.head_key, Some(entry))?;
+        (self.interceptor)(log.head_key(), Some(entry))?;
         self.inner.append(log, entry, once_key).await
     }
     async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {

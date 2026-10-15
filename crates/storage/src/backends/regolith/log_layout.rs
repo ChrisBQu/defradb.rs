@@ -1,7 +1,8 @@
 //! The arrival journal's keys, as regolith's commit-ordered append sees them.
 //!
-//! An [`AppendLog`] names a log's head key and its entry prefix; the key of
-//! the entry at a position is the prefix followed by the position as 20
+//! An [`AppendLog`](crate::corekv::AppendLog) names a log's head key and its
+//! entry prefix, which its clones share as one [`LogKeys`]; the key of the
+//! entry at a position is the prefix followed by the position as 20
 //! zero-padded decimal digits, which sort in position order and hold every
 //! `u64`. regolith asks for these keys inside the ordered step of a commit,
 //! which holds up every other writer, so a key is built in place, with no
@@ -10,12 +11,12 @@
 
 use regolith::LogLayout;
 
-use crate::corekv::AppendLog;
+use crate::corekv::types::LogKeys;
 
 /// The decimal digits of the largest position, `u64::MAX`.
 const POSITION_DIGITS: usize = 20;
 
-impl LogLayout for AppendLog {
+impl LogLayout for LogKeys {
     fn head_key(&self) -> &[u8] {
         &self.head_key
     }
@@ -47,14 +48,14 @@ mod tests {
 
     use super::*;
 
-    fn journal() -> AppendLog {
-        AppendLog {
+    fn journal() -> LogKeys {
+        LogKeys {
             head_key: b"s/arrival/7/head".to_vec(),
             entry_prefix: b"s/arrival/7/row/".to_vec(),
         }
     }
 
-    fn entry(log: &AppendLog, position: u64) -> Vec<u8> {
+    fn entry(log: &LogKeys, position: u64) -> Vec<u8> {
         let mut key = Vec::new();
         log.entry_key(position, &mut key);
         key
