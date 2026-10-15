@@ -253,14 +253,25 @@ pub async fn write_document_blocks(
         inherited_encryption_cid(blockstore, &composite_heads).await?
     };
 
+    let immutable = if is_create {
+        compute_immutable_block(doc, schema_version_id, encryption_config, signing_config)?
+    } else {
+        None
+    };
+
     for (field_name, field_value) in doc.values() {
         if field_name == "_docID" {
             continue;
         }
 
+        // On update an immutable field is unchanged (validated before blocks
+        // are written), so it needs no block; on create it is in the
+        // Immutable block.
         let should_create_block = match modified_fields {
-            None => true,
-            Some(fields) => fields.contains(field_name),
+            None => !immutable
+                .as_ref()
+                .is_some_and(|block| block.fields.contains(field_name)),
+            Some(fields) => fields.contains(field_name) && !is_schema_immutable(doc, field_name),
         };
 
         let field_head_entries = if is_create {
@@ -454,6 +465,28 @@ pub async fn write_document_blocks(
                 initial_field_cids.push(field_cid);
             }
         }
+    }
+
+    if let Some(block) = immutable {
+        if let Some((sig_cid, sig_cbor)) = &block.signature {
+            blockstore
+                .set(&sig_cid.to_bytes(), sig_cbor)
+                .await
+                .map_err(|e| format!("Failed to store signature block: {}", e))?;
+        }
+        blockstore
+            .set(&block.cid.to_bytes(), &block.bytes)
+            .await
+            .map_err(|e| format!("Failed to store immutable block: {}", e))?;
+        for (key, value) in block.head_entries(identity.doc_short_id) {
+            headstore
+                .set(&key, &value)
+                .await
+                .map_err(|e| format!("Failed to write immutable head: {}", e))?;
+        }
+        field_links.push(block.link());
+        field_cids.push(block.cid);
+        initial_field_cids.push(block.cid);
     }
 
     let composite_payload = CompositeDeltaPayload {

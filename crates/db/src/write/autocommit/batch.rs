@@ -191,6 +191,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         ensure_collection_is_active(&self.db, collection_name, &collection)?;
         let embedding_config = self.db.options().embedding_config();
 
+        crate::block::builder::attach_immutable_schema(&mut doc, collection.schema());
         crate::search::set_embedding(
             &collection.schema().vector_embeddings,
             &mut doc,
@@ -304,6 +305,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         ensure_collection_is_active(&self.db, collection_name, &collection)?;
         let embedding_config = self.db.options().embedding_config();
 
+        crate::block::builder::attach_immutable_schema(&mut doc, collection.schema());
         let generated = crate::search::set_embedding(
             &collection.schema().vector_embeddings,
             &mut doc,

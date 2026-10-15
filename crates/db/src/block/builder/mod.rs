@@ -11,6 +11,7 @@ mod batch_signing;
 mod build;
 pub mod collection;
 mod compute;
+mod immutable;
 mod write;
 
 pub(crate) use batch_signing::collect_on_commit;
@@ -18,6 +19,9 @@ pub use build::build_blocks_from_document;
 pub use collection::write_collection_block;
 pub use compute::{compute_document_blocks, insert_computed_blocks, ComputedBlocks};
 pub use write::{write_delete_block, write_document_blocks};
+
+pub use immutable::attach_immutable_schema;
+use immutable::{compute_immutable_block, is_schema_immutable};
 
 use bytes::Bytes;
 use rapidhash::{HashMapExt, RapidHashMap};

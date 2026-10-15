@@ -199,6 +199,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         self.ensure_collection_can_write(collection_name, &collection)
             .await?;
 
+        crate::block::builder::attach_immutable_schema(&mut doc, collection.schema());
         crate::search::set_embedding(
             &collection.schema().vector_embeddings,
             &mut doc,
@@ -399,6 +400,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             })?;
         doc.set_id(canonical_doc_id.clone());
 
+        crate::block::builder::attach_immutable_schema(&mut doc, collection.schema());
         let generated = crate::search::set_embedding(
             &collection.schema().vector_embeddings,
             &mut doc,

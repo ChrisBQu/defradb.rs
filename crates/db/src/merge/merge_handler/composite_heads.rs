@@ -77,20 +77,28 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                     }
                 }
 
-                let field_head_key = storage::keys::headstore::HeadstoreDocKey::new(
-                    context.doc_short_id,
-                    &dag_link.name,
-                    dag_link.link,
-                );
-                headstore
-                    .set(
-                        &<storage::keys::headstore::HeadstoreDocKey as storage::corekv::Key>::bytes(
-                            &field_head_key,
-                        ),
-                        &priority_bytes,
-                    )
-                    .await
-                    .map_err(|e| MergeError::Storage(e.to_string()))?;
+                // An Immutable block is the head of every field it carries, so
+                // a peer holding one of them as mutable chains its update to it.
+                let head_names = match state.immutable_block_fields.get(&dag_link.link) {
+                    Some(fields) => fields.iter().map(String::as_str).collect(),
+                    None => vec![dag_link.name.as_str()],
+                };
+                for head_name in head_names {
+                    let field_head_key = storage::keys::headstore::HeadstoreDocKey::new(
+                        context.doc_short_id,
+                        head_name,
+                        dag_link.link,
+                    );
+                    headstore
+                        .set(
+                            &<storage::keys::headstore::HeadstoreDocKey as storage::corekv::Key>::bytes(
+                                &field_head_key,
+                            ),
+                            &priority_bytes,
+                        )
+                        .await
+                        .map_err(|e| MergeError::Storage(e.to_string()))?;
+                }
 
                 let field_priority_key = storage::keys::headstore::HeadstorePriorityKey::new(
                     context.doc_short_id,

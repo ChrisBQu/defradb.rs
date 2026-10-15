@@ -59,6 +59,8 @@ pub struct CompositeMergeState {
     pub(crate) owned_field_cids: Vec<Cid>,
     pub(crate) linked_field_cids: Vec<Cid>,
     pub(crate) linked_encryption_cids: Vec<Cid>,
+    /// Fields of each linked Immutable block: their heads are the block.
+    pub(crate) immutable_block_fields: RapidHashMap<Cid, Vec<String>>,
     pub(crate) is_branchable: bool,
 }
 

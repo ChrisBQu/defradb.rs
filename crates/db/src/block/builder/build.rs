@@ -26,11 +26,17 @@ pub async fn build_blocks_from_document<B: Blockstore>(
     let mut field_links: Vec<DAGLink> = Vec::new();
     let mut field_cids: Vec<Cid> = Vec::new();
 
+    let immutable = compute_immutable_block(doc, schema_version_id, None, None)?;
+
     // Create a block for each field (LWW or Counter depending on CRDT type)
     for (field_name, field_value) in doc.values() {
         // Skip _docID (stored as the block key, not a CRDT field).
         // Other _-prefixed fields like _ownerID (foreign keys) DO get blocks.
-        if field_name == "_docID" {
+        if field_name == "_docID"
+            || immutable
+                .as_ref()
+                .is_some_and(|block| block.fields.contains(field_name))
+        {
             continue;
         }
 
@@ -88,6 +94,15 @@ pub async fn build_blocks_from_document<B: Blockstore>(
         // Add link to composite
         field_links.push(DAGLink::new(field_name.clone(), field_cid));
         field_cids.push(field_cid);
+    }
+
+    if let Some(block) = immutable {
+        blockstore
+            .put(&block.cid, &block.bytes)
+            .await
+            .map_err(|e| format!("Failed to store immutable block: {}", e))?;
+        field_links.push(block.link());
+        field_cids.push(block.cid);
     }
 
     // Create the Composite delta payload

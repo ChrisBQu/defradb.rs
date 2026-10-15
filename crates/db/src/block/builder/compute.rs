@@ -40,8 +40,15 @@ pub fn compute_document_blocks(
 
     let priority: u64 = 1; // Always 1 for creates
 
+    let immutable =
+        compute_immutable_block(doc, schema_version_id, encryption_config, signing_config)?;
+
     for (field_name, field_value) in doc.values() {
-        if field_name == "_docID" {
+        if field_name == "_docID"
+            || immutable
+                .as_ref()
+                .is_some_and(|block| block.fields.contains(field_name))
+        {
             continue;
         }
 
@@ -144,6 +151,16 @@ pub fn compute_document_blocks(
 
         field_links.push(DAGLink::new(field_name.clone(), field_cid));
         field_cids.push(field_cid);
+    }
+
+    if let Some(block) = immutable {
+        if let Some((sig_cid, sig_cbor)) = block.signature.clone() {
+            blockstore_entries.push((sig_cid.to_bytes(), sig_cbor));
+        }
+        blockstore_entries.push((block.cid.to_bytes(), block.bytes.clone()));
+        headstore_entries.extend(block.head_entries(identity.doc_short_id));
+        field_links.push(block.link());
+        field_cids.push(block.cid);
     }
 
     // Composite encryption CID for doc-level encryption

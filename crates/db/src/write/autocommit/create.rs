@@ -22,6 +22,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
         // Generate embeddings before blocks (embedding values affect the genesis CID)
         let embedding_config = self.db.options().embedding_config();
+        crate::block::builder::attach_immutable_schema(&mut doc, collection.schema());
         crate::search::set_embedding(
             &collection.schema().vector_embeddings,
             &mut doc,
@@ -228,6 +229,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         let mut prepared_docs: Vec<Document> = Vec::with_capacity(docs.len());
         let embedding_config = self.db.options().embedding_config();
         for mut doc in docs {
+            crate::block::builder::attach_immutable_schema(&mut doc, collection.schema());
             crate::search::set_embedding(
                 &collection.schema().vector_embeddings,
                 &mut doc,

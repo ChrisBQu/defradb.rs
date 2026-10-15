@@ -208,6 +208,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             // Get signing config from thread-local (set by FFI exec_request)
             let sign_config = get_signing_config();
 
+            crate::block::builder::attach_immutable_schema(&mut doc, collection.schema());
             let identity = DocStorageIdentity::new(collection.resolved_root_id(), doc_short_id);
 
             // For update operations, pass the modified fields to only create blocks
