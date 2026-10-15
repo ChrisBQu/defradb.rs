@@ -1,8 +1,11 @@
 //! Helper functions for migration placeholder creation and document materialization.
 
+use std::sync::Arc;
+
 use datastore::NamespaceView;
 use document::Document;
-use lens::{LensDoc, DOC_ID_FIELD};
+use lens::{LensDoc, TargetedHistoryLink, TransformStore, DOC_ID_FIELD};
+use rapidhash::RapidHashMap;
 use schema::{CollectionVersion, FieldKind, ORPHAN_COLLECTION_ID};
 
 use crate::collection::Collection;
@@ -133,6 +136,63 @@ pub fn lens_doc_to_document(
 
     doc.set_schema_version_id(collection.version_id());
     doc
+}
+
+/// What reading a stored document at its collection's active version takes.
+pub(crate) enum ToActive {
+    /// Stored at the active version, or at one this node does not know.
+    Current,
+    /// Stored with no version, or at one whose path to the active version
+    /// runs no transform: its values stand, only its version would move.
+    Identity,
+    /// The document as the transforms on its path make it.
+    Migrated(Document),
+}
+
+/// Reads `doc` at `collection`'s active version, through the transforms
+/// `history` puts on its path.
+pub(crate) async fn migrate_to_active(
+    doc: &Document,
+    collection: &Collection,
+    history: &RapidHashMap<String, TargetedHistoryLink>,
+    lens_store: &Arc<dyn TransformStore>,
+) -> Result<ToActive> {
+    let target = collection.version_id();
+    let Some(version) = doc.schema_version_id() else {
+        return Ok(ToActive::Identity);
+    };
+    if version == target {
+        return Ok(ToActive::Current);
+    }
+    if !history.contains_key(version) {
+        tracing::debug!(
+            doc_id = ?doc.id(),
+            doc_version = %version,
+            target_version = %target,
+            "a document at a version unknown locally is read as stored"
+        );
+        return Ok(ToActive::Current);
+    }
+    if !crate::definition::lens::migration_path_has_transform(history, version, target) {
+        return Ok(ToActive::Identity);
+    }
+    let lens_doc = crate::definition::lens::doc_to_lens_doc(doc).ok_or_else(|| {
+        Error::Lens(format!(
+            "failed to convert document {:?} for migration",
+            doc.id()
+        ))
+    })?;
+    let migrated = lens::transform_to_target(
+        lens_store,
+        target,
+        history,
+        lens::LensInput::new(version, lens_doc),
+    )
+    .await
+    .map_err(|error| Error::Lens(error.to_string()))?;
+    Ok(ToActive::Migrated(lens_doc_to_document(
+        migrated, doc, collection,
+    )))
 }
 
 /// Persist a lensed document directly to the datastore without creating CRDT commits.
