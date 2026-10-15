@@ -90,14 +90,12 @@ one directional invariant their bug violates.
 
 ## Fix status
 
-**Landed (#1021).** Rust's counter value behaves as one store under concurrency: local
-increments and merges serialize on the shared per-doc write guard
-(`crates/db/src/write/queue.rs`, taken by BOTH the local-write path and the db-merge
-merge handler — see `MergeQueue.tla`), and reconcile is init-if-absent (PCounter
-migrate-via-max), so a local write and a same-doc merge never interleave their store RMW.
+**Landed.** Rust's counter value behaves as one store under concurrency: local
+increments and merges use engine conflict validation and counter merge operands, while
+reconcile is init-if-absent (PCounter migrate-via-max), so a local write and a same-doc
+merge cannot silently overwrite each other's RMW.
 Validated by the asserting in-suite test
 `partition::convergence_concurrent_same_doc_merge_storm` (driven by
 `support::run_counter_storm`) and the rest of the `convergence_concurrent_counter_*`
 family, which converge to the exact expected value. The GREEN `Unified` mode here
-abstracts that fix as a conflict-checked RMW; the per-doc-lock realization is checked
-directly in `MergeQueue.tla`'s `INV_NoLocalMergeInterleave`.
+abstracts that fix as a conflict-checked RMW. Engine OCC remains outside this model.

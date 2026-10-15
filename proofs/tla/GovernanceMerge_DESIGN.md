@@ -210,9 +210,9 @@ is recorded there.
 ## Not covered
 
 1. **Soundness of deferral.** Assumed by both modules; see the contract note.
-2. **The batch path.** `MergeQueue.tla` covers ordered multi-document batches
-   and retry exhaustion. Nothing here distinguishes a batch from a sequence of
-   pushes.
+2. **The batch path.** No separate model covers ordered multi-document batches
+   or retry exhaustion. The historical `MergeQueue` model was retired with the
+   removed `DocWriteQueue`; it did not describe engine transaction retries.
 3. **Two collections.** Everything here is one governed collection. The
    fail-closed rule (a claimed collection with no validator defers everything)
    only becomes interesting with more than one.
