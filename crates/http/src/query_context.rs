@@ -41,14 +41,20 @@ pub async fn execute_with_context(
     let batch_session_key = signing_config.as_ref().map(|s| s.public_key_hex.clone());
     let acting_did = identity.did().map(|d| d.as_str().to_string());
 
+    let bearer = acting_did
+        .as_deref()
+        .and_then(defra_core::signing::get_request_bearer_token);
     match tokio::task::spawn_blocking(move || {
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(acting_did);
+        let _identity_guard =
+            defra_core::current_identity::scoped_current_identity(acting_did.clone());
         defra_core::signing::set_signing_config(signing_config);
         defra_core::batch_signing::set_batch_session_key(batch_session_key);
         defra_core::dac_bypass::set_dac_bypass(dac_bypass);
-        handle.block_on(async {
-            execute_prepared_with_executor(executor.as_ref(), request, max_retries).await
-        })
+        handle.block_on(defra_core::signing::scope_request_bearer_token(
+            acting_did,
+            bearer,
+            execute_prepared_with_executor(executor.as_ref(), request, max_retries),
+        ))
     })
     .await
     {
@@ -188,12 +194,20 @@ pub async fn execute_in_txn_with_context(
     let batch_session_key = signing_config.as_ref().map(|s| s.public_key_hex.clone());
     let acting_did = identity.did().map(|d| d.as_str().to_string());
 
+    let bearer = acting_did
+        .as_deref()
+        .and_then(defra_core::signing::get_request_bearer_token);
     match tokio::task::spawn_blocking(move || {
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(acting_did);
+        let _identity_guard =
+            defra_core::current_identity::scoped_current_identity(acting_did.clone());
         defra_core::signing::set_signing_config(signing_config);
         defra_core::batch_signing::set_batch_session_key(batch_session_key);
         defra_core::dac_bypass::set_dac_bypass(dac_bypass);
-        handle.block_on(async { executor.execute_in_txn(request, &txn_handle).await })
+        handle.block_on(defra_core::signing::scope_request_bearer_token(
+            acting_did,
+            bearer,
+            executor.execute_in_txn(request, &txn_handle),
+        ))
     })
     .await
     {
@@ -217,12 +231,20 @@ pub async fn execute_with_resolved_context(
 
     let batch_session_key = signing_config.as_ref().map(|s| s.public_key_hex.clone());
 
+    let bearer = acting_did
+        .as_deref()
+        .and_then(defra_core::signing::get_request_bearer_token);
     match tokio::task::spawn_blocking(move || {
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(acting_did);
+        let _identity_guard =
+            defra_core::current_identity::scoped_current_identity(acting_did.clone());
         defra_core::signing::set_signing_config(signing_config);
         defra_core::batch_signing::set_batch_session_key(batch_session_key);
         defra_core::dac_bypass::set_dac_bypass(dac_bypass);
-        handle.block_on(async { executor.execute(request).await })
+        handle.block_on(defra_core::signing::scope_request_bearer_token(
+            acting_did,
+            bearer,
+            executor.execute(request),
+        ))
     })
     .await
     {
@@ -472,6 +494,7 @@ mod tests {
     #[derive(Default)]
     struct DacBypassRecorder {
         observed: std::sync::atomic::AtomicBool,
+        bearer: std::sync::Mutex<Option<String>>,
     }
 
     #[async_trait]
@@ -481,6 +504,7 @@ mod tests {
         async fn execute(&self, _request: QueryRequest) -> QueryResponse {
             self.observed
                 .store(defra_core::dac_bypass::get_dac_bypass(), Ordering::SeqCst);
+            *self.bearer.lock().unwrap() = defra_core::signing::get_request_bearer_token(OWNER_DID);
             QueryResponse::success(serde_json::json!({}))
         }
 
@@ -491,6 +515,7 @@ mod tests {
         ) -> QueryResponse {
             self.observed
                 .store(defra_core::dac_bypass::get_dac_bypass(), Ordering::SeqCst);
+            *self.bearer.lock().unwrap() = defra_core::signing::get_request_bearer_token(OWNER_DID);
             QueryResponse::success(serde_json::json!({}))
         }
 
@@ -560,5 +585,50 @@ mod tests {
         .await;
 
         assert!(!executor.observed.load(Ordering::SeqCst));
+    }
+    #[tokio::test]
+    async fn bearer_scope_crosses_each_blocking_execution_boundary() {
+        let executor = Arc::new(DacBypassRecorder::default());
+        let state = AppStateBuilder::new(executor.clone())
+            .with_signing_enabled(false)
+            .with_nac(Arc::new(crate::MockNodeAcpOperations::new()))
+            .build();
+        for path in 0..3 {
+            *executor.bearer.lock().unwrap() = None;
+            defra_core::signing::scope_request_bearer_token(
+                Some(OWNER_DID.to_string()),
+                Some("request-token".to_string()),
+                async {
+                    let request = QueryRequest::new("{ __typename }");
+                    match path {
+                        0 => execute_with_context(&state, &owner_identity(), request).await,
+                        1 => {
+                            execute_in_txn_with_context(
+                                &state,
+                                &owner_identity(),
+                                request,
+                                TransactionHandle::new("txn".into()),
+                            )
+                            .await
+                        }
+                        _ => {
+                            execute_with_resolved_context(
+                                executor.clone(),
+                                request,
+                                None,
+                                false,
+                                Some(OWNER_DID.to_string()),
+                            )
+                            .await
+                        }
+                    }
+                },
+            )
+            .await;
+            assert_eq!(
+                executor.bearer.lock().unwrap().as_deref(),
+                Some("request-token")
+            );
+        }
     }
 }

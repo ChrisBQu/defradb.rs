@@ -48,22 +48,12 @@ pub async fn auth_middleware(
     // context, so the JWT is verified only once per request.
     let acting_did = match permission {
         RoutePermission::Exempt => None,
-        RoutePermission::IdentityOnly | RoutePermission::Dynamic => {
+        RoutePermission::IdentityOnly | RoutePermission::Dynamic | RoutePermission::Required(_) => {
             match parse_identity_from_headers(request.headers()) {
                 Ok(did) => did,
                 Err(err) => return err.into_response(),
             }
         }
-        RoutePermission::Required(perm) => match parse_identity_from_headers(request.headers()) {
-            Ok(did) => {
-                let identity = ExtractIdentity::from_did(did.clone());
-                if let Err(err) = require_permission(&state, &identity, perm).await {
-                    return err.into_response();
-                }
-                did
-            }
-            Err(err) => return err.into_response(),
-        },
     };
 
     if !is_exempt {
@@ -76,6 +66,34 @@ pub async fn auth_middleware(
     // paths resolve who is acting (survives `.await`, mirroring Go's
     // `identity.FromContext`). This replaces a separate outer middleware that
     // re-parsed the JWT.
-    let scoped = acting_did.map(|did| did.to_string());
-    defra_core::current_identity::with_scoped_identity(scoped, next.run(request)).await
+    let scoped = acting_did.as_ref().map(ToString::to_string);
+    // Capture this request's verified token directly from its header. Never
+    // publish it in the process-wide DID map: concurrent requests can share a
+    // DID while carrying different authorization tokens.
+    let bearer = acting_did.as_ref().and_then(|_| {
+        request
+            .headers()
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| {
+                value
+                    .strip_prefix("Bearer ")
+                    .or_else(|| value.strip_prefix("bearer "))
+            })
+            .map(|token| token.trim().to_owned())
+    });
+    let execution = async move {
+        if let RoutePermission::Required(perm) = permission {
+            let identity = ExtractIdentity::from_did(acting_did);
+            if let Err(err) = require_permission(&state, &identity, perm).await {
+                return err.into_response();
+            }
+        }
+        next.run(request).await
+    };
+    defra_core::current_identity::with_scoped_identity(
+        scoped.clone(),
+        defra_core::signing::scope_request_bearer_token(scoped, bearer, execution),
+    )
+    .await
 }

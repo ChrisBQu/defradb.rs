@@ -359,6 +359,9 @@ async fn graphql_sse(
     let variables = request.variables;
     let did = identity.did().cloned();
     let acting_did = did.as_ref().map(|d| d.as_str().to_string());
+    let bearer = did
+        .as_ref()
+        .and_then(|did| defra_core::signing::get_request_bearer_token(did.as_str()));
 
     // Signing configuration is fixed; authorization is resolved for each event.
     let signing_config = crate::query_context::resolve_signing_config(&state, &identity);
@@ -408,13 +411,13 @@ async fn graphql_sse(
                 if let Some(ref vars) = variables {
                     req = req.with_variables(vars.clone());
                 }
-                let dac_bypass = crate::query_context::resolve_dac_bypass(&state, &identity).await;
-                let response = execute_with_resolved_context(
-                    executor.clone(),
-                    req,
-                    signing_config.clone(),
-                    dac_bypass,
-                    acting_did.clone(),
+                let response = defra_core::signing::scope_request_bearer_token(
+                    acting_did.clone(), bearer.clone(), async {
+                        let dac_bypass = crate::query_context::resolve_dac_bypass(&state, &identity).await;
+                        execute_with_resolved_context(
+                            executor.clone(), req, signing_config.clone(), dac_bypass, acting_did.clone(),
+                        ).await
+                    },
                 ).await;
 
                 // Skip empty results (filter excluded the document)

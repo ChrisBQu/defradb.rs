@@ -78,10 +78,24 @@ struct EventAccessContext {
     identity: ExtractIdentity,
     did: Option<identity::Did>,
     acp_enabled: bool,
+    bearer: Option<String>,
 }
 
 impl EventAccessContext {
     async fn can_observe_document_event(
+        &self,
+        collection_id: &str,
+        doc_id: &str,
+    ) -> Result<bool, HttpError> {
+        defra_core::signing::scope_request_bearer_token(
+            self.did.as_ref().map(ToString::to_string),
+            self.bearer.clone(),
+            self.can_observe_document_event_scoped(collection_id, doc_id),
+        )
+        .await
+    }
+
+    async fn can_observe_document_event_scoped(
         &self,
         collection_id: &str,
         doc_id: &str,
@@ -181,6 +195,9 @@ pub async fn events_sse(
         identity: identity.clone(),
         did: identity.did().cloned(),
         acp_enabled: state.doc_acp.is_some() || state.acp.is_some(),
+        bearer: identity
+            .did()
+            .and_then(|did| defra_core::signing::get_request_bearer_token(did.as_str())),
     };
 
     let stream = async_stream::stream! {

@@ -378,17 +378,16 @@ pub fn clear_identity_store() {
 
 use std::sync::OnceLock;
 
-/// Global map of DID → JWT for in-flight requests.
-///
-/// `thread_local!` doesn't work here because tokio can migrate async tasks
-/// between OS threads at `.await` points. A global map keyed by DID ensures
-/// the token is available regardless of which thread reads it.
+/// Legacy fallback for callers outside an explicit bearer scope.
+/// HTTP requests and deferred authorization callbacks use task-scoped tokens
+/// so concurrent requests for the same DID cannot replace each other's JWT.
 fn request_token_store() -> &'static HopscotchMap<String, String, RandomState> {
     static STORE: OnceLock<HopscotchMap<String, String, RandomState>> = OnceLock::new();
     STORE.get_or_init(|| HopscotchMap::with_hasher(RandomState::default()))
 }
 
-/// Store the raw JWT from the HTTP Authorization header, keyed by the caller's DID.
+/// Set a legacy fallback JWT. Concurrent requests should use
+/// [`scope_request_bearer_token`] instead.
 ///
 /// When a user authenticates via JWT, the node doesn't have their private key
 /// and can't create new bearer tokens for them. Instead, we pass through the
