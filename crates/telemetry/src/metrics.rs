@@ -371,6 +371,8 @@ pub(crate) fn install(provider: &opentelemetry_sdk::metrics::SdkMeterProvider) -
             .build(),
     });
 
+    crate::engine_tickers::register(&meter);
+
     let installation = NEXT_INSTALLATION.fetch_add(1, Ordering::Relaxed) + 1;
     let registry = INSTRUMENTS.get_or_init(|| Atom::new(Vec::new()));
     registry.rcu(|current| {
