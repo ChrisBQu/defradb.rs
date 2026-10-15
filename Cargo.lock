@@ -19,6 +19,7 @@ dependencies = [
  "identity 0.5.0",
  "kovan",
  "rapidhash",
+ "regolith",
  "serde",
  "serde_json",
  "serde_yaml",

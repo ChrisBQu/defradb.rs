@@ -15,6 +15,8 @@ use zanzibar::types::{ObjectRef, Policy, Relationship, Subject};
 /// Persistent Zanzibar store backed by any Store implementation.
 pub struct PersistentZanzibarStore<S: Store> {
     store: NamespacedStore<S>,
+    /// Filled once the policy counter is known to cover every stored policy.
+    counter_seeded: regolith::sync::OnceCell<()>,
 }
 
 impl<S: Store> PersistentZanzibarStore<S> {
@@ -22,7 +24,51 @@ impl<S: Store> PersistentZanzibarStore<S> {
     pub fn from_store(store: Arc<S>) -> Self {
         Self {
             store: NamespacedStore::new(store, Namespace::Acpstore),
+            counter_seeded: regolith::sync::OnceCell::new(),
         }
+    }
+
+    /// A store written before the counter key existed holds policies but no
+    /// counter, and allocating from zero there would mint an ID already in
+    /// use. Such a counter is seeded by reserving one value per stored policy
+    /// (the NAC policy's ID is a constant and never consumed one). A
+    /// reservation only moves the counter forward, so two seeders leave a gap
+    /// and never a repeat.
+    async fn seed_policy_counter(&self) -> Result<()> {
+        let txn = self.store.new_txn(true).await.map_err(|e| {
+            Error::Serialization(format!("seed policy counter: create transaction: {}", e))
+        })?;
+        if txn
+            .has(POLICY_COUNTER_KEY.as_bytes())
+            .await
+            .map_err(|e| Error::Serialization(format!("seed policy counter: get: {}", e)))?
+        {
+            return Ok(());
+        }
+        let iter_opts = IterOptions::new()
+            .with_prefix(POLICY_PREFIX.as_bytes().to_vec())
+            .with_keys_only(true);
+        let mut iter = txn.iterator(iter_opts).await.map_err(|e| {
+            Error::Serialization(format!("seed policy counter: create iterator: {}", e))
+        })?;
+        let nac_policy_key = Self::policy_key(crate::nac::NODE_POLICY_ID);
+        let mut spent = 0u64;
+        while let Some(kv) = iter
+            .next()
+            .await
+            .map_err(|e| Error::Serialization(format!("seed policy counter: iterate: {}", e)))?
+        {
+            if !kv.key.ends_with(nac_policy_key.as_bytes()) {
+                spent += 1;
+            }
+        }
+        if spent > 0 {
+            self.store
+                .allocate(POLICY_COUNTER_KEY.as_bytes(), spent)
+                .await
+                .map_err(|error| Error::Serialization(error.to_string()))?;
+        }
+        Ok(())
     }
 }
 
@@ -160,6 +206,9 @@ impl<S: Store> ZanzibarStore for PersistentZanzibarStore<S> {
     }
 
     async fn next_policy_counter(&self) -> Result<u64> {
+        self.counter_seeded
+            .get_or_try_init(self.seed_policy_counter())
+            .await?;
         self.store
             .allocate(POLICY_COUNTER_KEY.as_bytes(), 1)
             .await
