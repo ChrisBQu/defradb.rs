@@ -187,3 +187,30 @@ Revision `3c8bed2824e305b4d5c02da47ade8169d490c6fa`; `allocs` SHA-256 `d2c45850f
   document from json             76.0 allocations/op
 ```
 
+
+### Step 6 measured candidate
+
+Revision `3bd4fdcd8229fa12401ebaaa4e03bcdb7e095b96`; `allocs` SHA-256 `54422e9900f5b0f7582d9b0ec7f80f8db06a639342d55e3cc67d495c97f89bcf`. This checkpoint predates the final batch/provider integration. Five-run create median: 4234.4 allocations/op; get-by-ID: 198.
+
+```text
+  document create              4238.4 allocations/op
+  document get by id            198.0 allocations/op
+  document to map                36.0 allocations/op
+  document from json             76.0 allocations/op
+  document create              4243.7 allocations/op
+  document get by id            198.0 allocations/op
+  document to map                36.0 allocations/op
+  document from json             76.0 allocations/op
+  document create              4234.4 allocations/op
+  document get by id            198.0 allocations/op
+  document to map                36.0 allocations/op
+  document from json             76.0 allocations/op
+  document create              4226.4 allocations/op
+  document get by id            198.0 allocations/op
+  document to map                36.0 allocations/op
+  document from json             76.0 allocations/op
+  document create              4231.2 allocations/op
+  document get by id            198.0 allocations/op
+  document to map                36.0 allocations/op
+  document from json             76.0 allocations/op
+```
