@@ -30,6 +30,7 @@ use kms::{
 use std::sync::{Arc, OnceLock, Weak};
 
 use cid::Cid;
+use edge::Edge;
 use kovan::AtomOption;
 use kovan_map::HopscotchMap;
 use std::time::Duration;
@@ -97,14 +98,18 @@ pub struct PubsubKeyTransport<T: P2PTransport> {
     /// Back-reference so `install_handler` can replay the buffer through the
     /// normal dispatch path.
     self_ref: OnceLock<Weak<Self>>,
+    /// The network runtime buffered requests are replayed on.
+    edge: Edge,
 }
 
 impl<T: P2PTransport> PubsubKeyTransport<T> {
     /// Construct, subscribe to ENCRYPTION_TOPIC and the local `_response`
-    /// sub-topic, and register both for raw routing.
+    /// sub-topic, and register both for raw routing. Requests that arrive
+    /// before a handler is installed are replayed on `edge`.
     pub async fn new(
         transport: T,
         identity_resolver: Arc<dyn PeerIdentityResolver>,
+        edge: Edge,
     ) -> KmsResult<Arc<Self>> {
         let local_peer_id = transport.local_peer_id().to_string();
         // Canonicalize through `libp2p::PeerId` when that dep is compiled in
@@ -145,6 +150,7 @@ impl<T: P2PTransport> PubsubKeyTransport<T> {
             self_response_topic,
             pending_requests: HopscotchMap::with_hasher(rapidhash::fast::RandomState::default()),
             self_ref: OnceLock::new(),
+            edge,
         });
         let _ = transport.self_ref.set(Arc::downgrade(&transport));
         Ok(transport)
@@ -528,22 +534,15 @@ impl<T: P2PTransport> KeyTransport for PubsubKeyTransport<T> {
         let Some(me) = self.self_ref.get().and_then(Weak::upgrade) else {
             return;
         };
-        match tokio::runtime::Handle::try_current() {
-            Ok(rt) => {
-                // One task per request, bounded by PENDING_CAP: a reply that
-                // blocks on publishing cannot head-of-line-block the other
-                // buffered callers past their response timeout.
-                for (from, payload) in buffered {
-                    let me = Arc::clone(&me);
-                    rt.spawn(async move {
-                        me.handle_request(from, payload).await;
-                    });
-                }
-            }
-            Err(_) => warn!(
-                count = buffered.len(),
-                "no async runtime to replay buffered KMS requests; dropping"
-            ),
+        // One task per request, bounded by PENDING_CAP: a reply that blocks
+        // on publishing cannot head-of-line-block the other buffered callers
+        // past their response timeout. Each request's requester waits on its
+        // own timeout, so the replays run detached.
+        for (from, payload) in buffered {
+            let me = Arc::clone(&me);
+            drop(self.edge.spawn(async move {
+                me.handle_request(from, payload).await;
+            }));
         }
     }
 }
@@ -782,9 +781,13 @@ mod tests {
         let transport = RacyTransport::new(3);
         let publish_attempts = transport.publish_attempts.clone();
         let published = transport.published.clone();
-        let kt = PubsubKeyTransport::new(transport, Arc::new(crate::AnonymousResolver))
-            .await
-            .unwrap();
+        let kt = PubsubKeyTransport::new(
+            transport,
+            Arc::new(crate::AnonymousResolver),
+            edge::testing::edge(),
+        )
+        .await
+        .unwrap();
 
         let req = EncodedFetchRequest {
             payload: b"fetch".to_vec(),
@@ -810,9 +813,13 @@ mod tests {
     async fn send_request_stops_when_transport_is_closed() {
         let transport = RacyTransport::new(usize::MAX);
         let publish_attempts = transport.publish_attempts.clone();
-        let kt = PubsubKeyTransport::new(transport.clone(), Arc::new(crate::AnonymousResolver))
-            .await
-            .unwrap();
+        let kt = PubsubKeyTransport::new(
+            transport.clone(),
+            Arc::new(crate::AnonymousResolver),
+            edge::testing::edge(),
+        )
+        .await
+        .unwrap();
         transport.close();
 
         let request = EncodedFetchRequest {
@@ -833,9 +840,13 @@ mod tests {
     #[tokio::test]
     async fn response_envelope_routes_to_waiting_request() {
         let transport = RacyTransport::new(1);
-        let kt = PubsubKeyTransport::new(transport, Arc::new(crate::AnonymousResolver))
-            .await
-            .unwrap();
+        let kt = PubsubKeyTransport::new(
+            transport,
+            Arc::new(crate::AnonymousResolver),
+            edge::testing::edge(),
+        )
+        .await
+        .unwrap();
 
         let payload = b"the-request-bytes".to_vec();
         let req = EncodedFetchRequest {
@@ -883,9 +894,13 @@ mod tests {
     #[tokio::test]
     async fn empty_reply_does_not_hide_later_key_reply() {
         let transport = RacyTransport::new(1);
-        let kt = PubsubKeyTransport::new(transport, Arc::new(crate::AnonymousResolver))
-            .await
-            .unwrap();
+        let kt = PubsubKeyTransport::new(
+            transport,
+            Arc::new(crate::AnonymousResolver),
+            edge::testing::edge(),
+        )
+        .await
+        .unwrap();
 
         let payload = b"multi-peer-key-request".to_vec();
         let req = EncodedFetchRequest {
@@ -944,9 +959,13 @@ mod tests {
     #[tokio::test]
     async fn partial_replies_are_collected_until_all_requested_links_arrive() {
         let transport = RacyTransport::new(1);
-        let kt = PubsubKeyTransport::new(transport, Arc::new(crate::AnonymousResolver))
-            .await
-            .unwrap();
+        let kt = PubsubKeyTransport::new(
+            transport,
+            Arc::new(crate::AnonymousResolver),
+            edge::testing::edge(),
+        )
+        .await
+        .unwrap();
 
         let first_link = vec![1, 2, 3];
         let second_link = vec![4, 5, 6];
@@ -1012,9 +1031,13 @@ mod tests {
     #[tokio::test]
     async fn claimed_complete_reply_does_not_hide_later_verified_candidate() {
         let transport = RacyTransport::new(1);
-        let kt = PubsubKeyTransport::new(transport, Arc::new(crate::AnonymousResolver))
-            .await
-            .unwrap();
+        let kt = PubsubKeyTransport::new(
+            transport,
+            Arc::new(crate::AnonymousResolver),
+            edge::testing::edge(),
+        )
+        .await
+        .unwrap();
 
         let requested_link = vec![1, 2, 3];
         let request = FetchEncryptionKeyRequest {
@@ -1076,9 +1099,13 @@ mod tests {
     async fn request_republishes_until_reply_arrives() {
         let transport = RacyTransport::new(0);
         let published = transport.published.clone();
-        let kt = PubsubKeyTransport::new(transport, Arc::new(crate::AnonymousResolver))
-            .await
-            .unwrap();
+        let kt = PubsubKeyTransport::new(
+            transport,
+            Arc::new(crate::AnonymousResolver),
+            edge::testing::edge(),
+        )
+        .await
+        .unwrap();
 
         let payload = b"retry-me".to_vec();
         let req = EncodedFetchRequest {
@@ -1136,9 +1163,13 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn request_with_no_reply_reports_unavailable() {
         let transport = RacyTransport::new(0);
-        let kt = PubsubKeyTransport::new(transport, Arc::new(crate::AnonymousResolver))
-            .await
-            .unwrap();
+        let kt = PubsubKeyTransport::new(
+            transport,
+            Arc::new(crate::AnonymousResolver),
+            edge::testing::edge(),
+        )
+        .await
+        .unwrap();
 
         let req = EncodedFetchRequest {
             payload: b"never-answered".to_vec(),
@@ -1210,6 +1241,7 @@ mod tests {
         let kt = PubsubKeyTransport::new(
             transport,
             Arc::new(FixedIdentityResolver(resolved_did.clone())),
+            edge::testing::edge(),
         )
         .await
         .unwrap();
@@ -1255,6 +1287,26 @@ mod tests {
     /// startup-wiring window.
     #[tokio::test]
     async fn request_before_handler_is_served_after_install() {
+        assert_buffered_request_is_served(|kt, handler| kt.install_handler(handler)).await;
+    }
+
+    /// The replay runs on the network runtime the transport was given, so a
+    /// handler installed from a thread outside any runtime still serves the
+    /// buffered request.
+    #[tokio::test]
+    async fn request_before_handler_is_served_when_installed_outside_a_runtime() {
+        assert_buffered_request_is_served(|kt, handler| {
+            std::thread::spawn(move || kt.install_handler(handler))
+                .join()
+                .expect("installing thread panicked");
+        })
+        .await;
+    }
+
+    async fn assert_buffered_request_is_served<I>(install: I)
+    where
+        I: FnOnce(Arc<PubsubKeyTransport<RacyTransport>>, Arc<dyn IncomingHandler>),
+    {
         struct FixedIdentityResolver(identity::Did);
         #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
         #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -1292,6 +1344,7 @@ mod tests {
         let kt = PubsubKeyTransport::new(
             transport,
             Arc::new(FixedIdentityResolver(resolved_did.clone())),
+            edge::testing::edge(),
         )
         .await
         .unwrap();
@@ -1306,7 +1359,10 @@ mod tests {
         kt.dispatch_incoming(caller.to_string(), ENCRYPTION_TOPIC.to_string(), req_bytes)
             .await;
 
-        kt.install_handler(Arc::new(EchoHandler { seen: seen.clone() }));
+        install(
+            Arc::clone(&kt),
+            Arc::new(EchoHandler { seen: seen.clone() }),
+        );
 
         let expected_topic = response_topic(ENCRYPTION_TOPIC, &caller);
         let mut served = false;

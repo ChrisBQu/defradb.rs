@@ -208,6 +208,16 @@ impl Edge {
     }
 }
 
+/// Two handles are equal when they admit work through the same gate: the
+/// same runtime, or the same scope of it.
+impl PartialEq for Edge {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.gate, &other.gate)
+    }
+}
+
+impl Eq for Edge {}
+
 impl fmt::Debug for Edge {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Edge")

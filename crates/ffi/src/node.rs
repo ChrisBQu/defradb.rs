@@ -207,6 +207,7 @@ fn resolve_embedded_config(
         peer_keyring: None,
         persistence,
         transport: embedded::TransportConfig::None,
+        edge: None,
         signing,
         document_acp,
         query_limits: query::QueryLimits::default(),

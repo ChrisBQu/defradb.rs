@@ -294,6 +294,12 @@ impl NodeBuilder {
         self
     }
 
+    /// The network runtime a configured transport runs on.
+    pub fn with_edge(mut self, edge: edge::Edge) -> Self {
+        self.config.edge = Some(edge);
+        self
+    }
+
     pub fn enable_signing(mut self) -> Self {
         self.config.signing = SigningConfig::Enabled { key: None };
         self
@@ -609,34 +615,43 @@ where
     #[cfg(all(not(feature = "vera"), any(feature = "libp2p", feature = "iroh")))]
     let strict_replicated_doc_access = false;
 
-    let p2p_setup: Result<Option<crate::node_p2p::P2PSetup>> = match &config.transport {
-        TransportConfig::None => Ok(None),
-        #[cfg(feature = "libp2p")]
-        TransportConfig::Libp2p(libp2p) => crate::node_p2p::setup_libp2p(
-            store.clone(),
-            database.clone(),
-            event_bus.clone(),
-            libp2p,
-            sync_config.clone(),
-            config.peer_keyring.as_ref(),
-        )
-        .await
-        .map(Some),
-        #[cfg(feature = "iroh")]
-        TransportConfig::Iroh(iroh) => crate::node_p2p::setup_iroh(
-            store.clone(),
-            database.clone(),
-            event_bus.clone(),
-            iroh,
-            sync_config.clone(),
-            raw_identity.clone(),
-            document_acp.clone(),
-            strict_replicated_doc_access,
-            config.peer_keyring.as_ref(),
-        )
-        .await
-        .map(Some),
-    };
+    // A transport runs on the network runtime the config names; a node
+    // without networking needs none.
+    let p2p_setup: Result<Option<crate::node_p2p::P2PSetup>> =
+        match (&config.transport, config.edge.as_ref()) {
+            (TransportConfig::None, _) => Ok(None),
+            #[cfg(feature = "libp2p")]
+            (TransportConfig::Libp2p(libp2p), Some(edge)) => crate::node_p2p::setup_libp2p(
+                store.clone(),
+                database.clone(),
+                event_bus.clone(),
+                libp2p,
+                sync_config.clone(),
+                config.peer_keyring.as_ref(),
+                edge,
+            )
+            .await
+            .map(Some),
+            #[cfg(feature = "iroh")]
+            (TransportConfig::Iroh(iroh), Some(edge)) => crate::node_p2p::setup_iroh(
+                store.clone(),
+                database.clone(),
+                event_bus.clone(),
+                iroh,
+                sync_config.clone(),
+                raw_identity.clone(),
+                document_acp.clone(),
+                strict_replicated_doc_access,
+                config.peer_keyring.as_ref(),
+                edge,
+            )
+            .await
+            .map(Some),
+            #[cfg(any(feature = "libp2p", feature = "iroh"))]
+            (_, None) => Err(anyhow!(
+                "a P2P transport needs the network runtime: set EmbeddedNodeConfig::edge"
+            )),
+        };
     let mut p2p_setup = match p2p_setup {
         Ok(setup) => setup,
         Err(error) => {

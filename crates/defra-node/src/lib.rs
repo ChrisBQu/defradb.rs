@@ -1479,6 +1479,9 @@ impl NodeBuilder {
         // P2P setup (affects mutator choice)
         #[cfg(feature = "p2p")]
         let mut p2p_result = if let Some(p2p_cfg) = p2p_config {
+            let network = network
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("P2P needs the network runtime"))?;
             Some(
                 p2p_runtime::setup_p2p(
                     store.clone(),
@@ -1488,6 +1491,7 @@ impl NodeBuilder {
                     node_p2p_identity,
                     document_acp.clone(),
                     _strict_replicated_doc_access,
+                    network.edge(),
                 )
                 .await?,
             )

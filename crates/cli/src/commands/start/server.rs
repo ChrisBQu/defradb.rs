@@ -160,6 +160,7 @@ impl Node {
             node_identity,
             se_key,
             acp_setup.document_acp.clone(),
+            edge,
         )
         .await?;
 
