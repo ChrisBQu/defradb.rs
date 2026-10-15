@@ -33,7 +33,13 @@ pub(crate) fn scan(pool: &PoolShared, now: u64) -> usize {
             continue;
         }
         stuck += 1;
-        worker.stuck.store(true, Ordering::Relaxed);
+        worker.stuck.store(true, Ordering::SeqCst);
+        // The poll may have ended between the read and the mark, after the
+        // worker cleared its flag: a worker no longer in that poll is not
+        // left marked, or an idle worker would be routed around for good.
+        if worker.heartbeat.read().map(|now| now.start) != Some(beat.start) {
+            worker.stuck.store(false, Ordering::SeqCst);
+        }
         let task = beat.task & !REPORTED;
         if beat.task & REPORTED == 0 && worker.reported.swap(task, Ordering::AcqRel) != task {
             worker.counters.long_polls.fetch_add(1, Ordering::Relaxed);

@@ -115,6 +115,17 @@ fn the_monitor_reports_a_stuck_poll_once_and_routes_around_it() {
 }
 
 #[test]
+fn an_idle_worker_is_never_marked_stuck() {
+    let clock = Arc::new(ManualClock::default());
+    let shared = bare(2, clock.clone());
+    shared.workers[0].heartbeat.begin(0, 5, "short");
+    shared.workers[0].heartbeat.idle();
+    clock.advance(20_000);
+    assert_eq!(monitor::scan(&shared, clock.now_micros()), 0);
+    assert!(!shared.workers[0].stuck.load(Ordering::SeqCst));
+}
+
+#[test]
 fn a_task_reported_before_is_not_reported_again() {
     let clock = Arc::new(ManualClock::default());
     let shared = bare(2, clock.clone());

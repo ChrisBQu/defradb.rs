@@ -218,8 +218,8 @@ impl Local {
     /// the monitor while it ran, or measured here when nothing watches.
     fn after_poll(&self, name: &'static str, start: u64, reported: bool) -> bool {
         let shared = &self.shared;
-        if shared.stuck.load(Ordering::Relaxed) {
-            shared.stuck.store(false, Ordering::Relaxed);
+        if shared.stuck.load(Ordering::SeqCst) {
+            shared.stuck.store(false, Ordering::SeqCst);
             return true;
         }
         if self.tuning.monitored {
