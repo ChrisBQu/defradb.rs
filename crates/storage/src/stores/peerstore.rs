@@ -3,7 +3,8 @@ use crate::corekv::{
     Store, Txn, Writer,
 };
 use crate::keys::peerstore::{
-    ReplicatorKey, ReplicatorRetryCollectionKey, ReplicatorRetryDocIDKey, ReplicatorRetryIDKey,
+    ReplicatorIncarnationKey, ReplicatorKey, ReplicatorRetryCollectionKey, ReplicatorRetryDocIDKey,
+    ReplicatorRetryIDKey,
 };
 use crate::namespace::{Namespace, NamespacedStore};
 use async_trait::async_trait;
@@ -101,6 +102,7 @@ pub struct Peerstore<S: Store> {
 
 struct RegisterScopeMarkerAttempt {
     peer_id: String,
+    expected_incarnation: u64,
     doc_id: String,
     collection_id: String,
     retry_info_bytes: Vec<u8>,
@@ -357,6 +359,36 @@ impl RetryAttemptFn for RegisterScopeMarkerAttempt {
             {
                 return Ok(Box::new(None::<u64>) as crate::corekv::RetryAttemptValue);
             }
+            let incarnation_key = ReplicatorIncarnationKey::new(&self.peer_id);
+            let incarnation = txn.get(&incarnation_key.bytes()).await?;
+            let incarnation = match incarnation {
+                Some(bytes) => decode_retry_marker_generation(&bytes),
+                None => Some(0),
+            };
+            if incarnation != Some(self.expected_incarnation) {
+                return Ok(Box::new(None::<u64>) as crate::corekv::RetryAttemptValue);
+            }
+            let marker = if self.doc_id.is_empty() && self.collection_id.is_empty() {
+                None
+            } else if self.doc_id.is_empty() {
+                Some(ReplicatorRetryCollectionKey::new(&self.peer_id, &self.collection_id).bytes())
+            } else {
+                Some(ReplicatorRetryDocIDKey::new(&self.peer_id, &self.doc_id).bytes())
+            };
+            if let Some(marker) = &marker {
+                if txn
+                    .get(marker)
+                    .await?
+                    .as_deref()
+                    .and_then(decode_retry_marker_generation)
+                    .is_some_and(|current| current > self.generation)
+                {
+                    // Allocations can be committed out of order when concurrent
+                    // registrations conflict and retry. Never let an older
+                    // announcement replace a newer durable scope generation.
+                    return Ok(Box::new(None::<u64>) as crate::corekv::RetryAttemptValue);
+                }
+            }
             let id_key = ReplicatorRetryIDKey::new(&self.peer_id);
             let requested = super::RetryInfo::from_bytes(&self.retry_info_bytes)
                 .unwrap_or_else(|_| super::RetryInfo::new_initial());
@@ -384,15 +416,9 @@ impl RetryAttemptFn for RegisterScopeMarkerAttempt {
                 .await?;
             }
 
-            if self.doc_id.is_empty() && self.collection_id.is_empty() {
+            let Some(marker) = marker else {
                 return Ok(Box::new(None::<u64>) as crate::corekv::RetryAttemptValue);
-            }
-            let marker = if self.doc_id.is_empty() {
-                ReplicatorRetryCollectionKey::new(&self.peer_id, &self.collection_id).bytes()
-            } else {
-                ReplicatorRetryDocIDKey::new(&self.peer_id, &self.doc_id).bytes()
             };
-            let _previous = txn.get(&marker).await?;
             txn.set(&marker, &encode_retry_marker_generation(self.generation))
                 .await?;
             Ok(Box::new(Some(self.generation)) as crate::corekv::RetryAttemptValue)
@@ -437,8 +463,30 @@ impl<S: Store> Peerstore<S> {
     /// The caller is responsible for serialization (typically CBOR).
     pub async fn create_replicator(&self, peer_id: &str, data: &[u8]) -> Result<()> {
         let key = ReplicatorKey::new(peer_id);
+        let incarnation = self
+            .store
+            .allocate(b"/rep/incarnation/generation", 1)
+            .await?
+            .end;
+        let incarnation_key = ReplicatorIncarnationKey::new(peer_id);
         let mut txn = self.store.new_txn(false).await?;
+        let previous_incarnation = txn.get(&incarnation_key.bytes()).await?;
+        let previous_incarnation = match previous_incarnation {
+            Some(bytes) => decode_retry_marker_generation(&bytes)
+                .ok_or_else(|| crate::corekv::Error::Other("invalid peer incarnation".into()))?,
+            None => 0,
+        };
+        if previous_incarnation > incarnation {
+            return Err(crate::corekv::Error::Other(
+                "stale peer incarnation allocation".into(),
+            ));
+        }
         txn.set(&key.bytes(), data).await?;
+        txn.set(
+            &incarnation_key.bytes(),
+            &encode_retry_marker_generation(incarnation),
+        )
+        .await?;
         txn.commit().await
     }
 
@@ -589,8 +637,27 @@ impl<S: Store> Peerstore<S> {
         collection_id: &str,
         retry_info_bytes: &[u8],
     ) -> Result<Option<u64>> {
+        let incarnation_key = ReplicatorIncarnationKey::new(peer_id);
+        let peer_key = ReplicatorKey::new(peer_id);
+        let txn = self.store.new_txn(true).await?;
+        if txn.get(&peer_key.bytes()).await?.is_none() {
+            return Ok(None);
+        }
+        let expected_incarnation = match txn.get(&incarnation_key.bytes()).await? {
+            Some(bytes) => decode_retry_marker_generation(&bytes)
+                .ok_or_else(|| crate::corekv::Error::Other("invalid peer incarnation".into()))?,
+            None => 0,
+        };
+        drop(txn);
+
         retry_scope_marker_write(|| {
-            self.register_scope_marker_once(peer_id, doc_id, collection_id, retry_info_bytes)
+            self.register_scope_marker_once(
+                peer_id,
+                doc_id,
+                collection_id,
+                retry_info_bytes,
+                expected_incarnation,
+            )
         })
         .await
     }
@@ -601,6 +668,7 @@ impl<S: Store> Peerstore<S> {
         doc_id: &str,
         collection_id: &str,
         retry_info_bytes: &[u8],
+        expected_incarnation: u64,
     ) -> Result<Option<u64>> {
         let peer_id = peer_id.to_owned();
         let doc_id = doc_id.to_owned();
@@ -621,6 +689,7 @@ impl<S: Store> Peerstore<S> {
                 RetryOptions::new(PUSH_RETRY_TXN_MAX_ATTEMPTS as u32),
                 Box::new(RegisterScopeMarkerAttempt {
                     peer_id,
+                    expected_incarnation,
                     doc_id,
                     collection_id,
                     retry_info_bytes,

@@ -225,6 +225,17 @@ async fn transient_marker_io_failure_recovers_durable_scopes() {
         .await
         .unwrap();
     let retry_info = super::super::RetryInfo::new_initial().to_bytes().unwrap();
+    let incarnation_key = crate::keys::peerstore::ReplicatorIncarnationKey::new("peer");
+    let incarnation_txn = peerstore.store.new_txn(true).await.unwrap();
+    let incarnation = decode_retry_marker_generation(
+        &incarnation_txn
+            .get(&incarnation_key.bytes())
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    incarnation_txn.discard();
 
     for (doc_id, collection_id, error) in [
         (
@@ -244,7 +255,13 @@ async fn transient_marker_io_failure_recovers_durable_scopes() {
                 Err(error.clone())
             } else {
                 peerstore
-                    .register_scope_marker_once("peer", doc_id, collection_id, &retry_info)
+                    .register_scope_marker_once(
+                        "peer",
+                        doc_id,
+                        collection_id,
+                        &retry_info,
+                        incarnation,
+                    )
                     .await
             }
         })
@@ -443,6 +460,113 @@ async fn concurrent_scope_registrations_get_distinct_generations() {
         .complete_retry_scope("peer", "doc", "collection", false, stale)
         .await
         .unwrap());
+}
+
+#[tokio::test]
+async fn stale_scope_registration_cannot_replace_newer_marker_or_schedule() {
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
+    let peerstore = Peerstore::new(store);
+    peerstore
+        .create_replicator("peer", b"replicator")
+        .await
+        .unwrap();
+    let current_generation = peerstore
+        .observe_push_head_with_generation("peer", "doc", "collection")
+        .await
+        .unwrap()
+        .unwrap();
+    let incarnation_key = crate::keys::peerstore::ReplicatorIncarnationKey::new("peer");
+    let incarnation_txn = peerstore.store.new_txn(true).await.unwrap();
+    let incarnation = decode_retry_marker_generation(
+        &incarnation_txn
+            .get(&incarnation_key.bytes())
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    incarnation_txn.discard();
+    let schedule_before = peerstore.get_retry_info("peer").await.unwrap();
+    let stale_attempt = RegisterScopeMarkerAttempt {
+        peer_id: "peer".to_string(),
+        expected_incarnation: incarnation,
+        doc_id: "doc".to_string(),
+        collection_id: "collection".to_string(),
+        retry_info_bytes: super::super::RetryInfo::new_initial().to_bytes().unwrap(),
+        retry_schedule: super::super::RetrySchedule::default(),
+        generation: current_generation.saturating_sub(1),
+    };
+
+    let result: Option<u64> = peerstore
+        .transact_conflicts(Box::new(stale_attempt))
+        .await
+        .unwrap();
+
+    assert_eq!(result, None);
+    let marker = peerstore.get_retry_documents("peer").await.unwrap();
+    assert_eq!(marker.len(), 1);
+    assert_eq!(marker[0].generation, current_generation);
+    assert_eq!(
+        peerstore.get_retry_info("peer").await.unwrap(),
+        schedule_before
+    );
+}
+
+#[tokio::test]
+async fn stale_scope_registration_cannot_cross_peer_forget_and_readd() {
+    let peerstore = Peerstore::new(Arc::new(RegolithStore::in_memory().unwrap()));
+    peerstore
+        .create_replicator("peer", b"same config")
+        .await
+        .unwrap();
+    let old_incarnation_key = crate::keys::peerstore::ReplicatorIncarnationKey::new("peer");
+    let old_txn = peerstore.store.new_txn(true).await.unwrap();
+    let old_incarnation = decode_retry_marker_generation(
+        &old_txn
+            .get(&old_incarnation_key.bytes())
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    old_txn.discard();
+    peerstore.delete_replicator("peer").await.unwrap();
+    peerstore
+        .create_replicator("peer", b"same config")
+        .await
+        .unwrap();
+    let new_txn = peerstore.store.new_txn(true).await.unwrap();
+    let new_incarnation = decode_retry_marker_generation(
+        &new_txn
+            .get(&old_incarnation_key.bytes())
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    new_txn.discard();
+    assert!(new_incarnation > old_incarnation);
+
+    let result: Option<u64> = peerstore
+        .transact_conflicts(Box::new(RegisterScopeMarkerAttempt {
+            peer_id: "peer".to_string(),
+            expected_incarnation: old_incarnation,
+            doc_id: "doc".to_string(),
+            collection_id: "collection".to_string(),
+            retry_info_bytes: super::super::RetryInfo::new_initial().to_bytes().unwrap(),
+            retry_schedule: super::super::RetrySchedule::default(),
+            generation: old_incarnation,
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result, None);
+    assert!(peerstore
+        .get_retry_documents("peer")
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(peerstore.get_retry_info("peer").await.unwrap().is_none());
 }
 
 #[tokio::test]
