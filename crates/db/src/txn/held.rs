@@ -2,7 +2,7 @@
 //! a mutator its caller commits through), or only reached by one that was
 //! lent it ([`Held::borrowed`]).
 //!
-//! A holding handle keeps the transaction's strong reference in a take-only
+//! A holding handle keeps the transaction's strong reference in a one-place
 //! slot; every handle reaches it, for each operation, through a weak one. Giving it back
 //! takes the strong reference out of the slot and unwraps it: that succeeds
 //! only once no other handle and no operation in flight holds the
@@ -12,7 +12,7 @@
 
 use std::sync::{Arc, Weak};
 
-use regolith::sync::SegQueue;
+use regolith::sync::ArrayQueue;
 use storage::corekv::Store;
 
 use super::{DbTxn, LentTxn};
@@ -21,7 +21,8 @@ pub(crate) struct Held<S>
 where
     S: Store + 'static,
 {
-    strong: SegQueue<LentTxn<S>>,
+    /// Holds at most the one strong reference.
+    strong: ArrayQueue<LentTxn<S>>,
     weak: Weak<DbTxn<S>>,
 }
 
@@ -32,8 +33,9 @@ where
     /// Holds `txn`, which other handles may share too.
     pub(crate) fn new(txn: LentTxn<S>) -> Self {
         let weak = Arc::downgrade(&txn);
-        let strong = SegQueue::new();
-        strong.push(txn);
+        let strong = ArrayQueue::new(1);
+        // The slot is new and holds one: the push cannot find it full.
+        let _ = strong.push(txn);
         Self { strong, weak }
     }
 
@@ -42,7 +44,7 @@ where
     /// operation of it is in flight. Afterwards every operation finds none.
     pub(crate) fn borrowed(txn: &LentTxn<S>) -> Self {
         Self {
-            strong: SegQueue::new(),
+            strong: ArrayQueue::new(1),
             weak: Arc::downgrade(txn),
         }
     }
@@ -50,7 +52,7 @@ where
     /// A handle that holds no transaction: every operation finds none.
     pub(crate) fn none() -> Self {
         Self {
-            strong: SegQueue::new(),
+            strong: ArrayQueue::new(1),
             weak: Weak::new(),
         }
     }
@@ -69,7 +71,8 @@ where
         match Arc::try_unwrap(txn) {
             Ok(txn) => Some(txn),
             Err(txn) => {
-                self.strong.push(txn);
+                // Put back where it was just taken from: the slot is empty.
+                let _ = self.strong.push(txn);
                 None
             }
         }
