@@ -206,6 +206,13 @@ pub trait VeraProvider: MaybeSendSync {
         Ok(None)
     }
 
+    /// The verified ACP state a decision is read at, when the provider
+    /// proves one (the vera.rs light client's module state root). A decision
+    /// cached under it is exact: a new state is a new key.
+    fn decision_state(&self) -> Option<String> {
+        None
+    }
+
     fn acp_light_client_status(&self) -> Result<AcpLightClientStatus, ProviderError> {
         Err(ProviderError::Unavailable(
             "ACP light client status is not available for this provider".into(),

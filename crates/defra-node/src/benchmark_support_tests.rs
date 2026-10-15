@@ -3,7 +3,7 @@ use crate::benchmark_queries::{
     format_vector, render_action_ranked_query, render_message_ranked_query, RankedQueryOrder,
 };
 use axum::{extract::State, routing::post, Json, Router};
-use rapidhash::{HashMapExt, RapidHashMap, RapidHashSet};
+use rapidhash::{HashMapExt, HashSetExt, RapidHashMap, RapidHashSet};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::cmp::Ordering;
@@ -127,10 +127,25 @@ struct MockEmbeddingState {
     dimensions: [usize; 3],
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+/// One text the mock embedded, with the model it was asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct EmbeddingRequest {
     model: String,
     input: String,
+}
+
+/// An OpenAI-compatible request: one text, or an array of them.
+#[derive(Debug, Deserialize)]
+struct EmbeddingRequestBody {
+    model: String,
+    input: EmbeddingInputs,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum EmbeddingInputs {
+    One(String),
+    Many(Vec<String>),
 }
 
 #[derive(Debug, Serialize)]
@@ -140,6 +155,7 @@ struct EmbeddingResponse {
 
 #[derive(Debug, Serialize)]
 struct EmbeddingResponseItem {
+    index: usize,
     embedding: Vec<f64>,
 }
 
@@ -194,23 +210,40 @@ impl Drop for MockEmbeddingServer {
 
 async fn mock_embedding_handler(
     State(state): State<MockEmbeddingState>,
-    Json(request): Json<EmbeddingRequest>,
+    Json(body): Json<EmbeddingRequestBody>,
 ) -> Json<EmbeddingResponse> {
-    state.requests.rcu(|requests| {
-        let mut requests = requests.clone();
-        requests.push(request.clone());
-        requests
+    let inputs = match body.input {
+        EmbeddingInputs::One(input) => vec![input],
+        EmbeddingInputs::Many(inputs) => inputs,
+    };
+    let requests: Vec<EmbeddingRequest> = inputs
+        .into_iter()
+        .map(|input| EmbeddingRequest {
+            model: body.model.clone(),
+            input,
+        })
+        .collect();
+    state.requests.rcu(|recorded| {
+        let mut recorded = recorded.clone();
+        recorded.extend(requests.iter().cloned());
+        recorded
     });
 
-    let mut embedding = deterministic_embedding(&request.model, &request.input);
-    let model_index = match request.model.as_str() {
+    let model_index = match body.model.as_str() {
         "coding-action-model" => 1,
         "coding-search-chunk-model" => 2,
         _ => 0,
     };
-    embedding.resize(state.dimensions[model_index], 0.0);
     Json(EmbeddingResponse {
-        data: vec![EmbeddingResponseItem { embedding }],
+        data: requests
+            .iter()
+            .enumerate()
+            .map(|(index, request)| {
+                let mut embedding = deterministic_embedding(&request.model, &request.input);
+                embedding.resize(state.dimensions[model_index], 0.0);
+                EmbeddingResponseItem { index, embedding }
+            })
+            .collect(),
     })
 }
 
@@ -493,6 +526,42 @@ async fn total_embedding_documents(node: &crate::EmbeddedNode) -> usize {
                 .map_or(0, Vec::len)
         })
         .sum()
+}
+
+/// The distinct (model, text) pairs the fixture's documents embed: each is
+/// embedded once, however many documents carry it.
+async fn embedded_source_texts(node: &crate::EmbeddedNode) -> usize {
+    let data = ensure_success(
+        node.execute(
+            r#"{
+  CodingMessage { content }
+  CodingAction { command }
+  CodingSearchChunk { content }
+}"#,
+        )
+        .await,
+        "read embedding sources",
+    )
+    .unwrap();
+
+    let mut texts = RapidHashSet::new();
+    for (collection_name, field, model) in [
+        ("CodingMessage", "content", "coding-message-model"),
+        ("CodingAction", "command", "coding-action-model"),
+        ("CodingSearchChunk", "content", "coding-search-chunk-model"),
+    ] {
+        for doc in data
+            .get(collection_name)
+            .and_then(JsonValue::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+        {
+            if let Some(text) = doc.get(field).and_then(JsonValue::as_str) {
+                texts.insert((model, format!("{text}\n")));
+            }
+        }
+    }
+    texts.len()
 }
 
 async fn lookup_session_doc_id(
@@ -953,7 +1022,7 @@ async fn coding_session_embedding_fixture_supports_similarity_queries() {
         .unwrap();
 
     let requests = server.requests();
-    assert_eq!(requests.len(), total_embedding_documents(&node).await);
+    assert_eq!(requests.len(), embedded_source_texts(&node).await);
     assert!(requests
         .iter()
         .any(|request| request.model == "coding-message-model"));
@@ -1157,7 +1226,7 @@ async fn coding_session_embedding_fixture_supports_query_text_hybrid_search_api(
     }
 
     let requests = server.requests();
-    assert_eq!(requests.len(), total_embedding_documents(&node).await + 2);
+    assert_eq!(requests.len(), embedded_source_texts(&node).await + 2);
     assert_eq!(
         requests
             .iter()
@@ -1250,7 +1319,7 @@ async fn coding_session_embedding_fixture_hybrid_search_api_honors_session_scope
 
     assert_eq!(
         server.requests().len(),
-        total_embedding_documents(&node).await + 2
+        embedded_source_texts(&node).await + 2
     );
 }
 
@@ -1386,7 +1455,7 @@ async fn dense_search_v1_supports_production_coding_search_chunks() {
     }));
 
     let requests = server.requests();
-    assert_eq!(requests.len(), total_embedding_documents(&node).await + 2);
+    assert_eq!(requests.len(), embedded_source_texts(&node).await + 2);
     assert_eq!(
         requests
             .iter()
@@ -1493,7 +1562,7 @@ async fn dense_search_v1_supports_query_text_api() {
     }
 
     let requests = server.requests();
-    assert_eq!(requests.len(), total_embedding_documents(&node).await + 2);
+    assert_eq!(requests.len(), embedded_source_texts(&node).await + 2);
     assert_eq!(
         requests
             .iter()
@@ -1594,7 +1663,7 @@ async fn dense_search_v1_honors_filter_and_exclusions() {
 
     assert_eq!(
         server.requests().len(),
-        total_embedding_documents(&node).await + 2
+        embedded_source_texts(&node).await + 2
     );
 }
 

@@ -49,6 +49,11 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
 
     fn handle_peer_subscribed(&self, peer_id: PeerId, topic: String) {
         tracing::debug!(peer_id = %peer_id, topic = %topic, "Peer subscribed to topic");
+        // A key request waiting for an encryption-topic subscriber looks again.
+        #[cfg(feature = "kms")]
+        if let Some(transport) = self.kms_transport.get() {
+            transport.peer_subscribed(&topic);
+        }
         self.access
             .peer_state
             .peer_subscribed(peer_id.as_str(), topic);

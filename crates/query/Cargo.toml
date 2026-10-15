@@ -21,6 +21,8 @@ rapidhash.workspace = true
 kovan.workspace = true
 kovan-map.workspace = true
 kovan-queue.workspace = true
+# Input-wait metrics share the remote-input histogram and stopwatch.
+inputs = { path = "../inputs" }
 
 # Internal crates
 cursor = { path = "../cursor" }

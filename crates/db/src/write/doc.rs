@@ -634,6 +634,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 schema_version_id,
                 sign_config.as_ref(),
                 Some(&self.prepared_inputs),
+                None,
             )
             .await
             .map_err(|error| {

@@ -12,6 +12,8 @@ struct DeleteRetryAttempt<S: Store> {
     doc_id: DocID,
     signing_config: Option<defra_core::signing::SigningConfig>,
     prepared_inputs: Option<query::prepared::PreparedInputMemo>,
+    /// Heads read before the transaction (`helpers::snapshot_heads`).
+    heads: rapidhash::RapidHashMap<u64, crate::block::builder::DocHeadsSnapshot>,
 }
 
 struct DeleteManyRetryAttempt<S: Store> {
@@ -21,6 +23,8 @@ struct DeleteManyRetryAttempt<S: Store> {
     doc_ids: Vec<DocID>,
     signing_config: Option<defra_core::signing::SigningConfig>,
     prepared_inputs: Option<query::prepared::PreparedInputMemo>,
+    /// Heads read before the transaction (`helpers::snapshot_heads`).
+    heads: rapidhash::RapidHashMap<u64, crate::block::builder::DocHeadsSnapshot>,
 }
 
 impl<S: Store + 'static> storage::corekv::RetryAttemptFn for DeleteManyRetryAttempt<S> {
@@ -125,6 +129,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
         let (_collection_guard, collection) = self.guarded_collection(collection_name).await?;
 
+        let heads =
+            super::helpers::snapshot_heads(&self.db, &collection, std::slice::from_ref(doc_id))
+                .await?;
         let attempt = DeleteRetryAttempt {
             db: Arc::clone(&self.db),
             collection_name: collection_name.to_string(),
@@ -132,6 +139,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             doc_id: doc_id.clone(),
             signing_config: get_signing_config(),
             prepared_inputs: Some(self.prepared_inputs.clone().unwrap_or_default()),
+            heads,
         };
         let result = self
             .db
@@ -239,6 +247,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 collection.version_id(),
                 attempt.signing_config.as_ref(),
                 attempt.prepared_inputs.as_ref(),
+                attempt.heads.get(&doc_short_id),
             )
             .await
             .map_err(|error| error.into_query_error_in("failed to write delete block"))?;
@@ -348,6 +357,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         }
 
         let (_collection_guard, collection) = self.guarded_collection(collection_name).await?;
+        let heads = super::helpers::snapshot_heads(&self.db, &collection, doc_ids).await?;
         let attempt = DeleteManyRetryAttempt {
             db: Arc::clone(&self.db),
             collection_name: collection_name.to_string(),
@@ -355,6 +365,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             doc_ids: doc_ids.to_vec(),
             signing_config: get_signing_config(),
             prepared_inputs: Some(self.prepared_inputs.clone().unwrap_or_default()),
+            heads,
         };
         let result = self
             .db
@@ -462,6 +473,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     collection.version_id(),
                     attempt.signing_config.as_ref(),
                     attempt.prepared_inputs.as_ref(),
+                    attempt.heads.get(&doc_short_id),
                 )
                 .await
                 .map_err(|error| error.into_query_error_in("failed to write delete block"))?;

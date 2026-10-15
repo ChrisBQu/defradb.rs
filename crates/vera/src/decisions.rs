@@ -4,8 +4,11 @@
 //! under the in-flight cap; every call has a deadline and a timeout is tried
 //! again.
 //!
-//! The service caches nothing: decisions live in the access cache
-//! (`access_cache::AccessCache`), which their invalidation events reach. A
+//! A decision the provider read at a verified state (the vera.rs light
+//! client's module state root) carries that state in its key, which makes it
+//! exact: the service caches it, bounded by bytes, and a new state is a new
+//! key. Every other decision lives in the access cache
+//! (`access_cache::AccessCache`), which its invalidation events reach. A
 //! circuit-breaker refusal is an error, so it is never cached anywhere.
 
 use std::sync::Arc;
@@ -23,6 +26,9 @@ pub(crate) struct DecisionKey {
     pub(crate) resource: String,
     pub(crate) object: String,
     pub(crate) permission: String,
+    /// The verified state the decision is read at, when the provider proves
+    /// one.
+    pub(crate) state: Option<String>,
 }
 
 pub(crate) struct RemoteDecisions {
@@ -40,7 +46,7 @@ pub(crate) fn config(request_timeout: Duration) -> inputs::Config {
         max_batch: 1,
         flights_per_group: 32,
         max_in_flight: 32,
-        cache_bytes: 0,
+        cache_bytes: 4 << 20,
         ttl: None,
     }
 }
@@ -97,7 +103,19 @@ impl inputs::Source for RemoteDecisions {
         matches!(error.as_ref(), ProviderError::Unavailable(_))
     }
 
-    fn cache_bytes(&self, _key: &DecisionKey, _value: &bool) -> Option<usize> {
-        None
+    /// Only a decision keyed by a verified state is exact enough to cache.
+    fn cache_bytes(&self, key: &DecisionKey, _value: &bool) -> Option<usize> {
+        key.state.as_ref().map(|state| {
+            key.actor.len()
+                + key.policy.len()
+                + key.resource.len()
+                + key.object.len()
+                + key.permission.len()
+                + state.len()
+        })
     }
 }
+
+#[cfg(test)]
+#[path = "decisions_tests.rs"]
+mod tests;
