@@ -624,6 +624,7 @@ mod tests {
         let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
         std::thread::spawn(move || {
             let mut store = wasmtime::Store::new(&local.engine, ());
+            store.set_fuel(50_000_000).unwrap();
             store.set_epoch_deadline(1);
             let result = wasmtime::Instance::new(&mut store, &module, &[]).and_then(|instance| {
                 let func = instance
