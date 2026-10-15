@@ -48,7 +48,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         let updated_collection =
             Collection::load_index_actions(updated_destination.clone(), &txn.systemstore()?)
                 .await?;
-        ctx.invalidate_migration_cache().await;
+        ctx.invalidate_migration_cache();
 
         let db = self.db.clone();
         let cache_db = db.clone();
