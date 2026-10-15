@@ -1,7 +1,6 @@
 //! The embedded node's API calls run on the database's worker pool: none of
 //! the storage calls they make is made off the pool, which the store counts.
 
-use anyhow::Result;
 use embedded::{EmbeddedNode, EmbeddedStore, NodeBuilder};
 use storage::Store;
 
@@ -15,18 +14,18 @@ fn off_pool_calls(node: &EmbeddedNode<EmbeddedStore>) -> u64 {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn api_calls_make_no_storage_call_off_the_pool() -> Result<()> {
-    let node = NodeBuilder::default().build().await?;
+async fn api_calls_make_no_storage_call_off_the_pool() {
+    let node = NodeBuilder::default().build().await.unwrap();
     let before = off_pool_calls(&node);
 
-    node.add_schema("type Note { title: String }").await?;
+    node.add_schema("type Note { title: String }").await.unwrap();
     let added = node
         .execute(r#"mutation { add_Note(input: { title: "first" }) { _docID } }"#)
         .await;
     assert!(added.errors.is_empty(), "{:?}", added.errors);
     let read = node.execute("query { Note { title } }").await;
     assert!(read.errors.is_empty(), "{:?}", read.errors);
-    node.add_encrypted_index("Note", "title").await?;
+    node.add_encrypted_index("Note", "title").await.unwrap();
 
     assert_eq!(
         off_pool_calls(&node),
@@ -34,5 +33,4 @@ async fn api_calls_make_no_storage_call_off_the_pool() -> Result<()> {
         "an API call reached the store from a thread off the pool"
     );
     node.shutdown().await;
-    Ok(())
 }
