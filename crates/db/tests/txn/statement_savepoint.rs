@@ -6,8 +6,8 @@ use db::{DbCollectionProvider, DbTransactionRegistry, LensedAutoCommitFetcher, D
 use events::{Bus, ChannelBus, EventName};
 use query::{QueryExecutor, QueryRequest};
 use storage::corekv::{
-    private::Sealed, AsyncTxnCallback, IterOptions, Iterator, Reader, Result as StorageResult,
-    Store, Txn, TxnCallback, Writer,
+    private::Sealed, AppendLog, AsyncTxnCallback, IterOptions, Iterator, Reader,
+    Result as StorageResult, Store, Txn, TxnCallback, Writer,
 };
 use storage::RegolithStore;
 
@@ -74,6 +74,19 @@ impl Reader for PauseAfterSetTxn {
 
 #[async_trait]
 impl Writer for PauseAfterSetTxn {
+    async fn merge(&mut self, key: &[u8], operand: &[u8]) -> StorageResult<()> {
+        self.inner.merge(key, operand).await
+    }
+
+    async fn append(
+        &mut self,
+        log: &AppendLog,
+        entry: &[u8],
+        once_key: Option<&[u8]>,
+    ) -> StorageResult<()> {
+        self.inner.append(log, entry, once_key).await
+    }
+
     async fn set(&mut self, key: &[u8], value: &[u8]) -> StorageResult<()> {
         self.inner.set(key, value).await?;
         if self.gate.armed.swap(false, Ordering::SeqCst) {
