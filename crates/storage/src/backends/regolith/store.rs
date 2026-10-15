@@ -15,6 +15,7 @@ use regolith::{OptimisticTransactionDb, TxnOptions};
 
 use super::config::RegolithStoreOptions;
 use super::event_order::{Binding, Event, EventOrder};
+use super::hooks::StoreHooks;
 use super::listener::StoreListener;
 use super::slots::TxnSlots;
 use super::transaction::RegolithTxn;
@@ -80,6 +81,7 @@ impl RegolithStore {
             .clone()
             .statistics(Some(engine_stats))
             .add_listener(Arc::new(StoreListener(stats.clone())))
+            .transaction_hooks(Arc::new(StoreHooks))
             .merge_operator(Some(Arc::new(crate::merge::DefraMergeOperator)));
         let db = OptimisticTransactionDb::open(&path, engine)
             .map_err(|error| Error::Backend(format!("failed to open regolith: {error}")))?
@@ -1042,6 +1044,41 @@ mod discard_tests {
         committed.on_discard(counting(&discarded));
         committed.commit().await.unwrap();
         assert_eq!(discarded.load(Ordering::SeqCst), 2);
+    }
+}
+
+#[cfg(test)]
+mod hooks_tests {
+    use super::*;
+    use crate::corekv::Writer;
+    use telemetry::StorageEvent;
+
+    /// Every transaction's one outcome reaches the store's hooks.
+    #[tokio::test]
+    async fn commits_rollbacks_and_conflicts_are_counted_by_kind() {
+        let store = RegolithStore::in_memory().unwrap();
+        let count = telemetry::storage_event_count;
+        let (commits, rollbacks, conflicts) = (
+            count(StorageEvent::Commit),
+            count(StorageEvent::AbortRollback),
+            count(StorageEvent::AbortConflict),
+        );
+        let mut committed = store.new_txn(false).await.unwrap();
+        committed.set(b"key", b"one").await.unwrap();
+        committed.commit().await.unwrap();
+        assert!(count(StorageEvent::Commit) > commits);
+
+        store.new_txn(false).await.unwrap().discard();
+        assert!(count(StorageEvent::AbortRollback) > rollbacks);
+
+        let mut loser = store.new_txn(false).await.unwrap();
+        assert!(loser.get(b"key").await.unwrap().is_some());
+        loser.set(b"key", b"loser").await.unwrap();
+        let mut winner = store.new_txn(false).await.unwrap();
+        winner.set(b"key", b"winner").await.unwrap();
+        winner.commit().await.unwrap();
+        assert!(loser.commit().await.is_err());
+        assert!(count(StorageEvent::AbortConflict) > conflicts);
     }
 }
 

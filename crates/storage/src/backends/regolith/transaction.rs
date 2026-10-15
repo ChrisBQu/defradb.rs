@@ -423,8 +423,11 @@ impl Txn for RegolithTxn {
     }
 
     fn discard(mut self: Box<Self>) {
-        // Dropping regolith's transaction rolls it back.
-        self.handle.take();
+        // An iterator still open keeps the transaction alive; regolith
+        // rolls it back when that last handle drops.
+        if let Some(Ok(Handle::Writable(txn))) = self.handle.take().map(Arc::try_unwrap) {
+            txn.rollback();
+        }
         self.callbacks.run_discard();
     }
 

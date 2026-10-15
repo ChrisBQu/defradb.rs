@@ -5,6 +5,7 @@ mod config;
 mod encryption;
 mod event_order;
 mod handle;
+mod hooks;
 pub(crate) mod iterator;
 mod listener;
 mod post_commit;

@@ -181,7 +181,6 @@ pub enum StorageEvent {
     WalTailDiscarded,
     Commit,
     AbortRollback,
-    AbortDropped,
     AbortConflict,
     AbortError,
     AbortClosed,
@@ -194,7 +193,7 @@ pub enum StorageEvent {
 }
 
 impl StorageEvent {
-    const COUNT: usize = 19;
+    const COUNT: usize = 18;
 
     /// The `event` label of `defradb.storage.events`.
     pub const fn label(self) -> &'static str {
@@ -208,7 +207,6 @@ impl StorageEvent {
             Self::WalTailDiscarded => "wal_tail_discarded",
             Self::Commit => "commit",
             Self::AbortRollback => "abort_rollback",
-            Self::AbortDropped => "abort_dropped",
             Self::AbortConflict => "abort_conflict",
             Self::AbortError => "abort_error",
             Self::AbortClosed => "abort_closed",
@@ -423,7 +421,6 @@ mod tests {
             StorageEvent::WalTailDiscarded,
             StorageEvent::Commit,
             StorageEvent::AbortRollback,
-            StorageEvent::AbortDropped,
             StorageEvent::AbortConflict,
             StorageEvent::AbortError,
             StorageEvent::AbortClosed,
