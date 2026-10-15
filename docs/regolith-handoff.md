@@ -19,7 +19,6 @@ Merge from the bottom upward, retargeting the next PR after each merge. The bran
 | 5 | 2 transactional decisions | [#1952](https://github.com/sourcenetwork/defradb.rs/pull/1952) | `defralevel/02-transaction-decisions` | `defralevel/01c-key-classifier` |
 | 6 | 3 mechanisms, in progress | [#1953](https://github.com/sourcenetwork/defradb.rs/pull/1953) | `defralevel/03-engine-mechanisms` | `defralevel/02-transaction-decisions` |
 | 7 | 4 ordered events | [#1955](https://github.com/sourcenetwork/defradb.rs/pull/1955) | `defralevel/04-ordered-events` | `defralevel/03-engine-mechanisms` |
-
 | 8 | 5 engine-owned retries | [#1956](https://github.com/sourcenetwork/defradb.rs/pull/1956) | `defralevel/05-engine-retries` | `defralevel/04-ordered-events` |
 
 The intended total is 11 PRs: these eight plus one each for steps 6–8. Split into two stacks if further necessary splits exceed 11. Do not merge superseded generated implementations (#1897/#1899/#1911); their closure remains pending completion of this adoption.
@@ -149,6 +148,6 @@ Latest CI on #1953 at `230c36c1`: signed-docs, Go compatibility, Iroh and P2P in
 
 ## Step 5 published checkpoint (#1956)
 
-The draft step-5 PR is above #1955; #1953 remains the permanent handoff. Backfill and final index publication pass all 58 index tests. The adapter retry-conflict regression verifies previous-conflict facts are available on replay and absent on the first attempt. All database read (65, one ignored), search (12), transaction (75), vector (245, 13 ignored), view (7), and write (63) tests pass after mandatory wrapper forwarding and typed-conflict assertion repairs. Ten KMS/signing tests pass. Earlier full database suites through merge passed; the latest individual-merge DEK candidate passes 217 merge tests. Batch merge remains a separate local candidate awaiting integration. Full final combined validation is pending.
+The draft step-5 PR is above #1955; #1953 remains the permanent handoff. Backfill and final index publication pass all 58 index tests. The adapter retry-conflict regression verifies previous-conflict facts are available on replay and absent on the first attempt. All database read (65, one ignored), search (12), transaction (75), vector (245, 13 ignored), view (7), and write (63) tests pass after mandatory wrapper forwarding and typed-conflict assertion repairs. Ten KMS/signing tests pass. Earlier full database suites through merge passed; the latest individual-merge DEK candidate passes 217 merge tests. Batch merge is now integrated; its candidate passed all 218 merge tests, including same-CID keys under distinct authorization contexts and bounded batch history. Final combined validation remains pending. Full final combined validation is pending.
 
 At the latest #1955 CI checkpoint, only Native ACP consumer was still running; every other reported check passed or was skipped. This supersedes earlier historical CI snapshots above. The new #1956 CI has just been triggered. External basic/encryption/ACP, counter conformance and fresh performance gates remain open. The failed earlier head-cache performance gate is not waived.
