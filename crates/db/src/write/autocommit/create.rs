@@ -128,23 +128,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         loop {
             match mutator.create_impl(collection_name, doc.clone()).await {
                 Err(query::error::QueryError::NeedsInput(request)) => {
-                    if inputs.get(&request).is_some() {
-                        return Err(query::error::QueryError::execution(format!(
-                            "prepared input {:?} remained missing after memoization",
-                            request.kind()
-                        )));
-                    }
-                    if !inputs.register_dependency_miss() {
-                        return Err(query::error::QueryError::execution(
-                            "prepared input dependency budget exhausted",
-                        ));
-                    }
-                    let response = self.resolve_prepared_input(&request).await?;
-                    if !inputs.insert(request, response) {
-                        return Err(query::error::QueryError::execution(
-                            "prepared input memory budget exhausted",
-                        ));
-                    }
+                    inputs
+                        .answer_miss(&request, || self.resolve_prepared_input(&request))
+                        .await?;
                 }
                 result => return result,
             }
@@ -174,17 +160,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 .await
             {
                 Err(query::error::QueryError::NeedsInput(request)) => {
-                    if !inputs.register_dependency_miss() {
-                        return Err(query::error::QueryError::execution(
-                            "prepared input dependency budget exhausted",
-                        ));
-                    }
-                    let response = self.resolve_prepared_input(&request).await?;
-                    if !inputs.insert(request, response) {
-                        return Err(query::error::QueryError::execution(
-                            "prepared input memory budget exhausted",
-                        ));
-                    }
+                    inputs
+                        .answer_miss(&request, || self.resolve_prepared_input(&request))
+                        .await?;
                 }
                 result => return result,
             }

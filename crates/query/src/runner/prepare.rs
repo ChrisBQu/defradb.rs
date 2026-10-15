@@ -118,9 +118,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 );
                 let response = serde_json::to_vec(&allowed)
                     .map_err(|error| QueryError::execution(error.to_string()))?;
-                if !prepared.inputs.insert(request, Arc::<[u8]>::from(response)) {
-                    return Err(QueryError::execution("prepared input memo budget exceeded"));
-                }
+                prepared.inputs.insert(request, Arc::<[u8]>::from(response));
             }
         }
         let mut documents = Vec::new();

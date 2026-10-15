@@ -1,8 +1,12 @@
-use std::sync::{Arc, Mutex};
+use std::future::Future;
+use std::sync::Arc;
 
 use chrono::{DateTime, FixedOffset};
 use document::{Document, WritePreparation};
-use rapidhash::RapidHashMap;
+use kovan_map::HopscotchMap;
+use rapidhash::fast::{RandomState, RapidHashMap};
+
+use crate::error::{QueryError, Result};
 
 /// A network input request, represented by its complete wire request bytes.
 /// Keeping the exact bytes in the key avoids accidental reuse when any
@@ -52,22 +56,28 @@ pub enum PreparedInputKind {
     EncryptedSearch,
 }
 
-const MAX_PREPARED_INPUTS: usize = 64;
-const MAX_PREPARED_INPUT_BYTES: usize = 8 * 1024 * 1024;
-const MAX_INPUT_DEPENDENCY_MISSES: usize = 8;
-
-#[derive(Default)]
-struct PreparedInputMemoState {
-    values: RapidHashMap<PreparedInputRequest, Arc<[u8]>>,
-    bytes: usize,
-    dependency_misses: usize,
-}
-
 /// Exact-request memo shared by all attempts of one logical request.
 /// Values are the provider's exact response bytes; parsing happens at the
 /// domain boundary that requested them.
-#[derive(Clone, Default)]
-pub struct PreparedInputMemo(Arc<Mutex<PreparedInputMemoState>>);
+///
+/// The attempts of one request, and the tasks inside one attempt, read and
+/// add answers without a lock. The first answer to a request wins and every
+/// later reader gets it, so an answer drawn at random (a key, a nonce, a
+/// ciphertext) is the same for every use in the request.
+///
+/// The memo holds only answers derived from its own request and is dropped
+/// with it, so its size follows the request's and it keeps no cap of its own:
+/// a cap would refuse a request that is valid only for being large. What
+/// bounds a dependency miss is progress: a miss must name a request the memo
+/// does not hold yet ([`answer_miss`](Self::answer_miss)).
+#[derive(Clone)]
+pub struct PreparedInputMemo(Arc<HopscotchMap<PreparedInputRequest, Arc<[u8]>, RandomState>>);
+
+impl Default for PreparedInputMemo {
+    fn default() -> Self {
+        Self(Arc::new(HopscotchMap::with_hasher(RandomState::default())))
+    }
+}
 
 impl std::fmt::Debug for PreparedInputMemo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -81,67 +91,50 @@ impl std::fmt::Debug for PreparedInputMemo {
 
 impl PreparedInputMemo {
     pub fn get(&self, request: &PreparedInputRequest) -> Option<Arc<[u8]>> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .values
-            .get(request)
-            .cloned()
+        self.0.get(request)
     }
 
-    /// Store a response if it fits the per-request entry and byte budgets.
-    /// Returns false when the caller must stop retrying instead of evicting an
-    /// exact response and risking another provider call for the same request.
-    pub fn insert(&self, request: PreparedInputRequest, response: impl Into<Arc<[u8]>>) -> bool {
-        let response = response.into();
-        let mut state = self
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let new_size = request.exact_request().len().saturating_add(response.len());
-        let old_size = state
-            .values
-            .get(&request)
-            .map(|old| request.exact_request().len().saturating_add(old.len()))
-            .unwrap_or_default();
-        let next_bytes = state
-            .bytes
-            .saturating_sub(old_size)
-            .saturating_add(new_size);
-        if !state.values.contains_key(&request) && state.values.len() >= MAX_PREPARED_INPUTS
-            || next_bytes > MAX_PREPARED_INPUT_BYTES
-        {
-            return false;
+    /// Memoize `response` unless the request is already answered, and return
+    /// the answer every use of the request must share: the first one.
+    pub fn insert(
+        &self,
+        request: PreparedInputRequest,
+        response: impl Into<Arc<[u8]>>,
+    ) -> Arc<[u8]> {
+        self.0.get_or_insert(request, response.into())
+    }
+
+    /// Answer the dependency miss that ended an attempt, so the next attempt
+    /// finds the input local. `resolve` fetches it outside any transaction.
+    /// A miss for a request the memo already answers means the attempt reads
+    /// some other memo, and running it again would only miss again: that is
+    /// an error, not another round.
+    pub async fn answer_miss<F, Fut>(
+        &self,
+        request: &PreparedInputRequest,
+        resolve: F,
+    ) -> Result<()>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<Arc<[u8]>>>,
+    {
+        if self.0.contains_key(request) {
+            return Err(QueryError::execution(format!(
+                "external input {:?} was requested again after it was provided",
+                request.kind()
+            )));
         }
-        state.bytes = next_bytes;
-        state.values.insert(request, response);
-        true
+        let response = resolve().await?;
+        self.insert(request.clone(), response);
+        Ok(())
     }
 
     pub fn len(&self) -> usize {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .values
-            .len()
+        self.0.len()
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
-    }
-
-    /// Count a cache miss that requires leaving the current transaction
-    /// attempt. Commit-conflict retries do not consume this budget.
-    pub fn register_dependency_miss(&self) -> bool {
-        let mut state = self
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.dependency_misses >= MAX_INPUT_DEPENDENCY_MISSES {
-            return false;
-        }
-        state.dependency_misses += 1;
-        true
     }
 }
 
@@ -210,9 +203,7 @@ mod tests {
                     return response;
                 }
                 *calls += 1;
-                let response: Arc<[u8]> = Arc::from(b"provider response".as_slice());
-                assert!(memo.insert(request, Arc::clone(&response)));
-                response
+                memo.insert(request, b"provider response".as_slice())
             };
 
         let first = PreparedInputRequest::new(
@@ -251,30 +242,57 @@ mod tests {
         assert!(!debug.contains("secret-dependency"));
     }
 
+    /// A request that derives thousands of inputs and tens of megabytes of
+    /// answers keeps every one: the memo follows its request's size.
     #[test]
-    fn prepared_input_memo_bounds_entries_bytes_and_dependency_retries() {
+    fn a_large_request_keeps_every_input() {
         let memo = PreparedInputMemo::default();
-        for index in 0..MAX_PREPARED_INPUTS {
+        let answer = vec![7_u8; 4096];
+        for index in 0_u32..8192 {
             let request = PreparedInputRequest::new(
                 PreparedInputKind::Embedding,
                 index.to_be_bytes().to_vec(),
             );
-            assert!(memo.insert(request, [1_u8].as_slice()));
+            memo.insert(request, answer.as_slice());
         }
-        let over_count =
-            PreparedInputRequest::new(PreparedInputKind::Embedding, b"over-count".as_slice());
-        assert!(!memo.insert(over_count, [1_u8].as_slice()));
-
-        let byte_limited = PreparedInputMemo::default();
-        let large_request = PreparedInputRequest::new(
-            PreparedInputKind::Signature,
-            vec![2_u8; MAX_PREPARED_INPUT_BYTES],
+        assert_eq!(memo.len(), 8192);
+        let last = PreparedInputRequest::new(
+            PreparedInputKind::Embedding,
+            8191_u32.to_be_bytes().to_vec(),
         );
-        assert!(!byte_limited.insert(large_request, [3_u8].as_slice()));
+        assert_eq!(memo.get(&last).as_deref(), Some(answer.as_slice()));
+    }
 
-        for _ in 0..MAX_INPUT_DEPENDENCY_MISSES {
-            assert!(byte_limited.register_dependency_miss());
-        }
-        assert!(!byte_limited.register_dependency_miss());
+    #[test]
+    fn the_first_answer_to_a_request_is_the_one_every_use_shares() {
+        let memo = PreparedInputMemo::default();
+        let request = PreparedInputRequest::new(PreparedInputKind::Encryption, b"nonce".as_slice());
+        assert_eq!(
+            &*memo.insert(request.clone(), b"first".as_slice()),
+            b"first"
+        );
+        assert_eq!(
+            &*memo.insert(request.clone(), b"second".as_slice()),
+            b"first"
+        );
+        assert_eq!(memo.get(&request).as_deref(), Some(b"first".as_slice()));
+    }
+
+    #[tokio::test]
+    async fn a_miss_is_answered_once_and_asking_again_is_an_error() {
+        let memo = PreparedInputMemo::default();
+        let request = PreparedInputRequest::new(PreparedInputKind::Signature, b"block".as_slice());
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let resolve = || async {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Arc::<[u8]>::from(b"signature".as_slice()))
+        };
+
+        memo.answer_miss(&request, resolve).await.unwrap();
+        assert_eq!(memo.get(&request).as_deref(), Some(b"signature".as_slice()));
+
+        let error = memo.answer_miss(&request, resolve).await.unwrap_err();
+        assert!(error.to_string().contains("requested again"), "{error}");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

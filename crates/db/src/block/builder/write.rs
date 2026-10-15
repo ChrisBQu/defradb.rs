@@ -490,21 +490,17 @@ pub(crate) async fn write_document_blocks_with_inputs(
                         query::prepared::PreparedInputKind::Encryption,
                         exact,
                     );
-                    if let Some(value) = inputs.get(&request) {
-                        i64::from_be_bytes(value.as_ref().try_into().map_err(|_| {
-                            BuildError::Message("invalid prepared counter nonce".into())
-                        })?)
-                    } else {
-                        let nonce: i64 = rand::random();
-                        if !inputs
-                            .insert(request, std::sync::Arc::<[u8]>::from(nonce.to_be_bytes()))
-                        {
-                            return Err(BuildError::Message(
-                                "prepared nonce memo budget exhausted".into(),
-                            ));
+                    let nonce = match inputs.get(&request) {
+                        Some(nonce) => nonce,
+                        None => {
+                            let nonce: i64 = rand::random();
+                            inputs
+                                .insert(request, std::sync::Arc::<[u8]>::from(nonce.to_be_bytes()))
                         }
-                        nonce
-                    }
+                    };
+                    i64::from_be_bytes(nonce.as_ref().try_into().map_err(|_| {
+                        BuildError::Message("invalid prepared counter nonce".into())
+                    })?)
                 } else {
                     rand::random()
                 }

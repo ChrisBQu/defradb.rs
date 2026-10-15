@@ -291,7 +291,7 @@ mod tests {
                 return Ok(None);
             };
             if prepared.inputs.get(input).is_none() {
-                assert!(prepared.inputs.insert(input.clone(), b"[1.0]".as_slice()));
+                prepared.inputs.insert(input.clone(), b"[1.0]".as_slice());
             }
             Ok(Some(prepared))
         }

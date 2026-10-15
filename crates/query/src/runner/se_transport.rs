@@ -122,7 +122,7 @@ mod retry_tests {
         let response = query_with_prepared_inputs(&transport, None, decoded)
             .await
             .unwrap();
-        assert!(memo.insert(request, serde_json::to_vec(&response).unwrap()));
+        memo.insert(request, serde_json::to_vec(&response).unwrap());
         assert_eq!(
             query_with_prepared_inputs(&transport, Some(&memo), input("alice"))
                 .await

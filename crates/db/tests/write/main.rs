@@ -12,4 +12,5 @@ mod identical_delta;
 mod kms;
 mod kms_authorization;
 mod kms_request;
+mod large_batch;
 mod update;

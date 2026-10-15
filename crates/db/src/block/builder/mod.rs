@@ -135,10 +135,11 @@ pub(crate) fn encryption_key_prepared(
             .map_err(|_| "invalid prepared local encryption key".into());
     }
     let key = defra_core::encryption::generate_encryption_key_for(doc_ref, field);
-    if !inputs.insert(request, std::sync::Arc::<[u8]>::from(key)) {
-        return Err("prepared encryption memo budget exhausted".into());
-    }
-    Ok(key)
+    inputs
+        .insert(request, std::sync::Arc::<[u8]>::from(key))
+        .as_ref()
+        .try_into()
+        .map_err(|_| "invalid prepared local encryption key".into())
 }
 
 /// Preserve a randomized ciphertext across transaction re-entry when a later
@@ -161,10 +162,10 @@ pub(crate) fn encrypt_delta_prepared(
         return Ok(ciphertext.to_vec());
     }
     let ciphertext = encrypt_delta(plaintext, key)?;
-    if !inputs.insert(request, std::sync::Arc::<[u8]>::from(ciphertext.clone())) {
-        return Err("prepared encryption memo budget exhausted".into());
-    }
-    Ok(ciphertext)
+    // Every use in the request shares the first ciphertext.
+    Ok(inputs
+        .insert(request, std::sync::Arc::<[u8]>::from(ciphertext))
+        .to_vec())
 }
 
 /// Compute a signature block without writing to storage.
@@ -473,7 +474,7 @@ mod prepared_signature_tests {
         assert_eq!(remote.0.load(Ordering::SeqCst), 0);
         let signature = input.resolve(&signer).unwrap();
         assert_eq!(remote.0.load(Ordering::SeqCst), 1);
-        assert!(memo.insert(request.clone(), std::sync::Arc::<[u8]>::from(signature)));
+        memo.insert(request.clone(), std::sync::Arc::<[u8]>::from(signature));
         assert!(compute_signature_prepared(&first, &signer, Some(&memo)).is_ok());
         assert_eq!(remote.0.load(Ordering::SeqCst), 1);
 

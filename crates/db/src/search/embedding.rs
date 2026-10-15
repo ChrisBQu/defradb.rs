@@ -447,7 +447,7 @@ mod prepared_input_tests {
                 let bytes = resolve_prepared_embedding_request(first.exact_request())
                     .await
                     .unwrap();
-                assert!(memo.insert(first.clone(), bytes));
+                memo.insert(first.clone(), bytes);
             }
         }
         assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
@@ -458,7 +458,7 @@ mod prepared_input_tests {
         let bytes = resolve_prepared_embedding_request(changed.exact_request())
             .await
             .unwrap();
-        assert!(memo.insert(changed, bytes));
+        memo.insert(changed, bytes);
         assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
 
         server.abort();

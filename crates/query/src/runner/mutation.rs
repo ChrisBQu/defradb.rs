@@ -380,10 +380,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                 };
                 let response = serde_json::to_vec(&allowed)
                     .map_err(|error| QueryError::execution(error.to_string()))?;
-                if !inputs.insert(request, std::sync::Arc::<[u8]>::from(response)) {
-                    return Err(QueryError::execution("prepared input memo budget exceeded"));
-                }
-                Ok(allowed)
+                // Every use in the request shares the first answer.
+                let answer = inputs.insert(request, std::sync::Arc::<[u8]>::from(response));
+                serde_json::from_slice(&answer)
+                    .map_err(|error| QueryError::execution(error.to_string()))
             }
             result => result,
         }
@@ -792,16 +792,20 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                                         e
                                     ))
                                 })?;
-                            if let Some(inputs) = prepared_inputs.as_ref() {
-                                let response = serde_json::to_vec(&decision_id)
-                                    .map_err(|error| QueryError::execution(error.to_string()))?;
-                                if !inputs.insert(request, std::sync::Arc::<[u8]>::from(response)) {
-                                    return Err(QueryError::execution(
-                                        "prepared input memo budget exceeded",
-                                    ));
+                            match prepared_inputs.as_ref() {
+                                Some(inputs) => {
+                                    let response =
+                                        serde_json::to_vec(&decision_id).map_err(|error| {
+                                            QueryError::execution(error.to_string())
+                                        })?;
+                                    // Every use in the request shares the first answer.
+                                    let answer = inputs
+                                        .insert(request, std::sync::Arc::<[u8]>::from(response));
+                                    serde_json::from_slice(&answer)
+                                        .map_err(|error| QueryError::execution(error.to_string()))?
                                 }
+                                None => decision_id,
                             }
-                            decision_id
                         };
 
                         tracing::info!(
