@@ -44,3 +44,12 @@ These historical checkpoint binaries were supplied from the frozen adoption buil
 | Step5 `56ea4db1a` | `a17f3f9c26851611664fe08dc5094f7552b431e29a29d48f4057f6beef796820` | 3411.4, 3411.4, 3411.3, 3411.5, 3411.4 | 269 each | 36 each | 76 each |
 
 Executable paths were `/tmp/defra-perf-artifacts/bin/step3-081806acb/allocs`, `.../step4-5feca8675/allocs`, and `.../step5-56ea4db1a/allocs`. The five-sample medians for create are 2980.7, 2982.8, and 3411.4 respectively. Treat these only as checkpoint observations; unrelated changes between checkpoints prevent attributing the differences to one patch.
+
+## Computed-create buffer sizing
+
+A paired follow-up compares the downsample-filter candidate at `fc7800ad7` with computed-create buffer reservations at `8f58623b5`. Both share the same base; the latter only reserves result vectors for the known non-ID field count and baseline per-field block/head entries. Extra signing/encryption entries can still grow as needed. Both used `cargo bench -p benches --bench allocs --profile release-fast --no-run` and five executable runs; no timings were used.
+
+- Downsample-filter base `fc7800ad7`: `/tmp/defra-downsample-alloc/release-fast/deps/allocs-8978f3dd8ac8be84`; SHA-256 `30dba1727df0e09e031a05379049ed36e991ae3067729677cebdcb4f07c58d78`.
+- Computed-create buffer candidate `8f58623b5`: same executable path after the source change; SHA-256 `dfceb092cf40926ec73f4a4a1e7009b4c46dc870f99d53eecf4b84806905be51`.
+
+Document-create samples were 3307.4, 3307.5, 3307.3, 3307.4, 3307.4 on the base, and 3296.4, 3296.3, 3296.3, 3296.3, 3296.5 on the candidate. Medians are 3307.4 and 3296.3, saving 11.1 allocations/op. Get-by-ID stayed 160; document-to-map 36; document-from-JSON 76.
