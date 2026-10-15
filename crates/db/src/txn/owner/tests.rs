@@ -65,9 +65,7 @@ fn a_request_runs_on_the_worker_its_id_names() {
     for _ in 0..12 {
         let id = begin(&owners, "alice", &dropped);
         let (ran_on, opened_on) = block_on(owners.run(id, mine("alice"), |probe| {
-            Box::pin(async move {
-                (workers::current_worker().unwrap().index, probe.opened_on)
-            })
+            Box::pin(async move { (workers::current_worker().unwrap().index, probe.opened_on) })
         }))
         .unwrap()
         .unwrap();
@@ -130,7 +128,11 @@ fn a_caller_that_does_not_own_the_transaction_finds_nothing_and_changes_nothing(
     assert_eq!(dropped.load(Ordering::SeqCst), 1);
     assert_eq!(owners.len(), 0);
     let after = block_on(owners.run(id, mine("alice"), |_| Box::pin(async {}))).unwrap();
-    assert_eq!(after, Err(Unavailable::NotFound), "a finished transaction is gone");
+    assert_eq!(
+        after,
+        Err(Unavailable::NotFound),
+        "a finished transaction is gone"
+    );
 }
 
 #[test]
@@ -230,7 +232,11 @@ fn transactions_on_different_workers_run_side_by_side() {
         Box::pin(async move { probe.opened_on })
     }))
     .unwrap();
-    assert_eq!(other, Ok(second.owner(2)), "ran while the first worker's request waited");
+    assert_eq!(
+        other,
+        Ok(second.owner(2)),
+        "ran while the first worker's request waited"
+    );
     gate.set();
     assert_eq!(blocked.join().unwrap().unwrap(), Ok(()));
 }
@@ -251,7 +257,10 @@ fn abandoning_or_dropping_the_registry_ends_the_transaction() {
     drop(owners);
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while dropped.load(Ordering::SeqCst) < 4 {
-        assert!(std::time::Instant::now() < deadline, "transactions outlived their registry");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "transactions outlived their registry"
+        );
         std::thread::yield_now();
     }
     pool.shutdown_blocking().unwrap();

@@ -311,6 +311,29 @@ impl BasicTxn {
         RootView::new(self.shared_txn.clone())
     }
 
+    /// [`on_commit`](Self::on_commit) through a shared reference, for a
+    /// transaction lent to the handles of one request. It joins the callbacks
+    /// registered through views, in registration order, and reaches the
+    /// transaction at its next savepoint, its commit or its end.
+    pub fn on_commit_shared(&self, callback: OnCommit) -> Result<()> {
+        self.shared_txn
+            .queued()
+            .on_commit(callback)
+            .map_err(Error::Storage)
+    }
+
+    /// [`on_abort`](Self::on_abort) through a shared reference; see
+    /// [`on_commit_shared`](Self::on_commit_shared).
+    pub fn on_abort_shared(&self, callback: OnAbort) {
+        self.shared_txn.queued().on_abort(callback);
+    }
+
+    /// [`before_commit`](Self::before_commit) through a shared reference; see
+    /// [`on_commit_shared`](Self::on_commit_shared).
+    pub fn before_commit_shared(&self, callback: storage::corekv::BeforeCommit) {
+        self.shared_txn.queued().before_commit(callback);
+    }
+
     /// Register `callback` to run once if the transaction commits. A
     /// read-only transaction refuses ordered work.
     pub fn on_commit(&mut self, callback: OnCommit) -> Result<()> {

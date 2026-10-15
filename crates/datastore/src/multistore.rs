@@ -5,64 +5,77 @@
 /// This matches Go DefraDB's internal/datastore/multi.go pattern.
 use async_trait::async_trait;
 use bytes::Bytes;
-use regolith::sync::{OnceCell, SegQueue};
 use std::sync::Arc;
-use storage::corekv::{Error, IterOptions, Iterator, OnCommit, Reader, Result, Txn, Writer};
+use storage::corekv::{
+    Error, IterOptions, Iterator, OnCommit, QueuedCallbacks, Reader, Result, Txn, Writer,
+};
 use storage::namespace::Namespace;
 
 /// One transaction shared by its namespace views.
 ///
 /// Reads and writes take `&self` and go straight to the transaction, which
-/// takes them that way: views share it with no lock. A commit callback a view
-/// registers waits in a queue, in order, until the transaction is held alone.
-/// A savepoint takes `&mut self` and turning it back into the transaction
-/// takes `self`; only the holder of the one remaining reference gets either
-/// ([`Arc::get_mut`], [`Arc::try_unwrap`]), so a view still open at that
-/// moment is an error, never a wait. Both hand the queued callbacks to the
-/// transaction first, so a savepoint's rollback takes back exactly those
-/// registered after it.
+/// takes them that way: views share it with no lock. A callback registered
+/// through a view waits in a queue, in order ([`QueuedCallbacks`]), until it
+/// is settled into the transaction. A savepoint takes `&mut self` and turning
+/// it back into the transaction takes `self`; only the holder of the one
+/// remaining reference gets either ([`Arc::get_mut`], [`Arc::try_unwrap`]), so
+/// a view still open at that moment is an error, never a wait. Each settles
+/// the queue first, so a savepoint's rollback takes back exactly what was
+/// registered after it, and so does a drop, so a transaction that ends with
+/// its last view still runs the abort callbacks registered through views.
 pub struct SharedTxn {
-    txn: Box<dyn Txn>,
-    read_only: bool,
-    commits: OnceCell<Box<SegQueue<OnCommit>>>,
+    /// `None` only once [`into_txn`](Self::into_txn) has taken it.
+    txn: Option<Box<dyn Txn>>,
+    queued: QueuedCallbacks,
 }
 
 impl SharedTxn {
+    fn txn(&self) -> Result<&dyn Txn> {
+        self.txn.as_deref().ok_or(Error::DiscardedTxn)
+    }
+
+    fn txn_mut(&mut self) -> Result<&mut Box<dyn Txn>> {
+        self.txn.as_mut().ok_or(Error::DiscardedTxn)
+    }
+
     pub(crate) fn set_savepoint(&mut self) -> Result<()> {
         self.settle()?;
-        self.txn.set_savepoint()
+        self.txn_mut()?.set_savepoint()
     }
 
     pub(crate) fn rollback_to_savepoint(&mut self) -> Result<()> {
         self.settle()?;
-        self.txn.rollback_to_savepoint()
+        self.txn_mut()?.rollback_to_savepoint()
     }
 
     pub(crate) fn release_savepoint(&mut self) -> Result<()> {
         self.settle()?;
-        self.txn.release_savepoint()
+        self.txn_mut()?.release_savepoint()
     }
 
-    /// Hands the callbacks views registered to the transaction, in order.
+    /// Hands the callbacks registered through views to the transaction, in
+    /// order.
     fn settle(&mut self) -> Result<()> {
-        let Some(commits) = self.commits.get_mut() else {
+        let Some(txn) = self.txn.as_mut() else {
             return Ok(());
         };
-        while let Some(callback) = commits.pop() {
-            self.txn.on_commit(callback)?;
-        }
-        Ok(())
+        self.queued.settle_into(txn)
+    }
+
+    /// Where callbacks registered through a shared handle wait.
+    pub(crate) fn queued(&self) -> &QueuedCallbacks {
+        &self.queued
     }
 
     pub(crate) fn try_into_txn(shared: Arc<Self>) -> Result<Box<dyn Txn>> {
         let mut shared = Arc::try_unwrap(shared)
             .map_err(|_| Error::Other("transaction still has namespace references".into()))?;
         shared.settle()?;
-        Ok(shared.txn)
+        shared.txn.take().ok_or(Error::DiscardedTxn)
     }
 
     pub async fn merge(&self, namespace: Namespace, key: &[u8], operand: &[u8]) -> Result<()> {
-        self.txn
+        self.txn()?
             .merge_shared(&prefix_key(namespace, key), operand)
             .await
     }
@@ -76,7 +89,7 @@ impl SharedTxn {
     ) -> Result<()> {
         let log = log.prefixed(&[namespace.prefix()]);
         let once_key = once_key.map(|key| prefix_key(namespace, key));
-        self.txn
+        self.txn()?
             .append_shared(&log, entry, once_key.as_deref())
             .await
     }
@@ -89,15 +102,14 @@ impl SharedTxn {
     #[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
     pub fn new(txn: Box<dyn Txn>) -> Arc<Self> {
         Arc::new(Self {
-            read_only: txn.is_readonly(),
-            txn,
-            commits: OnceCell::new(),
+            queued: QueuedCallbacks::new(txn.is_readonly()),
+            txn: Some(txn),
         })
     }
 
     /// Get a value with namespace prefix.
     pub async fn get(&self, namespace: Namespace, key: &[u8]) -> Result<Option<Bytes>> {
-        self.txn.get(&prefix_key(namespace, key)).await
+        self.txn()?.get(&prefix_key(namespace, key)).await
     }
 
     /// Read selected logical parts through the shared engine transaction.
@@ -107,27 +119,31 @@ impl SharedTxn {
         key: &[u8],
         parts: &[u32],
     ) -> Result<Option<Bytes>> {
-        self.txn.get_parts(&prefix_key(namespace, key), parts).await
+        self.txn()?
+            .get_parts(&prefix_key(namespace, key), parts)
+            .await
     }
 
     /// Check if a key exists with namespace prefix.
     pub async fn has(&self, namespace: Namespace, key: &[u8]) -> Result<bool> {
-        self.txn.has(&prefix_key(namespace, key)).await
+        self.txn()?.has(&prefix_key(namespace, key)).await
     }
 
     /// Get value size with namespace prefix.
     pub async fn get_size(&self, namespace: Namespace, key: &[u8]) -> Result<Option<usize>> {
-        self.txn.get_size(&prefix_key(namespace, key)).await
+        self.txn()?.get_size(&prefix_key(namespace, key)).await
     }
 
     /// Set a value with namespace prefix.
     pub async fn set(&self, namespace: Namespace, key: &[u8], value: &[u8]) -> Result<()> {
-        self.txn.set_shared(&prefix_key(namespace, key), value).await
+        self.txn()?
+            .set_shared(&prefix_key(namespace, key), value)
+            .await
     }
 
     /// Delete a key with namespace prefix.
     pub async fn delete(&self, namespace: Namespace, key: &[u8]) -> Result<()> {
-        self.txn.delete_shared(&prefix_key(namespace, key)).await
+        self.txn()?.delete_shared(&prefix_key(namespace, key)).await
     }
 
     /// Create an iterator with namespace prefix.
@@ -137,7 +153,7 @@ impl SharedTxn {
         opts: IterOptions,
     ) -> Result<Box<dyn Iterator>> {
         let iter = self
-            .txn
+            .txn()?
             .iterator(prefix_iter_options(namespace, opts))
             .await?;
         Ok(Box::new(NamespacedIterator { iter, namespace }))
@@ -145,41 +161,53 @@ impl SharedTxn {
 
     /// Get from rootstore (no namespace prefix).
     pub async fn root_get(&self, key: &[u8]) -> Result<Option<Bytes>> {
-        self.txn.get(key).await
+        self.txn()?.get(key).await
     }
 
     /// Set in rootstore (no namespace prefix).
     pub async fn root_set(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        self.txn.set_shared(key, value).await
+        self.txn()?.set_shared(key, value).await
     }
 
     /// Delete from rootstore (no namespace prefix).
     pub async fn root_delete(&self, key: &[u8]) -> Result<()> {
-        self.txn.delete_shared(key).await
+        self.txn()?.delete_shared(key).await
     }
 
     /// Register `callback` to run once if the transaction commits. A
     /// read-only transaction refuses ordered work.
     pub async fn on_commit(&self, callback: OnCommit) -> Result<()> {
-        callback.admitted_by(self.read_only)?;
-        self.commits.get_or_init_racy(Box::default).push(callback);
-        Ok(())
+        self.queued.on_commit(callback)
     }
 
     /// Check if readonly.
     pub async fn is_readonly(&self) -> bool {
-        self.read_only
+        self.txn.as_ref().is_none_or(|txn| txn.is_readonly())
     }
 
-    /// Consume self and return the underlying transaction, with the commit
-    /// callbacks views registered handed to it.
+    /// Consume self and return the underlying transaction, with the callbacks
+    /// registered through views settled into it.
     pub fn into_txn(mut self) -> Box<dyn Txn> {
         if let Err(error) = self.settle() {
             // Unreachable: each callback was checked against this
             // transaction when it was registered.
-            tracing::error!(%error, "a view's commit callback was refused by its transaction");
+            tracing::error!(%error, "a callback registered through a view was refused");
         }
-        self.txn
+        match self.txn.take() {
+            Some(txn) => txn,
+            // `txn` is taken only here, and this consumes `self`.
+            None => unreachable!("a shared transaction is turned back into its transaction once"),
+        }
+    }
+}
+
+impl Drop for SharedTxn {
+    /// Ending with its last view, the transaction still gets the callbacks
+    /// registered through views: its abort callbacks run when it drops.
+    fn drop(&mut self) {
+        if let Err(error) = self.settle() {
+            tracing::error!(%error, "a callback registered through a view was refused");
+        }
     }
 }
 

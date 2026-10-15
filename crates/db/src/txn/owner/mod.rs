@@ -121,33 +121,37 @@ where
         let workers = self.pool.workers();
         let opened = self
             .pool
-            .submit_with(Target::LeastLoaded, named("txn.begin"), move || async move {
-                let worker = workers::current_worker()
-                    .map(|worker| worker.index)
-                    .ok_or(Unavailable::Pool(workers::Error::NotOnWorker))?;
-                let txn = match open().await {
-                    Ok(txn) => txn,
-                    Err(error) => return Ok(Err(error)),
-                };
-                let Some(tables) = shared.upgrade() else {
-                    return Err(Unavailable::NotFound);
-                };
-                let table = &tables.tables[worker];
-                let id =
-                    TxnId::new(table.draw(), worker, workers).ok_or(Unavailable::Exhausted)?;
-                let (mailbox, inbox) = unbounded();
-                table.insert(id, mailbox);
-                drop(tables);
-                if let Err(error) =
-                    workers::spawn_daemon(actor::own(txn, id, worker, inbox, shared.clone()))
-                {
-                    if let Some(tables) = shared.upgrade() {
-                        tables.tables[worker].remove(id);
+            .submit_with(
+                Target::LeastLoaded,
+                named("txn.begin"),
+                move || async move {
+                    let worker = workers::current_worker()
+                        .map(|worker| worker.index)
+                        .ok_or(Unavailable::Pool(workers::Error::NotOnWorker))?;
+                    let txn = match open().await {
+                        Ok(txn) => txn,
+                        Err(error) => return Ok(Err(error)),
+                    };
+                    let Some(tables) = shared.upgrade() else {
+                        return Err(Unavailable::NotFound);
+                    };
+                    let table = &tables.tables[worker];
+                    let id =
+                        TxnId::new(table.draw(), worker, workers).ok_or(Unavailable::Exhausted)?;
+                    let (mailbox, inbox) = unbounded();
+                    table.insert(id, mailbox);
+                    drop(tables);
+                    if let Err(error) =
+                        workers::spawn_daemon(actor::own(txn, id, worker, inbox, shared.clone()))
+                    {
+                        if let Some(tables) = shared.upgrade() {
+                            tables.tables[worker].remove(id);
+                        }
+                        return Err(Unavailable::Pool(error));
                     }
-                    return Err(Unavailable::Pool(error));
-                }
-                Ok(Ok(id))
-            })
+                    Ok(Ok(id))
+                },
+            )
             .await?;
         opened.await?
     }
@@ -177,7 +181,12 @@ where
     /// Ends transaction `id` with `last`, which gets it by value, after every
     /// request for it that arrived earlier. Requests that arrive later find
     /// no transaction. A caller `admit` refuses leaves it as it was.
-    pub(crate) async fn finish<R, A, L>(&self, id: TxnId, admit: A, last: L) -> Result<R, Unavailable>
+    pub(crate) async fn finish<R, A, L>(
+        &self,
+        id: TxnId,
+        admit: A,
+        last: L,
+    ) -> Result<R, Unavailable>
     where
         R: Send + 'static,
         A: FnOnce(&T) -> bool + Send + 'static,
@@ -212,27 +221,31 @@ where
             let shared = Arc::downgrade(&self.shared);
             let completion = self
                 .pool
-                .submit_with(Target::Worker(worker), named("txn.sweep"), move || async move {
-                    let Some(shared) = shared.upgrade() else {
-                        return 0;
-                    };
-                    let (reply, answers) = unbounded();
-                    let asked = shared.tables[worker].send_all(|| Message::Expire {
-                        max_idle,
-                        reply: Some(reply.clone()),
-                    });
-                    drop(reply);
-                    drop(shared);
-                    let mut ended = 0;
-                    for _ in 0..asked {
-                        match answers.recv_async().await {
-                            Some(true) => ended += 1,
-                            Some(false) => {}
-                            None => break,
+                .submit_with(
+                    Target::Worker(worker),
+                    named("txn.sweep"),
+                    move || async move {
+                        let Some(shared) = shared.upgrade() else {
+                            return 0;
+                        };
+                        let (reply, answers) = unbounded();
+                        let asked = shared.tables[worker].send_all(|| Message::Expire {
+                            max_idle,
+                            reply: Some(reply.clone()),
+                        });
+                        drop(reply);
+                        drop(shared);
+                        let mut ended = 0;
+                        for _ in 0..asked {
+                            match answers.recv_async().await {
+                                Some(true) => ended += 1,
+                                Some(false) => {}
+                                None => break,
+                            }
                         }
-                    }
-                    ended
-                })
+                        ended
+                    },
+                )
                 .await?;
             replies.push(completion);
         }
