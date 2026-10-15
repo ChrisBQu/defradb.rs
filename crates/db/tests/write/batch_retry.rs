@@ -566,3 +566,74 @@ async fn transactional_acp_revoke_conflicts_and_denies_batch_update() {
     assert_eq!(docs.len(), 1);
     assert_eq!(docs[0].get("x"), Some(&document::NormalValue::Int(1)));
 }
+
+#[tokio::test]
+async fn remote_acp_batch_replays_with_attempt_local_registration_projection() {
+    let inner = RegolithStore::in_memory().unwrap();
+    let store = ConflictStore {
+        inner: inner.clone(),
+        attempts: Arc::new(AtomicUsize::new(0)),
+        raced: Arc::new(AtomicBool::new(false)),
+        attempt_ids: Arc::new(Mutex::new(Vec::new())),
+    };
+    let bus: Arc<dyn Bus> = Arc::new(ChannelBus::new());
+    let mut db = DB::new(store.clone()).unwrap();
+    db.set_event_bus(bus);
+    let owner =
+        identity::Did::new("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK").unwrap();
+    db.create_collection(
+        test_collection().with_policy(schema::PolicyDescription::new("policy1", "test-docs")),
+    )
+    .await
+    .unwrap();
+    let acp = Arc::new(acp::LocalDocumentACP::new(Arc::new(
+        acp::MemoryAcpStore::new(),
+    )));
+    db.set_document_acp(acp.clone());
+    let db = Arc::new(db);
+
+    let runner = query::QueryRunner::with_provider(
+        LensedAutoCommitFetcher::new(db.clone()),
+        DbCollectionProvider::new_arc(db.clone()),
+    )
+    .with_mutator(Arc::new(db::write::autocommit::AutoCommitMutator::new(
+        db.clone(),
+    )));
+    let request = QueryRequest::new(
+        r#"mutation {
+            first: add_TestDoc(input: {x: 1}) { _docID }
+            second: add_TestDoc(input: {x: 2}) { _docID }
+        }"#,
+    )
+    .with_identity(Some(owner.clone()));
+    let response =
+        defra_core::current_identity::with_scoped_identity(Some(owner.to_string()), async {
+            let prepared = runner.prepare_request(&request).await.unwrap();
+            assert!(
+                prepared.is_some(),
+                "remote ACP batches are request-prepared"
+            );
+            defra_core::signing::scope_broadcast_creator_did(
+                Some(owner.to_string()),
+                runner.execute_prepared(request, prepared),
+            )
+            .await
+        })
+        .await;
+    assert!(!response.has_errors(), "{:?}", response.errors);
+    assert_eq!(store.attempts.load(Ordering::SeqCst), 2);
+    let attempt_ids = store.attempt_ids.lock().unwrap();
+    assert_eq!(attempt_ids.len(), 2);
+    assert_eq!(attempt_ids[0], attempt_ids[1]);
+    let winner_ids = attempt_ids[1].clone();
+    drop(attempt_ids);
+
+    for id in winner_ids {
+        assert!(
+            acp.is_doc_registered("policy1", "test-docs", &id)
+                .await
+                .unwrap(),
+            "only committed batch documents should be registered"
+        );
+    }
+}
