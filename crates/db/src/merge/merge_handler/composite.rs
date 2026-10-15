@@ -1,4 +1,5 @@
 use super::batch::{PendingFieldBlockFinalization, PendingMergeEvent, PendingPostCommitAction};
+use super::frame_source::FrameSource;
 use super::*;
 use crate::merge::governance::{GovernedFrame, Judgement};
 
@@ -76,11 +77,8 @@ enum CompositeMergePreparation {
 enum CompositeMergeFrame {
     Enter {
         cid: Cid,
-        block: Option<Block>,
-        payload: Option<defra_core::block::CompositeDeltaPayload>,
-        child_cid: Option<Cid>,
+        source: FrameSource<defra_core::block::CompositeDeltaPayload>,
         depth: usize,
-        is_root: bool,
     },
     Exit {
         cid: Cid,
@@ -148,31 +146,6 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
 
     fn has_batch_merged_composite(batch_merged: &CidSet, cid: &Cid) -> bool {
         batch_merged.contains_key(cid)
-    }
-
-    async fn load_parent_composite(&self, parent_cid: &Cid, child_cid: &Cid) -> Option<Block> {
-        let data = match self.blockstore.get(parent_cid).await {
-            Ok(Some(data)) => data,
-            Ok(None) => {
-                tracing::debug!(
-                    %parent_cid,
-                    %child_cid,
-                    "Parent composite not in blockstore, skipping"
-                );
-                return None;
-            }
-            Err(error) => {
-                tracing::debug!(
-                    %parent_cid,
-                    %child_cid,
-                    %error,
-                    "Failed to load parent composite, skipping"
-                );
-                return None;
-            }
-        };
-
-        Block::from_dag_cbor(&data).ok()
     }
 
     async fn prepare_composite_merge(
@@ -302,23 +275,17 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         let doc_id_for_index = doc_id_str.clone();
         let mut frames = vec![CompositeMergeFrame::Enter {
             cid: *cid,
-            block: Some(block.clone()),
-            payload: Some(payload.clone()),
-            child_cid: None,
+            source: FrameSource::Root {
+                block: block.clone(),
+                payload: payload.clone(),
+            },
             depth,
-            is_root: true,
         }];
 
         while let Some(frame) = frames.pop() {
             match frame {
-                CompositeMergeFrame::Enter {
-                    cid,
-                    block,
-                    payload,
-                    child_cid,
-                    depth,
-                    is_root,
-                } => {
+                CompositeMergeFrame::Enter { cid, source, depth } => {
+                    let is_root = source.is_root();
                     self.ensure_merge_depth(&cid, depth)?;
                     if self.has_merged_composite(&cid) {
                         if is_root {
@@ -327,29 +294,8 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                         continue;
                     }
 
-                    let block = match block {
-                        Some(block) => block,
-                        None => {
-                            let Some(block) = self
-                                .load_parent_composite(
-                                    &cid,
-                                    &child_cid.expect("parent frame has a child CID"),
-                                )
-                                .await
-                            else {
-                                continue;
-                            };
-                            block
-                        }
-                    };
-                    let payload = match payload {
-                        Some(payload) => payload,
-                        None => {
-                            let CrdtDelta::Composite(payload) = &block.delta else {
-                                continue;
-                            };
-                            payload.clone()
-                        }
+                    let Some((block, payload)) = self.frame_block(&cid, source).await else {
+                        continue;
                     };
 
                     match self
@@ -377,11 +323,8 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                                 for parent_cid in heads.into_iter().rev() {
                                     frames.push(CompositeMergeFrame::Enter {
                                         cid: parent_cid,
-                                        block: None,
-                                        payload: None,
-                                        child_cid: Some(cid),
+                                        source: FrameSource::Parent { child_cid: cid },
                                         depth: depth + 1,
-                                        is_root: false,
                                     });
                                 }
                             }
@@ -742,23 +685,17 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         let doc_id_for_index = doc_id.clone();
         let mut frames = vec![CompositeMergeFrame::Enter {
             cid: *cid,
-            block: Some(block.clone()),
-            payload: Some(payload.clone()),
-            child_cid: None,
+            source: FrameSource::Root {
+                block: block.clone(),
+                payload: payload.clone(),
+            },
             depth,
-            is_root: true,
         }];
 
         while let Some(frame) = frames.pop() {
             match frame {
-                CompositeMergeFrame::Enter {
-                    cid,
-                    block,
-                    payload,
-                    child_cid,
-                    depth,
-                    is_root,
-                } => {
+                CompositeMergeFrame::Enter { cid, source, depth } => {
+                    let is_root = source.is_root();
                     self.ensure_merge_depth(&cid, depth)?;
                     if self.has_merged_composite(&cid)
                         || Self::has_batch_merged_composite(batch_merged, &cid)
@@ -769,29 +706,8 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                         continue;
                     }
 
-                    let block = match block {
-                        Some(block) => block,
-                        None => {
-                            let Some(block) = self
-                                .load_parent_composite(
-                                    &cid,
-                                    &child_cid.expect("parent frame has a child CID"),
-                                )
-                                .await
-                            else {
-                                continue;
-                            };
-                            block
-                        }
-                    };
-                    let payload = match payload {
-                        Some(payload) => payload,
-                        None => {
-                            let CrdtDelta::Composite(payload) = &block.delta else {
-                                continue;
-                            };
-                            payload.clone()
-                        }
+                    let Some((block, payload)) = self.frame_block(&cid, source).await else {
+                        continue;
                     };
                     let doc_id = doc_id.clone();
 
@@ -820,11 +736,8 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                                 for parent_cid in heads.into_iter().rev() {
                                     frames.push(CompositeMergeFrame::Enter {
                                         cid: parent_cid,
-                                        block: None,
-                                        payload: None,
-                                        child_cid: Some(cid),
+                                        source: FrameSource::Parent { child_cid: cid },
                                         depth: depth + 1,
-                                        is_root: false,
                                     });
                                 }
                             }

@@ -16,6 +16,7 @@ mod dispatch;
 mod doc_identity;
 mod encryption;
 pub(crate) mod error;
+mod frame_source;
 pub mod hook;
 mod lww;
 mod protected_update;

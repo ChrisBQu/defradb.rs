@@ -240,14 +240,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 attempt.prepared_inputs.as_ref(),
             )
             .await
-            .map_err(|error| match error {
-                crate::block::builder::BuildError::NeedsInput(request) => {
-                    query::error::QueryError::NeedsInput(request)
-                }
-                other => query::error::QueryError::execution(format!(
-                    "failed to write delete block: {other}"
-                )),
-            })?;
+            .map_err(|error| error.into_query_error_in("failed to write delete block"))?;
             crate::docid::map::set_block_doc_id_mapping(
                 &systemstore,
                 &block_result.cid.to_string(),
@@ -470,14 +463,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     attempt.prepared_inputs.as_ref(),
                 )
                 .await
-                .map_err(|e| match e {
-                    crate::block::builder::BuildError::NeedsInput(request) => {
-                        query::error::QueryError::NeedsInput(request)
-                    }
-                    other => query::error::QueryError::execution(format!(
-                        "failed to write delete block: {other}"
-                    )),
-                })?;
+                .map_err(|error| error.into_query_error_in("failed to write delete block"))?;
                 crate::docid::map::set_block_doc_id_mapping(
                     &systemstore,
                     &block_result.cid.to_string(),

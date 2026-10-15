@@ -63,11 +63,25 @@ impl Collection {
         doc_id: &DocID,
         fields: &rapidhash::RapidHashSet<String>,
     ) -> Result<Option<Document>> {
+        let version = self.load_version(datastore, doc_short_id).await?;
+        self.get_with_datastore_fields_at(datastore, doc_short_id, doc_id, fields, version)
+            .await
+    }
+
+    /// [`get_with_datastore_fields`](Self::get_with_datastore_fields) for a
+    /// caller that has already read the document's stored `version`.
+    pub(crate) async fn get_with_datastore_fields_at(
+        &self,
+        datastore: &NamespaceView,
+        doc_short_id: u64,
+        doc_id: &DocID,
+        fields: &rapidhash::RapidHashSet<String>,
+        version: Option<String>,
+    ) -> Result<Option<Document>> {
         let deleted_key = self.deleted_key(doc_short_id);
         if datastore.has(&deleted_key).await.map_err(Error::Storage)? {
             return Ok(None);
         }
-        let version = self.load_version(datastore, doc_short_id).await?;
         let parts = self
             .part_ids_of(datastore, fields.iter().map(String::as_str))
             .await?;

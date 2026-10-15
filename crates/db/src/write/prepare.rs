@@ -437,12 +437,17 @@ impl<S: Store + 'static> crate::AutoCommitMutator<S> {
         )
         .await?;
 
-        if doc.write_preparation().is_none() {
-            doc.set_write_preparation(Arc::new(WritePreparation::new(
-                identity.collection_short_id,
-                identity.doc_short_id,
-            )));
-        }
+        let preparation = match doc.write_preparation() {
+            Some(preparation) => Arc::clone(preparation),
+            None => {
+                let preparation = Arc::new(WritePreparation::new(
+                    identity.collection_short_id,
+                    identity.doc_short_id,
+                ));
+                doc.set_write_preparation(Arc::clone(&preparation));
+                preparation
+            }
+        };
         if modified_fields.is_none() {
             if let Some(signing_config) = signing_config.as_ref() {
                 let blocks = crate::block::builder::compute_document_blocks(
@@ -457,7 +462,7 @@ impl<S: Store + 'static> crate::AutoCommitMutator<S> {
                         "failed to prepare signed create blocks: {error}"
                     ))
                 })?;
-                let mut write = (**doc.write_preparation().unwrap()).clone();
+                let mut write = (*preparation).clone();
                 write.set_payload(Arc::new(PreparedCreateBlocks {
                     schema_version_id: collection.version_id().to_string(),
                     computed: blocks,

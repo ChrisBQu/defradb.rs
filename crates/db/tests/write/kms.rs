@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use crypto::PrivateKey;
-use db::{AutoCommitMutator, DB};
+use db::{AutoCommitMutator, DbDocMutator, DB};
 use defra_core::encryption::{set_encryption_config, EncryptionConfig};
 use document::Document;
 use query::mutator::{DocMutator, MutationBatchController};
@@ -405,4 +405,55 @@ async fn signed_document_encryption_without_kms_reuses_local_keys() {
     set_encryption_config(None);
     result.unwrap();
     assert_eq!(signer.calls.load(Ordering::SeqCst), 2);
+}
+
+/// An explicit-transaction create never calls the KMS inside the transaction:
+/// each key it needs ends the create asking for it, the key is generated
+/// outside, and the create runs again under the short ID its first run drew,
+/// so the keys generated for that document are found.
+#[tokio::test]
+async fn explicit_txn_create_generates_its_kms_keys_outside_the_transaction() {
+    let fixture = fixture().await;
+    encrypt();
+    let mutator = DbDocMutator::new(
+        Arc::clone(&fixture.db),
+        fixture.db.new_txn(false).await.unwrap(),
+    );
+    let inputs = query::prepared::PreparedInputMemo::default();
+    let mut misses = 0;
+    let mut created = None;
+    for _ in 0..8 {
+        let generated = fixture.kms.0.load(Ordering::SeqCst);
+        match mutator
+            .with_prepared_inputs(inputs.clone())
+            .unwrap()
+            .create("Secrets", document("txn"))
+            .await
+        {
+            Err(query::error::QueryError::NeedsInput(request)) => {
+                assert_eq!(
+                    fixture.kms.0.load(Ordering::SeqCst),
+                    generated,
+                    "the create called the KMS"
+                );
+                misses += 1;
+                inputs
+                    .answer_miss(&request, || mutator.resolve_prepared_input(&request))
+                    .await
+                    .unwrap();
+            }
+            result => {
+                created = Some(result.unwrap());
+                break;
+            }
+        }
+    }
+    let created = created.expect("the create kept asking for inputs");
+    assert_eq!(misses, 2, "one request per encrypted field");
+    assert_eq!(fixture.kms.0.load(Ordering::SeqCst), 2);
+    mutator.take_txn().await.unwrap().commit().await.unwrap();
+    assert!(AutoCommitMutator::new(Arc::clone(&fixture.db))
+        .exists("Secrets", &created.doc_id)
+        .await
+        .unwrap());
 }

@@ -340,8 +340,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     )
                     .await
                     .map_err(|error| query::error::QueryError::execution(error.to_string()))?;
-                let heads =
-                    super::helpers::load_update_heads(&datastore, doc_short_id).await?;
+                let heads = super::helpers::load_update_heads(&datastore, doc_short_id).await?;
                 write_local_update(
                     &datastore,
                     &collection,
@@ -368,13 +367,8 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     Some(&heads),
                 )
                 .await
-                .map_err(|error| match error {
-                    crate::block::builder::BuildError::NeedsInput(request) => {
-                        query::error::QueryError::NeedsInput(request)
-                    }
-                    other => query::error::QueryError::execution(format!(
-                        "failed to write document blocks for update: {other}"
-                    )),
+                .map_err(|error| {
+                    error.into_query_error_in("failed to write document blocks for update")
                 })?;
                 register_block_doc_id_mappings(
                     &systemstore,

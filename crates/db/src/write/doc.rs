@@ -6,13 +6,12 @@ use bytes::Bytes;
 use cid::Cid;
 use document::{DocID, Document};
 use query::mutator::{CreateResult, DeleteResult, DocMutator, UpdateResult};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use storage::corekv::Store;
 
 use crate::block::builder::DocStorageIdentity;
-use crate::block::builder::{
-    write_delete_block, write_document_blocks, write_document_blocks_with_inputs,
-};
+use crate::block::builder::{write_delete_block_with_inputs, write_document_blocks_with_inputs};
 use crate::collection::loader::{get_collection_with_index_manager, get_collection_with_lazy_load};
 use crate::collection::Collection;
 use crate::database::DB;
@@ -58,17 +57,22 @@ fn document_json_value(doc: &Document) -> Option<serde_json::Value> {
 ///
 /// # Remote inputs
 ///
-/// An update's embeddings are remote inputs and are never fetched inside the
-/// transaction: they come from the mutator's memo of prepared inputs (see
-/// [`DocMutator::with_prepared_inputs`]). A miss ends the update with
-/// [`query::error::QueryError::NeedsInput`] before it writes anything; the
-/// caller fetches the input with [`DocMutator::resolve_prepared_input`],
-/// records it in the memo and runs the update again.
+/// A write's remote inputs (embeddings, KMS keys, remote signatures) are never
+/// fetched inside the transaction: they come from the mutator's memo of
+/// prepared inputs (see [`DocMutator::with_prepared_inputs`]).
+/// A miss ends the write with [`query::error::QueryError::NeedsInput`]; the
+/// caller rolls the statement back to its savepoint, fetches the input with
+/// [`DocMutator::resolve_prepared_input`], records it in the memo and runs the
+/// statement again. A create keeps the short ID its first run drew, so the
+/// inputs keyed by it are found on the next run.
 pub struct DbDocMutator<S: Store> {
     db: Arc<DB<S>>,
     txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
     broadcaster: Option<Arc<dyn crate::event::emission::TxnBroadcaster>>,
     prepared_inputs: query::prepared::PreparedInputMemo,
+    /// Creates this attempt has made: the ordinal that names a create's
+    /// short ID in the memo.
+    creates: AtomicU64,
 }
 
 impl<S: Store> DbDocMutator<S> {
@@ -81,6 +85,7 @@ impl<S: Store> DbDocMutator<S> {
             txn: Arc::new(TokioMutex::new(Some(txn))),
             broadcaster: None,
             prepared_inputs: query::prepared::PreparedInputMemo::default(),
+            creates: AtomicU64::new(0),
         }
     }
 
@@ -98,6 +103,7 @@ impl<S: Store> DbDocMutator<S> {
             txn,
             broadcaster,
             prepared_inputs: query::prepared::PreparedInputMemo::default(),
+            creates: AtomicU64::new(0),
         }
     }
 
@@ -115,6 +121,42 @@ impl<S: Store> DbDocMutator<S> {
     /// no longer available for mutations.
     pub async fn is_consumed(&self) -> bool {
         self.txn.lock().await.is_none()
+    }
+
+    /// The storage identity of this attempt's next create. The short ID is
+    /// drawn once per create of the statement and kept in the memo, so a run
+    /// after a missing input gives each create the ID the first run gave it,
+    /// and the KMS keys requested for that document are found.
+    async fn next_create_identity(
+        &self,
+        collection: &Collection,
+    ) -> query::error::Result<DocStorageIdentity> {
+        let ordinal = self.creates.fetch_add(1, Ordering::Relaxed);
+        let request = query::prepared::PreparedInputRequest::new(
+            query::prepared::PreparedInputKind::Allocation,
+            [b"doc-short-id-v1".as_slice(), &ordinal.to_be_bytes()].concat(),
+        );
+        let drawn = match self.prepared_inputs.get(&request) {
+            Some(drawn) => drawn,
+            None => {
+                let short_id = self
+                    .db
+                    .next_doc_short_id()
+                    .await
+                    .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+                self.prepared_inputs
+                    .insert(request, short_id.to_be_bytes().as_slice())
+            }
+        };
+        let short_id = <[u8; 8]>::try_from(drawn.as_ref())
+            .map(u64::from_be_bytes)
+            .map_err(|_| {
+                query::error::QueryError::execution("invalid prepared document short ID")
+            })?;
+        Ok(DocStorageIdentity::new(
+            collection.resolved_root_id(),
+            short_id,
+        ))
     }
 
     async fn ensure_collection_can_write(
@@ -209,6 +251,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             txn: Arc::clone(&self.txn),
             broadcaster: self.broadcaster.clone(),
             prepared_inputs: inputs,
+            creates: AtomicU64::new(0),
         }))
     }
 
@@ -257,27 +300,22 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         self.ensure_collection_can_write(collection_name, &collection)
             .await?;
 
-        crate::search::set_embedding(
+        crate::search::embedding::set_embedding_from_inputs(
             &collection.schema().vector_embeddings,
             &mut doc,
             true,
-            None,
+            &rapidhash::RapidHashSet::default(),
             &self.db.options().embedding_config(),
-        )
-        .await
-        .map_err(|e| query::error::QueryError::execution(format!("embedding error: {}", e)))?;
+            &self.prepared_inputs,
+        )?;
 
         self.db
             .validate_downsample_write(&datastore, &systemstore, &collection, &doc, None)
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
-        let doc_short_id = self
-            .db
-            .next_doc_short_id()
-            .await
-            .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
-        let identity = DocStorageIdentity::new(collection.resolved_root_id(), doc_short_id);
+        let identity = self.next_create_identity(&collection).await?;
+        let doc_short_id = identity.doc_short_id;
 
         // Blocks first: the public DocID is derived from the genesis composite
         // block CID (Go #4838).
@@ -299,7 +337,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             let sign_config = get_signing_config();
             let kms = self.db.kms();
 
-            let block_result = write_document_blocks(
+            let block_result = write_document_blocks_with_inputs(
                 &blockstore,
                 &headstore,
                 &doc,
@@ -309,12 +347,13 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 enc_config.as_ref(),
                 sign_config.as_ref(),
                 kms.as_ref(),
+                Some(&self.prepared_inputs),
+                None,
             )
             .await
-            .map_err(|e| {
-                query::error::QueryError::execution(format!(
-                    "failed to write document blocks for transaction create on collection {}: {}",
-                    collection_name, e
+            .map_err(|error| {
+                error.into_query_error_in(&format!(
+                    "failed to write document blocks for transaction create on collection {collection_name}"
                 ))
             })?;
 
@@ -338,7 +377,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 block_result.cid,
                 doc_short_id,
                 sign_config.as_ref(),
-                None,
+                Some(&self.prepared_inputs),
             )
             .await?;
 
@@ -460,14 +499,13 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 enc_config.as_ref(),
                 sign_config.as_ref(),
                 kms.as_ref(),
-                None,
+                Some(&self.prepared_inputs),
                 Some(&heads),
             )
             .await
-            .map_err(|e| {
-                query::error::QueryError::execution(format!(
-                    "failed to write document blocks for transaction update on collection {}: {}",
-                    collection_name, e
+            .map_err(|error| {
+                error.into_query_error_in(&format!(
+                    "failed to write document blocks for transaction update on collection {collection_name}"
                 ))
             })?;
 
@@ -487,7 +525,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 block_result.cid,
                 doc_short_id,
                 sign_config.as_ref(),
-                None,
+                Some(&self.prepared_inputs),
             )
             .await?;
 
@@ -581,19 +619,19 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             let schema_version_id = collection.version_id();
             let sign_config = get_signing_config();
 
-            let block_result = write_delete_block(
+            let block_result = write_delete_block_with_inputs(
                 &blockstore,
                 &headstore,
                 &canonical_doc_id.to_string(),
                 doc_short_id,
                 schema_version_id,
                 sign_config.as_ref(),
+                Some(&self.prepared_inputs),
             )
             .await
-            .map_err(|e| {
-                query::error::QueryError::execution(format!(
-                    "failed to write delete block for transaction delete on collection {}: {}",
-                    collection_name, e
+            .map_err(|error| {
+                error.into_query_error_in(&format!(
+                    "failed to write delete block for transaction delete on collection {collection_name}"
                 ))
             })?;
 
@@ -614,7 +652,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 block_result.cid,
                 doc_short_id,
                 sign_config.as_ref(),
-                None,
+                Some(&self.prepared_inputs),
             )
             .await?;
 
