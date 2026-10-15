@@ -190,16 +190,12 @@ where
     S: Store + 'static,
 {
     match request.kind() {
-        query::prepared::PreparedInputKind::Embedding => {
-            let response = crate::search::embedding::resolve_prepared_embedding_request(
-                request.exact_request(),
-            )
-            .await
-            .map_err(|error| {
-                query::error::QueryError::execution(format!("embedding error: {error}"))
-            })?;
-            Ok(std::sync::Arc::from(response))
-        }
+        query::prepared::PreparedInputKind::Embedding => resolve_embeddings(db, &[request])
+            .await?
+            .pop()
+            .ok_or_else(|| {
+                query::error::QueryError::execution("embedding service returned nothing")
+            }),
         query::prepared::PreparedInputKind::Signature => resolve_signatures(db, &[request])
             .await?
             .pop()
@@ -344,8 +340,8 @@ where
 }
 
 /// Fetch a wave of external inputs at once, outside any transaction: the
-/// signatures in one call per signer, every other input concurrently. One
-/// answer per request, in order.
+/// signatures in one call per signer, the embeddings through their service,
+/// every other input concurrently. One answer per request, in order.
 pub(crate) async fn resolve_inputs<S>(
     db: &DB<S>,
     requests: Vec<query::prepared::PreparedInputRequest>,
@@ -353,22 +349,48 @@ pub(crate) async fn resolve_inputs<S>(
 where
     S: Store + 'static,
 {
-    let (signatures, others): (Vec<_>, Vec<_>) = requests
-        .iter()
-        .enumerate()
-        .partition(|(_, request)| request.kind() == query::prepared::PreparedInputKind::Signature);
-    let signature_requests: Vec<_> = signatures.iter().map(|(_, request)| *request).collect();
-    let signed = resolve_signatures(db, &signature_requests);
-    let fetched =
-        futures::future::try_join_all(others.iter().map(|(_, request)| resolve_input(db, request)));
-    let (signed, fetched) = futures::future::try_join(signed, fetched).await?;
+    use query::prepared::PreparedInputKind;
+    let of_kind = |kind: Option<PreparedInputKind>| -> Vec<usize> {
+        (0..requests.len())
+            .filter(|index| {
+                let found = requests[*index].kind();
+                match kind {
+                    Some(kind) => found == kind,
+                    None => {
+                        found != PreparedInputKind::Signature
+                            && found != PreparedInputKind::Embedding
+                    }
+                }
+            })
+            .collect()
+    };
+    let (signatures, embeddings, others) = (
+        of_kind(Some(PreparedInputKind::Signature)),
+        of_kind(Some(PreparedInputKind::Embedding)),
+        of_kind(None),
+    );
+    let picked = |indices: &[usize]| -> Vec<&query::prepared::PreparedInputRequest> {
+        indices.iter().map(|index| &requests[*index]).collect()
+    };
+    let (signature_requests, embedding_requests) = (picked(&signatures), picked(&embeddings));
+    let (signed, embedded, fetched) = futures::future::try_join3(
+        resolve_signatures(db, &signature_requests),
+        resolve_embeddings(db, &embedding_requests),
+        futures::future::try_join_all(
+            others
+                .iter()
+                .map(|index| resolve_input(db, &requests[*index])),
+        ),
+    )
+    .await?;
     let mut answers: Vec<Option<Arc<[u8]>>> = vec![None; requests.len()];
-    for ((index, _), answer) in signatures
-        .iter()
-        .chain(others.iter())
-        .zip(signed.into_iter().chain(fetched))
+    for (index, answer) in signatures
+        .into_iter()
+        .chain(embeddings)
+        .chain(others)
+        .zip(signed.into_iter().chain(embedded).chain(fetched))
     {
-        answers[*index] = Some(answer);
+        answers[index] = Some(answer);
     }
     answers
         .into_iter()
@@ -376,6 +398,44 @@ where
             answer.ok_or_else(|| {
                 query::error::QueryError::execution("an external input went unanswered")
             })
+        })
+        .collect()
+}
+
+/// Every embedding of a wave through the database's embedding service:
+/// each text once, from the cache when it holds it, all in flight at once.
+async fn resolve_embeddings<S>(
+    db: &DB<S>,
+    requests: &[&query::prepared::PreparedInputRequest],
+) -> query::error::Result<Vec<Arc<[u8]>>>
+where
+    S: Store + 'static,
+{
+    if requests.is_empty() {
+        return Ok(Vec::new());
+    }
+    let keys = requests
+        .iter()
+        .map(|request| {
+            crate::search::embedding::EmbeddingInput::decode(request.exact_request())
+                .map(crate::remote_inputs::Embedding::new)
+                .map_err(|error| {
+                    query::error::QueryError::execution(format!("embedding error: {error}"))
+                })
+        })
+        .collect::<query::error::Result<Vec<_>>>()?;
+    db.remote_inputs()
+        .embeddings()
+        .get_many(keys)
+        .await
+        .into_iter()
+        .map(|vector| {
+            let vector = vector.map_err(|error| {
+                query::error::QueryError::execution(format!("embedding error: {error}"))
+            })?;
+            serde_json::to_vec(&*vector)
+                .map(Arc::from)
+                .map_err(|error| query::error::QueryError::execution(error.to_string()))
         })
         .collect()
 }

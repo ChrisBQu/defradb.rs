@@ -7,8 +7,10 @@
 //! caller's async runtime when none was given. They are built on first use,
 //! so the runtime is set before the first write that needs one.
 
+mod embeddings;
 mod signatures;
 
+pub(crate) use embeddings::{Embedding, Embeddings};
 pub(crate) use signatures::{RemoteSignatures, Signature, Signer};
 
 use regolith::sync::OnceCell;
@@ -18,6 +20,7 @@ use regolith::sync::OnceCell;
 pub(crate) struct RemoteInputs {
     runtime: OnceCell<inputs::Runtime>,
     signatures: OnceCell<inputs::Service<RemoteSignatures>>,
+    embeddings: OnceCell<inputs::Service<Embeddings>>,
 }
 
 impl RemoteInputs {
@@ -37,6 +40,13 @@ impl RemoteInputs {
     pub(crate) fn signatures(&self) -> &inputs::Service<RemoteSignatures> {
         self.signatures.get_or_init_racy(|| {
             inputs::Service::new(RemoteSignatures, signatures::config(), self.runtime())
+        })
+    }
+
+    /// Embeddings, single-flighted and cached by text.
+    pub(crate) fn embeddings(&self) -> &inputs::Service<Embeddings> {
+        self.embeddings.get_or_init_racy(|| {
+            inputs::Service::new(Embeddings, embeddings::config(), self.runtime())
         })
     }
 }

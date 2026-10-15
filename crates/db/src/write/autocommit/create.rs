@@ -539,16 +539,24 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         // === Phase 1: Prepare documents (sequential — embeddings are async/external) ===
         let mut prepared_docs: Vec<Document> = Vec::with_capacity(docs.len());
         let embedding_config = self.db.options().embedding_config();
+        // Every document's missing embeddings join one wave.
+        let mut first_miss = None;
         for mut doc in docs {
             if let Some(inputs) = &self.prepared_inputs {
-                crate::search::embedding::set_embedding_from_inputs(
+                match crate::search::embedding::set_embedding_from_inputs(
                     &collection.schema().vector_embeddings,
                     &mut doc,
                     true,
                     &rapidhash::RapidHashSet::default(),
                     &embedding_config,
                     inputs,
-                )?;
+                ) {
+                    Ok(_) => {}
+                    Err(query::error::QueryError::NeedsInput(request)) => {
+                        first_miss.get_or_insert(request);
+                    }
+                    Err(error) => return Err(error),
+                }
             } else {
                 crate::search::set_embedding(
                     &collection.schema().vector_embeddings,
@@ -564,6 +572,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             }
 
             prepared_docs.push(doc);
+        }
+        if let Some(request) = first_miss {
+            return Err(query::error::QueryError::NeedsInput(request));
         }
 
         // No per-doc write guards for creates: identities are derived inside
