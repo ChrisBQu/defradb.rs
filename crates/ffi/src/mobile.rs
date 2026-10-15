@@ -6,7 +6,6 @@ use std::ptr;
 
 use acp::nac::NodePermission;
 
-use crate::helpers::get_rt;
 use crate::mobile_config::{
     c_string_ptr, decode_hex_field, ffi_result_error, maybe_cstring, MobileAddReplicatorRequest,
     MobileExecuteRequest, MobileNodeConfig, MobileSyncRequest,
@@ -366,13 +365,11 @@ pub extern "C" fn defra_mobile_ensure_schema(
             Some(value) => value,
             None => return FfiResult::error("invalid schema_sdl parameter"),
         };
-        let rt = try_ffi!(get_rt());
         let default_identity = match default_identity_cstring(node_ptr) {
             Ok(value) => value,
             Err(error) => return FfiResult::error(error),
         };
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             c_string_ptr(&default_identity),
             NodePermission::CollectionPatch
@@ -404,7 +401,7 @@ pub extern "C" fn defra_mobile_ensure_schema(
         // wildcard.
         let context = defra_core::RequestContext::default().with_identity(node_identity_did);
 
-        ffi_async!(rt, {
+        ffi_async!(node_ptr, {
             let existing_collections: RapidHashSet<String> =
                 database.list_collections().unwrap_or_default().into_iter().collect();
             let known_types = existing_collections.clone();

@@ -9,7 +9,6 @@ use std::ffi::c_char;
 use std::sync::Arc;
 
 use acp::nac::{NacStatus, NodePermission};
-use edge::Edge;
 
 use crate::state::{FfiNacManager, NODES};
 use crate::types::{c_str_to_string, FfiResult};
@@ -25,39 +24,65 @@ use crate::ERR_INVALID_NODE_HANDLE;
 /// - NAC enabled + identity has permission -> Ok
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn check_nac_permission(
-    rt: &Edge,
     nac_manager: &Arc<FfiNacManager>,
     identity_did: *const c_char,
     permission: NodePermission,
 ) -> Result<(), FfiResult> {
     // SAFETY: `identity_did` is either null or a valid C string from the FFI caller.
-    let identity_str = unsafe { c_str_to_string(identity_did) };
+    let identity = unsafe { c_str_to_string(identity_did) };
+    wait(admit(nac_manager.as_ref(), identity.as_deref(), permission))
+}
 
-    // One trip to the runtime decides. Check runtime NAC status directly
-    // rather than is_enabled(), because is_enabled() also requires
-    // config.enabled which is a startup flag. FFI nodes start with
-    // config.enabled=false and enable NAC at runtime via enable_nac().
-    // An empty identity is checked as the wildcard; a malformed one is
-    // denied. A call the runtime cannot run fails with its reason.
-    let allowed = rt
-        .block_on(async {
-            if nac_manager.status().await != NacStatus::Enabled {
-                return true;
-            }
-            let did = match identity_str {
-                Some(s) if !s.is_empty() => match identity::Did::new(&s) {
-                    Ok(d) => d,
-                    Err(_) => return false,
-                },
-                _ => identity::Did::wildcard(),
-            };
-            nac_manager
-                .check_permission(&did, permission)
-                .await
-                .unwrap_or(false)
-        })
-        .map_err(|error| FfiResult::error(error.to_string()))?;
+/// Convenience: extract NAC manager from node and check permission.
+///
+/// Returns `Ok(())` if authorized, `Err(FfiResult)` if the node handle
+/// is invalid or the caller is not authorized.
+pub fn check_nac_for_node(
+    node_ptr: usize,
+    identity_did: *const c_char,
+    permission: NodePermission,
+) -> Result<(), FfiResult> {
+    // SAFETY: `identity_did` is either null or a valid C string from the FFI caller.
+    let identity = unsafe { c_str_to_string(identity_did) };
+    wait(admit_on_node(node_ptr, identity.as_deref(), permission))
+}
 
+/// [`check_nac_for_node`] for a caller that awaits it.
+pub(crate) async fn admit_on_node(
+    node_ptr: usize,
+    identity: Option<&str>,
+    permission: NodePermission,
+) -> Result<(), FfiResult> {
+    let nac_manager = NODES
+        .get(node_ptr, |state| state.nac_manager.clone())
+        .ok_or_else(|| FfiResult::error(ERR_INVALID_NODE_HANDLE))?;
+    admit(nac_manager.as_ref(), identity, permission).await
+}
+
+/// Whether `identity` may perform `permission`. Check runtime NAC status
+/// directly rather than is_enabled(), because is_enabled() also requires
+/// config.enabled which is a startup flag. FFI nodes start with
+/// config.enabled=false and enable NAC at runtime via enable_nac(). An empty
+/// identity is checked as the wildcard; a malformed one is denied.
+async fn admit(
+    nac_manager: &FfiNacManager,
+    identity: Option<&str>,
+    permission: NodePermission,
+) -> Result<(), FfiResult> {
+    if nac_manager.status().await != NacStatus::Enabled {
+        return Ok(());
+    }
+    let did = match identity.filter(|s| !s.is_empty()) {
+        Some(s) => identity::Did::new(s).ok(),
+        None => Some(identity::Did::wildcard()),
+    };
+    let allowed = match did {
+        Some(did) => nac_manager
+            .check_permission(&did, permission)
+            .await
+            .unwrap_or(false),
+        None => false,
+    };
     if allowed {
         Ok(())
     } else {
@@ -68,19 +93,11 @@ pub fn check_nac_permission(
     }
 }
 
-/// Convenience: extract NAC manager from node and check permission.
-///
-/// Returns `Ok(())` if authorized, `Err(FfiResult)` if the node handle
-/// is invalid or the caller is not authorized.
-pub fn check_nac_for_node(
-    rt: &Edge,
-    node_ptr: usize,
-    identity_did: *const c_char,
-    permission: NodePermission,
-) -> Result<(), FfiResult> {
-    let nac_manager = NODES
-        .get(node_ptr, |state| state.nac_manager.clone())
-        .ok_or_else(|| FfiResult::error(ERR_INVALID_NODE_HANDLE))?;
-
-    check_nac_permission(rt, &nac_manager, identity_did, permission)
+/// The check, waited for on the caller's thread; a check that cannot wait
+/// there fails with its reason.
+fn wait<F>(check: F) -> Result<(), FfiResult>
+where
+    F: std::future::Future<Output = Result<(), FfiResult>>,
+{
+    crate::call::wait(async { Ok(check.await) }).map_err(FfiResult::error)?
 }

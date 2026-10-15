@@ -23,6 +23,7 @@ documentation_style = "c"
 include = [
     "DefraRemoteSignAsyncCallback",
     "DefraRemoteSignCallback",
+    "DefraResultCallback",
     "FfiResult",
     "NewNodeResult",
     "NewTxnResult",

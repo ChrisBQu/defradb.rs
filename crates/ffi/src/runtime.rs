@@ -1,8 +1,8 @@
 //! The C library's network runtime.
 //!
-//! FFI functions are synchronous and the Rust database API is async: each
-//! call blocks its C caller's thread on the network runtime
-//! ([`Edge::block_on`]), the one runtime this library holds. `defra_init`
+//! Network calls (P2P, starting and closing a node, remote ACP) run on it,
+//! blocking their C caller's thread ([`Edge::block_on`]); a node's data-path
+//! calls run on its worker pool instead ([`crate::call`]). `defra_init`
 //! starts it, and it lives as long as the process.
 
 use edge::{Edge, EdgeConfig, EdgeRuntime};

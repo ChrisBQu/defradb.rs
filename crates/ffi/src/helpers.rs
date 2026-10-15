@@ -17,9 +17,9 @@ pub fn get_rt() -> Result<&'static Edge, FfiResult> {
     crate::runtime::edge().ok_or_else(|| FfiResult::error(ERR_RUNTIME_NOT_INITIALIZED))
 }
 
-/// Runs `future` on the network runtime, blocking the C caller's thread
-/// until it completes. A failure of the runtime itself (it is shutting down,
-/// or the call panicked) becomes the call's own error.
+/// Runs `future`, network work, on the network runtime, blocking the C
+/// caller's thread until it completes. A failure of the runtime itself (it is
+/// shutting down, or the call panicked) becomes the call's own error.
 pub fn block_on<F, T, E>(rt: &Edge, future: F) -> Result<T, E>
 where
     F: Future<Output = Result<T, E>>,

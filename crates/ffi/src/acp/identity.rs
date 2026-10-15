@@ -2,7 +2,7 @@ use std::ffi::c_char;
 
 use identity::Identity;
 
-use crate::helpers::{get_node_database, get_rt};
+use crate::helpers::get_node_database;
 use crate::state::NODES;
 use crate::types::{c_str_to_string, FfiResult};
 use crate::{ffi_async, ffi_entry, try_ffi};
@@ -24,10 +24,9 @@ pub extern "C" fn get_node_identity(node_ptr: usize) -> FfiResult {
             return FfiResult::success(serde_json::json!({ "did": did }).to_string());
         }
 
-        let rt = try_ffi!(get_rt());
         let database = try_ffi!(get_node_database(node_ptr));
 
-        ffi_async!(rt, {
+        ffi_async!(node_ptr, {
             let identity = database
                 .node_identity()
                 .ok_or_else(|| "node identity not configured".to_string())?;

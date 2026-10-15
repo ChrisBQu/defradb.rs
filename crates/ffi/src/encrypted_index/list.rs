@@ -2,7 +2,7 @@ use std::ffi::c_char;
 
 use acp::nac::NodePermission;
 
-use crate::helpers::{get_node_database, get_rt, require_c_str};
+use crate::helpers::{get_node_database, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::types::FfiResult;
 use crate::{ffi_async, ffi_entry, try_ffi};
@@ -19,9 +19,7 @@ pub unsafe extern "C" fn list_encrypted_indexes(
     collection_name: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::EncryptedIndexList
@@ -29,7 +27,7 @@ pub unsafe extern "C" fn list_encrypted_indexes(
         let collection_name_str = try_ffi!(require_c_str(collection_name, "collection_name"));
         let database = try_ffi!(get_node_database(node_ptr));
 
-        ffi_async!(rt, {
+        ffi_async!(node_ptr, {
             let collection = database
                 .get_collection(&collection_name_str)
                 .map_err(|e| format!("failed to get collection: {}", e))?
@@ -56,16 +54,14 @@ pub unsafe extern "C" fn list_all_encrypted_indexes(
     identity_did: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::EncryptedIndexListAll
         ));
         let database = try_ffi!(get_node_database(node_ptr));
 
-        ffi_async!(rt, {
+        ffi_async!(node_ptr, {
             let names = database
                 .list_collections()
                 .map_err(|e| format!("failed to list collections: {}", e))?;

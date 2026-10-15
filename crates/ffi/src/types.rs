@@ -73,6 +73,16 @@ impl From<Result<String, String>> for FfiResult {
     }
 }
 
+/// A call's success with no value, or its error.
+impl From<Result<(), String>> for FfiResult {
+    fn from(result: Result<(), String>) -> Self {
+        match result {
+            Ok(()) => Self::ok(),
+            Err(error) => Self::error(error),
+        }
+    }
+}
+
 /// FFI result for node creation, containing a node handle.
 ///
 /// Matches Go's NewNodeResult struct.

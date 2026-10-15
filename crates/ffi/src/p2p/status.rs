@@ -25,7 +25,6 @@ pub unsafe extern "C" fn p2p_sync_status(
     ffi_entry! {
         let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::P2pPeerInfo

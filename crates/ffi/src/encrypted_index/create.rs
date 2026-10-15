@@ -3,7 +3,7 @@ use std::ffi::c_char;
 use acp::nac::NodePermission;
 use storage::corekv::Key;
 
-use crate::helpers::{get_node_database, get_rt, require_c_str};
+use crate::helpers::{get_node_database, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::types::FfiResult;
 use crate::{ffi_async, ffi_entry, try_ffi};
@@ -21,9 +21,7 @@ pub unsafe extern "C" fn add_encrypted_index(
     field_name: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::EncryptedIndexAdd
@@ -32,7 +30,7 @@ pub unsafe extern "C" fn add_encrypted_index(
         let field_name_str = try_ffi!(require_c_str(field_name, "field_name"));
         let database = try_ffi!(get_node_database(node_ptr));
 
-        ffi_async!(rt, {
+        ffi_async!(node_ptr, {
             // Get the collection
             let collection = database
                 .get_collection(&collection_name_str)
@@ -132,9 +130,7 @@ pub unsafe extern "C" fn delete_encrypted_index(
     field_name: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::EncryptedIndexDelete
@@ -143,7 +139,7 @@ pub unsafe extern "C" fn delete_encrypted_index(
         let field_name_str = try_ffi!(require_c_str(field_name, "field_name"));
         let database = try_ffi!(get_node_database(node_ptr));
 
-        ffi_async!(rt, {
+        ffi_async!(node_ptr, {
             // Get the collection
             let collection = database
                 .get_collection(&collection_name_str)

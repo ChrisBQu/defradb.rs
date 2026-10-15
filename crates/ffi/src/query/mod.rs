@@ -17,7 +17,7 @@ use crate::state::NODES;
 use crate::types::c_str_to_string;
 
 // Re-export all public items so external imports remain unchanged.
-pub use exec::{exec_request, exec_request_with_signing};
+pub use exec::{exec_request, exec_request_async, exec_request_with_signing};
 pub(crate) use subscription::{
     subscription_accepts_doc_id, subscription_doc_ids, subscription_to_scoped_query,
 };
@@ -42,47 +42,41 @@ pub(crate) fn nac_permission_for_query(query_str: &str) -> NodePermission {
 
 /// Whether the identity has the `DacBypass` NAC permission (NAC
 /// admin/owner), the request's DAC bypass.
-pub(crate) fn resolve_dac_bypass(
-    rt: &edge::Edge,
-    node_ptr: usize,
-    identity_did: *const c_char,
-) -> bool {
+pub(crate) fn resolve_dac_bypass(node_ptr: usize, identity_did: *const c_char) -> bool {
     // SAFETY: `identity_did` is either null or a valid C string from the FFI caller.
-    let identity_str = unsafe { c_str_to_string(identity_did) };
-    let did = match identity_str {
-        Some(s) if !s.is_empty() => match identity::Did::new(&s) {
+    let identity = unsafe { c_str_to_string(identity_did) };
+    // A check that cannot wait here leaves the bypass off.
+    crate::call::wait(async { Ok(dac_bypass(node_ptr, identity.as_deref()).await) }).unwrap_or_else(
+        |error| {
+            tracing::warn!(%error, "could not resolve DAC bypass; leaving it off");
+            false
+        },
+    )
+}
+
+/// [`resolve_dac_bypass`] for a caller that awaits it.
+pub(crate) async fn dac_bypass(node_ptr: usize, identity: Option<&str>) -> bool {
+    let did = match identity.filter(|s| !s.is_empty()) {
+        Some(s) => match identity::Did::new(s) {
             Ok(d) => Some(d),
             Err(_) => return false,
         },
-        _ => None,
+        None => None,
     };
-
     let Some(nac_manager) = NODES.get(node_ptr, |state| state.nac_manager.clone()) else {
         return false;
     };
-
-    // A call the runtime cannot run leaves the bypass off.
-    rt.block_on(async {
-        let status = nac_manager.status().await;
-        acp::nac::should_bypass_dac(status, did.as_ref(), |d, p| async move {
-            nac_manager.check_permission(d, p).await.unwrap_or(false)
-        })
-        .await
+    let status = nac_manager.status().await;
+    acp::nac::should_bypass_dac(status, did.as_ref(), |d, p| async move {
+        nac_manager.check_permission(d, p).await.unwrap_or(false)
     })
-    .unwrap_or_else(|error| {
-        tracing::warn!(%error, "could not resolve DAC bypass; leaving it off");
-        false
-    })
+    .await
 }
 
 /// [`resolve_dac_bypass`] installed in the thread-local DAC bypass, as the FFI
 /// entry points did before the bypass travelled in the request's context;
 /// kept, test-only, for the tests written against it.
 #[cfg(test)]
-pub(crate) fn check_and_set_dac_bypass(
-    rt: &edge::Edge,
-    node_ptr: usize,
-    identity_did: *const c_char,
-) {
-    defra_core::dac_bypass::set_dac_bypass(resolve_dac_bypass(rt, node_ptr, identity_did));
+pub(crate) fn check_and_set_dac_bypass(node_ptr: usize, identity_did: *const c_char) {
+    defra_core::dac_bypass::set_dac_bypass(resolve_dac_bypass(node_ptr, identity_did));
 }
