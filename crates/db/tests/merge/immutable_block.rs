@@ -61,13 +61,12 @@ async fn make_handler_with_flags(
     )
 }
 
-fn record(collection: &Collection) -> Document {
+fn record() -> Document {
     let mut doc = Document::new();
     doc.set("author", NormalValue::String("did:key:alice".into()));
     doc.set("body", NormalValue::String("hello".into()));
     doc.set("kind", NormalValue::String("note".into()));
     doc.set_schema_version_id("v1");
-    doc.set_collection(collection.schema().clone());
     doc
 }
 
@@ -139,10 +138,10 @@ async fn put_genesis(
 #[tokio::test]
 async fn create_writes_immutable_fields_in_one_block() {
     let (handler, blockstore, collection) = make_handler().await;
-    let mut doc = record(&collection);
+    let mut doc = record();
 
     let (_, _, result) =
-        super::merge_handler_tests::create_doc_locally(&handler, &collection, &mut doc, "v1").await;
+        super::merge_handler_tests::create_doc_locally(&handler, &collection, &mut doc).await;
 
     let composite = load(&blockstore, &result.cid).await;
     let mut links: Vec<&str> = composite
@@ -178,9 +177,9 @@ async fn create_writes_immutable_fields_in_one_block() {
 #[tokio::test]
 async fn update_writes_no_block_for_unchanged_immutable_field() {
     let (handler, blockstore, collection) = make_handler().await;
-    let mut doc = record(&collection);
+    let mut doc = record();
     let (_, short_id, created) =
-        super::merge_handler_tests::create_doc_locally(&handler, &collection, &mut doc, "v1").await;
+        super::merge_handler_tests::create_doc_locally(&handler, &collection, &mut doc).await;
 
     doc.set("body", NormalValue::String("edited".into()));
     let modified: rapidhash::RapidHashSet<String> =
@@ -190,7 +189,7 @@ async fn update_writes_no_block_for_unchanged_immutable_field() {
         &txn.blockstore().unwrap(),
         &txn.headstore().unwrap(),
         &doc,
-        "v1",
+        collection.schema(),
         db::block::builder::DocStorageIdentity::new(collection.resolved_root_id(), short_id),
         Some(&modified),
         None,
@@ -215,10 +214,14 @@ async fn update_writes_no_block_for_unchanged_immutable_field() {
 #[tokio::test]
 async fn remote_genesis_applies_immutable_block_fields() {
     let (local, local_blocks, local_collection) = make_handler().await;
-    let doc = record(&local_collection);
-    let built = db::block::builder::build_blocks_from_document(&doc, "v1", &local_blocks)
-        .await
-        .unwrap();
+    let doc = record();
+    let built = db::block::builder::build_blocks_from_document(
+        &doc,
+        local_collection.schema(),
+        &local_blocks,
+    )
+    .await
+    .unwrap();
 
     for batch in [false, true] {
         let (remote, remote_blocks, remote_collection) = make_handler().await;
@@ -328,7 +331,7 @@ async fn peer_without_immutable_flags_merges_and_chains_its_updates() {
         &txn.blockstore().unwrap(),
         &txn.headstore().unwrap(),
         &update,
-        "v1",
+        collection.schema(),
         db::block::builder::DocStorageIdentity::new(collection.resolved_root_id(), short_id),
         Some(&modified),
         None,
@@ -347,9 +350,9 @@ async fn peer_without_immutable_flags_merges_and_chains_its_updates() {
 #[tokio::test]
 async fn later_immutable_block_cannot_change_a_value() {
     let (handler, blockstore, collection) = make_handler().await;
-    let mut doc = record(&collection);
+    let mut doc = record();
     let (doc_id, _, created) =
-        super::merge_handler_tests::create_doc_locally(&handler, &collection, &mut doc, "v1").await;
+        super::merge_handler_tests::create_doc_locally(&handler, &collection, &mut doc).await;
 
     let forged = Block::new(
         CrdtDelta::Immutable(ImmutableDeltaPayload {
@@ -405,17 +408,23 @@ async fn later_immutable_block_cannot_change_a_value() {
 #[tokio::test]
 async fn batch_and_single_create_build_the_same_genesis() {
     let (handler, _, collection) = make_handler().await;
-    let doc = record(&collection);
+    let doc = record();
     let identity = db::block::builder::DocStorageIdentity::new(collection.resolved_root_id(), 7);
 
-    let computed =
-        db::block::builder::compute_document_blocks(&doc, "v1", identity, None, None).unwrap();
+    let computed = db::block::builder::compute_document_blocks(
+        &doc,
+        collection.schema(),
+        identity,
+        None,
+        None,
+    )
+    .unwrap();
     let txn = handler.db().new_txn(false).await.unwrap();
     let written = db::block::builder::write_document_blocks(
         &txn.blockstore().unwrap(),
         &txn.headstore().unwrap(),
         &doc,
-        "v1",
+        collection.schema(),
         identity,
         None,
         None,
@@ -446,4 +455,98 @@ async fn a_field_named_like_the_immutable_link_is_rejected() {
         .await;
     let error = created.expect_err("a field cannot take the immutable link name");
     assert!(error.to_string().contains("reserved"), "{error}");
+}
+
+async fn commits(
+    handler: &Handler,
+    options: db::read::commits::CommitsQueryOptions,
+) -> Vec<Document> {
+    let txn = handler.db().new_txn(true).await.unwrap();
+    let fetcher =
+        db::read::commits::CommitsFetcher::new(Arc::new(async_lock::Mutex::new(Some(txn))));
+    fetcher.fetch_commits(&options).await.unwrap()
+}
+
+fn commit_row(commit: &Document) -> (String, String, Option<String>) {
+    let text = |key: &str| commit.get(key).and_then(|v| v.as_str()).map(str::to_string);
+    (
+        text("cid").unwrap(),
+        text("fieldName").unwrap(),
+        text("delta"),
+    )
+}
+
+fn base64_cbor(value: &str) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(cbor(value))
+}
+
+#[tokio::test]
+async fn commits_for_an_immutable_field_return_the_immutable_block() {
+    let (handler, blockstore, collection) = make_handler().await;
+    let mut doc = record();
+    let (doc_id, _, created) =
+        super::merge_handler_tests::create_doc_locally(&handler, &collection, &mut doc).await;
+    let immutable_cid = load(&blockstore, &created.cid)
+        .await
+        .links
+        .unwrap()
+        .into_iter()
+        .find(|link| link.name == IMMUTABLE_LINK_NAME)
+        .unwrap()
+        .link;
+
+    let rows = commits(
+        &handler,
+        db::read::commits::CommitsQueryOptions {
+            doc_id: Some(doc_id.to_string()),
+            field_name: Some("author".into()),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    assert_eq!(
+        rows.iter().map(commit_row).collect::<Vec<_>>(),
+        [(
+            immutable_cid.to_string(),
+            "author".to_string(),
+            Some(base64_cbor("did:key:alice"))
+        )]
+    );
+}
+
+/// Downsampling reads a document's values from its commits by height.
+#[tokio::test]
+async fn height_one_commits_carry_every_immutable_field_value() {
+    let (handler, _, collection) = make_handler().await;
+    let mut doc = record();
+    let (doc_id, _, _) =
+        super::merge_handler_tests::create_doc_locally(&handler, &collection, &mut doc).await;
+
+    let rows = commits(
+        &handler,
+        db::read::commits::CommitsQueryOptions {
+            doc_id: Some(doc_id.to_string()),
+            height_start: Some(1),
+            height_end: Some(2),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let mut values: Vec<_> = rows
+        .iter()
+        .map(commit_row)
+        .filter_map(|(_, field, delta)| Some((field, delta?)))
+        .collect();
+    values.sort();
+    assert_eq!(
+        values,
+        [
+            ("author".to_string(), base64_cbor("did:key:alice")),
+            ("body".to_string(), base64_cbor("hello")),
+            ("kind".to_string(), base64_cbor("note")),
+        ]
+    );
 }

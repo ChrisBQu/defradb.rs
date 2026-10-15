@@ -76,7 +76,8 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
 
         // Phase 1: decode/decrypt every linked field ONCE and validate @immutable
         // BEFORE persisting anything, so a rejected composite leaves no partial write.
-        let mut pending: Vec<(Cid, CrdtDelta)> = Vec::with_capacity(links.len());
+        // One entry per link: an Immutable block carries several field deltas.
+        let mut pending: Vec<(Cid, Vec<CrdtDelta>)> = Vec::with_capacity(links.len());
         for dag_link in links {
             let link_name = &dag_link.name;
             let link_cid = &dag_link.link;
@@ -134,75 +135,75 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                 }
                 other => vec![other],
             };
-            for effective in deltas {
-                let field_name = match &effective {
+            for effective in &deltas {
+                let field_name = match effective {
                     CrdtDelta::Lww(payload) => payload.field_name.as_str(),
                     _ => link_name.as_str(),
                 };
                 if immutable_fields.contains(field_name) {
                     if let Some(baseline) = immutable_baseline.as_ref() {
-                        Self::check_immutable_delta(baseline, field_name, &effective)?;
+                        Self::check_immutable_delta(baseline, field_name, effective)?;
                     }
                 }
-                pending.push((*link_cid, effective));
             }
+            pending.push((*link_cid, deltas));
         }
 
         // Phase 2: persist the decoded deltas.
-        for (link_cid, effective) in pending {
-            match effective {
-                CrdtDelta::Lww(lww_payload) => {
-                    let result = self
-                        .process_lww_delta_in_txn(
-                            datastore,
-                            headstore,
-                            &link_cid,
-                            &lww_payload,
-                            context.metadata.collection_id,
-                            context.doc_id_str,
-                            context.doc_short_id,
-                        )
-                        .await?;
-                    if result.applied {
-                        state.any_field_applied = true;
+        for (link_cid, deltas) in pending {
+            for effective in deltas {
+                match effective {
+                    CrdtDelta::Lww(lww_payload) => {
+                        let result = self
+                            .process_lww_delta_in_txn(
+                                datastore,
+                                headstore,
+                                &link_cid,
+                                &lww_payload,
+                                context.metadata.collection_id,
+                                context.doc_id_str,
+                                context.doc_short_id,
+                            )
+                            .await?;
+                        if result.applied {
+                            state.any_field_applied = true;
+                        }
+                        if let Some(value) = result.value {
+                            state
+                                .field_values
+                                .insert(lww_payload.field_name.clone(), value);
+                        }
                     }
-                    if let Some(value) = result.value {
-                        state
-                            .field_values
-                            .insert(lww_payload.field_name.clone(), value);
+                    CrdtDelta::Counter(counter_payload) => {
+                        let result = self
+                            .process_counter_delta_in_txn(
+                                datastore,
+                                headstore,
+                                &link_cid,
+                                &counter_payload,
+                                context.metadata.collection_id,
+                                context.doc_id_str,
+                                context.doc_short_id,
+                            )
+                            .await?;
+                        if result.applied {
+                            state.any_field_applied = true;
+                        }
+                        if let Some(value) = result.value {
+                            state
+                                .field_values
+                                .insert(counter_payload.field_name.clone(), value);
+                        }
                     }
-                }
-                CrdtDelta::Counter(counter_payload) => {
-                    let result = self
-                        .process_counter_delta_in_txn(
-                            datastore,
-                            headstore,
-                            &link_cid,
-                            &counter_payload,
-                            context.metadata.collection_id,
-                            context.doc_id_str,
-                            context.doc_short_id,
-                        )
-                        .await?;
-                    if result.applied {
-                        state.any_field_applied = true;
+                    other => {
+                        return Err(MergeError::UnsupportedDelta(format!(
+                            "Unexpected delta type in linked block: {:?}",
+                            std::mem::discriminant(&other)
+                        )));
                     }
-                    if let Some(value) = result.value {
-                        state
-                            .field_values
-                            .insert(counter_payload.field_name.clone(), value);
-                    }
-                }
-                other => {
-                    return Err(MergeError::UnsupportedDelta(format!(
-                        "Unexpected delta type in linked block: {:?}",
-                        std::mem::discriminant(&other)
-                    )));
                 }
             }
-            if state.linked_field_cids.last() != Some(&link_cid) {
-                state.linked_field_cids.push(link_cid);
-            }
+            state.linked_field_cids.push(link_cid);
         }
 
         Ok(None)

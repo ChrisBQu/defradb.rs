@@ -191,7 +191,6 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         ensure_collection_is_active(&self.db, collection_name, &collection)?;
         let embedding_config = self.db.options().embedding_config();
 
-        crate::block::builder::attach_immutable_schema(&mut doc, collection.schema());
         crate::search::set_embedding(
             &collection.schema().vector_embeddings,
             &mut doc,
@@ -211,7 +210,6 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
         let short_id = collection.resolved_root_id();
-        let schema_version_id = collection.version_id();
         let enc_config = get_encryption_config();
         let sign_config = get_signing_config();
 
@@ -229,7 +227,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 &blockstore,
                 &headstore,
                 &doc,
-                schema_version_id,
+                collection.schema(),
                 identity,
                 None,
                 enc_config.as_ref(),
@@ -305,7 +303,6 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         ensure_collection_is_active(&self.db, collection_name, &collection)?;
         let embedding_config = self.db.options().embedding_config();
 
-        crate::block::builder::attach_immutable_schema(&mut doc, collection.schema());
         let generated = crate::search::set_embedding(
             &collection.schema().vector_embeddings,
             &mut doc,
@@ -362,7 +359,6 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         .await?;
 
         let short_id = collection.resolved_root_id();
-        let schema_version_id = collection.version_id();
         let enc_config = get_encryption_config();
         let sign_config = get_signing_config();
 
@@ -373,7 +369,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 &blockstore,
                 &headstore,
                 &doc,
-                schema_version_id,
+                collection.schema(),
                 DocStorageIdentity::new(short_id, doc_short_id),
                 Some(&modified_fields),
                 enc_config.as_ref(),

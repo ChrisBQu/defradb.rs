@@ -199,7 +199,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .await?;
 
             // Use version_id for collectionVersionID (matches Go's VersionID())
-            let schema_version_id = collection.version_id();
             // Explicit config from the mutation only. A document created
             // encrypted keeps its encryption because the block writer
             // inherits it from the previous block, matching Go's
@@ -208,7 +207,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             // Get signing config from thread-local (set by FFI exec_request)
             let sign_config = get_signing_config();
 
-            crate::block::builder::attach_immutable_schema(&mut doc, collection.schema());
             let identity = DocStorageIdentity::new(collection.resolved_root_id(), doc_short_id);
 
             // For update operations, pass the modified fields to only create blocks
@@ -217,7 +215,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 &blockstore,
                 &headstore,
                 &doc,
-                schema_version_id,
+                collection.schema(),
                 identity,
                 Some(&modified_fields),
                 enc_config.as_ref(),

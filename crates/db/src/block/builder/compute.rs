@@ -25,11 +25,12 @@ pub struct ComputedBlocks {
 /// Accumulates all (key, value) pairs instead of writing to storage.
 pub fn compute_document_blocks(
     doc: &Document,
-    schema_version_id: &str,
+    schema: &CollectionVersion,
     identity: DocStorageIdentity,
     encryption_config: Option<&EncryptionConfig>,
     signing_config: Option<&SigningConfig>,
 ) -> Result<ComputedBlocks, String> {
+    let schema_version_id = schema.version_id.as_str();
     let doc_ref_bytes = identity.doc_ref_bytes();
 
     let mut blockstore_entries: Vec<(Vec<u8>, Bytes)> = Vec::new();
@@ -40,8 +41,7 @@ pub fn compute_document_blocks(
 
     let priority: u64 = 1; // Always 1 for creates
 
-    let immutable =
-        compute_immutable_block(doc, schema_version_id, encryption_config, signing_config)?;
+    let immutable = compute_immutable_block(doc, schema, encryption_config, signing_config)?;
 
     for (field_name, field_value) in doc.values() {
         if field_name == "_docID"

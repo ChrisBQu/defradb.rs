@@ -200,13 +200,15 @@ pub async fn write_document_blocks(
     blockstore: &NamespaceView,
     headstore: &NamespaceView,
     doc: &Document,
-    schema_version_id: &str,
+    schema: &CollectionVersion,
     identity: DocStorageIdentity,
     modified_fields: Option<&rapidhash::RapidHashSet<String>>,
     encryption_config: Option<&EncryptionConfig>,
     signing_config: Option<&SigningConfig>,
     kms: Option<&std::sync::Arc<dyn kms::KmsService>>,
 ) -> Result<BlockResult, String> {
+    let schema_version_id = schema.version_id.as_str();
+    let immutable_fields = immutable_field_names(schema);
     let doc_ref_bytes = identity.doc_ref_bytes();
 
     let mut field_links: Vec<DAGLink> = Vec::new();
@@ -254,7 +256,7 @@ pub async fn write_document_blocks(
     };
 
     let immutable = if is_create {
-        compute_immutable_block(doc, schema_version_id, encryption_config, signing_config)?
+        compute_immutable_block(doc, schema, encryption_config, signing_config)?
     } else {
         None
     };
@@ -271,7 +273,9 @@ pub async fn write_document_blocks(
             None => !immutable
                 .as_ref()
                 .is_some_and(|block| block.fields.contains(field_name)),
-            Some(fields) => fields.contains(field_name) && !is_schema_immutable(doc, field_name),
+            Some(fields) => {
+                fields.contains(field_name) && !immutable_fields.contains(field_name.as_str())
+            }
         };
 
         let field_head_entries = if is_create {

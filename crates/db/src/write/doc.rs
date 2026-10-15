@@ -199,7 +199,6 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         self.ensure_collection_can_write(collection_name, &collection)
             .await?;
 
-        crate::block::builder::attach_immutable_schema(&mut doc, collection.schema());
         crate::search::set_embedding(
             &collection.schema().vector_embeddings,
             &mut doc,
@@ -237,7 +236,6 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 query::error::QueryError::execution(format!("failed to get headstore: {}", e))
             })?;
 
-            let schema_version_id = collection.version_id();
             let enc_config = get_encryption_config();
             let sign_config = get_signing_config();
             let kms = self.db.kms();
@@ -246,7 +244,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 &blockstore,
                 &headstore,
                 &doc,
-                schema_version_id,
+                collection.schema(),
                 identity,
                 None,
                 enc_config.as_ref(),
@@ -400,7 +398,6 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             })?;
         doc.set_id(canonical_doc_id.clone());
 
-        crate::block::builder::attach_immutable_schema(&mut doc, collection.schema());
         let generated = crate::search::set_embedding(
             &collection.schema().vector_embeddings,
             &mut doc,
@@ -505,7 +502,6 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 query::error::QueryError::execution(format!("failed to get headstore: {}", e))
             })?;
 
-            let schema_version_id = collection.version_id();
             let enc_config = get_encryption_config();
             let sign_config = get_signing_config();
             let kms = self.db.kms();
@@ -514,7 +510,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 &blockstore,
                 &headstore,
                 &doc,
-                schema_version_id,
+                collection.schema(),
                 DocStorageIdentity::new(collection.resolved_root_id(), doc_short_id),
                 Some(&modified_fields),
                 enc_config.as_ref(),

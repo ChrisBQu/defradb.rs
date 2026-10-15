@@ -73,3 +73,9 @@ pub fn test_collection() -> CollectionVersion {
         ],
     )
 }
+
+/// A collection at `version_id` with no fields, for building blocks of a
+/// document whose fields are all mutable.
+pub fn version(version_id: &str) -> CollectionVersion {
+    CollectionVersion::new("Test", version_id, "col-test", vec![])
+}

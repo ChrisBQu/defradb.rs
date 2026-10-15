@@ -20,13 +20,14 @@ use std::sync::Arc;
 /// Returns `BlockResult` containing the composite block and metadata.
 pub async fn build_blocks_from_document<B: Blockstore>(
     doc: &Document,
-    schema_version_id: &str,
+    schema: &CollectionVersion,
     blockstore: &Arc<B>,
 ) -> Result<BlockResult, String> {
+    let schema_version_id = schema.version_id.as_str();
     let mut field_links: Vec<DAGLink> = Vec::new();
     let mut field_cids: Vec<Cid> = Vec::new();
 
-    let immutable = compute_immutable_block(doc, schema_version_id, None, None)?;
+    let immutable = compute_immutable_block(doc, schema, None, None)?;
 
     // Create a block for each field (LWW or Counter depending on CRDT type)
     for (field_name, field_value) in doc.values() {

@@ -34,25 +34,14 @@ impl ImmutableBlock {
     }
 }
 
-/// Attach the collection to a document about to be written when it declares
-/// `@immutable` fields, which the block builders read from the document.
-pub fn attach_immutable_schema(doc: &mut Document, schema: &schema::CollectionVersion) {
-    if schema.fields.iter().any(|field| field.immutable) {
-        doc.set_collection(schema.clone());
-    }
-}
-
-/// Whether `field_name` is declared `@immutable` by the document's collection.
-///
-/// A document without its collection set reports no immutable fields, so its
-/// fields keep one LWW block each.
-pub(crate) fn is_schema_immutable(doc: &Document, field_name: &str) -> bool {
-    doc.collection().is_some_and(|collection| {
-        collection
-            .fields
-            .iter()
-            .any(|field| field.immutable && field.name == field_name)
-    })
+/// The names of the fields `schema` declares `@immutable`.
+pub(crate) fn immutable_field_names(schema: &CollectionVersion) -> rapidhash::RapidHashSet<&str> {
+    schema
+        .fields
+        .iter()
+        .filter(|field| field.immutable)
+        .map(|field| field.name.as_str())
+        .collect()
 }
 
 /// Build the Immutable block for a document being created.
@@ -62,14 +51,18 @@ pub(crate) fn is_schema_immutable(doc: &Document, field_name: &str) -> bool {
 /// keeps its own block and key. Returns `None` when no field qualifies.
 pub(crate) fn compute_immutable_block(
     doc: &Document,
-    schema_version_id: &str,
+    schema: &CollectionVersion,
     encryption_config: Option<&EncryptionConfig>,
     signing_config: Option<&SigningConfig>,
 ) -> Result<Option<ImmutableBlock>, String> {
+    let immutable = immutable_field_names(schema);
+    if immutable.is_empty() {
+        return Ok(None);
+    }
     let mut fields = BTreeMap::new();
     for (field_name, field_value) in doc.values() {
         if field_name == "_docID"
-            || !is_schema_immutable(doc, field_name)
+            || !immutable.contains(field_name.as_str())
             || encryption_config.is_some_and(|enc| enc.should_encrypt_field(field_name))
         {
             continue;
@@ -84,7 +77,7 @@ pub(crate) fn compute_immutable_block(
     let names = fields.keys().cloned().collect();
     let delta = CrdtDelta::Immutable(ImmutableDeltaPayload {
         priority: 1,
-        schema_version_id: schema_version_id.to_string(),
+        schema_version_id: schema.version_id.clone(),
         fields,
     });
     let mut block = Block::new(delta, vec![], vec![]);

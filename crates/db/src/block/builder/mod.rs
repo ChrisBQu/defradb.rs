@@ -20,8 +20,7 @@ pub use collection::write_collection_block;
 pub use compute::{compute_document_blocks, insert_computed_blocks, ComputedBlocks};
 pub use write::{write_delete_block, write_document_blocks};
 
-pub use immutable::attach_immutable_schema;
-use immutable::{compute_immutable_block, is_schema_immutable};
+use immutable::{compute_immutable_block, immutable_field_names};
 
 use bytes::Bytes;
 use rapidhash::{HashMapExt, RapidHashMap};
@@ -39,6 +38,7 @@ use defra_core::block::{
 use defra_core::encryption::EncryptionConfig;
 use defra_core::signing::SigningConfig;
 use document::{DocID, Document, NormalValue};
+use schema::CollectionVersion;
 use storage::corekv::Key;
 use storage::keys::doc_id_index::DocRef;
 use storage::keys::headstore::{HeadstoreColKey, HeadstoreDocKey, HeadstorePriorityKey};
