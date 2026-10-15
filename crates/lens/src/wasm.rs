@@ -1,8 +1,8 @@
-//! WASM transform execution using wasmtime.
+//! WASM transform store: lens modules compiled on the shared lens engine.
 //!
-//! Provides the runtime for executing Lens WASM modules.
 //! Resource limits (memory, CPU fuel, epoch interruption) are opt-in via
-//! `WasmSandboxConfig` -- by default modules run without restrictions.
+//! `WasmSandboxConfig`; the engine, its clock and the limits live in the
+//! `engine` module.
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -10,106 +10,23 @@ use kovan_map::HopscotchMap;
 use rapidhash::fast::RandomState;
 use rapidhash::RapidHashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::thread::{self, JoinHandle};
-use std::time::Duration;
-use wasmtime::{Config, Engine, Module, StoreLimits, StoreLimitsBuilder};
+use wasmtime::Module;
 
 use tracing::{info, warn};
 
+use crate::engine::{LensEngine, WasmSandboxConfig};
 use crate::store::{LensDocResultStream, LensDocStream, TransformId, TransformStore};
 use crate::wasm_runtime::execute_batch_transform;
 use crate::{Error, LensConfig, LensDoc, LensModule, Result};
-
-/// Opt-in resource limits for WASM execution.
-///
-/// All fields are optional. When `None`, the corresponding limit is not applied,
-/// giving the WASM module full access to that resource.
-#[derive(Debug, Clone)]
-pub struct WasmSandboxConfig {
-    /// Maximum memory a single WASM instance may allocate (bytes).
-    pub max_memory_bytes: Option<usize>,
-
-    /// Fuel budget per transform execution (roughly maps to instruction count).
-    pub fuel_budget: Option<u64>,
-
-    /// Epoch deadline ticks before interruption.
-    pub epoch_deadline_ticks: Option<u64>,
-
-    /// Period at which the shared engine advances its epoch clock. The 100 ms
-    /// restrictive default is a measured provisional setting; tune it for the
-    /// workload with the ignored probe described in
-    /// `docs/benchmarks/lens-epoch-period/measurement.md`.
-    pub epoch_tick_period: Option<Duration>,
-}
-
-impl WasmSandboxConfig {
-    /// Recommended defaults for high-security environments.
-    pub fn restrictive() -> Self {
-        Self {
-            max_memory_bytes: Some(64 * 1024 * 1024), // 64 MiB
-            fuel_budget: Some(1_000_000),
-            epoch_deadline_ticks: Some(2),
-            epoch_tick_period: Some(Duration::from_millis(100)),
-        }
-    }
-}
-
-/// One independent epoch clock per shared Wasmtime engine. This must not run
-/// on the Tokio runtime: transform execution is synchronous, so every runtime
-/// worker could be occupied by WASM while the clock needs to advance.
-struct EpochTicker {
-    stop: Arc<AtomicBool>,
-    worker: Option<JoinHandle<()>>,
-}
-
-impl EpochTicker {
-    fn start(engine: Engine, period: Duration) -> Result<Self> {
-        if period.is_zero() {
-            return Err(Error::InvalidConfig(
-                "WASM epoch tick period must be greater than zero".into(),
-            ));
-        }
-
-        let stop = Arc::new(AtomicBool::new(false));
-        let worker_stop = stop.clone();
-        let worker = thread::Builder::new()
-            .name("defradb-lens-epoch".into())
-            .spawn(move || loop {
-                thread::park_timeout(period);
-                if worker_stop.load(Ordering::Acquire) {
-                    break;
-                }
-                engine.increment_epoch();
-            })?;
-
-        Ok(Self {
-            stop,
-            worker: Some(worker),
-        })
-    }
-}
-
-impl Drop for EpochTicker {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        if let Some(worker) = self.worker.take() {
-            worker.thread().unpark();
-            let _ = worker.join();
-        }
-    }
-}
 
 /// WASM-based transform store.
 ///
 /// Manages WASM module instances and executes transforms.
 pub struct WasmTransformStore {
-    engine: Engine,
+    engine: LensEngine,
     modules: HopscotchMap<TransformId, Arc<Vec<CompiledModule>>, RandomState>,
     configs: HopscotchMap<TransformId, LensConfig, RandomState>,
-    sandbox: Option<WasmSandboxConfig>,
-    epoch_ticker: Option<Arc<EpochTicker>>,
 }
 
 #[derive(Clone)]
@@ -130,44 +47,10 @@ impl WasmTransformStore {
 
     /// Create a WASM transform store with optional sandboxing.
     pub fn with_sandbox(sandbox: Option<WasmSandboxConfig>) -> Result<Self> {
-        let mut config = Config::new();
-        #[cfg(target_os = "macos")]
-        {
-            // Fork-capable embedders can crash when Wasmtime's Mach-port
-            // exception handler is initialized before spawning child processes.
-            config.macos_use_mach_ports(false);
-        }
-        if let Some(ref sb) = sandbox {
-            if sb.fuel_budget.is_some() {
-                config.consume_fuel(true);
-            }
-            if sb.epoch_deadline_ticks.is_some() {
-                config.epoch_interruption(true);
-            }
-        }
-        let engine = Engine::new(&config)
-            .map_err(|e| Error::WasmLoad(format!("failed to create WASM engine: {}", e)))?;
-        let epoch_ticker = match sandbox.as_ref() {
-            Some(sb) => match (sb.epoch_deadline_ticks, sb.epoch_tick_period) {
-                (Some(_), Some(period)) => {
-                    Some(Arc::new(EpochTicker::start(engine.clone(), period)?))
-                }
-                (Some(_), None) => {
-                    return Err(Error::InvalidConfig(
-                        "WASM epoch interruption requires an epoch tick period".into(),
-                    ));
-                }
-                _ => None,
-            },
-            None => None,
-        };
-
         Ok(Self {
-            engine,
+            engine: LensEngine::new(sandbox)?,
             modules: HopscotchMap::with_hasher(RandomState::default()),
             configs: HopscotchMap::with_hasher(RandomState::default()),
-            sandbox,
-            epoch_ticker,
         })
     }
 
@@ -176,8 +59,6 @@ impl WasmTransformStore {
             engine: self.engine.clone(),
             modules: HopscotchMap::with_hasher(RandomState::default()),
             configs: HopscotchMap::with_hasher(RandomState::default()),
-            sandbox: self.sandbox.clone(),
-            epoch_ticker: self.epoch_ticker.clone(),
         }
     }
 
@@ -191,7 +72,7 @@ impl WasmTransformStore {
             let clean_path = path_str.strip_prefix("file://").unwrap_or(path_str);
             Self::validate_wasm_path(clean_path)?;
             let path = Path::new(clean_path);
-            Module::from_file(&self.engine, path).map_err(|e| {
+            Module::from_file(self.engine.engine(), path).map_err(|e| {
                 Error::WasmLoad(format!(
                     "failed to load WASM from {}: {}",
                     path.display(),
@@ -199,7 +80,7 @@ impl WasmTransformStore {
                 ))
             })
         } else if let Some(ref bytes) = lens.module {
-            Module::new(&self.engine, bytes)
+            Module::new(self.engine.engine(), bytes)
                 .map_err(|e| Error::WasmLoad(format!("failed to load WASM from bytes: {}", e)))
         } else {
             Err(Error::InvalidConfig(
@@ -235,13 +116,7 @@ impl WasmTransformStore {
             .get(id)
             .ok_or_else(|| Error::TransformNotFound(id.to_string()))?;
 
-        execute_pipeline_values(
-            &self.engine,
-            (*compiled_modules).clone(),
-            values,
-            self.sandbox.clone(),
-            false,
-        )
+        execute_pipeline_values(&self.engine, (*compiled_modules).clone(), values, false)
     }
 
     /// Inverse transform JSON values using a registered lens pipeline.
@@ -255,13 +130,7 @@ impl WasmTransformStore {
             .get(id)
             .ok_or_else(|| Error::TransformNotFound(id.to_string()))?;
 
-        execute_pipeline_values(
-            &self.engine,
-            (*compiled_modules).clone(),
-            values,
-            self.sandbox.clone(),
-            true,
-        )
+        execute_pipeline_values(&self.engine, (*compiled_modules).clone(), values, true)
     }
 
     /// Validate a WASM module file path to prevent path traversal.
@@ -297,8 +166,8 @@ impl WasmTransformStore {
 
 #[async_trait]
 impl TransformStore for WasmTransformStore {
-    fn new_isolated_store(&self) -> Option<Arc<dyn TransformStore>> {
-        Some(Arc::new(self.empty_with_shared_engine()))
+    fn new_isolated_store(&self) -> Arc<dyn TransformStore> {
+        Arc::new(self.empty_with_shared_engine())
     }
 
     async fn add(&self, config: LensConfig) -> Result<TransformId> {
@@ -388,9 +257,7 @@ impl TransformStore for WasmTransformStore {
             self.engine.clone(),
             (*compiled_modules).clone(),
             docs,
-            self.sandbox.clone(),
             false,
-            self.epoch_ticker.clone(),
         ))
     }
 
@@ -404,9 +271,7 @@ impl TransformStore for WasmTransformStore {
             self.engine.clone(),
             (*compiled_modules).clone(),
             docs,
-            self.sandbox.clone(),
             true,
-            self.epoch_ticker.clone(),
         ))
     }
 
@@ -423,21 +288,19 @@ impl TransformStore for WasmTransformStore {
     }
 }
 
+/// The returned stream holds a clone of `engine`, so the engine's epoch clock
+/// keeps running until the stream is done, even after its store is dropped.
 fn execute_pipeline_stream(
-    engine: Engine,
+    engine: LensEngine,
     mut modules: Vec<CompiledModule>,
     docs: LensDocStream,
-    sandbox: Option<WasmSandboxConfig>,
     inverse: bool,
-    epoch_ticker: Option<Arc<EpochTicker>>,
 ) -> LensDocResultStream {
     enum Phase {
         Collecting {
-            engine: Engine,
+            engine: LensEngine,
             modules: Vec<CompiledModule>,
             docs: LensDocStream,
-            sandbox: Option<WasmSandboxConfig>,
-            epoch_ticker: Option<Arc<EpochTicker>>,
         },
         Yielding {
             results: Vec<LensDoc>,
@@ -456,8 +319,6 @@ fn execute_pipeline_stream(
         engine,
         modules,
         docs,
-        sandbox,
-        epoch_ticker,
     };
 
     Box::pin(futures::stream::unfold(initial, |phase| async {
@@ -466,10 +327,7 @@ fn execute_pipeline_stream(
                 engine,
                 modules,
                 docs,
-                sandbox,
-                epoch_ticker,
             } => {
-                let _ticker_keepalive = epoch_ticker;
                 let current_docs: Vec<serde_json::Value> = docs
                     .collect::<Vec<_>>()
                     .await
@@ -478,7 +336,7 @@ fn execute_pipeline_stream(
                     .collect();
 
                 let current_docs =
-                    match execute_pipeline_values(&engine, modules, current_docs, sandbox, false) {
+                    match execute_pipeline_values(&engine, modules, current_docs, false) {
                         Ok(outputs) => outputs,
                         Err(e) => {
                             return Some((
@@ -536,10 +394,9 @@ fn execute_pipeline_stream(
 }
 
 fn execute_pipeline_values(
-    engine: &Engine,
+    engine: &LensEngine,
     mut modules: Vec<CompiledModule>,
     mut current_docs: Vec<serde_json::Value>,
-    sandbox: Option<WasmSandboxConfig>,
     inverse: bool,
 ) -> Result<Vec<serde_json::Value>> {
     if inverse {
@@ -556,19 +413,10 @@ fn execute_pipeline_values(
             current_docs,
             module.arguments,
             module.inverse,
-            store_limits(&sandbox),
-            &sandbox,
         )?;
     }
 
     Ok(current_docs)
-}
-
-fn store_limits(sandbox: &Option<WasmSandboxConfig>) -> Option<StoreLimits> {
-    sandbox.as_ref().and_then(|sb| {
-        sb.max_memory_bytes
-            .map(|max| StoreLimitsBuilder::new().memory_size(max).build())
-    })
 }
 
 fn json_value_type(value: &serde_json::Value) -> &'static str {
@@ -586,51 +434,6 @@ fn json_value_type(value: &serde_json::Value) -> &'static str {
 mod tests {
     use super::*;
 
-    const IDENTITY_PASSTHROUGH_WASM: &[u8] = &[
-        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // header
-        0x01, 0x0a, 0x02, 0x60, 0x00, 0x01, 0x7f, 0x60, 0x01, 0x7f, 0x01, 0x7f, // types
-        0x02, 0x0d, 0x01, 0x04, b'l', b'e', b'n', b's', 0x04, b'n', b'e', b'x', b't', 0x00,
-        0x00, // import lens.next
-        0x03, 0x03, 0x02, 0x01, 0x00, // alloc and transform functions
-        0x05, 0x03, 0x01, 0x00, 0x01, // one-page memory
-        0x07, 0x1e, 0x03, 0x06, b'm', b'e', b'm', b'o', b'r', b'y', 0x02, 0x00, 0x05, b'a', b'l',
-        b'l', b'o', b'c', 0x00, 0x01, 0x09, b't', b'r', b'a', b'n', b's', b'f', b'o', b'r', b'm',
-        0x00, 0x02, // exports
-        0x0a, 0x0c, 0x02, 0x05, 0x00, 0x41, 0x80, 0x08, 0x0b, 0x04, 0x00, 0x10, 0x00,
-        0x0b,
-        // alloc returns the same in-bounds scratch offset; transform returns the next input
-        // record. This exercises the real host JSON marshalling and result decoding path.
-    ];
-
-    const INFINITE_LOOP_WASM: &[u8] = &[
-        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // header
-        0x01, 0x04, 0x01, 0x60, 0x00, 0x00, // type () -> ()
-        0x03, 0x02, 0x01, 0x00, // one function of type 0
-        0x07, 0x07, 0x01, 0x03, b'r', b'u', b'n', 0x00, 0x00, // export run
-        0x0a, 0x09, 0x01, 0x07, 0x00, 0x03, 0x40, 0x0c, 0x00, 0x0b, 0x0b, // loop { br 0 }
-    ];
-
-    fn env_usize(name: &str, default: usize) -> usize {
-        std::env::var(name)
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(default)
-    }
-
-    fn env_u64(name: &str, default: u64) -> u64 {
-        std::env::var(name)
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(default)
-    }
-
-    fn percentile(sorted: &[f64], quantile: f64) -> f64 {
-        let index = ((sorted.len() - 1) as f64 * quantile).round() as usize;
-        sorted[index]
-    }
-
     #[test]
     fn test_wasm_store_creation() {
         let store = WasmTransformStore::new();
@@ -644,215 +447,35 @@ mod tests {
     }
 
     #[test]
-    fn shared_engine_epoch_ticker_interrupts_an_infinite_call() {
-        // A module with one exported function whose body loops forever.
-        let mut sandbox = WasmSandboxConfig::restrictive();
-        // Fuel is a final bound if epoch ticking regresses; the expected trap
-        // is specifically the epoch interrupt.
-        sandbox.fuel_budget = Some(50_000_000);
-        sandbox.epoch_deadline_ticks = Some(1);
-        sandbox.epoch_tick_period = Some(Duration::from_millis(2));
-        let base = WasmTransformStore::with_sandbox(Some(sandbox)).unwrap();
-        // Transaction-local stores share the base engine and its ticker.
+    fn an_isolated_store_shares_the_engine_and_its_clock() {
+        let base =
+            WasmTransformStore::with_sandbox(Some(WasmSandboxConfig::restrictive())).unwrap();
         let local = base.empty_with_shared_engine();
-        assert!(Engine::same(&base.engine, &local.engine));
-        let module = Module::new(&local.engine, INFINITE_LOOP_WASM).unwrap();
-        let ticker = Arc::downgrade(local.epoch_ticker.as_ref().unwrap());
+        assert!(wasmtime::Engine::same(base.engine.engine(), local.engine.engine()));
+        let clock = base.engine.clock_handle().unwrap();
+        assert!(clock.ptr_eq(&local.engine.clock_handle().unwrap()));
         drop(base);
-
-        let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
-        std::thread::spawn(move || {
-            let mut store = wasmtime::Store::new(&local.engine, ());
-            store.set_fuel(50_000_000).unwrap();
-            store.set_epoch_deadline(1);
-            let result = wasmtime::Instance::new(&mut store, &module, &[]).and_then(|instance| {
-                let func = instance
-                    .get_func(&mut store, "run")
-                    .expect("test module exports run");
-                func.call(&mut store, &[], &mut [])
-            });
-            drop(store);
-            drop(local);
-            let _ = result_tx.send(result);
-        });
-
-        let result = result_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("epoch interruption must finish within the bounded test window");
-        assert_eq!(
-            result
-                .unwrap_err()
-                .downcast_ref::<wasmtime::Trap>()
-                .copied(),
-            Some(wasmtime::Trap::Interrupt)
-        );
-        assert!(
-            ticker.upgrade().is_none(),
-            "last local store stops the ticker"
-        );
-    }
-
-    /// Manual performance probe for choosing the epoch ticker period. Run with:
-    /// `cargo test -p lens measure_epoch_ticker_periods -- --ignored --nocapture`.
-    /// `DEFRA_LENS_TICKER_SAMPLES` and `DEFRA_LENS_TICKER_LIGHT_MS` shorten or
-    /// lengthen the run. It reports wall latency only; portable Rust does not
-    /// expose reliable thread CPU-time or context-switch counters here.
-    #[test]
-    #[ignore = "manual epoch ticker timing probe; run on an otherwise idle host"]
-    fn measure_epoch_ticker_periods() {
-        let samples = env_usize("DEFRA_LENS_TICKER_SAMPLES", 20);
-        let light_sample_ms = env_usize("DEFRA_LENS_TICKER_LIGHT_MS", 2_000);
-        let light_fuel_budget = env_u64("DEFRA_LENS_TICKER_FUEL", u64::MAX);
-        let docs_per_batch = 16;
-        let periods_ms = [10, 25, 50, 100, 250];
-        let input_docs = vec![
-            serde_json::json!({"id": "doc-1", "name": "Ada", "count": 7}),
-            serde_json::json!({"id": "doc-2", "name": "Grace", "count": 11}),
-        ];
-        let module_bytes = IDENTITY_PASSTHROUGH_WASM;
-
-        println!("epoch ticker probe: profile={}, samples={samples}, light_ms/sample={light_sample_ms}, docs/batch={docs_per_batch}, light_fuel={light_fuel_budget}, trap_fuel=u64::MAX, epoch_deadline_ticks=2", if cfg!(debug_assertions) { "debug" } else { "release" });
-        println!("period_ms,light_median_ns_per_doc,light_p95_ns_per_doc,light_epoch_traps,trap_median_ms,trap_p95_ms,trap_min_ms,trap_max_ms");
-        println!("CPU time/context switches: not measured by this portable harness; optionally wrap the test process in platform-specific perf tooling.");
-
-        for period_ms in periods_ms {
-            let period = Duration::from_millis(period_ms);
-            let mut sandbox = WasmSandboxConfig::restrictive();
-            // Use the actual two-tick deadline for ordinary work too. The
-            // light probe runs long enough to span many timer periods and
-            // reports any accidental interruption. Fuel is only a distant
-            // safety bound so it does not mask epoch timing.
-            sandbox.fuel_budget = Some(light_fuel_budget);
-            sandbox.epoch_deadline_ticks = Some(2);
-            sandbox.epoch_tick_period = Some(period);
-            let wasm_store = WasmTransformStore::with_sandbox(Some(sandbox.clone())).unwrap();
-            let module = Module::new(&wasm_store.engine, module_bytes).unwrap();
-
-            // Warm module instantiation, host marshalling, and the timer before sampling.
-            for _ in 0..5 {
-                let result = execute_batch_transform(
-                    &wasm_store.engine,
-                    &module,
-                    input_docs.clone(),
-                    None,
-                    false,
-                    store_limits(&Some(sandbox.clone())),
-                    &Some(sandbox.clone()),
-                )
-                .unwrap();
-                assert_eq!(result, input_docs);
-            }
-
-            let mut light_ns_per_doc = Vec::with_capacity(samples);
-            let mut light_epoch_traps = 0usize;
-            let mut light_traps_per_sample = Vec::with_capacity(samples);
-            for _ in 0..samples {
-                let started = std::time::Instant::now();
-                let mut doc_count = 0usize;
-                let mut sample_traps = 0usize;
-                while started.elapsed() < Duration::from_millis(light_sample_ms as u64) {
-                    let docs = (0..docs_per_batch)
-                        .map(|index| input_docs[index % input_docs.len()].clone())
-                        .collect();
-                    match execute_batch_transform(
-                        &wasm_store.engine,
-                        &module,
-                        docs,
-                        None,
-                        false,
-                        store_limits(&Some(sandbox.clone())),
-                        &Some(sandbox.clone()),
-                    ) {
-                        Ok(result) => doc_count += result.len(),
-                        Err(error) if error.to_string().to_lowercase().contains("interrupt") => {
-                            light_epoch_traps += 1;
-                            sample_traps += 1;
-                        }
-                        Err(error) => panic!("light transform failed unexpectedly: {error}"),
-                    }
-                }
-                light_ns_per_doc
-                    .push(started.elapsed().as_nanos() as f64 / doc_count.max(1) as f64);
-                light_traps_per_sample.push(sample_traps);
-            }
-            let raw_light_ns_per_doc = light_ns_per_doc.clone();
-            light_ns_per_doc.sort_by(f64::total_cmp);
-
-            let module = Module::new(&wasm_store.engine, INFINITE_LOOP_WASM).unwrap();
-            let mut trap_ms = Vec::with_capacity(samples);
-            for _ in 0..samples {
-                let engine = wasm_store.engine.clone();
-                let module = module.clone();
-                let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-                std::thread::spawn(move || {
-                    let mut store = wasmtime::Store::new(&engine, ());
-                    store.set_fuel(u64::MAX).unwrap();
-                    store.set_epoch_deadline(2);
-                    let instance = wasmtime::Instance::new(&mut store, &module, &[])
-                        .expect("infinite loop module instantiates");
-                    let function = instance
-                        .get_func(&mut store, "run")
-                        .expect("infinite loop module exports run");
-                    let started = std::time::Instant::now();
-                    let result = function.call(&mut store, &[], &mut []);
-                    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
-                    let epoch_interrupt = result.err().is_some_and(|error| {
-                        error
-                            .downcast_ref::<wasmtime::Trap>()
-                            .is_some_and(|trap| *trap == wasmtime::Trap::Interrupt)
-                    });
-                    let _ = sender.send((elapsed_ms, epoch_interrupt));
-                });
-                let completed = receiver
-                    .recv_timeout(Duration::from_secs(10))
-                    .expect("infinite transform must trap within the safety timeout");
-                assert!(
-                    completed.1,
-                    "epoch deadline should interrupt before fuel fallback"
-                );
-                trap_ms.push(completed.0);
-            }
-            let raw_trap_ms = trap_ms.clone();
-            trap_ms.sort_by(f64::total_cmp);
-
-            println!(
-                "{period_ms},{:.1},{:.1},{light_epoch_traps},{:.3},{:.3},{:.3},{:.3}",
-                percentile(&light_ns_per_doc, 0.50),
-                percentile(&light_ns_per_doc, 0.95),
-                percentile(&trap_ms, 0.50),
-                percentile(&trap_ms, 0.95),
-                trap_ms[0],
-                trap_ms[trap_ms.len() - 1],
-            );
-            for sample_index in 0..samples {
-                println!(
-                    "raw_sample,{period_ms},{sample_index},{:.1},{},{:.3}",
-                    raw_light_ns_per_doc[sample_index],
-                    light_traps_per_sample[sample_index],
-                    raw_trap_ms[sample_index],
-                );
-            }
-        }
+        assert!(clock.upgrade().is_some(), "the isolated store keeps it");
+        drop(local);
+        assert!(clock.upgrade().is_none());
     }
 
     #[test]
     fn returned_stream_keeps_epoch_ticker_alive_until_dropped() {
         let store =
             WasmTransformStore::with_sandbox(Some(WasmSandboxConfig::restrictive())).unwrap();
-        let ticker = Arc::downgrade(store.epoch_ticker.as_ref().unwrap());
+        let clock = store.engine.clock_handle().unwrap();
         let stream = execute_pipeline_stream(
             store.engine.clone(),
             Vec::new(),
             Box::pin(futures::stream::empty()),
-            None,
             false,
-            store.epoch_ticker.clone(),
         );
 
         drop(store);
-        assert!(ticker.upgrade().is_some());
+        assert!(clock.upgrade().is_some());
         drop(stream);
-        assert!(ticker.upgrade().is_none());
+        assert!(clock.upgrade().is_none());
     }
 
     #[test]

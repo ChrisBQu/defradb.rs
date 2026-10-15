@@ -1,6 +1,16 @@
 use super::*;
 
 impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
+    /// Whether `cid` was already merged. A store that cannot say fails the
+    /// merge as retryable: reading it as "not merged" would apply the block
+    /// again.
+    async fn block_is_merged(&self, cid: &Cid) -> std::result::Result<bool, MergeError> {
+        self.blockstore
+            .is_merged(cid)
+            .await
+            .map_err(|e| MergeError::Storage(e.to_string()))
+    }
+
     /// Process a Counter delta from a block (standalone, with its own transaction).
     pub async fn process_counter_delta(
         &self,
@@ -16,7 +26,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
 
         // A replay of a finalized block ends here, before it needs the
         // collection; the check after the queue covers a concurrent delivery.
-        if self.blockstore.is_merged(cid).await.unwrap_or(false) {
+        if self.block_is_merged(cid).await? {
             return Ok(MergeOutcome::terminal_skip("already merged"));
         }
 
@@ -42,7 +52,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             "Processing Counter delta"
         );
 
-        if self.blockstore.is_merged(cid).await.unwrap_or(false) {
+        if self.block_is_merged(cid).await? {
             tracing::debug!(
                 cid = %cid,
                 field_name = %payload.field_name,

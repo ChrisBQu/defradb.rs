@@ -10,6 +10,7 @@ mod counter_merges;
 mod doc_suite;
 mod embedding;
 mod embedding_reload;
+mod empty_arrays;
 mod identical_create;
 mod identical_delta;
 mod kms;

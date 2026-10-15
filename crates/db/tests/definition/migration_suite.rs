@@ -66,6 +66,10 @@ impl TransformIdSet {
 
 #[async_trait]
 impl TransformStore for SetVerifiedStore {
+    fn new_isolated_store(&self) -> Arc<dyn TransformStore> {
+        Arc::new(Self::default())
+    }
+
     async fn add(&self, config: LensConfig) -> lens::Result<TransformId> {
         let id = TransformId::new(format!("test-transform-{}", config.lenses.len()));
         self.transforms.insert(id.clone());
@@ -139,6 +143,10 @@ impl BlockingVerifiedStore {
 
 #[async_trait]
 impl TransformStore for BlockingVerifiedStore {
+    fn new_isolated_store(&self) -> Arc<dyn TransformStore> {
+        Arc::new(Self::default())
+    }
+
     async fn add(&self, config: LensConfig) -> lens::Result<TransformId> {
         let id = TransformId::new(format!("blocking-transform-{}", config.lenses.len()));
         self.transforms.insert(id.clone());
@@ -210,6 +218,10 @@ impl Default for StepTransformStore {
 
 #[async_trait]
 impl TransformStore for StepTransformStore {
+    fn new_isolated_store(&self) -> Arc<dyn TransformStore> {
+        Arc::new(Self::default())
+    }
+
     async fn add(&self, _config: LensConfig) -> lens::Result<TransformId> {
         let sequence = self.next_id.fetch_add(1, Ordering::SeqCst);
         let id = TransformId::new(format!("step-transform-{sequence}"));

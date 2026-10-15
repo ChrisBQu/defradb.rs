@@ -13,10 +13,6 @@ use events::Bus;
 use identity::{Identity, RawIdentity};
 use kovan_map::HopscotchMap;
 use lens::TransformStore;
-#[cfg(not(feature = "wasmtime-runtime"))]
-use lens::UnsupportedTransformStore;
-#[cfg(feature = "wasmtime-runtime")]
-use lens::WasmTransformStore;
 use rapidhash::fast::RandomState;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -686,18 +682,10 @@ impl<S: Store> DB<S> {
             .and_then(|id| id.did().ok())
     }
 
-    /// Create the appropriate lens transform store for the current platform.
-    #[cfg(feature = "wasmtime-runtime")]
+    /// The lens transform store this database runs its migrations on.
     fn create_lens_store() -> Result<Arc<dyn TransformStore>> {
-        let store = WasmTransformStore::with_sandbox(Some(lens::WasmSandboxConfig::restrictive()))
-            .map_err(|e| Error::Lens(format!("failed to create lens transform store: {}", e)))?;
-        Ok(Arc::new(store))
-    }
-
-    /// Create the appropriate lens transform store for the current platform.
-    #[cfg(not(feature = "wasmtime-runtime"))]
-    fn create_lens_store() -> Result<Arc<dyn TransformStore>> {
-        Ok(Arc::new(UnsupportedTransformStore))
+        lens::default_store()
+            .map_err(|e| Error::Lens(format!("failed to create lens transform store: {}", e)))
     }
 
     /// Get the current transaction ID counter value.

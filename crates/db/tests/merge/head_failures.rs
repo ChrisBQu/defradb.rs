@@ -14,12 +14,18 @@ use storage::corekv::{
 };
 use storage::RegolithStore;
 
+mod collection;
+
 /// One headstore write, identified by the CID it records, that the store refuses.
 #[derive(Clone, Copy, Debug)]
 enum FailPoint {
     SetHead(Cid),
     SupersedeHead(Cid),
     SetPriority(Cid),
+    /// The head key of a collection block.
+    CollectionHead(Cid),
+    /// A marker that this collection block superseded one of its parents.
+    CollectionSupersede(Cid),
 }
 
 impl FailPoint {
@@ -41,6 +47,12 @@ impl FailPoint {
             }
             Self::SetPriority(cid) => {
                 !delete && key.starts_with(b"/p/") && key.ends_with(&cid.to_bytes())
+            }
+            Self::CollectionHead(cid) => {
+                !delete && key.starts_with(b"/c/") && key.ends_with(cid.to_string().as_bytes())
+            }
+            Self::CollectionSupersede(child) => {
+                !delete && key.starts_with(b"/cs/") && key.ends_with(child.to_string().as_bytes())
             }
         }
     }

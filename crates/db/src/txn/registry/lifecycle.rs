@@ -36,14 +36,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         // Transaction-scoped collection caching: collections are loaded lazily
         // from the SystemStore on first access within the transaction. Once loaded,
         // the collection metadata is cached for the transaction's duration.
-        let lens_store = Arc::new(TxnLensStore::new(self.db.lens_store().clone()).map_err(
-            |e| {
-                TransactionError::execution(format!(
-                    "failed to create transaction lens store: {}",
-                    e
-                ))
-            },
-        )?);
+        let lens_store = Arc::new(TxnLensStore::new(self.db.lens_store().clone()));
         let fetcher = Arc::new(LensedDocFetcher::new(self.db.clone(), db_txn, lens_store));
         let ctx = Arc::new(DbTransactionContext::new_with_broadcaster(
             self.db.clone(),

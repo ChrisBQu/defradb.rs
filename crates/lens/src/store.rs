@@ -3,6 +3,7 @@
 //! Matches Go's lens/host-go/store.Store interface.
 
 use std::pin::Pin;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::Stream;
@@ -52,13 +53,10 @@ pub type LensDocResultStream = Pin<Box<dyn Stream<Item = Result<LensDoc>> + Send
 /// Matches Go's lens/host-go/store.Store interface.
 #[async_trait]
 pub trait TransformStore: Send + Sync {
-    /// Create an empty store for transaction-local registrations that shares
-    /// immutable runtime resources with this store. Implementations that do
-    /// not have shareable runtime state may return `None`; callers can then
-    /// use their normal isolated-store fallback.
-    fn new_isolated_store(&self) -> Option<std::sync::Arc<dyn TransformStore>> {
-        None
-    }
+    /// Create an empty store for one transaction's registrations. It shares
+    /// this store's runtime (for WASM, the engine and its epoch clock), so a
+    /// transaction never builds a runtime or a clock thread of its own.
+    fn new_isolated_store(&self) -> Arc<dyn TransformStore>;
 
     /// Register a new lens transform.
     ///
@@ -114,6 +112,10 @@ impl MemoryTransformStore {
 
 #[async_trait]
 impl TransformStore for MemoryTransformStore {
+    fn new_isolated_store(&self) -> Arc<dyn TransformStore> {
+        Arc::new(Self::new())
+    }
+
     async fn add(&self, config: LensConfig) -> Result<TransformId> {
         use sha2::{Digest, Sha256};
 
@@ -216,6 +218,20 @@ mod tests {
 
         store.remove(&id).await.unwrap();
         assert!(!store.has_transform(&id));
+    }
+
+    #[tokio::test]
+    async fn isolated_memory_store_starts_empty_and_stays_apart() {
+        let store = MemoryTransformStore::new();
+        let config = LensConfig::new("v1", "v2", LensModule::from_path("/path/to/transform.wasm"));
+        let id = store.add(config.clone()).await.unwrap();
+
+        let isolated = store.new_isolated_store();
+        assert!(!isolated.has_transform(&id));
+        let local = TransformId::new("local");
+        isolated.add_with_id(local.clone(), config).await.unwrap();
+        assert!(isolated.has_transform(&local));
+        assert!(!store.has_transform(&local));
     }
 
     #[tokio::test]
