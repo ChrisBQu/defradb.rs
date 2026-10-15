@@ -125,7 +125,12 @@ impl EventOrder {
 
     /// Sends out whatever the floors allow, unless another thread is
     /// draining: then that thread finds these messages before it stops.
+    /// A thread that is unwinding only queues: an event panicking under it
+    /// would abort the process, and the next drain sends what it queued.
     fn drain(&self) {
+        if std::thread::panicking() {
+            return;
+        }
         while let Some(mut drainer) = self.drainer.pop() {
             drainer.run(&self.life, &self.work);
             self.drainer.push(drainer);
@@ -556,6 +561,22 @@ mod tests {
         later_binding.hand_over(true);
         assert_eq!(fixture.out(), vec![2, 3]);
         assert!(telemetry::storage_event_count(StorageEvent::PostCommitEventPanicked) > before);
+    }
+
+    #[test]
+    fn an_owner_that_panics_queues_its_events_for_the_next_drain() {
+        let fixture = Fixture::new();
+        let unwound = catch_unwind(AssertUnwindSafe(|| {
+            let (txn, _binding) = fixture.bound(b"a", 1, false);
+            txn.commit().unwrap();
+            panic!("the owner panicked after its commit");
+        }));
+        assert!(unwound.is_err());
+        assert!(fixture.out().is_empty());
+        let (later, later_binding) = fixture.bound(b"b", 2, false);
+        later.commit().unwrap();
+        later_binding.hand_over(true);
+        assert_eq!(fixture.out(), vec![1, 2]);
     }
 
     #[test]
