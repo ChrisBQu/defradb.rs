@@ -2,8 +2,8 @@
 
 use lens::{LensConfig, TransformId};
 use schema::CollectionSource;
-use storage::corekv::{Key, Store};
-use storage::keys::systemstore::{CollectionKey, CollectionVersionKey};
+use storage::corekv::{Key, OnCommit, Store};
+use storage::keys::systemstore::{CollectionKey, CollectionVersionKey, LensConfigKey};
 use tracing::instrument;
 
 use super::helpers::{create_orphan_placeholder, create_placeholder_with_source};
@@ -234,7 +234,7 @@ impl<S: Store> DB<S> {
             let collections = std::sync::Arc::clone(&self.collections);
             let collection_name = collection_name.clone();
             let dest_version_id = dest_version_id.clone();
-            txn.on_success_ordered(std::sync::Arc::new(move || {
+            txn.on_commit(OnCommit::Ordered(Box::new(move || {
                 collections.rcu(|old| {
                     let mut cache = old.clone();
                     let matches_dest = cache
@@ -245,7 +245,7 @@ impl<S: Store> DB<S> {
                     }
                     cache
                 });
-            }))?;
+            })))?;
         }
         txn.commit().await?;
         self.bump_migration_generation();

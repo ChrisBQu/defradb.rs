@@ -18,7 +18,7 @@ use cid::Cid;
 use document::{DocID, Document};
 use query::mutator::{CreateResult, DeleteResult, DocMutator, MutationBatch, UpdateResult};
 use std::sync::Arc;
-use storage::corekv::Store;
+use storage::corekv::{OnCommit, Store};
 use tracing::warn;
 
 use crate::block::builder::{
@@ -116,7 +116,7 @@ impl<S: Store> AutoCommitMutator<S> {
         let policy_id = policy.id.clone();
         let resource_name = policy.resource_name.clone();
         let request_bearer_token = defra_core::signing::get_request_bearer_token(creator.as_str());
-        let registration = txn.on_success_ordered_async(Arc::new(move || {
+        let registration = txn.on_commit(OnCommit::OrderedAsync(Box::new(move || {
             let acp = Arc::clone(&acp);
             let policy_id = policy_id.clone();
             let resource_name = resource_name.clone();
@@ -134,7 +134,7 @@ impl<S: Store> AutoCommitMutator<S> {
                         })
                 },
             ))
-        }));
+        })));
         registration.map_err(|error| query::error::QueryError::execution(error.to_string()))
     }
 
@@ -160,7 +160,7 @@ impl<S: Store> AutoCommitMutator<S> {
         let request_bearer_token = creator
             .as_deref()
             .and_then(defra_core::signing::get_request_bearer_token);
-        txn.on_success_ordered_async(Arc::new(move || {
+        txn.on_commit(OnCommit::OrderedAsync(Box::new(move || {
             let acp = Arc::clone(&acp);
             let policy_id = policy_id.clone();
             let resource_name = resource_name.clone();
@@ -178,7 +178,7 @@ impl<S: Store> AutoCommitMutator<S> {
                         })
                 },
             ))
-        }))
+        })))
         .map_err(|error| query::error::QueryError::execution(error.to_string()))
     }
 

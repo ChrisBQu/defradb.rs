@@ -31,7 +31,7 @@
 /// txn.systemstore().set(b"config", b"data").await?;
 ///
 /// // Register callbacks
-/// txn.on_success(Box::new(|| println!("Committed!")));
+/// txn.on_commit(OnCommit::Sync(Box::new(|| println!("Committed!"))))?;
 ///
 /// // Commit
 /// txn.commit().await?;
@@ -47,8 +47,8 @@ pub use error::{Error, Result};
 pub use multistore::{NamespaceView, RootView, SharedTxn, WeakNamespaceView};
 pub use traits::Txn;
 pub use transact::transact;
-pub use txn::{AsyncCallback, BasicTxn};
+pub use txn::BasicTxn;
 
 // Re-export storage types for convenience
-pub use storage::corekv::{IterOptions, Store, TxnCallback};
+pub use storage::corekv::{IterOptions, OnAbort, OnCommit, Store, TxnCallback};
 pub use storage::namespace::Namespace;

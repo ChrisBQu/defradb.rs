@@ -1,5 +1,6 @@
 use super::*;
 use rapidhash::HashSetExt;
+use storage::corekv::OnCommit;
 
 const TRUNCATE_CHUNK_SIZE: usize = 1000;
 
@@ -79,13 +80,13 @@ impl<S: Store> crate::database::DB<S> {
             Ok(()) => {
                 let collections = std::sync::Arc::clone(&self.collections);
                 let name = name.to_owned();
-                txn.on_success_ordered(std::sync::Arc::new(move || {
+                txn.on_commit(OnCommit::Ordered(Box::new(move || {
                     collections.rcu(|old| {
                         let mut cache = old.clone();
                         cache.remove(&name);
                         cache
                     });
-                }))?;
+                })))?;
                 txn.commit().await?;
 
                 Ok(())

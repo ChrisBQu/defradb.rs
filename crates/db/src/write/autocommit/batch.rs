@@ -8,7 +8,7 @@ use query::mutator::{
 };
 use rapidhash::RapidHashSet;
 use std::sync::Arc;
-use storage::corekv::Store;
+use storage::corekv::{OnCommit, Store};
 
 use super::helpers::{
     ensure_collection_is_active, register_block_doc_id_mappings, register_created_doc,
@@ -321,13 +321,13 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
 
     async fn register_ordered_async_hook(
         &self,
-        callback: storage::corekv::AsyncOrderedTxnCallback,
+        callback: storage::corekv::CommitHook,
     ) -> query::error::Result<()> {
         let mut guard = self.txn.lock().await;
         let txn = guard.as_mut().ok_or_else(|| {
             query::error::QueryError::execution("mutation batch transaction is no longer active")
         })?;
-        txn.on_success_ordered_async(callback)
+        txn.on_commit(OnCommit::OrderedAsync(callback))
             .map_err(|error| query::error::QueryError::execution(error.to_string()))
     }
 

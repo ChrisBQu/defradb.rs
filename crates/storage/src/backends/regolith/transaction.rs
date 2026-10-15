@@ -18,14 +18,14 @@ use regolith::{
     IsolationLevel, OptimisticTransactionDb, Transaction, TransactionError, TxnOptions,
 };
 
-use super::event_order::{Event, EventOrder};
+use super::event_order::EventOrder;
 use super::handle::Handle;
 use super::iterator::RegolithIterator;
+use super::post_commit::PostCommit;
 use super::slots::TxnSlot;
-use crate::backends::shared::{CallbackCounts, CallbackManager};
 use crate::corekv::{
-    AsyncOrderedTxnCallback, AsyncTxnCallback, Error, IterOptions, Iterator, OrderedTxnCallback,
-    Reader, Result, Txn, TxnCallback, Writer,
+    CallbackMark, Error, IterOptions, Iterator, OnAbort, OnCommit, Reader, Result, Txn,
+    TxnCallbacks, Writer,
 };
 
 /// Transaction over a regolith store.
@@ -35,20 +35,11 @@ pub struct RegolithTxn {
     /// the transaction and its post-commit work are done. A read-only open
     /// and a retry attempt's view count against no store.
     _slot: Option<TxnSlot>,
-    callbacks: CallbackManager,
+    callbacks: TxnCallbacks,
     readonly: bool,
     event_order: Arc<EventOrder>,
-    ordered_events: Vec<OrderedTxnCallback>,
-    ordered_async_callbacks: Vec<AsyncOrderedTxnCallback>,
-    savepoints: Vec<SavepointState>,
+    savepoints: Vec<CallbackMark>,
     scoped_attempt: bool,
-}
-
-#[derive(Clone)]
-struct SavepointState {
-    callbacks: CallbackCounts,
-    ordered_events: usize,
-    ordered_async_callbacks: usize,
 }
 
 impl RegolithTxn {
@@ -67,12 +58,10 @@ impl RegolithTxn {
         Ok(Self {
             handle: Some(Arc::new(Handle::ReadOnly(db.snapshot()))),
             _slot: None,
-            callbacks: CallbackManager::default(),
+            callbacks: TxnCallbacks::new(true),
             readonly: true,
             savepoints: Vec::new(),
             event_order: Arc::new(EventOrder::default()),
-            ordered_events: Vec::new(),
-            ordered_async_callbacks: Vec::new(),
             scoped_attempt: false,
         })
     }
@@ -93,12 +82,10 @@ impl RegolithTxn {
             Ok(Self {
                 handle: Some(Arc::new(handle)),
                 _slot: Some(slot),
-                callbacks: CallbackManager::default(),
+                callbacks: TxnCallbacks::new(readonly),
                 readonly,
                 savepoints: Vec::new(),
                 event_order,
-                ordered_events: Vec::new(),
-                ordered_async_callbacks: Vec::new(),
                 scoped_attempt: false,
             })
         })
@@ -108,11 +95,9 @@ impl RegolithTxn {
         Self {
             handle: Some(Arc::new(Handle::Writable(txn))),
             _slot: None,
-            callbacks: CallbackManager::default(),
+            callbacks: TxnCallbacks::default(),
             readonly: false,
             event_order: Arc::new(EventOrder::default()),
-            ordered_events: Vec::new(),
-            ordered_async_callbacks: Vec::new(),
             savepoints: Vec::new(),
             scoped_attempt: true,
         }
@@ -132,6 +117,13 @@ impl RegolithTxn {
             return Err(Error::ReadOnlyTxn);
         };
         Ok(txn)
+    }
+
+    /// Ends without a commit, where nothing can await: the abort callbacks
+    /// run now, their async ones spawned.
+    fn abort_now(&mut self) {
+        let (_, aborted) = std::mem::take(&mut self.callbacks).into_ends();
+        aborted.run_now();
     }
 
     fn handle(&self) -> Result<&Arc<Handle>> {
@@ -164,7 +156,7 @@ impl Drop for RegolithTxn {
     /// panicked too would abort the process.
     fn drop(&mut self) {
         if self.handle.take().is_some() && !std::thread::panicking() {
-            self.callbacks.run_discard();
+            self.abort_now();
         }
     }
 }
@@ -172,12 +164,7 @@ impl Drop for RegolithTxn {
 pub(super) fn map_txn_error(error: TransactionError) -> Error {
     match error {
         TransactionError::Conflict(conflict) => {
-            Error::TxnConflictDetails(crate::corekv::TransactionConflict {
-                access: conflict.mine(),
-                winning_write: conflict.theirs(),
-                observed_seq: conflict.observed_seq(),
-                latest_seq: conflict.latest_seq(),
-            })
+            Error::TxnConflictDetails(crate::corekv::TransactionConflict::from(&conflict))
         }
         // Lock admission failure is not an optimistic validation conflict.
         // Keep it transient and typed as a backend failure so outer callers
@@ -299,7 +286,7 @@ impl Writer for RegolithTxn {
         entry: &[u8],
         once_key: Option<&[u8]>,
     ) -> Result<()> {
-        let layout: Arc<dyn regolith::LogLayout> = Arc::new(log.clone());
+        let layout: Arc<dyn regolith::LogLayout> = log.keys().clone();
         let txn = self.writable()?;
         regolith::ready(|| txn.append(&layout, entry, once_key))
             .await
@@ -340,12 +327,14 @@ impl Txn for RegolithTxn {
             ));
         }
         let handle = self.handle.take().ok_or(Error::DiscardedTxn)?;
+        let callbacks = std::mem::take(&mut self.callbacks);
         // regolith's `commit` consumes the transaction, so this has to be
         // its only owner. An iterator opened from it holds the same `Arc`,
         // so a caller that commits without closing one gets told, rather
         // than a commit that silently does not happen.
         let Ok(handle) = Arc::try_unwrap(handle) else {
-            self.callbacks.run_error().await;
+            let (_, aborted) = callbacks.into_ends();
+            aborted.run().await;
             return Err(Error::Other(
                 "cannot commit while an iterator opened from this transaction is still open"
                     .to_string(),
@@ -353,63 +342,42 @@ impl Txn for RegolithTxn {
         };
         let Handle::Writable(mut txn) = handle else {
             // A snapshot has nothing to commit and cannot carry ordered work.
-            self.callbacks.run_success().await;
+            let (committed, _) = callbacks.into_ends();
+            committed.then.run().await;
             return Ok(());
         };
-        let events: Vec<Event> = std::mem::take(&mut self.ordered_events)
-            .into_iter()
-            .map(|callback| Box::new(move || callback()) as Event)
-            .collect();
-        let hooks = std::mem::take(&mut self.ordered_async_callbacks);
-        let binding = (!events.is_empty() || !hooks.is_empty())
-            .then(|| self.event_order.bind(&mut txn, events, !hooks.is_empty()));
-        let outcome = super::blocking(|| txn.commit()).map_err(map_txn_error);
-        let running = binding.and_then(|binding| binding.hand_over(outcome.is_ok()));
-        match outcome {
+        let work = PostCommit::bind(&self.event_order, &mut txn, callbacks);
+        match super::blocking(|| txn.commit()).map_err(map_txn_error) {
             // Durable from here on: what follows can be reported, never
             // turned into a failed write.
             Ok(_) => {
-                if let Some(running) = running {
-                    for hook in hooks {
-                        super::post_commit::run_hook(hook()).await;
-                    }
-                    running.done();
-                }
-                self.callbacks.run_success().await;
+                work.committed().await;
                 Ok(())
             }
             Err(error) => {
-                self.callbacks.run_error().await;
+                work.failed().await;
                 Err(error)
             }
         }
     }
 
     fn set_savepoint(&mut self) -> Result<()> {
-        let state = SavepointState {
-            callbacks: self.callbacks.counts(),
-            ordered_events: self.ordered_events.len(),
-            ordered_async_callbacks: self.ordered_async_callbacks.len(),
-        };
+        let mark = self.callbacks.mark();
         self.writable_mut()?.set_savepoint();
-        self.savepoints.push(state);
+        self.savepoints.push(mark);
         Ok(())
     }
 
     fn rollback_to_savepoint(&mut self) -> Result<()> {
-        let state = self
+        let mark = *self
             .savepoints
             .last()
-            .cloned()
             .ok_or_else(|| Error::Other("transaction has no active savepoint".into()))?;
         self.writable_mut()?
             .rollback_to_savepoint()
             .map_err(map_txn_error)?;
         self.savepoints.pop();
-        self.callbacks.truncate(state.callbacks);
-        self.ordered_events.truncate(state.ordered_events);
-        self.ordered_async_callbacks
-            .truncate(state.ordered_async_callbacks);
+        self.callbacks.truncate(mark);
         Ok(())
     }
 
@@ -430,47 +398,15 @@ impl Txn for RegolithTxn {
         if let Some(Ok(Handle::Writable(txn))) = self.handle.take().map(Arc::try_unwrap) {
             txn.rollback();
         }
-        self.callbacks.run_discard();
+        self.abort_now();
     }
 
-    fn on_success(&mut self, callback: TxnCallback) {
-        self.callbacks.on_success(callback);
+    fn on_commit(&mut self, callback: OnCommit) -> Result<()> {
+        self.callbacks.on_commit(callback)
     }
 
-    fn on_success_ordered(&mut self, callback: crate::corekv::OrderedTxnCallback) -> Result<()> {
-        if self.readonly {
-            return Err(Error::ReadOnlyTxn);
-        }
-        self.ordered_events.push(callback);
-        Ok(())
-    }
-
-    fn on_success_ordered_async(&mut self, callback: AsyncOrderedTxnCallback) -> Result<()> {
-        if self.readonly {
-            return Err(Error::ReadOnlyTxn);
-        }
-        self.ordered_async_callbacks.push(callback);
-        Ok(())
-    }
-
-    fn on_success_async(&mut self, callback: AsyncTxnCallback) {
-        self.callbacks.on_success_async(callback);
-    }
-
-    fn on_error(&mut self, callback: TxnCallback) {
-        self.callbacks.on_error(callback);
-    }
-
-    fn on_error_async(&mut self, callback: AsyncTxnCallback) {
-        self.callbacks.on_error_async(callback);
-    }
-
-    fn on_discard(&mut self, callback: TxnCallback) {
-        self.callbacks.on_discard(callback);
-    }
-
-    fn on_discard_async(&mut self, callback: AsyncTxnCallback) {
-        self.callbacks.on_discard_async(callback);
+    fn on_abort(&mut self, callback: OnAbort) {
+        self.callbacks.on_abort(callback);
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -486,6 +422,128 @@ impl Txn for RegolithTxn {
     }
 
     fn callback_count(&self) -> usize {
-        self.callbacks.total()
+        self.callbacks.len()
+    }
+}
+
+#[cfg(test)]
+mod append_tests {
+    use crate::backends::RegolithStore;
+    use crate::corekv::{AppendLog, Store, Writer};
+
+    /// A pending append holds the layout its log already shares, not a copy.
+    #[tokio::test]
+    async fn an_append_shares_its_log_layout() {
+        let store = RegolithStore::in_memory().unwrap();
+        let log = AppendLog::new(b"s/arrival/c1/head".to_vec(), b"s/arrival/c1/row/".to_vec());
+        let mut txn = store.new_txn(false).await.unwrap();
+        txn.append(&log, b"doc-1", Some(b"s/arrival/c1/doc/doc-1"))
+            .await
+            .unwrap();
+        assert_eq!(std::sync::Arc::strong_count(log.keys()), 2);
+        txn.discard();
+    }
+}
+
+#[cfg(test)]
+mod callback_tests {
+    use super::*;
+    use crate::backends::RegolithStore;
+    use crate::corekv::{Store, TxnCallback, Writer};
+    use regolith::sync::SegQueue;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn counting(count: &Arc<AtomicUsize>) -> TxnCallback {
+        let count = Arc::clone(count);
+        Box::new(move || {
+            count.fetch_add(1, Ordering::SeqCst);
+        })
+    }
+
+    /// A transaction dropped without a commit or a discard ends without
+    /// committing, so its abort callbacks run, once.
+    #[tokio::test]
+    async fn a_dropped_transaction_runs_its_abort_callbacks_once() {
+        let store = RegolithStore::in_memory().unwrap();
+        let aborted = Arc::new(AtomicUsize::new(0));
+        let mut dropped = store.new_txn(false).await.unwrap();
+        dropped.set(b"key", b"value").await.unwrap();
+        dropped.on_abort(OnAbort::Sync(counting(&aborted)));
+        drop(dropped);
+        assert_eq!(aborted.load(Ordering::SeqCst), 1);
+
+        let mut explicit = store.new_txn(false).await.unwrap();
+        explicit.on_abort(OnAbort::Sync(counting(&aborted)));
+        explicit.discard();
+        assert_eq!(aborted.load(Ordering::SeqCst), 2);
+
+        let mut committed = store.new_txn(false).await.unwrap();
+        committed.set(b"key", b"value").await.unwrap();
+        committed.on_abort(OnAbort::Sync(counting(&aborted)));
+        committed.commit().await.unwrap();
+        assert_eq!(aborted.load(Ordering::SeqCst), 2);
+    }
+
+    /// A commit that loses a conflict runs its abort callbacks once and none
+    /// of its commit callbacks, ordered ones included.
+    #[tokio::test]
+    async fn a_commit_that_loses_runs_only_its_abort_callbacks() {
+        let store = RegolithStore::in_memory().unwrap();
+        let mut seed = store.new_txn(false).await.unwrap();
+        seed.set(b"key", b"one").await.unwrap();
+        seed.commit().await.unwrap();
+
+        let (committed, aborted) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let mut loser = store.new_txn(false).await.unwrap();
+        assert!(loser.get(b"key").await.unwrap().is_some());
+        loser.set(b"key", b"loser").await.unwrap();
+        loser
+            .on_commit(OnCommit::Sync(counting(&committed)))
+            .unwrap();
+        loser
+            .on_commit(OnCommit::Ordered(counting(&committed)))
+            .unwrap();
+        loser.on_abort(OnAbort::Sync(counting(&aborted)));
+        let aborted_async = Arc::clone(&aborted);
+        loser.on_abort(OnAbort::Async(Box::new(move || {
+            Box::pin(async move {
+                aborted_async.fetch_add(1, Ordering::SeqCst);
+            })
+        })));
+        let mut winner = store.new_txn(false).await.unwrap();
+        winner.set(b"key", b"winner").await.unwrap();
+        winner.commit().await.unwrap();
+
+        assert!(loser.commit().await.is_err());
+        assert_eq!(committed.load(Ordering::SeqCst), 0);
+        assert_eq!(aborted.load(Ordering::SeqCst), 2);
+    }
+
+    /// After a commit the async callbacks are awaited before the sync ones
+    /// run, each kind in registration order; a read-only transaction runs
+    /// them the same way and refuses ordered work.
+    #[tokio::test]
+    async fn a_commit_awaits_its_async_callbacks_before_its_sync_ones() {
+        let store = RegolithStore::in_memory().unwrap();
+        for readonly in [false, true] {
+            let seen = Arc::new(SegQueue::new());
+            let mut txn = store.new_txn(readonly).await.unwrap();
+            for name in ["sync-1", "async-1", "sync-2", "async-2"] {
+                let seen = Arc::clone(&seen);
+                let callback = if name.starts_with("async") {
+                    OnCommit::Async(Box::new(move || Box::pin(async move { seen.push(name) })))
+                } else {
+                    OnCommit::Sync(Box::new(move || seen.push(name)))
+                };
+                txn.on_commit(callback).unwrap();
+            }
+            assert_eq!(
+                txn.on_commit(OnCommit::Ordered(Box::new(|| {}))).is_err(),
+                readonly
+            );
+            txn.commit().await.unwrap();
+            let order: Vec<&str> = std::iter::from_fn(|| seen.pop()).collect();
+            assert_eq!(order, ["async-1", "async-2", "sync-1", "sync-2"]);
+        }
     }
 }

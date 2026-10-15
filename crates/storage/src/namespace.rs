@@ -230,7 +230,7 @@ impl crate::corekv::RetryTxn for NamespacedRetryTxn<'_> {
     fn finish_attempt_io(
         &mut self,
         io: Box<dyn crate::corekv::RetryAttemptIO>,
-        callbacks: crate::corekv::RetryCallbacks,
+        callbacks: crate::corekv::TxnCallbacks,
     ) -> Result<()> {
         let namespaced = io
             .into_any()
@@ -434,39 +434,12 @@ impl Txn for NamespacedTxn {
         self.txn.discard()
     }
 
-    fn on_success(&mut self, callback: crate::corekv::TxnCallback) {
-        self.txn.on_success(callback)
+    fn on_commit(&mut self, callback: crate::corekv::OnCommit) -> Result<()> {
+        self.txn.on_commit(callback)
     }
 
-    fn on_success_ordered(&mut self, callback: crate::corekv::OrderedTxnCallback) -> Result<()> {
-        self.txn.on_success_ordered(callback)
-    }
-
-    fn on_success_ordered_async(
-        &mut self,
-        callback: crate::corekv::AsyncOrderedTxnCallback,
-    ) -> Result<()> {
-        self.txn.on_success_ordered_async(callback)
-    }
-
-    fn on_success_async(&mut self, callback: crate::corekv::AsyncTxnCallback) {
-        self.txn.on_success_async(callback)
-    }
-
-    fn on_error(&mut self, callback: crate::corekv::TxnCallback) {
-        self.txn.on_error(callback)
-    }
-
-    fn on_error_async(&mut self, callback: crate::corekv::AsyncTxnCallback) {
-        self.txn.on_error_async(callback)
-    }
-
-    fn on_discard(&mut self, callback: crate::corekv::TxnCallback) {
-        self.txn.on_discard(callback)
-    }
-
-    fn on_discard_async(&mut self, callback: crate::corekv::AsyncTxnCallback) {
-        self.txn.on_discard_async(callback)
+    fn on_abort(&mut self, callback: crate::corekv::OnAbort) {
+        self.txn.on_abort(callback)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

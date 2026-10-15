@@ -7,7 +7,7 @@ use async_lock::RwLock;
 use async_trait::async_trait;
 use bytes::Bytes;
 use std::sync::Arc;
-use storage::corekv::{Error, IterOptions, Iterator, Reader, Result, Txn, TxnCallback, Writer};
+use storage::corekv::{Error, IterOptions, Iterator, OnCommit, Reader, Result, Txn, Writer};
 use storage::namespace::Namespace;
 
 /// Shared transaction wrapper allowing multiple namespace views.
@@ -157,9 +157,9 @@ impl SharedTxn {
         txn.delete(key).await
     }
 
-    /// Register a callback to run only if the transaction commits.
-    pub async fn on_success(&self, callback: TxnCallback) {
-        self.txn.write().await.on_success(callback);
+    /// Register `callback` to run once if the transaction commits.
+    pub async fn on_commit(&self, callback: OnCommit) -> Result<()> {
+        self.txn.write().await.on_commit(callback)
     }
 
     /// Check if readonly.
@@ -274,9 +274,9 @@ impl NamespaceView {
         self.txn.iterator(self.namespace, opts).await
     }
 
-    /// Register a callback to run only if the shared transaction commits.
-    pub async fn on_success(&self, callback: TxnCallback) {
-        self.txn.on_success(callback).await
+    /// Register `callback` to run once if the shared transaction commits.
+    pub async fn on_commit(&self, callback: OnCommit) -> Result<()> {
+        self.txn.on_commit(callback).await
     }
 }
 

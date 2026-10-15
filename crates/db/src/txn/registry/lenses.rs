@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::definition::migration::committed_lenses::PreparedLens;
+use storage::corekv::OnCommit;
 
 impl<S: Store + 'static> DbTransactionRegistry<S> {
     /// Add a standalone lens within a transaction.
@@ -38,14 +39,14 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         let db = self.db.clone();
         let transform_id = lens.id.clone();
         let config = lens.config;
-        txn.on_success_async(Box::new(move || {
+        txn.on_commit(OnCommit::Async(Box::new(move || {
             let db = db.clone();
             let transform_id = transform_id.clone();
             let config = config.clone();
             Box::pin(async move {
                 db.register_committed_lens(transform_id, config).await;
             })
-        }))?;
+        })))?;
 
         Ok(lens.id)
     }

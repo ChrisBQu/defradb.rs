@@ -345,6 +345,6 @@ pub async fn insert_computed_blocks(
             .copied()
             .chain([blocks.block_result.cid]),
     )
-    .await;
+    .await?;
     Ok(())
 }

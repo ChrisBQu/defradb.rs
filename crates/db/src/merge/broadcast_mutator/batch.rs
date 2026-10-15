@@ -339,7 +339,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
 
     async fn register_ordered_async_hook(
         &self,
-        callback: storage::corekv::AsyncOrderedTxnCallback,
+        callback: storage::corekv::CommitHook,
     ) -> query::error::Result<()> {
         self.inner.register_ordered_async_hook(callback).await
     }

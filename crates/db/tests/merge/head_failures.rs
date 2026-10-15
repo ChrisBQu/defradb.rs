@@ -8,9 +8,8 @@ use defra_core::block::{
 use defra_core::merge::{BlockMetadata, MergeBlock, MergeHandler};
 use std::sync::{Arc, Mutex};
 use storage::corekv::{
-    intercept_retry_writes, private::Sealed, AsyncTxnCallback, IterOptions, Iterator, Reader,
-    Result, RetryAttempt, RetryAttemptError, RetryAttemptValue, RetryOptions,
-    RetryWriteInterceptor, Store, Txn, TxnCallback, Writer,
+    intercept_retry_writes, private::Sealed, IterOptions, Iterator, Reader, Result, RetryAttempt,
+    RetryAttemptError, RetryAttemptValue, RetryOptions, RetryWriteInterceptor, Store, Txn, Writer,
 };
 use storage::RegolithStore;
 
@@ -181,26 +180,12 @@ impl Txn for FailingHeadTxn {
     fn discard(self: Box<Self>) {
         self.inner.discard()
     }
-    fn on_success(&mut self, callback: TxnCallback) {
-        self.inner.on_success(callback)
+    fn on_commit(&mut self, callback: storage::corekv::OnCommit) -> Result<()> {
+        self.inner.on_commit(callback)
     }
-    fn on_success_ordered(&mut self, callback: storage::corekv::OrderedTxnCallback) -> Result<()> {
-        self.inner.on_success_ordered(callback)
-    }
-    fn on_success_async(&mut self, callback: AsyncTxnCallback) {
-        self.inner.on_success_async(callback)
-    }
-    fn on_error(&mut self, callback: TxnCallback) {
-        self.inner.on_error(callback)
-    }
-    fn on_error_async(&mut self, callback: AsyncTxnCallback) {
-        self.inner.on_error_async(callback)
-    }
-    fn on_discard(&mut self, callback: TxnCallback) {
-        self.inner.on_discard(callback)
-    }
-    fn on_discard_async(&mut self, callback: AsyncTxnCallback) {
-        self.inner.on_discard_async(callback)
+
+    fn on_abort(&mut self, callback: storage::corekv::OnAbort) {
+        self.inner.on_abort(callback)
     }
     fn as_any(&self) -> &dyn std::any::Any {
         self

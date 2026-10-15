@@ -132,7 +132,7 @@ pub(crate) async fn write_collection_block_with_inputs(
         "Built collection block for branchable collection"
     );
 
-    collect_on_commit(blockstore, [collection_cid]).await;
+    collect_on_commit(blockstore, [collection_cid]).await?;
 
     Ok((collection_cid, collection_bytes.into()))
 }

@@ -115,3 +115,55 @@ mod tests {
         assert_eq!(slots.open.load(Ordering::SeqCst), 0);
     }
 }
+
+#[cfg(test)]
+mod close_tests {
+    use super::*;
+    use crate::backends::{RegolithStore, RegolithStoreOptions};
+    use crate::corekv::Store;
+    use std::future::Future;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll, Wake, Waker};
+
+    #[derive(Default)]
+    struct CountingWaker(AtomicUsize);
+    impl Wake for CountingWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// The transaction that ends last wakes `close`; nothing polls a clock.
+    #[tokio::test]
+    async fn close_is_woken_by_the_last_transaction_that_ends() {
+        let store = RegolithStore::in_memory().unwrap();
+        let reader = store.new_txn(true).await.unwrap();
+        let mut writer = store.new_txn(false).await.unwrap();
+        writer.set(b"key", b"value").await.unwrap();
+        let counter = Arc::new(CountingWaker::default());
+        let waker = Waker::from(Arc::clone(&counter));
+        let mut cx = Context::from_waker(&waker);
+        let mut close = Box::pin(store.close());
+        assert!(close.as_mut().poll(&mut cx).is_pending());
+        assert!(matches!(store.new_txn(false).await, Err(Error::DBClosed)));
+
+        drop(reader);
+        assert_eq!(counter.0.load(Ordering::SeqCst), 0);
+        writer.commit().await.unwrap();
+        assert_eq!(counter.0.load(Ordering::SeqCst), 1);
+        assert!(matches!(close.as_mut().poll(&mut cx), Poll::Ready(Ok(()))));
+    }
+
+    #[tokio::test]
+    async fn close_reports_a_transaction_still_open_at_its_deadline() {
+        let mut options = RegolithStoreOptions::memory();
+        options.close_timeout = std::time::Duration::from_millis(20);
+        let store = RegolithStore::open_with_options("close-deadline", options).unwrap();
+        let held = store.new_txn(false).await.unwrap();
+        let error = store.close().await.unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("1 transaction(s) still in flight"));
+        drop(held);
+    }
+}

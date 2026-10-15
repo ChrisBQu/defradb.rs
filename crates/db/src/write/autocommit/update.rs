@@ -3,6 +3,7 @@ use super::helpers::{
 };
 use super::*;
 use events::{Message, Update};
+use storage::corekv::OnCommit;
 
 use crate::block::builder::DocStorageIdentity;
 use query::runner::DocFetcher;
@@ -416,7 +417,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             let doc_id = canonical_doc_id.to_string();
             let block = block.clone();
             let col_data = col_data.clone();
-            txn.on_retry_success_ordered(Box::new(move || {
+            txn.on_commit(OnCommit::Ordered(Box::new(move || {
                 let update = Update::new(
                     doc_id.clone(),
                     cid,
@@ -437,7 +438,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                         false,
                     )));
                 }
-            }))
+            })))
             .map_err(crate::error::commit_query_error)?;
         }
         let (io, callbacks) = txn

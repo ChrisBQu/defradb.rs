@@ -31,10 +31,10 @@ async fn number(store: &NamespaceView, key: &[u8]) -> Result<u64> {
 pub(crate) async fn record(store: &NamespaceView, collection: u32, doc: &str) -> Result<()> {
     store
         .append(
-            &storage::corekv::AppendLog {
-                head_key: head_key(collection),
-                entry_prefix: format!("/arrival/{collection}/row/").into_bytes(),
-            },
+            &storage::corekv::AppendLog::new(
+                head_key(collection),
+                format!("/arrival/{collection}/row/").into_bytes(),
+            ),
             doc.as_bytes(),
             Some(&doc_key(collection, doc)),
         )

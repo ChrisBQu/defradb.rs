@@ -8,7 +8,7 @@ use document::{DocID, Document};
 use query::mutator::{CreateResult, DeleteResult, DocMutator, UpdateResult};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use storage::corekv::Store;
+use storage::corekv::{OnCommit, Store};
 
 use crate::block::builder::DocStorageIdentity;
 use crate::block::builder::{write_delete_block_with_inputs, write_document_blocks_with_inputs};
@@ -268,13 +268,13 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
 
     async fn register_ordered_async_hook(
         &self,
-        callback: storage::corekv::AsyncOrderedTxnCallback,
+        callback: storage::corekv::CommitHook,
     ) -> query::error::Result<()> {
         let mut guard = self.txn.lock().await;
         let txn = guard.as_mut().ok_or_else(|| {
             query::error::QueryError::execution("transaction is no longer active")
         })?;
-        txn.on_success_ordered_async(callback)
+        txn.on_commit(OnCommit::OrderedAsync(callback))
             .map_err(|error| query::error::QueryError::execution(error.to_string()))
     }
 

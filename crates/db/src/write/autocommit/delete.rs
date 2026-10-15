@@ -1,6 +1,7 @@
 use super::helpers::write_branchable_collection_block;
 use super::*;
 use events::{Message, Update};
+use storage::corekv::OnCommit;
 
 type DeleteAttemptResult = (DocID, bool, Option<CommitArtifacts>);
 
@@ -291,7 +292,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 let cid = *cid;
                 let block = block.clone();
                 let col_data = col_data.clone();
-                txn.on_retry_success_ordered(Box::new(move || {
+                txn.on_commit(OnCommit::Ordered(Box::new(move || {
                     bus.publish(Message::update(Update::new(
                         doc_id.clone(),
                         cid,
@@ -311,7 +312,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                             false,
                         )));
                     }
-                }))
+                })))
                 .map_err(crate::error::commit_query_error)?;
             }
         }
@@ -519,7 +520,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 let cid = *cid;
                 let block = block.clone();
                 let col_data = col_data.clone();
-                txn.on_retry_success_ordered(Box::new(move || {
+                txn.on_commit(OnCommit::Ordered(Box::new(move || {
                     bus.publish(Message::update(Update::new(
                         doc_id.clone(),
                         cid,
@@ -539,7 +540,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                             false,
                         )));
                     }
-                }))
+                })))
                 .map_err(crate::error::commit_query_error)?;
             }
         }

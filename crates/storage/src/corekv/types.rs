@@ -3,6 +3,7 @@
 /// This module provides the foundational abstractions for key-value storage,
 /// including the Key trait for typed keys and iteration options.
 use std::fmt;
+use std::sync::Arc;
 
 /// Trait for keys that can be serialized to bytes.
 ///
@@ -259,18 +260,45 @@ mod tests {
 }
 
 /// Layout of an append-only journal. Entry keys append a zero-padded, 20-digit
-/// decimal position to `entry_prefix`; positions are assigned only at commit.
+/// decimal position to the entry prefix; positions are assigned only at commit.
+///
+/// Clones share one layout, and an append hands the engine that shared
+/// layout rather than a copy of it.
 #[derive(Debug, Clone)]
-pub struct AppendLog {
-    pub head_key: Vec<u8>,
-    pub entry_prefix: Vec<u8>,
+pub struct AppendLog(Arc<LogKeys>);
+
+/// The keys an [`AppendLog`] names, shared by its clones.
+#[derive(Debug)]
+pub(crate) struct LogKeys {
+    pub(crate) head_key: Vec<u8>,
+    pub(crate) entry_prefix: Vec<u8>,
 }
 
 impl AppendLog {
+    pub fn new(head_key: Vec<u8>, entry_prefix: Vec<u8>) -> Self {
+        Self(Arc::new(LogKeys {
+            head_key,
+            entry_prefix,
+        }))
+    }
+
+    pub fn head_key(&self) -> &[u8] {
+        &self.0.head_key
+    }
+
+    pub fn entry_prefix(&self) -> &[u8] {
+        &self.0.entry_prefix
+    }
+
     pub fn prefixed(&self, prefix: &[u8]) -> Self {
-        Self {
-            head_key: [prefix, self.head_key.as_slice()].concat(),
-            entry_prefix: [prefix, self.entry_prefix.as_slice()].concat(),
-        }
+        Self::new(
+            [prefix, self.head_key()].concat(),
+            [prefix, self.entry_prefix()].concat(),
+        )
+    }
+
+    /// The shared layout, as the engine takes it.
+    pub(crate) fn keys(&self) -> &Arc<LogKeys> {
+        &self.0
     }
 }

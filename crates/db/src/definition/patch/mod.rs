@@ -18,7 +18,7 @@ use crate::definition::patch::json::{
 };
 use crate::error::{Error, Result};
 use schema::{CollectionSource, CollectionVersion};
-use storage::corekv::{Key, Store};
+use storage::corekv::{Key, OnCommit, Store};
 use storage::keys::systemstore::{CollectionKey, CollectionNameKey, CollectionVersionKey};
 use tracing::instrument;
 
@@ -307,7 +307,7 @@ impl<S: Store> crate::database::DB<S> {
             let collections = std::sync::Arc::clone(&self.collections);
             let registered_name = actual_name.clone();
             let active = new_schema.is_active;
-            txn.on_success_ordered(std::sync::Arc::new(move || {
+            txn.on_commit(OnCommit::Ordered(Box::new(move || {
                 collections.rcu(|old| {
                     let mut cache = old.clone();
                     if active {
@@ -317,7 +317,7 @@ impl<S: Store> crate::database::DB<S> {
                     }
                     cache
                 });
-            }))?;
+            })))?;
             txn.commit().await?;
 
             tracing::info!(

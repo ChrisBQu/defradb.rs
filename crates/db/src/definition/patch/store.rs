@@ -1,5 +1,7 @@
 use super::*;
 use lens::TransformStore;
+use storage::corekv::OnCommit;
+use storage::keys::systemstore::LensConfigKey;
 
 impl<S: Store> crate::database::DB<S> {
     /// Create and store a new schema version from a validated patched schema.
@@ -500,9 +502,9 @@ impl<S: Store> crate::database::DB<S> {
         if let Ok(new_cid) = cid::Cid::try_from(new_version_id.as_str()) {
             let schema_heads = std::sync::Arc::clone(&self.schema_heads);
             let head_name = actual_name.to_string();
-            txn.on_success_ordered(std::sync::Arc::new(move || {
+            txn.on_commit(OnCommit::Ordered(Box::new(move || {
                 schema_heads.insert(head_name.clone(), (vec![new_cid], collection_priority));
-            }))?;
+            })))?;
         }
 
         let collections = std::sync::Arc::clone(&self.collections);
@@ -513,7 +515,7 @@ impl<S: Store> crate::database::DB<S> {
         } else {
             None
         };
-        txn.on_success_ordered(std::sync::Arc::new(move || {
+        txn.on_commit(OnCommit::Ordered(Box::new(move || {
             collections.rcu(|old| {
                 let mut cache = old.clone();
                 if let Some(collection) = &cached_collection {
@@ -523,7 +525,7 @@ impl<S: Store> crate::database::DB<S> {
                 }
                 cache
             });
-        }))?;
+        })))?;
         txn.commit().await?;
 
         if let Some((transform_id, config)) = committed_migration {
@@ -645,13 +647,13 @@ impl<S: Store> crate::database::DB<S> {
                         .await?;
                 let collections = std::sync::Arc::clone(&self.collections);
                 let registered_name = coll_name.to_string();
-                txn.on_success_ordered(std::sync::Arc::new(move || {
+                txn.on_commit(OnCommit::Ordered(Box::new(move || {
                     collections.rcu(|old| {
                         let mut cache = old.clone();
                         cache.put_named(&registered_name, cached_collection.clone());
                         cache
                     });
-                }))?;
+                })))?;
                 txn.commit().await?;
             }
         }

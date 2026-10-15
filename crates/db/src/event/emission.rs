@@ -8,7 +8,7 @@ use bytes::Bytes;
 use cid::Cid;
 use events::{Bus, Message, Update};
 use std::sync::Arc;
-use storage::corekv::Store;
+use storage::corekv::{OnCommit, Store};
 
 use crate::error::Result;
 use crate::merge::governance::LocalCommitRelease;
@@ -102,7 +102,7 @@ where
         collection_block,
         creator_did,
     };
-    txn.on_success_ordered(Arc::new(move || {
+    txn.on_commit(OnCommit::Ordered(Box::new(move || {
         if let Some(bus) = &bus {
             bus.publish(Message::update(Update::new(
                 event.doc_id.clone(),
@@ -130,11 +130,11 @@ where
         if let (Some(broadcaster), Some(handed)) = (&broadcaster, &handed) {
             broadcaster.submit_update(event.clone(), BroadcastDone(Arc::clone(handed)));
         }
-    }))?;
+    })))?;
     if let Some(delivered) = delivered {
-        txn.on_success_async(Box::new(move || {
+        txn.on_commit(OnCommit::Async(Box::new(move || {
             Box::pin(async move { delivered.wait().await })
-        }))?;
+        })))?;
     }
     Ok(())
 }
@@ -151,6 +151,8 @@ pub(crate) fn register_ordered_events<S: Store>(
     if messages.is_empty() {
         return Ok(());
     }
-    txn.on_success_ordered(Arc::new(move || bus.publish_batch(messages.clone())))?;
+    txn.on_commit(OnCommit::Ordered(Box::new(move || {
+        bus.publish_batch(messages)
+    })))?;
     Ok(())
 }

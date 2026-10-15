@@ -43,6 +43,7 @@ mod log_layout;
 pub mod merge;
 mod post_commit;
 mod prefix;
+mod retry;
 mod slots;
 #[cfg(not(target_arch = "wasm32"))]
 mod rewrite;

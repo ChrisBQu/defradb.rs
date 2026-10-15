@@ -2,6 +2,7 @@ use super::helpers::{register_created_doc, write_branchable_collection_block, wr
 use super::*;
 use bytes::Bytes;
 use events::{Message, Update};
+use storage::corekv::OnCommit;
 
 use crate::block::builder::DocStorageIdentity;
 
@@ -67,7 +68,7 @@ pub(super) fn acp_registration_retry_callback(
     resource_name: String,
     doc_id: String,
     bearer_token: Option<String>,
-) -> storage::corekv::AsyncOrderedRetryCallback {
+) -> storage::corekv::CommitHook {
     Box::new(move || {
         Box::pin(defra_core::signing::scope_request_bearer_token(
             Some(creator.to_string()),
@@ -456,14 +457,14 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             }
         };
         if let Some(registration) = attempt.acp_registration.as_ref() {
-            txn.on_retry_success_ordered_async(acp_registration_retry_callback(
+            txn.on_commit(OnCommit::OrderedAsync(acp_registration_retry_callback(
                 Arc::clone(&registration.acp),
                 registration.creator.clone(),
                 registration.policy_id.clone(),
                 registration.resource_name.clone(),
                 doc_id.to_string(),
                 registration.bearer_token.clone(),
-            ))
+            )))
             .map_err(crate::error::commit_query_error)?;
         }
         if let Some(bus) = self.db.event_bus().cloned() {
@@ -471,7 +472,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             let doc_id = doc_id.to_string();
             let block = block.clone();
             let col_data = col_data.clone();
-            txn.on_retry_success_ordered(Box::new(move || {
+            txn.on_commit(OnCommit::Ordered(Box::new(move || {
                 let update = Update::new(
                     doc_id.clone(),
                     cid,
@@ -493,7 +494,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     );
                     bus.publish(Message::update(col_update));
                 }
-            }))
+            })))
             .map_err(crate::error::commit_query_error)?;
         }
         let (io, callbacks) = txn
@@ -859,14 +860,14 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         };
         for (doc_id, _, cid, block, col_data) in &results {
             if let Some(registration) = attempt.acp_registration.as_ref() {
-                txn.on_retry_success_ordered_async(acp_registration_retry_callback(
+                txn.on_commit(OnCommit::OrderedAsync(acp_registration_retry_callback(
                     Arc::clone(&registration.acp),
                     registration.creator.clone(),
                     registration.policy_id.clone(),
                     registration.resource_name.clone(),
                     doc_id.to_string(),
                     registration.bearer_token.clone(),
-                ))
+                )))
                 .map_err(crate::error::commit_query_error)?;
             }
             if let Some(bus) = self.db.event_bus().cloned() {
@@ -875,7 +876,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 let cid = *cid;
                 let block = block.clone();
                 let col_data = col_data.clone();
-                txn.on_retry_success_ordered(Box::new(move || {
+                txn.on_commit(OnCommit::Ordered(Box::new(move || {
                     bus.publish(Message::update(Update::new(
                         doc_id.clone(),
                         cid,
@@ -895,7 +896,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                             false,
                         )));
                     }
-                }))
+                })))
                 .map_err(crate::error::commit_query_error)?;
             }
         }

@@ -15,6 +15,4 @@ pub mod regolith;
 pub mod test_suite;
 
 pub use regolith::{RegolithStore, RegolithStoreOptions, RegolithTxn};
-pub use shared::{
-    CallbackCounts, DurabilityMode, TransactionStatsHandle, TransactionStatsSnapshot,
-};
+pub use shared::{DurabilityMode, TransactionStatsHandle, TransactionStatsSnapshot};

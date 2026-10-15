@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use storage::backends::regolith::RegolithStore;
-use storage::corekv::{Store, Writer};
+use storage::corekv::{OnCommit, Store, Writer};
 
 #[tokio::test]
 async fn eventful_empty_commit_commits_and_dispatches_its_events() {
@@ -15,9 +15,9 @@ async fn eventful_empty_commit_commits_and_dispatches_its_events() {
     let mut empty = store.new_txn(false).await.expect("empty txn");
     let published_by_callback = Arc::clone(&published);
     empty
-        .on_success_ordered(Arc::new(move || {
+        .on_commit(OnCommit::Ordered(Box::new(move || {
             published_by_callback.fetch_add(1, Ordering::SeqCst);
-        }))
+        })))
         .expect("register event");
 
     empty.commit().await.expect("a commit that writes nothing");
@@ -36,9 +36,9 @@ async fn accepted_identical_blind_write_keeps_its_event_callback() {
     let published = Arc::new(AtomicUsize::new(0));
     let published_by_callback = Arc::clone(&published);
     delayed
-        .on_success_ordered(Arc::new(move || {
+        .on_commit(OnCommit::Ordered(Box::new(move || {
             published_by_callback.fetch_add(1, Ordering::SeqCst);
-        }))
+        })))
         .expect("register event");
 
     let mut concurrent = store.new_txn(false).await.expect("concurrent txn");
@@ -64,14 +64,14 @@ async fn failed_ordered_hook_keeps_the_commit_its_events_and_later_commits() {
     first.set(b"first", b"value").await.expect("first write");
     let published_by_first = Arc::clone(&published);
     first
-        .on_success_ordered(Arc::new(move || {
+        .on_commit(OnCommit::Ordered(Box::new(move || {
             published_by_first.fetch_add(1, Ordering::SeqCst);
-        }))
+        })))
         .expect("first event");
     first
-        .on_success_ordered_async(Arc::new(|| {
+        .on_commit(OnCommit::OrderedAsync(Box::new(|| {
             Box::pin(async { Err("external postcommit hook failed".to_string()) })
-        }))
+        })))
         .expect("failing hook");
     first
         .commit()
@@ -83,9 +83,9 @@ async fn failed_ordered_hook_keeps_the_commit_its_events_and_later_commits() {
     second.set(b"second", b"value").await.expect("second write");
     let published_by_second = Arc::clone(&published);
     second
-        .on_success_ordered(Arc::new(move || {
+        .on_commit(OnCommit::Ordered(Box::new(move || {
             published_by_second.fetch_add(1, Ordering::SeqCst);
-        }))
+        })))
         .expect("second event");
     second.commit().await.expect("second commit");
     assert_eq!(published.load(Ordering::SeqCst), 2);

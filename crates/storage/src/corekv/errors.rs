@@ -21,6 +21,17 @@ pub struct TransactionConflict {
     pub latest_seq: u64,
 }
 
+impl From<&regolith::Conflict> for TransactionConflict {
+    fn from(conflict: &regolith::Conflict) -> Self {
+        Self {
+            access: conflict.mine(),
+            winning_write: conflict.theirs(),
+            observed_seq: conflict.observed_seq(),
+            latest_seq: conflict.latest_seq(),
+        }
+    }
+}
+
 /// The reason in plain words, without the key: what the losing transaction
 /// did and the newer write that won.
 impl std::fmt::Display for TransactionConflict {
