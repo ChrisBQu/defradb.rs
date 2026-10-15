@@ -1585,14 +1585,14 @@ async fn car_put_many_conflict_is_reported_once_and_not_re_run() {
     let root_cid = Cid::new_v1(0x71, Code::Sha2_256.digest(block_data));
     let car_data =
         crate::sync::car::encode_car(&[root_cid], &[(&root_cid, block_data.as_slice())]).unwrap();
-    let completion = coordinator
-        .manager()
-        .rooted_car_completion_tracker()
-        .register(root_cid, peer.clone());
-
-    let ingest = {
+    let respond = || {
+        let completion = coordinator
+            .manager()
+            .rooted_car_completion_tracker()
+            .register(root_cid, peer.clone());
         let coordinator = Arc::clone(&coordinator);
-        n0_future::task::spawn(async move {
+        let (peer, car_data) = (peer.clone(), car_data.clone());
+        let ingest = n0_future::task::spawn(async move {
             coordinator
                 .handle_transport_event(TransportEvent::CarFetchResponse {
                     query_id: None,
@@ -1601,12 +1601,14 @@ async fn car_put_many_conflict_is_reported_once_and_not_re_run() {
                     car_data,
                 })
                 .await
-        })
+        });
+        (completion, ingest)
     };
 
     // The blockstore settles its own conflicts in the engine; one it could
     // not settle reaches the event once, and the event handler does not run
     // the ingest again.
+    let (completion, ingest) = respond();
     assert_eq!(
         timeout(Duration::from_secs(1), completion)
             .await
@@ -1617,6 +1619,20 @@ async fn car_put_many_conflict_is_reported_once_and_not_re_run() {
     assert!(ingest.await.unwrap().is_err());
     assert_eq!(blockstore.put_many_attempts(), 1);
     assert!(!blockstore.has(&root_cid).await.unwrap());
+
+    // The fetch is asked again and its response lands: one success
+    // completion, and the block stored.
+    let (completion, ingest) = respond();
+    assert_eq!(
+        timeout(Duration::from_secs(1), completion)
+            .await
+            .expect("the CAR completion should be published")
+            .expect("completion sender remains alive"),
+        crate::sync::manager::FetchCompletion::Success,
+    );
+    ingest.await.unwrap().unwrap();
+    assert_eq!(blockstore.put_many_attempts(), 2);
+    assert!(blockstore.has(&root_cid).await.unwrap());
 }
 
 #[tokio::test]
@@ -3427,6 +3443,20 @@ async fn pushlog_block_conflict_is_reported_once_and_not_re_run() {
         other => panic!("expected the conflict as a sync error, got {:?}", other),
     }
     assert!(coordinator.manager().pending_dag_cids().is_empty());
+
+    // The nacked pusher keeps its retry record and pushes again: the block
+    // lands and its DAG is ready, with no sync error.
+    coordinator
+        .handle_transport_event(pushlog_event(peer.clone(), "collection1"))
+        .await
+        .unwrap();
+    assert_eq!(blockstore.put_attempts(), 2);
+    match recv_complete_pushlog(&coordinator, &mut events).await {
+        SyncEvent::DagReady { sender_peer, .. } => {
+            assert_eq!(sender_peer.as_deref(), Some(peer.as_str()));
+        }
+        other => panic!("expected DagReady after the push again, got {:?}", other),
+    }
 }
 
 #[tokio::test]
@@ -3467,6 +3497,23 @@ async fn gossip_block_conflict_is_reported_once_and_not_re_run() {
         other => panic!("expected the conflict as a sync error, got {:?}", other),
     }
     assert!(coordinator.manager().pending_dag_cids().is_empty());
+
+    // The head arrives again: the block lands and its DAG is ready, with no
+    // sync error.
+    coordinator
+        .handle_transport_event(gossip_event(peer.clone(), "collection1"))
+        .await
+        .unwrap();
+    assert_eq!(blockstore.put_attempts(), 2);
+    match recv_complete_pushlog(&coordinator, &mut events).await {
+        SyncEvent::DagReady { sender_peer, .. } => {
+            assert_eq!(sender_peer.as_deref(), Some(peer.as_str()));
+        }
+        other => panic!(
+            "expected DagReady after the head arrived again, got {:?}",
+            other
+        ),
+    }
 }
 
 #[tokio::test]

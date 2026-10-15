@@ -139,6 +139,9 @@ pub fn lens_doc_to_document(
 }
 
 /// What reading a stored document at its collection's active version takes.
+// Returned once per document and consumed at once; boxing `Migrated` would add an
+// allocation per migrated document for no lasting saving.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum ToActive {
     /// Stored at the active version, or at one this node does not know.
     Current,

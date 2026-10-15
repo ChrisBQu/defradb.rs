@@ -4,6 +4,7 @@ mod fd_limit;
 mod node;
 mod node_identity;
 mod p2p;
+mod pool_args;
 mod run;
 mod server;
 mod server_acp;
@@ -19,6 +20,7 @@ use identity::Identity;
 use storage::backends::DurabilityMode;
 
 pub use node::Node;
+pub use pool_args::{StartCommand, WorkerArgs};
 
 const DEV_MODE_BANNER: &str = r#"
 ******************************************

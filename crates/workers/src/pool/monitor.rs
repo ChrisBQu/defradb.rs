@@ -1,19 +1,68 @@
 //! The stuck-poll monitor. Each worker publishes when its current poll began;
-//! a scan on a timer (run by two workers, so one of them always watches the
-//! other) finds a poll past the limit, reports it once per task (its name,
-//! its worker, how long), marks the worker stuck so routing sends it nothing
-//! new, and moves the movable jobs still queued in its inbox to free workers
-//! on the same node. Bound jobs wait for their owner, and no running task is
-//! ever moved.
+//! a scan on a timer finds a poll past the limit, reports it once per task
+//! (its name, its worker, how long), marks the worker stuck so routing sends
+//! it nothing new, and moves the movable jobs still queued in its inbox to
+//! free workers on the same node. Bound jobs wait for their owner, and no
+//! running task is ever moved.
+//!
+//! The timer is a [`MonitorDriver`]'s when the configuration gives one (the
+//! network edge's, so no worker spends a poll watching the others);
+//! otherwise two workers run it, so one of them always watches the other.
 
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use super::PoolShared;
 use crate::worker::{micros, report_long_poll, REPORTED};
 
-/// How many workers run the scan.
+/// How many workers run the scan when no driver does.
 pub(crate) const WATCHERS: usize = 2;
+
+/// Runs the stuck-poll scan on a timer outside the pool: called once when
+/// the pool starts, with the [`Monitor`] to run every
+/// [`Monitor::period`] until [`Monitor::scan`] returns `None`.
+pub type MonitorDriver = Arc<dyn Fn(Monitor) + Send + Sync>;
+
+/// The pool's stuck-poll scan, for a [`MonitorDriver`] to run. Holds the pool
+/// weakly, so a driver never keeps a pool alive.
+#[derive(Clone)]
+pub struct Monitor {
+    pool: Weak<PoolShared>,
+    period: Duration,
+}
+
+impl Monitor {
+    pub(crate) fn of(pool: &Arc<PoolShared>) -> Monitor {
+        Monitor {
+            pool: Arc::downgrade(pool),
+            period: period(pool.stuck_after),
+        }
+    }
+
+    /// How often to scan.
+    pub fn period(&self) -> Duration {
+        self.period
+    }
+
+    /// Scans every worker now: how many are stuck, or `None` once the pool
+    /// is gone or every worker has stopped, when the driver stops.
+    pub fn scan(&self) -> Option<usize> {
+        let pool = self.pool.upgrade()?;
+        if pool.stopped.is_set() {
+            return None;
+        }
+        Some(scan(&pool, pool.clock.now_micros()))
+    }
+}
+
+impl std::fmt::Debug for Monitor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Monitor")
+            .field("period", &self.period)
+            .finish_non_exhaustive()
+    }
+}
 
 /// How often a watcher scans, for a stuck limit of `limit`.
 pub(crate) fn period(limit: Duration) -> Duration {

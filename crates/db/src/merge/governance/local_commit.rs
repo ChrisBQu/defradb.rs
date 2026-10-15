@@ -42,7 +42,8 @@ where
         if !handler.deferred.has_waiters() {
             return;
         }
-        spawn_task(async move {
+        let pool = handler.db.pool().cloned();
+        spawn_task(pool.as_ref(), "db::local_commit_redrive", async move {
             let block = Block::from_dag_cbor(&block_data).ok();
             handler.release_merged_composite(&cid, block.as_ref()).await;
             handler.redrive_deferred().await;

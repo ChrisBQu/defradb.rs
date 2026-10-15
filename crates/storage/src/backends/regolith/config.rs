@@ -138,6 +138,15 @@ impl RegolithStoreOptions {
         opts
     }
 
+    /// Start the threads regolith starts (compaction, log writeback) where
+    /// `pool` places its background threads, at their priority. Pair it with
+    /// a pool started with [`with_worker_io`](super::with_worker_io).
+    pub fn placed_on(mut self, pool: &workers::Pool) -> Self {
+        let env = pool.env(self.engine.get_env().clone());
+        self.engine = self.engine.env(env);
+        self
+    }
+
     /// Override commit validation. The Defra key policy only applies at
     /// `DefraLevel`; other levels retain Regolith's native semantics.
     pub fn with_isolation(mut self, isolation: IsolationLevel) -> Self {

@@ -5,6 +5,7 @@
 //! without explicit transaction management while still providing proper
 //! transactional semantics per operation.
 
+mod base_heads;
 pub mod batch;
 mod create;
 mod delete;
@@ -279,6 +280,22 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
         request: &query::prepared::PreparedInputRequest,
     ) -> query::error::Result<std::sync::Arc<[u8]>> {
         crate::write::prepare::resolve_input(&self.db, context, request).await
+    }
+
+    async fn resolve_prepared_inputs(
+        &self,
+        requests: Vec<query::prepared::PreparedInputRequest>,
+    ) -> query::error::Result<Vec<std::sync::Arc<[u8]>>> {
+        self.resolve_prepared_inputs_as(&RequestContext::ambient(), requests)
+            .await
+    }
+
+    async fn resolve_prepared_inputs_as(
+        &self,
+        context: &RequestContext,
+        requests: Vec<query::prepared::PreparedInputRequest>,
+    ) -> query::error::Result<Vec<std::sync::Arc<[u8]>>> {
+        crate::write::prepare::resolve_inputs(&self.db, context, requests).await
     }
 
     async fn prepared_embedding_request(

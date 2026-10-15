@@ -381,8 +381,8 @@ impl<S: Store + 'static> crate::database::DB<S> {
         let written = loop {
             match controller.run(Arc::clone(&operation), None, None).await {
                 Err(query::error::QueryError::NeedsInput(request)) => inputs
-                    .answer_miss(&request, || {
-                        mutator.resolve_prepared_input_as(context, &request)
+                    .answer_wave(&request, |wave| {
+                        mutator.resolve_prepared_inputs_as(context, wave)
                     })
                     .await
                     .map_err(Error::Query)?,

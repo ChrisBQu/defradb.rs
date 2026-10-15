@@ -1,7 +1,7 @@
-//! A merge fetches each decryption key it misses outside its engine-owned
-//! attempts, once, and runs again with it. A document with more encrypted
-//! fields than any fixed count merges whole: what bounds the misses is that
-//! each one names a key the merge does not hold yet.
+//! A merge fetches the decryption keys its blocks need outside its
+//! engine-owned attempts, all in one request per authorization context, and
+//! never asks for a key again. A document with more encrypted fields than any
+//! fixed count merges whole.
 
 use async_trait::async_trait;
 use blockstore::Blockstore as _;
@@ -141,8 +141,9 @@ async fn a_merge_with_more_encrypted_fields_than_any_cap_merges_whole() {
         .await
         .unwrap();
     assert_eq!(outcome, MergeOutcome::Merged);
-    // One request per key: a key once fetched is never asked for again.
-    assert_eq!(server.requests.load(Ordering::SeqCst), FIELDS);
+    // One request for every key, before the merge's transaction: a key once
+    // fetched is never asked for again.
+    assert_eq!(server.requests.load(Ordering::SeqCst), 1);
 
     let collection = db.find_collection_by_id("col-wide").unwrap().unwrap();
     let txn = db.new_txn(true).await.unwrap();

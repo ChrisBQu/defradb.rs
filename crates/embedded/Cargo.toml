@@ -23,6 +23,8 @@ db = { path = "../db", default-features = false }
 defra-core = { path = "../defra-core" }
 # The network runtime a configured transport runs on.
 edge = { path = "../edge" }
+# The worker pool the node's data path runs on.
+workers = { path = "../workers" }
 defra-http = { path = "../http" }
 defra-p2p-adapter = { workspace = true, default-features = false }
 document = { path = "../document" }

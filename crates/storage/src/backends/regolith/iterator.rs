@@ -19,6 +19,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use super::handle::Handle;
+use super::worker_io::wait_out;
 use crate::corekv::{Error, IterOptions, Iterator, KvPair, Result};
 
 /// Bytes of keys and values a page may hold before it stops filling.
@@ -179,7 +180,10 @@ impl RegolithIterator {
                 // reads an invalid cursor as one that was never positioned:
                 // it would restart at the far end of the store and hand back
                 // keys the caller seeked away from. So it must not see one.
-                if !cursor.valid() {
+                // A seek that stopped on a block the worker's cache does not
+                // hold, or on an error, is no end: `Entries` hands either out
+                // and resumes the seek after a `WouldBlock`.
+                if !cursor.valid() && cursor.status().is_ok() {
                     Source::Empty
                 } else if self.reverse {
                     Source::Cursor(cursor.entries_rev())
@@ -250,9 +254,19 @@ impl RegolithIterator {
     async fn step(&mut self) -> Result<Option<KvPair>> {
         let (key, value) = match &mut self.source {
             Source::Empty => return Ok(None),
-            Source::Cursor(entries) => match entries.next() {
-                Some(entry) => entry.map_err(|error| Error::Backend(error.to_string()))?,
-                None => return Ok(None),
+            Source::Cursor(entries) => loop {
+                match entries.next() {
+                    Some(Ok(entry)) => break entry,
+                    // The worker's queue reads the block; the next item
+                    // resumes the walk where it stopped.
+                    Some(Err(regolith::Error::WouldBlock(would_block))) => {
+                        wait_out(would_block)
+                            .await
+                            .map_err(|error| Error::Backend(error.to_string()))?;
+                    }
+                    Some(Err(error)) => return Err(Error::Backend(error.to_string())),
+                    None => return Ok(None),
+                }
             },
             Source::Txn {
                 cursor,

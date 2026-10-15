@@ -79,12 +79,21 @@ fn the_first_family_a_key_starts_with_is_its_family() {
         (b"a/acp/users/bae-1/", Class::Ordinary),
     ];
     for (key, class) in cases {
-        assert_eq!(family_of(key).map(|family| family.class()), Some(class), "{key:?}");
+        assert_eq!(
+            family_of(key).map(|family| family.class()),
+            Some(class),
+            "{key:?}"
+        );
     }
     // `d/del/` is the deletion markers' family, not an index of collection
     // `d`: its entity is the collection's name.
     assert_eq!(entity_len(b"d/del/users/\x01"), Some(b"d/del/users/".len()));
-    for key in [b"".as_slice(), b"e\x01\x55", b"h/f/users/email/cid", b"s/seq/doc"] {
+    for key in [
+        b"".as_slice(),
+        b"e\x01\x55",
+        b"h/f/users/email/cid",
+        b"s/seq/doc",
+    ] {
         assert!(family_of(key).is_none(), "{key:?}");
     }
 }

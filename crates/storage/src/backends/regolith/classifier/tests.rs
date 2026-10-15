@@ -31,7 +31,10 @@ fn a_documents_heads_and_markers_are_each_one_commutative_set() {
     for id in [1u64, 47, 239, 240, 287, 2287, 2288, u64::MAX] {
         let heads = headstore(&HeadstoreDocKey::document_prefix(id));
         let head = headstore(&HeadstoreDocKey::new(id, "field", cid).bytes());
-        assert_eq!(class(&head), KeyClass::CommutativePrefix { len: heads.len() });
+        assert_eq!(
+            class(&head),
+            KeyClass::CommutativePrefix { len: heads.len() }
+        );
         let markers = [b"h/ds/".as_slice(), &encode_doc_short_id(id), b"/"].concat();
         for set in [heads, markers] {
             for suffix in [b"".as_slice(), b"field/parent/child", b"\xff\0/"] {
@@ -54,8 +57,14 @@ fn a_collections_heads_and_markers_are_each_one_commutative_set() {
         let markers = headstore(&HeadstoreColSuperseded::collection_prefix(id));
         let head = headstore(&HeadstoreColKey::new(id, cid).bytes());
         let marker = headstore(&HeadstoreColSuperseded::new(id, cid, cid).bytes());
-        assert_eq!(class(&head), KeyClass::CommutativePrefix { len: heads.len() });
-        assert_eq!(class(&marker), KeyClass::CommutativePrefix { len: markers.len() });
+        assert_eq!(
+            class(&head),
+            KeyClass::CommutativePrefix { len: heads.len() }
+        );
+        assert_eq!(
+            class(&marker),
+            KeyClass::CommutativePrefix { len: markers.len() }
+        );
     }
 }
 

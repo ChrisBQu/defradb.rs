@@ -46,7 +46,9 @@ impl Drop for StatementRollbackGuard {
     }
 }
 
-/// Await a future with an optional timeout (native only, WASM always awaits directly).
+/// Await a future with an optional timeout (native only, WASM always awaits
+/// directly). The deadline is a timer of the worker pool's deadline queue:
+/// the calling worker's, or the fallback pool's off the pool.
 #[cfg(not(target_arch = "wasm32"))]
 async fn await_with_timeout<T, F: Future<Output = Result<T>>>(
     future: F,
@@ -54,11 +56,14 @@ async fn await_with_timeout<T, F: Future<Output = Result<T>>>(
 ) -> Result<T> {
     if timeout_secs > 0 {
         let timeout = std::time::Duration::from_secs(timeout_secs);
-        match tokio::time::timeout(timeout, future).await {
+        match workers::timeout(timeout, future).await {
             Ok(r) => r,
-            Err(_) => Err(crate::error::QueryError::execution(format!(
+            Err(workers::Error::TimedOut) => Err(crate::error::QueryError::execution(format!(
                 "query execution timed out after {} seconds",
                 timeout_secs
+            ))),
+            Err(error) => Err(crate::error::QueryError::execution(format!(
+                "the query's deadline could not be kept: {error}"
             ))),
         }
     } else {
@@ -169,32 +174,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         };
         prepared
             .inputs
-            .answer_miss(input, || async {
-                match input.kind() {
-                    crate::prepared::PreparedInputKind::AcpDecision => {
-                        runner.resolve_acp_decision_input(input).await
-                    }
-                    crate::prepared::PreparedInputKind::WriteValidation => {
-                        runner.resolve_write_validation_input(input).await
-                    }
-                    crate::prepared::PreparedInputKind::ReadValidation => {
-                        runner.resolve_read_validation_input(input).await
-                    }
-                    crate::prepared::PreparedInputKind::EncryptedSearch => {
-                        runner.resolve_encrypted_search_input(input).await
-                    }
-                    _ => {
-                        let mutator = runner.mutator.as_ref().ok_or_else(|| {
-                            crate::error::QueryError::execution(
-                                "retry input has no document mutator",
-                            )
-                        })?;
-                        mutator
-                            .resolve_prepared_input_as(&runner.context(), input)
-                            .await
-                    }
-                }
-            })
+            .answer_wave(input, |wave| runner.resolve_wave(wave))
             .await?;
         Ok(Some(prepared))
     }
@@ -616,10 +596,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             // projection must never fall back to mutating an external provider
             // before the storage transaction commits. The mutator's ordered
             // hook registration will fail closed if it cannot retain hooks.
-            scoped_runner.acp_registration_projection =
-                Some(txn_ctx.acp_registration_projection().unwrap_or_else(|| {
-                    Arc::new(crate::txn::AcpRegistrationProjection::detached())
-                }));
+            scoped_runner.acp_registration_projection = Some(
+                txn_ctx
+                    .acp_registration_projection()
+                    .unwrap_or_else(crate::txn::AcpRegistrationProjection::detached_shared),
+            );
         }
 
         let statement_guard = if !txn_ctx.is_readonly()
@@ -721,8 +702,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                         .map_err(crate::error::QueryError::execution)?;
                                     let context = self.context();
                                     inputs
-                                        .answer_miss(&input, || {
-                                            mutator.resolve_prepared_input_as(&context, &input)
+                                        .answer_wave(&input, |wave| {
+                                            mutator.resolve_prepared_inputs_as(&context, wave)
                                         })
                                         .await?;
                                     txn_ctx
@@ -783,6 +764,75 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         }
 
         response
+    }
+
+    /// One wave of a request's external inputs, each by the resolver of its
+    /// kind: the runner's own concurrently, the mutator's as one batch, all
+    /// in the context of the request this runner serves.
+    async fn resolve_wave(
+        &self,
+        wave: Vec<crate::prepared::PreparedInputRequest>,
+    ) -> Result<Vec<std::sync::Arc<[u8]>>> {
+        let (own, delegated): (Vec<_>, Vec<_>) =
+            wave.iter().enumerate().partition(|(_, request)| {
+                matches!(
+                    request.kind(),
+                    crate::prepared::PreparedInputKind::AcpDecision
+                        | crate::prepared::PreparedInputKind::WriteValidation
+                        | crate::prepared::PreparedInputKind::ReadValidation
+                        | crate::prepared::PreparedInputKind::EncryptedSearch
+                )
+            });
+        let own_answers =
+            futures::future::try_join_all(own.iter().map(|(_, request)| async move {
+                match request.kind() {
+                    crate::prepared::PreparedInputKind::AcpDecision => {
+                        self.resolve_acp_decision_input(request).await
+                    }
+                    crate::prepared::PreparedInputKind::WriteValidation => {
+                        self.resolve_write_validation_input(request).await
+                    }
+                    crate::prepared::PreparedInputKind::ReadValidation => {
+                        self.resolve_read_validation_input(request).await
+                    }
+                    _ => self.resolve_encrypted_search_input(request).await,
+                }
+            }));
+        let delegated_answers = async {
+            if delegated.is_empty() {
+                return Ok(Vec::new());
+            }
+            let mutator = self.mutator.as_ref().ok_or_else(|| {
+                crate::error::QueryError::execution("retry input has no document mutator")
+            })?;
+            mutator
+                .resolve_prepared_inputs_as(
+                    &self.context(),
+                    delegated
+                        .iter()
+                        .map(|(_, request)| (*request).clone())
+                        .collect(),
+                )
+                .await
+        };
+        let (own_answers, delegated_answers) =
+            futures::future::try_join(own_answers, delegated_answers).await?;
+        let mut answers: Vec<Option<std::sync::Arc<[u8]>>> = vec![None; wave.len()];
+        for ((index, _), answer) in own
+            .iter()
+            .chain(delegated.iter())
+            .zip(own_answers.into_iter().chain(delegated_answers))
+        {
+            answers[*index] = Some(answer);
+        }
+        answers
+            .into_iter()
+            .map(|answer| {
+                answer.ok_or_else(|| {
+                    crate::error::QueryError::execution("an external input went unanswered")
+                })
+            })
+            .collect()
     }
 
     async fn resolve_write_validation_input(

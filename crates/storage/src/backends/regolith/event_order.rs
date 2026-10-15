@@ -465,6 +465,20 @@ mod tests {
     }
 
     #[test]
+    fn events_from_one_commit_keep_registration_order() {
+        let fixture = Fixture::new();
+        let mut txn = fixture.db.begin(&TxnOptions::new());
+        txn.put(b"a", b"v").unwrap();
+        let binding =
+            fixture
+                .order
+                .bind(&mut txn, vec![fixture.event(10), fixture.event(11)], false);
+        txn.commit().unwrap();
+        binding.hand_over(true);
+        assert_eq!(fixture.out(), vec![10, 11]);
+    }
+
+    #[test]
     fn an_aborted_commit_releases_the_stream_and_sends_nothing() {
         let fixture = Fixture::new();
         let (failed, failed_binding) = fixture.bound(b"a", 1, false);

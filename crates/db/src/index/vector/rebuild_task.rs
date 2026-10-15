@@ -5,10 +5,6 @@ use storage::corekv::Store;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
-#[cfg(not(target_arch = "wasm32"))]
-use tokio::task::JoinHandle;
-#[cfg(not(target_arch = "wasm32"))]
-use tokio::time::{self, MissedTickBehavior};
 
 use crate::database::DB;
 use crate::index::vector::index::VectorIndex;
@@ -23,29 +19,29 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 impl<S: Store + 'static> DB<S> {
-    /// Starts the vector index rebuild task.
-    ///
-    /// Scheduled on tokio for now: once the core owns its worker pools this
-    /// becomes a periodic job there (#1942).
+    /// Starts the vector index rebuild job on the database's pool: a sweep
+    /// now, then one every [`SWEEP_INTERVAL`] on its worker's deadline queue,
+    /// until it is aborted or its worker stops.
     ///
     /// HNSW maintenance is lazy by design: updates keep the graph reachable
     /// but leave waste behind, and a whole-graph rebuild is far too heavy to
-    /// price into a single write. This task owns that rebuild instead. Each
+    /// price into a single write. This job owns that rebuild instead. Each
     /// sweep asks every HNSW index whether its waste says a rebuild is due:
     /// a fresh or clean graph answers one meta read and nothing more, while a
     /// graph owed one (last written before self-link-free inserts, or heavy
     /// with tombstones) is rebuilt on the sweep's own transaction.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn start_vector_rebuild_task(self: Arc<Self>) -> JoinHandle<()> {
-        tokio::spawn(async move {
-            let mut ticker = time::interval(SWEEP_INTERVAL);
-            ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
-            loop {
-                ticker.tick().await;
+    pub fn start_vector_rebuild_task(self: Arc<Self>) -> workers::Background {
+        let pool = self.pool().cloned();
+        workers::spawn_background(pool.as_ref(), "db::vector_rebuild", move || async move {
+            let sweep = || async {
                 if let Err(error) = self.rebuild_due_vector_indexes().await {
                     tracing::warn!(error = %error, "Vector index rebuild sweep failed");
                 }
-            }
+            };
+            sweep().await;
+            let Err(error) = workers::every(SWEEP_INTERVAL, sweep).await;
+            tracing::error!(%error, "the vector rebuild job stopped: it runs only on a worker");
         })
     }
 

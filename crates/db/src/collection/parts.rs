@@ -88,10 +88,7 @@ impl PartIdSnapshot {
 
 impl Collection {
     /// This version's part-ID map, or `None` when the version has none.
-    pub(crate) async fn part_ids(
-        &self,
-        datastore: &NamespaceView,
-    ) -> Result<Option<Arc<PartIds>>> {
+    pub(crate) async fn part_ids(&self, datastore: &NamespaceView) -> Result<Option<Arc<PartIds>>> {
         if let Some(ids) = self.part_id_snapshot.get() {
             return Ok(Some(ids));
         }

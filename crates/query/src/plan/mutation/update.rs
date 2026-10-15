@@ -531,6 +531,9 @@ impl PlanNode for UpdateNode {
                                     .as_ref()
                                     .and_then(|memo| memo.get(&request))
                                 else {
+                                    if !dependencies_match {
+                                        crate::prepared::record_dependency_rerun();
+                                    }
                                     return Err(QueryError::NeedsInput(request));
                                 };
                                 let vector: Vec<f64> =

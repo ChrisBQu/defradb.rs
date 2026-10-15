@@ -12,6 +12,7 @@ struct DeleteRetryAttempt<S: Store> {
     doc_id: DocID,
     context: RequestContext,
     prepared_inputs: Option<query::prepared::PreparedInputMemo>,
+    heads: super::base_heads::BaseHeads,
 }
 
 struct DeleteManyRetryAttempt<S: Store> {
@@ -21,6 +22,7 @@ struct DeleteManyRetryAttempt<S: Store> {
     doc_ids: Vec<DocID>,
     context: RequestContext,
     prepared_inputs: Option<query::prepared::PreparedInputMemo>,
+    heads: super::base_heads::BaseHeads,
 }
 
 impl<S: Store + 'static> storage::corekv::RetryAttemptFn for DeleteManyRetryAttempt<S> {
@@ -78,8 +80,8 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             match mutator.delete_impl(context, collection_name, doc_id).await {
                 Err(query::error::QueryError::NeedsInput(request)) => {
                     inputs
-                        .answer_miss(&request, || {
-                            self.resolve_prepared_input_as(context, &request)
+                        .answer_wave(&request, |wave| {
+                            self.resolve_prepared_inputs_as(context, wave)
                         })
                         .await?;
                 }
@@ -121,8 +123,8 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             {
                 Err(query::error::QueryError::NeedsInput(request)) => {
                     inputs
-                        .answer_miss(&request, || {
-                            self.resolve_prepared_input_as(context, &request)
+                        .answer_wave(&request, |wave| {
+                            self.resolve_prepared_inputs_as(context, wave)
                         })
                         .await?;
                 }
@@ -144,6 +146,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
         let (_collection_guard, collection) = self.guarded_collection(collection_name).await?;
 
+        let heads =
+            super::base_heads::BaseHeads::read(&self.db, &collection, std::slice::from_ref(doc_id))
+                .await?;
         let attempt = DeleteRetryAttempt {
             db: Arc::clone(&self.db),
             collection_name: collection_name.to_string(),
@@ -151,6 +156,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             doc_id: doc_id.clone(),
             context: context.clone(),
             prepared_inputs: Some(self.prepared_inputs.clone().unwrap_or_default()),
+            heads,
         };
         let result = self
             .db
@@ -251,6 +257,10 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             )
             .await?;
             let doc_id_string = canonical_doc_id.to_string();
+            let heads = attempt
+                .heads
+                .for_attempt(&*retry, &headstore, doc_short_id)
+                .await?;
             let block_result = write_delete_block_with_inputs(
                 &blockstore,
                 &headstore,
@@ -260,6 +270,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 attempt.context.signing(),
                 attempt.context.batch_session(),
                 attempt.prepared_inputs.as_ref(),
+                Some(&heads),
             )
             .await
             .map_err(|error| error.into_query_error_in("failed to write delete block"))?;
@@ -371,6 +382,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         }
 
         let (_collection_guard, collection) = self.guarded_collection(collection_name).await?;
+        let heads = super::base_heads::BaseHeads::read(&self.db, &collection, doc_ids).await?;
         let attempt = DeleteManyRetryAttempt {
             db: Arc::clone(&self.db),
             collection_name: collection_name.to_string(),
@@ -378,6 +390,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             doc_ids: doc_ids.to_vec(),
             context: context.clone(),
             prepared_inputs: Some(self.prepared_inputs.clone().unwrap_or_default()),
+            heads,
         };
         let result = self
             .db
@@ -478,6 +491,10 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     &canonical_id,
                 )
                 .await?;
+                let heads = attempt
+                    .heads
+                    .for_attempt(&*retry, &headstore, doc_short_id)
+                    .await?;
                 let block_result = write_delete_block_with_inputs(
                     &blockstore,
                     &headstore,
@@ -487,6 +504,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     attempt.context.signing(),
                     attempt.context.batch_session(),
                     attempt.prepared_inputs.as_ref(),
+                    Some(&heads),
                 )
                 .await
                 .map_err(|error| error.into_query_error_in("failed to write delete block"))?;

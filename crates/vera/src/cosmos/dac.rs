@@ -13,6 +13,7 @@ use identity::Did;
 use acp::{DocumentACP, DocumentPermission, Identity, Result, Subject};
 
 use crate::access_cache::AccessCache;
+use crate::decisions::{DecisionKey, RemoteDecisions};
 use crate::provider::{AcpLightClientStatus, ProviderError, SubjectRef, VeraProvider};
 
 /// DocumentACP backed by Vera's on-chain x/acp module.
@@ -24,27 +25,78 @@ use crate::provider::{AcpLightClientStatus, ProviderError, SubjectRef, VeraProvi
 pub struct VeraDocumentACP {
     provider: Arc<dyn VeraProvider>,
     access_cache: Option<Arc<AccessCache>>,
+    /// Remote decisions: one call per tuple in flight, a deadline, retries.
+    decisions: inputs::Service<RemoteDecisions>,
     #[cfg(not(target_arch = "wasm32"))]
     event_subscriber: Option<super::event_subscriber::CosmosEventSubscriber>,
 }
 
+/// How long a remote decision may take when the caller sets nothing else.
+const DECISION_TIMEOUT: Duration = Duration::from_secs(5);
+
 impl VeraDocumentACP {
     pub fn new(provider: Arc<dyn VeraProvider>, cache_ttl: Duration) -> Self {
+        Self::with_cache(provider, Some(Arc::new(AccessCache::new(cache_ttl))))
+    }
+
+    pub fn without_access_cache(provider: Arc<dyn VeraProvider>) -> Self {
+        Self::with_cache(provider, None)
+    }
+
+    fn with_cache(provider: Arc<dyn VeraProvider>, access_cache: Option<Arc<AccessCache>>) -> Self {
         Self {
+            decisions: Self::decisions(&provider, inputs::Runtime::inline(), DECISION_TIMEOUT),
             provider,
-            access_cache: Some(Arc::new(AccessCache::new(cache_ttl))),
+            access_cache,
             #[cfg(not(target_arch = "wasm32"))]
             event_subscriber: None,
         }
     }
 
-    pub fn without_access_cache(provider: Arc<dyn VeraProvider>) -> Self {
-        Self {
-            provider,
-            access_cache: None,
-            #[cfg(not(target_arch = "wasm32"))]
-            event_subscriber: None,
+    fn decisions(
+        provider: &Arc<dyn VeraProvider>,
+        runtime: inputs::Runtime,
+        request_timeout: Duration,
+    ) -> inputs::Service<RemoteDecisions> {
+        inputs::Service::new(
+            RemoteDecisions {
+                provider: Arc::clone(provider),
+            },
+            crate::decisions::config(request_timeout),
+            runtime,
+        )
+    }
+
+    /// A cached ACP as `tuning` sets it, its remote decisions on the network
+    /// runtime `network` when the node has one.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn tuned(
+        provider: Arc<dyn VeraProvider>,
+        tuning: &crate::AcpTuning,
+        network: Option<&edge::Edge>,
+    ) -> Self {
+        let acp = Self::new(provider, tuning.cache_ttl);
+        match network {
+            Some(edge) => acp.on_network(edge, tuning.request_timeout),
+            None => acp,
         }
+    }
+
+    /// Remote decisions run on the network runtime `edge`, each within twice
+    /// `request_timeout` (one retry).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn on_network(mut self, edge: &edge::Edge, request_timeout: Duration) -> Self {
+        self.decisions = Self::decisions(
+            &self.provider,
+            inputs::Runtime::edge(edge.clone()),
+            request_timeout,
+        );
+        self
+    }
+
+    /// The metrics of remote decisions.
+    pub fn decision_stats(&self) -> &inputs::Stats {
+        self.decisions.stats()
     }
 
     /// Invalidate the access cache from the Cosmos chain's ACP events, read
@@ -65,6 +117,9 @@ impl VeraDocumentACP {
             Arc::clone(cache),
             edge,
         )?);
+        // Events now reach the cache: denials and registrations are cached
+        // too, cut short by the events like allows (D36).
+        cache.receive_events();
         Ok(self)
     }
 
@@ -109,6 +164,42 @@ impl VeraDocumentACP {
         Ok(Some(policy))
     }
 
+    /// Whether the document is registered: from the cache while events
+    /// reach it, else asked of the provider.
+    async fn is_registered(
+        &self,
+        policy_id: &str,
+        resource_name: &str,
+        doc_id: &str,
+    ) -> std::result::Result<bool, acp::Error> {
+        if let Some(registered) = self
+            .access_cache
+            .as_ref()
+            .and_then(|cache| cache.registration(policy_id, resource_name, doc_id))
+        {
+            return Ok(registered);
+        }
+        let generation = self
+            .access_cache
+            .as_ref()
+            .map(|cache| cache.registration_generation());
+        let (is_registered, _owner) = self
+            .provider
+            .query_object_owner(policy_id, resource_name, doc_id)
+            .await
+            .map_err(provider_err)?;
+        if let (Some(cache), Some(generation)) = (&self.access_cache, generation) {
+            cache.remember_registration(
+                policy_id,
+                resource_name,
+                doc_id,
+                is_registered,
+                generation,
+            );
+        }
+        Ok(is_registered)
+    }
+
     async fn create_bearer_token(&self, did: &str) -> std::result::Result<String, acp::Error> {
         self.provider
             .create_bearer_token(did)
@@ -142,7 +233,7 @@ fn subject_to_actor_did(target: &Subject) -> Did {
     }
 }
 
-fn provider_err(e: ProviderError) -> acp::Error {
+fn provider_err(e: impl std::fmt::Display) -> acp::Error {
     acp::Error::Storage(format!("Vera: {}", e))
 }
 
@@ -212,15 +303,10 @@ impl DocumentACP for VeraDocumentACP {
         resource_name: &str,
         doc_id: &str,
     ) -> Result<bool> {
-        if self.provider.unregistered_documents_are_public() {
-            let (is_registered, _owner) = self
-                .provider
-                .query_object_owner(policy_id, resource_name, doc_id)
-                .await
-                .map_err(provider_err)?;
-            if !is_registered {
-                return Ok(true);
-            }
+        if self.provider.unregistered_documents_are_public()
+            && !self.is_registered(policy_id, resource_name, doc_id).await?
+        {
+            return Ok(true);
         }
 
         let actor_did = match identity.did() {
@@ -250,19 +336,30 @@ impl DocumentACP for VeraDocumentACP {
             )
         });
         let result = self
-            .provider
-            .verify_access(
-                policy_id,
-                resource_name,
-                doc_id,
-                permission.as_str(),
-                &actor_did,
-            )
+            .decisions
+            .get(DecisionKey {
+                actor: actor_did,
+                policy: policy_id.to_string(),
+                resource: resource_name.to_string(),
+                object: doc_id.to_string(),
+                permission: permission.as_str().to_string(),
+                state: self.provider.decision_state(),
+            })
             .await
-            .map_err(provider_err)?;
+            .map_err(|error| match error {
+                inputs::Error::Source(error) => provider_err(error),
+                other => provider_err(other),
+            })?;
 
-        if result {
-            if let Some(pending) = pending {
+        // A denial is cached only where invalidation events reach the cache
+        // (D36); an allow always is.
+        if let Some(pending) = pending {
+            if result
+                || self
+                    .access_cache
+                    .as_ref()
+                    .is_some_and(|cache| cache.caches_denials())
+            {
                 pending.complete(result);
             }
         }

@@ -59,6 +59,8 @@ jobs:
               { suite: 'signed-docs', needs_go: false, multipliers: 'signed-docs' },
               { suite: 'go-compat', needs_go: true },
               { suite: 'iroh', needs_go: false },
+              // The same data path on a pool of one worker.
+              { suite: 'one-worker', needs_go: false },
             ];
             if (context.eventName !== 'pull_request') {
               suites.push({ suite: 'rust', needs_go: false });
@@ -80,6 +82,14 @@ jobs:
         with:
           save-if: ${{ env.SAVE_CACHE == 'true' }}
       - run: cargo clippy --all --all-targets -- -D warnings
+      - name: Data path confinement
+        env:
+          CLIPPY_CONF_DIR: .github/clippy/data-path
+        run: >-
+          cargo clippy --lib
+          -p storage -p datastore -p blockstore -p crdt -p defra-core -p query -p db
+          -p acp -p zanzibar -p lens -p kms -p events
+          -- -A clippy::all -D clippy::disallowed_methods
 
   feature-checks:
     name: Feature checks (${{ matrix.group }})
@@ -459,6 +469,14 @@ jobs:
           cargo test --profile super-dev -p integration-test
           --test query --test acp --test nac --test encryption --test identity
           --test backup --test fts --test vector --test acp_replay_outage_repro
+          -- --test-threads=1 --skip ::go_
+      - name: Run rust integration tests on a one-worker pool (basic, query)
+        if: matrix.suite == 'one-worker'
+        env:
+          # Every node the suites start runs its data path on one worker.
+          DEFRA_WORKERS: '1'
+        run: >-
+          cargo test --profile super-dev -p integration-test --test basic --test query
           -- --test-threads=1 --skip ::go_
       - name: Run rust P2P integration tests
         if: matrix.suite == 'rust' || matrix.suite == 'signed-docs'

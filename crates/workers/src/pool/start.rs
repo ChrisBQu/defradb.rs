@@ -78,7 +78,9 @@ impl Pool {
             placed: (0..count).map(|_| OnceCell::new()).collect(),
             ready: Latch::new(count),
         });
-        let tuning = PoolShared::tuning(&config, count > 1);
+        let driven_monitor = config.monitor.clone();
+        let tuning = PoolShared::tuning(&config, count > 1 || driven_monitor.is_some());
+        let watchers = if driven_monitor.is_some() { 0 } else { monitor::WATCHERS };
         let mut threads = Vec::with_capacity(count);
         for index in 0..count {
             let thread = {
@@ -91,7 +93,10 @@ impl Pool {
                 let recheck = config.recheck_every;
                 std::thread::Builder::new()
                     .name(format!("{}-{index}", config.thread_name))
-                    .spawn(move || run_worker(&shared, index, tuning, hook, recheck, &startup))
+                    .spawn(move || {
+                        let watches = index < watchers;
+                        run_worker(&shared, index, tuning, hook, recheck, watches, &startup)
+                    })
             };
             match thread {
                 Ok(thread) => threads.push(thread),
@@ -131,6 +136,9 @@ impl Pool {
             memory_lock,
             notes,
         };
+        if let Some(driver) = driven_monitor {
+            driver(monitor::Monitor::of(&shared));
+        }
         Ok(Pool::from_parts(shared, report, &config, threads))
     }
 }
@@ -177,6 +185,7 @@ fn run_worker(
     tuning: Tuning,
     hook: Option<HookFactory>,
     recheck: std::time::Duration,
+    watches: bool,
     startup: &Startup,
 ) {
     let _out = CountOut(&shared.stopped);
@@ -197,7 +206,7 @@ fn run_worker(
         Ok(worker) => worker,
         Err(error) => return report_in.send(Err(error)),
     };
-    if index < monitor::WATCHERS && shared.workers.len() > 1 {
+    if watches && shared.workers.len() > 1 {
         let pool = shared.clone();
         worker.spawn_daemon("workers::monitor", async move {
             let period = monitor::period(pool.stuck_after);

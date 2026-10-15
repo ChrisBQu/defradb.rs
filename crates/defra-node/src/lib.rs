@@ -183,16 +183,38 @@ pub struct EmbeddedNode {
     /// The node's share of the network runtime; `None` when the node has
     /// no network work and was given no runtime.
     network: Option<NodeEdge>,
+    /// Closes the database: its worker pool finishes and stops, then its
+    /// store closes. Run once, at shutdown.
+    close_database: CloseDatabase,
     #[cfg(not(target_arch = "wasm32"))]
     transaction_stats: Option<storage::TransactionStatsHandle>,
     #[cfg(feature = "http")]
-    txn_cleanup_task: kovan_queue::seg_queue::SegQueue<tokio::task::JoinHandle<()>>,
+    txn_cleanup_task: kovan_queue::seg_queue::SegQueue<workers::Background>,
     #[cfg(feature = "p2p")]
     p2p_ops: Option<Arc<dyn defra_http::P2POperations>>,
     #[cfg(feature = "p2p")]
     p2p_lifecycle: Option<p2p_runtime::P2PLifecycle>,
     #[cfg(feature = "otel")]
     telemetry: kovan_queue::seg_queue::SegQueue<TelemetryHandle>,
+}
+
+/// Closes a node's database, whatever store it runs on.
+type CloseDatabase = Box<
+    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = db::Result<()>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// The closer of `database`, for a node that does not know its store type.
+fn close_database<S>(database: &Arc<db::DB<S>>) -> CloseDatabase
+where
+    S: storage::corekv::Store + 'static,
+{
+    let database = Arc::clone(database);
+    Box::new(move || {
+        let database = Arc::clone(&database);
+        Box::pin(async move { database.close().await })
+    })
 }
 
 #[cfg(feature = "http")]
@@ -707,6 +729,12 @@ impl EmbeddedNode {
             lifecycle.shutdown().await;
         }
 
+        // Nothing reaches the data path any more: the worker pool finishes
+        // what it admitted and stops, then the store closes.
+        if let Err(error) = (self.close_database)().await {
+            tracing::warn!(%error, "the node's database did not close cleanly");
+        }
+
         // Flush buffered spans / metrics. Done after P2P shutdown so trailing
         // shutdown spans are still captured. Go DefraDB never calls provider
         // shutdown — we don't repeat that bug.
@@ -854,6 +882,7 @@ pub enum StorageBackend {
 #[derive(Default)]
 pub struct NodeBuilder {
     edge: Option<edge::Edge>,
+    workers: Option<workers::Config>,
     data_path: Option<PathBuf>,
     storage_backend: StorageBackend,
     storage_durability: storage::backends::DurabilityMode,
@@ -943,6 +972,13 @@ struct PersistentStoreBuildArgs {
 }
 
 impl NodeBuilder {
+    /// The worker pool the node's data path runs on. Unset, the pool's own
+    /// defaults (`workers::Config::default()`).
+    pub fn with_workers(mut self, config: workers::Config) -> Self {
+        self.workers = Some(config);
+        self
+    }
+
     /// Run the node's network work (signed queries, the HTTP server, P2P)
     /// on the application's network runtime. Without one, the node starts
     /// its own when it has network work to run, and stops it at shutdown.
@@ -1210,10 +1246,24 @@ impl NodeBuilder {
         let runs_p2p = p2p_config.is_some();
         #[cfg(not(feature = "p2p"))]
         let runs_p2p = false;
+        // Remote inputs are network work too: an embedding endpoint and a
+        // remote ACP each need the network runtime.
+        let reaches_remote_inputs =
+            self.embedding_url.is_some() || !matches!(self.document_acp, DocumentAcpConfig::Local);
         let network = NodeEdge::start(
             self.edge,
-            node_identity_did.is_some() || serves_http || runs_p2p,
+            node_identity_did.is_some() || serves_http || runs_p2p || reaches_remote_inputs,
         )?;
+
+        // The data path's worker pool comes before the store, which places
+        // its compaction threads by the pool's plan; the network runtime's
+        // timer, when the node has one, runs the pool's stuck-poll monitor.
+        let pool = storage::start_pool(
+            self.workers.clone().unwrap_or_default(),
+            network.as_ref().map(|network| network.edge().pool_monitor()),
+        )
+        .map_err(|error| anyhow::anyhow!("the worker pool did not start: {error}"))?;
+        let db_options = db_options.with_pool(pool.clone());
 
         // 3. Storage backend + database
         let node = if let Some(path) = self.data_path {
@@ -1245,7 +1295,8 @@ impl NodeBuilder {
                 "embedded node starting"
             );
             let opts = with_at_rest_keys(
-                resolve_regolith_options(self.regolith_options.clone(), self.storage_durability),
+                resolve_regolith_options(self.regolith_options.clone(), self.storage_durability)
+                    .placed_on(&pool),
                 self.at_rest_encryption_key,
                 &self.previous_at_rest_encryption_keys,
             )?;
@@ -1262,7 +1313,7 @@ impl NodeBuilder {
                 storage::RegolithStore::open_with_options(
                     "memory",
                     with_at_rest_keys(
-                        storage::RegolithStoreOptions::memory(),
+                        storage::RegolithStoreOptions::memory().placed_on(&pool),
                         self.at_rest_encryption_key,
                         &self.previous_at_rest_encryption_keys,
                     )?,
@@ -1481,7 +1532,11 @@ impl NodeBuilder {
 
         // Wire event bus so mutations publish events
         database.set_event_bus(event_bus.clone());
+        if let Some(network) = network.as_ref() {
+            database.set_network(network.edge().clone());
+        }
         let database = Arc::new(database);
+        let closer = close_database(&database);
 
         // Node Access Control: only installed when explicitly enabled. The node
         // identity owns the policy, so DB-layer node operations run by the node
@@ -1515,7 +1570,13 @@ impl NodeBuilder {
         }
 
         let acp_setup =
-            node_acp::create_document_acp(store.clone(), persistence, &document_acp_config).await?;
+            node_acp::create_document_acp(
+                store.clone(),
+                persistence,
+                &document_acp_config,
+                network.as_ref().map(NodeEdge::edge),
+            )
+            .await?;
         let document_acp = acp_setup.document_acp.clone();
         #[cfg(feature = "vera")]
         let _strict_replicated_doc_access = acp_setup.vera_acp.is_some();
@@ -1617,12 +1678,16 @@ impl NodeBuilder {
                     .expect("static anonymous DID parses")
             });
 
-            let kms_service: Arc<dyn kms::KmsService> = Arc::new(kms::DefraKms::new(
+            let kms_service: Arc<dyn kms::KmsService> = Arc::new(kms::DefraKms::with_inputs(
                 key_store,
                 vec![p2p.kms_transport.clone()],
                 policy as Arc<dyn kms::AccessPolicy>,
                 Arc::new(db::DbBlockDocIDResolver::new(database.clone())),
                 kms_node_did,
+                network
+                    .as_ref()
+                    .map(|network| kms::KmsInputs::on(network.edge()))
+                    .unwrap_or_default(),
             ));
 
             // Bind this node's transport peer id into the KMS so served
@@ -1675,7 +1740,9 @@ impl NodeBuilder {
             query_runner
         };
 
-        let runner: Arc<dyn QueryExecutor> = Arc::new(query_runner);
+        // GraphQL requests run on the database's worker pool, routed there
+        // once at the boundary.
+        let runner = query::pooled::PooledExecutor::wrap(Arc::new(query_runner), database.pool());
         #[cfg(feature = "vera")]
         let policy_lookup =
             acp_ops::PolicyLookup::new(acp_setup.local_zanzibar_store, acp_setup.vera_acp);
@@ -1723,6 +1790,7 @@ impl NodeBuilder {
             node_identity_did,
             node_query_identity,
             network,
+            close_database: closer,
             #[cfg(not(target_arch = "wasm32"))]
             transaction_stats,
             #[cfg(feature = "http")]

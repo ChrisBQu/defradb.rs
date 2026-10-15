@@ -56,6 +56,11 @@ commonware-codec = "2026.9.0"
 # Lock-free shared state
 kovan.workspace = true
 kovan-map.workspace = true
+kovan-queue.workspace = true
+
+# Remote decisions: single-flight, a deadline, retries, an in-flight cap,
+# metrics; the byte-bounded registration cache.
+inputs = { path = "../inputs" }
 
 # Logging
 tracing.workspace = true
@@ -86,7 +91,7 @@ tokio-tungstenite = { version = "0.26.2", features = ["rustls-tls-webpki-roots"]
 
 [dev-dependencies]
 edge = { path = "../edge", features = ["testing"] }
-tokio = { workspace = true, features = ["macros", "net"] }
+tokio = { workspace = true, features = ["macros", "net", "test-util"] }
 kovan-queue.workspace = true
 
 [lints]

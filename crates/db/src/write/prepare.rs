@@ -13,8 +13,9 @@ pub(crate) enum PreparedKmsOperation {
     Get {
         cid: String,
     },
-    GetForRead {
-        cid: String,
+    /// Every key one read decrypts with, under its caller's identity.
+    ReadKeys {
+        cids: Vec<String>,
         caller_identity: Option<String>,
     },
     Generate {
@@ -27,6 +28,14 @@ pub(crate) enum PreparedKmsOperation {
 pub(crate) struct PreparedKmsResponse {
     pub cid: String,
     pub key: Vec<u8>,
+}
+
+/// One key of a [`PreparedKmsOperation::ReadKeys`] answer: the key, or why
+/// the KMS released none.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct PreparedReadKey {
+    pub cid: String,
+    pub key: Result<Vec<u8>, String>,
 }
 
 pub(crate) fn kms_input_request(
@@ -182,28 +191,19 @@ where
     S: Store + 'static,
 {
     match request.kind() {
-        query::prepared::PreparedInputKind::Embedding => {
-            let response = crate::search::embedding::resolve_prepared_embedding_request(
-                request.exact_request(),
-            )
-            .await
-            .map_err(|error| {
-                query::error::QueryError::execution(format!("embedding error: {error}"))
-            })?;
-            Ok(std::sync::Arc::from(response))
-        }
+        query::prepared::PreparedInputKind::Embedding => resolve_embeddings(db, &[request])
+            .await?
+            .pop()
+            .ok_or_else(|| {
+                query::error::QueryError::execution("embedding service returned nothing")
+            }),
         query::prepared::PreparedInputKind::Signature => {
-            let input = defra_core::signing::RemoteSignatureInput::decode(request.exact_request())
-                .map_err(query::error::QueryError::execution)?;
-            let signer = context.signing().ok_or_else(|| {
-                query::error::QueryError::execution(
-                    "remote signature input has no configured signer",
-                )
-            })?;
-            let response = input
-                .resolve(signer)
-                .map_err(query::error::QueryError::execution)?;
-            Ok(std::sync::Arc::from(response))
+            resolve_signatures(db, context, &[request])
+                .await?
+                .pop()
+                .ok_or_else(|| {
+                    query::error::QueryError::execution("remote signer returned no signature")
+                })
         }
         query::prepared::PreparedInputKind::KmsKey => {
             let operation: PreparedKmsOperation = serde_json::from_slice(request.exact_request())
@@ -217,26 +217,52 @@ where
                     "prepared KMS input has no configured KMS provider",
                 )
             })?;
-            let context = match &operation {
-                PreparedKmsOperation::GetForRead {
-                    caller_identity: Some(did),
-                    ..
-                } => kms::RequestContext::with_user(
-                    identity::Did::new(did)
-                        .map_err(|error| query::error::QueryError::execution(error.to_string()))?,
-                ),
-                _ => kms::RequestContext::anonymous(),
-            };
             let (cid, key) = match operation {
-                PreparedKmsOperation::Get { cid }
-                | PreparedKmsOperation::GetForRead { cid, .. } => {
+                PreparedKmsOperation::ReadKeys {
+                    cids,
+                    caller_identity,
+                } => {
+                    let context = match caller_identity {
+                        Some(did) => {
+                            kms::RequestContext::with_user(identity::Did::new(&did).map_err(
+                                |error| query::error::QueryError::execution(error.to_string()),
+                            )?)
+                        }
+                        None => kms::RequestContext::anonymous(),
+                    };
+                    let cids = cids
+                        .iter()
+                        .map(|cid| {
+                            cid::Cid::try_from(cid.as_str()).map_err(|error| {
+                                query::error::QueryError::execution(format!(
+                                    "invalid encryption CID in prepared KMS request: {error}"
+                                ))
+                            })
+                        })
+                        .collect::<query::error::Result<Vec<_>>>()?;
+                    let answers = kms.get_keys_each(&context, &cids).await.map_err(|error| {
+                        query::error::QueryError::execution(format!("kms get_keys: {error}"))
+                    })?;
+                    let keys: Vec<PreparedReadKey> = cids
+                        .iter()
+                        .zip(answers)
+                        .map(|(cid, answer)| PreparedReadKey {
+                            cid: cid.to_string(),
+                            key: answer.map(|key| key.to_vec()).map_err(|e| e.to_string()),
+                        })
+                        .collect();
+                    let response = serde_json::to_vec(&keys)
+                        .map_err(|error| query::error::QueryError::execution(error.to_string()))?;
+                    return Ok(std::sync::Arc::from(response));
+                }
+                PreparedKmsOperation::Get { cid } => {
                     let cid = cid::Cid::try_from(cid.as_str()).map_err(|error| {
                         query::error::QueryError::execution(format!(
                             "invalid encryption CID in prepared KMS request: {error}"
                         ))
                     })?;
                     let key = kms
-                        .get_keys(&context, &[cid])
+                        .get_keys(&kms::RequestContext::anonymous(), &[cid])
                         .await
                         .map_err(|error| {
                             query::error::QueryError::execution(format!(
@@ -316,6 +342,159 @@ where
             "prepared {kind:?} input resolution is not available"
         ))),
     }
+}
+
+/// Fetch a wave of external inputs at once, outside any transaction: the
+/// signatures in one call per signer, the embeddings through their service,
+/// every other input concurrently. One answer per request, in order.
+pub(crate) async fn resolve_inputs<S>(
+    db: &DB<S>,
+    context: &defra_core::RequestContext,
+    requests: Vec<query::prepared::PreparedInputRequest>,
+) -> query::error::Result<Vec<Arc<[u8]>>>
+where
+    S: Store + 'static,
+{
+    use query::prepared::PreparedInputKind;
+    let of_kind = |kind: Option<PreparedInputKind>| -> Vec<usize> {
+        (0..requests.len())
+            .filter(|index| {
+                let found = requests[*index].kind();
+                match kind {
+                    Some(kind) => found == kind,
+                    None => {
+                        found != PreparedInputKind::Signature
+                            && found != PreparedInputKind::Embedding
+                    }
+                }
+            })
+            .collect()
+    };
+    let (signatures, embeddings, others) = (
+        of_kind(Some(PreparedInputKind::Signature)),
+        of_kind(Some(PreparedInputKind::Embedding)),
+        of_kind(None),
+    );
+    let picked = |indices: &[usize]| -> Vec<&query::prepared::PreparedInputRequest> {
+        indices.iter().map(|index| &requests[*index]).collect()
+    };
+    let (signature_requests, embedding_requests) = (picked(&signatures), picked(&embeddings));
+    let (signed, embedded, fetched) = futures::future::try_join3(
+        resolve_signatures(db, context, &signature_requests),
+        resolve_embeddings(db, &embedding_requests),
+        futures::future::try_join_all(
+            others
+                .iter()
+                .map(|index| resolve_input(db, context, &requests[*index])),
+        ),
+    )
+    .await?;
+    let mut answers: Vec<Option<Arc<[u8]>>> = vec![None; requests.len()];
+    for (index, answer) in signatures
+        .into_iter()
+        .chain(embeddings)
+        .chain(others)
+        .zip(signed.into_iter().chain(embedded).chain(fetched))
+    {
+        answers[index] = Some(answer);
+    }
+    answers
+        .into_iter()
+        .map(|answer| {
+            answer.ok_or_else(|| {
+                query::error::QueryError::execution("an external input went unanswered")
+            })
+        })
+        .collect()
+}
+
+/// Every embedding of a wave through the database's embedding service:
+/// each text once, from the cache when it holds it, all in flight at once.
+async fn resolve_embeddings<S>(
+    db: &DB<S>,
+    requests: &[&query::prepared::PreparedInputRequest],
+) -> query::error::Result<Vec<Arc<[u8]>>>
+where
+    S: Store + 'static,
+{
+    if requests.is_empty() {
+        return Ok(Vec::new());
+    }
+    let keys = requests
+        .iter()
+        .map(|request| {
+            crate::search::embedding::EmbeddingInput::decode(request.exact_request())
+                .map(crate::remote_inputs::Embedding::new)
+                .map_err(|error| {
+                    query::error::QueryError::execution(format!("embedding error: {error}"))
+                })
+        })
+        .collect::<query::error::Result<Vec<_>>>()?;
+    // Natively an embedding is a request on the network runtime, which a
+    // database built without one does not have.
+    let embeddings = db.remote_inputs().embeddings().ok_or_else(|| {
+        query::error::QueryError::execution(
+            "embedding error: no network runtime to reach the embedding provider; run the node with its network runtime",
+        )
+    })?;
+    embeddings
+        .get_many(keys)
+        .await
+        .into_iter()
+        .map(|vector| {
+            let vector = vector.map_err(|error| {
+                query::error::QueryError::execution(format!("embedding error: {error}"))
+            })?;
+            serde_json::to_vec(&*vector)
+                .map(Arc::from)
+                .map_err(|error| query::error::QueryError::execution(error.to_string()))
+        })
+        .collect()
+}
+
+/// Every remote signature of a wave through the database's signature
+/// service: one `sign_batch` call per signer for the whole wave, signed by
+/// the signer the request's context names.
+async fn resolve_signatures<S>(
+    db: &DB<S>,
+    context: &defra_core::RequestContext,
+    requests: &[&query::prepared::PreparedInputRequest],
+) -> query::error::Result<Vec<Arc<[u8]>>>
+where
+    S: Store + 'static,
+{
+    if requests.is_empty() {
+        return Ok(Vec::new());
+    }
+    let config = context.signing().ok_or_else(|| {
+        query::error::QueryError::execution("remote signature input has no configured signer")
+    })?;
+    let keys = requests
+        .iter()
+        .map(|request| {
+            let input = defra_core::signing::RemoteSignatureInput::decode(request.exact_request())
+                .map_err(query::error::QueryError::execution)?;
+            let remote = input
+                .remote_signer(&config)
+                .map_err(query::error::QueryError::execution)?;
+            Ok(crate::remote_inputs::Signature {
+                signer: crate::remote_inputs::Signer {
+                    remote,
+                    authorization: input.authorization,
+                },
+                data: Arc::from(input.data),
+            })
+        })
+        .collect::<query::error::Result<Vec<_>>>()?;
+    db.remote_inputs()
+        .signatures()
+        .get_many(keys)
+        .await
+        .into_iter()
+        .map(|signature| {
+            signature.map_err(|error| query::error::QueryError::execution(error.to_string()))
+        })
+        .collect()
 }
 
 pub(crate) fn prepared_identity(doc: &Document) -> Option<DocStorageIdentity> {

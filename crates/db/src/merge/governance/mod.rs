@@ -23,6 +23,8 @@ pub(crate) use judge::{GovernedFrame, Judgement};
 pub use local_commit::LocalCommitRelease;
 pub use redriven::{RedrivenMerge, RedrivenMergeSink};
 pub use signature::SignatureStatus;
+#[cfg(not(target_arch = "wasm32"))]
+pub use sweep::start_governance_sweep;
 pub use sweep::{run_governance_sweep, SWEEP_BUDGET, SWEEP_INTERVAL};
 pub use validator::{MergeCandidate, MergeGovernance, MergeValidator};
 pub use verdict::MergeVerdict;

@@ -45,6 +45,11 @@ pub struct DbOptions {
     pub embedding_model: String,
     /// Resolved embedding API key value.
     pub embedding_api_key: String,
+    /// The worker pool this database's work runs on: its periodic and
+    /// detached jobs, and the pool [`DB::close`] stops before the store
+    /// closes. `None` (a test, a one-shot tool) runs them on the fallback
+    /// pool.
+    pub pool: Option<workers::Pool>,
 }
 
 impl std::fmt::Debug for DbOptions {
@@ -66,6 +71,7 @@ impl std::fmt::Debug for DbOptions {
                 "embedding_api_key_configured",
                 &!self.embedding_api_key.is_empty(),
             )
+            .field("pool", &self.pool)
             .finish()
     }
 }
@@ -128,6 +134,12 @@ impl DbOptions {
         self
     }
 
+    /// Runs the database's work on `pool`, the pool its store was placed on.
+    pub fn with_pool(mut self, pool: workers::Pool) -> Self {
+        self.pool = Some(pool);
+        self
+    }
+
     /// Returns the embedding client configuration for this database.
     pub fn embedding_config(&self) -> EmbeddingClientConfig {
         EmbeddingClientConfig::new()
@@ -182,6 +194,8 @@ pub struct DB<S: Store> {
     /// Set once at node startup via [`DB::set_kms`].
     document_acp: std::sync::OnceLock<Arc<dyn acp::DocumentACP>>,
     kms: std::sync::OnceLock<std::sync::Arc<dyn kms::KmsService>>,
+    /// Remote signatures and embeddings, each behind its own service.
+    remote_inputs: crate::remote_inputs::RemoteInputs,
     /// Owning handle to the KMS durable blockstore. The KMS adapter
     /// (`DbEncBlockStore`) references this weakly to avoid the
     /// DB→KMS→`KeyStore`→adapter→blockstore→store Arc cycle that would pin the
@@ -230,7 +244,7 @@ impl<S: Store> DB<S> {
     /// This creates a DB with an empty collection cache. Use `open_with_options()`
     /// to load existing collections from the store.
     pub fn with_options(store: S, options: DbOptions) -> Result<Self> {
-        let lens_store: Arc<dyn TransformStore> = Self::create_lens_store()?;
+        let lens_store: Arc<dyn TransformStore> = Self::create_lens_store(options.pool.as_ref())?;
         let store = Arc::new(store);
         Ok(Self {
             doc_short_id_allocator: crate::docid::map::DocShortIdAllocator::new(store.clone()),
@@ -250,6 +264,7 @@ impl<S: Store> DB<S> {
             forbidden_collection_ids: HopscotchMap::with_hasher(RandomState::default()),
             document_acp: std::sync::OnceLock::new(),
             kms: std::sync::OnceLock::new(),
+            remote_inputs: Default::default(),
             kms_blockstore: std::sync::OnceLock::new(),
             nac_manager: std::sync::OnceLock::new(),
             merge_governance: std::sync::OnceLock::new(),
@@ -297,7 +312,7 @@ impl<S: Store> DB<S> {
     /// **Warning:** When multiple DB instances share a store via `from_arc()`,
     /// transaction IDs may collide if both instances create transactions concurrently.
     pub fn from_arc_with_options(store: Arc<S>, options: DbOptions) -> Result<Self> {
-        let lens_store: Arc<dyn TransformStore> = Self::create_lens_store()?;
+        let lens_store: Arc<dyn TransformStore> = Self::create_lens_store(options.pool.as_ref())?;
         Ok(Self {
             doc_short_id_allocator: crate::docid::map::DocShortIdAllocator::new(store.clone()),
             store,
@@ -316,6 +331,7 @@ impl<S: Store> DB<S> {
             forbidden_collection_ids: HopscotchMap::with_hasher(RandomState::default()),
             document_acp: std::sync::OnceLock::new(),
             kms: std::sync::OnceLock::new(),
+            remote_inputs: Default::default(),
             kms_blockstore: std::sync::OnceLock::new(),
             nac_manager: std::sync::OnceLock::new(),
             merge_governance: std::sync::OnceLock::new(),
@@ -485,6 +501,19 @@ impl<S: Store> DB<S> {
         self.kms.get().cloned()
     }
 
+    /// Runs the database's remote inputs (signatures, embeddings) on the
+    /// node's network runtime. Set once at startup, before the first write
+    /// that needs one; without it they run on the caller's async runtime.
+    pub fn set_network(&self, edge: edge::Edge) {
+        if !self.remote_inputs.set_runtime(inputs::Runtime::edge(edge)) {
+            tracing::warn!("the database's network runtime was already set; keeping the first");
+        }
+    }
+
+    pub(crate) fn remote_inputs(&self) -> &crate::remote_inputs::RemoteInputs {
+        &self.remote_inputs
+    }
+
     /// Install the NAC manager. First call wins (OnceLock); subsequent calls
     /// are silently discarded. Called once at node startup. When unset, all
     /// `check_node_access` calls are no-ops (NAC not configured).
@@ -634,9 +663,26 @@ impl<S: Store> DB<S> {
     ///
     /// After closing, any attempt to create new transactions will return
     /// `Error::DatabaseClosed`. Matches Go's close-guard behavior (PR #4435).
+    /// Closes the database, in the one shutdown order: new transactions are
+    /// refused, the pool finishes the work it admitted and stops (within its
+    /// shutdown deadline), then the store closes. Called on a worker, the
+    /// pool is left to its owner: a worker cannot wait for itself to stop.
     pub async fn close(&self) -> Result<()> {
         self.closed.store(true, Ordering::SeqCst);
+        if let Some(pool) = &self.options.pool {
+            match pool.stop().await {
+                Ok(()) | Err(workers::Error::OnWorker) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "the worker pool did not stop cleanly before the store closed");
+                }
+            }
+        }
         self.store.close().await.map_err(Error::Storage)
+    }
+
+    /// The pool this database's work runs on, when it was given one.
+    pub fn pool(&self) -> Option<&workers::Pool> {
+        self.options.pool.as_ref()
     }
 
     /// Returns true if the database has been closed.
@@ -689,8 +735,21 @@ impl<S: Store> DB<S> {
     }
 
     /// The lens transform store this database runs its migrations on.
-    fn create_lens_store() -> Result<Arc<dyn TransformStore>> {
-        lens::default_store()
+    /// The database's lens store: its epoch ticks run on `pool`'s deadline
+    /// queue, or on a thread of their own without one.
+    fn create_lens_store(pool: Option<&workers::Pool>) -> Result<Arc<dyn TransformStore>> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let store = match pool {
+            Some(pool) => lens::default_store_on(pool),
+            None => lens::default_store(),
+        };
+        // A browser build compiles no lens runtime: nothing ticks.
+        #[cfg(target_arch = "wasm32")]
+        let store = {
+            let _ = pool;
+            lens::default_store()
+        };
+        store
             .map(crate::definition::migration::committed_lenses::CommittedLensStore::wrap)
             .map_err(|e| Error::Lens(format!("failed to create lens transform store: {}", e)))
     }
@@ -700,6 +759,9 @@ impl<S: Store> DB<S> {
         self.txn_id_counter.load(Ordering::SeqCst)
     }
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod close_tests;
 
 #[cfg(test)]
 mod vector_cache_tests {

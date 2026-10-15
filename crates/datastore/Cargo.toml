@@ -24,16 +24,12 @@ async-lock.workspace = true
 thiserror.workspace = true
 
 # Logging
-tracing.workspace = true
 
 # IPLD
 cid.workspace = true
 
 # Internal crates
 storage = { path = "../storage" }
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
 # Testing

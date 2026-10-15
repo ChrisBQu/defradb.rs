@@ -275,10 +275,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         let doc_id_for_index = doc_id_str.clone();
         let mut frames = vec![CompositeMergeFrame::Enter {
             cid: *cid,
-            source: FrameSource::Root {
-                block: block.clone(),
-                payload: payload.clone(),
-            },
+            source: FrameSource::root(block, payload),
             depth,
         }];
 
@@ -376,8 +373,37 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         Ok(MergeOutcome::terminal_skip("already merged"))
     }
 
+    /// Merges one composite in its own transaction, with every key its
+    /// fields decrypt with fetched before the transaction opens.
     #[allow(clippy::too_many_arguments)]
     async fn process_composite_delta_body(
+        &self,
+        cid: &Cid,
+        block: &Block,
+        payload: &defra_core::block::CompositeDeltaPayload,
+        metadata: &BlockMetadata<'_>,
+        from_collection: bool,
+        is_root: bool,
+        doc_id_str: &str,
+        collection_lookup: Option<Collection>,
+    ) -> std::result::Result<MergeOutcome, MergeError> {
+        self.with_merge_keys(block, Some(metadata))
+            .await
+            .process_composite_delta_keyed(
+                cid,
+                block,
+                payload,
+                metadata,
+                from_collection,
+                is_root,
+                doc_id_str,
+                collection_lookup,
+            )
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn process_composite_delta_keyed(
         &self,
         cid: &Cid,
         block: &Block,
@@ -685,10 +711,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         let doc_id_for_index = doc_id.clone();
         let mut frames = vec![CompositeMergeFrame::Enter {
             cid: *cid,
-            source: FrameSource::Root {
-                block: block.clone(),
-                payload: payload.clone(),
-            },
+            source: FrameSource::root(block, payload),
             depth,
         }];
 

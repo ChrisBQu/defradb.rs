@@ -386,6 +386,8 @@ pub(crate) async fn write_document_blocks_with_inputs(
         inherited_encryption_cid(blockstore, &composite_heads).await?
     };
 
+    // The first signature this pass is missing; the pass goes on past it.
+    let mut first_miss = None;
     for (field_name, field_value) in doc.values() {
         if field_name == "_docID" {
             continue;
@@ -549,6 +551,12 @@ pub(crate) async fn write_document_blocks_with_inputs(
                     Ok(None) => {
                         tracing::debug!(field = %field_name, priority = field_priority, "Skipped signing (priority > 1)");
                     }
+                    // The field waits for its signature; the other fields'
+                    // go out in the same wave.
+                    Err(BuildError::NeedsInput(request)) => {
+                        first_miss.get_or_insert(request);
+                        continue;
+                    }
                     Err(e) => {
                         tracing::debug!(field = %field_name, error = %e, "Failed to sign field block");
                         return Err(e);
@@ -624,6 +632,10 @@ pub(crate) async fn write_document_blocks_with_inputs(
                 initial_field_cids.push(field_cid);
             }
         }
+    }
+    // The composite links every field block, so it waits for all of them.
+    if let Some(request) = first_miss {
+        return Err(BuildError::NeedsInput(request));
     }
 
     let composite_payload = CompositeDeltaPayload {
@@ -761,11 +773,13 @@ pub async fn write_delete_block(
         signing_config,
         None,
         None,
+        None,
     )
     .await
     .map_err(|error| error.to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn write_delete_block_with_inputs(
     blockstore: &NamespaceView,
     headstore: &NamespaceView,
@@ -775,8 +789,16 @@ pub(crate) async fn write_delete_block_with_inputs(
     signing_config: Option<&SigningConfig>,
     batch_session: Option<&str>,
     prepared_inputs: Option<&query::prepared::PreparedInputMemo>,
+    heads: Option<&DocHeadsSnapshot>,
 ) -> Result<BlockResult, BuildError> {
-    let snapshot = DocHeadsSnapshot::load(headstore, doc_short_id).await?;
+    let loaded;
+    let snapshot = match heads {
+        Some(heads) => heads,
+        None => {
+            loaded = DocHeadsSnapshot::load(headstore, doc_short_id).await?;
+            &loaded
+        }
+    };
     let priority: u64 = snapshot.max_priority() + 1;
 
     let composite_head_entries = snapshot.field_heads("C");

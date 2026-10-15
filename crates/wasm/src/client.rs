@@ -53,6 +53,9 @@ use crate::p2p::P2PRuntime;
 /// ```
 #[wasm_bindgen]
 pub struct DefraClient {
+    /// The page's one worker, driven by the browser's event loop: the
+    /// store's I/O completes on its queue and the database's jobs run on it.
+    pool: workers::Pool,
     db: Option<Arc<DB<RegolithStore>>>,
     runner: Option<WasmRunner>,
     pub(crate) event_bus: Arc<events::ChannelBus>,
@@ -245,6 +248,11 @@ impl DefraClient {
             from_js(config)?
         };
 
+        // The page's thread is the pool's one worker, driven by the event
+        // loop; it polls the store's I/O queue between its tasks.
+        let pool = edge::page_pool(storage::with_worker_io(workers::Config::default()))
+            .map_err(|e| WasmError::Storage(format!("Failed to start the worker: {}", e)))?;
+
         // A regolith store on the origin-private filesystem, which is the
         // only filesystem this target has.
         let db_name = config.db_name.as_deref().unwrap_or("defradb");
@@ -254,7 +262,7 @@ impl DefraClient {
 
         // Create the database
         let event_bus = Arc::new(events::ChannelBus::new());
-        let mut db = DB::new(store)
+        let mut db = DB::with_options(store, db::DbOptions::default().with_pool(pool.clone()))
             .map_err(|e| WasmError::Storage(format!("Failed to create database: {}", e)))?;
         db.set_event_bus(event_bus.clone());
 
@@ -279,6 +287,7 @@ impl DefraClient {
         };
 
         Ok(Self {
+            pool,
             db: Some(db),
             runner: Some(runner),
             event_bus,
@@ -463,6 +472,8 @@ impl DefraClient {
             }
         }
 
+        // Its last tasks finish as the event loop drives them; then it stops.
+        self.pool.shutdown();
         self.closed = true;
         Ok(())
     }

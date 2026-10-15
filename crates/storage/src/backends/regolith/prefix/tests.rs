@@ -73,7 +73,12 @@ async fn a_prefix_scan_reads_what_it_did_and_skips_tables_without_its_entity() {
             [b"h/cs/".as_slice(), &[digit], b"/a/b"].concat(),
             [b"d/d/col".as_slice(), &[digit], b"/\x01"].concat(),
             [b"d/\x01/".as_slice(), &[entity], b"/value/\x01"].concat(),
-            [b"a/zanzibar/1/rel/users/bae-".as_slice(), &[digit], b"/owner/x"].concat(),
+            [
+                b"a/zanzibar/1/rel/users/bae-".as_slice(),
+                &[digit],
+                b"/owner/x",
+            ]
+            .concat(),
         ]);
     }
     // A key that names no entity, between the others.

@@ -10,7 +10,7 @@ use web_time::Instant;
 
 use p2p::message::PushLogReply;
 use p2p::transport::PeerId;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use regolith::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// Maximum concurrent per-document push tasks during initial replay.
 ///
@@ -256,11 +256,7 @@ impl ReplayPushGate {
     pub(crate) async fn acquire_document_task(
         &self,
     ) -> Result<OwnedSemaphorePermit, ReplayPushSendError> {
-        self.document_task_semaphore
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| ReplayPushSendError::SemaphoreClosed)
+        Ok(self.document_task_semaphore.acquire_owned(1).await)
     }
 
     pub async fn send_pushlog<F>(
@@ -294,12 +290,7 @@ impl ReplayPushGate {
             n0_future::time::sleep(delay).await;
         }
 
-        let _permit = self
-            .outbound_push_semaphore
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| ReplayPushSendError::SemaphoreClosed)?;
+        let _permit = self.outbound_push_semaphore.acquire_owned(1).await;
 
         if let Some(retry_after) = self.peer_pacer.retry_after(peer_id.as_str()) {
             return Err(ReplayPushSendError::Backpressure { retry_after });

@@ -270,6 +270,22 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         crate::write::prepare::resolve_input(&self.db, context, request).await
     }
 
+    async fn resolve_prepared_inputs(
+        &self,
+        requests: Vec<query::prepared::PreparedInputRequest>,
+    ) -> query::error::Result<Vec<Arc<[u8]>>> {
+        self.resolve_prepared_inputs_as(&RequestContext::ambient(), requests)
+            .await
+    }
+
+    async fn resolve_prepared_inputs_as(
+        &self,
+        context: &RequestContext,
+        requests: Vec<query::prepared::PreparedInputRequest>,
+    ) -> query::error::Result<Vec<Arc<[u8]>>> {
+        crate::write::prepare::resolve_inputs(&self.db, context, requests).await
+    }
+
     fn set_document_acp(&self, provider: Arc<dyn acp::DocumentACP>) {
         self.db.set_document_acp(provider);
     }
@@ -680,6 +696,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 sign_config,
                 context.batch_session(),
                 Some(&self.prepared_inputs),
+                None,
             )
             .await
             .map_err(|error| {

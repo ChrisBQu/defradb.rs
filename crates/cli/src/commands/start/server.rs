@@ -29,6 +29,7 @@ impl Node {
         zanzibar_store: Arc<dyn acp::ZanzibarStore>,
         node_identity: Option<Arc<identity::RawIdentity>>,
         se_key: Option<[u8; 32]>,
+        pool: &workers::Pool,
         edge: &edge::Edge,
     ) -> Result<ServerSetup> {
         let user_did = match &user_identity {
@@ -83,8 +84,9 @@ impl Node {
             info!("Stored node identity signing config for DID {}", did);
         }
 
-        let mut db_options =
-            db::DbOptions::new().with_max_txn_retries(config.datastore.max_txn_retries);
+        let mut db_options = db::DbOptions::new()
+            .with_max_txn_retries(config.datastore.max_txn_retries)
+            .with_pool(pool.clone());
         if let Some(identity) = node_identity.as_ref() {
             db_options = db_options.with_node_identity_arc(identity.clone());
             info!("Database configured with node identity");
@@ -124,6 +126,7 @@ impl Node {
         let event_bus: Arc<dyn events::Bus> = Arc::new(events::ChannelBus::new());
         database.set_event_bus(event_bus.clone());
         info!("Event bus configured for subscriptions");
+        database.set_network(edge.clone());
 
         let database = Arc::new(database);
 
@@ -244,12 +247,13 @@ impl Node {
                 Some(t) => vec![t],
                 None => vec![],
             };
-            let kms_service: Arc<dyn kms::KmsService> = Arc::new(kms::DefraKms::new(
+            let kms_service: Arc<dyn kms::KmsService> = Arc::new(kms::DefraKms::with_inputs(
                 kms_store,
                 transports,
                 policy as Arc<dyn kms::AccessPolicy>,
                 Arc::new(db::DbBlockDocIDResolver::new(database.clone())),
                 node_did,
+                kms::KmsInputs::on(edge),
             ));
             kms_service.set_local_peer_id(p2p_setup.local_peer_id.clone());
 
@@ -335,7 +339,7 @@ impl Node {
         })?;
         #[cfg(feature = "postgres")]
         let pg_server = Self::build_pg_server(
-            database,
+            database.clone(),
             config,
             &query_setup,
             &acp_setup,
@@ -343,6 +347,7 @@ impl Node {
         )?;
 
         Ok(ServerSetup {
+            database,
             p2p_handle: p2p_setup.host_handle,
             p2p_tasks: p2p_setup.p2p_tasks,
             downsample_task,

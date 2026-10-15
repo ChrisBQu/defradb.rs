@@ -15,10 +15,11 @@ use storage::RegolithStore;
 const WRITERS: i64 = 64;
 const LABELS: usize = 4;
 
-fn tally() -> CollectionVersion {
+/// The collection, its `count` a counter of `kind`.
+fn tally(kind: CType) -> CollectionVersion {
     let mut fields = vec![
         FieldDescription::new("1", "_docID", FieldKind::doc_id()),
-        FieldDescription::new("2", "count", FieldKind::int()).with_crdt_type(CType::PnCounter),
+        FieldDescription::new("2", "count", FieldKind::int()).with_crdt_type(kind),
     ];
     for label in 0..LABELS {
         fields.push(FieldDescription::new(
@@ -31,9 +32,14 @@ fn tally() -> CollectionVersion {
 }
 
 async fn open() -> (Arc<RegolithStore>, Arc<DB<RegolithStore>>, DocID) {
+    open_with(CType::PnCounter).await
+}
+
+/// One document at `count: 0`, its counter of `kind`.
+async fn open_with(kind: CType) -> (Arc<RegolithStore>, Arc<DB<RegolithStore>>, DocID) {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let db = Arc::new(DB::from_arc(store.clone()).unwrap());
-    db.create_collection(tally()).await.unwrap();
+    db.create_collection(tally(kind)).await.unwrap();
     let doc_id = AutoCommitMutator::new(db.clone())
         .create("Tally", Document::from_json_str(r#"{"count": 0}"#).unwrap())
         .await
@@ -162,6 +168,37 @@ async fn an_increment_lands_on_the_stored_value_not_the_callers_copy() {
         .unwrap();
     assert_eq!(updated.document.get("count"), Some(&NormalValue::Int(8)));
     assert_eq!(read(&db).await.get("count"), Some(&NormalValue::Int(8)));
+}
+
+/// A caller's copy of the document never replaces the stored counter, for a
+/// P-counter and a PN-counter alike, whether the copy says more or less than
+/// is stored: only the increment moves it.
+#[tokio::test]
+async fn a_callers_copy_never_replaces_the_stored_counter() {
+    for kind in [CType::PCounter, CType::PnCounter] {
+        let (_store, db, doc_id) = open_with(kind).await;
+        let mutator = AutoCommitMutator::new(db.clone());
+        increment(&mutator, &doc_id, 5).await;
+        for (copy, expected) in [(100, 6), (2, 7)] {
+            let mut stale = Document::new();
+            stale.set_id(doc_id.clone());
+            stale.set("count", NormalValue::Int(copy));
+            stale.set_counter_delta("count".to_string(), NormalValue::Int(1));
+            mutator
+                .update(
+                    "Tally",
+                    stale,
+                    RapidHashSet::from_iter(["count".to_string()]),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                read(&db).await.get("count"),
+                Some(&NormalValue::Int(expected)),
+                "{kind:?}, a copy that says {copy}"
+            );
+        }
+    }
 }
 
 /// Interactive transactions take the same route: two that increment one

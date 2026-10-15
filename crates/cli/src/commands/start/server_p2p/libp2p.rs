@@ -138,7 +138,9 @@ impl Node {
             coordinator.clone(),
             config.datastore.max_merge_depth,
         );
-        let merge_handler_for_loop = replication.merge_handler.clone();
+        // Each merge runs on the database's worker pool, on its document's
+        // worker; the loop itself stays on the network runtime.
+        let merge_handler_for_loop = replication.merge_handler_on_pool();
         let merge_handler_inner_for_syncer = replication.merge_handler_inner.clone();
         let merge_handler_inner_for_kms = replication.merge_handler_inner.clone();
         let broadcast_mutator = replication.broadcast_mutator.clone();
@@ -209,16 +211,13 @@ impl Node {
         // The fallback for a deferred verdict no arrival can release: one
         // named nothing, one past the index's capacity, and everything the
         // index held before this process started.
-        let sweep_handler = replication.merge_handler_inner.clone();
-        let sweep_shutdown = coordinator.shutdown_handle();
-        coordinator.spawn_background_task("governance_sweep", async move {
-            db::merge::governance::run_governance_sweep(
-                sweep_handler,
-                db::merge::governance::SWEEP_INTERVAL,
-                sweep_shutdown,
-            )
-            .await;
-        });
+        // It runs on the database's worker pool and ends with the
+        // coordinator's shutdown.
+        drop(db::merge::governance::start_governance_sweep(
+            replication.merge_handler_inner.clone(),
+            db::merge::governance::SWEEP_INTERVAL,
+            coordinator.shutdown_handle(),
+        ));
 
         let coordinator_for_events = coordinator.clone();
         let se_store = store.clone();

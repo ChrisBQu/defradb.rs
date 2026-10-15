@@ -16,6 +16,8 @@ use storage::RegolithStore;
 
 const DOCUMENTS: usize = 400;
 const DIMENSIONS: usize = 384;
+/// Texts one embedding request carries at most.
+const EMBEDDING_BATCH: usize = 256;
 
 /// Hands out a fresh key per call and serves the keys it handed out.
 struct KeyingKms {
@@ -65,19 +67,34 @@ impl kms::KmsService for KeyingKms {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_batch_of_hundreds_of_embedded_encrypted_creates_commits() {
     let embedding_calls = Arc::new(AtomicUsize::new(0));
+    let embedded_texts = Arc::new(AtomicUsize::new(0));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let calls = Arc::clone(&embedding_calls);
+    let texts = Arc::clone(&embedded_texts);
     let server = tokio::spawn(async move {
         axum::serve(
             listener,
             Router::new().route(
                 "/embeddings",
-                post(move |Json(_): Json<Value>| {
+                // An OpenAI-compatible endpoint: `input` is one text or an
+                // array of them, answered in order with their indices.
+                post(move |Json(request): Json<Value>| {
                     let calls = Arc::clone(&calls);
+                    let texts = Arc::clone(&texts);
                     async move {
                         calls.fetch_add(1, Ordering::SeqCst);
-                        Json(json!({"data": [{"embedding": vec![0.25_f64; DIMENSIONS]}]}))
+                        let count = match &request["input"] {
+                            Value::Array(inputs) => inputs.len(),
+                            _ => 1,
+                        };
+                        texts.fetch_add(count, Ordering::SeqCst);
+                        let data: Vec<Value> = (0..count)
+                            .map(|index| {
+                                json!({"index": index, "embedding": vec![0.25_f64; DIMENSIONS]})
+                            })
+                            .collect();
+                        Json(json!({ "data": data }))
                     }
                 }),
             ),
@@ -87,6 +104,7 @@ async fn a_batch_of_hundreds_of_embedded_encrypted_creates_commits() {
     });
 
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
+    db.set_network(edge::testing::edge());
     let kms = Arc::new(KeyingKms {
         issued: AtomicU64::new(1),
         keys: HopscotchMap::with_hasher(RandomState::default()),
@@ -135,11 +153,16 @@ async fn a_batch_of_hundreds_of_embedded_encrypted_creates_commits() {
         .len();
     assert_eq!(created, DOCUMENTS);
     // Each embedding is fetched once, before the transaction, whatever the
-    // number of attempts.
-    assert_eq!(embedding_calls.load(Ordering::SeqCst), DOCUMENTS);
+    // number of attempts, and the request's embeddings go out together: one
+    // request per batch of texts, not one per document.
+    assert_eq!(embedded_texts.load(Ordering::SeqCst), DOCUMENTS);
+    assert_eq!(
+        embedding_calls.load(Ordering::SeqCst),
+        DOCUMENTS.div_ceil(EMBEDDING_BATCH)
+    );
 
     let response = runner
-        .execute(QueryRequest::new("{ Texts { _docID text } }"))
+        .execute(QueryRequest::new("{ Texts { _docID text vector } }"))
         .await;
     assert!(!response.has_errors(), "{:?}", response.errors);
     let stored = response.data.unwrap()["Texts"].as_array().unwrap().clone();
@@ -148,5 +171,10 @@ async fn a_batch_of_hundreds_of_embedded_encrypted_creates_commits() {
         .as_str()
         .unwrap()
         .starts_with("document number ")));
+    // Every document has its own vector, whole.
+    assert!(stored.iter().all(|doc| doc["vector"]
+        .as_array()
+        .is_some_and(|vector| vector.len() == DIMENSIONS
+            && vector.iter().all(|value| value.as_f64() == Some(0.25)))));
     server.abort();
 }

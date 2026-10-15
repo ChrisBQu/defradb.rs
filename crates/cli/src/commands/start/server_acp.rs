@@ -75,7 +75,7 @@ impl Node {
                 .map_err(|e| Error::InvalidConfig(format!("Vera provider: {}", e)))?,
             );
 
-            let document_acp = vera::VeraDocumentACP::new(provider, tuning.cache_ttl);
+            let document_acp = vera::VeraDocumentACP::tuned(provider, &tuning, Some(edge));
             let document_acp = if config.acp.vera_events_ws.is_empty() {
                 document_acp
             } else {

@@ -188,7 +188,7 @@ async fn unchanged_decision_fields(
         .iter()
         .filter(|plan| !skips(plan, Some(modified)))
         .flat_map(read_fields)
-        .filter(|name| !modified.contains(*name) && declared(*name))
+        .filter(|name| !modified.contains(*name) && declared(name))
         .map(str::to_owned)
         .collect();
     if fields.is_empty() {
