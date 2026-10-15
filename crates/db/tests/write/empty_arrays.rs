@@ -1,0 +1,91 @@
+//! An empty array reads back from storage without its element kind. A
+//! document holding one must still pass validation when it is updated.
+
+use db::{AutoCommitMutator, DB};
+use document::{Document, NormalValue};
+use query::mutator::DocMutator;
+use rapidhash::RapidHashSet;
+use schema::{CollectionVersion, FieldDescription, FieldKind};
+use std::sync::Arc;
+use storage::RegolithStore;
+
+#[tokio::test]
+async fn updating_a_document_that_holds_an_empty_string_array_succeeds() {
+    let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
+    db.create_collection(CollectionVersion::new(
+        "Post",
+        "v1",
+        "col-post",
+        vec![
+            FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+            FieldDescription::new("2", "title", FieldKind::string()),
+            FieldDescription::new("3", "tags", FieldKind::nillable_string_array()),
+        ],
+    ))
+    .await
+    .unwrap();
+    let mutator = AutoCommitMutator::new(Arc::clone(&db));
+    let mut doc = Document::new();
+    doc.set("title", NormalValue::String("first".to_string()));
+    doc.set("tags", NormalValue::NillableStringArray(Some(Vec::new())));
+    let created = mutator.create("Post", doc).await.unwrap();
+
+    // The plan's full read of the stored document, as an update that returns
+    // the document does it, carries the stored empty array into validation.
+    let expected = mutator
+        .get_for_update("Post", &created.doc_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut doc = expected.clone();
+    doc.set("title", NormalValue::String("second".to_string()));
+    mutator
+        .update_if_unchanged(
+            "Post",
+            expected,
+            doc,
+            RapidHashSet::from_iter(["title".to_string()]),
+        )
+        .await
+        .expect("an update of a document holding an empty array commits");
+
+    let stored = mutator
+        .get_for_update("Post", &created.doc_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stored.get("title"),
+        Some(&NormalValue::String("second".to_string()))
+    );
+    let tags = stored.get("tags").expect("tags stays set");
+    assert_eq!(
+        document::encoding::normal_value_to_json(tags).unwrap(),
+        serde_json::json!([])
+    );
+}
+
+#[test]
+fn an_empty_array_read_from_storage_is_valid_for_every_array_kind() {
+    for kind in [
+        FieldKind::nillable_string_array(),
+        FieldKind::string_array(),
+        FieldKind::ScalarArray(schema::ScalarArrayKind::NillableIntArray),
+        FieldKind::ScalarArray(schema::ScalarArrayKind::BoolArray),
+    ] {
+        let collection = db::Collection::new(CollectionVersion::new(
+            "Post",
+            "v1",
+            "col-post",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "values", kind.clone()),
+            ],
+        ));
+        let mut doc = Document::new();
+        doc.set("values", NormalValue::JsonArray(Vec::new()));
+        collection
+            .validate_document(&doc)
+            .unwrap_or_else(|error| panic!("{kind:?}: {error}"));
+    }
+}

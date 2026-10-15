@@ -323,6 +323,9 @@ fn is_empty_array(value: &NormalValue) -> bool {
         NormalValue::NillableFloat64ElementArray(arr) => arr.is_empty(),
         NormalValue::NillableStringElementArray(arr) => arr.is_empty(),
         NormalValue::NillableTimeElementArray(arr) => arr.is_empty(),
+        // Stored values decode without their kind, so every empty array reads
+        // back as an empty JSON array.
+        NormalValue::JsonArray(arr) => arr.is_empty(),
         _ => false,
     }
 }
