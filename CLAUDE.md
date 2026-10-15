@@ -178,7 +178,7 @@ the network stays at the edge. Code that does not fit yet is moved toward it, ne
     a discarded WAL tail, flush, compaction and table-file events for telemetry;
   - `TransactionHooks` and the per-transaction callbacks (`before_commit`, `on_commit`, `on_abort`): post-commit work;
   - `KeyProvider`: the current key and every older key a store still names, so a key rotation works;
-  - `CompactionFilter`: data compaction may drop (superseded head markers, expired data);
+  - `CompactionFilter`: data compaction may drop (expired data);
   - `PrefixExtractor`: defradb.rs's prefix families, so prefix seeks use the prefix bloom filters.
   Where regolith ships an implementation that fits (`Env`, `RateLimiter`), use it.
 - When the regolith pin moves, every implementation is rechecked against the new trait docs, and a trait regolith adds
@@ -194,11 +194,12 @@ Reads:
 - traversal hints that decide nothing (HNSW neighbours): `get_parts(key, &[])`, never validated;
 - content-addressed blocks: a ContentAddressed read; the arrival journal: a Log read;
 - a set that decides (ACP owners and tuples, a claim queue): `scan_validated` or a cursor with `ScanCheck`, so a
-  write inside the range aborts the decision; head sets: a scan inside their CommutativePrefix.
+  write inside the range aborts the decision;
+- a head set: one `get_parts(key, &[])` point read of the set's key, never validated.
 
 Writes:
-- never conflict: blocks (`b` + CID, ContentAddressed puts), head sets (markers in a CommutativePrefix or a blind merge
-  of the set operator), document values (blind merges of part operands), secondary index entries (blind puts and
+- never conflict: blocks (`b` + CID, ContentAddressed puts), head sets (one key per set, blind merges of the head-set
+  operand), document values (blind merges of part operands), secondary index entries (blind puts and
   deletes), block ownership (blind puts), counters (blind merges with an exact `partial_merge`), the arrival journal
   (`append` with the document as its once key), short IDs and policy IDs (`Db::allocate`);
 - one winner by design, surfaced as a `Conflict` with its reason: a unique index key, the DocID mapping, the deletion
@@ -527,7 +528,7 @@ Profiles come from regolith itself: `Options::default()` for a server,
 `Options::embedded()` for a 1-4 MiB working set, and `Options::wasm()` for a
 browser or wasi module. Every transaction runs at `IsolationLevel::DefraLevel`,
 with defradb.rs's `KeyClassifier` installed through `with_policy`: each key
-family's class (Ordinary, ContentAddressed, CommutativePrefix or Log) decides how
+family's class (Ordinary, ContentAddressed or Log) decides how
 its reads and writes are validated (section 8), with `DurabilityMode::Immediate`.
 
 ## Goal
