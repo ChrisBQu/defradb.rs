@@ -133,7 +133,7 @@ pub fn spawn_failure_recorder<S: storage::corekv::Store + 'static>(
                     // marker. They intentionally create the initial retry
                     // obligation; terminal PushJob failures always carry the
                     // generation returned by the admission handshake.
-                    None => {
+                    None if failure.initial_registration => {
                         peerstore
                             .record_push_failure_with_generation(
                                 &failure.peer_id,
@@ -143,6 +143,7 @@ pub fn spawn_failure_recorder<S: storage::corekv::Store + 'static>(
                             )
                             .await
                     }
+                    None => Ok(None),
                 }
             } else {
                 peerstore
@@ -167,15 +168,20 @@ pub fn spawn_failure_recorder<S: storage::corekv::Store + 'static>(
                 if marker_generation.is_some() {
                     let _ = peerstore.clear_retry_peer(&failure.peer_id).await;
                 }
-            } else if failure.create_retry && marker_generation.is_some() {
-                if let Err(error) = crate::set_persisted_replicator_status(
-                    &peerstore,
-                    &failure.peer_id,
-                    p2p::ReplicatorStatus::Inactive,
-                )
-                .await
-                {
-                    tracing::warn!(%error, "failed to mark replicator inactive");
+            } else if failure.create_retry {
+                if let Some(generation) = marker_generation {
+                    if let Err(error) = crate::set_persisted_replicator_status_for_scope_generation(
+                        &peerstore,
+                        &failure.peer_id,
+                        &failure.doc_id,
+                        &failure.collection_id,
+                        generation,
+                        p2p::ReplicatorStatus::Inactive,
+                    )
+                    .await
+                    {
+                        tracing::warn!(%error, "failed to mark replicator inactive");
+                    }
                 }
             }
         }
@@ -1188,6 +1194,7 @@ mod tests {
             cid: "head-a".to_string(),
             head_priority: 7,
             create_retry: false,
+            initial_registration: false,
             acknowledged,
             marker_generation: None,
             durable_tx: None,
@@ -1219,6 +1226,19 @@ mod tests {
         failed.create_retry = true;
         failed.marker_generation = Some(marker_generation);
         failed.retry_after = retry_after;
+        failed.durable_tx = Some(durable_tx);
+        tx.send(failed).await.unwrap();
+        durable_rx.await.unwrap()
+    }
+
+    async fn record_initial_failure(
+        tx: &tokio::sync::mpsc::Sender<p2p::sync::PushFailure>,
+        initial_registration: bool,
+    ) -> Option<u64> {
+        let (durable_tx, durable_rx) = tokio::sync::oneshot::channel();
+        let mut failed = failure(false);
+        failed.create_retry = true;
+        failed.initial_registration = initial_registration;
         failed.durable_tx = Some(durable_tx);
         tx.send(failed).await.unwrap();
         durable_rx.await.unwrap()
@@ -1422,6 +1442,43 @@ mod tests {
             .unwrap()
             .is_empty());
         assert!(peerstore.get_retry_info("peer-a").await.unwrap().is_none());
+
+        drop(tx);
+        recorder.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_worker_generation_does_not_fall_back_to_initial_registration() {
+        let store = Arc::new(storage::backends::RegolithStore::in_memory().unwrap());
+        let peerstore = storage::stores::Peerstore::new(store.clone());
+        let replicator =
+            p2p::ReplicatorInfo::from_raw("peer-a".into(), vec!["collection-a".into()], Vec::new());
+        peerstore
+            .create_replicator("peer-a", &replicator.to_bytes().unwrap())
+            .await
+            .unwrap();
+
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let recorder = spawn_failure_recorder(storage::stores::Peerstore::new(store.clone()), rx);
+
+        // A terminal worker failure with a missing source token is dropped;
+        // absence never silently switches into initial registration mode.
+        assert_eq!(record_initial_failure(&tx, false).await, None);
+        assert!(peerstore
+            .get_retry_documents("peer-a")
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(peerstore.get_retry_info("peer-a").await.unwrap().is_none());
+
+        // The SE path has no admitted PushJob, so its explicit initial
+        // registration signal is still allowed to create the obligation.
+        let generation = record_initial_failure(&tx, true)
+            .await
+            .expect("explicit initial registration should create a marker");
+        let markers = peerstore.get_retry_documents("peer-a").await.unwrap();
+        assert_eq!(markers.len(), 1);
+        assert_eq!(markers[0].generation, generation);
 
         drop(tx);
         recorder.await.unwrap();

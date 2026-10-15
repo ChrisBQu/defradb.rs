@@ -119,6 +119,15 @@ struct RefreshPushFailureAttempt {
     new_generation: u64,
 }
 
+struct SetReplicatorIfMarkerGenerationAttempt {
+    peer_id: String,
+    doc_id: String,
+    collection_id: String,
+    expected_generation: u64,
+    expected_replicator: Vec<u8>,
+    updated_replicator: Vec<u8>,
+}
+
 enum PeerstoreRetryAttempt {
     DeleteReplicator {
         peer_id: String,
@@ -487,6 +496,35 @@ impl RetryAttemptFn for RefreshPushFailureAttempt {
     }
 }
 
+impl RetryAttemptFn for SetReplicatorIfMarkerGenerationAttempt {
+    fn run<'a>(&'a mut self, txn: &'a mut dyn RetryTxn) -> RetryAttemptFuture<'a> {
+        Box::pin(async move {
+            let replicator_key = ReplicatorKey::new(&self.peer_id).bytes();
+            let Some(current_replicator) = txn.get(&replicator_key).await? else {
+                return Ok(Box::new(false) as crate::corekv::RetryAttemptValue);
+            };
+            if current_replicator.as_ref() != self.expected_replicator {
+                return Ok(Box::new(false) as crate::corekv::RetryAttemptValue);
+            }
+
+            let marker = if self.doc_id.is_empty() {
+                ReplicatorRetryCollectionKey::new(&self.peer_id, &self.collection_id).bytes()
+            } else {
+                ReplicatorRetryDocIDKey::new(&self.peer_id, &self.doc_id).bytes()
+            };
+            let Some(marker_bytes) = txn.get(&marker).await? else {
+                return Ok(Box::new(false) as crate::corekv::RetryAttemptValue);
+            };
+            if decode_retry_marker_generation(&marker_bytes) != Some(self.expected_generation) {
+                return Ok(Box::new(false) as crate::corekv::RetryAttemptValue);
+            }
+
+            txn.set(&replicator_key, &self.updated_replicator).await?;
+            Ok(Box::new(true) as crate::corekv::RetryAttemptValue)
+        })
+    }
+}
+
 impl<S: Store> Peerstore<S> {
     async fn transact_conflicts<T: Send + 'static>(
         &self,
@@ -829,6 +867,29 @@ impl<S: Store> Peerstore<S> {
             retry_info_bytes,
             expected_generation,
             new_generation,
+        }))
+        .await
+    }
+
+    /// Replace replicator bytes only while both the peer value and its exact
+    /// scope marker generation remain unchanged. This fences follow-up status
+    /// writes from a completed push against newer heads and peer recreation.
+    pub async fn set_replicator_if_marker_generation(
+        &self,
+        peer_id: &str,
+        doc_id: &str,
+        collection_id: &str,
+        expected_generation: u64,
+        expected_replicator: &[u8],
+        updated_replicator: &[u8],
+    ) -> Result<bool> {
+        self.transact_conflicts(Box::new(SetReplicatorIfMarkerGenerationAttempt {
+            peer_id: peer_id.to_owned(),
+            doc_id: doc_id.to_owned(),
+            collection_id: collection_id.to_owned(),
+            expected_generation,
+            expected_replicator: expected_replicator.to_vec(),
+            updated_replicator: updated_replicator.to_vec(),
         }))
         .await
     }

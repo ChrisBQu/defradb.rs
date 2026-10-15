@@ -108,6 +108,10 @@ pub struct PushFailure {
     /// False for a pre-send observation; true for a terminal failure that keeps
     /// the already-registered scope marker on its durable ladder.
     pub create_retry: bool,
+    /// This failure is an initial SE-artifact obligation without a PushJob or
+    /// previously admitted marker generation. Terminal PushJob failures must
+    /// carry their source generation instead.
+    pub initial_registration: bool,
     /// Negotiated receiver backpressure, handed to the durable retry owner.
     pub retry_after: Option<Duration>,
     /// Query the durable peer deadline immediately before a transport send.

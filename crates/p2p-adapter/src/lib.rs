@@ -44,7 +44,10 @@ pub use iroh_restore::restore_iroh_p2p_state;
 pub use libp2p::{CollectionLookup, P2PAdapter, VersionSyncer};
 pub use read_gate::{DbBlockClassifier, DbBlockReadGate};
 pub use replication_events::publish_replication_result;
-pub use replicator_status::{load_persisted_replicators, set_persisted_replicator_status};
+pub use replicator_status::{
+    load_persisted_replicators, set_persisted_replicator_status,
+    set_persisted_replicator_status_for_scope_generation,
+};
 #[cfg(any(feature = "iroh", feature = "libp2p"))]
 pub use retry::{activate_retry_peer, run_retry_pass, spawn_failure_recorder, spawn_retry_loop};
 #[cfg(any(feature = "iroh", feature = "libp2p"))]

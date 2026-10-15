@@ -50,6 +50,7 @@ pub(super) async fn report_push_failure(
         None,
         false,
         None,
+        true,
     )
     .await
     .is_some()
@@ -71,6 +72,7 @@ pub(super) async fn report_observed_head(
         None,
         false,
         None,
+        false,
     )
     .await
 }
@@ -91,6 +93,7 @@ pub(super) async fn report_push_ack(
         None,
         false,
         job.marker_generation,
+        false,
     )
     .await
     .is_some()
@@ -109,6 +112,7 @@ async fn report_push_event(
     retry_after: Option<Duration>,
     admission_only: bool,
     marker_generation: Option<u64>,
+    initial_registration: bool,
 ) -> Option<u64> {
     // Collection commits are doc-less. Their durable obligation is a collection
     // marker whose retry rederives the current collection heads. The CID below
@@ -136,6 +140,7 @@ async fn report_push_event(
             cid: cid.map(|cid| cid.to_string()).unwrap_or_default(),
             head_priority,
             create_retry,
+            initial_registration,
             acknowledged,
             marker_generation,
             retry_after,
@@ -212,6 +217,7 @@ where
             None,
             true,
             job.marker_generation,
+            false,
         )
         .await
         .is_none()
@@ -276,6 +282,7 @@ where
                 send_outcome.retry_after,
                 false,
                 queued_job.marker_generation,
+                false,
             )
             .await;
         }
@@ -296,6 +303,7 @@ where
             send_outcome.retry_after,
             false,
             job.marker_generation,
+            false,
         )
         .await;
         JobCompletion::Failed

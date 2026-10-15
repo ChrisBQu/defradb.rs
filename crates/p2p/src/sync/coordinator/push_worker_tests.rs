@@ -530,6 +530,7 @@ async fn report_push_failure_backpressures_instead_of_dropping() {
         cid: Cid::new_v1(0x55, Code::Sha2_256.digest(b"occupant")).to_string(),
         head_priority: 0,
         create_retry: true,
+        initial_registration: false,
         acknowledged: false,
         marker_generation: None,
         durable_tx: None,
