@@ -32,6 +32,9 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         for (txn_id, candidate_ctx) in stale_candidates {
             let action_lock = candidate_ctx.action_lock();
             let _action_guard = action_lock.lock().await;
+            if let Err(error) = candidate_ctx.recover_pending_statement_sync() {
+                tracing::warn!(txn_id, %error, "Failed to recover cancelled transaction statement during cleanup");
+            }
 
             // Claiming the idle clock and removing the entry is what makes this
             // safe against a concurrent request: a request that touched the

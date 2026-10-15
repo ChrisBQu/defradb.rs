@@ -21,7 +21,7 @@ use regolith::{
 use super::handle::Handle;
 use super::head_cache::{self, HeadChanges, HeadSnapshot, SharedHeadCache};
 use super::iterator::RegolithIterator;
-use crate::backends::shared::{CallbackManager, TransactionStatsHandle};
+use crate::backends::shared::{CallbackCounts, CallbackManager, TransactionStatsHandle};
 use crate::corekv::{
     AsyncTxnCallback, Error, IterOptions, Iterator, Reader, Result, Txn, TxnCallback, Writer,
 };
@@ -35,6 +35,13 @@ pub struct RegolithTxn {
     readonly: bool,
     pub(super) head_cache: SharedHeadCache,
     head_snapshot: Option<HeadSnapshot>,
+    head_changes: HeadChanges,
+    savepoints: Vec<SavepointState>,
+}
+
+#[derive(Clone)]
+struct SavepointState {
+    callbacks: CallbackCounts,
     head_changes: HeadChanges,
 }
 
@@ -62,6 +69,7 @@ impl RegolithTxn {
             head_cache: SharedHeadCache::default(),
             head_snapshot: None,
             head_changes: HeadChanges::default(),
+            savepoints: Vec::new(),
         })
     }
 
@@ -93,6 +101,7 @@ impl RegolithTxn {
                 head_cache,
                 head_snapshot,
                 head_changes: HeadChanges::default(),
+                savepoints: Vec::new(),
             })
         })
     }
@@ -103,6 +112,17 @@ impl RegolithTxn {
 
     fn writable(&self) -> Result<&Transaction> {
         match self.handle()?.as_ref() {
+            Handle::Writable(txn) => Ok(txn),
+            Handle::ReadOnly(_) => Err(Error::ReadOnlyTxn),
+        }
+    }
+
+    fn writable_mut(&mut self) -> Result<&mut Transaction> {
+        let handle = self.handle.as_mut().ok_or(Error::DiscardedTxn)?;
+        let handle = Arc::get_mut(handle).ok_or_else(|| {
+            Error::Other("cannot savepoint while transaction iterators are active".into())
+        })?;
+        match handle {
             Handle::Writable(txn) => Ok(txn),
             Handle::ReadOnly(_) => Err(Error::ReadOnlyTxn),
         }
@@ -319,6 +339,42 @@ impl Txn for RegolithTxn {
                 Err(error)
             }
         }
+    }
+
+    fn set_savepoint(&mut self) -> Result<()> {
+        let state = SavepointState {
+            callbacks: self.callbacks.counts(),
+            head_changes: self.head_changes.clone(),
+        };
+        self.writable_mut()?.set_savepoint();
+        self.savepoints.push(state);
+        Ok(())
+    }
+
+    fn rollback_to_savepoint(&mut self) -> Result<()> {
+        let state = self
+            .savepoints
+            .last()
+            .cloned()
+            .ok_or_else(|| Error::Other("transaction has no active savepoint".into()))?;
+        self.writable_mut()?
+            .rollback_to_savepoint()
+            .map_err(map_txn_error)?;
+        self.savepoints.pop();
+        self.callbacks.truncate(state.callbacks);
+        self.head_changes = state.head_changes;
+        Ok(())
+    }
+
+    fn release_savepoint(&mut self) -> Result<()> {
+        self.savepoints
+            .last()
+            .ok_or_else(|| Error::Other("transaction has no active savepoint".into()))?;
+        self.writable_mut()?
+            .release_savepoint()
+            .map_err(map_txn_error)?;
+        self.savepoints.pop();
+        Ok(())
     }
 
     fn discard(mut self: Box<Self>) {

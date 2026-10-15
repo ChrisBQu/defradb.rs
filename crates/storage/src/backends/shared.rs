@@ -134,6 +134,31 @@ impl CallbackManager {
         }
     }
 
+    /// Drop callbacks registered after a transaction savepoint.
+    pub(crate) fn truncate(&self, counts: CallbackCounts) {
+        let Some(lists) = self.registered() else {
+            return;
+        };
+        fn trim<T: 'static>(queue: &SegQueue<T>, keep: usize) {
+            let mut retained = Vec::with_capacity(keep);
+            for _ in 0..keep {
+                if let Some(callback) = queue.pop() {
+                    retained.push(callback);
+                }
+            }
+            while queue.pop().is_some() {}
+            for callback in retained {
+                queue.push(callback);
+            }
+        }
+        trim(&lists.success, counts.success);
+        trim(&lists.success_async, counts.success_async);
+        trim(&lists.error, counts.error);
+        trim(&lists.error_async, counts.error_async);
+        trim(&lists.discard, counts.discard);
+        trim(&lists.discard_async, counts.discard_async);
+    }
+
     pub(crate) fn total(&self) -> usize {
         self.counts().total()
     }

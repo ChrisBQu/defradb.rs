@@ -52,11 +52,21 @@ pub struct PendingCounterOp {
     pub is_create: bool,
 }
 
+#[derive(Clone)]
 struct PendingCollectionAcpRegistration {
     acp: Arc<dyn acp::DocumentACP>,
     creator: identity::Did,
     request_bearer_token: Option<String>,
     schemas: Vec<CollectionVersion>,
+}
+
+struct StatementSavepoint {
+    collection_cache: CollectionCache,
+    locally_created_collection_ids: RapidHashSet<String>,
+    pending_counter_ops: Vec<PendingCounterOp>,
+    pending_collection_acp_registrations: Vec<PendingCollectionAcpRegistration>,
+    doc_guard_ids: Vec<String>,
+    collection_guard_ids: Vec<String>,
 }
 
 enum CollectionGuard {
@@ -148,6 +158,7 @@ pub struct DbTxn<S: Store> {
     pending_collection_acp_registrations: Vec<PendingCollectionAcpRegistration>,
     /// The database's resident DiskANN codes, for searches in this transaction.
     vector_codes: Arc<CodeCaches>,
+    statement_savepoint: Option<StatementSavepoint>,
     /// Phantom data for the store type.
     _marker: std::marker::PhantomData<S>,
 }
@@ -165,6 +176,7 @@ impl<S: Store> DbTxn<S> {
             pending_counter_ops: Vec::new(),
             pending_collection_acp_registrations: Vec::new(),
             vector_codes: Arc::default(),
+            statement_savepoint: None,
             _marker: std::marker::PhantomData,
         }
     }
@@ -190,6 +202,7 @@ impl<S: Store> DbTxn<S> {
             pending_counter_ops: Vec::new(),
             pending_collection_acp_registrations: Vec::new(),
             vector_codes: Arc::default(),
+            statement_savepoint: None,
             _marker: std::marker::PhantomData,
         }
     }
@@ -200,6 +213,64 @@ impl<S: Store> DbTxn<S> {
     /// when passed to database methods.
     pub fn make_explicit(&mut self) {
         self.explicit = true;
+    }
+
+    pub(crate) fn set_statement_savepoint(&mut self) -> Result<()> {
+        if !self.explicit || self.statement_savepoint.is_some() {
+            return Err(Error::Other(
+                "statement savepoint requires an explicit transaction with no active statement"
+                    .into(),
+            ));
+        }
+        let snapshot = StatementSavepoint {
+            collection_cache: self.collection_cache.clone(),
+            locally_created_collection_ids: self.locally_created_collection_ids.clone(),
+            pending_counter_ops: self.pending_counter_ops.clone(),
+            pending_collection_acp_registrations: self.pending_collection_acp_registrations.clone(),
+            doc_guard_ids: self.doc_guards.keys().cloned().collect(),
+            collection_guard_ids: self.collection_guards.keys().cloned().collect(),
+        };
+        self.txn
+            .as_mut()
+            .ok_or(Error::TxnNotActive)?
+            .set_savepoint()?;
+        self.statement_savepoint = Some(snapshot);
+        Ok(())
+    }
+
+    pub(crate) fn rollback_statement_savepoint(&mut self) -> Result<()> {
+        if self.statement_savepoint.is_none() {
+            return Err(Error::Other("no statement savepoint is active".into()));
+        }
+        self.txn
+            .as_mut()
+            .ok_or(Error::TxnNotActive)?
+            .rollback_to_savepoint()?;
+        let snapshot = self
+            .statement_savepoint
+            .take()
+            .expect("savepoint checked above");
+        self.collection_cache = snapshot.collection_cache;
+        self.locally_created_collection_ids = snapshot.locally_created_collection_ids;
+        self.pending_counter_ops = snapshot.pending_counter_ops;
+        self.pending_collection_acp_registrations = snapshot.pending_collection_acp_registrations;
+        self.doc_guards
+            .retain(|key, _| snapshot.doc_guard_ids.contains(key));
+        self.collection_guards
+            .retain(|key, _| snapshot.collection_guard_ids.contains(key));
+        Ok(())
+    }
+
+    pub(crate) fn release_statement_savepoint(&mut self) -> Result<()> {
+        if self.statement_savepoint.is_none() {
+            return Err(Error::Other("no statement savepoint is active".into()));
+        }
+        self.txn
+            .as_mut()
+            .ok_or(Error::TxnNotActive)?
+            .release_savepoint()?;
+        self.statement_savepoint = None;
+        Ok(())
     }
 
     /// Check if this is an explicit transaction.

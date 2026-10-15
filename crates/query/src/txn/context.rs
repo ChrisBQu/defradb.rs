@@ -55,6 +55,12 @@ struct DeferredAcpHookEntry {
 struct DeferredAcpState {
     projected_registrations: RapidHashMap<DocRegistrationKey, ProjectedDocRegistration>,
     hooks: Vec<DeferredAcpHookEntry>,
+    savepoints: Vec<DeferredAcpSavepoint>,
+}
+
+struct DeferredAcpSavepoint {
+    projected_registrations: RapidHashMap<DocRegistrationKey, ProjectedDocRegistration>,
+    hook_count: usize,
 }
 
 /// Deferred ACP mutations and their transaction-local registration projection.
@@ -71,6 +77,36 @@ impl DeferredAcpMutations {
     /// Create an empty deferred ACP state container.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn set_statement_savepoint(&self) -> Result<(), String> {
+        let mut state = self.lock_state()?;
+        let savepoint = DeferredAcpSavepoint {
+            projected_registrations: state.projected_registrations.clone(),
+            hook_count: state.hooks.len(),
+        };
+        state.savepoints.push(savepoint);
+        Ok(())
+    }
+
+    pub fn rollback_statement_savepoint(&self) -> Result<(), String> {
+        let mut state = self.lock_state()?;
+        let savepoint = state
+            .savepoints
+            .pop()
+            .ok_or_else(|| "deferred ACP state has no active statement savepoint".to_string())?;
+        state.projected_registrations = savepoint.projected_registrations;
+        state.hooks.truncate(savepoint.hook_count);
+        Ok(())
+    }
+
+    pub fn release_statement_savepoint(&self) -> Result<(), String> {
+        let mut state = self.lock_state()?;
+        state
+            .savepoints
+            .pop()
+            .map(|_| ())
+            .ok_or_else(|| "deferred ACP state has no active statement savepoint".to_string())
     }
 
     fn doc_key(policy_id: &str, resource_name: &str, doc_id: &str) -> DocRegistrationKey {
@@ -392,6 +428,22 @@ pub trait TransactionContext: MaybeSendSync {
     fn action_lock(&self) -> Option<Arc<async_lock::Mutex<()>>> {
         None
     }
+
+    /// Start an atomicity boundary around one explicit mutation statement.
+    /// Writable implementations must override this; the default fails closed.
+    fn set_statement_savepoint(&self) -> Result<(), String> {
+        Err("transaction context does not support statement savepoints".into())
+    }
+
+    fn finish_statement_savepoint(&self, _success: bool) -> Result<(), String> {
+        Err("transaction context does not support statement savepoints".into())
+    }
+
+    fn recover_pending_statement(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn mark_statement_rollback_pending(&self) {}
 
     /// Check if the transaction is still active (not yet committed or rolled back).
     ///

@@ -56,6 +56,7 @@ pub struct BasicTxn {
     readonly: bool,
     state: TxnState,
     callbacks: Vec<RegisteredCallback>,
+    savepoints: Vec<usize>,
 }
 
 impl BasicTxn {
@@ -77,7 +78,48 @@ impl BasicTxn {
             readonly,
             state: TxnState::Active,
             callbacks: Vec::new(),
+            savepoints: Vec::new(),
         }
+    }
+
+    pub fn set_savepoint(&mut self) -> Result<()> {
+        if self.state != TxnState::Active || self.readonly {
+            return Err(Error::Storage(if self.readonly {
+                storage::corekv::Error::ReadOnlyTxn
+            } else {
+                storage::corekv::Error::DiscardedTxn
+            }));
+        }
+        self.shared_txn.set_savepoint().map_err(Error::Storage)?;
+        self.savepoints.push(self.callbacks.len());
+        Ok(())
+    }
+
+    pub fn rollback_to_savepoint(&mut self) -> Result<()> {
+        let callback_count = *self.savepoints.last().ok_or_else(|| {
+            Error::Storage(storage::corekv::Error::Other(
+                "transaction has no active savepoint".into(),
+            ))
+        })?;
+        self.shared_txn
+            .rollback_to_savepoint()
+            .map_err(Error::Storage)?;
+        self.savepoints.pop();
+        self.callbacks.truncate(callback_count);
+        Ok(())
+    }
+
+    pub fn release_savepoint(&mut self) -> Result<()> {
+        if self.savepoints.is_empty() {
+            return Err(Error::Storage(storage::corekv::Error::Other(
+                "transaction has no active savepoint".into(),
+            )));
+        }
+        self.shared_txn
+            .release_savepoint()
+            .map_err(Error::Storage)?;
+        self.savepoints.pop();
+        Ok(())
     }
 
     /// Get the transaction ID.

@@ -10,6 +10,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
             .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
         let action_lock = ctx.action_lock();
         let _action_guard = action_lock.lock().await;
+        ctx.recover_pending_statement_sync().map_err(Error::Other)?;
 
         ctx.doc_fetcher()
             .get_all(collection_name)
@@ -32,6 +33,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
             .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
         let action_lock = ctx.action_lock();
         let _action_guard = action_lock.lock().await;
+        ctx.recover_pending_statement_sync().map_err(Error::Other)?;
 
         ctx.doc_fetcher()
             .get_by_ids(collection_name, doc_ids)

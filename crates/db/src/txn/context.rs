@@ -5,7 +5,8 @@ use query::mutator::DocMutator;
 use query::runner::DocFetcher;
 use query::txn::{DeferredAcpMutations, TransactionContext};
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::result::Result;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use storage::corekv::Store;
@@ -32,6 +33,7 @@ pub struct DbTransactionContext<S: Store> {
     deferred_acp_mutations: Arc<DeferredAcpMutations>,
     broadcaster: Option<Arc<dyn crate::event::emission::TxnBroadcaster>>,
     action_lock: Arc<async_lock::Mutex<()>>,
+    statement_rollback_pending: AtomicBool,
     created_at: Instant,
     last_request_seen: AtomicU64,
 }
@@ -63,6 +65,7 @@ impl<S: Store> DbTransactionContext<S> {
             deferred_acp_mutations,
             broadcaster,
             action_lock: Arc::new(async_lock::Mutex::new(())),
+            statement_rollback_pending: AtomicBool::new(false),
             created_at: now,
             last_request_seen: AtomicU64::new(0),
         }
@@ -125,6 +128,25 @@ impl<S: Store> DbTransactionContext<S> {
 }
 
 impl<S: Store + 'static> DbTransactionContext<S> {
+    pub(crate) fn recover_pending_statement_sync(&self) -> Result<(), String> {
+        if !self.statement_rollback_pending.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let shared = self.fetcher.shared_txn();
+        let mut guard = shared.try_lock().ok_or_else(|| {
+            "transaction is still in use while recovering cancelled statement".to_string()
+        })?;
+        let txn = guard
+            .as_mut()
+            .ok_or_else(|| "transaction was consumed with statement cleanup pending".to_string())?;
+        txn.rollback_statement_savepoint()
+            .map_err(|error| error.to_string())?;
+        self.deferred_acp_mutations.rollback_statement_savepoint()?;
+        self.statement_rollback_pending
+            .store(false, Ordering::Release);
+        Ok(())
+    }
+
     /// Take the underlying transaction (for commit/rollback).
     ///
     /// After calling this, `is_consumed()` will return `true` and all
@@ -269,5 +291,56 @@ impl<S: Store + 'static> TransactionContext for DbTransactionContext<S> {
 
     fn action_lock(&self) -> Option<Arc<async_lock::Mutex<()>>> {
         Some(self.action_lock.clone())
+    }
+
+    fn set_statement_savepoint(&self) -> Result<(), String> {
+        if self.readonly {
+            return Err("cannot set a statement savepoint on a read-only transaction".into());
+        }
+        self.recover_pending_statement_sync()?;
+        let shared = self.fetcher.shared_txn();
+        let mut guard = shared
+            .try_lock()
+            .ok_or_else(|| "transaction is in use at statement boundary".to_string())?;
+        let txn = guard
+            .as_mut()
+            .ok_or_else(|| "transaction is no longer active".to_string())?;
+        self.deferred_acp_mutations.set_statement_savepoint()?;
+        if let Err(error) = txn.set_statement_savepoint() {
+            self.deferred_acp_mutations.rollback_statement_savepoint()?;
+            return Err(error.to_string());
+        }
+        Ok(())
+    }
+
+    fn finish_statement_savepoint(&self, success: bool) -> Result<(), String> {
+        let shared = self.fetcher.shared_txn();
+        let mut guard = shared
+            .try_lock()
+            .ok_or_else(|| "transaction is in use while finishing statement".to_string())?;
+        let txn = guard
+            .as_mut()
+            .ok_or_else(|| "transaction was consumed while finishing statement".to_string())?;
+        if success {
+            txn.release_statement_savepoint()
+                .map_err(|error| error.to_string())?;
+            self.deferred_acp_mutations.release_statement_savepoint()?;
+        } else {
+            txn.rollback_statement_savepoint()
+                .map_err(|error| error.to_string())?;
+            self.deferred_acp_mutations.rollback_statement_savepoint()?;
+        }
+        self.statement_rollback_pending
+            .store(false, Ordering::Release);
+        Ok(())
+    }
+
+    fn recover_pending_statement(&self) -> Result<(), String> {
+        self.recover_pending_statement_sync()
+    }
+
+    fn mark_statement_rollback_pending(&self) {
+        self.statement_rollback_pending
+            .store(true, Ordering::Release);
     }
 }

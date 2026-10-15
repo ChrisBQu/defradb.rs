@@ -254,6 +254,7 @@ fn apply(rows: &mut Rows, key: &[u8], value: &Option<Bytes>) {
 /// The native transaction remains the write buffer and conflict owner. This
 /// bounded journal only updates cached rows after a successful native commit;
 /// exceeding its budget evicts the cache rather than retaining a second buffer.
+#[derive(Clone)]
 pub(super) struct HeadChanges {
     writes: Option<BTreeMap<Vec<u8>, Option<Bytes>>>,
     bytes: usize,

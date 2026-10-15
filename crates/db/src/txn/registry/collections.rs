@@ -18,6 +18,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
             .ok_or_else(|| Error::TransactionNotFound(txn_id.to_string()))?;
         let action_lock = ctx.action_lock();
         let _action_guard = action_lock.lock().await;
+        ctx.recover_pending_statement_sync().map_err(Error::Other)?;
 
         let shared_txn = ctx.fetcher_shared_txn();
         let txn_guard = shared_txn.lock().await;
@@ -67,6 +68,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
             .await?;
         let action_lock = ctx.action_lock();
         let _action_guard = action_lock.lock().await;
+        ctx.recover_pending_statement_sync().map_err(Error::Other)?;
 
         let shared_txn = ctx.fetcher_shared_txn();
         let mut txn_guard = shared_txn.lock().await;
@@ -235,6 +237,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
             .await?;
         let action_lock = ctx.action_lock();
         let _action_guard = action_lock.lock().await;
+        ctx.recover_pending_statement_sync().map_err(Error::Other)?;
 
         let shared_txn = ctx.fetcher_shared_txn();
         let mut txn_guard = shared_txn.lock().await;

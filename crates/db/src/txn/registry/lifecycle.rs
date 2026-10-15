@@ -224,6 +224,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
             .new_txn(readonly)
             .await
             .map_err(|e| TransactionError::execution(format!("storage error: {}", e)))?;
+        db_txn.make_explicit();
         // Non-Send on wasm32, where the callbacks it holds drop their `Send`
         // bounds for the single-threaded browser runtime.
         #[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
@@ -314,9 +315,18 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
         &self,
         handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError> {
-        let ctx = self.take_owned_ctx(handle)?;
+        let ctx = self
+            .get_ctx(handle.as_str())
+            .map_err(|error| TransactionError::execution(error.to_string()))?
+            .ok_or_else(|| {
+                TransactionError::not_found(format!("transaction '{}' not found", handle))
+            })?;
         let action_lock = ctx.action_lock();
         let _action_guard = action_lock.lock().await;
+        ctx.recover_pending_statement_sync()
+            .map_err(TransactionError::execution)?;
+
+        let ctx = self.take_owned_ctx(handle)?;
 
         let txn = ctx.take_txn().await.ok_or_else(|| {
             TransactionError::already_finalized(format!(
@@ -332,9 +342,18 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
         &self,
         handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError> {
-        let ctx = self.take_owned_ctx(handle)?;
+        let ctx = self
+            .get_ctx(handle.as_str())
+            .map_err(|error| TransactionError::execution(error.to_string()))?
+            .ok_or_else(|| {
+                TransactionError::not_found(format!("transaction '{}' not found", handle))
+            })?;
         let action_lock = ctx.action_lock();
         let _action_guard = action_lock.lock().await;
+        ctx.recover_pending_statement_sync()
+            .map_err(TransactionError::execution)?;
+
+        let ctx = self.take_owned_ctx(handle)?;
 
         let txn = ctx.take_txn().await.ok_or_else(|| {
             TransactionError::already_finalized(format!(
@@ -359,6 +378,8 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
         let ctx = self.take_owned_ctx(handle)?;
         let action_lock = ctx.action_lock();
         let _action_guard = action_lock.lock().await;
+        ctx.recover_pending_statement_sync()
+            .map_err(TransactionError::execution)?;
 
         let txn = ctx.take_txn().await.ok_or_else(|| {
             TransactionError::already_finalized(format!(

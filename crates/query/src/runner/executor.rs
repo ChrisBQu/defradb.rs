@@ -12,9 +12,37 @@ use identity::Did;
 use crate::error::{Result, TransactionError};
 use crate::executor::{GqlWarning, QueryExecutor, QueryRequest, QueryResponse, QueryResponseError};
 use crate::query_parse::{parse_request_with_limits, validate_parsed_operation, ParsedOperation};
-use crate::txn::{GetTransactionResult, TransactionHandle, TransactionRegistry};
+use crate::txn::{
+    GetTransactionResult, TransactionContext, TransactionHandle, TransactionRegistry,
+};
 
 use super::{DocFetcher, QueryRunner};
+
+struct StatementRollbackGuard {
+    transaction: Arc<dyn TransactionContext>,
+    armed: bool,
+}
+
+impl StatementRollbackGuard {
+    fn new(transaction: Arc<dyn TransactionContext>) -> Self {
+        Self {
+            transaction,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StatementRollbackGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.transaction.mark_statement_rollback_pending();
+        }
+    }
+}
 
 /// Await a future with an optional timeout (native only, WASM always awaits directly).
 #[cfg(not(target_arch = "wasm32"))]
@@ -353,6 +381,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
             None => None,
         };
 
+        if let Err(error) = txn_ctx.recover_pending_statement() {
+            return QueryResponse::error(format!(
+                "failed to roll back cancelled transaction statement: {error}"
+            ));
+        }
+
         // Convert variables from JSON to RapidHashMap format for the parser
         let variables = convert_variables(&request.variables);
 
@@ -430,6 +464,19 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
             Err(error) => return QueryResponse::error(error.to_string()),
         };
         let scoped_runner = self.scoped_runner(scoped_acp);
+
+        let statement_guard = if !txn_ctx.is_readonly()
+            && matches!(&parsed, ParsedOperation::Mutation { explain: None, .. })
+        {
+            if let Err(error) = txn_ctx.set_statement_savepoint() {
+                return QueryResponse::error(format!(
+                    "failed to establish transaction statement savepoint: {error}"
+                ));
+            }
+            Some(StatementRollbackGuard::new(Arc::clone(&txn_ctx)))
+        } else {
+            None
+        };
 
         // Route to appropriate handler based on operation type
         let execution = async {
@@ -549,7 +596,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
             await_with_timeout(execution, self.query_timeout).await
         };
 
-        match result {
+        let response = match result {
             Ok(data) => QueryResponse {
                 data: Some(data),
                 errors: vec![],
@@ -570,7 +617,18 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
                 }
                 .with_warnings(warnings)
             }
+        };
+
+        if let Some(mut guard) = statement_guard {
+            if let Err(error) = txn_ctx.finish_statement_savepoint(response.errors.is_empty()) {
+                return QueryResponse::error(format!(
+                    "failed to finish transaction statement savepoint: {error}"
+                ));
+            }
+            guard.disarm();
         }
+
+        response
     }
 
     async fn begin_txn(

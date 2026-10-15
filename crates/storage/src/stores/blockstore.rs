@@ -203,6 +203,18 @@ impl Writer for BlockstoreTxn {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Txn for BlockstoreTxn {
+    fn set_savepoint(&mut self) -> Result<()> {
+        self.txn.set_savepoint()
+    }
+
+    fn rollback_to_savepoint(&mut self) -> Result<()> {
+        self.txn.rollback_to_savepoint()
+    }
+
+    fn release_savepoint(&mut self) -> Result<()> {
+        self.txn.release_savepoint()
+    }
+
     async fn commit(self: Box<Self>) -> Result<()> {
         self.txn.commit().await
     }

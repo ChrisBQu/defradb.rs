@@ -347,6 +347,28 @@ pub trait Txn: ReaderWriter + private::Sealed {
     /// After calling commit (success or failure), the transaction cannot be reused.
     async fn commit(self: Box<Self>) -> Result<()>;
 
+    /// Save the current buffered writes and lifecycle callback queues.
+    /// Backends without statement savepoint support fail explicitly.
+    fn set_savepoint(&mut self) -> Result<()> {
+        Err(crate::Error::Other(
+            "transaction savepoints are unsupported by this backend".into(),
+        ))
+    }
+
+    /// Roll back writes and callbacks staged since the latest savepoint.
+    fn rollback_to_savepoint(&mut self) -> Result<()> {
+        Err(crate::Error::Other(
+            "transaction savepoints are unsupported by this backend".into(),
+        ))
+    }
+
+    /// Release the latest savepoint, retaining its writes and callbacks.
+    fn release_savepoint(&mut self) -> Result<()> {
+        Err(crate::Error::Other(
+            "transaction savepoints are unsupported by this backend".into(),
+        ))
+    }
+
     /// Discard the transaction, rolling back all changes.
     ///
     /// All on_discard callbacks are executed. After calling discard, the

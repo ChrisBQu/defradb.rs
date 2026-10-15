@@ -16,6 +16,29 @@ pub struct SharedTxn {
 }
 
 impl SharedTxn {
+    pub(crate) fn set_savepoint(&self) -> Result<()> {
+        self.txn
+            .try_write()
+            .ok_or_else(|| Error::Other("transaction is busy at statement boundary".into()))?
+            .set_savepoint()
+    }
+
+    pub(crate) fn rollback_to_savepoint(&self) -> Result<()> {
+        self.txn
+            .try_write()
+            .ok_or_else(|| Error::Other("transaction is busy during statement rollback".into()))?
+            .rollback_to_savepoint()
+    }
+
+    pub(crate) fn release_savepoint(&self) -> Result<()> {
+        self.txn
+            .try_write()
+            .ok_or_else(|| {
+                Error::Other("transaction is busy releasing statement savepoint".into())
+            })?
+            .release_savepoint()
+    }
+
     /// Create a new shared transaction.
     // `Txn` drops its `Send + Sync` bounds on wasm32 (see `MaybeSendSync`), so
     // there the Arc wraps a non-Send value. That is sound in the

@@ -5,6 +5,7 @@ mod common;
 mod guard;
 mod lifecycle;
 mod registry_suite;
+mod statement_savepoint;
 
 mod ownership;
 mod store_release;

@@ -178,6 +178,14 @@ impl TransactionContext for MockTxnContext {
     fn action_lock(&self) -> Option<Arc<async_lock::Mutex<()>>> {
         Some(self.action_lock.clone())
     }
+
+    fn set_statement_savepoint(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn finish_statement_savepoint(&self, _success: bool) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// Mock transaction registry for testing.
