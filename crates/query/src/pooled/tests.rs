@@ -113,9 +113,7 @@ where
 #[test]
 fn every_request_runs_on_a_worker() {
     let (recorder, executor, pool) = pooled(2);
-    all(vec![
-        executor.execute(QueryRequest::new("{ User { name } }"))
-    ]);
+    all(vec![executor.execute(QueryRequest::new("{ User { name } }"))]);
     assert!(workers::block_on(executor.schema()).unwrap().is_ok());
     assert!(recorder.workers().iter().all(Option::is_some));
     pool.shutdown_blocking().unwrap();
@@ -146,9 +144,7 @@ fn writes_to_one_document_run_one_at_a_time() {
 #[test]
 fn an_explicit_transactions_requests_pass_through_to_its_registry() {
     let (recorder, executor, pool) = pooled(2);
-    let handle = workers::block_on(executor.begin_txn(false))
-        .unwrap()
-        .unwrap();
+    let handle = workers::block_on(executor.begin_txn(false)).unwrap().unwrap();
     workers::block_on(executor.execute_in_txn(QueryRequest::new("{ User { name } }"), &handle))
         .unwrap();
     workers::block_on(executor.commit_txn(&handle))
