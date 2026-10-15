@@ -128,7 +128,6 @@ impl RegolithTxn {
             has_writes: false,
             scoped_attempt: true,
             owns_active_slot: false,
-            savepoints: Vec::new(),
         }
     }
 
