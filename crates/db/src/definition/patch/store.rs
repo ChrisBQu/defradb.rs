@@ -49,7 +49,7 @@ impl<S: Store> crate::database::DB<S> {
         }) else {
             return Err(Error::CollectionVersionNotFound(old_version_id.to_string()));
         };
-        if persisted_old_schema != old_schema {
+        if !crate::collection::loader::same_schema(persisted_old_schema, old_schema) {
             return Err(Error::Storage(storage::Error::TxnConflict));
         }
         let old_name_key = CollectionNameKey::new(actual_name);
