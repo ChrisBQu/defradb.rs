@@ -47,34 +47,6 @@ pub struct AcpRegistrationProjection {
     state: std::sync::Mutex<AcpRegistrationState>,
 }
 
-/// Temporarily restore a captured request JWT while an ordered ACP hook runs.
-pub struct RequestBearerTokenGuard {
-    did: String,
-    previous_token: Option<String>,
-}
-
-impl RequestBearerTokenGuard {
-    pub fn new(did: &str, token: Option<String>) -> Option<Self> {
-        let token = token?;
-        let previous_token = defra_core::signing::get_request_bearer_token(did);
-        defra_core::signing::set_request_bearer_token(did, token);
-        Some(Self {
-            did: did.to_string(),
-            previous_token,
-        })
-    }
-}
-
-impl Drop for RequestBearerTokenGuard {
-    fn drop(&mut self) {
-        if let Some(previous_token) = self.previous_token.take() {
-            defra_core::signing::set_request_bearer_token(&self.did, previous_token);
-        } else {
-            defra_core::signing::clear_request_bearer_token(&self.did);
-        }
-    }
-}
-
 impl AcpRegistrationProjection {
     pub fn new() -> Self {
         Self::default()
