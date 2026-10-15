@@ -82,6 +82,7 @@ fn a_local_task_runs_to_its_completion_on_this_thread() {
     assert!(sleep(Duration::from_secs(1)).is_err());
 }
 
+#[cfg(not(target_family = "wasm"))]
 #[test]
 fn a_blocking_wait_on_a_worker_is_an_error_not_a_deadlock() {
     let (worker, _) = worker();

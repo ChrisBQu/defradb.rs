@@ -2,6 +2,11 @@
 //! topology, where workers run, their priority and memory policy, each
 //! worker's local executor, routing work to a worker, admission, blocking
 //! code kept off the workers, and shutdown.
+//!
+//! On wasm, which has no threads, only the one-worker driven mode
+//! ([`Pool::driven`]) runs; the threaded pool's parts still compile there,
+//! unused.
+#![cfg_attr(target_family = "wasm", allow(dead_code))]
 
 mod clock;
 mod completion;
@@ -10,6 +15,7 @@ mod error;
 mod hook;
 mod os;
 mod placement;
+mod pool;
 pub mod topology;
 mod worker;
 
@@ -26,6 +32,9 @@ pub use config::{
 pub use error::Error;
 pub use hook::{Hook, HookFactory, HookProgress};
 pub use os::Outcome;
+pub use pool::{
+    Driver, PlacedEnv, Pool, Report, Stats, Submit, Target, ThreadPlacement, TopologySummary, WorkerReport,
+};
 pub use worker::{
     current_worker, every, on_worker, sleep, spawn_daemon, spawn_local, yield_now, Budget, Sleep,
     WorkerStats, YieldNow,

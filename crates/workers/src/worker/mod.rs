@@ -30,9 +30,9 @@ use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
-pub(crate) use heartbeat::{Beat, REPORTED};
+pub(crate) use heartbeat::REPORTED;
 use keyed::Keyed;
-pub(crate) use shared::{bump, Admitted, Job, LocalFuture, Start, WorkerShared};
+pub(crate) use shared::{bump, Admitted, Job, LocalFuture, WorkerShared};
 pub use shared::WorkerStats;
 pub(crate) use signal::{Parker, Signal};
 use signal::TaskWaker;
@@ -133,7 +133,7 @@ where
 }
 
 /// The text of a panic payload.
-fn panic_message(payload: &(dyn Any + Send)) -> String {
+pub(crate) fn panic_message(payload: &(dyn Any + Send)) -> String {
     payload
         .downcast_ref::<&str>()
         .map(|s| (*s).to_owned())
@@ -461,6 +461,22 @@ impl Worker {
         }
     }
 
+    /// The worker is about to rest: marks it parked, so the next push, wake
+    /// or hook completion wakes it, and hands the hook its waker. Returns
+    /// `false`, leaving it running, when work arrived meanwhile.
+    pub(crate) fn rest(&mut self) -> bool {
+        let signal = &self.local.shared.signal;
+        signal.parking();
+        if self.has_work() || self.finished() {
+            signal.running();
+            return false;
+        }
+        if let Some(hook) = self.hook.hook.as_mut() {
+            hook.idle(&self.unpark);
+        }
+        true
+    }
+
     /// Nothing to do: spin briefly, then park until a push, a wake, a timer
     /// or the hook needs the worker.
     #[cfg(not(target_family = "wasm"))]
@@ -475,27 +491,24 @@ impl Worker {
                 }
                 round = round.wrapping_add(1);
                 if round % 64 == 0 {
-                    if self.hook.poll(&self.local) > 0 || self.local.now() >= until {
+                    if self.hook.poll(&self.local) > 0 {
+                        return;
+                    }
+                    if self.local.now() >= until {
                         break;
                     }
                 }
                 std::hint::spin_loop();
             }
         }
-        let signal = self.local.shared.signal.clone();
-        signal.parking();
-        if self.has_work() || self.finished() {
-            signal.running();
+        if !self.rest() {
             return;
-        }
-        if let Some(hook) = self.hook.hook.as_mut() {
-            hook.idle(&self.unpark);
         }
         match self.wait_for() {
             Some(wait) => std::thread::park_timeout(wait),
             None => std::thread::park(),
         }
-        signal.running();
+        self.local.shared.signal.running();
     }
 }
 

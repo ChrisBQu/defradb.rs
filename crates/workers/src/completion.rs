@@ -245,7 +245,7 @@ impl std::task::Wake for Unpark {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
     use super::*;
     use std::time::Duration;

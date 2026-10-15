@@ -43,11 +43,6 @@ impl<J> Keyed<J> {
         next
     }
 
-    /// Jobs waiting behind a running task.
-    pub(crate) fn queued(&self) -> usize {
-        self.waiting.values().map(VecDeque::len).sum()
-    }
-
     pub(crate) fn is_empty(&self) -> bool {
         self.waiting.is_empty()
     }
@@ -69,7 +64,6 @@ mod tests {
         assert_eq!(keyed.admit(2, "b1"), Some("b1"), "another key runs at once");
         assert_eq!(keyed.admit(1, "a2"), None);
         assert_eq!(keyed.admit(1, "a3"), None);
-        assert_eq!(keyed.queued(), 2);
         assert_eq!(keyed.finished(1), Some("a2"));
         assert_eq!(keyed.finished(1), Some("a3"));
         assert_eq!(keyed.finished(1), None);

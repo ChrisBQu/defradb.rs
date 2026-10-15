@@ -97,10 +97,6 @@ impl<T> Slab<T> {
         Some(value)
     }
 
-    pub(crate) fn len(&self) -> usize {
-        self.len
-    }
-
     pub(crate) fn is_empty(&self) -> bool {
         self.len == 0
     }
@@ -120,10 +116,6 @@ impl<T> Slab<T> {
         self.len = 0;
         taken
     }
-
-    pub(crate) fn values(&self) -> impl Iterator<Item = &T> + '_ {
-        self.slots.iter().filter_map(|slot| slot.value.as_ref())
-    }
 }
 
 #[cfg(test)]
@@ -142,7 +134,6 @@ mod tests {
         assert!(!slab.contains(first));
         assert_eq!(slab.remove(first), None);
         assert_eq!(slab.get_mut(second), Some(&mut "b"));
-        assert_eq!(slab.len(), 1);
     }
 
     #[test]
@@ -157,7 +148,6 @@ mod tests {
         assert!(slab.is_empty());
         assert!(!slab.contains(predicted));
         let reused = slab.insert(3);
-        assert_eq!(slab.values().copied().collect::<Vec<_>>(), vec![3]);
-        assert!(slab.contains(reused));
+        assert_eq!(slab.remove(reused), Some(3));
     }
 }

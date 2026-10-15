@@ -96,6 +96,7 @@ impl Clock for ManualClock {
 mod tests {
     use super::*;
 
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     #[test]
     fn the_std_clock_never_goes_back() {
         let clock = StdClock::new();
@@ -105,6 +106,11 @@ mod tests {
 
     #[test]
     fn an_env_clock_needs_an_env_with_a_clock() {
-        assert!(EnvClock::new(Arc::new(regolith::MemEnv::new())).is_some());
+        let env = Arc::new(regolith::MemEnv::new());
+        let clock = EnvClock::new(env.clone()).unwrap();
+        env.advance_micros(5);
+        assert_eq!(clock.now_micros(), 5);
+        env.set_clocks(None, None);
+        assert!(EnvClock::new(env).is_none());
     }
 }

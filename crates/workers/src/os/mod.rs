@@ -68,11 +68,14 @@ pub(crate) fn system() -> &'static dyn Os {
 }
 
 /// The calling thread's CPU mask, read through the platform.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn current_affinity() -> Option<CpuSet> {
     system().thread_affinity().ok()
 }
 
-/// How a thread is scheduled, as read back from the OS.
+/// How a thread is scheduled, as read back from the OS. Each platform builds
+/// only its own variants.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Scheduling {
     RealTime { policy: RealTimePolicy, priority: i32 },
@@ -96,7 +99,9 @@ impl fmt::Display for Scheduling {
     }
 }
 
-/// A thread's NUMA memory policy, as read back from the OS.
+/// A thread's NUMA memory policy, as read back from the OS. Only Linux
+/// builds the NUMA variants.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MemoryMode {
     Default,

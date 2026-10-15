@@ -78,6 +78,11 @@ impl Admitted {
     pub(crate) fn bytes(&self) -> usize {
         self.bytes
     }
+
+    /// The worker the permits belong to, where the job goes.
+    pub(crate) fn worker(&self) -> &Arc<WorkerShared> {
+        &self.worker
+    }
 }
 
 impl Drop for Admitted {
@@ -252,10 +257,6 @@ impl WorkerShared {
         self.exited.store(true, Ordering::Relaxed);
         fence(Ordering::SeqCst);
         self.drain_orphans();
-    }
-
-    pub(crate) fn has_exited(&self) -> bool {
-        self.exited.load(Ordering::Acquire)
     }
 
     /// Drops every queued message; each job's completion fails with
