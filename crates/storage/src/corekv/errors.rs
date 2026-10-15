@@ -21,6 +21,33 @@ pub struct TransactionConflict {
     pub latest_seq: u64,
 }
 
+/// The reason in plain words, without the key: what the losing transaction
+/// did and the newer write that won.
+impl std::fmt::Display for TransactionConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mine = match self.access {
+            regolith::Access::Read => "read",
+            regolith::Access::ReadParts => "partial read",
+            regolith::Access::ReadPresence => "presence check",
+            regolith::Access::ReadForUpdate => "read for update",
+            regolith::Access::ScannedThenWrote => "write after a scan",
+            regolith::Access::ScannedRange => "range scan",
+            regolith::Access::Put => "put",
+            regolith::Access::Delete => "delete",
+            regolith::Access::Merge => "merge",
+            _ => "access",
+        };
+        let theirs = match self.winning_write {
+            regolith::WriteKind::Put => "put",
+            regolith::WriteKind::Delete => "delete",
+            regolith::WriteKind::RangeDelete => "range delete",
+            regolith::WriteKind::Merge => "merge",
+            _ => "write",
+        };
+        write!(f, "a {mine} lost to a newer {theirs}")
+    }
+}
+
 /// CoreKV error types.
 ///
 /// These errors match the error types defined in the Go corekv package
@@ -68,12 +95,12 @@ pub enum Error {
     TxnConflict,
 
     /// A transaction conflict with non-sensitive engine classification.
-    #[error("transaction conflict. Please retry")]
+    #[error("{0}: transaction conflict. Please retry")]
     TxnConflictDetails(TransactionConflict),
 
     /// The engine exhausted its own retry policy. Outer request retry loops
     /// must not repeat the exact same stale attempt body.
-    #[error("transaction retry attempts exhausted")]
+    #[error("transaction retry attempts exhausted: {0}")]
     TxnRetryExhausted(TransactionConflict),
 
     /// Unique index constraint violation.
@@ -179,6 +206,26 @@ mod tests {
         assert!(Error::TxnConflict.is_retriable());
         assert!(!Error::NotFound.is_retriable());
         assert!(!Error::DBClosed.is_retriable());
+    }
+
+    #[test]
+    fn conflict_errors_name_their_reason_and_keep_the_retry_wording() {
+        let conflict = TransactionConflict {
+            access: regolith::Access::ReadForUpdate,
+            winning_write: regolith::WriteKind::Delete,
+            observed_seq: 4,
+            latest_seq: 9,
+        };
+        let details = Error::TxnConflictDetails(conflict).to_string();
+        assert_eq!(
+            details,
+            "a read for update lost to a newer delete: transaction conflict. Please retry"
+        );
+        assert!(details.ends_with(&Error::TxnConflict.to_string()));
+        assert_eq!(
+            Error::TxnRetryExhausted(conflict).to_string(),
+            "transaction retry attempts exhausted: a read for update lost to a newer delete"
+        );
     }
 
     #[test]

@@ -5,6 +5,7 @@ mod common;
 mod batch;
 mod batch_retry;
 mod batch_signing;
+mod conflict_reasons;
 mod doc_suite;
 mod embedding;
 mod embedding_reload;
