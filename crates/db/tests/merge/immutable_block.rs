@@ -317,34 +317,74 @@ async fn peer_without_immutable_flags_merges_and_chains_its_updates() {
     // Here `author` is mutable: its update must chain to the Immutable block
     // at priority 2, not start a second root that ties with it at priority 1.
     let immutable_cid = load(&blockstore, &cid).await.links.unwrap()[0].link;
-    let txn = handler.db().new_txn(false).await.unwrap();
-    let short_id = db::docid::map::get_doc_ref(&txn.systemstore().unwrap(), &doc_id_str)
+    let mut author_cids = Vec::new();
+    for author in ["did:key:bob", "did:key:carol"] {
+        let txn = handler.db().new_txn(false).await.unwrap();
+        let short_id = db::docid::map::get_doc_ref(&txn.systemstore().unwrap(), &doc_id_str)
+            .await
+            .unwrap()
+            .expect("merged document has a short id")
+            .doc_short_id;
+        let mut update = Document::new();
+        update.set_id(doc_id.clone());
+        update.set("author", NormalValue::String(author.into()));
+        let modified: rapidhash::RapidHashSet<String> =
+            ["author".to_string()].into_iter().collect();
+        let result = db::block::builder::write_document_blocks(
+            &txn.blockstore().unwrap(),
+            &txn.headstore().unwrap(),
+            &update,
+            collection.schema(),
+            db::block::builder::DocStorageIdentity::new(collection.resolved_root_id(), short_id),
+            Some(&modified),
+            None,
+            None,
+            None,
+        )
         .await
-        .unwrap()
-        .expect("merged document has a short id")
-        .doc_short_id;
-    let mut update = Document::new();
-    update.set_id(doc_id.clone());
-    update.set("author", NormalValue::String("did:key:bob".into()));
-    let modified: rapidhash::RapidHashSet<String> = ["author".to_string()].into_iter().collect();
-    let result = db::block::builder::write_document_blocks(
-        &txn.blockstore().unwrap(),
-        &txn.headstore().unwrap(),
-        &update,
-        collection.schema(),
-        db::block::builder::DocStorageIdentity::new(collection.resolved_root_id(), short_id),
-        Some(&modified),
-        None,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    txn.force_commit().await.unwrap();
+        .unwrap();
+        db::docid::map::set_block_doc_id_mapping(
+            &txn.systemstore().unwrap(),
+            &result.field_cids[0].to_string(),
+            &doc_id_str,
+        )
+        .await
+        .unwrap();
+        txn.force_commit().await.unwrap();
+        author_cids.push(result.field_cids[0]);
+    }
 
-    let author_block = load(&blockstore, &result.field_cids[0]).await;
+    let author_block = load(&blockstore, &author_cids[0]).await;
     assert_eq!(author_block.heads, Some(vec![immutable_cid]));
     assert_eq!(author_block.delta.priority(), 2);
+
+    // A walk filtered to `kind` passes through the `author` updates to reach
+    // the Immutable block that carries `kind`. The starting block is always
+    // reported, whatever the filter.
+    let rows = commits(
+        &handler,
+        db::read::commits::CommitsQueryOptions {
+            doc_id: Some(doc_id_str.clone()),
+            cid: Some(author_cids[1].to_string()),
+            depth: Some(3),
+            field_name: Some("kind".into()),
+            ..Default::default()
+        },
+    )
+    .await;
+    let kind_rows: Vec<_> = rows
+        .iter()
+        .map(commit_row)
+        .filter(|(_, field, _)| field == "kind")
+        .collect();
+    assert_eq!(
+        kind_rows,
+        [(
+            immutable_cid.to_string(),
+            "kind".to_string(),
+            Some(base64_cbor("note"))
+        )]
+    );
 }
 
 #[tokio::test]

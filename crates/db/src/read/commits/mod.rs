@@ -169,9 +169,7 @@ impl<S: Store> CommitsFetcher<S> {
                         options.field_name.as_deref(),
                     )
                     .await?;
-                if docs.is_empty() {
-                    continue;
-                }
+                // A block the field filter drops still leads to ones it keeps.
                 commits.extend(docs);
 
                 let should_traverse = match options.depth {
@@ -332,9 +330,6 @@ impl<S: Store> CommitsFetcher<S> {
                         options.field_name.as_deref(),
                     )
                     .await?;
-                if docs.is_empty() {
-                    continue;
-                }
                 commits.extend(docs);
 
                 Box::pin(self.traverse_depth(
