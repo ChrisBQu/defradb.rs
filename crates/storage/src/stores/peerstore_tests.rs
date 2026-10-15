@@ -405,7 +405,7 @@ async fn live_push_admission_rejects_malformed_marker_generation() {
         .unwrap()
         .unwrap();
 
-    let mut txn = store.new_txn(false).await.unwrap();
+    let mut txn = peerstore.store.new_txn(false).await.unwrap();
     txn.set(
         &ReplicatorRetryDocIDKey::new("peer", "doc").bytes(),
         b"malformed generation",
