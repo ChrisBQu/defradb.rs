@@ -9,7 +9,7 @@ use db::Error;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use storage::corekv::Key;
+use storage::corekv::{Key, OnAbort, OnCommit};
 use storage::keys::systemstore::CollectionID;
 use storage::keys::systemstore::CollectionIDSequenceKey;
 use storage::RegolithStore;
@@ -191,9 +191,9 @@ async fn test_db_txn_callbacks_executed_on_commit() {
 
     let success_called = Arc::new(AtomicBool::new(false));
     let success_clone = success_called.clone();
-    txn.on_success(Box::new(move || {
+    txn.on_commit(OnCommit::Sync(Box::new(move || {
         success_clone.store(true, Ordering::SeqCst);
-    }))
+    })))
     .unwrap();
 
     txn.commit().await.unwrap();
@@ -208,9 +208,9 @@ async fn test_db_txn_callbacks_executed_on_discard() {
 
     let discard_called = Arc::new(AtomicBool::new(false));
     let discard_clone = discard_called.clone();
-    txn.on_discard(Box::new(move || {
+    txn.on_abort(OnAbort::Sync(Box::new(move || {
         discard_clone.store(true, Ordering::SeqCst);
-    }))
+    })))
     .unwrap();
 
     txn.discard().unwrap();

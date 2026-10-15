@@ -3,8 +3,8 @@ use std::sync::{
     Arc,
 };
 use storage::corekv::{
-    Error, RetryAttemptError, RetryAttemptFn, RetryAttemptFuture, RetryAttemptValue,
-    RetryCallbacks, RetryOptions, RetryTxn, Store, Writer,
+    Error, RetryAttemptError, RetryAttemptFn, RetryAttemptFuture, RetryAttemptValue, RetryOptions,
+    RetryTxn, Store, TxnCallbacks, Writer,
 };
 use storage::{RegolithStore, RegolithStoreOptions};
 
@@ -151,7 +151,7 @@ impl RetryAttemptFn for ConflictOnceAttempt {
                     })?;
             }
             io.set(b"retry-counter", b"attempt").await?;
-            retry.finish_attempt_io(io, RetryCallbacks::default())?;
+            retry.finish_attempt_io(io, TxnCallbacks::default())?;
             Ok(Box::new(()) as RetryAttemptValue)
         })
     }

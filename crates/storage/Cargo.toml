@@ -40,10 +40,6 @@ sha2.workspace = true
 # At-rest keys
 zeroize = "1.8"
 
-# Lock-free shared state
-kovan.workspace = true
-kovan-queue.workspace = true
-
 # The deadline `close` waits with
 n0-future.workspace = true
 

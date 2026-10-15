@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use futures::channel::oneshot;
 use schema::{IndexDescription, IndexKind, IndexedFieldDescription};
-use storage::corekv::{Key, Store};
+use storage::corekv::{Key, OnCommit, Store};
 use storage::keys::systemstore::{CollectionKey, CollectionNameKey};
 
 use crate::database::action::ActionExecutionLease;
@@ -115,13 +115,13 @@ impl<S: Store> DB<S> {
         )
         .await?;
         let cache = std::sync::Arc::clone(&self.collections);
-        txn.on_success_ordered(std::sync::Arc::new(move || {
+        txn.on_commit(OnCommit::Ordered(Box::new(move || {
             cache.rcu(|old| {
                 let mut cache = old.clone();
                 cache.put(cached_collection.clone());
                 cache
             });
-        }))?;
+        })))?;
         txn.commit().await?;
         // The fence is a short-ID cutoff taken after the definition commits.
         // It is sound without the definition commit's sequence because every

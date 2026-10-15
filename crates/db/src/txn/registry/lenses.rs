@@ -1,6 +1,7 @@
 //! Lens transform registration and listing inside a transaction.
 
 use super::*;
+use storage::corekv::OnCommit;
 
 impl<S: Store + 'static> DbTransactionRegistry<S> {
     async fn compute_lens_transform_id(config: &LensConfig) -> Result<TransformId> {
@@ -75,7 +76,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         let db = self.db.clone();
         let config_for_commit = config.clone();
         let transform_id_for_log = transform_id.to_string();
-        txn.on_success_async(Box::new(move || {
+        txn.on_commit(OnCommit::Async(Box::new(move || {
             let db = db.clone();
             Box::pin(async move {
                 if let Err(error) = db.add_lens(config_for_commit).await {
@@ -86,7 +87,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
                     );
                 }
             })
-        }))?;
+        })))?;
 
         txn_lens_store
             .add_with_id(transform_id.clone(), config)

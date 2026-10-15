@@ -1,245 +1,261 @@
-//! Callbacks a transaction runs when it ends: the callback types, the
-//! bundle of receipt-ordered callbacks a mutation attempt collects, and the
-//! success callbacks an engine-owned retry attempt hands its store.
+//! Callbacks a transaction runs when it ends, and the one registry that holds
+//! them.
+//!
+//! A transaction ends once: it commits, or it ends without committing (its
+//! commit fails, or it is discarded or dropped). What was registered with
+//! [`Txn::on_commit`](super::Txn::on_commit) runs only after a commit, what
+//! was registered with [`Txn::on_abort`](super::Txn::on_abort) only after any
+//! other end; each callback runs once, and the other end's are dropped unrun.
+//!
+//! After a commit, in this order: the hooks ([`OnCommit::OrderedAsync`]) are
+//! awaited and the events ([`OnCommit::Ordered`]) handed to the stream that
+//! sends every commit's events out in commit-receipt order; then the async
+//! callbacks are awaited and the sync ones run. After any other end the
+//! async callbacks come first too: awaited after a failed commit, spawned
+//! after a discard or a drop, whose caller cannot await. Each kind keeps its
+//! registration order.
+//!
+//! Every callback type is one shape of [`CallOnce`], declared once for every
+//! target: `Send` on native targets, not required to be in the
+//! single-threaded browser ([`MaybeSend`]).
 
 use std::future::Future;
-use std::pin::Pin;
 
 use defra_core::thread_bounds::MaybeBoxFuture;
 use regolith::sync::SegQueue;
 
+use super::errors::{Error, Result};
 use super::traits::MaybeSend;
 
-/// A callback that runs once and returns `T`: `Send` on native targets, not
-/// required to be in the single-threaded browser ([`MaybeSend`]). Each
-/// callback type below is one shape of it, declared once for every target.
+/// A callback that runs once and returns `T`.
 pub trait CallOnce<T>: FnOnce() -> T + MaybeSend + 'static {}
 
 impl<F, T> CallOnce<T> for F where F: FnOnce() -> T + MaybeSend + 'static {}
 
-/// A callback run synchronously when a transaction ends.
+/// A callback run once, synchronously.
 pub type TxnCallback = Box<dyn CallOnce<()>>;
 
-#[cfg(not(target_arch = "wasm32"))]
-pub type OrderedTxnCallback = std::sync::Arc<dyn Fn() + Send + Sync + 'static>;
+/// A callback awaited once.
+pub type AsyncTxnCallback = Box<dyn CallOnce<MaybeBoxFuture<'static, ()>>>;
 
-#[cfg(target_arch = "wasm32")]
-pub type OrderedTxnCallback = std::sync::Arc<dyn Fn() + 'static>;
+/// A hook awaited once its commit is durable, before that commit's events go
+/// out. Its error is reported, never returned: the commit stands.
+pub type CommitHook = Box<dyn CallOnce<MaybeBoxFuture<'static, std::result::Result<(), String>>>>;
 
-#[cfg(not(target_arch = "wasm32"))]
-pub type AsyncOrderedTxnCallback = std::sync::Arc<
-    dyn Fn() -> Pin<Box<dyn Future<Output = std::result::Result<(), String>> + Send>>
-        + Send
-        + Sync
-        + 'static,
->;
-
-/// Receipt-ordered callbacks collected while evaluating a mutation attempt.
-/// A retrying caller can keep the bundle with its attempt and register only
-/// the winning attempt on the transaction that receives the commit receipt.
-#[derive(Default)]
-pub struct OrderedTxnCallbacks {
-    sync: Vec<OrderedTxnCallback>,
-    asynchronous: Vec<AsyncOrderedTxnCallback>,
+/// What runs after a commit, and how.
+pub enum OnCommit {
+    /// Run once the commit is durable.
+    Sync(TxnCallback),
+    /// Awaited once the commit is durable.
+    Async(AsyncTxnCallback),
+    /// An event: sent out with every commit's events, in commit-receipt
+    /// order.
+    Ordered(TxnCallback),
+    /// A hook: awaited before this commit's events go out, which holds back
+    /// the events of every later commit until it finishes.
+    OrderedAsync(CommitHook),
 }
 
-impl OrderedTxnCallbacks {
-    pub fn push_sync(&mut self, callback: OrderedTxnCallback) {
-        self.sync.push(callback);
+impl OnCommit {
+    /// Whether it is ordered by the commit's receipt.
+    fn is_ordered(&self) -> bool {
+        matches!(self, Self::Ordered(_) | Self::OrderedAsync(_))
+    }
+}
+
+/// What runs after a transaction ends without committing.
+pub enum OnAbort {
+    /// Run once the transaction has ended.
+    Sync(TxnCallback),
+    /// Awaited once a failed commit returns, or spawned after a discard or a
+    /// drop.
+    Async(AsyncTxnCallback),
+}
+
+/// The callbacks one transaction registered, in registration order.
+///
+/// The queue is what makes the registry `Sync` without a lock (an attempt
+/// view holding it is shared by reference across awaits), and it is built on
+/// the first registration, so a transaction that registers nothing allocates
+/// nothing.
+#[derive(Default)]
+pub struct TxnCallbacks {
+    read_only: bool,
+    entries: Option<Box<SegQueue<Entry>>>,
+}
+
+enum Entry {
+    Commit(OnCommit),
+    Abort(OnAbort),
+}
+
+/// How many callbacks a registry held when a savepoint was set.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CallbackMark(usize);
+
+impl TxnCallbacks {
+    /// A registry for a transaction that is `read_only` or not. A read-only
+    /// one refuses ordered work: it never gets a commit receipt to order it
+    /// by.
+    pub fn new(read_only: bool) -> Self {
+        Self {
+            read_only,
+            entries: None,
+        }
     }
 
-    pub fn push_async(&mut self, callback: AsyncOrderedTxnCallback) {
-        self.asynchronous.push(callback);
+    /// Register `callback` to run once if the transaction commits.
+    pub fn on_commit(&mut self, callback: OnCommit) -> Result<()> {
+        if self.read_only && callback.is_ordered() {
+            return Err(Error::ReadOnlyTxn);
+        }
+        self.push(Entry::Commit(callback));
+        Ok(())
     }
 
-    pub fn append(&mut self, mut other: Self) {
-        self.sync.append(&mut other.sync);
-        self.asynchronous.append(&mut other.asynchronous);
+    /// Register `callback` to run once if the transaction ends without
+    /// committing.
+    pub fn on_abort(&mut self, callback: OnAbort) {
+        self.push(Entry::Abort(callback));
+    }
+
+    fn push(&mut self, entry: Entry) {
+        self.entries.get_or_insert_with(Box::default).push(entry);
+    }
+
+    /// The callbacks registered so far, of every kind.
+    pub fn len(&self) -> usize {
+        self.entries.as_ref().map_or(0, |entries| entries.len())
     }
 
     pub fn is_empty(&self) -> bool {
-        self.sync.is_empty() && self.asynchronous.is_empty()
+        self.len() == 0
     }
 
-    pub fn into_parts(self) -> (Vec<OrderedTxnCallback>, Vec<AsyncOrderedTxnCallback>) {
-        (self.sync, self.asynchronous)
-    }
-}
-#[cfg(target_arch = "wasm32")]
-pub type AsyncOrderedTxnCallback = std::sync::Arc<
-    dyn Fn() -> Pin<Box<dyn Future<Output = std::result::Result<(), String>>>> + 'static,
->;
-
-/// A callback awaited when a transaction ends.
-pub type AsyncTxnCallback = Box<dyn CallOnce<MaybeBoxFuture<'static, ()>>>;
-
-/// Success callbacks collected by datastore's attempt facade. The store runs
-/// them only after the winning native commit has produced its receipt.
-///
-/// Each kind is a FIFO queue owned by the bundle: a queue is what makes the
-/// bundle `Sync` without a lock (the attempt view holding it is shared by
-/// reference across awaits), and the queues are built on the first
-/// registration, so an attempt that registers nothing allocates nothing.
-#[derive(Default)]
-pub struct RetryCallbacks {
-    queues: Option<Box<RetryQueues>>,
-}
-
-#[derive(Default)]
-struct RetryQueues {
-    sync: SegQueue<TxnCallback>,
-    asynchronous: SegQueue<AsyncTxnCallback>,
-    ordered: SegQueue<OrderedRetryCallback>,
-    ordered_async: SegQueue<AsyncOrderedRetryCallback>,
-}
-
-/// The callbacks of a [`RetryCallbacks`] bundle, by kind, in registration
-/// order.
-pub struct RetryCallbackParts {
-    pub sync: Vec<TxnCallback>,
-    pub asynchronous: Vec<AsyncTxnCallback>,
-    pub ordered: Vec<OrderedRetryCallback>,
-    pub ordered_async: Vec<AsyncOrderedRetryCallback>,
-}
-
-/// Lengths of retry-success callback queues at a transaction savepoint.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct RetryCallbackCounts {
-    sync: usize,
-    asynchronous: usize,
-    ordered: usize,
-    ordered_async: usize,
-}
-
-/// An event a retry attempt registers, dispatched once in commit-receipt
-/// order.
-pub type OrderedRetryCallback = TxnCallback;
-
-/// A hook a retry attempt registers, awaited once its commit is durable and
-/// before its events go out; its error is reported, never returned.
-pub type AsyncOrderedRetryCallback =
-    Box<dyn CallOnce<MaybeBoxFuture<'static, std::result::Result<(), String>>>>;
-
-/// Keep the first `keep` entries of `queue`, in order, and drop the rest.
-pub(crate) fn truncate_queue<T>(queue: &SegQueue<T>, keep: usize)
-where
-    T: 'static,
-{
-    let mut retained = Vec::with_capacity(keep.min(queue.len()));
-    for _ in 0..keep {
-        match queue.pop() {
-            Some(entry) => retained.push(entry),
-            None => break,
-        }
-    }
-    while queue.pop().is_some() {}
-    for entry in retained {
-        queue.push(entry);
-    }
-}
-
-fn drain_queue<T>(queue: SegQueue<T>) -> Vec<T>
-where
-    T: 'static,
-{
-    let mut drained = Vec::with_capacity(queue.len());
-    while let Some(entry) = queue.pop() {
-        drained.push(entry);
-    }
-    drained
-}
-
-impl RetryCallbacks {
-    fn queues(&mut self) -> &RetryQueues {
-        self.queues.get_or_insert_with(Box::default)
+    /// Where the registry stands, for a savepoint to return to.
+    pub fn mark(&self) -> CallbackMark {
+        CallbackMark(self.len())
     }
 
-    pub fn counts(&self) -> RetryCallbackCounts {
-        let Some(queues) = &self.queues else {
-            return RetryCallbackCounts::default();
-        };
-        RetryCallbackCounts {
-            sync: queues.sync.len(),
-            asynchronous: queues.asynchronous.len(),
-            ordered: queues.ordered.len(),
-            ordered_async: queues.ordered_async.len(),
-        }
-    }
-
-    pub fn truncate(&mut self, counts: RetryCallbackCounts) {
-        let Some(queues) = &self.queues else {
+    /// Drop the callbacks registered after `mark`.
+    pub fn truncate(&mut self, mark: CallbackMark) {
+        let Some(entries) = &self.entries else {
             return;
         };
-        truncate_queue(&queues.sync, counts.sync);
-        truncate_queue(&queues.asynchronous, counts.asynchronous);
-        truncate_queue(&queues.ordered, counts.ordered);
-        truncate_queue(&queues.ordered_async, counts.ordered_async);
+        let mut kept = Vec::with_capacity(mark.0.min(entries.len()));
+        while kept.len() < mark.0 {
+            match entries.pop() {
+                Some(entry) => kept.push(entry),
+                None => break,
+            }
+        }
+        while entries.pop().is_some() {}
+        for entry in kept {
+            entries.push(entry);
+        }
     }
 
-    pub fn has_ordered_callbacks(&self) -> bool {
-        self.queues
-            .as_ref()
-            .is_some_and(|queues| !queues.ordered.is_empty() || !queues.ordered_async.is_empty())
-    }
-
+    /// Register what `other` holds after what this registry holds.
     pub fn append(&mut self, other: Self) {
-        let Some(other) = other.queues else {
+        let Some(other) = other.entries else {
             return;
         };
-        let queues = self.queues();
-        for entry in drain_queue(other.sync) {
-            queues.sync.push(entry);
-        }
-        for entry in drain_queue(other.asynchronous) {
-            queues.asynchronous.push(entry);
-        }
-        for entry in drain_queue(other.ordered) {
-            queues.ordered.push(entry);
-        }
-        for entry in drain_queue(other.ordered_async) {
-            queues.ordered_async.push(entry);
+        while let Some(entry) = other.pop() {
+            self.push(entry);
         }
     }
 
-    pub fn push_sync(&mut self, callback: TxnCallback) {
-        self.queues().sync.push(callback);
-    }
-
-    pub fn push_async(&mut self, callback: AsyncTxnCallback) {
-        self.queues().asynchronous.push(callback);
-    }
-
-    pub fn push_ordered(&mut self, callback: OrderedRetryCallback) {
-        self.queues().ordered.push(callback);
-    }
-
-    pub fn push_ordered_async(&mut self, callback: AsyncOrderedRetryCallback) {
-        self.queues().ordered_async.push(callback);
-    }
-
-    /// The callbacks by kind, each in registration order.
-    pub fn into_parts(self) -> RetryCallbackParts {
-        let Some(queues) = self.queues else {
-            return RetryCallbackParts {
-                sync: Vec::new(),
-                asynchronous: Vec::new(),
-                ordered: Vec::new(),
-                ordered_async: Vec::new(),
-            };
+    /// What runs after a commit, and what runs after any other end.
+    pub fn into_ends(self) -> (Committed, Ended) {
+        let mut committed = Committed::default();
+        let mut aborted = Ended::default();
+        let Some(entries) = self.entries else {
+            return (committed, aborted);
         };
-        let RetryQueues {
-            sync,
-            asynchronous,
-            ordered,
-            ordered_async,
-        } = *queues;
-        RetryCallbackParts {
-            sync: drain_queue(sync),
-            asynchronous: drain_queue(asynchronous),
-            ordered: drain_queue(ordered),
-            ordered_async: drain_queue(ordered_async),
+        while let Some(entry) = entries.pop() {
+            match entry {
+                Entry::Commit(OnCommit::Sync(callback)) => committed.then.sync.push(callback),
+                Entry::Commit(OnCommit::Async(callback)) => {
+                    committed.then.asynchronous.push(callback)
+                }
+                Entry::Commit(OnCommit::Ordered(event)) => committed.events.push(event),
+                Entry::Commit(OnCommit::OrderedAsync(hook)) => committed.hooks.push(hook),
+                Entry::Abort(OnAbort::Sync(callback)) => aborted.sync.push(callback),
+                Entry::Abort(OnAbort::Async(callback)) => aborted.asynchronous.push(callback),
+            }
+        }
+        (committed, aborted)
+    }
+}
+
+/// What runs after a commit, each kind in registration order.
+#[derive(Default)]
+pub struct Committed {
+    /// Sent out in commit-receipt order.
+    pub events: Vec<TxnCallback>,
+    /// Awaited before the events go out.
+    pub hooks: Vec<CommitHook>,
+    /// Run once the hooks finished.
+    pub then: Ended,
+}
+
+/// The callbacks of one end that nothing orders: the async ones run before
+/// the sync ones, each kind in registration order.
+#[derive(Default)]
+pub struct Ended {
+    asynchronous: Vec<AsyncTxnCallback>,
+    sync: Vec<TxnCallback>,
+}
+
+impl Ended {
+    /// Await the async callbacks, then run the sync ones. A panic in one
+    /// unwinds to the caller, and the callbacks after it do not run.
+    pub async fn run(self) {
+        for callback in self.asynchronous {
+            callback().await;
+        }
+        for callback in self.sync {
+            callback();
         }
     }
+
+    /// For an end whose caller cannot await, a discard or a drop: the async
+    /// callbacks are spawned, one task running them in order, then the sync
+    /// ones run. Without a runtime there is nowhere to spawn them, and that
+    /// is said out loud rather than dropped quietly.
+    pub fn run_now(self) {
+        if !self.asynchronous.is_empty() {
+            spawn_in_order(self.asynchronous);
+        }
+        for callback in self.sync {
+            callback();
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_in_order(callbacks: Vec<AsyncTxnCallback>) {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            handle.spawn(async move {
+                for callback in callbacks {
+                    callback().await;
+                }
+            });
+        }
+        Err(_) => tracing::warn!(
+            count = callbacks.len(),
+            "async abort callbacks dropped: the transaction ended outside a tokio runtime"
+        ),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn spawn_in_order(callbacks: Vec<AsyncTxnCallback>) {
+    tracing::warn!(
+        count = callbacks.len(),
+        "async abort callbacks dropped: no runtime to spawn them on"
+    );
 }
 
 /// Helper function to create a simple sync callback from a closure.
@@ -247,7 +263,7 @@ impl RetryCallbacks {
 /// # Example
 ///
 /// ```ignore
-/// txn.on_success(make_callback(|| println!("Success!")));
+/// txn.on_commit(OnCommit::Sync(make_callback(|| println!("Success!"))))?;
 /// ```
 pub fn make_callback<F>(f: F) -> TxnCallback
 where
@@ -261,9 +277,9 @@ where
 /// # Example
 ///
 /// ```ignore
-/// txn.on_success_async(make_async_callback(|| async {
+/// txn.on_commit(OnCommit::Async(make_async_callback(|| async {
 ///     println!("Async success!");
-/// }));
+/// })))?;
 /// ```
 pub fn make_async_callback<F, Fut>(f: F) -> AsyncTxnCallback
 where
@@ -274,62 +290,4 @@ where
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_make_callback() {
-        let _callback = make_callback(|| {
-            println!("Test callback");
-        });
-        // Just ensure it compiles and has the right type
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn retry_callbacks_are_shareable_without_a_lock() {
-        fn shareable<T>()
-        where
-            T: Send + Sync,
-        {
-        }
-        shareable::<RetryCallbacks>();
-    }
-
-    #[test]
-    fn retry_callbacks_keep_registration_order_through_append_and_truncate() {
-        let seen = std::sync::Arc::new(regolith::sync::SegQueue::new());
-        let push = |value: u32| -> TxnCallback {
-            let seen = std::sync::Arc::clone(&seen);
-            Box::new(move || seen.push(value))
-        };
-        let mut callbacks = RetryCallbacks::default();
-        assert!(callbacks.queues.is_none());
-        assert!(!callbacks.has_ordered_callbacks());
-        callbacks.push_sync(push(1));
-        let mark = callbacks.counts();
-        callbacks.push_sync(push(2));
-        callbacks.push_ordered(Box::new(|| {}));
-        assert!(callbacks.has_ordered_callbacks());
-        callbacks.truncate(mark);
-        assert!(!callbacks.has_ordered_callbacks());
-        let mut more = RetryCallbacks::default();
-        more.push_sync(push(3));
-        callbacks.append(more);
-        callbacks.append(RetryCallbacks::default());
-        for callback in callbacks.into_parts().sync {
-            callback();
-        }
-        let order: Vec<u32> = std::iter::from_fn(|| seen.pop()).collect();
-        assert_eq!(order, vec![1, 3]);
-        assert!(RetryCallbacks::default().into_parts().sync.is_empty());
-    }
-
-    #[test]
-    fn test_make_async_callback() {
-        let _callback = make_async_callback(|| async {
-            println!("Test async callback");
-        });
-        // Just ensure it compiles and has the right type
-    }
-}
+mod tests;

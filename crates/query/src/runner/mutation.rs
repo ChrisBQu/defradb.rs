@@ -1086,32 +1086,27 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                         let doc_id = doc_id.to_string();
                         let token =
                             defra_core::signing::get_request_bearer_token(identity_did.as_str());
-                        let callback: storage::corekv::AsyncOrderedTxnCallback =
-                            Arc::new(move || {
-                                let acp = acp.clone();
-                                let identity = identity.clone();
-                                let policy_id = policy_id.clone();
-                                let resource_name = resource_name.clone();
-                                let doc_id = doc_id.clone();
-                                let token = token.clone();
-                                Box::pin(defra_core::signing::scope_request_bearer_token(
-                                    Some(identity.to_string()),
-                                    token,
-                                    async move {
-                                        acp.redrive_registration(
-                                            &policy_id,
-                                            &resource_name,
-                                            &doc_id,
-                                        )
+                        let callback: storage::corekv::CommitHook = Box::new(move || {
+                            let acp = acp.clone();
+                            let identity = identity.clone();
+                            let policy_id = policy_id.clone();
+                            let resource_name = resource_name.clone();
+                            let doc_id = doc_id.clone();
+                            let token = token.clone();
+                            Box::pin(defra_core::signing::scope_request_bearer_token(
+                                Some(identity.to_string()),
+                                token,
+                                async move {
+                                    acp.redrive_registration(&policy_id, &resource_name, &doc_id)
                                         .await
                                         .map_err(|error| {
                                             format!(
                                                 "failed to register ACP document {doc_id}: {error}"
                                             )
                                         })
-                                    },
-                                ))
-                            });
+                                },
+                            ))
+                        });
                         mutator.register_ordered_async_hook(callback).await?;
                     }
                 }
@@ -1171,19 +1166,18 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                             let token = identity.as_ref().and_then(|identity| {
                                 defra_core::signing::get_request_bearer_token(identity.as_str())
                             });
-                            let callback: storage::corekv::AsyncOrderedTxnCallback = Arc::new(
-                                move || {
-                                    let acp = acp.clone();
-                                    let policy_id = policy_id.clone();
-                                    let resource_name = resource_name.clone();
-                                    let doc_id = doc_id.clone();
-                                    let identity = identity.clone();
-                                    let token = token.clone();
-                                    Box::pin(defra_core::signing::scope_request_bearer_token(
-                                        identity.map(|identity| identity.to_string()),
-                                        token,
-                                        async move {
-                                            acp.unregister_doc_object(
+                            let callback: storage::corekv::CommitHook = Box::new(move || {
+                                let acp = acp.clone();
+                                let policy_id = policy_id.clone();
+                                let resource_name = resource_name.clone();
+                                let doc_id = doc_id.clone();
+                                let identity = identity.clone();
+                                let token = token.clone();
+                                Box::pin(defra_core::signing::scope_request_bearer_token(
+                                    identity.map(|identity| identity.to_string()),
+                                    token,
+                                    async move {
+                                        acp.unregister_doc_object(
                                             &policy_id,
                                             &resource_name,
                                             &doc_id,
@@ -1192,10 +1186,9 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R
                                         .map_err(|error| {
                                             format!("failed to unregister ACP document {doc_id}: {error}")
                                         })
-                                        },
-                                    ))
-                                },
-                            );
+                                    },
+                                ))
+                            });
                             mutator.register_ordered_async_hook(callback).await?;
                         } else if let Err(error) = self
                             .acp

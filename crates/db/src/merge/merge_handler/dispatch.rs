@@ -5,7 +5,7 @@ use defra_core::merge::{
     BlockMetadata, ExplicitReplayAuthorization, MergeBlock, MergeErrorDisposition, MergeHandler,
     MergeOutcome, RecoveredBlockMetadata,
 };
-use storage::corekv::Store;
+use storage::corekv::{OnCommit, Store};
 
 use super::{cid_set, DbMergeHandler, MergeError};
 use crate::merge::governance::{RedrivenMerge, REDRIVE_BUDGET};
@@ -142,18 +142,20 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> MergeRetryAttempt<
         if events.is_empty() {
             // Deferred/schema-only outcomes may have no native writes. Their
             // follow-up work owns its own commits and needs no receipt slot.
-            txn.on_success_async(Box::new(move || Box::pin(after_commit)))?;
+            txn.on_commit(OnCommit::Async(Box::new(move || Box::pin(after_commit))))?;
         } else {
-            txn.on_retry_success_ordered_async(Box::new(move || {
+            txn.on_commit(OnCommit::OrderedAsync(Box::new(move || {
                 Box::pin(async move {
                     after_commit.await;
                     Ok(())
                 })
-            }))?;
+            })))?;
         }
         if !events.is_empty() {
             if let Some(bus) = self.handler.db.event_bus().cloned() {
-                txn.on_retry_success_ordered(Box::new(move || bus.publish_batch(events)))?;
+                txn.on_commit(OnCommit::Ordered(Box::new(move || {
+                    bus.publish_batch(events)
+                })))?;
             }
         }
         let (io, callbacks) = txn

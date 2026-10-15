@@ -16,7 +16,7 @@
 ///
 /// Txn (extends ReaderWriter)
 ///   ├── commit/discard
-///   └── lifecycle callbacks (on_success, on_error, on_discard)
+///   └── callbacks (on_commit, on_abort)
 ///
 /// TxnStore (extends Store)
 ///   └── new_txn(readonly) -> Txn
@@ -26,7 +26,7 @@
 ///
 /// - **Async-first**: All I/O operations are asynchronous using async/await
 /// - **MVCC Transactions**: Support for serializable snapshot isolation
-/// - **Callbacks**: Transaction lifecycle hooks for success, error, and discard events
+/// - **Callbacks**: One registry per transaction, run once at its end (`callbacks`)
 /// - **Iteration**: Flexible iteration with prefix, range, and reverse support
 /// - **Backend Agnostic**: Works with Redb, in-memory, or custom backends
 ///
@@ -45,8 +45,8 @@
 /// txn.set(b"key1", b"value1").await?;
 /// txn.set(b"key2", b"value2").await?;
 ///
-/// // Register success callback
-/// txn.on_success(Box::new(|| println!("Transaction committed!")));
+/// // Register a commit callback
+/// txn.on_commit(OnCommit::Sync(Box::new(|| println!("Transaction committed!"))))?;
 ///
 /// // Commit the transaction
 /// txn.commit().await?;
@@ -72,11 +72,9 @@ pub mod traits;
 pub mod types;
 
 // Re-export commonly used types and traits for convenience
-pub(crate) use callbacks::truncate_queue;
 pub use callbacks::{
-    make_async_callback, make_callback, AsyncOrderedRetryCallback, AsyncOrderedTxnCallback,
-    AsyncTxnCallback, CallOnce, OrderedRetryCallback, OrderedTxnCallback, OrderedTxnCallbacks,
-    RetryCallbackCounts, RetryCallbackParts, RetryCallbacks, TxnCallback,
+    make_async_callback, make_callback, AsyncTxnCallback, CallOnce, CallbackMark, CommitHook,
+    Committed, Ended, OnAbort, OnCommit, TxnCallback, TxnCallbacks,
 };
 pub use errors::{Error, Result, TransactionConflict, UNIQUE_CONSTRAINT_VIOLATION_MESSAGE};
 pub use iterator::{Iterator, KvPair};

@@ -1,4 +1,5 @@
 use super::*;
+use storage::corekv::OnCommit;
 
 impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     /// Process a CollectionDefinition delta - register synced collection schema in systemstore.
@@ -278,7 +279,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             .map_err(MergeError::Database)?;
             let collections = std::sync::Arc::clone(&self.db.collections);
             let cache_result_for_commit = cache_result.clone();
-            txn.on_success_ordered(std::sync::Arc::new(move || {
+            txn.on_commit(OnCommit::Ordered(Box::new(move || {
                 collections.rcu(|old| {
                     let mut cache = old.clone();
                     let offered = cache.offer(collection.clone());
@@ -288,7 +289,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                     );
                     cache
                 });
-            }))
+            })))
             .map_err(MergeError::Database)?;
         } else {
             tracing::warn!(

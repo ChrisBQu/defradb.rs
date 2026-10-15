@@ -1,4 +1,10 @@
-//! Post-commit work that failed after its commit was durable.
+//! A commit's post-commit work, and what failed of it after the commit was
+//! durable.
+//!
+//! What a transaction or a retry attempt registered ([`TxnCallbacks`]) is
+//! bound to the commit-receipt stream before regolith commits it
+//! ([`PostCommit::bind`]), and runs once the outcome is known: the commit
+//! callbacks after a commit, the abort callbacks after a failed one.
 //!
 //! A durable commit's outcome stands. A hook that fails, panics or is
 //! cancelled, an event that panics, and a regolith callback that panics
@@ -6,7 +12,71 @@
 //! of `defradb.storage.events` by kind, and never turned into a failed write
 //! or raised in another caller.
 
+use std::sync::Arc;
+
 use telemetry::StorageEvent;
+
+use super::event_order::{Binding, EventOrder};
+use crate::corekv::{CommitHook, Committed, Ended, TxnCallbacks};
+
+/// What one commit registered for after its outcome: its events and hooks,
+/// bound to the stream, and its other callbacks.
+pub(super) struct PostCommit {
+    binding: Option<Binding>,
+    hooks: Vec<CommitHook>,
+    committed: Ended,
+    aborted: Ended,
+}
+
+impl PostCommit {
+    /// Binds the ordered work of `callbacks` to `txn`, which regolith
+    /// commits next.
+    pub(super) fn bind(
+        order: &Arc<EventOrder>,
+        txn: &mut regolith::Transaction,
+        callbacks: TxnCallbacks,
+    ) -> Self {
+        let (
+            Committed {
+                events,
+                hooks,
+                then,
+            },
+            aborted,
+        ) = callbacks.into_ends();
+        let binding = (!events.is_empty() || !hooks.is_empty())
+            .then(|| order.bind(txn, events, !hooks.is_empty()));
+        Self {
+            binding,
+            hooks,
+            committed: then,
+            aborted,
+        }
+    }
+
+    /// The commit is durable: its hooks run (a failure is reported, never
+    /// returned), its events go out in receipt order, and its other commit
+    /// callbacks run.
+    pub(super) async fn committed(self) {
+        let running = self.binding.and_then(|binding| binding.hand_over(true));
+        if let Some(running) = running {
+            for hook in self.hooks {
+                run_hook(hook()).await;
+            }
+            running.done();
+        }
+        self.committed.run().await;
+    }
+
+    /// The commit failed: nothing it registered for after a commit runs, and
+    /// its abort callbacks do.
+    pub(super) async fn failed(self) {
+        if let Some(binding) = self.binding {
+            binding.hand_over(false);
+        }
+        self.aborted.run().await;
+    }
+}
 
 pub(super) fn report(kind: StorageEvent, detail: &dyn std::fmt::Display) {
     tracing::warn!(
@@ -44,11 +114,9 @@ mod post_commit_tests {
 
     use crate::backends::RegolithStore;
     use crate::corekv::{
-        AppendLog, AsyncOrderedTxnCallback, OrderedRetryCallback, OrderedTxnCallback,
-        RetryAttemptFn, RetryAttemptFuture, Writer,
+        AppendLog, CommitHook, OnCommit, RetryAttemptFn, RetryAttemptFuture, RetryAttemptValue,
+        RetryOptions, RetryTxn, Store, TxnCallback, TxnCallbacks, Writer,
     };
-    use crate::corekv::{RetryAttemptValue, RetryOptions, Store};
-    use crate::corekv::{RetryCallbacks, RetryTxn};
     use regolith::sync::{Atom, Event as Signal};
     use telemetry::StorageEvent;
 
@@ -65,12 +133,7 @@ mod post_commit_tests {
             });
         }
 
-        fn event(&self, value: u64) -> OrderedTxnCallback {
-            let out = self.clone();
-            Arc::new(move || out.push(value))
-        }
-
-        fn retry_event(&self, value: u64) -> OrderedRetryCallback {
+        fn event(&self, value: u64) -> TxnCallback {
             let out = self.clone();
             Box::new(move || out.push(value))
         }
@@ -80,8 +143,8 @@ mod post_commit_tests {
         }
     }
 
-    fn failing_hook() -> AsyncOrderedTxnCallback {
-        Arc::new(|| Box::pin(async { Err("the registration was refused".to_string()) }))
+    fn failing_hook() -> CommitHook {
+        Box::new(|| Box::pin(async { Err("the registration was refused".to_string()) }))
     }
 
     async fn read(store: &RegolithStore, key: &[u8]) -> Option<Vec<u8>> {
@@ -98,8 +161,9 @@ mod post_commit_tests {
         let before = telemetry::storage_event_count(StorageEvent::PostCommitHookFailed);
         let mut txn = store.new_txn(false).await.unwrap();
         txn.set(b"doc", b"v").await.unwrap();
-        txn.on_success_ordered_async(failing_hook()).unwrap();
-        txn.on_success_ordered(out.event(1)).unwrap();
+        txn.on_commit(OnCommit::OrderedAsync(failing_hook()))
+            .unwrap();
+        txn.on_commit(OnCommit::Ordered(out.event(1))).unwrap();
         txn.commit().await.unwrap();
         assert_eq!(out.get(), vec![1]);
         assert!(telemetry::storage_event_count(StorageEvent::PostCommitHookFailed) > before);
@@ -122,14 +186,14 @@ mod post_commit_tests {
                 if let Some(key) = self.key {
                     io.set(key, b"v").await?;
                 }
-                let mut callbacks = RetryCallbacks::default();
+                let mut callbacks = TxnCallbacks::default();
                 if self.failing {
-                    callbacks.push_ordered_async(Box::new(|| {
+                    callbacks.on_commit(OnCommit::OrderedAsync(Box::new(|| {
                         Box::pin(async { Err("the registration was refused".to_string()) })
-                    }));
+                    })))?;
                 }
                 for value in &self.events {
-                    callbacks.push_ordered(self.out.retry_event(*value));
+                    callbacks.on_commit(OnCommit::Ordered(self.out.event(*value)))?;
                 }
                 retry.finish_attempt_io(io, callbacks)?;
                 Ok(Box::new(()) as RetryAttemptValue)
@@ -163,7 +227,7 @@ mod post_commit_tests {
         let out = Out::default();
         let mut txn = store.new_txn(false).await.unwrap();
         assert!(txn.get(b"absent").await.unwrap().is_none());
-        txn.on_success_ordered(out.event(1)).unwrap();
+        txn.on_commit(OnCommit::Ordered(out.event(1))).unwrap();
         txn.commit().await.unwrap();
         let attempt = EventfulAttempt {
             key: None,
@@ -190,7 +254,7 @@ mod post_commit_tests {
             txn.append(&log, b"doc-1", Some(b"s/arrival/c1/doc/doc-1"))
                 .await
                 .unwrap();
-            txn.on_success_ordered(out.event(value)).unwrap();
+            txn.on_commit(OnCommit::Ordered(out.event(value))).unwrap();
             txn.commit().await.unwrap();
         }
         assert_eq!(out.get(), vec![1, 2]);
@@ -208,16 +272,16 @@ mod post_commit_tests {
             Box::pin(async move {
                 let mut io = retry.begin_attempt_io()?;
                 io.set(b"held", b"v").await?;
-                let mut callbacks = RetryCallbacks::default();
+                let mut callbacks = TxnCallbacks::default();
                 let entered = Arc::clone(&self.entered);
                 let release = Arc::clone(&self.release);
-                callbacks.push_ordered_async(Box::new(move || {
+                callbacks.on_commit(OnCommit::OrderedAsync(Box::new(move || {
                     Box::pin(async move {
                         entered.set();
                         release.wait().await;
                         Ok(())
                     })
-                }));
+                })))?;
                 retry.finish_attempt_io(io, callbacks)?;
                 Ok(Box::new(()) as RetryAttemptValue)
             })
@@ -249,8 +313,10 @@ mod post_commit_tests {
 
         let mut txn = store.new_txn(false).await.unwrap();
         txn.set(b"doc", b"v").await.unwrap();
-        txn.on_success_ordered(Arc::new(|| panic!("a subscriber panicked")))
-            .unwrap();
+        txn.on_commit(OnCommit::Ordered(Box::new(|| {
+            panic!("a subscriber panicked")
+        })))
+        .unwrap();
         txn.commit().await.unwrap();
 
         release.set();

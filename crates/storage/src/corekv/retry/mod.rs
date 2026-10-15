@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use defra_core::thread_bounds::MaybeBoxFuture;
 
-use super::callbacks::RetryCallbacks;
+use super::callbacks::TxnCallbacks;
 use super::errors::Result;
 use super::traits::{private, MaybeSend, MaybeSendSync, ReaderWriter};
 
@@ -53,7 +53,7 @@ pub trait RetryTxn: MaybeSendSync + private::Sealed {
     fn finish_attempt_io(
         &mut self,
         _io: Box<dyn RetryAttemptIO>,
-        _callbacks: RetryCallbacks,
+        _callbacks: TxnCallbacks,
     ) -> Result<()> {
         Err(super::errors::Error::Other(
             "backend does not accept scoped retry IO".into(),

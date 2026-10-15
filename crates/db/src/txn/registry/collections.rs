@@ -2,6 +2,7 @@
 
 use super::*;
 use rapidhash::HashSetExt;
+use storage::corekv::OnCommit;
 
 impl<S: Store + 'static> DbTransactionRegistry<S> {
     /// Get all collection versions visible within a transaction.
@@ -196,7 +197,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
 
         let db = self.db.clone();
         let committed = Collection::load_index_actions(target.clone(), &txn.systemstore()?).await?;
-        txn.on_success_ordered(Arc::new(move || {
+        txn.on_commit(OnCommit::Ordered(Box::new(move || {
             db.collections.rcu(|old| {
                 let mut cache = old.clone();
                 if committed.schema().is_active {
@@ -209,7 +210,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
                 }
                 cache
             });
-        }))?;
+        })))?;
 
         Ok(target)
     }
@@ -417,7 +418,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         drop(blockstore);
 
         let db = self.db.clone();
-        txn.on_success_ordered(Arc::new(move || {
+        txn.on_commit(OnCommit::Ordered(Box::new(move || {
             db.collections.rcu(|old| {
                 let mut cache = old.clone();
                 for name in &removed_names {
@@ -428,7 +429,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
             for collection_id in &removed_collection_ids {
                 let _ = db.forbid_collection_id(collection_id);
             }
-        }))?;
+        })))?;
 
         Ok(())
     }

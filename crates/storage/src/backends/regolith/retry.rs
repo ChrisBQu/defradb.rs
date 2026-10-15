@@ -4,9 +4,10 @@
 //!
 //! An attempt sees a [`RegolithRetryTxn`]: the reads and writes of the
 //! engine transaction, and nothing that could commit it or let it escape.
-//! What the attempt registered for after its commit ([`AttemptWork`]) is
-//! bound to the commit-receipt stream before regolith commits it; an attempt
-//! that loses lets go of its place, and only the winner's work runs.
+//! What the attempt registered for after its end ([`PostCommit`]) is bound to
+//! the commit-receipt stream before regolith commits it; an attempt that
+//! loses lets go of its place and runs its abort callbacks, and only the
+//! winner's commit callbacks run.
 
 #![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
 
@@ -15,11 +16,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use regolith::{OptimisticTransactionDb, TxnOptions};
 
-use super::event_order::{Binding, Event, EventOrder};
+use super::event_order::EventOrder;
+use super::post_commit::PostCommit;
 use super::transaction::RegolithTxn;
 use crate::corekv::{
-    AsyncOrderedRetryCallback, AsyncTxnCallback, Error, Result, RetryAttempt, RetryAttemptError,
-    RetryAttemptIO, RetryAttemptValue, RetryCallbacks, RetryOptions, RetryTxn, TxnCallback,
+    Error, Result, RetryAttempt, RetryAttemptError, RetryAttemptIO, RetryAttemptValue,
+    RetryOptions, RetryTxn, TxnCallbacks,
 };
 
 /// Runs `attempt` in engine transactions of `db` until one commits, an
@@ -35,9 +37,9 @@ pub(super) async fn transact(
     let policy = regolith::RetryPolicy::new(options.max_attempts.max(1));
     // The work the latest attempt registered. regolith runs exactly one
     // outcome per attempt: an attempt that lost already let go of its
-    // place in the stream through its own `on_abort`, and its callbacks
-    // are dropped here when the next one starts.
-    let mut latest: Option<AttemptWork> = None;
+    // place in the stream through its own `on_abort`, and its abort
+    // callbacks run here when the next one starts.
+    let mut latest: Option<PostCommit> = None;
     let outcome = {
         let mut queue = queue_db.db().io_queue();
         let queue_id = queue.id();
@@ -46,7 +48,7 @@ pub(super) async fn transact(
                 telemetry::record_retry_attempt(telemetry::RetryLayer::Engine);
             }
             if let Some(previous) = latest.take() {
-                previous.lost();
+                previous.failed().await;
             }
             let mut retry_txn = RegolithRetryTxn {
                 previous_conflict: lost.map(|reason| crate::corekv::TransactionConflict {
@@ -57,9 +59,9 @@ pub(super) async fn transact(
                 }),
                 txn,
                 db: Arc::clone(db),
-                isolation: isolation,
+                isolation,
                 attempt_io_active: false,
-                callbacks: RetryCallbacks::default(),
+                callbacks: TxnCallbacks::default(),
             };
             let mut value = attempt.run(&mut retry_txn).await;
             if value.is_ok() && retry_txn.attempt_io_active {
@@ -69,7 +71,7 @@ pub(super) async fn transact(
             }
             if value.is_ok() {
                 let callbacks = std::mem::take(&mut retry_txn.callbacks);
-                latest = Some(AttemptWork::bind(event_order, retry_txn.txn, callbacks));
+                latest = Some(PostCommit::bind(event_order, retry_txn.txn, callbacks));
             }
             value
         });
@@ -91,7 +93,7 @@ pub(super) async fn transact(
         if committed {
             latest.committed().await;
         } else {
-            latest.lost();
+            latest.failed().await;
         }
     }
     match outcome {
@@ -114,73 +116,13 @@ pub(super) async fn transact(
     }
 }
 
-/// What one retry attempt registered for after its commit: its ordered
-/// events and hooks bound to the stream, and its other success callbacks.
-struct AttemptWork {
-    binding: Option<Binding>,
-    hooks: Vec<AsyncOrderedRetryCallback>,
-    sync: Vec<TxnCallback>,
-    asynchronous: Vec<AsyncTxnCallback>,
-}
-
-impl AttemptWork {
-    /// Binds the attempt's ordered work to `txn`, which regolith commits next.
-    fn bind(
-        order: &Arc<EventOrder>,
-        txn: &mut regolith::Transaction,
-        callbacks: RetryCallbacks,
-    ) -> Self {
-        let parts = callbacks.into_parts();
-        let events: Vec<Event> = parts
-            .ordered
-            .into_iter()
-            .map(|callback| callback as Event)
-            .collect();
-        let hooks = parts.ordered_async;
-        let binding = (!events.is_empty() || !hooks.is_empty())
-            .then(|| order.bind(txn, events, !hooks.is_empty()));
-        Self {
-            binding,
-            hooks,
-            sync: parts.sync,
-            asynchronous: parts.asynchronous,
-        }
-    }
-
-    /// The attempt did not commit: nothing it registered runs.
-    fn lost(self) {
-        if let Some(binding) = self.binding {
-            binding.hand_over(false);
-        }
-    }
-
-    /// The attempt committed and is durable: its hooks run (a failure is
-    /// reported, never returned), its events go out in receipt order, and
-    /// its success callbacks run.
-    async fn committed(self) {
-        let running = self.binding.and_then(|binding| binding.hand_over(true));
-        if let Some(running) = running {
-            for hook in self.hooks {
-                super::post_commit::run_hook(hook()).await;
-            }
-            running.done();
-        }
-        for callback in self.sync {
-            callback();
-        }
-        for callback in self.asynchronous {
-            callback().await;
-        }
-    }
-}
-
 struct RegolithRetryTxn<'a> {
     previous_conflict: Option<crate::corekv::TransactionConflict>,
     txn: &'a mut regolith::Transaction,
     db: Arc<OptimisticTransactionDb>,
     isolation: regolith::IsolationLevel,
     attempt_io_active: bool,
-    callbacks: RetryCallbacks,
+    callbacks: TxnCallbacks,
 }
 
 impl RegolithRetryTxn<'_> {
@@ -262,7 +204,7 @@ impl RetryTxn for RegolithRetryTxn<'_> {
     fn finish_attempt_io(
         &mut self,
         io: Box<dyn RetryAttemptIO>,
-        callbacks: RetryCallbacks,
+        callbacks: TxnCallbacks,
     ) -> Result<()> {
         let io = io
             .into_any()
@@ -379,7 +321,7 @@ mod retry_cold_io_tests {
                     drop(iter);
                 }
                 io.set(b"cold-result", b"complete").await?;
-                retry.finish_attempt_io(io, RetryCallbacks::default())?;
+                retry.finish_attempt_io(io, TxnCallbacks::default())?;
                 Ok(Box::new(()) as RetryAttemptValue)
             })
         }
@@ -418,7 +360,8 @@ mod retry_cold_io_tests {
 mod retry_read_tests {
     use super::*;
     use crate::backends::RegolithStore;
-    use crate::corekv::Store;
+    use crate::corekv::{OnAbort, OnCommit, Store, TxnCallback};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A compare-and-set whose condition finds nothing to change, while
     /// another writer updates the key it read before it commits.
@@ -463,13 +406,74 @@ mod retry_read_tests {
         );
         read.discard();
     }
+    fn counting(count: &Arc<AtomicUsize>) -> TxnCallback {
+        let count = Arc::clone(count);
+        Box::new(move || {
+            count.fetch_add(1, Ordering::SeqCst);
+        })
+    }
+
+    /// An attempt that writes after a read another writer changes before
+    /// its first run commits, and the callbacks each run registers.
+    struct LosesOnce {
+        store: RegolithStore,
+        runs: usize,
+        committed: Arc<AtomicUsize>,
+        aborted: Arc<AtomicUsize>,
+    }
+    impl crate::corekv::RetryAttemptFn for LosesOnce {
+        fn run<'a>(
+            &'a mut self,
+            retry: &'a mut dyn RetryTxn,
+        ) -> crate::corekv::RetryAttemptFuture<'a> {
+            Box::pin(async move {
+                self.runs += 1;
+                let mut io = retry.begin_attempt_io()?;
+                assert!(io.get(b"flag").await?.is_some());
+                io.set(b"out", b"v").await?;
+                if self.runs == 1 {
+                    let other = self.store.engine().begin(&TxnOptions::new());
+                    other.put(b"flag", b"changed").unwrap();
+                    other.commit().unwrap();
+                }
+                let mut callbacks = TxnCallbacks::default();
+                callbacks.on_commit(OnCommit::Sync(counting(&self.committed)))?;
+                callbacks.on_abort(OnAbort::Sync(counting(&self.aborted)));
+                retry.finish_attempt_io(io, callbacks)?;
+                Ok(Box::new(()) as RetryAttemptValue)
+            })
+        }
+    }
+
+    /// Each attempt ends once: the one that lost runs its abort callbacks,
+    /// the one that won its commit callbacks.
+    #[tokio::test]
+    async fn an_attempt_that_loses_runs_its_abort_callbacks_and_the_winner_its_commit_ones() {
+        let store = RegolithStore::in_memory().unwrap();
+        let mut seed = store.new_txn(false).await.unwrap();
+        seed.set(b"flag", b"old").await.unwrap();
+        seed.commit().await.unwrap();
+        let (committed, aborted) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let attempt = LosesOnce {
+            store: store.clone(),
+            runs: 0,
+            committed: Arc::clone(&committed),
+            aborted: Arc::clone(&aborted),
+        };
+        store
+            .transact_retry(RetryOptions::new(2), Box::new(attempt))
+            .await
+            .unwrap();
+        assert_eq!(committed.load(Ordering::SeqCst), 1);
+        assert_eq!(aborted.load(Ordering::SeqCst), 1);
+    }
 }
 
 #[cfg(test)]
 mod retry_order_tests {
     use super::*;
     use crate::backends::RegolithStore;
-    use crate::corekv::Store;
+    use crate::corekv::{OnCommit, Store};
     use std::sync::Mutex;
     use tokio::sync::Notify;
 
@@ -486,18 +490,20 @@ mod retry_order_tests {
             Box::pin(async move {
                 let mut io = retry.begin_attempt_io()?;
                 io.set(b"ordered-retry", b"durable").await?;
-                let mut callbacks = RetryCallbacks::default();
+                let mut callbacks = TxnCallbacks::default();
                 let entered = self.entered.clone();
                 let release = self.release.clone();
-                callbacks.push_ordered_async(Box::new(move || {
+                callbacks.on_commit(OnCommit::OrderedAsync(Box::new(move || {
                     Box::pin(async move {
                         entered.notify_one();
                         release.notified().await;
                         Ok(())
                     })
-                }));
+                })))?;
                 let events = self.events.clone();
-                callbacks.push_ordered(Box::new(move || events.lock().unwrap().push(1)));
+                callbacks.on_commit(OnCommit::Ordered(Box::new(move || {
+                    events.lock().unwrap().push(1)
+                })))?;
                 retry.finish_attempt_io(io, callbacks)?;
                 Ok(Box::new(()) as RetryAttemptValue)
             })
@@ -529,7 +535,9 @@ mod retry_order_tests {
         regular.set(b"ordered-regular", b"durable").await.unwrap();
         let out = events.clone();
         regular
-            .on_success_ordered(Arc::new(move || out.lock().unwrap().push(2)))
+            .on_commit(OnCommit::Ordered(Box::new(move || {
+                out.lock().unwrap().push(2)
+            })))
             .unwrap();
         regular.commit().await.unwrap();
         assert!(events.lock().unwrap().is_empty());

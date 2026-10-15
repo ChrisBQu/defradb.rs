@@ -720,7 +720,7 @@ pub(crate) async fn write_document_blocks_with_inputs(
         blockstore,
         initial_field_cids.into_iter().chain([composite_cid]),
     )
-    .await;
+    .await?;
 
     Ok(BlockResult {
         cid: composite_cid,
@@ -840,7 +840,7 @@ pub(crate) async fn write_delete_block_with_inputs(
         "Built delete composite block (status=2)"
     );
 
-    collect_on_commit(blockstore, [composite_cid]).await;
+    collect_on_commit(blockstore, [composite_cid]).await?;
 
     Ok(BlockResult {
         cid: composite_cid,

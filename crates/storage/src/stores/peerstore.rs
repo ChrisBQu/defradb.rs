@@ -155,7 +155,7 @@ impl RetryAttemptFn for PeerstoreRetryAttempt {
                     }
                     io.delete(&ReplicatorRetryIDKey::new(peer_id.as_str()).bytes())
                         .await?;
-                    txn.finish_attempt_io(io, crate::corekv::RetryCallbacks::default())?;
+                    txn.finish_attempt_io(io, crate::corekv::TxnCallbacks::default())?;
                     Ok(Box::new(()) as crate::corekv::RetryAttemptValue)
                 }
                 Attempt::Reschedule {
@@ -285,16 +285,16 @@ impl RetryAttemptFn for PeerstoreRetryAttempt {
                         .await?
                         .is_none()
                     {
-                        txn.finish_attempt_io(io, crate::corekv::RetryCallbacks::default())?;
+                        txn.finish_attempt_io(io, crate::corekv::TxnCallbacks::default())?;
                         return Ok(Box::new(false) as crate::corekv::RetryAttemptValue);
                     }
                     let Some(bytes) = io.get(key).await? else {
-                        txn.finish_attempt_io(io, crate::corekv::RetryCallbacks::default())?;
+                        txn.finish_attempt_io(io, crate::corekv::TxnCallbacks::default())?;
                         return Ok(Box::new(false) as crate::corekv::RetryAttemptValue);
                     };
                     let current = decode_retry_marker_generation(&bytes).unwrap_or(0);
                     if current != *expected_generation {
-                        txn.finish_attempt_io(io, crate::corekv::RetryCallbacks::default())?;
+                        txn.finish_attempt_io(io, crate::corekv::TxnCallbacks::default())?;
                         return Ok(Box::new(false) as crate::corekv::RetryAttemptValue);
                     }
                     io.delete(key).await?;
@@ -345,7 +345,7 @@ impl RetryAttemptFn for PeerstoreRetryAttempt {
                             }
                         }
                     }
-                    txn.finish_attempt_io(io, crate::corekv::RetryCallbacks::default())?;
+                    txn.finish_attempt_io(io, crate::corekv::TxnCallbacks::default())?;
                     Ok(Box::new(true) as crate::corekv::RetryAttemptValue)
                 }
                 Attempt::ClearPeer {
@@ -365,7 +365,7 @@ impl RetryAttemptFn for PeerstoreRetryAttempt {
                             .map(|bytes| decode_retry_marker_generation(&bytes))
                             .unwrap_or(Some(0));
                         if !exists || current != Some(*expected) {
-                            txn.finish_attempt_io(io, crate::corekv::RetryCallbacks::default())?;
+                            txn.finish_attempt_io(io, crate::corekv::TxnCallbacks::default())?;
                             return Ok(Box::new(()) as crate::corekv::RetryAttemptValue);
                         }
                     }
@@ -417,7 +417,7 @@ impl RetryAttemptFn for PeerstoreRetryAttempt {
                             }
                         }
                     }
-                    txn.finish_attempt_io(io, crate::corekv::RetryCallbacks::default())?;
+                    txn.finish_attempt_io(io, crate::corekv::TxnCallbacks::default())?;
                     Ok(Box::new(()) as crate::corekv::RetryAttemptValue)
                 }
             }
@@ -589,11 +589,11 @@ impl RetryAttemptFn for SetReplicatorIfIncarnationAttempt {
             let mut io = txn.begin_attempt_io()?;
             let replicator_key = ReplicatorKey::new(&self.peer_id).bytes();
             let Some(current_replicator) = io.get(&replicator_key).await? else {
-                txn.finish_attempt_io(io, crate::corekv::RetryCallbacks::default())?;
+                txn.finish_attempt_io(io, crate::corekv::TxnCallbacks::default())?;
                 return Ok(Box::new(false) as crate::corekv::RetryAttemptValue);
             };
             if current_replicator.as_ref() != self.expected_replicator {
-                txn.finish_attempt_io(io, crate::corekv::RetryCallbacks::default())?;
+                txn.finish_attempt_io(io, crate::corekv::TxnCallbacks::default())?;
                 return Ok(Box::new(false) as crate::corekv::RetryAttemptValue);
             }
 
@@ -604,7 +604,7 @@ impl RetryAttemptFn for SetReplicatorIfIncarnationAttempt {
                 .map(|bytes| decode_retry_marker_generation(&bytes))
                 .unwrap_or(Some(0));
             if current_incarnation != Some(self.expected_incarnation) {
-                txn.finish_attempt_io(io, crate::corekv::RetryCallbacks::default())?;
+                txn.finish_attempt_io(io, crate::corekv::TxnCallbacks::default())?;
                 return Ok(Box::new(false) as crate::corekv::RetryAttemptValue);
             }
 
@@ -617,14 +617,14 @@ impl RetryAttemptFn for SetReplicatorIfIncarnationAttempt {
                     let has_marker = iter.next().await?.is_some();
                     iter.close().await?;
                     if has_marker {
-                        txn.finish_attempt_io(io, crate::corekv::RetryCallbacks::default())?;
+                        txn.finish_attempt_io(io, crate::corekv::TxnCallbacks::default())?;
                         return Ok(Box::new(false) as crate::corekv::RetryAttemptValue);
                     }
                 }
             }
 
             io.set(&replicator_key, &self.updated_replicator).await?;
-            txn.finish_attempt_io(io, crate::corekv::RetryCallbacks::default())?;
+            txn.finish_attempt_io(io, crate::corekv::TxnCallbacks::default())?;
             Ok(Box::new(true) as crate::corekv::RetryAttemptValue)
         })
     }

@@ -7,13 +7,13 @@
 use crate::collection::cache::CollectionCache;
 use crate::collection::{populate_collection_root_id, Collection};
 use crate::error::{Error, Result};
-use datastore::{AsyncCallback, BasicTxn, NamespaceView, RootView, TxnCallback};
+use datastore::{BasicTxn, NamespaceView, RootView};
 use rapidhash::{HashSetExt, RapidHashSet};
 use schema::CollectionVersion;
 use std::sync::Arc;
 
 use crate::index::vector::engine::diskann::CodeCaches;
-use storage::corekv::{IterOptions, Key, Store};
+use storage::corekv::{IterOptions, Key, OnAbort, OnCommit, Store};
 use storage::keys::systemstore::{CollectionKey, CollectionNameKey};
 
 pub mod context;
@@ -143,7 +143,7 @@ impl<S: Store> DbTxn<S> {
         mut self,
     ) -> storage::corekv::Result<(
         Box<dyn storage::corekv::RetryAttemptIO>,
-        storage::corekv::RetryCallbacks,
+        storage::corekv::TxnCallbacks,
     )> {
         if !self.pending_collection_acp_registrations.is_empty() {
             return Err(storage::corekv::Error::Other(
@@ -332,126 +332,28 @@ impl<S: Store> DbTxn<S> {
             .ok_or(Error::TxnNotActive)
     }
 
-    /// Register a callback for successful commit.
+    /// Register `callback` to run once if the transaction commits. A
+    /// read-only transaction refuses ordered work.
     ///
     /// Returns an error if the transaction has been committed or discarded.
-    pub fn on_success(&mut self, callback: TxnCallback) -> Result<()> {
-        if let Some(txn) = &mut self.txn {
-            txn.on_success(callback);
-            Ok(())
-        } else {
-            Err(Error::TxnNotActive)
-        }
-    }
-
-    /// Register a synchronous post-commit event for receipt-ordered dispatch.
-    pub fn on_success_ordered(
-        &mut self,
-        callback: storage::corekv::OrderedTxnCallback,
-    ) -> Result<()> {
-        if let Some(txn) = &mut self.txn {
-            txn.on_success_ordered(callback)?;
-            Ok(())
-        } else {
-            Err(Error::TxnNotActive)
-        }
-    }
-
-    /// Register an async post-commit hook that must finish before ordered events publish.
-    pub fn on_success_ordered_async(
-        &mut self,
-        callback: storage::corekv::AsyncOrderedTxnCallback,
-    ) -> Result<()> {
-        if let Some(txn) = &mut self.txn {
-            txn.on_success_ordered_async(callback)?;
-            Ok(())
-        } else {
-            Err(Error::TxnNotActive)
-        }
-    }
-
-    /// Move ordered callbacks out of a completed mutation attempt.
-    pub fn take_ordered_callbacks(&mut self) -> Result<storage::corekv::OrderedTxnCallbacks> {
+    pub fn on_commit(&mut self, callback: OnCommit) -> Result<()> {
         self.txn
             .as_mut()
-            .map(BasicTxn::take_ordered_callbacks)
-            .ok_or(Error::TxnNotActive)
+            .ok_or(Error::TxnNotActive)?
+            .on_commit(callback)?;
+        Ok(())
     }
 
-    /// Register callbacks from a winning attempt on this commit transaction.
-    pub fn register_ordered_callbacks(
-        &mut self,
-        callbacks: storage::corekv::OrderedTxnCallbacks,
-    ) -> Result<()> {
-        if let Some(txn) = &mut self.txn {
-            txn.register_ordered_callbacks(callbacks)?;
-            Ok(())
-        } else {
-            Err(Error::TxnNotActive)
-        }
-    }
-
-    /// Register a callback for commit error.
+    /// Register `callback` to run once if the transaction ends without
+    /// committing.
     ///
     /// Returns an error if the transaction has been committed or discarded.
-    pub fn on_error(&mut self, callback: TxnCallback) -> Result<()> {
-        if let Some(txn) = &mut self.txn {
-            txn.on_error(callback);
-            Ok(())
-        } else {
-            Err(Error::TxnNotActive)
-        }
-    }
-
-    /// Register an async callback for successful commit.
-    ///
-    /// Returns an error if the transaction has been committed or discarded.
-    pub fn on_success_async(&mut self, callback: AsyncCallback) -> Result<()> {
-        if let Some(txn) = &mut self.txn {
-            txn.on_success_async(callback);
-            Ok(())
-        } else {
-            Err(Error::TxnNotActive)
-        }
-    }
-
-    /// Register a receipt-ordered publication callback for a retry attempt.
-    pub fn on_retry_success_ordered(
-        &mut self,
-        callback: storage::corekv::OrderedRetryCallback,
-    ) -> Result<()> {
-        if let Some(txn) = &mut self.txn {
-            txn.on_retry_success_ordered(callback);
-            Ok(())
-        } else {
-            Err(Error::TxnNotActive)
-        }
-    }
-
-    /// Register an async postcommit hook that must complete before ordered
-    /// event publication. Its error is returned after the durable commit.
-    pub fn on_retry_success_ordered_async(
-        &mut self,
-        callback: storage::corekv::AsyncOrderedRetryCallback,
-    ) -> Result<()> {
-        if let Some(txn) = &mut self.txn {
-            txn.on_retry_success_ordered_async(callback);
-            Ok(())
-        } else {
-            Err(Error::TxnNotActive)
-        }
-    }
-
-    /// Register a callback for discard.
-    ///
-    /// Returns an error if the transaction has been committed or discarded.
-    pub fn on_discard(&mut self, callback: TxnCallback) -> Result<()> {
-        if let Some(txn) = &mut self.txn {
-            txn.on_discard(callback);
-            Ok(())
-        } else {
-            Err(Error::TxnNotActive)
-        }
+    pub fn on_abort(&mut self, callback: OnAbort) -> Result<()> {
+        self.txn
+            .as_mut()
+            .ok_or(Error::TxnNotActive)?
+            .on_abort(callback);
+        Ok(())
     }
 
     // =========================================================================

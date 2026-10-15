@@ -1,4 +1,4 @@
-use crate::corekv::Store;
+use crate::corekv::{OnAbort, OnCommit, Store};
 use futures::FutureExt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -24,9 +24,10 @@ pub async fn test_success_callback<S: Store>(store: &S) {
     let called = Arc::new(AtomicBool::new(false));
     let called_clone = called.clone();
 
-    txn.on_success(Box::new(move || {
+    txn.on_commit(OnCommit::Sync(Box::new(move || {
         called_clone.store(true, Ordering::SeqCst);
-    }));
+    })))
+    .unwrap();
 
     txn.set(b"key", b"value").await.unwrap();
     txn.commit().await.unwrap();
@@ -44,9 +45,9 @@ pub async fn test_discard_callback<S: Store>(store: &S) {
     let called = Arc::new(AtomicBool::new(false));
     let called_clone = called.clone();
 
-    txn.on_discard(Box::new(move || {
+    txn.on_abort(OnAbort::Sync(Box::new(move || {
         called_clone.store(true, Ordering::SeqCst);
-    }));
+    })));
 
     txn.set(b"key", b"value").await.unwrap();
     txn.discard();
@@ -64,13 +65,14 @@ pub async fn test_async_success_callback<S: Store>(store: &S) {
     let called = Arc::new(AtomicBool::new(false));
     let called_clone = called.clone();
 
-    txn.on_success_async(Box::new(move || {
+    txn.on_commit(OnCommit::Async(Box::new(move || {
         let flag = called_clone.clone();
         Box::pin(async move {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             flag.store(true, Ordering::SeqCst);
         })
-    }));
+    })))
+    .unwrap();
 
     txn.set(b"key", b"value").await.unwrap();
     txn.commit().await.unwrap();
@@ -89,20 +91,23 @@ pub async fn test_callback_panic_propagates<S: Store>(store: &S) {
 
     // First callback - increments
     let count1 = count.clone();
-    txn.on_success(Box::new(move || {
+    txn.on_commit(OnCommit::Sync(Box::new(move || {
         count1.fetch_add(1, Ordering::SeqCst);
-    }));
+    })))
+    .unwrap();
 
     // Second callback - PANICS
-    txn.on_success(Box::new(|| {
+    txn.on_commit(OnCommit::Sync(Box::new(|| {
         panic!("Intentional panic in test");
-    }));
+    })))
+    .unwrap();
 
     // Third callback - should not run once panic propagation begins
     let count3 = count.clone();
-    txn.on_success(Box::new(move || {
+    txn.on_commit(OnCommit::Sync(Box::new(move || {
         count3.fetch_add(1, Ordering::SeqCst);
-    }));
+    })))
+    .unwrap();
 
     txn.set(b"key", b"value").await.unwrap();
     let panic = std::panic::AssertUnwindSafe(async move {
@@ -129,26 +134,29 @@ pub async fn test_async_callback_panic_propagates<S: Store>(store: &S) {
     let count = Arc::new(AtomicUsize::new(0));
 
     let count1 = count.clone();
-    txn.on_success_async(Box::new(move || {
+    txn.on_commit(OnCommit::Async(Box::new(move || {
         let c = count1.clone();
         Box::pin(async move {
             c.fetch_add(1, Ordering::SeqCst);
         })
-    }));
+    })))
+    .unwrap();
 
-    txn.on_success_async(Box::new(|| {
+    txn.on_commit(OnCommit::Async(Box::new(|| {
         Box::pin(async {
             panic!("Intentional async panic");
         })
-    }));
+    })))
+    .unwrap();
 
     let count3 = count.clone();
-    txn.on_success_async(Box::new(move || {
+    txn.on_commit(OnCommit::Async(Box::new(move || {
         let c = count3.clone();
         Box::pin(async move {
             c.fetch_add(1, Ordering::SeqCst);
         })
-    }));
+    })))
+    .unwrap();
 
     txn.set(b"key", b"value").await.unwrap();
     let panic = std::panic::AssertUnwindSafe(async move {
@@ -171,18 +179,18 @@ pub async fn test_discard_callback_panic_propagates<S: Store>(store: &S) {
     let count = Arc::new(AtomicUsize::new(0));
 
     let count1 = count.clone();
-    txn.on_discard(Box::new(move || {
+    txn.on_abort(OnAbort::Sync(Box::new(move || {
         count1.fetch_add(1, Ordering::SeqCst);
-    }));
+    })));
 
-    txn.on_discard(Box::new(|| {
+    txn.on_abort(OnAbort::Sync(Box::new(|| {
         panic!("Discard callback panic");
-    }));
+    })));
 
     let count3 = count.clone();
-    txn.on_discard(Box::new(move || {
+    txn.on_abort(OnAbort::Sync(Box::new(move || {
         count3.fetch_add(1, Ordering::SeqCst);
-    }));
+    })));
 
     txn.set(b"key", b"value").await.unwrap();
     let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

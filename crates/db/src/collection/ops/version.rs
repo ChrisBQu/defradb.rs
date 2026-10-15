@@ -1,4 +1,5 @@
 use super::*;
+use storage::corekv::OnCommit;
 
 impl<S: Store> crate::database::DB<S> {
     /// Set the active collection version.
@@ -125,13 +126,13 @@ impl<S: Store> crate::database::DB<S> {
             Collection::load_index_actions(target_schema.clone(), &txn.systemstore()?).await?;
         let cache = std::sync::Arc::clone(&self.collections);
         let registered_name = name.clone();
-        txn.on_success_ordered(std::sync::Arc::new(move || {
+        txn.on_commit(OnCommit::Ordered(Box::new(move || {
             cache.rcu(|old| {
                 let mut cache = old.clone();
                 cache.put_named(registered_name.as_str(), collection.clone());
                 cache
             });
-        }))?;
+        })))?;
         txn.commit().await?;
 
         tracing::info!(
@@ -356,13 +357,13 @@ impl<S: Store> crate::database::DB<S> {
         if target_schema.is_active {
             let cache = std::sync::Arc::clone(&self.collections);
             let name_for_cache = name.clone();
-            txn.on_success_ordered(std::sync::Arc::new(move || {
+            txn.on_commit(OnCommit::Ordered(Box::new(move || {
                 cache.rcu(|old| {
                     let mut cache = old.clone();
                     cache.remove(&name_for_cache);
                     cache
                 });
-            }))?;
+            })))?;
         }
         txn.commit().await?;
 

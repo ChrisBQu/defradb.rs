@@ -23,6 +23,7 @@ use schema::FieldDescription;
 use schema::FieldKind;
 use schema::PolicyDescription;
 use std::sync::Arc;
+use storage::corekv::OnCommit;
 use storage::index::IndexIterator;
 use storage::RegolithStore;
 
@@ -1094,12 +1095,12 @@ async fn transactional_broadcasts_and_releases_follow_commit_receipts() {
     let mut first_txn = db.new_txn(false).await.expect("first txn");
     let (held_entered, held_gate) = (Arc::clone(&entered), Arc::clone(&gate));
     first_txn
-        .on_success_async(Box::new(move || {
+        .on_commit(OnCommit::Async(Box::new(move || {
             Box::pin(async move {
                 held_entered.set();
                 held_gate.wait().await;
             })
-        }))
+        })))
         .expect("gate");
     let first = DbDocMutator::from_shared_txn_with_broadcaster(
         Arc::clone(&db),

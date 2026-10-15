@@ -526,7 +526,7 @@ pub trait DocMutator: MaybeSendSync {
     /// cannot make this guarantee must return an error.
     async fn register_ordered_async_hook(
         &self,
-        _callback: storage::corekv::AsyncOrderedTxnCallback,
+        _callback: storage::corekv::CommitHook,
     ) -> Result<()> {
         Err(crate::error::QueryError::execution(
             "ordered post-commit hooks are unsupported by this mutator",

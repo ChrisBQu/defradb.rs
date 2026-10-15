@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use super::{RetryAttempt, RetryAttemptFn, RetryAttemptFuture, RetryAttemptIO, RetryTxn};
-use crate::corekv::callbacks::RetryCallbacks;
+use crate::corekv::callbacks::TxnCallbacks;
 use crate::corekv::errors::{Result, TransactionConflict};
 use crate::corekv::iterator::Iterator;
 use crate::corekv::traits::{private, MaybeSendSync, Reader, Writer};
@@ -94,7 +94,7 @@ impl RetryTxn for InterceptingRetryTxn<'_> {
     fn finish_attempt_io(
         &mut self,
         io: Box<dyn RetryAttemptIO>,
-        callbacks: RetryCallbacks,
+        callbacks: TxnCallbacks,
     ) -> Result<()> {
         self.inner.finish_attempt_io(io, callbacks)
     }

@@ -1,5 +1,6 @@
 use super::hook::CompositePostCommitAction;
 use super::*;
+use storage::corekv::OnCommit;
 
 use defra_core::merge::MergeBlock;
 
@@ -166,16 +167,18 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> BatchMergeRetryAtt
         };
 
         if events.is_empty() {
-            txn.on_success_async(Box::new(move || Box::pin(after_commit)))?;
+            txn.on_commit(OnCommit::Async(Box::new(move || Box::pin(after_commit))))?;
         } else {
-            txn.on_retry_success_ordered_async(Box::new(move || {
+            txn.on_commit(OnCommit::OrderedAsync(Box::new(move || {
                 Box::pin(async move {
                     after_commit.await;
                     Ok(())
                 })
-            }))?;
+            })))?;
             if let Some(bus) = self.handler.db.event_bus().cloned() {
-                txn.on_retry_success_ordered(Box::new(move || bus.publish_batch(events)))?;
+                txn.on_commit(OnCommit::Ordered(Box::new(move || {
+                    bus.publish_batch(events)
+                })))?;
             }
         }
 

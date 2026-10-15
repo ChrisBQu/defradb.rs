@@ -7,8 +7,8 @@ use db::{DbCollectionProvider, DbTransactionRegistry, LensedAutoCommitFetcher, D
 use events::{Bus, ChannelBus, EventName};
 use query::{QueryExecutor, QueryRequest};
 use storage::corekv::{
-    private::Sealed, AppendLog, AsyncTxnCallback, IterOptions, Iterator, Reader,
-    Result as StorageResult, Store, Txn, TxnCallback, Writer,
+    private::Sealed, AppendLog, IterOptions, Iterator, Reader, Result as StorageResult, Store, Txn,
+    Writer,
 };
 use storage::RegolithStore;
 
@@ -139,42 +139,12 @@ impl Txn for PauseAfterSetTxn {
         self.inner.discard()
     }
 
-    fn on_success(&mut self, callback: TxnCallback) {
-        self.inner.on_success(callback)
+    fn on_commit(&mut self, callback: storage::corekv::OnCommit) -> StorageResult<()> {
+        self.inner.on_commit(callback)
     }
 
-    fn on_success_ordered(
-        &mut self,
-        callback: storage::corekv::OrderedTxnCallback,
-    ) -> StorageResult<()> {
-        self.inner.on_success_ordered(callback)
-    }
-
-    fn on_success_ordered_async(
-        &mut self,
-        callback: storage::corekv::AsyncOrderedTxnCallback,
-    ) -> StorageResult<()> {
-        self.inner.on_success_ordered_async(callback)
-    }
-
-    fn on_success_async(&mut self, callback: AsyncTxnCallback) {
-        self.inner.on_success_async(callback)
-    }
-
-    fn on_error(&mut self, callback: TxnCallback) {
-        self.inner.on_error(callback)
-    }
-
-    fn on_error_async(&mut self, callback: AsyncTxnCallback) {
-        self.inner.on_error_async(callback)
-    }
-
-    fn on_discard(&mut self, callback: TxnCallback) {
-        self.inner.on_discard(callback)
-    }
-
-    fn on_discard_async(&mut self, callback: AsyncTxnCallback) {
-        self.inner.on_discard_async(callback)
+    fn on_abort(&mut self, callback: storage::corekv::OnAbort) {
+        self.inner.on_abort(callback)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

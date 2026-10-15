@@ -1,6 +1,7 @@
 //! Schema and migration mutations inside a transaction.
 
 use super::*;
+use storage::corekv::OnCommit;
 
 impl<S: Store + 'static> DbTransactionRegistry<S> {
     /// Set a migration within an existing transaction.
@@ -53,7 +54,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         let cache_db = db.clone();
         let cache_destination = updated_destination.clone();
         let cache_collection = updated_collection.clone();
-        txn.on_success_ordered(Arc::new(move || {
+        txn.on_commit(OnCommit::Ordered(Box::new(move || {
             if cache_destination.name.is_empty() {
                 return;
             }
@@ -68,9 +69,9 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
                 }
                 cache
             });
-        }))?;
+        })))?;
         let transform_id_for_commit = transform_id.clone();
-        txn.on_success_async(Box::new(move || {
+        txn.on_commit(OnCommit::Async(Box::new(move || {
             let db = db.clone();
             let config = config.clone();
             let transform_id = transform_id_for_commit.clone();
@@ -106,7 +107,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
                     }
                 }
             })
-        }))?;
+        })))?;
 
         Ok(transform_id)
     }
@@ -185,7 +186,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
             collections_for_cache
                 .push(Collection::load_index_actions(schema.clone(), &txn.systemstore()?).await?);
         }
-        txn.on_success_ordered(Arc::new(move || {
+        txn.on_commit(OnCommit::Ordered(Box::new(move || {
             for schema in &schemas_for_cache {
                 let _ = db.unforbid_collection_id(&schema.collection_id);
             }
@@ -196,7 +197,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
                 }
                 cache
             });
-        }))?;
+        })))?;
 
         Ok(finalized)
     }

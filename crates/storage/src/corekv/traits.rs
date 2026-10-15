@@ -26,9 +26,7 @@ pub mod private {
     impl Sealed for Box<dyn super::super::iterator::Iterator> {}
 }
 
-use super::callbacks::{
-    AsyncOrderedTxnCallback, AsyncTxnCallback, OrderedTxnCallback, OrderedTxnCallbacks, TxnCallback,
-};
+use super::callbacks::{OnAbort, OnCommit};
 use super::errors::Result;
 use super::iterator::Iterator;
 use super::retry::{RetryAttempt, RetryAttemptError, RetryAttemptValue, RetryOptions};
@@ -273,38 +271,24 @@ pub trait Dropable: Store + private::Sealed {
 /// All operations within a transaction are isolated from other transactions until
 /// commit is called.
 ///
-/// # Lifecycle Callbacks
+/// # Callbacks
 ///
-/// Transactions support registering callbacks for lifecycle events:
-/// - `on_success`: Called when commit succeeds
-/// - `on_error`: Called when commit fails
-/// - `on_discard`: Called when transaction is discarded
-///
-/// Each callback type has both sync and async variants.
+/// [`on_commit`](Txn::on_commit) and [`on_abort`](Txn::on_abort) register
+/// what runs once the transaction ends: after a commit, or after any other
+/// end. The [`callbacks`](super::callbacks) module says in what order.
 ///
 /// # Callback Panic Handling
 ///
 /// Transaction callbacks run directly. In dev/test profiles, a callback panic
 /// unwinds through the transaction API. In release builds this workspace uses
 /// `panic = "abort"`, so a panicking callback aborts the process.
-///
-/// # Example
-///
-/// ```ignore
-/// let mut txn = store.new_txn(false).await?;
-///
-/// txn.on_success(Box::new(|| println!("Transaction committed!")));
-///
-/// txn.set(b"key", b"value").await?;
-/// txn.commit().await?; // Callbacks execute here
-/// ```
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait Txn: ReaderWriter + private::Sealed {
     /// Commit the transaction, making all changes permanent.
     ///
-    /// On success, all on_success callbacks are executed. On failure, all
-    /// on_error callbacks are executed.
+    /// On success the commit callbacks run; on failure the abort callbacks
+    /// are awaited.
     ///
     /// # Returns
     ///
@@ -324,7 +308,7 @@ pub trait Txn: ReaderWriter + private::Sealed {
     /// After calling commit (success or failure), the transaction cannot be reused.
     async fn commit(self: Box<Self>) -> Result<()>;
 
-    /// Save the current buffered writes and lifecycle callback queues.
+    /// Save the current buffered writes and the registered callbacks.
     /// Backends without statement savepoint support fail explicitly.
     fn set_savepoint(&mut self) -> Result<()> {
         Err(crate::Error::Other(
@@ -346,42 +330,12 @@ pub trait Txn: ReaderWriter + private::Sealed {
         ))
     }
 
-    /// Register a synchronous event to dispatch in commit receipt order.
-    ///
-    /// The transaction must contain a write that obtains a commit receipt.
-    /// Regolith rejects eventful write-free and append-only transactions:
-    /// an append can be deduplicated by its once-key and reuse its snapshot
-    /// receipt, which cannot establish event order.
-    /// Backends without receipt sequencing retain ordinary success semantics.
-    fn on_success_ordered(&mut self, callback: OrderedTxnCallback) -> Result<()> {
-        let callback = callback.clone();
-        self.on_success(Box::new(move || callback()));
-        Ok(())
-    }
-
-    /// Register an async post-commit hook that must complete before ordered events become visible.
-    fn on_success_ordered_async(&mut self, _callback: AsyncOrderedTxnCallback) -> Result<()> {
-        Err(crate::Error::Other(
-            "ordered async callbacks are unsupported by this store".into(),
-        ))
-    }
-
-    /// Register a bundle collected from a winning transaction attempt.
-    fn register_ordered_callbacks(&mut self, callbacks: OrderedTxnCallbacks) -> Result<()> {
-        let (sync, asynchronous) = callbacks.into_parts();
-        for callback in sync {
-            self.on_success_ordered(callback)?;
-        }
-        for callback in asynchronous {
-            self.on_success_ordered_async(callback)?;
-        }
-        Ok(())
-    }
-
     /// Discard the transaction, rolling back all changes.
     ///
-    /// All on_discard callbacks are executed. After calling discard, the
-    /// transaction cannot be used for any further operations.
+    /// The abort callbacks run, the async ones spawned as background tasks
+    /// that may not finish if the process exits first: `discard()` is
+    /// synchronous, as in Go DefraDB. After calling discard, the transaction
+    /// cannot be used for any further operations.
     ///
     /// # Callback Panic Handling
     ///
@@ -394,54 +348,36 @@ pub trait Txn: ReaderWriter + private::Sealed {
     /// This method consumes self, ensuring the transaction cannot be used after discard.
     fn discard(self: Box<Self>);
 
-    /// Register a synchronous callback to be called on successful commit.
+    /// Register `callback` to run once if the transaction commits.
     ///
-    /// Multiple callbacks can be registered and will be executed in order until
-    /// one panics or the list completes.
-    fn on_success(&mut self, callback: TxnCallback);
+    /// Plain callbacks run once the commit is durable. An ordered one goes
+    /// out with every commit's events in commit-receipt order, so it needs a
+    /// commit receipt: a read-only transaction refuses it with
+    /// [`Error::ReadOnlyTxn`](super::Error::ReadOnlyTxn).
+    ///
+    /// ```no_run
+    /// use storage::corekv::{OnAbort, OnCommit, Store};
+    ///
+    /// # async fn example(store: storage::RegolithStore) -> storage::Result<()> {
+    /// let mut txn = store.new_txn(false).await?;
+    /// txn.set(b"doc", b"v1").await?;
+    /// // Once the commit is durable.
+    /// txn.on_commit(OnCommit::Sync(Box::new(|| println!("committed"))))?;
+    /// // With every commit's events, in commit-receipt order.
+    /// txn.on_commit(OnCommit::Ordered(Box::new(|| println!("doc changed"))))?;
+    /// // Before this commit's events go out; a failure is reported and the
+    /// // commit stands.
+    /// txn.on_commit(OnCommit::OrderedAsync(Box::new(|| Box::pin(async { Ok(()) }))))?;
+    /// // Only if the transaction ends without committing.
+    /// txn.on_abort(OnAbort::Sync(Box::new(|| println!("rolled back"))));
+    /// txn.commit().await
+    /// # }
+    /// ```
+    fn on_commit(&mut self, callback: OnCommit) -> Result<()>;
 
-    /// Register an asynchronous callback to be called on successful commit.
-    ///
-    /// Multiple callbacks can be registered and will be executed sequentially
-    /// in registration order until one panics or the list completes.
-    fn on_success_async(&mut self, callback: AsyncTxnCallback);
-
-    /// Register a synchronous callback to be called on commit error.
-    ///
-    /// Multiple callbacks can be registered and will be executed in order until
-    /// one panics or the list completes.
-    fn on_error(&mut self, callback: TxnCallback);
-
-    /// Register an asynchronous callback to be called on commit error.
-    ///
-    /// Multiple callbacks can be registered and will be executed sequentially
-    /// in registration order until one panics or the list completes.
-    fn on_error_async(&mut self, callback: AsyncTxnCallback);
-
-    /// Register a synchronous callback to be called on discard.
-    ///
-    /// Multiple callbacks can be registered and will be executed in order until
-    /// one panics or the list completes.
-    fn on_discard(&mut self, callback: TxnCallback);
-
-    /// Register an asynchronous callback to be called on discard.
-    ///
-    /// Multiple callbacks can be registered and will be executed sequentially
-    /// in registration order until one panics or the list completes.
-    ///
-    /// # Fire-and-Forget Warning
-    ///
-    /// Unlike `on_success_async` and `on_error_async` which are awaited during commit,
-    /// async discard callbacks are **spawned as background tasks** and may not complete
-    /// if the process exits before they finish. This matches Go DefraDB semantics where
-    /// `discard()` is a synchronous operation.
-    ///
-    /// If you need completion guarantees for async cleanup:
-    /// - Use `on_discard` (synchronous) instead
-    /// - Use `commit()` with `on_success_async` when possible
-    /// - Implement your own synchronization using `tokio::task::JoinSet`,
-    ///   `tokio_util::task::TaskTracker`, or third-party crates like `awaitgroup`
-    fn on_discard_async(&mut self, callback: AsyncTxnCallback);
+    /// Register `callback` to run once if the transaction ends without
+    /// committing: its commit fails, or it is discarded or dropped.
+    fn on_abort(&mut self, callback: OnAbort);
 
     /// Downcast to concrete type (for internal use in tests)
     fn as_any(&self) -> &dyn std::any::Any;
@@ -452,10 +388,8 @@ pub trait Txn: ReaderWriter + private::Sealed {
     /// Check if this is a read-only transaction.
     fn is_readonly(&self) -> bool;
 
-    /// Get the total number of callbacks registered on this transaction.
-    ///
-    /// This returns the sum of all callback types (success, error, discard)
-    /// including both sync and async variants.
+    /// Get the total number of callbacks registered on this transaction, of
+    /// every kind.
     ///
     /// Useful for monitoring callback accumulation in long-running transactions.
     fn callback_count(&self) -> usize;
