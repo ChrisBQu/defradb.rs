@@ -300,25 +300,25 @@ impl Reader for DatastoreTxn {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Writer for DatastoreTxn {
-    async fn merge(&mut self, key: &[u8], operand: &[u8]) -> Result<()> {
-        self.txn.merge(key, operand).await
+    async fn merge_shared(&self, key: &[u8], operand: &[u8]) -> Result<()> {
+        self.txn.merge_shared(key, operand).await
     }
 
-    async fn append(
-        &mut self,
+    async fn append_shared(
+        &self,
         log: &crate::corekv::AppendLog,
         entry: &[u8],
         once_key: Option<&[u8]>,
     ) -> Result<()> {
-        self.txn.append(log, entry, once_key).await
+        self.txn.append_shared(log, entry, once_key).await
     }
 
-    async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
-        self.txn.set(key, value).await
+    async fn set_shared(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        self.txn.set_shared(key, value).await
     }
 
-    async fn delete(&mut self, key: &[u8]) -> Result<()> {
-        self.txn.delete(key).await
+    async fn delete_shared(&self, key: &[u8]) -> Result<()> {
+        self.txn.delete_shared(key).await
     }
 }
 

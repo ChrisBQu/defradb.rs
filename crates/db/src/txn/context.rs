@@ -1,207 +1,58 @@
-//! Transaction context for query execution.
+//! One request's view of an explicit transaction, on the worker that owns it.
+//!
+//! The owner lends the transaction to the request ([`OwnedTxn`]'s turn), and
+//! the context hands it to the request's handles: one lensed fetcher for the
+//! whole request, a mutator and a collection provider made on demand. They
+//! share the transaction through `&self`, with no lock. None of them holds
+//! it: the owner does, and takes it back once no operation of theirs is in
+//! flight; a handle kept past its request finds the transaction gone.
+//!
+//! [`OwnedTxn`]: crate::txn::registry::owned::OwnedTxn
+
+use std::sync::{Arc, Weak};
 
 use query::fetcher::CollectionProvider;
 use query::mutator::DocMutator;
 use query::runner::DocFetcher;
 use query::txn::{AcpRegistrationProjection, TransactionContext};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
 use storage::corekv::Store;
-use web_time::Instant;
 
 use crate::collection::provider::TxnCollectionProvider;
 use crate::database::DB;
-use crate::read::lensed::fetcher::LensedDocFetcher;
-use crate::txn::DbTxn;
+use crate::event::emission::TxnBroadcaster;
+use crate::read::lensed::fetcher::{FetcherCaches, LensedDocFetcher};
+use crate::txn::{DbTxn, LentTxn};
 use crate::write::doc::DbDocMutator;
 
-/// Transaction context for query execution.
-///
-/// Implements `query::TransactionContext` to provide transaction-scoped
-/// document fetching to the query executor. Uses `LensedDocFetcher` to support
-/// lens migrations within transactions.
-pub struct DbTransactionContext<S: Store> {
+/// One request's view of an explicit transaction.
+pub struct DbTransactionContext<S: Store + 'static> {
     db: Arc<DB<S>>,
     id: String,
     readonly: bool,
-    owner: Option<String>,
+    txn: Weak<DbTxn<S>>,
     fetcher: Arc<LensedDocFetcher<S>>,
-    acp_registration_projection: Arc<AcpRegistrationProjection>,
-    broadcaster: Option<Arc<dyn crate::event::emission::TxnBroadcaster>>,
-    action_lock: Arc<async_lock::Mutex<()>>,
-    statement_rollback_pending: AtomicBool,
-    created_at: Instant,
-    last_request_seen: AtomicU64,
+    broadcaster: Option<Arc<dyn TxnBroadcaster>>,
 }
 
-/// `last_request_seen` sentinel for a context a cleanup sweep has claimed. It
-/// couples the claim to the idle clock, so a request arriving mid-sweep either
-/// refreshes the clock before the claim and keeps the transaction, or finds it
-/// claimed and treats it as gone.
-const CLAIMED_FOR_CLEANUP: u64 = u64::MAX;
-
-impl<S: Store> DbTransactionContext<S> {
-    /// Create a transaction context. Pass `Some(broadcaster)` to forward
-    /// committed writes to P2P peers; pass `None` for the non-P2P case.
-    pub(crate) fn new_with_broadcaster(
+impl<S: Store + 'static> DbTransactionContext<S> {
+    pub(crate) fn new(
         db: Arc<DB<S>>,
         id: String,
         readonly: bool,
-        fetcher: Arc<LensedDocFetcher<S>>,
-        acp_registration_projection: Arc<AcpRegistrationProjection>,
-        broadcaster: Option<Arc<dyn crate::event::emission::TxnBroadcaster>>,
+        txn: &LentTxn<S>,
+        lens_store: Arc<dyn lens::TransformStore>,
+        caches: FetcherCaches,
+        broadcaster: Option<Arc<dyn TxnBroadcaster>>,
     ) -> Self {
-        let now = Instant::now();
+        let fetcher = Arc::new(LensedDocFetcher::lent(db.clone(), txn, lens_store, caches));
         Self {
             db,
             id,
             readonly,
-            owner: defra_core::current_identity::get_effective_identity(),
+            txn: Arc::downgrade(txn),
             fetcher,
-            acp_registration_projection,
             broadcaster,
-            action_lock: Arc::new(async_lock::Mutex::new(())),
-            statement_rollback_pending: AtomicBool::new(false),
-            created_at: now,
-            last_request_seen: AtomicU64::new(0),
         }
-    }
-
-    pub(crate) fn is_owned_by_caller(&self) -> bool {
-        self.owner == defra_core::current_identity::get_effective_identity()
-    }
-
-    /// Get the instant when this transaction was created.
-    pub fn created_at(&self) -> Instant {
-        self.created_at
-    }
-
-    /// Mark that a request used this transaction. `false` when a cleanup sweep
-    /// has already claimed it, in which case the caller must treat the
-    /// transaction as gone.
-    #[allow(deprecated, reason = "try_update requires Rust 1.95; MSRV is 1.91")]
-    pub(crate) fn touch(&self) -> bool {
-        let now = self.age_nanos(Instant::now());
-        self.last_request_seen
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |seen| {
-                (seen != CLAIMED_FOR_CLEANUP).then_some(now)
-            })
-            .is_ok()
-    }
-
-    /// Claim this transaction for a cleanup sweep, but only while it is still
-    /// idle for longer than `max_idle_age`.
-    #[allow(deprecated, reason = "try_update requires Rust 1.95; MSRV is 1.91")]
-    pub(crate) fn try_claim_stale(&self, now: Instant, max_idle_age: Duration) -> bool {
-        let now = self.age_nanos(now);
-        self.last_request_seen
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |seen| {
-                (seen != CLAIMED_FOR_CLEANUP
-                    && Duration::from_nanos(now.saturating_sub(seen)) > max_idle_age)
-                    .then_some(CLAIMED_FOR_CLEANUP)
-            })
-            .is_ok()
-    }
-
-    /// Get the instant when this transaction last saw a request.
-    pub fn last_request_seen(&self) -> Instant {
-        match self.last_request_seen.load(Ordering::Acquire) {
-            CLAIMED_FOR_CLEANUP => self.created_at,
-            nanos => self.created_at + Duration::from_nanos(nanos),
-        }
-    }
-
-    /// Get how long this transaction has been idle.
-    pub fn idle_for(&self, now: Instant) -> Duration {
-        now.saturating_duration_since(self.last_request_seen())
-    }
-
-    fn age_nanos(&self, now: Instant) -> u64 {
-        u64::try_from(now.saturating_duration_since(self.created_at).as_nanos())
-            .unwrap_or(u64::MAX)
-            .min(CLAIMED_FOR_CLEANUP - 1)
-    }
-}
-
-impl<S: Store + 'static> DbTransactionContext<S> {
-    pub(crate) fn recover_pending_statement_sync(&self) -> Result<(), String> {
-        if !self.statement_rollback_pending.load(Ordering::Acquire) {
-            return Ok(());
-        }
-        let shared = self.fetcher.shared_txn();
-        let mut guard = shared.try_lock().ok_or_else(|| {
-            "transaction is still in use while recovering cancelled statement".to_string()
-        })?;
-        let txn = guard
-            .as_mut()
-            .ok_or_else(|| "transaction was consumed with statement cleanup pending".to_string())?;
-        txn.rollback_statement_savepoint()
-            .map_err(|error| error.to_string())?;
-        self.statement_rollback_pending
-            .store(false, Ordering::Release);
-        Ok(())
-    }
-
-    /// Take the underlying transaction (for commit/rollback).
-    ///
-    /// After calling this, `is_consumed()` will return `true` and all
-    /// fetcher operations will return an error.
-    pub async fn take_txn(&self) -> Option<DbTxn<S>> {
-        self.fetcher.take_txn().await
-    }
-
-    /// Take the underlying transaction without waiting. `None` when it is
-    /// already taken, or another task is holding it.
-    pub(crate) fn try_take_txn(&self) -> Option<DbTxn<S>> {
-        self.fetcher.try_take_txn()
-    }
-
-    /// Check if the transaction has been consumed (via commit/rollback).
-    ///
-    /// Returns `true` if `take_txn()` was called and the transaction is
-    /// no longer available for queries.
-    pub async fn is_consumed(&self) -> bool {
-        self.fetcher.is_consumed().await
-    }
-}
-
-impl<S: Store + 'static> DbTransactionContext<S> {
-    /// Get a document mutator for performing mutations within this transaction.
-    ///
-    /// The mutator shares the same underlying transaction as the fetcher, so all
-    /// read and write operations are within the same transaction context.
-    ///
-    /// # Note
-    ///
-    /// Should only be called on non-readonly transactions. Attempting to mutate
-    /// via the returned mutator on a readonly transaction will fail.
-    pub fn doc_mutator(&self) -> Arc<dyn DocMutator> {
-        Arc::new(DbDocMutator::from_shared_txn_with_broadcaster(
-            self.db.clone(),
-            self.fetcher.shared_txn(),
-            self.broadcaster.clone(),
-        ))
-    }
-
-    /// Get the underlying fetcher's shared transaction.
-    ///
-    /// This is used by `DbTransactionRegistry::set_migration_in_txn` to perform
-    /// migration configuration within the transaction context.
-    pub(crate) fn fetcher_shared_txn(&self) -> Arc<async_lock::Mutex<Option<DbTxn<S>>>> {
-        self.fetcher.shared_txn()
-    }
-
-    pub(crate) fn lens_store(&self) -> Arc<dyn lens::TransformStore> {
-        self.fetcher.lens_store()
-    }
-
-    pub(crate) fn invalidate_migration_cache(&self) {
-        self.fetcher.invalidate_migration_cache();
-    }
-
-    pub(crate) fn action_lock(&self) -> Arc<async_lock::Mutex<()>> {
-        self.action_lock.clone()
     }
 }
 
@@ -220,70 +71,27 @@ impl<S: Store + 'static> TransactionContext for DbTransactionContext<S> {
 
     fn doc_mutator(&self) -> Option<Arc<dyn DocMutator>> {
         if self.readonly {
-            None
-        } else {
-            Some(self.doc_mutator())
+            return None;
         }
-    }
-
-    fn collection_provider(&self) -> Option<Arc<dyn CollectionProvider>> {
-        Some(Arc::new(TxnCollectionProvider::new(
+        let txn = self.txn.upgrade()?;
+        Some(Arc::new(DbDocMutator::lent_with_broadcaster(
             self.db.clone(),
-            self.fetcher.shared_txn(),
+            &txn,
+            self.broadcaster.clone(),
         )))
     }
 
+    fn collection_provider(&self) -> Option<Arc<dyn CollectionProvider>> {
+        let txn = self.txn.upgrade()?;
+        Some(Arc::new(TxnCollectionProvider::new(self.db.clone(), &txn)))
+    }
+
     fn acp_registration_projection(&self) -> Option<Arc<AcpRegistrationProjection>> {
-        Some(self.acp_registration_projection.clone())
-    }
-
-    fn action_lock(&self) -> Option<Arc<async_lock::Mutex<()>>> {
-        Some(self.action_lock.clone())
-    }
-
-    fn set_statement_savepoint(&self) -> Result<(), String> {
-        if self.readonly {
-            return Err("cannot set a statement savepoint on a read-only transaction".into());
-        }
-        self.recover_pending_statement_sync()?;
-        let shared = self.fetcher.shared_txn();
-        let mut guard = shared
-            .try_lock()
-            .ok_or_else(|| "transaction is in use at statement boundary".to_string())?;
-        let txn = guard
-            .as_mut()
-            .ok_or_else(|| "transaction is no longer active".to_string())?;
-        txn.set_statement_savepoint()
-            .map_err(|error| error.to_string())?;
-        Ok(())
-    }
-
-    fn finish_statement_savepoint(&self, success: bool) -> Result<(), String> {
-        let shared = self.fetcher.shared_txn();
-        let mut guard = shared
-            .try_lock()
-            .ok_or_else(|| "transaction is in use while finishing statement".to_string())?;
-        let txn = guard
-            .as_mut()
-            .ok_or_else(|| "transaction was consumed while finishing statement".to_string())?;
-        if success {
-            txn.release_statement_savepoint()
-                .map_err(|error| error.to_string())?;
-        } else {
-            txn.rollback_statement_savepoint()
-                .map_err(|error| error.to_string())?;
-        }
-        self.statement_rollback_pending
-            .store(false, Ordering::Release);
-        Ok(())
-    }
-
-    fn recover_pending_statement(&self) -> Result<(), String> {
-        self.recover_pending_statement_sync()
-    }
-
-    fn mark_statement_rollback_pending(&self) {
-        self.statement_rollback_pending
-            .store(true, Ordering::Release);
+        Some(
+            self.txn
+                .upgrade()
+                .map(|txn| txn.acp_registration_projection())
+                .unwrap_or_else(|| Arc::new(AcpRegistrationProjection::detached())),
+        )
     }
 }

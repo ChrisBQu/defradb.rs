@@ -90,7 +90,7 @@ impl<S: Store> crate::database::DB<S> {
         collection: &Collection,
         doc_ids: &[String],
     ) -> Result<usize> {
-        let mut txn = self.new_txn(false).await?;
+        let txn = self.new_txn(false).await?;
         txn.validate_collection_for_write(collection).await?;
         let datastore = txn.datastore()?;
         let headstore = txn.headstore()?;

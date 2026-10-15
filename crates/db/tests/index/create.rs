@@ -546,25 +546,25 @@ impl Reader for PauseDefinitionCommitTxn {
 
 #[async_trait]
 impl Writer for PauseDefinitionCommitTxn {
-    async fn merge(&mut self, key: &[u8], operand: &[u8]) -> StorageResult<()> {
-        self.inner.merge(key, operand).await
+    async fn merge_shared(&self, key: &[u8], operand: &[u8]) -> StorageResult<()> {
+        self.inner.merge_shared(key, operand).await
     }
 
-    async fn append(
-        &mut self,
+    async fn append_shared(
+        &self,
         log: &storage::corekv::AppendLog,
         entry: &[u8],
         once_key: Option<&[u8]>,
     ) -> StorageResult<()> {
-        self.inner.append(log, entry, once_key).await
+        self.inner.append_shared(log, entry, once_key).await
     }
 
-    async fn set(&mut self, key: &[u8], value: &[u8]) -> StorageResult<()> {
-        self.inner.set(key, value).await
+    async fn set_shared(&self, key: &[u8], value: &[u8]) -> StorageResult<()> {
+        self.inner.set_shared(key, value).await
     }
 
-    async fn delete(&mut self, key: &[u8]) -> StorageResult<()> {
-        self.inner.delete(key).await
+    async fn delete_shared(&self, key: &[u8]) -> StorageResult<()> {
+        self.inner.delete_shared(key).await
     }
 }
 

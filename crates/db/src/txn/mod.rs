@@ -4,11 +4,10 @@
 /// - Explicit/implicit transaction handling
 /// - Transaction-scoped collection cache (lazy loading)
 /// - Reference to the database for collection operations
-use crate::collection::cache::CollectionCache;
 use crate::collection::{populate_collection_root_id, Collection};
 use crate::error::{Error, Result};
+use catalog::Catalog;
 use datastore::{BasicTxn, NamespaceView, RootView};
-use rapidhash::{HashSetExt, RapidHashSet};
 use schema::CollectionVersion;
 use std::sync::Arc;
 
@@ -16,25 +15,22 @@ use crate::index::vector::engine::diskann::CodeCaches;
 use storage::corekv::{IterOptions, Key, OnAbort, OnCommit, Store};
 use storage::keys::systemstore::{CollectionKey, CollectionNameKey};
 
+mod catalog;
 pub mod context;
+pub(crate) mod held;
 pub(crate) mod lenses;
+pub(crate) mod owner;
 pub mod registry;
 
 #[derive(Clone)]
-struct PendingCollectionAcpRegistration {
+struct OwedAcpRegistration {
     acp: Arc<dyn acp::DocumentACP>,
     creator: identity::Did,
     request_bearer_token: Option<String>,
     schemas: Vec<CollectionVersion>,
 }
 
-struct StatementSavepoint {
-    collection_cache: CollectionCache,
-    locally_created_collection_ids: RapidHashSet<String>,
-    pending_collection_acp_registrations: Vec<PendingCollectionAcpRegistration>,
-}
-
-impl PendingCollectionAcpRegistration {
+impl OwedAcpRegistration {
     async fn run(self) -> Result<()> {
         let creator = self.creator;
         let result = defra_core::signing::scope_request_bearer_token(
@@ -78,27 +74,58 @@ impl PendingCollectionAcpRegistration {
 ///
 /// The collection cache is populated lazily from the SystemStore on first
 /// access, matching the Go DefraDB pattern for transaction isolation.
+///
+/// Everything a request does with the transaction takes `&self`, so the
+/// handles of one request (its fetcher, mutator and collection provider)
+/// share it with no lock. What needs it held alone (a statement savepoint, the
+/// commit, a discard) takes `&mut self` or `self`.
 pub struct DbTxn<S: Store> {
     /// The underlying BasicTxn. `None` after commit/discard.
     txn: Option<BasicTxn>,
     /// Whether this is an explicit transaction.
     explicit: bool,
-    /// Transaction-scoped collection cache (lazy loading from SystemStore).
-    collection_cache: CollectionCache,
-    /// Collection IDs created inside this transaction.
-    locally_created_collection_ids: RapidHashSet<String>,
-    /// Branchable collection ACP registrations that must succeed before the
+    /// The collections this transaction loaded, changed and created, and the
+    /// branchable collection ACP registrations that must succeed before the
     /// storage commit, otherwise a protected collection could be persisted
     /// without its collection-level ACP object.
-    pending_collection_acp_registrations: Vec<PendingCollectionAcpRegistration>,
+    catalog: Catalog,
     /// The database's resident DiskANN codes, for searches in this transaction.
     vector_codes: Arc<CodeCaches>,
     /// The database's committed collections, so a collection this transaction
     /// loads with the same definition reuses the cached handle's decoded state.
     shared_collections: Option<Arc<crate::collection::epoch::EpochedCollections>>,
-    statement_savepoint: Option<StatementSavepoint>,
+    statement_savepoint: Option<catalog::Snapshot>,
     /// Phantom data for the store type.
     _marker: std::marker::PhantomData<S>,
+}
+
+/// A transaction lent to the handles of one request (its fetcher, mutator and
+/// collection provider). They share it through `&self`, with no lock;
+/// whoever lent it takes it back with [`reclaim`] once they are gone.
+pub type LentTxn<S> = Arc<DbTxn<S>>;
+
+/// Takes a lent transaction back, by value. A handle that still holds it (an
+/// open stream, a component kept past its request) is an error, never a wait.
+pub fn reclaim<S>(txn: LentTxn<S>) -> Result<DbTxn<S>>
+where
+    S: Store,
+{
+    Arc::try_unwrap(txn).map_err(|_| Error::TxnInUse)
+}
+
+/// A transaction is lent to the handles of one request as a shared value, so
+/// it must be shareable on every store: checked here at compile time.
+#[cfg(not(target_arch = "wasm32"))]
+fn _lendable_on_every_store<S>()
+where
+    S: Store + 'static,
+{
+    fn shareable<T>()
+    where
+        T: Send + Sync,
+    {
+    }
+    shareable::<DbTxn<S>>();
 }
 
 impl<S: Store> DbTxn<S> {
@@ -107,9 +134,7 @@ impl<S: Store> DbTxn<S> {
         Self {
             txn: Some(txn),
             explicit: false,
-            collection_cache: CollectionCache::new(),
-            locally_created_collection_ids: RapidHashSet::new(),
-            pending_collection_acp_registrations: Vec::new(),
+            catalog: Catalog::new(),
             vector_codes: Arc::default(),
             shared_collections: None,
             statement_savepoint: None,
@@ -146,9 +171,7 @@ impl<S: Store> DbTxn<S> {
         Self {
             txn: Some(txn),
             explicit: true,
-            collection_cache: CollectionCache::new(),
-            locally_created_collection_ids: RapidHashSet::new(),
-            pending_collection_acp_registrations: Vec::new(),
+            catalog: Catalog::new(),
             vector_codes: Arc::default(),
             shared_collections: None,
             statement_savepoint: None,
@@ -165,7 +188,7 @@ impl<S: Store> DbTxn<S> {
         Box<dyn storage::corekv::RetryAttemptIO>,
         storage::corekv::TxnCallbacks,
     )> {
-        if !self.pending_collection_acp_registrations.is_empty() {
+        if self.catalog.owes() {
             return Err(storage::corekv::Error::Other(
                 "retry attempts cannot carry pending collection ACP registrations".into(),
             ));
@@ -194,34 +217,28 @@ impl<S: Store> DbTxn<S> {
                     .into(),
             ));
         }
-        let snapshot = StatementSavepoint {
-            collection_cache: self.collection_cache.clone(),
-            locally_created_collection_ids: self.locally_created_collection_ids.clone(),
-            pending_collection_acp_registrations: self.pending_collection_acp_registrations.clone(),
-        };
         self.txn
             .as_mut()
             .ok_or(Error::TxnNotActive)?
             .set_savepoint()?;
-        self.statement_savepoint = Some(snapshot);
+        self.statement_savepoint = Some(self.catalog.snapshot());
         Ok(())
     }
 
     pub(crate) fn rollback_statement_savepoint(&mut self) -> Result<()> {
-        if self.statement_savepoint.is_none() {
+        let Some(snapshot) = self.statement_savepoint.take() else {
             return Err(Error::Other("no statement savepoint is active".into()));
-        }
-        self.txn
+        };
+        if let Err(error) = self
+            .txn
             .as_mut()
-            .ok_or(Error::TxnNotActive)?
-            .rollback_to_savepoint()?;
-        let snapshot = self
-            .statement_savepoint
-            .take()
-            .expect("savepoint checked above");
-        self.collection_cache = snapshot.collection_cache;
-        self.locally_created_collection_ids = snapshot.locally_created_collection_ids;
-        self.pending_collection_acp_registrations = snapshot.pending_collection_acp_registrations;
+            .ok_or(Error::TxnNotActive)
+            .and_then(|txn| txn.rollback_to_savepoint().map_err(Error::from))
+        {
+            self.statement_savepoint = Some(snapshot);
+            return Err(error);
+        }
+        self.catalog.restore(snapshot);
         Ok(())
     }
 
@@ -356,11 +373,11 @@ impl<S: Store> DbTxn<S> {
     /// read-only transaction refuses ordered work.
     ///
     /// Returns an error if the transaction has been committed or discarded.
-    pub fn on_commit(&mut self, callback: OnCommit) -> Result<()> {
+    pub fn on_commit(&self, callback: OnCommit) -> Result<()> {
         self.txn
-            .as_mut()
+            .as_ref()
             .ok_or(Error::TxnNotActive)?
-            .on_commit(callback)?;
+            .on_commit_shared(callback)?;
         Ok(())
     }
 
@@ -368,11 +385,11 @@ impl<S: Store> DbTxn<S> {
     /// committing.
     ///
     /// Returns an error if the transaction has been committed or discarded.
-    pub fn on_abort(&mut self, callback: OnAbort) -> Result<()> {
+    pub fn on_abort(&self, callback: OnAbort) -> Result<()> {
         self.txn
-            .as_mut()
+            .as_ref()
             .ok_or(Error::TxnNotActive)?
-            .on_abort(callback);
+            .on_abort_shared(callback);
         Ok(())
     }
 
@@ -380,11 +397,11 @@ impl<S: Store> DbTxn<S> {
     /// An error from it fails the commit, and the abort callbacks run.
     ///
     /// Returns an error if the transaction has been committed or discarded.
-    pub fn before_commit(&mut self, callback: storage::corekv::BeforeCommit) -> Result<()> {
+    pub fn before_commit(&self, callback: storage::corekv::BeforeCommit) -> Result<()> {
         self.txn
-            .as_mut()
+            .as_ref()
             .ok_or(Error::TxnNotActive)?
-            .before_commit(callback);
+            .before_commit_shared(callback);
         Ok(())
     }
 
@@ -397,16 +414,15 @@ impl<S: Store> DbTxn<S> {
     /// This implements lazy loading - collections are loaded on first access.
     /// Returns `None` if the collection doesn't exist in the store.
     ///
-    /// Note: This method is structured to avoid holding `&mut self` across awaits,
-    /// which allows futures using this method to be `Send`.
+    /// The collection is returned by value: the handles a transaction is lent
+    /// to share its cache, so nothing borrows into it.
     ///
     /// Storage layout:
     /// - `/collection/name/{name}` - Maps name to version_id (string)
     /// - `/collection/id/{version_id}` - Full collection JSON
-    pub async fn get_collection(&mut self, name: &str) -> Result<Option<&Collection>> {
-        // Check cache first
-        if self.collection_cache.contains(name) {
-            return Ok(self.collection_cache.get(name));
+    pub async fn get_collection(&self, name: &str) -> Result<Option<Collection>> {
+        if let Some(collection) = self.catalog.get(name) {
+            return Ok(Some(collection));
         }
 
         // Cache miss: extract systemstore synchronously, then do async operation
@@ -443,8 +459,9 @@ impl<S: Store> DbTxn<S> {
                                 )
                             })?;
                         populate_collection_root_id(&systemstore, &mut schema).await?;
-                        self.collection_cache.add(Collection::new(schema));
-                        return Ok(self.collection_cache.get(name));
+                        let collection = Collection::new(schema);
+                        self.catalog.add(collection.clone());
+                        return Ok(Some(collection));
                     }
                 }
             }
@@ -473,8 +490,9 @@ impl<S: Store> DbTxn<S> {
                 )
             })?;
             populate_collection_root_id(&systemstore, &mut schema).await?;
-            self.collection_cache.add(Collection::new(schema));
-            return Ok(self.collection_cache.get(name));
+            let collection = Collection::new(schema);
+            self.catalog.add(collection.clone());
+            return Ok(Some(collection));
         }
 
         // version_id found but no collection data - inconsistent state
@@ -494,8 +512,8 @@ impl<S: Store> DbTxn<S> {
     /// Storage layout:
     /// - `/collection/name/{name}` - Maps name to version_id (string)
     /// - `/collection/id/{version_id}` - Full collection JSON
-    pub async fn load_all_collections(&mut self) -> Result<()> {
-        if self.collection_cache.is_fully_populated() {
+    pub async fn load_all_collections(&self) -> Result<()> {
+        if self.catalog.is_fully_populated() {
             return Ok(());
         }
 
@@ -609,47 +627,43 @@ impl<S: Store> DbTxn<S> {
             }
         }
 
-        self.collection_cache.populate(collections);
+        self.catalog.populate(collections);
         Ok(())
     }
 
     /// Add a collection to the transaction-scoped cache.
     ///
     /// The key is derived from the collection's name to prevent key-name mismatches.
-    pub fn cache_collection(&mut self, collection: Collection) {
-        self.collection_cache.add(collection);
+    pub fn cache_collection(&self, collection: Collection) {
+        self.catalog.add(collection);
     }
 
     /// Remove a collection from the transaction-scoped cache.
     ///
     /// Called by delete_collection to update the cache after writing to store.
-    pub fn uncache_collection(&mut self, name: &str) {
-        self.collection_cache.remove(name);
+    pub fn uncache_collection(&self, name: &str) {
+        self.catalog.remove(name);
     }
 
-    /// Get the collection cache.
-    ///
-    /// Use this for read-only access to iterate over cached collections.
-    pub fn collection_cache(&self) -> &CollectionCache {
-        &self.collection_cache
+    /// The collection `name` as this transaction has it cached, without
+    /// loading it.
+    pub fn cached_collection(&self, name: &str) -> Option<Collection> {
+        self.catalog.get(name)
     }
 
-    /// Get mutable access to the collection cache.
-    ///
-    /// Use this for advanced cache manipulation (e.g., populate from snapshot).
-    pub fn collection_cache_mut(&mut self) -> &mut CollectionCache {
-        &mut self.collection_cache
+    /// The names of the collections this transaction has cached.
+    pub fn cached_collection_names(&self) -> Vec<String> {
+        self.catalog.names()
     }
 
     /// Mark a collection as created inside this transaction.
-    pub fn mark_collection_created(&mut self, collection_id: impl Into<String>) {
-        self.locally_created_collection_ids
-            .insert(collection_id.into());
+    pub fn mark_collection_created(&self, collection_id: impl Into<String>) {
+        self.catalog.mark_created(collection_id.into());
     }
 
     /// Check whether a collection was created inside this transaction.
     pub fn was_collection_created(&self, collection_id: &str) -> bool {
-        self.locally_created_collection_ids.contains(collection_id)
+        self.catalog.was_created(collection_id)
     }
 
     /// Load the collection and its index-action state from this transaction's
@@ -658,7 +672,7 @@ impl<S: Store> DbTxn<S> {
     /// collection definition, while index-only updates (which preserve the
     /// version ID) use the current snapshot's write/query index sets.
     pub(crate) async fn load_collection_for_write_attempt(
-        &mut self,
+        &self,
         name: &str,
         expected: &Collection,
     ) -> Result<Collection> {
@@ -669,14 +683,14 @@ impl<S: Store> DbTxn<S> {
             expected,
         )
         .await?;
-        self.collection_cache.add(collection.clone());
+        self.catalog.add(collection.clone());
         Ok(collection)
     }
 
     /// Validate the active collection name and immutable schema through this
     /// transaction so concurrent DDL changes conflict at commit.
     pub(crate) async fn validate_collection_for_write(
-        &mut self,
+        &self,
         collection: &Collection,
     ) -> Result<()> {
         let systemstore = self.systemstore()?;
@@ -695,7 +709,7 @@ impl<S: Store> DbTxn<S> {
     /// Validate an immutable schema key for a remote merge, even if it is not
     /// the currently active version associated with its collection name.
     pub(crate) async fn validate_collection_schema_for_write(
-        &mut self,
+        &self,
         collection: &Collection,
     ) -> Result<()> {
         let systemstore = self.systemstore()?;
@@ -744,7 +758,7 @@ impl<S: Store> DbTxn<S> {
 
     /// Stage branchable collection ACP registration to run before commit.
     pub(crate) fn stage_collection_acp_registration(
-        &mut self,
+        &self,
         acp: Arc<dyn acp::DocumentACP>,
         creator: identity::Did,
         schemas: Vec<CollectionVersion>,
@@ -753,17 +767,16 @@ impl<S: Store> DbTxn<S> {
             return;
         }
         let request_bearer_token = defra_core::signing::get_request_bearer_token(creator.as_str());
-        self.pending_collection_acp_registrations
-            .push(PendingCollectionAcpRegistration {
-                acp,
-                creator,
-                request_bearer_token,
-                schemas,
-            });
+        self.catalog.owe(OwedAcpRegistration {
+            acp,
+            creator,
+            request_bearer_token,
+            schemas,
+        });
     }
 
     async fn run_pending_collection_acp_registrations(&mut self) -> Result<()> {
-        for mut registration in std::mem::take(&mut self.pending_collection_acp_registrations) {
+        for mut registration in self.catalog.take_owed() {
             if let Some(scoped) = registration.acp.bind_transaction(self.acpstore()?) {
                 registration.acp = scoped;
             }

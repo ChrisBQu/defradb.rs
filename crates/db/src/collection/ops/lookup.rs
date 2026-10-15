@@ -8,7 +8,7 @@ impl<S: Store> crate::database::DB<S> {
     /// if they haven't been loaded yet.
     pub async fn list_collections_with_txn(&self, txn: &mut DbTxn<S>) -> Result<Vec<String>> {
         txn.load_all_collections().await?;
-        Ok(txn.collection_cache().names())
+        Ok(txn.cached_collection_names())
     }
 
     /// List all collection names.
@@ -76,7 +76,7 @@ impl<S: Store> crate::database::DB<S> {
         txn: &mut DbTxn<S>,
         name: &str,
     ) -> Result<Option<Collection>> {
-        txn.get_collection(name).await.map(|opt| opt.cloned())
+        txn.get_collection(name).await
     }
 
     /// Get a collection by name.

@@ -326,7 +326,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         // preserving concurrent branches for later merge via write_collection_block.
         let collection_id = metadata.collection_id.unwrap_or(&payload.schema_version_id);
         let collection = self.db.find_collection_by_id(collection_id)?;
-        let mut txn = self.db.new_txn(false).await?;
+        let txn = self.db.new_txn(false).await?;
         if let Some(collection) = collection.as_ref() {
             txn.validate_collection_schema_for_write(collection)
                 .await

@@ -43,7 +43,7 @@ pub(crate) async fn record(store: &NamespaceView, collection: u32, doc: &str) ->
 }
 
 pub(crate) async fn read<S: Store>(
-    txn: &mut DbTxn<S>,
+    txn: &DbTxn<S>,
     options: &DocumentArrivalOptions,
 ) -> Result<DocumentArrivalPage> {
     let collection = txn

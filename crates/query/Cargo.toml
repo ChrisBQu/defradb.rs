@@ -38,7 +38,6 @@ lens = { path = "../lens", default-features = false }
 
 # Async runtime
 async-trait.workspace = true
-async-lock.workspace = true
 futures.workspace = true
 sync_wrapper = "1"
 
@@ -79,6 +78,7 @@ chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1.35", default-features = false, features = ["rt", "time"] }
 
 [dev-dependencies]
+async-lock.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 # regolith::sync events the pooled boundary's tests wait on.
 regolith.workspace = true

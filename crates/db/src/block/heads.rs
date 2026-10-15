@@ -46,7 +46,9 @@ use datastore::NamespaceView;
 use storage::corekv::{Reader, Result};
 
 pub mod document;
+mod reclamation;
 mod walk;
+use reclamation::Reclamation;
 use storage::corekv::IterOptions;
 use storage::keys::headstore::{HeadstoreColKey, HeadstoreColSuperseded};
 use walk::HeadWalk;
@@ -138,7 +140,7 @@ pub async fn record_supersedes(
 }
 
 /// What one reclamation removed.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct PruneOutcome {
     /// Head keys removed. Each came with its markers.
     pub heads_removed: usize,
@@ -206,62 +208,13 @@ pub(crate) async fn reclaim(
     if publication.is_some() {
         walk = walk.collect_orphans(max_keys);
     }
-
     // Collected rather than deleted in place: deleting from under an iterator
     // that is rebuilt from its last key would skip entries. The budget is what
     // keeps this bounded.
-    let mut doomed: Vec<Vec<u8>> = Vec::new();
-    let mut outcome = PruneOutcome::default();
-    while let Some(head) = walk.next().await? {
-        if !head.superseded {
-            continue;
-        }
-        // Every marker against this head, so the group leaves together.
-        let mut group = Vec::new();
-        walk.take_markers(&head.pair.key, &mut group).await?;
-        group.push(head.pair.key);
-        // A group always leaves whole, so one larger than the whole budget
-        // still goes on an otherwise empty pass. Deferring it instead would
-        // defer it forever: every later pass would meet the same group first
-        // and stop in the same place.
-        if !doomed.is_empty() && doomed.len() + group.len() > max_keys {
-            outcome.more_remaining = true;
-            break;
-        }
-        outcome.heads_removed += 1;
-        outcome.markers_removed += group.len() - 1;
-        doomed.extend(group);
-    }
-    if !outcome.more_remaining {
-        walk.finish().await?;
-    }
+    let gathered = Reclamation::gather(&mut walk, max_keys, true, |_| {}).await?;
     let orphans = walk.take_orphans();
     walk.close().await?;
-
-    if let Some(publication) = publication {
-        let mut published = Vec::with_capacity(publication.len() + 64);
-        for marker in orphans {
-            if doomed.len() >= max_keys {
-                outcome.more_remaining = true;
-                break;
-            }
-            let Some(parent) = marker
-                .get(parent_name_at..)
-                .and_then(|rest| Some(&rest[..rest.iter().rposition(|byte| *byte == b'/')?]))
-            else {
-                continue;
-            };
-            published.clear();
-            published.extend_from_slice(publication);
-            published.extend_from_slice(parent);
-            if headstore.get_parts(&published, &[]).await?.is_some() {
-                outcome.orphans_removed += 1;
-                doomed.push(marker);
-            }
-        }
-    }
-    for key in doomed {
-        headstore.delete(&key).await?;
-    }
-    Ok(outcome)
+    gathered
+        .finish(headstore, orphans, publication, parent_name_at, max_keys)
+        .await
 }

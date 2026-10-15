@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use rapidhash::{HashMapExt, HashSetExt, RapidHashMap, RapidHashSet};
 
 use super::{ParsedPolicy, PolicyRelation};
 use crate::error::{Error, Result};
@@ -24,7 +24,7 @@ pub(super) fn validate(policy: &ParsedPolicy) -> Result<()> {
     if policy.name.trim().is_empty() || policy.name.len() > 256 {
         return Err(invalid("policy name must contain 1–256 bytes"));
     }
-    let mut names = HashMap::new();
+    let mut names = RapidHashMap::new();
     for resource in &policy.resources {
         identifier(&resource.name)?;
         if resource.name == "actor" || names.contains_key(resource.name.as_str()) {
@@ -52,8 +52,8 @@ pub(super) fn validate(policy: &ParsedPolicy) -> Result<()> {
     validate_references(&policy.actor.relations, &names)
 }
 
-fn relation_names(relations: &[PolicyRelation], with_owner: bool) -> Result<HashSet<&str>> {
-    let mut names = HashSet::new();
+fn relation_names(relations: &[PolicyRelation], with_owner: bool) -> Result<RapidHashSet<&str>> {
+    let mut names = RapidHashSet::new();
     for relation in relations {
         identifier(&relation.name)?;
         if !names.insert(relation.name.as_str()) {
@@ -73,7 +73,7 @@ fn relation_names(relations: &[PolicyRelation], with_owner: bool) -> Result<Hash
 
 fn validate_references(
     relations: &[PolicyRelation],
-    resources: &HashMap<&str, HashSet<&str>>,
+    resources: &RapidHashMap<&str, RapidHashSet<&str>>,
 ) -> Result<()> {
     for relation in relations {
         for managed in &relation.manages {
