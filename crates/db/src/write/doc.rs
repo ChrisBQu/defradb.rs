@@ -556,7 +556,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 context.batch_session(),
                 kms.as_ref(),
                 Some(&self.prepared_inputs),
-                Some(&heads),
+                Some(heads),
             )
             .await
             .map_err(|error| {

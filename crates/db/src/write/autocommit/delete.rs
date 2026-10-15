@@ -270,7 +270,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 attempt.context.signing(),
                 attempt.context.batch_session(),
                 attempt.prepared_inputs.as_ref(),
-                Some(&heads),
+                Some(heads.into_owned()),
             )
             .await
             .map_err(|error| error.into_query_error_in("failed to write delete block"))?;
@@ -504,7 +504,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     attempt.context.signing(),
                     attempt.context.batch_session(),
                     attempt.prepared_inputs.as_ref(),
-                    Some(&heads),
+                    Some(heads.into_owned()),
                 )
                 .await
                 .map_err(|error| error.into_query_error_in("failed to write delete block"))?;

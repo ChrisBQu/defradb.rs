@@ -396,7 +396,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     attempt.context.batch_session(),
                     self.db.kms().as_ref(),
                     attempt.prepared_inputs.as_ref(),
-                    Some(&heads),
+                    Some(heads.into_owned()),
                 )
                 .await
                 .map_err(|error| {

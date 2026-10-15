@@ -602,7 +602,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 context.batch_session(),
                 self.db.kms().as_ref(),
                 self.prepared_inputs.as_ref(),
-                Some(&heads),
+                Some(heads),
             )
             .await
             .map_err(|error| {
