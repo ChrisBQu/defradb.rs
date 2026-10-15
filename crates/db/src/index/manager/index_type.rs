@@ -141,12 +141,15 @@ impl IndexType {
 
     /// Removes up to `limit` of this index's keys after `after`
     /// ([`CollectionIndex::remove_page`]).
-    pub async fn remove_page<T: Reader + Writer + MaybeSend>(
+    pub async fn remove_page<T>(
         &self,
         txn: &mut T,
         after: Option<&[u8]>,
         limit: usize,
-    ) -> Result<(usize, Option<Vec<u8>>)> {
+    ) -> Result<(usize, Option<Vec<u8>>)>
+    where
+        T: Reader + Writer + MaybeSend,
+    {
         match self {
             IndexType::Simple(idx) => idx.remove_page(txn, after, limit).await,
             IndexType::Unique(idx) => idx.remove_page(txn, after, limit).await,

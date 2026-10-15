@@ -62,12 +62,15 @@ pub trait CollectionIndex: MaybeSendSync {
     /// many it removed and the last of them, so a caller clears a large
     /// index in bounded transactions by passing that key back; fewer than
     /// `limit` means none is left after `after`.
-    async fn remove_page<T: Reader + Writer + MaybeSend>(
+    async fn remove_page<T>(
         &self,
         txn: &mut T,
         after: Option<&[u8]>,
         limit: usize,
-    ) -> Result<(usize, Option<Vec<u8>>)> {
+    ) -> Result<(usize, Option<Vec<u8>>)>
+    where
+        T: Reader + Writer + MaybeSend,
+    {
         let limit = limit.max(1);
         let mut options = IterOptions::default()
             .with_prefix(self.key_prefix())

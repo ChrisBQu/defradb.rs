@@ -104,11 +104,10 @@ impl CollectionMap {
 
     /// Replace the collection with `collection_id` by what `update` makes of
     /// it, which must keep its name and version.
-    pub(crate) fn update(
-        &mut self,
-        collection_id: &str,
-        update: impl FnOnce(&Collection) -> Collection,
-    ) {
+    pub(crate) fn update<F>(&mut self, collection_id: &str, update: F)
+    where
+        F: FnOnce(&Collection) -> Collection,
+    {
         if let Some(entry) = self.by_id.get_mut(collection_id) {
             *entry = update(entry);
         }
