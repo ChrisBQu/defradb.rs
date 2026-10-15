@@ -91,6 +91,22 @@ pub const PROPERTIES: &[Property] = &[
         tiers: &[Behavioral],
     },
     Property {
+        family: "Retry input and marker fencing",
+        name: "INV_ProviderOncePerContext / INV_NewRegistrationSurvivesOldAck / INV_NewRegistrationSurvivesOldClear",
+        axis: Tla,
+        anchor: "crates/db/src/write/autocommit/{create,update,delete}.rs NeedsInput resolver; crates/query/src/prepared.rs; crates/storage/src/stores/peerstore.rs register/complete/clear retry scope",
+        model_ref: "MC_RetryPreparedInputs_{Green,Red_*}.cfg / MC_RetryMarkerGeneration_{Green,Red_*}.cfg",
+        tiers: &[Boundary],
+    },
+    Property {
+        family: "Collection schema-version OCC",
+        name: "INV_NoStaleSchemaWrite — a writer cannot commit against an obsolete structural version",
+        axis: Tla,
+        anchor: "crates/db/src/txn/mod.rs validate_collection_for_write; crates/db/src/write/autocommit/{create,update,delete}.rs; crates/db/src/definition structural updates",
+        model_ref: "MC_CollectionVersionOCC_Green.cfg / MC_CollectionVersionOCC_Red_NoValidation.cfg",
+        tiers: &[Boundary],
+    },
+    Property {
         family: "B3 filtered replication",
         name: "INV_DagComplete — filtered push still converges per-document",
         axis: Tla,

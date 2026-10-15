@@ -440,8 +440,8 @@ async fn rust_storm_cluster(nodes: usize) -> TestCluster {
 /// reconciled the store FROM a concurrently-stale blob, dropping increments while
 /// the commit DAG still converged (identical `_commits`, divergent value). Fixed by
 /// the Go-parity single store (local writes + merges RMW the authoritative store by
-/// delta; reconcile init-if-absent / PCounter migrate-via-max) serialized per-doc
-/// (`crates/db/src/write/queue.rs`). Modeled by `proofs/tla/TwoStoreCounter` +
+/// delta; reconcile init-if-absent / PCounter migrate-via-max). Modeled by
+/// `proofs/tla/TwoStoreCounter` +
 /// `DefraConvergence.CounterReconcile`. Driver: `support::run_counter_storm` (the
 /// cluster-agnostic harness shared with the Go-parity storm in `parity.rs`).
 #[tokio::test]

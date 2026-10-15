@@ -20,7 +20,7 @@ Status of the effort across the 40-crate surface, from the per-crate survey in
 are plumbing covered by integration tests / Go-FFI parity / unit tests. The point of this
 section is the **diff**: what is proven vs. the accepted gap.
 
-### Modeled — 22 families (proven)
+### Modeled — 26 families (bounded model claims)
 | Family | Tool | Crates it covers |
 |---|---|---|
 | B3 filtered replication | TLA+ | p2p, db-merge |
@@ -45,13 +45,18 @@ section is the **diff**: what is proven vs. the accepted gap.
 | Order-preserving key encoding | Lean | storage |
 | Index-maintenance consistency | Lean + TLA+ | db-index, db-merge |
 | Concurrent collection-head transitions | TLA+ & Lean | db-block-builder, storage |
+| Commit-ordered document arrivals | TLA+ | db, storage (pinned regolith) |
+| Retry input and marker fencing | TLA+ | db, query, storage |
+| Collection schema-version OCC | TLA+ | db |
 
-### Backlog — want to model: **none**
-**The medium-and-up correctness surface is fully modeled.** All 2 high + 11 medium backlog
-items from the 40-crate survey are now in *Modeled* above (built across three
-builder→verifier batches, each integrator-verified). The remaining work is the explicitly
-deferred low-priority Lean-lemma appendix below; new modelable surfaces would come from a
-re-survey as the code evolves.
+### Backlog — current retry-era gaps
+This inventory includes legacy models and does not mean every current mechanism is
+proven. Engine OCC remains an implementation boundary. `HeadSet.tla` models derived head
+keys and scan/write conflicts, not collection-version validation. Remote ACP/Vera checks,
+dynamic KMS policy/scope changes, cold
+read-time decryption, and complete attempt-level preparation coverage also remain audit
+gaps. The new retry input and peer marker models cover only their stated protocol
+abstractions. Reconcile these surfaces against the survey before making completeness claims.
 
 ### Deferred — Lean-lemma appendix (13 low)
 Low-risk hardening lemmas parked for later: index-extraction determinism, cartesian-product
@@ -203,6 +208,17 @@ AssignBeforeValidation are negative controls. The engine's model is kept at the
 same revision as Cargo.lock rather than copied into this repository. DefraDB's
 `arrival_transactions` tests exercise reverse commit order, rollback, duplicate
 once keys and reopen through the adapter.
+
+`RetryPreparedInputs.tla` models exact-context provider answers resolved outside
+an attempt and reused after a commit conflict; its RED cases run provider work
+inside an attempt or clear the memo and repeat provider work. It does not establish that every remote ACP/Vera/KMS/decrypt call
+is lifted out of retry attempts. `RetryMarkerGeneration.tla` models generation
+compare-delete and the peer-incarnation fence on clear across forget/re-add. Their
+conformance tier is deliberately `Boundary`: these models are not driven against
+the public binary. The focused storage and DB tests remain the implementation
+checks. `CollectionVersionOCC.tla` separately models why a writer selected against
+an old schema version must abort after a concurrent structural put. It remains a
+boundary model and does not prove storage's implementation of validation.
 
 `HeadSetCache.tla`, its configurations and `HeadSet/Cache.lean` are retired with
 the adapter cache and publication lock. `HeadSet.tla` and `HeadSet/Core.lean`
