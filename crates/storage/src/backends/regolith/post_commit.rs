@@ -16,3 +16,24 @@ pub(super) fn report(kind: StorageEvent, detail: &dyn std::fmt::Display) {
     );
     telemetry::record_storage_event(kind, 0);
 }
+
+/// Runs one hook to its end. A failure or a panic in it is reported, never
+/// returned: its commit is durable by now.
+pub(super) async fn run_hook<F>(hook: F)
+where
+    F: std::future::Future<Output = Result<(), String>>,
+{
+    #[cfg(not(target_arch = "wasm32"))]
+    let outcome = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(hook)).await;
+    // A browser build aborts on a panic, so there is nothing to catch.
+    #[cfg(target_arch = "wasm32")]
+    let outcome: Result<Result<(), String>, Box<dyn std::any::Any + Send>> = Ok(hook.await);
+    match outcome {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => report(StorageEvent::PostCommitHookFailed, &error),
+        Err(panic) => report(
+            StorageEvent::PostCommitHookPanicked,
+            &super::event_order::panic_message(panic.as_ref()),
+        ),
+    }
+}

@@ -14,14 +14,15 @@ use async_trait::async_trait;
 use regolith::{OptimisticTransactionDb, TxnOptions};
 
 use super::config::RegolithStoreOptions;
-use super::event_order::{Event, EventOrder};
+use super::event_order::{Binding, Event, EventOrder};
 use super::listener::StoreListener;
 use super::slots::TxnSlots;
 use super::transaction::RegolithTxn;
 use crate::backends::shared::TransactionStatsHandle;
 use crate::corekv::{
-    Dropable, Error, Result, RetryAttempt, RetryAttemptError, RetryAttemptIO, RetryAttemptValue,
-    RetryCallbacks, RetryOptions, RetryTxn, Store, Txn,
+    AsyncOrderedRetryCallback, AsyncTxnCallback, Dropable, Error, Result, RetryAttempt,
+    RetryAttemptError, RetryAttemptIO, RetryAttemptValue, RetryCallbacks, RetryOptions, RetryTxn,
+    Store, Txn, TxnCallback,
 };
 
 /// Key-value store backed by regolith.
@@ -232,8 +233,11 @@ impl Store for RegolithStore {
         let _slot = self.inner.slots.enter()?;
         let queue_db = Arc::clone(&self.inner.db);
         let policy = regolith::RetryPolicy::new(options.max_attempts.max(1));
-        let mut event_token = None;
-        let mut committed_callbacks = RetryCallbacks::default();
+        // The work the latest attempt registered. regolith runs exactly one
+        // outcome per attempt: an attempt that lost already let go of its
+        // place in the stream through its own `on_abort`, and its callbacks
+        // are dropped here when the next one starts.
+        let mut latest: Option<AttemptWork> = None;
         let outcome = {
             let mut queue = queue_db.db().io_queue();
             let queue_id = queue.id();
@@ -241,7 +245,9 @@ impl Store for RegolithStore {
                 if lost.is_some() {
                     telemetry::record_retry_attempt(telemetry::RetryLayer::Engine);
                 }
-                committed_callbacks = RetryCallbacks::default();
+                if let Some(previous) = latest.take() {
+                    previous.lost();
+                }
                 let mut retry_txn = RegolithRetryTxn {
                     previous_conflict: lost.map(|reason| crate::corekv::TransactionConflict {
                         access: reason.mine(),
@@ -253,7 +259,6 @@ impl Store for RegolithStore {
                     db: Arc::clone(&self.inner.db),
                     isolation: self.inner.options.isolation,
                     attempt_io_active: false,
-                    has_writes: false,
                     callbacks: RetryCallbacks::default(),
                 };
                 let mut value = attempt.run(&mut retry_txn).await;
@@ -262,20 +267,13 @@ impl Store for RegolithStore {
                         "retry attempt returned with scoped IO still active".into(),
                     )));
                 }
-                if value.is_ok()
-                    && retry_txn.callbacks.has_ordered_callbacks()
-                    && !retry_txn.has_writes
-                {
-                    value = Err(RetryAttemptError::Storage(Error::Other(
-                        "cannot publish ordered callbacks from a retry attempt without writes"
-                            .into(),
-                    )));
-                }
                 if value.is_ok() {
-                    if retry_txn.callbacks.has_ordered_callbacks() && event_token.is_none() {
-                        event_token = Some(self.inner.event_order.begin());
-                    }
-                    committed_callbacks = std::mem::take(&mut retry_txn.callbacks);
+                    let callbacks = std::mem::take(&mut retry_txn.callbacks);
+                    latest = Some(AttemptWork::bind(
+                        &self.inner.event_order,
+                        retry_txn.txn,
+                        callbacks,
+                    ));
                 }
                 value
             });
@@ -292,60 +290,16 @@ impl Store for RegolithStore {
                 drive_browser_queue(&mut queue, future).await
             }
         };
-        match outcome {
-            Ok((value, receipt)) => {
-                let (callbacks, async_callbacks, ordered_callbacks, ordered_async_callbacks) =
-                    committed_callbacks.into_parts();
-                for callback in async_callbacks {
-                    let callback = callback.lock().unwrap().take();
-                    if let Some(callback) = callback {
-                        callback().await;
-                    }
-                }
-                for callback in callbacks {
-                    let callback = callback.lock().unwrap().take();
-                    if let Some(callback) = callback {
-                        callback();
-                    }
-                }
-                let mut post_commit_error = None;
-                for callback in ordered_async_callbacks {
-                    let callback = callback.lock().unwrap().take();
-                    if let Some(callback) = callback {
-                        if let Err(error) = callback().await {
-                            post_commit_error.get_or_insert(error);
-                        }
-                    }
-                }
-                let events: Vec<Event> = ordered_callbacks
-                    .into_iter()
-                    .map(|callback| {
-                        Arc::new(move || {
-                            let callback = callback.lock().unwrap().take();
-                            if let Some(callback) = callback {
-                                callback();
-                            }
-                        }) as Event
-                    })
-                    .collect();
-                let events = if post_commit_error.is_some() {
-                    Vec::new()
-                } else {
-                    events
-                };
-                let has_events = !events.is_empty();
-                if event_token.is_some_and(|token| !token.finish(receipt.seq(), events))
-                    && has_events
-                {
-                    return Err(RetryAttemptError::PostCommit(Error::Other(
-                        "ordered retry receipt did not advance".into(),
-                    )));
-                }
-                if let Some(error) = post_commit_error {
-                    return Err(RetryAttemptError::PostCommit(Error::Other(error)));
-                }
-                Ok(value)
+        let committed = outcome.is_ok();
+        if let Some(latest) = latest {
+            if committed {
+                latest.committed().await;
+            } else {
+                latest.lost();
             }
+        }
+        match outcome {
+            Ok((value, _receipt)) => Ok(value),
             Err(regolith::TransactError::Closure(error)) => Err(error),
             Err(regolith::TransactError::Exhausted(conflict)) => Err(RetryAttemptError::Exhausted(
                 crate::corekv::TransactionConflict {
@@ -387,13 +341,75 @@ impl Store for RegolithStore {
     }
 }
 
+/// What one retry attempt registered for after its commit: its ordered
+/// events and hooks bound to the stream, and its other success callbacks.
+struct AttemptWork {
+    binding: Option<Binding>,
+    hooks: Vec<AsyncOrderedRetryCallback>,
+    sync: Vec<TxnCallback>,
+    asynchronous: Vec<AsyncTxnCallback>,
+}
+
+impl AttemptWork {
+    /// Binds the attempt's ordered work to `txn`, which regolith commits next.
+    fn bind(
+        order: &Arc<EventOrder>,
+        txn: &mut regolith::Transaction,
+        callbacks: RetryCallbacks,
+    ) -> Self {
+        let (sync, asynchronous, ordered, hooks) = callbacks.into_parts();
+        fn take<T>(cell: std::sync::Arc<std::sync::Mutex<Option<T>>>) -> Option<T> {
+            cell.lock().ok().and_then(|mut slot| slot.take())
+        }
+        let events: Vec<Event> = ordered
+            .into_iter()
+            .filter_map(take)
+            .map(|callback| Box::new(callback) as Event)
+            .collect();
+        let hooks: Vec<AsyncOrderedRetryCallback> = hooks.into_iter().filter_map(take).collect();
+        let binding = (!events.is_empty() || !hooks.is_empty())
+            .then(|| order.bind(txn, events, !hooks.is_empty()));
+        Self {
+            binding,
+            hooks,
+            sync: sync.into_iter().filter_map(take).collect(),
+            asynchronous: asynchronous.into_iter().filter_map(take).collect(),
+        }
+    }
+
+    /// The attempt did not commit: nothing it registered runs.
+    fn lost(self) {
+        if let Some(binding) = self.binding {
+            binding.hand_over(false);
+        }
+    }
+
+    /// The attempt committed and is durable: its hooks run (a failure is
+    /// reported, never returned), its events go out in receipt order, and
+    /// its success callbacks run.
+    async fn committed(self) {
+        let running = self.binding.and_then(|binding| binding.hand_over(true));
+        if let Some(running) = running {
+            for hook in self.hooks {
+                super::post_commit::run_hook(hook()).await;
+            }
+            running.done();
+        }
+        for callback in self.sync {
+            callback();
+        }
+        for callback in self.asynchronous {
+            callback().await;
+        }
+    }
+}
+
 struct RegolithRetryTxn<'a> {
     previous_conflict: Option<crate::corekv::TransactionConflict>,
     txn: &'a mut regolith::Transaction,
     db: Arc<OptimisticTransactionDb>,
     isolation: regolith::IsolationLevel,
     attempt_io_active: bool,
-    has_writes: bool,
     callbacks: RetryCallbacks,
 }
 
@@ -449,7 +465,6 @@ impl RetryTxn for RegolithRetryTxn<'_> {
         regolith::ready(|| self.txn.put(key, value))
             .await
             .map_err(super::transaction::map_txn_error)?;
-        self.has_writes = true;
         Ok(())
     }
 
@@ -461,7 +476,6 @@ impl RetryTxn for RegolithRetryTxn<'_> {
         regolith::ready(|| self.txn.delete(key))
             .await
             .map_err(super::transaction::map_txn_error)?;
-        self.has_writes = true;
         Ok(())
     }
 
@@ -484,8 +498,7 @@ impl RetryTxn for RegolithRetryTxn<'_> {
             .into_any()
             .downcast::<RegolithTxn>()
             .map_err(|_| Error::Other("retry IO belongs to a different backend".into()))?;
-        let (actual, has_writes) = io.into_scoped_engine_txn()?;
-        self.has_writes |= has_writes;
+        let actual = io.into_scoped_engine_txn()?;
         *self.txn = *actual;
         self.callbacks = callbacks;
         self.attempt_io_active = false;
@@ -774,6 +787,226 @@ mod scan_tests {
         assert!(snapshot_lookups > 0);
         assert_eq!(writing_lookups, snapshot_lookups);
         store.close().await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod post_commit_tests {
+    use super::*;
+    use crate::corekv::{
+        AppendLog, AsyncOrderedTxnCallback, OrderedRetryCallback, OrderedTxnCallback,
+        RetryAttemptFn, RetryAttemptFuture, Writer,
+    };
+    use regolith::sync::{Atom, Event as Signal};
+    use telemetry::StorageEvent;
+
+    /// What the ordered events of a test saw, in dispatch order.
+    #[derive(Clone, Default)]
+    struct Out(Arc<Atom<Vec<u64>>>);
+
+    impl Out {
+        fn push(&self, value: u64) {
+            self.0.rcu(|values| {
+                let mut next = values.clone();
+                next.push(value);
+                next
+            });
+        }
+
+        fn event(&self, value: u64) -> OrderedTxnCallback {
+            let out = self.clone();
+            Arc::new(move || out.push(value))
+        }
+
+        fn retry_event(&self, value: u64) -> OrderedRetryCallback {
+            let out = self.clone();
+            Box::new(move || out.push(value))
+        }
+
+        fn get(&self) -> Vec<u64> {
+            self.0.load().clone()
+        }
+    }
+
+    fn failing_hook() -> AsyncOrderedTxnCallback {
+        Arc::new(|| Box::pin(async { Err("the registration was refused".to_string()) }))
+    }
+
+    async fn read(store: &RegolithStore, key: &[u8]) -> Option<Vec<u8>> {
+        let txn = store.new_txn(true).await.unwrap();
+        let value = txn.get(key).await.unwrap().map(|value| value.to_vec());
+        txn.discard();
+        value
+    }
+
+    #[tokio::test]
+    async fn a_failed_hook_after_a_durable_commit_is_reported_and_the_commit_stands() {
+        let store = RegolithStore::in_memory().unwrap();
+        let out = Out::default();
+        let before = telemetry::storage_event_count(StorageEvent::PostCommitHookFailed);
+        let mut txn = store.new_txn(false).await.unwrap();
+        txn.set(b"doc", b"v").await.unwrap();
+        txn.on_success_ordered_async(failing_hook()).unwrap();
+        txn.on_success_ordered(out.event(1)).unwrap();
+        txn.commit().await.unwrap();
+        assert_eq!(out.get(), vec![1]);
+        assert!(telemetry::storage_event_count(StorageEvent::PostCommitHookFailed) > before);
+        assert_eq!(read(&store, b"doc").await.as_deref(), Some(&b"v"[..]));
+    }
+
+    /// An attempt that writes `key` (when given) and registers `events`, and
+    /// a hook that fails when `failing`.
+    struct EventfulAttempt {
+        key: Option<&'static [u8]>,
+        out: Out,
+        events: Vec<u64>,
+        failing: bool,
+    }
+
+    impl RetryAttemptFn for EventfulAttempt {
+        fn run<'a>(&'a mut self, retry: &'a mut dyn RetryTxn) -> RetryAttemptFuture<'a> {
+            Box::pin(async move {
+                let mut io = retry.begin_attempt_io()?;
+                if let Some(key) = self.key {
+                    io.set(key, b"v").await?;
+                }
+                let mut callbacks = RetryCallbacks::default();
+                if self.failing {
+                    callbacks.push_ordered_async(Box::new(|| {
+                        Box::pin(async { Err("the registration was refused".to_string()) })
+                    }));
+                }
+                for value in &self.events {
+                    callbacks.push_ordered(self.out.retry_event(*value));
+                }
+                retry.finish_attempt_io(io, callbacks)?;
+                Ok(Box::new(()) as RetryAttemptValue)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_hook_after_a_durable_retry_commit_is_reported_and_the_commit_stands() {
+        let store = RegolithStore::in_memory().unwrap();
+        let out = Out::default();
+        let before = telemetry::storage_event_count(StorageEvent::PostCommitHookFailed);
+        let attempt = EventfulAttempt {
+            key: Some(b"doc"),
+            out: out.clone(),
+            events: vec![2],
+            failing: true,
+        };
+        store
+            .transact_retry(RetryOptions::new(2), Box::new(attempt))
+            .await
+            .unwrap();
+        assert_eq!(out.get(), vec![2]);
+        assert!(telemetry::storage_event_count(StorageEvent::PostCommitHookFailed) > before);
+        assert_eq!(read(&store, b"doc").await.as_deref(), Some(&b"v"[..]));
+    }
+
+    #[tokio::test]
+    async fn an_eventful_transaction_that_writes_nothing_dispatches_its_events() {
+        let store = RegolithStore::in_memory().unwrap();
+        let out = Out::default();
+        let mut txn = store.new_txn(false).await.unwrap();
+        assert!(txn.get(b"absent").await.unwrap().is_none());
+        txn.on_success_ordered(out.event(1)).unwrap();
+        txn.commit().await.unwrap();
+        let attempt = EventfulAttempt {
+            key: None,
+            out: out.clone(),
+            events: vec![2],
+            failing: false,
+        };
+        store
+            .transact_retry(RetryOptions::new(1), Box::new(attempt))
+            .await
+            .unwrap();
+        assert_eq!(out.get(), vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn an_eventful_transaction_that_only_appends_dispatches_its_events() {
+        let store = RegolithStore::in_memory().unwrap();
+        let out = Out::default();
+        let log = AppendLog {
+            head_key: b"s/arrival/c1/head".to_vec(),
+            entry_prefix: b"s/arrival/c1/row/".to_vec(),
+        };
+        for value in [1, 2] {
+            // The second append names a once key that already holds a
+            // position, so regolith appends nothing for it.
+            let mut txn = store.new_txn(false).await.unwrap();
+            txn.append(&log, b"doc-1", Some(b"s/arrival/c1/doc/doc-1"))
+                .await
+                .unwrap();
+            txn.on_success_ordered(out.event(value)).unwrap();
+            txn.commit().await.unwrap();
+        }
+        assert_eq!(out.get(), vec![1, 2]);
+    }
+
+    /// An attempt that writes and whose hook holds the stream until
+    /// `release` is set.
+    struct HoldingAttempt {
+        entered: Arc<Signal>,
+        release: Arc<Signal>,
+    }
+
+    impl RetryAttemptFn for HoldingAttempt {
+        fn run<'a>(&'a mut self, retry: &'a mut dyn RetryTxn) -> RetryAttemptFuture<'a> {
+            Box::pin(async move {
+                let mut io = retry.begin_attempt_io()?;
+                io.set(b"held", b"v").await?;
+                let mut callbacks = RetryCallbacks::default();
+                let entered = Arc::clone(&self.entered);
+                let release = Arc::clone(&self.release);
+                callbacks.push_ordered_async(Box::new(move || {
+                    Box::pin(async move {
+                        entered.set();
+                        release.wait().await;
+                        Ok(())
+                    })
+                }));
+                retry.finish_attempt_io(io, callbacks)?;
+                Ok(Box::new(()) as RetryAttemptValue)
+            })
+        }
+    }
+
+    /// A commit's panicking event goes out while another commit's thread
+    /// drains the stream; that thread must not panic.
+    #[tokio::test]
+    async fn a_panicking_event_does_not_reach_the_commit_that_drains_it() {
+        let store = RegolithStore::in_memory().unwrap();
+        let before = telemetry::storage_event_count(StorageEvent::PostCommitEventPanicked);
+        let entered = Arc::new(Signal::new());
+        let release = Arc::new(Signal::new());
+        let attempt = HoldingAttempt {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        };
+        let holder = store.clone();
+        let held = tokio::spawn(async move {
+            holder
+                .transact_retry(RetryOptions::new(1), Box::new(attempt))
+                .await
+                .map(|_| ())
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered.wait())
+            .await
+            .unwrap();
+
+        let mut txn = store.new_txn(false).await.unwrap();
+        txn.set(b"doc", b"v").await.unwrap();
+        txn.on_success_ordered(Arc::new(|| panic!("a subscriber panicked")))
+            .unwrap();
+        txn.commit().await.unwrap();
+
+        release.set();
+        held.await.unwrap().unwrap();
+        assert!(telemetry::storage_event_count(StorageEvent::PostCommitEventPanicked) > before);
     }
 }
 

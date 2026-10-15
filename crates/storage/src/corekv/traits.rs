@@ -447,7 +447,6 @@ pub type RetryAttemptValue = Box<dyn Any>;
 pub enum RetryAttemptError {
     Storage(super::errors::Error),
     Exhausted(super::errors::TransactionConflict),
-    PostCommit(super::errors::Error),
     #[cfg(not(target_arch = "wasm32"))]
     Abort(Box<dyn Any + Send>),
     #[cfg(target_arch = "wasm32")]
@@ -461,7 +460,6 @@ impl std::fmt::Debug for RetryAttemptError {
             Self::Exhausted(conflict) => {
                 formatter.debug_tuple("Exhausted").field(conflict).finish()
             }
-            Self::PostCommit(error) => formatter.debug_tuple("PostCommit").field(error).finish(),
             Self::Abort(_) => formatter.write_str("Abort(<typed domain error>)"),
         }
     }
@@ -478,7 +476,6 @@ impl RetryAttemptError {
         match self {
             Self::Storage(error) => error,
             Self::Exhausted(conflict) => super::errors::Error::TxnRetryExhausted(conflict),
-            Self::PostCommit(error) => error,
             Self::Abort(_) => super::errors::Error::Other(
                 "transaction attempt aborted with a domain error".to_string(),
             ),

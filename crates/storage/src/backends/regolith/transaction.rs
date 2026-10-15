@@ -24,8 +24,8 @@ use super::iterator::RegolithIterator;
 use super::slots::TxnSlot;
 use crate::backends::shared::{CallbackCounts, CallbackManager};
 use crate::corekv::{
-    AsyncOrderedTxnCallback, AsyncTxnCallback, Error, IterOptions, Iterator, Reader, Result, Txn,
-    TxnCallback, Writer,
+    AsyncOrderedTxnCallback, AsyncTxnCallback, Error, IterOptions, Iterator, OrderedTxnCallback,
+    Reader, Result, Txn, TxnCallback, Writer,
 };
 
 /// Transaction over a regolith store.
@@ -38,10 +38,9 @@ pub struct RegolithTxn {
     callbacks: CallbackManager,
     readonly: bool,
     event_order: Arc<EventOrder>,
-    ordered_events: Vec<Event>,
+    ordered_events: Vec<OrderedTxnCallback>,
     ordered_async_callbacks: Vec<AsyncOrderedTxnCallback>,
     savepoints: Vec<SavepointState>,
-    has_writes: bool,
     scoped_attempt: bool,
 }
 
@@ -50,7 +49,6 @@ struct SavepointState {
     callbacks: CallbackCounts,
     ordered_events: usize,
     ordered_async_callbacks: usize,
-    has_writes: bool,
 }
 
 impl RegolithTxn {
@@ -73,7 +71,6 @@ impl RegolithTxn {
             event_order: Arc::new(EventOrder::default()),
             ordered_events: Vec::new(),
             ordered_async_callbacks: Vec::new(),
-            has_writes: false,
             scoped_attempt: false,
         })
     }
@@ -100,7 +97,6 @@ impl RegolithTxn {
                 event_order,
                 ordered_events: Vec::new(),
                 ordered_async_callbacks: Vec::new(),
-                has_writes: false,
                 scoped_attempt: false,
             })
         })
@@ -116,14 +112,13 @@ impl RegolithTxn {
             ordered_events: Vec::new(),
             ordered_async_callbacks: Vec::new(),
             savepoints: Vec::new(),
-            has_writes: false,
             scoped_attempt: true,
         }
     }
 
     // Ownership arrives boxed from the sealed attempt IO capability.
     #[allow(clippy::boxed_local)]
-    pub(super) fn into_scoped_engine_txn(mut self: Box<Self>) -> Result<(Box<Transaction>, bool)> {
+    pub(super) fn into_scoped_engine_txn(mut self: Box<Self>) -> Result<Box<Transaction>> {
         if !self.scoped_attempt {
             return Err(Error::Other("not a scoped retry transaction".into()));
         }
@@ -134,7 +129,7 @@ impl RegolithTxn {
         let Handle::Writable(txn) = handle else {
             return Err(Error::ReadOnlyTxn);
         };
-        Ok((txn, self.has_writes))
+        Ok(txn)
     }
 
     fn handle(&self) -> Result<&Arc<Handle>> {
@@ -281,7 +276,6 @@ impl Writer for RegolithTxn {
         regolith::ready(|| txn.merge(key, operand))
             .await
             .map_err(map_txn_error)?;
-        self.has_writes = true;
         Ok(())
     }
 
@@ -296,9 +290,6 @@ impl Writer for RegolithTxn {
         regolith::ready(|| txn.append(&layout, entry, once_key))
             .await
             .map_err(map_txn_error)?;
-        // An append with an already-present once-key is elided by Regolith
-        // during commit planning. Append-only commits therefore cannot
-        // authorize an ordered event receipt here.
         Ok(())
     }
 
@@ -310,7 +301,6 @@ impl Writer for RegolithTxn {
         regolith::ready(|| txn.put(key, value))
             .await
             .map_err(map_txn_error)?;
-        self.has_writes = true;
         Ok(())
     }
 
@@ -322,7 +312,6 @@ impl Writer for RegolithTxn {
         regolith::ready(|| txn.delete(key))
             .await
             .map_err(map_txn_error)?;
-        self.has_writes = true;
         Ok(())
     }
 }
@@ -336,13 +325,6 @@ impl Txn for RegolithTxn {
                 "scoped retry transaction cannot commit independently".into(),
             ));
         }
-        if !self.ordered_events.is_empty() && !self.has_writes {
-            self.handle.take();
-            self.callbacks.run_error().await;
-            return Err(Error::Other(
-                "cannot publish ordered events from a transaction with no writes".to_string(),
-            ));
-        }
         let handle = self.handle.take().ok_or(Error::DiscardedTxn)?;
         // regolith's `commit` consumes the transaction, so this has to be
         // its only owner. An iterator opened from it holds the same `Arc`,
@@ -354,48 +336,34 @@ impl Txn for RegolithTxn {
                     .to_string(),
             )
         })?;
-        // Register before entering native commit so failed commits cannot
-        // publish events and receipt-ordering starts before commit completion.
-        let ordered_token = (!self.ordered_events.is_empty()).then(|| self.event_order.begin());
-        let mut ordered_seq = None;
-        let outcome = match handle {
-            Handle::ReadOnly(snapshot) => {
-                drop(snapshot);
-                Ok(())
-            }
-            Handle::Writable(txn) => super::blocking(|| {
-                let outcome = txn.commit().map_err(map_txn_error);
-                if let (Some(_token), Ok(receipt)) = (&ordered_token, &outcome) {
-                    ordered_seq = Some(receipt.seq());
-                }
-                outcome.map(|_| ())
-            }),
+        let Handle::Writable(mut txn) = handle else {
+            // A snapshot has nothing to commit and cannot carry ordered work.
+            self.callbacks.run_success().await;
+            return Ok(());
         };
+        let events: Vec<Event> = std::mem::take(&mut self.ordered_events)
+            .into_iter()
+            .map(|callback| Box::new(move || callback()) as Event)
+            .collect();
+        let hooks = std::mem::take(&mut self.ordered_async_callbacks);
+        let binding = (!events.is_empty() || !hooks.is_empty())
+            .then(|| self.event_order.bind(&mut txn, events, !hooks.is_empty()));
+        let outcome = super::blocking(|| txn.commit()).map_err(map_txn_error);
+        let running = binding.and_then(|binding| binding.hand_over(outcome.is_ok()));
         match outcome {
-            Ok(()) => {
-                for callback in std::mem::take(&mut self.ordered_async_callbacks) {
-                    if let Err(error) = callback().await {
-                        drop(ordered_token);
-                        self.callbacks.run_success().await;
-                        return Err(Error::Other(format!(
-                            "ordered post-commit hook failed: {error}"
-                        )));
+            // Durable from here on: what follows can be reported, never
+            // turned into a failed write.
+            Ok(_) => {
+                if let Some(running) = running {
+                    for hook in hooks {
+                        super::post_commit::run_hook(hook()).await;
                     }
-                }
-                if let (Some(token), Some(seq)) = (ordered_token, ordered_seq) {
-                    if !token.finish(seq, std::mem::take(&mut self.ordered_events)) {
-                        self.callbacks.run_success().await;
-                        return Err(Error::Other(
-                            "ordered event receipt did not advance beyond its ordering floor"
-                                .to_string(),
-                        ));
-                    }
+                    running.done();
                 }
                 self.callbacks.run_success().await;
                 Ok(())
             }
             Err(error) => {
-                drop(ordered_token);
                 self.callbacks.run_error().await;
                 Err(error)
             }
@@ -407,7 +375,6 @@ impl Txn for RegolithTxn {
             callbacks: self.callbacks.counts(),
             ordered_events: self.ordered_events.len(),
             ordered_async_callbacks: self.ordered_async_callbacks.len(),
-            has_writes: self.has_writes,
         };
         self.writable_mut()?.set_savepoint();
         self.savepoints.push(state);
@@ -428,7 +395,6 @@ impl Txn for RegolithTxn {
         self.ordered_events.truncate(state.ordered_events);
         self.ordered_async_callbacks
             .truncate(state.ordered_async_callbacks);
-        self.has_writes = state.has_writes;
         Ok(())
     }
 
