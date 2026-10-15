@@ -26,7 +26,7 @@ pub mod private {
     impl Sealed for Box<dyn super::super::iterator::Iterator> {}
 }
 
-use super::callbacks::{OnAbort, OnCommit};
+use super::callbacks::{BeforeCommit, OnAbort, OnCommit};
 use super::errors::Result;
 use super::iterator::Iterator;
 use super::retry::{RetryAttempt, RetryAttemptError, RetryAttemptValue, RetryOptions};
@@ -378,6 +378,10 @@ pub trait Txn: ReaderWriter + private::Sealed {
     /// Register `callback` to run once if the transaction ends without
     /// committing: its commit fails, or it is discarded or dropped.
     fn on_abort(&mut self, callback: OnAbort);
+
+    /// Register `callback` to run once just before the commit is attempted.
+    /// An error from it fails the commit, and the abort callbacks run.
+    fn before_commit(&mut self, callback: BeforeCommit);
 
     /// Downcast to concrete type (for internal use in tests)
     fn as_any(&self) -> &dyn std::any::Any;

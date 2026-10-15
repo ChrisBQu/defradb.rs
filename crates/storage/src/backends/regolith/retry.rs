@@ -65,8 +65,17 @@ pub(super) async fn transact(
                 )));
             }
             if value.is_ok() {
-                let callbacks = std::mem::take(&mut retry_txn.callbacks);
-                latest = Some(PostCommit::bind(event_order, retry_txn.txn, callbacks));
+                let mut callbacks = std::mem::take(&mut retry_txn.callbacks);
+                match callbacks.run_before_commit() {
+                    Ok(()) => {
+                        latest = Some(PostCommit::bind(event_order, retry_txn.txn, callbacks));
+                    }
+                    Err(error) => {
+                        let (_, aborted) = callbacks.into_ends();
+                        aborted.run().await;
+                        value = Err(RetryAttemptError::Storage(error));
+                    }
+                }
             }
             value
         });

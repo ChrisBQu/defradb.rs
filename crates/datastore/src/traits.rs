@@ -40,4 +40,8 @@ pub trait Txn: MaybeSendSync {
     /// Register `callback` to run once if the transaction ends without
     /// committing.
     fn on_abort(&mut self, callback: OnAbort);
+
+    /// Register `callback` to run once just before the commit is attempted.
+    /// An error from it fails the commit, and the abort callbacks run.
+    fn before_commit(&mut self, callback: storage::corekv::BeforeCommit);
 }

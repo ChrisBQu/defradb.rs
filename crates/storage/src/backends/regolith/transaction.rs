@@ -327,7 +327,12 @@ impl Txn for RegolithTxn {
             ));
         }
         let handle = self.handle.take().ok_or(Error::DiscardedTxn)?;
-        let callbacks = std::mem::take(&mut self.callbacks);
+        let mut callbacks = std::mem::take(&mut self.callbacks);
+        if let Err(error) = callbacks.run_before_commit() {
+            let (_, aborted) = callbacks.into_ends();
+            aborted.run().await;
+            return Err(error);
+        }
         // regolith's `commit` consumes the transaction, so this has to be
         // its only owner. An iterator opened from it holds the same `Arc`,
         // so a caller that commits without closing one gets told, rather
@@ -409,6 +414,10 @@ impl Txn for RegolithTxn {
         self.callbacks.on_abort(callback);
     }
 
+    fn before_commit(&mut self, callback: crate::corekv::BeforeCommit) {
+        self.callbacks.before_commit(callback);
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -449,7 +458,7 @@ mod append_tests {
 mod callback_tests {
     use super::*;
     use crate::backends::RegolithStore;
-    use crate::corekv::{Store, TxnCallback, Writer};
+    use crate::corekv::{Reader, Store, TxnCallback, Writer};
     use regolith::sync::SegQueue;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -458,6 +467,26 @@ mod callback_tests {
         Box::new(move || {
             count.fetch_add(1, Ordering::SeqCst);
         })
+    }
+
+    /// A before-commit error fails the commit: nothing is written, the abort
+    /// callbacks run, and the commit callbacks do not.
+    #[tokio::test]
+    async fn a_failing_before_commit_fails_the_commit_and_runs_the_abort_callbacks() {
+        let store = RegolithStore::in_memory().unwrap();
+        let committed = Arc::new(AtomicUsize::new(0));
+        let aborted = Arc::new(AtomicUsize::new(0));
+        let mut txn = store.new_txn(false).await.unwrap();
+        txn.set(b"key", b"value").await.unwrap();
+        txn.on_commit(OnCommit::Sync(counting(&committed))).unwrap();
+        txn.on_abort(OnAbort::Sync(counting(&aborted)));
+        txn.before_commit(Box::new(|| Err(Error::Other("not yet".into()))));
+        let error = txn.commit().await.unwrap_err();
+        assert!(error.to_string().contains("not yet"), "{error}");
+        assert_eq!(committed.load(Ordering::SeqCst), 0);
+        assert_eq!(aborted.load(Ordering::SeqCst), 1);
+        let reader = store.new_txn(true).await.unwrap();
+        assert!(reader.get(b"key").await.unwrap().is_none());
     }
 
     /// A transaction dropped without a commit or a discard ends without

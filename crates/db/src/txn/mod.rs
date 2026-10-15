@@ -376,6 +376,18 @@ impl<S: Store> DbTxn<S> {
         Ok(())
     }
 
+    /// Register `callback` to run once just before the commit is attempted.
+    /// An error from it fails the commit, and the abort callbacks run.
+    ///
+    /// Returns an error if the transaction has been committed or discarded.
+    pub fn before_commit(&mut self, callback: storage::corekv::BeforeCommit) -> Result<()> {
+        self.txn
+            .as_mut()
+            .ok_or(Error::TxnNotActive)?
+            .before_commit(callback);
+        Ok(())
+    }
+
     // =========================================================================
     // Collection Cache Methods (Transaction-scoped caching)
     // =========================================================================

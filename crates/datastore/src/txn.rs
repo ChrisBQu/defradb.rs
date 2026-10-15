@@ -143,6 +143,10 @@ impl Txn for AttemptScopedTxn {
         self.callbacks.on_abort(callback);
     }
 
+    fn before_commit(&mut self, callback: storage::corekv::BeforeCommit) {
+        self.callbacks.before_commit(callback);
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -320,6 +324,12 @@ impl BasicTxn {
         self.callbacks.on_abort(callback);
     }
 
+    /// Register `callback` to run once just before the commit is attempted.
+    /// An error from it fails the commit, and the abort callbacks run.
+    pub fn before_commit(&mut self, callback: storage::corekv::BeforeCommit) {
+        self.callbacks.before_commit(callback);
+    }
+
     /// Commit the transaction.
     ///
     /// On success the commit callbacks run; on error the abort callbacks are
@@ -339,7 +349,13 @@ impl BasicTxn {
             });
         }
 
-        let (committed, aborted) = std::mem::take(&mut self.callbacks).into_ends();
+        let mut callbacks = std::mem::take(&mut self.callbacks);
+        if let Err(error) = callbacks.run_before_commit() {
+            let (_, aborted) = callbacks.into_ends();
+            aborted.run().await;
+            return Err(Error::Storage(error));
+        }
+        let (committed, aborted) = callbacks.into_ends();
         let shared = Arc::try_unwrap(self.shared_txn).map_err(|_| {
             Error::Storage(storage::corekv::Error::Other(
                 "Cannot commit: transaction still has references".into(),

@@ -337,6 +337,10 @@ impl Txn for BlockstoreTxn {
         self.txn.on_abort(callback)
     }
 
+    fn before_commit(&mut self, callback: crate::corekv::BeforeCommit) {
+        self.txn.before_commit(callback)
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }

@@ -15,6 +15,11 @@
 //! after a discard or a drop, whose caller cannot await. Each kind keeps its
 //! registration order.
 //!
+//! [`Txn::before_commit`](super::Txn::before_commit) registers work that runs
+//! just before the commit is attempted, in registration order; an error from
+//! one fails the commit and its abort callbacks run. A transaction that
+//! registers none pays nothing for it: no allocation and no pass.
+//!
 //! Every callback type is one shape of [`CallOnce`], declared once for every
 //! target: `Send` on native targets, not required to be in the
 //! single-threaded browser ([`MaybeSend`]).
@@ -41,6 +46,10 @@ pub type AsyncTxnCallback = Box<dyn CallOnce<MaybeBoxFuture<'static, ()>>>;
 /// A hook awaited once its commit is durable, before that commit's events go
 /// out. Its error is reported, never returned: the commit stands.
 pub type CommitHook = Box<dyn CallOnce<MaybeBoxFuture<'static, std::result::Result<(), String>>>>;
+
+/// Work run once just before the commit is attempted; an error fails the
+/// commit.
+pub type BeforeCommit = Box<dyn CallOnce<Result<()>>>;
 
 /// What runs after a commit, and how.
 pub enum OnCommit {
@@ -82,9 +91,13 @@ pub enum OnAbort {
 pub struct TxnCallbacks {
     read_only: bool,
     entries: Option<Box<SegQueue<Entry>>>,
+    /// Whether any before-commit work was registered, so a commit with none
+    /// skips that pass entirely.
+    before: bool,
 }
 
 enum Entry {
+    Before(BeforeCommit),
     Commit(OnCommit),
     Abort(OnAbort),
 }
@@ -101,7 +114,39 @@ impl TxnCallbacks {
         Self {
             read_only,
             entries: None,
+            before: false,
         }
+    }
+
+    /// Register `callback` to run once just before the commit is attempted.
+    pub fn before_commit(&mut self, callback: BeforeCommit) {
+        self.before = true;
+        self.push(Entry::Before(callback));
+    }
+
+    /// Run the before-commit work, in registration order, and keep every
+    /// other callback in its place. The first error stops the pass and is
+    /// returned; the commit must then fail. With nothing registered this
+    /// returns at once.
+    pub fn run_before_commit(&mut self) -> Result<()> {
+        if !std::mem::take(&mut self.before) {
+            return Ok(());
+        }
+        let Some(entries) = &self.entries else {
+            return Ok(());
+        };
+        let mut rest = Vec::with_capacity(entries.len());
+        let mut before = Vec::new();
+        while let Some(entry) = entries.pop() {
+            match entry {
+                Entry::Before(callback) => before.push(callback),
+                other => rest.push(other),
+            }
+        }
+        for entry in rest {
+            entries.push(entry);
+        }
+        before.into_iter().try_for_each(|callback| callback())
     }
 
     /// Register `callback` to run once if the transaction commits.
@@ -157,6 +202,7 @@ impl TxnCallbacks {
 
     /// Register what `other` holds after what this registry holds.
     pub fn append(&mut self, other: Self) {
+        self.before |= other.before;
         let Some(other) = other.entries else {
             return;
         };
@@ -174,6 +220,9 @@ impl TxnCallbacks {
         };
         while let Some(entry) = entries.pop() {
             match entry {
+                // Run by `run_before_commit` before any commit; one that is
+                // still here belongs to a transaction that never committed.
+                Entry::Before(_) => {}
                 Entry::Commit(OnCommit::Sync(callback)) => committed.then.sync.push(callback),
                 Entry::Commit(OnCommit::Async(callback)) => {
                     committed.then.asynchronous.push(callback)

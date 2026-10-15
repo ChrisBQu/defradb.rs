@@ -590,6 +590,10 @@ impl Txn for PauseDefinitionCommitTxn {
         self.inner.on_abort(callback)
     }
 
+    fn before_commit(&mut self, callback: storage::corekv::BeforeCommit) {
+        self.inner.before_commit(callback)
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
