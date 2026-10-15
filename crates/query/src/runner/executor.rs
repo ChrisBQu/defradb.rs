@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use rapidhash::RapidHashMap;
 use serde_json::Value as JsonValue;
 use std::future::Future;
+use std::sync::Arc;
 use tracing::{instrument, warn};
 
 use acp::nac::NodePermission;

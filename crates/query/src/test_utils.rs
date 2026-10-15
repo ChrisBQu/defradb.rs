@@ -179,11 +179,11 @@ impl TransactionContext for MockTxnContext {
         Some(self.action_lock.clone())
     }
 
-    fn set_statement_savepoint(&self) -> Result<(), String> {
+    fn set_statement_savepoint(&self) -> std::result::Result<(), String> {
         Ok(())
     }
 
-    fn finish_statement_savepoint(&self, _success: bool) -> Result<(), String> {
+    fn finish_statement_savepoint(&self, _success: bool) -> std::result::Result<(), String> {
         Ok(())
     }
 }
