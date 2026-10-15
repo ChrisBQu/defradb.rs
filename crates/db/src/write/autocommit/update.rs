@@ -112,6 +112,28 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 ));
             }
         }
+        // Explicit config from the mutation only. A document created
+        // encrypted keeps its encryption because the block writer
+        // inherits it from the previous block, matching Go's
+        // determineBlockEncryption.
+        let enc_config = get_encryption_config();
+        // A field that already holds the written value needs no block: its
+        // LWW priority would only re-assert the current state. Counter inputs
+        // are deltas, an explicit encryption config re-keys every field, and a
+        // downsample source records every write as a sample.
+        let downsample_source = self
+            .db
+            .is_downsample_source(collection_name)
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+        if enc_config.is_none() && !downsample_source {
+            modified_fields.retain(|field_name| {
+                doc.get_counter_delta(field_name).is_some()
+                    || doc.get(field_name) != current_doc.get(field_name)
+            });
+            if modified_fields.is_empty() {
+                return Ok(UpdateResult::new(current_doc, 0));
+            }
+        }
         for field_name in &modified_fields {
             if let Some(delta) = doc.get_counter_delta(field_name).cloned() {
                 // Counter inputs are deltas computed from the stale
@@ -199,11 +221,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .await?;
 
             // Use version_id for collectionVersionID (matches Go's VersionID())
-            // Explicit config from the mutation only. A document created
-            // encrypted keeps its encryption because the block writer
-            // inherits it from the previous block, matching Go's
-            // determineBlockEncryption.
-            let enc_config = get_encryption_config();
             // Get signing config from thread-local (set by FFI exec_request)
             let sign_config = get_signing_config();
 

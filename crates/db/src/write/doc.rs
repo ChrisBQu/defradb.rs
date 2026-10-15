@@ -398,6 +398,42 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             })?;
         doc.set_id(canonical_doc_id.clone());
 
+        // Read the PRE-WRITE committed doc ONCE (before the provisional blob
+        // write below). It decides which fields actually change, and each
+        // counter op records its value as the reconcile base, replicating the
+        // inline `apply_local_counter_deltas` semantics. Re-reading at finalize
+        // would observe the already-overwritten provisional blob and
+        // double-apply the delta for a PCounter (#1044).
+        let committed_pre_write = collection
+            .get_with_datastore(&datastore, doc_short_id, &canonical_doc_id)
+            .await
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+
+        // A field that already holds the written value needs no block: its
+        // LWW priority would only re-assert the current state. Counter inputs
+        // are deltas, an explicit encryption config re-keys every field, and a
+        // downsample source records every write as a sample. A document stored
+        // under an older version is compared only after lensing, which this
+        // raw read skips, so it is written in full.
+        let downsample_source = self
+            .db
+            .is_downsample_source(collection_name)
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+        if get_encryption_config().is_none() && !downsample_source {
+            if let Some(committed) = committed_pre_write
+                .as_ref()
+                .filter(|d| d.schema_version_id() == Some(collection.version_id()))
+            {
+                modified_fields.retain(|field_name| {
+                    doc.get_counter_delta(field_name).is_some()
+                        || doc.get(field_name) != committed.get(field_name)
+                });
+                if modified_fields.is_empty() {
+                    return Ok(UpdateResult::new(committed.clone(), 0));
+                }
+            }
+        }
+
         let generated = crate::search::set_embedding(
             &collection.schema().vector_embeddings,
             &mut doc,
@@ -428,24 +464,6 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         // interactive txn from holding the process-wide gate over its
         // user-controlled lifetime. See `InteractiveTxnCounter.tla`.
         let mut counter_ops = Vec::new();
-        // Read the PRE-WRITE committed doc ONCE (before the provisional blob write
-        // below) so each counter op records its pre-update committed value as the
-        // reconcile base — replicating the inline `apply_local_counter_deltas`
-        // semantics. Re-reading at finalize would observe the already-overwritten
-        // provisional blob and double-apply the delta for a PCounter (#1044).
-        let committed_pre_write = if collection
-            .schema()
-            .fields
-            .iter()
-            .any(|f| f.crdt_type.is_counter() && doc.get_counter_delta(&f.name).is_some())
-        {
-            collection
-                .get_with_datastore(&datastore, doc_short_id, &canonical_doc_id)
-                .await
-                .map_err(|e| query::error::QueryError::execution(e.to_string()))?
-        } else {
-            None
-        };
         for field in &collection.schema().fields {
             if !field.crdt_type.is_counter() {
                 continue;
