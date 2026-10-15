@@ -684,14 +684,14 @@ mod tests {
 
     /// Manual performance probe for choosing the epoch ticker period. Run with:
     /// `cargo test -p lens measure_epoch_ticker_periods -- --ignored --nocapture`.
-    /// `DEFRA_LENS_TICKER_SAMPLES` and `DEFRA_LENS_TICKER_BATCHES` shorten or
+    /// `DEFRA_LENS_TICKER_SAMPLES` and `DEFRA_LENS_TICKER_LIGHT_MS` shorten or
     /// lengthen the run. It reports wall latency only; portable Rust does not
     /// expose reliable thread CPU-time or context-switch counters here.
     #[test]
     #[ignore = "manual epoch ticker timing probe; run on an otherwise idle host"]
     fn measure_epoch_ticker_periods() {
         let samples = env_usize("DEFRA_LENS_TICKER_SAMPLES", 20);
-        let batches = env_usize("DEFRA_LENS_TICKER_BATCHES", 50);
+        let light_sample_ms = env_usize("DEFRA_LENS_TICKER_LIGHT_MS", 2_000);
         let docs_per_batch = 16;
         let periods_ms = [10, 25, 50, 100, 250];
         let input_docs = vec![
@@ -700,19 +700,19 @@ mod tests {
         ];
         let module_bytes = IDENTITY_PASSTHROUGH_WASM;
 
-        println!("epoch ticker probe: samples={samples}, batches/sample={batches}, docs/batch={docs_per_batch}");
-        println!("period_ms,light_median_ns_per_doc,light_p95_ns_per_doc,trap_median_ms,trap_p95_ms,trap_min_ms,trap_max_ms");
+        println!("epoch ticker probe: samples={samples}, light_ms/sample={light_sample_ms}, docs/batch={docs_per_batch}");
+        println!("period_ms,light_median_ns_per_doc,light_p95_ns_per_doc,light_epoch_traps,trap_median_ms,trap_p95_ms,trap_min_ms,trap_max_ms");
         println!("CPU time/context switches: not measured by this portable harness; optionally wrap the test process in platform-specific perf tooling.");
 
         for period_ms in periods_ms {
             let period = Duration::from_millis(period_ms);
             let mut sandbox = WasmSandboxConfig::restrictive();
-            sandbox.fuel_budget = Some(50_000_000);
-            // The light-call probe compares periodic wake overhead without
-            // allowing the deliberately tiny 10 ms setting to interrupt a
-            // batch under a loaded machine. The trap probe below uses the
-            // actual restrictive deadline of two ticks.
-            sandbox.epoch_deadline_ticks = Some(10_000);
+            // Use the actual two-tick deadline for ordinary work too. The
+            // light probe runs long enough to span many timer periods and
+            // reports any accidental interruption. Fuel is only a distant
+            // safety bound so it does not mask epoch timing.
+            sandbox.fuel_budget = Some(u64::MAX);
+            sandbox.epoch_deadline_ticks = Some(2);
             sandbox.epoch_tick_period = Some(period);
             let wasm_store = WasmTransformStore::with_sandbox(Some(sandbox.clone())).unwrap();
             let module = Module::new(&wasm_store.engine, module_bytes).unwrap();
@@ -733,14 +733,15 @@ mod tests {
             }
 
             let mut light_ns_per_doc = Vec::with_capacity(samples);
+            let mut light_epoch_traps = 0usize;
             for _ in 0..samples {
                 let started = std::time::Instant::now();
                 let mut doc_count = 0usize;
-                for _ in 0..batches {
+                while started.elapsed() < Duration::from_millis(light_sample_ms as u64) {
                     let docs = (0..docs_per_batch)
                         .map(|index| input_docs[index % input_docs.len()].clone())
                         .collect();
-                    let result = execute_batch_transform(
+                    match execute_batch_transform(
                         &wasm_store.engine,
                         &module,
                         docs,
@@ -748,11 +749,16 @@ mod tests {
                         false,
                         store_limits(&Some(sandbox.clone())),
                         &Some(sandbox.clone()),
-                    )
-                    .unwrap();
-                    doc_count += result.len();
+                    ) {
+                        Ok(result) => doc_count += result.len(),
+                        Err(error) if error.to_string().to_lowercase().contains("interrupt") => {
+                            light_epoch_traps += 1;
+                        }
+                        Err(error) => panic!("light transform failed unexpectedly: {error}"),
+                    }
                 }
-                light_ns_per_doc.push(started.elapsed().as_nanos() as f64 / doc_count as f64);
+                light_ns_per_doc
+                    .push(started.elapsed().as_nanos() as f64 / doc_count.max(1) as f64);
             }
             light_ns_per_doc.sort_by(f64::total_cmp);
 
@@ -760,10 +766,11 @@ mod tests {
             let mut trap_ms = Vec::with_capacity(samples);
             for _ in 0..samples {
                 let engine = wasm_store.engine.clone();
+                let module = module.clone();
                 let (sender, receiver) = std::sync::mpsc::sync_channel(1);
                 std::thread::spawn(move || {
                     let mut store = wasmtime::Store::new(&engine, ());
-                    store.set_fuel(50_000_000).unwrap();
+                    store.set_fuel(u64::MAX).unwrap();
                     store.set_epoch_deadline(2);
                     let instance = wasmtime::Instance::new(&mut store, &module, &[])
                         .expect("infinite loop module instantiates");
@@ -792,7 +799,7 @@ mod tests {
             trap_ms.sort_by(f64::total_cmp);
 
             println!(
-                "{period_ms},{:.1},{:.1},{:.3},{:.3},{:.3},{:.3}",
+                "{period_ms},{:.1},{:.1},{light_epoch_traps},{:.3},{:.3},{:.3},{:.3}",
                 percentile(&light_ns_per_doc, 0.50),
                 percentile(&light_ns_per_doc, 0.95),
                 percentile(&trap_ms, 0.50),
