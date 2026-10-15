@@ -1,0 +1,110 @@
+{
+  "observed_utc": "2026-10-15T09:21:30Z",
+  "source_manifest": {
+    "path": "/tmp/defra-main-refreshed-heads.json",
+    "sha256": "17399b5526dd493514ddb81e084b15c15fb9c935d4e9c3e1e47a0233bc3cb6d3"
+  },
+  "checks": [
+    {
+      "pr": 1959,
+      "head_sha": "89d71e2b7449e0b52a277996603ee3073f4d10f6",
+      "workflow": "CI",
+      "run_id": 38703087678,
+      "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38703087678",
+      "conclusion": "success"
+    },
+    {
+      "pr": 1959,
+      "head_sha": "89d71e2b7449e0b52a277996603ee3073f4d10f6",
+      "workflow": "CI (macOS)",
+      "run_id": 38703087766,
+      "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38703087766",
+      "conclusion": "success"
+    },
+    {
+      "pr": 1959,
+      "head_sha": "89d71e2b7449e0b52a277996603ee3073f4d10f6",
+      "workflow": "Native consumer",
+      "run_id": 38703087623,
+      "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38703087623",
+      "conclusion": "success"
+    },
+    {
+      "pr": 1959,
+      "head_sha": "89d71e2b7449e0b52a277996603ee3073f4d10f6",
+      "workflow": "Performance (pull request)",
+      "run_id": 38703087643,
+      "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38703087643",
+      "conclusion": "success"
+    },
+    {
+      "pr": 1960,
+      "head_sha": "133a308aa62dfdddc2fa33b95b5d37e0676399c1",
+      "workflow": "CI",
+      "run_id": 38703089324,
+      "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38703089324",
+      "conclusion": "success"
+    },
+    {
+      "pr": 1960,
+      "head_sha": "133a308aa62dfdddc2fa33b95b5d37e0676399c1",
+      "workflow": "CI (macOS)",
+      "run_id": 38703089390,
+      "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38703089390",
+      "conclusion": "success"
+    },
+    {
+      "pr": 1960,
+      "head_sha": "133a308aa62dfdddc2fa33b95b5d37e0676399c1",
+      "workflow": "Native consumer",
+      "run_id": 38703089156,
+      "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38703089156",
+      "conclusion": "success"
+    },
+    {
+      "pr": 1960,
+      "head_sha": "133a308aa62dfdddc2fa33b95b5d37e0676399c1",
+      "workflow": "Performance (pull request)",
+      "run_id": 38703089116,
+      "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38703089116",
+      "conclusion": "success"
+    },
+    {
+      "pr": 1961,
+      "head_sha": "f7813d07f2f16eefb6ebc994ff09fc08b63e0742",
+      "workflow": "CI",
+      "run_id": 38703087341,
+      "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38703087341",
+      "conclusion": "success"
+    },
+    {
+      "pr": 1961,
+      "head_sha": "f7813d07f2f16eefb6ebc994ff09fc08b63e0742",
+      "workflow": "CI (macOS)",
+      "run_id": 38703087339,
+      "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38703087339",
+      "conclusion": "success"
+    },
+    {
+      "pr": 1961,
+      "head_sha": "f7813d07f2f16eefb6ebc994ff09fc08b63e0742",
+      "workflow": "Native consumer",
+      "run_id": 38703087302,
+      "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38703087302",
+      "conclusion": "success"
+    },
+    {
+      "pr": 1961,
+      "head_sha": "f7813d07f2f16eefb6ebc994ff09fc08b63e0742",
+      "workflow": "Performance (pull request)",
+      "run_id": 38703087343,
+      "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38703087343",
+      "conclusion": "success"
+    }
+  ],
+  "notes": [
+    "All 12 listed runs completed successfully at the recorded observation time.",
+    "Earlier cancelled same-head runs were superseded and are intentionally omitted.",
+    "No local builds, tests, repository edits, or GitHub mutations were performed for this monitoring task."
+  ]
+}

@@ -1,0 +1,150 @@
+{
+  "bundle": "source-revisions.bundle",
+  "size_bytes": 1572932,
+  "sha256": "b5ad705e6c3144b1ab4ca199fdc99e62df7cd1ee40a87ae3b371cb75ad100d12",
+  "included_refs": [
+    {
+      "sha": "d6f58d6249ca90701f8ceb9732d859e046e6fdc6",
+      "ref": "refs/regolith-evidence/20261015/step0-d6f58d624"
+    },
+    {
+      "sha": "3162318e27754ccf5cb64ae4f04bd8675505edfa",
+      "ref": "refs/regolith-evidence/20261015/step1a-3162318e2"
+    },
+    {
+      "sha": "1cf6a0b236bf8f2fd357503a7d0762d6f1ea760b",
+      "ref": "refs/regolith-evidence/20261015/step1b-1cf6a0b23"
+    },
+    {
+      "sha": "45c81aed5c73f431e00549acb78c7f7582c725a1",
+      "ref": "refs/regolith-evidence/20261015/step1-45c81aed5"
+    },
+    {
+      "sha": "23c8fde54a085ce99b6c10aa92c1ce2d52ac9cc0",
+      "ref": "refs/regolith-evidence/20261015/step2-23c8fde54"
+    },
+    {
+      "sha": "711555a37a37b4c017e1753ea28f96beaaa757f2",
+      "ref": "refs/regolith-evidence/20261015/step3-711555a37"
+    },
+    {
+      "sha": "965fb4e6e65d3a0874b0e5964eee4fde2509ede3",
+      "ref": "refs/regolith-evidence/20261015/step4-965fb4e6e"
+    },
+    {
+      "sha": "c2502fc5c1afd9e5f8013f11e3f0b35836548b6d",
+      "ref": "refs/regolith-evidence/20261015/step5-c2502fc5c"
+    },
+    {
+      "sha": "d230f33fb42881be8ae82322ae39dae74e869c68",
+      "ref": "refs/regolith-evidence/20261015/forcedread-d230f33fb"
+    },
+    {
+      "sha": "bafceb60c0d8c0f59482a212a719e7ac2f14fa6a",
+      "ref": "refs/regolith-evidence/20261015/arrival-bafceb60c"
+    },
+    {
+      "sha": "a4487cef0752f822006e128618be3a99778a8878",
+      "ref": "refs/regolith-evidence/20261015/acpcounter-a4487cef0"
+    },
+    {
+      "sha": "1ceaefaca54f684086cf218f5cc69470c59cbe5b",
+      "ref": "refs/regolith-evidence/20261015/docqueue-1ceaefaca"
+    },
+    {
+      "sha": "b33f571c7b1f05e647d1ad6ab993c76abd1001b0",
+      "ref": "refs/regolith-evidence/20261015/collectionlock-b33f571c7"
+    },
+    {
+      "sha": "6262270d1aaa5a92fafefc15a341dd4b0acd49c8",
+      "ref": "refs/regolith-evidence/20261015/peergeneration-6262270d1"
+    },
+    {
+      "sha": "d7d8d0c1764a0091242e368d72ae23c946130781",
+      "ref": "refs/regolith-evidence/20261015/acpengine-d7d8d0c17"
+    },
+    {
+      "sha": "5ae8448a4dc3b27dc60d1034dfdcf46c9f697fea",
+      "ref": "refs/regolith-evidence/20261015/deferredacp-5ae8448a4"
+    },
+    {
+      "sha": "5af484fb3ffd85108423fcdd2313480625fd2aaa",
+      "ref": "refs/regolith-evidence/20261015/headcache-5af484fb3"
+    },
+    {
+      "sha": "47a35b11180a503394f23d7c511d65cc650a5245",
+      "ref": "refs/regolith-evidence/20261015/step6-47a35b111"
+    },
+    {
+      "sha": "11b71efcdc6d6ceefc74984c6184c1e1e90aed90",
+      "ref": "refs/regolith-evidence/20261015/step7-11b71efcd"
+    },
+    {
+      "sha": "051fd5fc3d794844d083feba219c8d5e2b0eb710",
+      "ref": "refs/regolith-evidence/20261015/step8-051fd5fc3"
+    },
+    {
+      "sha": "3a90482b2fd1b333a88892d1b0921d9be8fa8116",
+      "ref": "refs/regolith-evidence/20261015/createfast-3a90482b2"
+    },
+    {
+      "sha": "7b7fb91af990f368d29e79a65df4df366922222f",
+      "ref": "refs/regolith-evidence/20261015/pr-1922"
+    },
+    {
+      "sha": "ea27f8338922b64df273a3940a5b9dfffd4a653f",
+      "ref": "refs/regolith-evidence/20261015/pr-1949"
+    },
+    {
+      "sha": "e309501d211ec6fdf0a10c890c1a0c454745562d",
+      "ref": "refs/regolith-evidence/20261015/pr-1920"
+    },
+    {
+      "sha": "7668ba87fb1cf7bd8401ece70a925a18128b5a2c",
+      "ref": "refs/regolith-evidence/20261015/pr-1951"
+    },
+    {
+      "sha": "b65de36345b17168bb18e520eabfa3f392fb1856",
+      "ref": "refs/regolith-evidence/20261015/pr-1952"
+    },
+    {
+      "sha": "78e48a854d7d9e18d06178eeeeb314036b00697a",
+      "ref": "refs/regolith-evidence/20261015/pr-1953"
+    },
+    {
+      "sha": "ad6427264f4807452a74fd9e5fedc9b45e285182",
+      "ref": "refs/regolith-evidence/20261015/pr-1955"
+    },
+    {
+      "sha": "913e98b280ee98b4e89545ce264c424de269cbeb",
+      "ref": "refs/regolith-evidence/20261015/pr-1956"
+    },
+    {
+      "sha": "89d71e2b7449e0b52a277996603ee3073f4d10f6",
+      "ref": "refs/regolith-evidence/20261015/pr-1959"
+    },
+    {
+      "sha": "133a308aa62dfdddc2fa33b95b5d37e0676399c1",
+      "ref": "refs/regolith-evidence/20261015/pr-1960"
+    },
+    {
+      "sha": "f7813d07f2f16eefb6ebc994ff09fc08b63e0742",
+      "ref": "refs/regolith-evidence/20261015/pr-1961"
+    }
+  ],
+  "included_ref_count": 32,
+  "built_revision_manifest": "/tmp/defra-perf-artifacts/final-label-mapping.json",
+  "built_revision_manifest_sha256": "fdd90a078d653918957fd10eae13d9d5aec44483b01646ed39f345611040ae33",
+  "built_entries_in_manifest": 22,
+  "built_entry_base_prerequisite_excluded": "8a38e96f213cd9edc55c89eed272ba8f83c76524",
+  "built_non_base_refs_in_bundle": 21,
+  "published_heads_manifest": "/tmp/defra-main-refreshed-heads.json",
+  "published_heads_manifest_sha256": "17399b5526dd493514ddb81e084b15c15fb9c935d4e9c3e1e47a0233bc3cb6d3",
+  "published_head_refs_in_bundle": 11,
+  "prerequisite": "8a38e96f213cd9edc55c89eed272ba8f83c76524",
+  "bundle_verify": "/tmp/defra-regolith-sources.bundle is okay",
+  "bundle_verify_output": "/tmp/defra-regolith-sources.bundle is okay\nThe bundle contains these 32 refs:\nd6f58d6249ca90701f8ceb9732d859e046e6fdc6 refs/regolith-evidence/20261015/step0-d6f58d624\n3162318e27754ccf5cb64ae4f04bd8675505edfa refs/regolith-evidence/20261015/step1a-3162318e2\n1cf6a0b236bf8f2fd357503a7d0762d6f1ea760b refs/regolith-evidence/20261015/step1b-1cf6a0b23\n45c81aed5c73f431e00549acb78c7f7582c725a1 refs/regolith-evidence/20261015/step1-45c81aed5\n23c8fde54a085ce99b6c10aa92c1ce2d52ac9cc0 refs/regolith-evidence/20261015/step2-23c8fde54\n711555a37a37b4c017e1753ea28f96beaaa757f2 refs/regolith-evidence/20261015/step3-711555a37\n965fb4e6e65d3a0874b0e5964eee4fde2509ede3 refs/regolith-evidence/20261015/step4-965fb4e6e\nc2502fc5c1afd9e5f8013f11e3f0b35836548b6d refs/regolith-evidence/20261015/step5-c2502fc5c\nd230f33fb42881be8ae82322ae39dae74e869c68 refs/regolith-evidence/20261015/forcedread-d230f33fb\nbafceb60c0d8c0f59482a212a719e7ac2f14fa6a refs/regolith-evidence/20261015/arrival-bafceb60c\na4487cef0752f822006e128618be3a99778a8878 refs/regolith-evidence/20261015/acpcounter-a4487cef0\n1ceaefaca54f684086cf218f5cc69470c59cbe5b refs/regolith-evidence/20261015/docqueue-1ceaefaca\nb33f571c7b1f05e647d1ad6ab993c76abd1001b0 refs/regolith-evidence/20261015/collectionlock-b33f571c7\n6262270d1aaa5a92fafefc15a341dd4b0acd49c8 refs/regolith-evidence/20261015/peergeneration-6262270d1\nd7d8d0c1764a0091242e368d72ae23c946130781 refs/regolith-evidence/20261015/acpengine-d7d8d0c17\n5ae8448a4dc3b27dc60d1034dfdcf46c9f697fea refs/regolith-evidence/20261015/deferredacp-5ae8448a4\n5af484fb3ffd85108423fcdd2313480625fd2aaa refs/regolith-evidence/20261015/headcache-5af484fb3\n47a35b11180a503394f23d7c511d65cc650a5245 refs/regolith-evidence/20261015/step6-47a35b111\n11b71efcdc6d6ceefc74984c6184c1e1e90aed90 refs/regolith-evidence/20261015/step7-11b71efcd\n051fd5fc3d794844d083feba219c8d5e2b0eb710 refs/regolith-evidence/20261015/step8-051fd5fc3\n3a90482b2fd1b333a88892d1b0921d9be8fa8116 refs/regolith-evidence/20261015/createfast-3a90482b2\n7b7fb91af990f368d29e79a65df4df366922222f refs/regolith-evidence/20261015/pr-1922\nea27f8338922b64df273a3940a5b9dfffd4a653f refs/regolith-evidence/20261015/pr-1949\ne309501d211ec6fdf0a10c890c1a0c454745562d refs/regolith-evidence/20261015/pr-1920\n7668ba87fb1cf7bd8401ece70a925a18128b5a2c refs/regolith-evidence/20261015/pr-1951\nb65de36345b17168bb18e520eabfa3f392fb1856 refs/regolith-evidence/20261015/pr-1952\n78e48a854d7d9e18d06178eeeeb314036b00697a refs/regolith-evidence/20261015/pr-1953\nad6427264f4807452a74fd9e5fedc9b45e285182 refs/regolith-evidence/20261015/pr-1955\n913e98b280ee98b4e89545ce264c424de269cbeb refs/regolith-evidence/20261015/pr-1956\n89d71e2b7449e0b52a277996603ee3073f4d10f6 refs/regolith-evidence/20261015/pr-1959\n133a308aa62dfdddc2fa33b95b5d37e0676399c1 refs/regolith-evidence/20261015/pr-1960\nf7813d07f2f16eefb6ebc994ff09fc08b63e0742 refs/regolith-evidence/20261015/pr-1961\nThe bundle requires this ref:\n8a38e96f213cd9edc55c89eed272ba8f83c76524 \nThe bundle uses this hash algorithm: sha1",
+  "notes": "Includes only the 21 non-base benchmark build revisions and 11 published PR heads named in the manifests. The integrated main prerequisite is excluded from the bundle payload and required to fetch it.",
+  "original_bundle_path": "/tmp/defra-regolith-sources.bundle",
+  "path_note": "Absolute paths in original manifests and verification output record producer-machine provenance; use sibling source-revisions.bundle for portable verification."
+}

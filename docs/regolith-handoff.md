@@ -1,139 +1,74 @@
 # Regolith adoption handoff
 
-[PR #1953](https://github.com/sourcenetwork/defradb.rs/pull/1953) is Theo's permanent review entry point. **The actual top of the stack is [#1961](https://github.com/sourcenetwork/defradb.rs/pull/1961). All eight adoption steps are represented by 11 PRs, but implementation and validation gates remain open. No PR has been merged.**
+[PR #1953](https://github.com/sourcenetwork/defradb.rs/pull/1953) is the permanent review entry point; the current stack tip is [#1961](https://github.com/sourcenetwork/defradb.rs/pull/1961). The stack represents prep step 0 and all eight §5.2 adoption steps. **All PRs remain drafts and none are merged.** Merge bottom-up, retargeting each next PR only after its base lands.
 
-Scope: §5.2 steps 1–8 plus preparatory step 0 from Theo's bundle. New installations only; Jack waived migrations and compatibility with existing encrypted/value layouts. Step 9's worker-pool redesign is excluded. Main base: `8a38e96f2` (includes the resident DiskANN code-cache and MSRV changes). Regolith pin: `d1e36aa747913f6b1ecc14c821f4e5e6314674cf`.
+Scope is new installations only. Existing-store format compatibility and migrations are explicitly waived. Step 9's worker-pool redesign is excluded. Regolith is pinned to `d1e36aa747913f6b1ecc14c821f4e5e6314674cf`; the integrated main base is `8a38e96f2`.
 
-## Stack and merge order
+## Merge order and step map
 
-Merge from the bottom upward, retargeting the next PR after each merge. The branch name on #1920 predates its replacement implementation; its current content is engine encryption, not the old marker proposal.
+| Order | Step | PR | Validated code/CI head | Base |
+|---:|---|---|---|---|
+| 1 | Prep / step 0 | [#1922](https://github.com/sourcenetwork/defradb.rs/pull/1922) | `7b7fb91a` | `main` (`8a38e96f2`) |
+| 2 | 1a: Regolith API, RepeatableRead | [#1949](https://github.com/sourcenetwork/defradb.rs/pull/1949) | `ea27f833` | #1922 |
+| 3 | 1b: engine encryption | [#1920](https://github.com/sourcenetwork/defradb.rs/pull/1920) | `e309501d` | #1949 |
+| 4 | 1c: key classifier / DefraLevel | [#1951](https://github.com/sourcenetwork/defradb.rs/pull/1951) | `7668ba87` | #1920 |
+| 5 | 2: transactional decisions | [#1952](https://github.com/sourcenetwork/defradb.rs/pull/1952) | `b65de363` | #1951 |
+| 6 | 3: engine mechanisms | [#1953](https://github.com/sourcenetwork/defradb.rs/pull/1953) | `78e48a85` | #1952 |
+| 7 | 4: receipt-ordered events | [#1955](https://github.com/sourcenetwork/defradb.rs/pull/1955) | `ad642726` | #1953 |
+| 8 | 5: engine-owned retries | [#1956](https://github.com/sourcenetwork/defradb.rs/pull/1956) | `913e98b2` | #1955 |
+| 9 | 6: lock removal | [#1959](https://github.com/sourcenetwork/defradb.rs/pull/1959) | `89d71e2b` | #1956 |
+| 10 | 7: engine telemetry | [#1960](https://github.com/sourcenetwork/defradb.rs/pull/1960) | `133a308a` | #1959 |
+| 11 | 8: proof alignment | [#1961](https://github.com/sourcenetwork/defradb.rs/pull/1961) | `f7813d07` | #1960 |
 
-| Order | Plan | PR | Branch | Base |
-|---|---|---|---|---|
-| 1 | Prep / step 0 | [#1922](https://github.com/sourcenetwork/defradb.rs/pull/1922) | `fix/step0-kms-writes` | `main` |
-| 2 | 1a API bump, still RepeatableRead | [#1949](https://github.com/sourcenetwork/defradb.rs/pull/1949) | `chore/regolith-defralevel-api` | `fix/step0-kms-writes` |
-| 3 | 1b engine encryption | [#1920](https://github.com/sourcenetwork/defradb.rs/pull/1920) | `defralevel/s0-change-markers` | `chore/regolith-defralevel-api` |
-| 4 | 1c classifier / DefraLevel | [#1951](https://github.com/sourcenetwork/defradb.rs/pull/1951) | `defralevel/01c-key-classifier` | `defralevel/s0-change-markers` |
-| 5 | 2 transactional decisions | [#1952](https://github.com/sourcenetwork/defradb.rs/pull/1952) | `defralevel/02-transaction-decisions` | `defralevel/01c-key-classifier` |
-| 6 | 3 mechanisms | [#1953](https://github.com/sourcenetwork/defradb.rs/pull/1953) | `defralevel/03-engine-mechanisms` | `defralevel/02-transaction-decisions` |
-| 7 | 4 ordered events | [#1955](https://github.com/sourcenetwork/defradb.rs/pull/1955) | `defralevel/04-ordered-events` | `defralevel/03-engine-mechanisms` |
-| 8 | 5 engine-owned retries | [#1956](https://github.com/sourcenetwork/defradb.rs/pull/1956) | `defralevel/05-engine-retries` | `defralevel/04-ordered-events` |
-| 9 | 6 lock removal | [#1959](https://github.com/sourcenetwork/defradb.rs/pull/1959) | `defralevel/06-lock-removal` | `defralevel/05-engine-retries` |
-| 10 | 7 engine telemetry | [#1960](https://github.com/sourcenetwork/defradb.rs/pull/1960) | `defralevel/07-engine-telemetry` | `defralevel/06-lock-removal` |
-| 11 | 8 proof alignment | [#1961](https://github.com/sourcenetwork/defradb.rs/pull/1961) | `defralevel/08-proof-alignment` | `defralevel/07-engine-telemetry` |
+The table records the validated code heads; subsequent documentation-only commits on #1961 publish this handoff and evidence. CI results below refer to those recorded heads, not automatically to later commits.
 
-The stack has the intended 11 PRs. All eleven PRs remain drafts while adoption gates are completed. No auto-merge is enabled on #1922. Split into two stacks if further necessary splits exceed 11. Do not merge superseded generated implementations (#1897/#1899/#1911); their closure remains pending completion of this adoption.
+The #1920 branch name predates the final implementation; its current content is engine encryption. Do not merge superseded generated PRs #1897, #1899, or #1911.
 
-## Current implementation and remaining work
+## Implementation status
 
-| Step | Published implementation | Remaining work |
-|---|---|---|
-| 1 | Pinned API, engine encryption, classifier/DefraLevel in three PRs | Final stack validation and performance gates |
-| 2 | Transactional decision reads, local ACP, relationship/NAC/downsample decisions | Lower-checkpoint interoperability passes; final stack performance gates remain |
-| 3 | Arrival append, ID allocation, field/counter/vector/full-text operators, head markers, read-only lenses and known-field write projections | General query/output and conditional reads remain conservative; no blanket zero-conflict claim |
-| 4 | Receipt-ordered events and fallible ordered ACP hooks | Final CI/performance gates; winner-only hooks and suppression on hook failure are covered |
-| 5 | Engine retries for individual/many writes, merges, lenses, backfill and pending DAG writes; bounded prepared inputs | Generic HTTP/embedded business-conflict replay removed; eligible single mutations now rerun selection inside engine batches. Final CI and performance gates remain |
-| 6 | Requested locks/cache/forced-read APIs removed; snapshot metadata, collection OCC, immutable ACP projections and peer generation fences replace them. Native Vera-backed local tombstones now retain shared ACP registration/grants; explicit ArchiveObject remains global, and Cosmos keeps its default archive behavior. | Vera library 67/67 and all seven unchanged native qualification cases pass with the pinned runtime. Provider/CLI and native-test Clippy pass; fresh upper-stack CI remains pending. Errors from archive operations that are actually issued still propagate. Performance gates remain |
-| 7 | Native commit/policy tickers and bounded conflict reasons; caller instrumentation retained | Current-head remote CI and performance gates |
-| 8 | Obsolete cache/counter/queue proofs retired; HeadSet retained; pinned arrival proof and new adapter boundary models | Fresh exact-head CI after the native ACP correction remains; models do not verify Rust or remote authorization |
+- **Step 0:** write preparation, bounded shared lens execution, shared engine ticker lifecycle, and lazy transaction-local lens transforms. The 100 ms epoch-ticker interval is provisional: a bounded measurement observed 213 ms median and 220 ms p95 interruption after two ticks, not an optimal interval or a complex-lens latency guarantee ([measurement](benchmarks/lens-epoch-period/measurement.md)).
+- **Step 1:** API upgrade, direct engine key providers, and key classification are split across #1949/#1920/#1951. DefraLevel is used for writes; only genuine block CID keys are content-addressed.
+- **Step 2:** transaction-snapshot reads and writes cover document/schema/relationship/NAC/downsample decisions, local authorization, and schema/index decision scans. Schema-head cache publication follows successful commit; schema decisions use a validated scan in the write transaction. Explicit GraphQL statement savepoints make later failure, timeout, or cancellation roll back only that statement while preserving prior statements; failed-statement blob blocks are removed, while allocated IDs may leave gaps. Direct registry DDL has only pending GraphQL cleanup, not an independent operation savepoint.
+- **Step 3:** commit-ordered arrivals, engine ID allocation and value merges cover counters, full text, vectors, and document fields. It adds document head markers and write-free read-only lenses. General query/output and conditional reads remain conservative; do not claim zero incidental conflicts.
+- **Step 4:** events dispatch by actual commit receipt sequence. Ordered fallible ACP hooks run before related events; hook failure suppresses those events. A later receipt waits for earlier active receipts, including external ACP work.
+- **Step 5:** engine-owned retries cover writes, merges, lenses, backfill, pending-DAG transactions, and selected mutation batches. Attempt callbacks can rerun. Losing transaction writes and callback bundles are discarded; only the winner’s registered post-commit hooks and effect bundles are transferred for dispatch. Inputs such as IDs, DEKs, ciphertext, and counter nonces remain stable across replay; request-prepared external inputs are bounded and typed. Interactive transactions return conflicts to callers.
+- **Step 6:** the planned storage/cache/collection locks and forced-read APIs are retired or replaced by snapshot validation, OCC, immutable ACP projections, and peer-generation fences. Explicit-ID scalar GraphQL writes project known changed fields and `_docID` outputs; unsupported query shapes and conditional updates retain broader validation. Index-list drift alone is tolerated while every non-index schema field remains checked. Index backfill captures its cutoff after schema publication, and an interrupted action with no progress row recaptures a safe post-publication cutoff. Native Vera local tombstones retain shared registration/grants across a replica-local delete; explicit `ArchiveObject` remains global, and other providers retain their default behavior. Issued archive errors still propagate.
+- **Step 7:** engine transaction/policy tickers and bounded conflict reasons are exposed; caller-side measurements remain distinct from engine replay counts.
+- **Step 8:** obsolete cache/finalizer proof models are retired, while HeadSet remains. At the published proof head, all 167 configured TLC cases have their expected verdicts; five registry/library checks and two Lean contract checks pass. The restack leaves proof source unchanged. These finite boundary models do not prove Rust behavior or remote authorization.
 
-### Latest validation and remaining gates
+Accepted D39/D56 supersede the earlier synchronous-trait wording: data paths remain async and use `transact_async`; the existing native blocking bridge stays in place until excluded step 9. Scoped retry I/O cannot commit/discard independently, and retained views fail closed before returning the real engine transaction.
 
-The stack has been rebased onto main `8a38e96f2`. GitHub's native stack reported a conflict against newer main even though each PR's immediate branch base was an ancestor; the real conflict was resolved by retaining both the new DiskANN cache and statement-savepoint state. Collection caches retain their step-6 OCC ownership.
+## Validation
 
-The pre-native-fix stack at `887502472` passed **2,377 core tests (33 ignored), 358 HTTP/embedded tests (5 ignored), five benchmark-accounting tests, native all-target Clippy, and WASM Clippy**. [Portable raw logs, checksums, and reproduction commands](validation/regolith-887502472/README.md) record that checkpoint. The native ACP fix is a subsequent optional Vera-provider behavior change; default DB/query/storage source is unchanged, but these results do not validate that Vera path.
+All eleven published exact heads are draft, clean/mergeable, have the expected preceding-PR base, and have auto-merge disabled. Exact-head CI and Performance workflows passed for all eleven; Native consumer passed for all eleven. Applicable macOS workflows passed; #1949, #1920, #1951, and #1952 have explicit workflow-level skips (a skipped `Unit tests` job with no steps), not failures. The [full-stack exact-head audit](validation/regolith-full-stack-ci.json) records SHA mapping, run URLs, bases, skips, and conclusions. The three upper PRs have fresh green [Native ACP runs](https://github.com/sourcenetwork/defradb.rs/actions/runs/38703087623), [#1960](https://github.com/sourcenetwork/defradb.rs/actions/runs/38703089156), [#1961](https://github.com/sourcenetwork/defradb.rs/actions/runs/38703087302), plus green CI, macOS, and hosted quick benchmark runs.
 
-These results include shared resident DiskANN code caches for retry-created transactions and the actual **engine replay execution** counter, reported separately from conflict outcomes and exhaustion. Focused tests verify shared cache identity and zero replays without a conflict, one replay before success, and two replays for three exhausted attempts.
+At pre-native-fix checkpoint `887502472`, validation passed 2,377 core tests (33 ignored), 358 HTTP/embedded tests (5 ignored), five benchmark-accounting tests, native all-target Clippy, and WASM Clippy. See [portable logs, checksums, and reproduction commands](validation/regolith-887502472/README.md). The [ten-checkpoint CLI matrix](validation/regolith-cli-checkpoints/README.md) passes basic 56, ACP 204 (16 ignored), encryption 25, and counter 9 (8 ignored) at each checkpoint through telemetry. The same artifact records the independent prep0 schema fixture check: all 183 schema tests pass. The [native ACP fix record](validation/regolith-native-acp-89d71e2b.json) includes pinned Vera provenance, the failing baseline, passing fix, exact selectors, and hashes/provenance for private logs and executables (the private logs themselves are not included); on the fix, Vera passes 67/67 and all seven unchanged native qualification cases pass. Provider/CLI and native-test Clippy pass. The fix changes optional Vera behavior; the default DB/query/storage benchmark build does not include Vera.
 
-After main integration at `8a38e96f2`, the boundary repair moved an unused-import cleanup into step 3 and removed obsolete savepoint guard snapshots at their corresponding step-6 lock-removal commits (then-published checkpoints: step 3 `711555a37`, step 5 `653d13be3`, step 6 `cce8b2990`, step 7 `11b71efcd`, top `051fd5fc3`). A subsequent test-only prep0 fix excludes the existing `doc`/`_docID` collision from inheritance property fixtures and tests the collision deterministically; it changes no runtime code. All 183 schema tests pass at `7b7fb91af`; the portable checkpoint evidence includes this log. The deferred-ACP removal checkpoint defines its savepoint lock helper at the first commit that uses it. The latest native ACP correction is step 6 `89d71e2b`, step 7 `133a308aa`, top `febcf263`; it changes only the optional Vera provider cleanup policy and related ACP comments. The default DB/query/storage runtime remains equivalent to the previously validated `887502472` tree. On the fix, all 67 Vera library tests and all seven unchanged native qualification cases pass with the pinned Vera runtime. Provider/CLI and native-test Clippy pass; fresh upper-stack CI is required after publication.
+## Remaining gates and limits
 
-[Native ACP validation summary](validation/regolith-native-acp-89d71e2b.json) records the failing baseline, passing fix, pinned Vera revision, executable and private-log hashes, exact selectors, and reproduction commands. Native fixture logs remain private; this artifact contains only sanitized results and provenance.
+**All 22 checkpoints are complete, and the strict performance gates failed. The stack is not merge-ready.** The [complete measurement pack](benchmarks/regolith-adoption-8a38e96f2/README.md) contains 792 workload samples, 176 completed command runs, raw Criterion/allocation data, guard records, source and executable identities, final comparisons, and a Git bundle preserving frozen revisions. There are no missing comparisons. Load-guard refusals and the step1b runner pause are recorded; passing command-start guards do not establish an idle host throughout each sample. Comparisons use strict medians/point estimates, without a statistical-significance claim or regression waiver.
 
-The shared Wasmtime engine owns an independent parked epoch-clock thread so synchronous WASM cannot starve its clock. Transaction-local transform maps initialize lazily. The provisional **100 ms** period now has a [bounded measurement report](benchmarks/lens-epoch-period/measurement.md): no light-workload traps across the measured periods; the 100 ms setting gives approximately 213 ms median / 220 ms p95 interruption with two ticks. This is not an optimality claim or a complex-lens latency guarantee.
-
-Statement savepoints enter at step 2 after the API bump supplies releasable savepoints; ordered queues enter their snapshots at step 4, retry bundles at step 5, and ACP projection state at step 6. Failed, timed-out, and cancelled explicit GraphQL mutation statements roll back staged writes and effects while retaining prior successful statements. The regression also verifies failed-statement blobs are absent and earlier successful blobs remain. Direct registry DDL calls recover pending GraphQL cleanup but do not receive independent operation savepoints. Finalization may consume the registry entry when cleanup fails; it cannot successfully commit partial statement writes.
-
-Schema decision scans use the same write transaction with validation enabled; schema-head caches publish after successful commit. Legacy index representations are compared after normalization, while other schema fields remain checked. The stale-scan regression stages a write and checks the typed transaction conflict.
-
-1. Publish the ACP correction and inspect fresh exact-head CI, especially the three upper Native ACP jobs. Earlier exact-head Native ACP runs passed through step 5 (#1922, #1949, #1920, #1951, #1952, #1953, #1955, #1956); pre-fix step6, step7, and step8 heads failed the revoked-delete case at `strict_replication.rs:122`. The fix preserves local shared registration/grants for Vera while leaving explicit global archive available. The old Native ACP artifacts expose only the panic site, not the underlying returned error. Fresh upper-stack CI is pending after publication.
-2. Complete §5.3 timing and allocation gates on a quiet host. All 22 current-main/adoption/removal/candidate binaries are built. The new-main, prep0, and API-bump guarded runs are complete and record strict-target regressions; step1b is also complete (36 workload samples, eight commands) with observed regressions; serial guarded timing is continuing at the classifier checkpoint. The `532aac3f` baseline remains historical evidence and does not substitute for the new-main baseline. The optional Vera-only fix is absent from the default benchmark compilation (no Vera artifacts in the step6 compiler output); default DB/query/storage timing evidence remains scoped accordingly. No performance gate is waived.
-
-Independent fresh CLI validation passed at all ten checkpoints below the proof PR: prep `d6f58d624`, API `3162318e2`, encryption `1cf6a0b23`, classifier `45c81aed5`, decisions `23c8fde54`, mechanisms `f5738ebd3`, events `965fb4e6e`, retries `653d13be3`, lock removal `cce8b2990`, and telemetry `11b71efcd`. Each passed basic 56, ACP 204 (16 ignored), encryption 25, and counter 9 (8 ignored). [Portable logs, CLI hashes, tested revisions, and source-equivalence mapping](validation/regolith-cli-checkpoints/README.md) are committed. These CLI checks do not validate the optional Vera-provider archive behavior added after those checkpoints.
-
-The browser identity regression is fixed at step 5: identity is scoped per future poll and restored before suspension. CI at `1fb3ebed0` passes 73 browser library tests, two browser integration tests and four relay tests; six native identity tests also pass.
-
-Step 6 also supports projected GraphQL updates for unconditional explicit document IDs, scalar patches and `_docID`-only output. Full documents are materialized, with only relevant field dependencies validated. Filters, other returned fields, migrations, downsample and unsupported shapes retain conservative reads. Preparation uses the same dependency set, preserves found-target membership and invokes preparation hooks; custom mutators default to full validation. Eight real GraphQL regressions pass, including disjoint commits with required untouched fields, same-field/predicate/output/index conflicts and later full reads. A custom-mutator regression confirms hooks run and missing IDs stay excluded. Query 599, DB library 29, write 64 and index 61 tests pass. At `b4a2552f7`, the full core run passes 2,365 tests (33 ignored), HTTP/embedded passes 358 (5 ignored), and benchmark accounting passes five. After an unused-import cleanup, `888e2da4c` passes broad native all-target Clippy, WASM Clippy, formatting, and a fresh CLI run: ACP 204 (16 ignored), basic 56, encryption 25, counter 9 (8 ignored), and write-skew one. The cleanup changes no runtime behavior. These earlier results do not include the new optional Vera-provider archive capability; its full validation is pending.
-
-## Earlier validation evidence (see latest results above)
-
-| Revision / scope | Result | Limit |
-|---|---|---|
-| Combined `f0d3fd4d5` | 2,364 DB/query/authorization/data tests pass, 33 ignored; HTTP/embedded tests 358 pass, 5 ignored; benchmark accounting tests 5 pass | Fresh CLI: ACP 204 pass/16 ignored, basic 56 pass, encryption 25 pass, counter 9 pass/8 ignored and write-skew 1 pass |
-| Combined `f0d3fd4d5` | Broad native all-target Clippy includes CLI and benchmarks; WASM Clippy, cargo-machete, formatting and diff checks pass | Fresh remote CI remains required |
-| Key capacity `2bb8dd9f5` | All 8 key-layout tests and storage all-target Clippy pass | Only buffer allocation changes after the full combined validation |
-| Engine telemetry on combined stack | All 3 integration tests pass | Local native validation |
-| Step 5 alone `427da1b4e` | Batch retry tests 4/4, HTTP context tests 7/7, DB/query/HTTP all-target Clippy pass after workspace-cache cleanup | Does not include step-6 remote projection |
-| Earlier combined `9afeb8447` | Storage 257, P2P 395 and adapter 94 pass; external ACP 204 pass/16 ignored, basic 56, encryption 25; counter 9 pass/8 ignored; real point-read write-skew passes | Predates final retry-surface cleanup; exact Go pin `53f0e76a32d1761e3396a88ce607ebc3e37baa5a` |
-| Lower checkpoints `7fc488f2`, `f39db77d`, `5ed6e2fa`, `82047ca2` | At each: fresh CLI build; basic 56, ACP 204 (16 ignored), encryption 25 and full counter 9 (8 ignored) pass | Exact Go pin `53f0e76a32d1761e3396a88ce607ebc3e37baa5a`; see binary hashes below |
-| Exact-head Native ACP / macOS matrix before the step6 fix | Native ACP passes through #1956; #1959/#1960/#1961 fail the same revoked-delete request. Applicable macOS jobs pass; out-of-scope jobs are skipped. | The Native ACP failure artifact omits the returned error. Focused regression passes with the provider fix; fresh upper-stack CI is required |
-| Step 8 proof suite (source unchanged by restack) | All 167 configured TLC cases have expected verdicts verified across full-suite and focused runs (including five new statement-atomicity cases); five library/registry and two Lean contract checks pass | Finite boundary models, not Rust verification |
-| Earlier repaired step-6 removal history | All nine checkpoint benchmark builds passed; queue benchmark removal and dependency cleanup moved to their removal boundaries | New restacked checkpoint builds and timing pending |
-
-Lower-checkpoint CLI SHA-256 values (the first checkpoint's integration run was serial; later runs used four test threads):
-
-| Revision | Saved CLI SHA-256 |
-|---|---|
-| `7fc488f21192` | `57865f5a57d16c8c56b317875fc24d4e47a346aeb48bd5174329787fdffa8f1d` |
-| `f39db77d84e9` | `e5ec041aa61268c255becf35a9722021ce74d375ca7350e0884c3c554abdf480` |
-| `5ed6e2fa8034` | `040b6925089f10647a4adce5c200b8917dd5c225626e6c985efa809f5bd2e692` |
-| `82047ca26fd7` | `cd7854bae0f7d0b6f91ad1dceb296cd1c84eb28ccdd6039e696dface5e077e22` |
-
-The single-update regression verifies that a concurrent change causes the engine retry to reselect targets instead of overwriting the winner. Prepared node permissions use the same acting identity as execution; authoritative local NAC checks remain inside the transaction. The local ACP revocation regression retains READ access and revokes UPDATE during the first attempt, then verifies an explicit denial and unchanged stored data. Read-denied documents are intentionally invisible and may produce an empty mutation result.
-
-P2P validation covers admission backoff, exact marker generations, registration ordering, forget/re-add incarnation fencing, stale failure refresh, atomic ACK cleanup and conditional status transitions. Already-admitted external I/O cannot be revoked; durable side effects are fenced. Obsolete SSI/SSI-range proofs referencing the removed ConflictTracker are retired, while the real write-skew behavior test remains.
-
-Earlier mixed Go/Rust parity failures passed all three local controls and ten mixed repeats; fresh step-5 Go compatibility CI also passed before this final restack. Use current-head runs, not cancelled or superseded rollups.
-
-## Performance gates: not passed
-
-The historical [frozen clean-host main evidence](benchmarks/regolith-main-532aac3f/README.md) includes all 36 workload samples, eight guarded command runs, five allocation samples (median **2989.575 allocations/create**), four Criterion estimates, executable hashes and checksums. Structural/provenance validation passes. The guarded `8a38e96f2` main baseline is also complete and structurally valid (36 samples, eight commands); main itself misses strict increasing-throughput targets with zero observed create conflicts. Prep0 and API timing also show observed strict-target regressions. Step1b is also complete (36 workload samples, eight commands) with observed regressions; serial guarded timing is continuing at the classifier checkpoint. Historical evidence does not waive the remaining gates.
-
-The historical head-cache comparison is retained in [the raw artifact](benchmarks/regolith-head-cache-2026-10-14.json), before `c29a923b` and after `14e7264a`. Each run has 36 samples: creates/shared updates/counters+indexes, 1/4/16/64 writers, 256 operations per writer, three repetitions, release-fast and on-disk Immediate durability. Ambient host load contaminated timing. Creates had zero conflicts but did not scale consistently; four-writer shared/mixed conflicts increased, and 16-writer mixed exhaustion rose from zero to four. Higher-contention improvements do not waive these failures.
-
-Five-run allocation counts and binary hashes are in [the checkpoint artifact](benchmarks/allocation-adoption-checkpoints.md). True medians (allocations per operation):
-
-| Checkpoint | Create | Get by ID |
+| Final runtime versus main | Main | Final |
 |---|---:|---:|
-| Main `532aac3f` | 2991.5 | 165 |
-| Step 0 `199daa57` | 3002.3 | 165 |
-| Step 1 `5ed6e2fa` | 3025.0 | 165 |
-| Step 2 `82047ca2` | 3049.7 | 169 |
-| Step 3 `230c36c1` | 3622.3 | 269 |
-| Step 4 `3c8bed28` | 3624.3 | 269 |
-| Step 6 measured candidate `3bd4fdcd` | 4234.4 | 198 |
+| 64-writer creates, commits/sec | 247.019 | 7,366.801 |
+| 64-writer shared updates, commits/sec | 242.428 | 493.410 |
+| 64-writer counters/indexes, commits/sec | 232.505 | 299.086 |
+| Shared-update exhausted requests / 16,384 | 577 (legacy HTTP) | 4,775 (engine) |
+| Counter/index exhausted requests / 16,384 | 543 (legacy HTTP) | 8,434 (engine) |
+| Allocations/create, median | 2,991.135 | 3,133.550 |
 
-The largest early increase is at step 3. Safe read-only fetching and one-pass decoding reduce read allocations while preserving writable field-validation dependencies. These counts do not establish throughput. No fresh per-step or per-removal throughput gate is claimed.
+Final creates have zero observed conflicts, but eight strict workload comparisons, three create Criterion comparisons, and allocations regress against main. Latency samples include successes and failures; legacy HTTP and current engine counters are distinct. Shared updates include real same-field contention, so this aggregate workload does not establish the separate disjoint-field target. [Full results](benchmarks/regolith-adoption-8a38e96f2/results.md) retain every checkpoint's gates. The optional create-validation optimization is **not adopted**: small allocation/create-latency improvements did not pass throughput and cold-start nonregression checks.
 
-[Paired allocation results](benchmarks/allocation-sort-and-schema.md): CID-string sort caching reduces create allocations from 4237.8 to 3588.4 on its exact baseline pair. On a separate exact pair, immutable schema sharing reduces 3612.3 to 3346.4 and get-by-ID 198 to 160. Downsample filtering before cloning reduces creates to 3307.4; reserving computed-create buffers reduces them further to 3296.3. Block ordering tests (61) and collection/definition/index suites (232) pass. These counts do not establish final-tip or throughput gates.
+Theo's next work is to resolve the performance gates, not rerun missing checkpoints:
 
-Historical frozen step-3/4/5 binaries yielded create medians **2980.7 / 2982.8 / 3411.4**, respectively (get-by-ID 269 at all three). The first two are slightly below the measured main create median; the step-5 increase remains under investigation. Exact raw samples, revisions and executable hashes are in the paired allocation artifact. The earlier nine repaired lock-removal checkpoint binaries built successfully; the new restack requires refreshed binaries and timings.
+1. Classify conflict/access reasons at retries and exhaustion, separating true same-field contention from unnecessarily broad dependencies.
+2. Compare equal total attempt budgets and zero-delay versus bounded engine backoff. Current autocommit uses four conflict-budgeted attempts without backoff; historical HTTP allowed six executions with jitter. This is a plausible contributor, not an established cause. Cache-validation replays do not consume that budget. The pinned engine supports deterministic exponential backoff; jitter would require a separate engine change. See the [source-pinned retry investigation](benchmarks/regolith-adoption-8a38e96f2/retry-policy-findings.md).
+3. Profile the allocation/create-latency regressions while preserving statement atomicity, validated dependencies, and winner-only post-commit effects. Compare commit throughput, exhaustion, and all-request latency together on a guarded host. Keep all PRs draft until failures are resolved or explicitly accepted by the reviewer.
 
-[Sharing immutable create inputs](benchmarks/create-retry-sharing.md) reduces the next exact paired create median from 3296.4 to **3231.3**, with get-by-ID unchanged at **160**. This remains about 8% above main for creates. The [schema-byte reuse pair](benchmarks/schema-wire-reuse.md) reduces its own five-run median from 3231.4 to 3189.3, with reads unchanged. That pair uses the default release profile; final release-fast gate measurements remain pending.
+General query/output validation remains conservative where dependencies are uncertain. Counter reads remain validated because document/index mirrors depend on them. Writable projections cover changed fields, touched-index components, immutable checks, downsample sources, and embeddings; unsupported or conditional changes fall back to broader validation. These choices favor correct conflict detection over a blanket low-conflict claim.
 
-[The release-fast key-buffer pair](benchmarks/doc-id-index-key-capacity.md) confirms a baseline create median of 3189.3 and reduces it to **3130.4**, with get-by-ID falling from **160 to 157**. The new create count is still about **4.6% above main**; the allocation gate remains open. Exact key bytes are unchanged, with all eight layout tests and storage all-target Clippy passing.
+The P2P `pending_metadata_writer` mutex remains. It coordinates multi-operation durable-cap updates with in-memory root/scope caches; engine retries cover individual pending-store transactions, not the whole protocol. It is outside the listed step-6 removals and remains a network-runtime follow-up, not a claim that every mutex has been removed. Durable P2P operations are fenced by peer incarnation and marker generation, but already-admitted external I/O cannot be revoked.
 
-The [gate runner and analyzer](../tools/regolith-gates/README.md) preserve source/executable hashes, all raw samples, failed and passed guard attempts, exact Criterion estimates and five allocation runs. They distinguish invalid evidence from observed regressions; historical #218 comparisons are descriptive because hardware/profile equivalence is unknown.
+Ordered event delivery is not durable: cancellation after commit can still lose in-memory event delivery. Proofs are finite boundary models, not verification of Rust or remote ACP behavior. The optional native tombstone change preserves shared authorization state on a local replica delete; globally archiving an ACP object remains an explicit provider operation. Do not change these semantics to make local replica cleanup look like global revocation.
 
-Required timing evidence: before/after each step and lock-removal checkpoint, all writer counts/workloads/repetitions, commits/s, conflicts/commit, retries by layer, p50/p99, create benchmarks at 4/16 fields, branchable create at 14, and cold startup at 10 collections. Use `tools/perf-site/loadguard.py`, record its result and source revision, and do not treat a failed/missing guard as clean-host evidence.
-
-## Review constraints and intentional limits
-
-- Accepted D39/D56 supersede the earlier synchronous-trait wording: retain async data paths and `transact_async`, using the existing native blocking bridge until step 9. Scoped attempt I/O cannot commit/discard independently; retained views fail closed before the real engine transaction is returned.
-- Every retry attempt gets fresh reads, writes, projections and hooks. Prepared inputs are request-scoped, exactly keyed, bounded to 64 entries / 8 MiB / eight misses, and debug-redacted. A typed input miss exits the attempt; external providers resolve it outside the callback. IDs, DEKs, ciphertext and counter nonces stay stable across replay.
-- Interactive transactions return conflicts to their caller. Ordinary ordered hooks and retry-only once hooks remain distinct. Ordered ACP failure suppresses events; cancellation after durability can still lose nondurable delivery.
-- Writable projections include changed fields, all components of touched indexes, immutable checks, downsample source dependencies and embedding sources. Unknown/conditional changes, structural replacements, lens migrations and general query reads retain conservative validation. Counter reads remain validated because document/index mirrors depend on them.
-- Collection/index metadata is reloaded from the attempt snapshot. Only index-list drift is accepted; schema drift fails closed. Index backfill requires a global cutoff after publication, with restart-safe no-progress handling.
-- The P2P `pending_metadata_writer` remains: it coordinates multi-operation durable-cap transitions with in-memory root/scope caches. Engine retries cover individual pending-store transactions, not that whole protocol. It is outside §5.2 step 6's listed lock removals and remains a network-runtime follow-up; this stack does not claim to remove every P2P mutex.
-- Remote authorization, dynamic KMS scope and browser retry execution are not formally verified. The browser queue driver has compile/lint coverage only. Proof models are explicit finite boundary abstractions, not a proof of the Rust adapter.
-
-Prior progress notes and superseded measurements remain available in this file's Git history. This document and PR #1953 should be updated together after the final restack, replacing pending items with exact results or explicit unresolved gaps.
+Historical allocation and benchmark investigations remain in the linked evidence and Git history. The complete measurement pack above is the final record for this handoff; no measured regression has been waived.

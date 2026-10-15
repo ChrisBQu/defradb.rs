@@ -1,0 +1,1693 @@
+{
+  "source_report": "/tmp/defra-perf-artifacts/analysis-final-22.json",
+  "measurement_scope": {
+    "labels": 22,
+    "structurally_valid_labels": 22,
+    "samples_per_label": 36,
+    "commands_per_label": 8,
+    "total_samples": 792,
+    "total_commands": 176,
+    "note": "Point estimates from the completed frozen run; no tolerance or significance claim. Latency percentiles include all requests, successful and failed."
+  },
+  "main_label": "main-8a38e96f2",
+  "final_published_step8": "step8-051fd5fc3",
+  "optional_candidate": "createfast-3a90482b2",
+  "writer64": {
+    "main-8a38e96f2": {
+      "counters_indexes|writers=64": {
+        "client_conflict_requests": null,
+        "client_conflicts_per_commit": null,
+        "commits_per_second": 232.50476924839174,
+        "engine_exhaustions": null,
+        "engine_exhaustions_per_commit": null,
+        "latency_p50_ms": 33.041834,
+        "latency_p99_ms": 2973.385292,
+        "legacy_http_conflicts_per_commit": 1.8931543116490166,
+        "legacy_http_exhausted_per_commit": 0.03427813900637586,
+        "legacy_http_exhausted_requests": 543.0,
+        "retry_metrics_per_commit": {
+          "HTTP retries": 1.8603756933938478,
+          "embedded retries": 0.0,
+          "merge retries": 0.0,
+          "push marker retries": 0.0
+        },
+        "storage_conflicts_per_commit": 0.0
+      },
+      "creates|writers=64": {
+        "client_conflict_requests": null,
+        "client_conflicts_per_commit": null,
+        "commits_per_second": 247.0186023898854,
+        "engine_exhaustions": null,
+        "engine_exhaustions_per_commit": null,
+        "latency_p50_ms": 253.97104199999998,
+        "latency_p99_ms": 518.889,
+        "legacy_http_conflicts_per_commit": 0.0,
+        "legacy_http_exhausted_per_commit": 0.0,
+        "legacy_http_exhausted_requests": 0.0,
+        "retry_metrics_per_commit": {
+          "HTTP retries": 0.0,
+          "embedded retries": 0.0,
+          "merge retries": 0.0,
+          "push marker retries": 0.0
+        },
+        "storage_conflicts_per_commit": 0.0
+      },
+      "shared_updates|writers=64": {
+        "client_conflict_requests": null,
+        "client_conflicts_per_commit": null,
+        "commits_per_second": 242.4276841501726,
+        "engine_exhaustions": null,
+        "engine_exhaustions_per_commit": null,
+        "latency_p50_ms": 28.878292,
+        "latency_p99_ms": 2866.3423749999997,
+        "legacy_http_conflicts_per_commit": 1.8401742864359687,
+        "legacy_http_exhausted_per_commit": 0.03650281520845195,
+        "legacy_http_exhausted_requests": 577.0,
+        "retry_metrics_per_commit": {
+          "HTTP retries": 1.8050863541468969,
+          "embedded retries": 0.0,
+          "merge retries": 0.0,
+          "push marker retries": 0.0
+        },
+        "storage_conflicts_per_commit": 0.0
+      }
+    },
+    "step8-051fd5fc3": {
+      "counters_indexes|writers=64": {
+        "client_conflict_requests": 0.0,
+        "client_conflicts_per_commit": 0.0,
+        "commits_per_second": 299.0862923137424,
+        "engine_exhaustions": 8434.0,
+        "engine_exhaustions_per_commit": 1.060880503144654,
+        "latency_p50_ms": 71.367709,
+        "latency_p99_ms": 284.9355,
+        "legacy_http_conflicts_per_commit": null,
+        "legacy_http_exhausted_per_commit": null,
+        "legacy_http_exhausted_requests": null,
+        "retry_metrics_per_commit": {
+          "HTTP retries (retired)": 0.0,
+          "embedded retries (retired)": 0.0,
+          "engine retries": 4.373993963782696,
+          "merge retries (retired)": 0.0,
+          "push marker retries": 0.0,
+          "short ID reservation retries (retired)": 0.0
+        },
+        "storage_conflicts_per_commit": 5.434356136820925
+      },
+      "creates|writers=64": {
+        "client_conflict_requests": 0.0,
+        "client_conflicts_per_commit": 0.0,
+        "commits_per_second": 7366.8014449009825,
+        "engine_exhaustions": 0.0,
+        "engine_exhaustions_per_commit": 0.0,
+        "latency_p50_ms": 8.25125,
+        "latency_p99_ms": 15.883833,
+        "legacy_http_conflicts_per_commit": null,
+        "legacy_http_exhausted_per_commit": null,
+        "legacy_http_exhausted_requests": null,
+        "retry_metrics_per_commit": {
+          "HTTP retries (retired)": 0.0,
+          "embedded retries (retired)": 0.0,
+          "engine retries": 0.0,
+          "merge retries (retired)": 0.0,
+          "push marker retries": 0.0,
+          "short ID reservation retries (retired)": 0.0
+        },
+        "storage_conflicts_per_commit": 0.0
+      },
+      "shared_updates|writers=64": {
+        "client_conflict_requests": 0.0,
+        "client_conflicts_per_commit": 0.0,
+        "commits_per_second": 493.40957157731344,
+        "engine_exhaustions": 4775.0,
+        "engine_exhaustions_per_commit": 0.4113188043759152,
+        "latency_p50_ms": 55.768417,
+        "latency_p99_ms": 292.6555,
+        "legacy_http_conflicts_per_commit": null,
+        "legacy_http_exhausted_per_commit": null,
+        "legacy_http_exhausted_requests": null,
+        "retry_metrics_per_commit": {
+          "HTTP retries (retired)": 0.0,
+          "embedded retries (retired)": 0.0,
+          "engine retries": 2.250926005685244,
+          "merge retries (retired)": 0.0,
+          "push marker retries": 0.0,
+          "short ID reservation retries (retired)": 0.0
+        },
+        "storage_conflicts_per_commit": 2.6622448100611593
+      }
+    },
+    "createfast-3a90482b2": {
+      "counters_indexes|writers=64": {
+        "client_conflict_requests": 0.0,
+        "client_conflicts_per_commit": 0.0,
+        "commits_per_second": 299.01493801381366,
+        "engine_exhaustions": 8385.0,
+        "engine_exhaustions_per_commit": 1.0482560320040004,
+        "latency_p50_ms": 70.75425,
+        "latency_p99_ms": 286.10841700000003,
+        "legacy_http_conflicts_per_commit": null,
+        "legacy_http_exhausted_per_commit": null,
+        "legacy_http_exhausted_requests": null,
+        "retry_metrics_per_commit": {
+          "HTTP retries (retired)": 0.0,
+          "embedded retries (retired)": 0.0,
+          "engine retries": 4.333791723965495,
+          "merge retries (retired)": 0.0,
+          "push marker retries": 0.0,
+          "short ID reservation retries (retired)": 0.0
+        },
+        "storage_conflicts_per_commit": 5.382047755969496
+      },
+      "creates|writers=64": {
+        "client_conflict_requests": 0.0,
+        "client_conflicts_per_commit": 0.0,
+        "commits_per_second": 7694.633477210848,
+        "engine_exhaustions": 0.0,
+        "engine_exhaustions_per_commit": 0.0,
+        "latency_p50_ms": 7.999499999999999,
+        "latency_p99_ms": 14.672457999999999,
+        "legacy_http_conflicts_per_commit": null,
+        "legacy_http_exhausted_per_commit": null,
+        "legacy_http_exhausted_requests": null,
+        "retry_metrics_per_commit": {
+          "HTTP retries (retired)": 0.0,
+          "embedded retries (retired)": 0.0,
+          "engine retries": 0.0,
+          "merge retries (retired)": 0.0,
+          "push marker retries": 0.0,
+          "short ID reservation retries (retired)": 0.0
+        },
+        "storage_conflicts_per_commit": 0.0
+      },
+      "shared_updates|writers=64": {
+        "client_conflict_requests": 0.0,
+        "client_conflicts_per_commit": 0.0,
+        "commits_per_second": 495.34861935154044,
+        "engine_exhaustions": 4814.0,
+        "engine_exhaustions_per_commit": 0.416076058772688,
+        "latency_p50_ms": 55.607333000000004,
+        "latency_p99_ms": 285.144833,
+        "legacy_http_conflicts_per_commit": null,
+        "legacy_http_exhausted_per_commit": null,
+        "legacy_http_exhausted_requests": null,
+        "retry_metrics_per_commit": {
+          "HTTP retries (retired)": 0.0,
+          "embedded retries (retired)": 0.0,
+          "engine retries": 2.259464131374244,
+          "merge retries (retired)": 0.0,
+          "push marker retries": 0.0,
+          "short ID reservation retries (retired)": 0.0
+        },
+        "storage_conflicts_per_commit": 2.675540190146932
+      }
+    }
+  },
+  "allocations_document_create": {
+    "main-8a38e96f2": {
+      "samples_allocations_per_op": [
+        2991.135,
+        2984.99,
+        2984.19,
+        2991.58,
+        3000.055
+      ],
+      "median_allocations_per_op": 2991.135
+    },
+    "step8-051fd5fc3": {
+      "samples_allocations_per_op": [
+        3133.615,
+        3133.565,
+        3133.545,
+        3133.54,
+        3133.55
+      ],
+      "median_allocations_per_op": 3133.55
+    },
+    "createfast-3a90482b2": {
+      "samples_allocations_per_op": [
+        3111.545,
+        3111.55,
+        3111.465,
+        3111.495,
+        3111.54
+      ],
+      "median_allocations_per_op": 3111.54
+    }
+  },
+  "step8_vs_main": {
+    "baseline_nonregression": {
+      "status": "observed_fail",
+      "compared_cells": 48,
+      "regression_count": 8,
+      "missing_comparison_count": 0,
+      "regressions": [
+        {
+          "workload": "creates",
+          "writers": 1,
+          "metric": "commits_per_second",
+          "reference_median": 249.09638704421474,
+          "candidate_median": 248.13557062922496,
+          "delta": -0.9608164149897789
+        },
+        {
+          "workload": "shared_updates",
+          "writers": 1,
+          "metric": "commits_per_second",
+          "reference_median": 256.07123030985036,
+          "candidate_median": 247.61067187487345,
+          "delta": -8.460558434976917
+        },
+        {
+          "workload": "shared_updates",
+          "writers": 4,
+          "metric": "storage_conflicts_per_commit",
+          "reference_median": 0.0,
+          "candidate_median": 0.001953125,
+          "delta": 0.001953125
+        },
+        {
+          "workload": "shared_updates",
+          "writers": 16,
+          "metric": "storage_conflicts_per_commit",
+          "reference_median": 0.0,
+          "candidate_median": 0.1268985791278785,
+          "delta": 0.1268985791278785
+        },
+        {
+          "workload": "shared_updates",
+          "writers": 64,
+          "metric": "storage_conflicts_per_commit",
+          "reference_median": 0.0,
+          "candidate_median": 2.6622448100611593,
+          "delta": 2.6622448100611593
+        },
+        {
+          "workload": "counters_indexes",
+          "writers": 4,
+          "metric": "storage_conflicts_per_commit",
+          "reference_median": 0.0,
+          "candidate_median": 0.009765625,
+          "delta": 0.009765625
+        },
+        {
+          "workload": "counters_indexes",
+          "writers": 16,
+          "metric": "storage_conflicts_per_commit",
+          "reference_median": 0.0,
+          "candidate_median": 1.1537436717292833,
+          "delta": 1.1537436717292833
+        },
+        {
+          "workload": "counters_indexes",
+          "writers": 64,
+          "metric": "storage_conflicts_per_commit",
+          "reference_median": 0.0,
+          "candidate_median": 5.434356136820925,
+          "delta": 5.434356136820925
+        }
+      ]
+    },
+    "allocation": {
+      "candidate_median": 3133.55,
+      "delta": 142.41499999999996,
+      "reference_median": 2991.135,
+      "status": "observed_fail",
+      "strict_no_tolerance": true
+    },
+    "criterion": {
+      "details": [
+        {
+          "candidate_nanoseconds": 37769.65989069581,
+          "criterion_id": "document_create/4",
+          "delta_nanoseconds": 15181.265954381444,
+          "observed_pass": false,
+          "reference_nanoseconds": 22588.393936314365
+        },
+        {
+          "candidate_nanoseconds": 100358.6306712963,
+          "criterion_id": "document_create/16",
+          "delta_nanoseconds": 22953.37506232194,
+          "observed_pass": false,
+          "reference_nanoseconds": 77405.25560897436
+        },
+        {
+          "candidate_nanoseconds": 45964.848466003314,
+          "criterion_id": "document_create_branchable/14",
+          "delta_nanoseconds": 16147.907989812837,
+          "observed_pass": false,
+          "reference_nanoseconds": 29816.940476190477
+        },
+        {
+          "candidate_nanoseconds": 8503847.25,
+          "criterion_id": "startup/cold_open/embedded/10_collections",
+          "delta_nanoseconds": -57173.550000000745,
+          "observed_pass": true,
+          "reference_nanoseconds": 8561020.8
+        }
+      ],
+      "missing_comparisons": [],
+      "regressions": [
+        {
+          "candidate_nanoseconds": 37769.65989069581,
+          "criterion_id": "document_create/4",
+          "delta_nanoseconds": 15181.265954381444,
+          "observed_pass": false,
+          "reference_nanoseconds": 22588.393936314365
+        },
+        {
+          "candidate_nanoseconds": 100358.6306712963,
+          "criterion_id": "document_create/16",
+          "delta_nanoseconds": 22953.37506232194,
+          "observed_pass": false,
+          "reference_nanoseconds": 77405.25560897436
+        },
+        {
+          "candidate_nanoseconds": 45964.848466003314,
+          "criterion_id": "document_create_branchable/14",
+          "delta_nanoseconds": 16147.907989812837,
+          "observed_pass": false,
+          "reference_nanoseconds": 29816.940476190477
+        }
+      ],
+      "status": "observed_fail",
+      "strict_no_tolerance": true
+    },
+    "criterion_benchmarks": [
+      {
+        "criterion_id": "document_create/4",
+        "reference_nanoseconds": 22588.393936314365,
+        "candidate_nanoseconds": 37769.65989069581,
+        "delta_nanoseconds": 15181.265954381444,
+        "observed_pass": false
+      },
+      {
+        "criterion_id": "document_create/16",
+        "reference_nanoseconds": 77405.25560897436,
+        "candidate_nanoseconds": 100358.6306712963,
+        "delta_nanoseconds": 22953.37506232194,
+        "observed_pass": false
+      },
+      {
+        "criterion_id": "document_create_branchable/14",
+        "reference_nanoseconds": 29816.940476190477,
+        "candidate_nanoseconds": 45964.848466003314,
+        "delta_nanoseconds": 16147.907989812837,
+        "observed_pass": false
+      },
+      {
+        "criterion_id": "startup/cold_open/embedded/10_collections",
+        "reference_nanoseconds": 8561020.8,
+        "candidate_nanoseconds": 8503847.25,
+        "delta_nanoseconds": -57173.550000000745,
+        "observed_pass": true
+      }
+    ],
+    "create_sample_coverage_complete": true,
+    "current_create_conflicts_zero_proven": true,
+    "legacy_create_conflict_indicators_zero": null
+  },
+  "optional_candidate_vs_step8": {
+    "baseline_nonregression": {
+      "compared_cells": 84,
+      "details": [
+        {
+          "candidate_median": 0.0,
+          "delta": 0.0,
+          "gate_metric": true,
+          "metric": "client_conflicts_per_commit",
+          "observed_pass": true,
+          "reference_median": 0.0,
+          "workload": "creates",
+          "writers": 1
+        },
+        {
+          "candidate_median": 235.96802541080672,
+          "delta": -12.16754521841824,
+          "gate_metric": true,
+          "metric": "commits_per_second",
+          "observed_pass": false,
+          "reference_median": 248.13557062922496,
+          "workload": "creates",
+          "writers": 1
+        },
+        {
+          "candidate_median": 0.0,
+          "delta": 0.0,
+          "gate_metric": false,
+          "metric": "engine_exhaustions",
+          "observed_pass": null,
+          "reference_median": 0.0,
+          "workload": "creates",
+          "writers": 1
+        },
+        {
+          "candidate_median": 0.0,
+          "delta": 0.0,
+          "gate_metric": true,
+          "metric": "engine_exhaustions_per_commit",
+          "observed_pass": true,
+          "reference_median": 0.0,
+          "workload": "creates",
+          "writers": 1
+        },
+        {
+          "candidate_median": 4.076792,
+          "delta": 0.009458999999999662,
+          "gate_metric": false,
+          "metric": "latency_p50_ms",
+          "observed_pass": null,
+          "reference_median": 4.0673330000000005,
+          "workload": "creates",
+          "writers": 1
+        },
+        {
+          "candidate_median": 7.93375,
+          "delta": 2.8130409999999992,
+          "gate_metric": false,
+          "metric": "latency_p99_ms",
+          "observed_pass": null,
+          "reference_median": 5.120709000000001,
+          "workload": "creates",
+          "writers": 1
+        },
+        {
+          "candidate_median": 0.0,
+          "delta": 0.0,
+          "gate_metric": true,
+          "metric": "storage_conflicts_per_commit",
+          "observed_pass": true,
+          "reference_median": 0.0,
+          "workload": "creates",
+          "writers": 1
+        },
+        {
+          "candidate_median": 0.0,
+          "delta": 0.0,
+          "gate_metric": true,
+          "metric": "client_conflicts_per_commit",
+          "observed_pass": true,
+          "reference_median": 0.0,
+          "workload": "creates",
+          "writers": 4
+        },
+        {
+          "candidate_median": 552.9069348564504,
+          "delta": 28.834880582762366,
+          "gate_metric": true,
+          "metric": "commits_per_second",
+          "observed_pass": true,
+          "reference_median": 524.0720542736881,
+          "workload": "creates",
+          "writers": 4
+        },
+        {
+          "candidate_median": 0.0,
+          "delta": 0.0,
+          "gate_metric": false,
+          "metric": "engine_exhaustions",
+          "observed_pass": null,
+          "reference_median": 0.0,
+          "workload": "creates",
+          "writers": 4
+        },
+        {
+          "candidate_median": 0.0,
+          "delta": 0.0,
+          "gate_metric": true,
+          "metric": "engine_exhaustions_per_commit",
+          "observed_pass": true,
+          "reference_median": 0.0,
+          "workload": "creates",
+          "writers": 4
+        },
+        {
+          "candidate_median": 7.1837919999999995,
+          "delta": -0.5366670000000004,
+          "gate_metric": false,
+          "metric": "latency_p50_ms",
+          "observed_pass": null,
+          "reference_median": 7.720459,
+          "workload": "creates",
+          "writers": 4
+        },
+        {
+          "candidate_median": 8.402209000000001,
+          "delta": -1.076499,
+          "gate_metric": false,
+          "metric": "latency_p99_ms",
+          "observed_pass": null,
+          "reference_median": 9.478708000000001,
+          "workload": "creates",
+          "writers": 4
+        },
+        {
+          "candidate_median": 0.0,
+          "delta": 0.0,
+          "gate_metric": true,
+          "metric": "storage_conflicts_per_commit",
+          "observed_pass": true,
+          "reference_median": 0.0,
+          "workload": "creates",
+          "writers": 4
+        },
+        {
+          "candidate_median": 0.0,
+          "delta": 0.0,
+          "gate_metric": true,
+          "metric": "client_conflicts_per_commit",
+          "observed_pass": true,
+          "reference_median": 0.0,
+          "workload": "creates",
+          "writers": 16
+        },
+        {
+          "candidate_median": 2044.9393648144244,
+          "delta": -33.38226495839194,
+          "gate_metric": true,
+          "metric": "commits_per_second",
+          "observed_pass": false,
+          "reference_median": 2078.3216297728163,
+          "workload": "creates",
+          "writers": 16
+        },
+        {
+          "candidate_median": 0.0,
+          "delta": 0.0,
+          "gate_metric": false,
+          "metric": "engine_exhaustions",
+          "observed_pass": null,
+          "reference_median": 0.0,
+          "workload": "creates",
+          "writers": 16
+        },
+        {
+          "candidate_median": 0.0,
+          "delta": 0.0,
+          "gate_metric": true,
+          "metric": "engine_exhaustions_per_commit",
+          "observed_pass": true,
+          "reference_median": 0.0,
+          "workload": "creates",
+          "writers": 16
+        },
+        {
+          "candidate_median": 7.7532499999999995,
+          "delta": -0.06508400000000059,
+          "gate_metric": false,
+          "metric": "latency_p50_ms",
+          "observed_pass": null,
+          "reference_median": 7.818334,
+          "workload": "creates",
+          "writers": 16
+        },
+        {
+          "candidate_median": 9.314958,
+          "delta": -0.17470800000000075,
+          "gate_metric": false,
+          "metric": "latency_p99_ms",
+          "observed_pass": null,
+          "reference_median": 9.489666000000001,
+          "workload": "creates",
+          "writers": 16
+        },
+        {
+          "candidate_median": 0.0,
+          "delta": 0.0,
+          "gate_metric": true,
+          "metric": "storage_conflicts_per_commit",
+          "observed_pass": true,
+          "reference_median": 0.0,
+          "workload": "creates",
+          "writers": 16
+        },
+        {
+          "candidate_median": 0.0,
+          "delta": 0.0,
+          "gate_metric": true,
+          "metric": "client_conflicts_per_commit",
+          "observed_pass": true,
+          "reference_median": 0.0,
+          "workload": "creates",
+          "writers": 64
+        },
+        {
+          "candidate_median": 7694.633477210848,
+          "delta": 327.8320323098651,
+          "gate_metric": true,
+          "metric": "commits_per_second",
+          "observed_pass": true,
+          "reference_median": 7366.8014449009825,
+          "workload": "creates",
+          "writers": 64
+        },
+        {
+          "candidate_median": 0.0,
+          "delta": 0.0,
+          "gate_metric": false,
+          "metric": "engine_exhaustions",
+          "observed_pass": null,
+          "reference_median": 0.0,
+          "workload": "creates",
+          "writers": 64
+        },
+        {
+          "candidate_median": 0.0,
+          "delta": 0.0,
+          "gate_metric": true,
+          "metric": "engine_exhaustions_per_commit",
+          "observed_pass": true,
+          "reference_median": 0.0,
+          "workload": "creates",
+          "writers": 64
+        },
+        {
+          "candidate_median": 7.999499999999999,
+          "delta": -0.25175000000000125,
+          "gate_metric": false,
+          "metric": "latency_p50_ms",
+          "observed_pass": null,
+          "reference_median": 8.25125,
+          "workload": "creates",
+          "writers": 64
+        },
+        {
+          "candidate_median": 14.672457999999999,
+          "delta": -1.2113750000000003,
+          "gate_metric": false,
+          "metric": "latency_p99_ms",
+          "observed_pass": null,
+          "reference_median": 15.883833,
+          "workload": "creates",
+          "writers": 64
+        },
+        {
+          "candidate_median": 0.0,
+          "delta": 0.0,
+          "gate_metric": true,
+          "metric": "storage_conflicts_per_commit",
+          "observed_pass": true,
+          "reference_median": 0.0,
+          "workload": "creates",
+          "writers": 64
+        },
+        {
+          "candidate_median": 0.0,
+          "delta": 0.0,
+          "gate_metric": true,
+          "metric": "client_conflicts_per_commit",
+          "observed_pass": true,
+          "reference_median": 0.0,
+          "workload": "shared_updates",
+          "writers": 1
+        },
+        {
+          "candidate_median": 250.9425455925895,
+          "delta": 3.331873717716064,
+          "gate_metric": true,
+          "metric": "commits_per_second",
+          "observed_pass": true,
+          "reference_median": 247.61067187487345,
+          "workload": "shared_updates",
+          "writers": 1
+        },
+        {
+          "candidate_median": 0.0,
+          "delta": 0.0,
+          "gate_metric": false,
+          "metric": "engine_exhaustions",
+          "observed_pass": null,
+          "reference_median": 0.0,
+          "workload": "shared_updates",
+          "writers": 1
+        },
+        {
+          "candidate_median": 0.0,
+          "delta": 0.0,
+          "gate_metric": true,
+          "metric": "engine_exhaustions_per_commit",
+          "observed_pass": true,
+          "reference_median": 0.0,
+          "workload": "shared_updates",
+          "writers": 1
+        },
+        {
+          "candidate_median": 4.0753330000000005,
+          "delta": 0.03741600000000034,
+          "gate_metric": false,
+          "metric": "latency_p50_ms",
+          "observed_pass": null,
+          "reference_median": 4.037917,
+          "workload": "shared_updates",
+          "writers": 1
+        },
+        {
+          "candidate_median": 5.116167,
+          "delta": 0.11895800000000012,
+          "gate_metric": false,
+          "metric": "latency_p99_ms",
+          "observed_pass": null,
+          "reference_median": 4.997209,
+          "workload": "shared_updates",
+          "writers": 1
+        },
+        {
+          "candidate_median": 0.0,
+          "delta": 0.0,
+          "gate_metric": true,
+          "metric": "storage_conflicts_per_commit",
+          "observed_pass": true,
+          "reference_median": 0.0,
+          "workload": "shared_updates",
+          "writers": 1
+        },
+        {
+          "candidate_median": 0.0,
+          "delta": 0.0,
+          "gate_metric": true,
+          "metric": "client_conflicts_per_commit",
+          "observed_pass": true,
+          "reference_median": 0.0,
+          "workload": "shared_updates",
+          "writers": 4
+        },
+        {
+          "candidate_median": 566.326627752115,
+          "delta": 20.537966216917766,
+          "gate_metric": true,
+          "metric": "commits_per_second",
+          "observed_pass": true,
+          "reference_median": 545.7886615351972,
+          "workload": "shared_updates",
+          "writers": 4
+        },
+        {
+          "candidate_median": 0.0,
+          "delta": 0.0,
+          "gate_metric": false,
+          "metric": "engine_exhaustions",
+          "observed_pass": null,
+          "reference_median": 0.0,
+          "workload": "shared_updates",
+          "writers": 4
+        },
+        {
+          "candidate_median": 0.0,
+          "delta": 0.0,
+          "gate_metric": true,
+          "metric": "engine_exhaustions_per_commit",
+          "observed_pass": true,
+          "reference_median": 0.0,
+          "workload": "shared_updates",
+          "writers": 4
+        },
+        {
+          "candidate_median": 6.84025,
+          "delta": -0.36775,
+          "gate_metric": false,
+          "metric": "latency_p50_ms",
+          "observed_pass": null,
+          "reference_median": 7.208,
+          "workload": "shared_updates",
+          "writers": 4
+        },
+        {
+          "candidate_median": 9.185375,
+          "delta": 0.13462500000000155,
+          "gate_metric": false,
+          "metric": "latency_p99_ms",
+          "observed_pass": null,
+          "reference_median": 9.050749999999999,
+          "workload": "shared_updates",
+          "writers": 4
+        },
+        {
+          "candidate_median": 0.001953125,
+          "delta": 0.0,
+          "gate_metric": true,
+          "metric": "storage_conflicts_per_commit",
+          "observed_pass": true,
+          "reference_median": 0.001953125,
+          "workload": "shared_updates",
+          "writers": 4
+        },
+        {
+          "candidate_median": 0.0,
+          "delta": 0.0,
+          "gate_metric": true,
+          "metric": "client_conflicts_per_commit",
+          "observed_pass": true,
+          "reference_median": 0.0,
+          "workload": "shared_updates",
+          "writers": 16
+        },
+        {
+          "candidate_median": 1589.2310550946527,
+          "delta": 33.44742652070727,
+          "gate_metric": true,
+          "metric": "commits_per_second",
+          "observed_pass": true,
+          "reference_median": 1555.7836285739454,
+          "workload": "shared_updates",
+          "writers": 16
+        },
+        {
+          "candidate_median": 15.0,
+          "delta": 1.0,
+          "gate_metric": false,
+          "metric": "engine_exhaustions",
+          "observed_pass": null,
+          "reference_median": 14.0,
+          "workload": "shared_updates",
+          "writers": 16
+        },
+        {
+          "candidate_median": 0.0036755697133055622,
+          "delta": 0.00024587838552506255,
+          "gate_metric": true,
+          "metric": "engine_exhaustions_per_commit",
+          "observed_pass": false,
+          "reference_median": 0.0034296913277804997,
+          "workload": "shared_updates",
+          "writers": 16
+        },
+        {
+          "candidate_median": 8.24725,
+          "delta": 0.009665999999999286,
+          "gate_metric": false,
+          "metric": "latency_p50_ms",
+          "observed_pass": null,
+          "reference_median": 8.237584,
+          "workload": "shared_updates",
+          "writers": 16
+        },
+        {
+          "candidate_median": 25.3575,
+          "delta": 1.2001250000000034,
+          "gate_metric": false,
+          "metric": "latency_p99_ms",
+          "observed_pass": null,
+          "reference_median": 24.157375,
+          "workload": "shared_updates",
+          "writers": 16
+        },
+        {
+          "candidate_median": 0.1581269919097818,
+          "delta": 0.031228412781903303,
+          "gate_metric": true,
+          "metric": "storage_conflicts_per_commit",
+          "observed_pass": false,
+          "reference_median": 0.1268985791278785,
+          "workload": "shared_updates",
+          "writers": 16
+        },
+        {
+          "candidate_median": 0.0,
+          "delta": 0.0,
+          "gate_metric": true,
+          "metric": "client_conflicts_per_commit",
+          "observed_pass": true,
+          "reference_median": 0.0,
+          "workload": "shared_updates",
+          "writers": 64
+        },
+        {
+          "candidate_median": 495.34861935154044,
+          "delta": 1.9390477742269923,
+          "gate_metric": true,
+          "metric": "commits_per_second",
+          "observed_pass": true,
+          "reference_median": 493.40957157731344,
+          "workload": "shared_updates",
+          "writers": 64
+        },
+        {
+          "candidate_median": 4814.0,
+          "delta": 39.0,
+          "gate_metric": false,
+          "metric": "engine_exhaustions",
+          "observed_pass": null,
+          "reference_median": 4775.0,
+          "workload": "shared_updates",
+          "writers": 64
+        },
+        {
+          "candidate_median": 0.416076058772688,
+          "delta": 0.00475725439677277,
+          "gate_metric": true,
+          "metric": "engine_exhaustions_per_commit",
+          "observed_pass": false,
+          "reference_median": 0.4113188043759152,
+          "workload": "shared_updates",
+          "writers": 64
+        },
+        {
+          "candidate_median": 55.607333000000004,
+          "delta": -0.16108399999999534,
+          "gate_metric": false,
+          "metric": "latency_p50_ms",
+          "observed_pass": null,
+          "reference_median": 55.768417,
+          "workload": "shared_updates",
+          "writers": 64
+        },
+        {
+          "candidate_median": 285.144833,
+          "delta": -7.510667000000012,
+          "gate_metric": false,
+          "metric": "latency_p99_ms",
+          "observed_pass": null,
+          "reference_median": 292.6555,
+          "workload": "shared_updates",
+          "writers": 64
+        },
+        {
+          "candidate_median": 2.675540190146932,
+          "delta": 0.013295380085772468,
+          "gate_metric": true,
+          "metric": "storage_conflicts_per_commit",
+          "observed_pass": false,
+          "reference_median": 2.6622448100611593,
+          "workload": "shared_updates",
+          "writers": 64
+        },
+        {
+          "candidate_median": 0.0,
+          "delta": 0.0,
+          "gate_metric": true,
+          "metric": "client_conflicts_per_commit",
+          "observed_pass": true,
+          "reference_median": 0.0,
+          "workload": "counters_indexes",
+          "writers": 1
+        },
+        {
+          "candidate_median": 248.0803049358919,
+          "delta": 1.8850414002063758,
+          "gate_metric": true,
+          "metric": "commits_per_second",
+          "observed_pass": true,
+          "reference_median": 246.1952635356855,
+          "workload": "counters_indexes",
+          "writers": 1
+        },
+        {
+          "candidate_median": 0.0,
+          "delta": 0.0,
+          "gate_metric": false,
+          "metric": "engine_exhaustions",
+          "observed_pass": null,
+          "reference_median": 0.0,
+          "workload": "counters_indexes",
+          "writers": 1
+        },
+        {
+          "candidate_median": 0.0,
+          "delta": 0.0,
+          "gate_metric": true,
+          "metric": "engine_exhaustions_per_commit",
+          "observed_pass": true,
+          "reference_median": 0.0,
+          "workload": "counters_indexes",
+          "writers": 1
+        },
+        {
+          "candidate_median": 4.072125000000001,
+          "delta": 0.028833000000000553,
+          "gate_metric": false,
+          "metric": "latency_p50_ms",
+          "observed_pass": null,
+          "reference_median": 4.043292,
+          "workload": "counters_indexes",
+          "writers": 1
+        },
+        {
+          "candidate_median": 5.047958,
+          "delta": -1.2977499999999997,
+          "gate_metric": false,
+          "metric": "latency_p99_ms",
+          "observed_pass": null,
+          "reference_median": 6.345708,
+          "workload": "counters_indexes",
+          "writers": 1
+        },
+        {
+          "candidate_median": 0.0,
+          "delta": 0.0,
+          "gate_metric": true,
+          "metric": "storage_conflicts_per_commit",
+          "observed_pass": true,
+          "reference_median": 0.0,
+          "workload": "counters_indexes",
+          "writers": 1
+        },
+        {
+          "candidate_median": 0.0,
+          "delta": 0.0,
+          "gate_metric": true,
+          "metric": "client_conflicts_per_commit",
+          "observed_pass": true,
+          "reference_median": 0.0,
+          "workload": "counters_indexes",
+          "writers": 4
+        },
+        {
+          "candidate_median": 531.1449998887864,
+          "delta": -13.821813814255052,
+          "gate_metric": true,
+          "metric": "commits_per_second",
+          "observed_pass": false,
+          "reference_median": 544.9668137030415,
+          "workload": "counters_indexes",
+          "writers": 4
+        },
+        {
+          "candidate_median": 0.0,
+          "delta": 0.0,
+          "gate_metric": false,
+          "metric": "engine_exhaustions",
+          "observed_pass": null,
+          "reference_median": 0.0,
+          "workload": "counters_indexes",
+          "writers": 4
+        },
+        {
+          "candidate_median": 0.0,
+          "delta": 0.0,
+          "gate_metric": true,
+          "metric": "engine_exhaustions_per_commit",
+          "observed_pass": true,
+          "reference_median": 0.0,
+          "workload": "counters_indexes",
+          "writers": 4
+        },
+        {
+          "candidate_median": 7.584124999999999,
+          "delta": 0.3984159999999992,
+          "gate_metric": false,
+          "metric": "latency_p50_ms",
+          "observed_pass": null,
+          "reference_median": 7.185709,
+          "workload": "counters_indexes",
+          "writers": 4
+        },
+        {
+          "candidate_median": 11.867,
+          "delta": 0.601916000000001,
+          "gate_metric": false,
+          "metric": "latency_p99_ms",
+          "observed_pass": null,
+          "reference_median": 11.265084,
+          "workload": "counters_indexes",
+          "writers": 4
+        },
+        {
+          "candidate_median": 0.009765625,
+          "delta": 0.0,
+          "gate_metric": true,
+          "metric": "storage_conflicts_per_commit",
+          "observed_pass": true,
+          "reference_median": 0.009765625,
+          "workload": "counters_indexes",
+          "writers": 4
+        },
+        {
+          "candidate_median": 0.0,
+          "delta": 0.0,
+          "gate_metric": true,
+          "metric": "client_conflicts_per_commit",
+          "observed_pass": true,
+          "reference_median": 0.0,
+          "workload": "counters_indexes",
+          "writers": 16
+        },
+        {
+          "candidate_median": 811.3679832779886,
+          "delta": 13.578893285133972,
+          "gate_metric": true,
+          "metric": "commits_per_second",
+          "observed_pass": true,
+          "reference_median": 797.7890899928547,
+          "workload": "counters_indexes",
+          "writers": 16
+        },
+        {
+          "candidate_median": 362.0,
+          "delta": 19.0,
+          "gate_metric": false,
+          "metric": "engine_exhaustions",
+          "observed_pass": null,
+          "reference_median": 343.0,
+          "workload": "counters_indexes",
+          "writers": 16
+        },
+        {
+          "candidate_median": 0.09694697375468667,
+          "delta": 0.005553421929480162,
+          "gate_metric": true,
+          "metric": "engine_exhaustions_per_commit",
+          "observed_pass": false,
+          "reference_median": 0.0913935518252065,
+          "workload": "counters_indexes",
+          "writers": 16
+        },
+        {
+          "candidate_median": 12.90275,
+          "delta": -1.043666,
+          "gate_metric": false,
+          "metric": "latency_p50_ms",
+          "observed_pass": null,
+          "reference_median": 13.946416,
+          "workload": "counters_indexes",
+          "writers": 16
+        },
+        {
+          "candidate_median": 47.933542,
+          "delta": -2.035083,
+          "gate_metric": false,
+          "metric": "latency_p99_ms",
+          "observed_pass": null,
+          "reference_median": 49.968625,
+          "workload": "counters_indexes",
+          "writers": 16
+        },
+        {
+          "candidate_median": 1.1499732190680236,
+          "delta": -0.003770452661259638,
+          "gate_metric": true,
+          "metric": "storage_conflicts_per_commit",
+          "observed_pass": true,
+          "reference_median": 1.1537436717292833,
+          "workload": "counters_indexes",
+          "writers": 16
+        },
+        {
+          "candidate_median": 0.0,
+          "delta": 0.0,
+          "gate_metric": true,
+          "metric": "client_conflicts_per_commit",
+          "observed_pass": true,
+          "reference_median": 0.0,
+          "workload": "counters_indexes",
+          "writers": 64
+        },
+        {
+          "candidate_median": 299.01493801381366,
+          "delta": -0.07135429992871423,
+          "gate_metric": true,
+          "metric": "commits_per_second",
+          "observed_pass": false,
+          "reference_median": 299.0862923137424,
+          "workload": "counters_indexes",
+          "writers": 64
+        },
+        {
+          "candidate_median": 8385.0,
+          "delta": -49.0,
+          "gate_metric": false,
+          "metric": "engine_exhaustions",
+          "observed_pass": null,
+          "reference_median": 8434.0,
+          "workload": "counters_indexes",
+          "writers": 64
+        },
+        {
+          "candidate_median": 1.0482560320040004,
+          "delta": -0.01262447114065357,
+          "gate_metric": true,
+          "metric": "engine_exhaustions_per_commit",
+          "observed_pass": true,
+          "reference_median": 1.060880503144654,
+          "workload": "counters_indexes",
+          "writers": 64
+        },
+        {
+          "candidate_median": 70.75425,
+          "delta": -0.613459000000006,
+          "gate_metric": false,
+          "metric": "latency_p50_ms",
+          "observed_pass": null,
+          "reference_median": 71.367709,
+          "workload": "counters_indexes",
+          "writers": 64
+        },
+        {
+          "candidate_median": 286.10841700000003,
+          "delta": 1.1729170000000408,
+          "gate_metric": false,
+          "metric": "latency_p99_ms",
+          "observed_pass": null,
+          "reference_median": 284.9355,
+          "workload": "counters_indexes",
+          "writers": 64
+        },
+        {
+          "candidate_median": 5.382047755969496,
+          "delta": -0.052308380851429526,
+          "gate_metric": true,
+          "metric": "storage_conflicts_per_commit",
+          "observed_pass": true,
+          "reference_median": 5.434356136820925,
+          "workload": "counters_indexes",
+          "writers": 64
+        }
+      ],
+      "missing_comparisons": [],
+      "not_comparable_schema_metrics": [],
+      "regressions": [
+        {
+          "candidate_median": 235.96802541080672,
+          "delta": -12.16754521841824,
+          "gate_metric": true,
+          "metric": "commits_per_second",
+          "observed_pass": false,
+          "reference_median": 248.13557062922496,
+          "workload": "creates",
+          "writers": 1
+        },
+        {
+          "candidate_median": 2044.9393648144244,
+          "delta": -33.38226495839194,
+          "gate_metric": true,
+          "metric": "commits_per_second",
+          "observed_pass": false,
+          "reference_median": 2078.3216297728163,
+          "workload": "creates",
+          "writers": 16
+        },
+        {
+          "candidate_median": 0.0036755697133055622,
+          "delta": 0.00024587838552506255,
+          "gate_metric": true,
+          "metric": "engine_exhaustions_per_commit",
+          "observed_pass": false,
+          "reference_median": 0.0034296913277804997,
+          "workload": "shared_updates",
+          "writers": 16
+        },
+        {
+          "candidate_median": 0.1581269919097818,
+          "delta": 0.031228412781903303,
+          "gate_metric": true,
+          "metric": "storage_conflicts_per_commit",
+          "observed_pass": false,
+          "reference_median": 0.1268985791278785,
+          "workload": "shared_updates",
+          "writers": 16
+        },
+        {
+          "candidate_median": 0.416076058772688,
+          "delta": 0.00475725439677277,
+          "gate_metric": true,
+          "metric": "engine_exhaustions_per_commit",
+          "observed_pass": false,
+          "reference_median": 0.4113188043759152,
+          "workload": "shared_updates",
+          "writers": 64
+        },
+        {
+          "candidate_median": 2.675540190146932,
+          "delta": 0.013295380085772468,
+          "gate_metric": true,
+          "metric": "storage_conflicts_per_commit",
+          "observed_pass": false,
+          "reference_median": 2.6622448100611593,
+          "workload": "shared_updates",
+          "writers": 64
+        },
+        {
+          "candidate_median": 531.1449998887864,
+          "delta": -13.821813814255052,
+          "gate_metric": true,
+          "metric": "commits_per_second",
+          "observed_pass": false,
+          "reference_median": 544.9668137030415,
+          "workload": "counters_indexes",
+          "writers": 4
+        },
+        {
+          "candidate_median": 0.09694697375468667,
+          "delta": 0.005553421929480162,
+          "gate_metric": true,
+          "metric": "engine_exhaustions_per_commit",
+          "observed_pass": false,
+          "reference_median": 0.0913935518252065,
+          "workload": "counters_indexes",
+          "writers": 16
+        },
+        {
+          "candidate_median": 299.01493801381366,
+          "delta": -0.07135429992871423,
+          "gate_metric": true,
+          "metric": "commits_per_second",
+          "observed_pass": false,
+          "reference_median": 299.0862923137424,
+          "workload": "counters_indexes",
+          "writers": 64
+        }
+      ],
+      "status": "observed_fail",
+      "strict_no_tolerance": true
+    },
+    "allocation": {
+      "candidate_median": 3111.54,
+      "delta": -22.01000000000022,
+      "reference_median": 3133.55,
+      "status": "observed_pass",
+      "strict_no_tolerance": true
+    },
+    "criterion": {
+      "details": [
+        {
+          "candidate_nanoseconds": 37170.62403846154,
+          "criterion_id": "document_create/4",
+          "delta_nanoseconds": -599.0358522342722,
+          "observed_pass": true,
+          "reference_nanoseconds": 37769.65989069581
+        },
+        {
+          "candidate_nanoseconds": 97786.77429653681,
+          "criterion_id": "document_create/16",
+          "delta_nanoseconds": -2571.856374759489,
+          "observed_pass": true,
+          "reference_nanoseconds": 100358.6306712963
+        },
+        {
+          "candidate_nanoseconds": 45370.94219322344,
+          "criterion_id": "document_create_branchable/14",
+          "delta_nanoseconds": -593.9062727798737,
+          "observed_pass": true,
+          "reference_nanoseconds": 45964.848466003314
+        },
+        {
+          "candidate_nanoseconds": 8835302.166666666,
+          "criterion_id": "startup/cold_open/embedded/10_collections",
+          "delta_nanoseconds": 331454.91666666605,
+          "observed_pass": false,
+          "reference_nanoseconds": 8503847.25
+        }
+      ],
+      "missing_comparisons": [],
+      "regressions": [
+        {
+          "candidate_nanoseconds": 8835302.166666666,
+          "criterion_id": "startup/cold_open/embedded/10_collections",
+          "delta_nanoseconds": 331454.91666666605,
+          "observed_pass": false,
+          "reference_nanoseconds": 8503847.25
+        }
+      ],
+      "status": "observed_fail",
+      "strict_no_tolerance": true
+    },
+    "decision": "NOT ADOPTED: strict comparisons fail against published step8 despite modest allocation reduction."
+  },
+  "checkpoint_gates_vs_main": [
+    {
+      "label": "main-8a38e96f2",
+      "source_revision": "8a38e96f213cd9edc55c89eed272ba8f83c76524",
+      "structurally_valid": true,
+      "samples": 36,
+      "commands": 8,
+      "baseline_gate": "reference",
+      "baseline_regressions": null,
+      "baseline_missing": null,
+      "allocation_vs_main": "reference",
+      "criterion_vs_main": "reference",
+      "create_conflicts_gate": "observed_pass"
+    },
+    {
+      "label": "step0-d6f58d624",
+      "source_revision": "d6f58d6249ca90701f8ceb9732d859e046e6fdc6",
+      "structurally_valid": true,
+      "samples": 36,
+      "commands": 8,
+      "baseline_gate": "observed_fail",
+      "baseline_regressions": 13,
+      "baseline_missing": 0,
+      "allocation_vs_main": "observed_fail",
+      "criterion_vs_main": "observed_fail",
+      "create_conflicts_gate": "observed_fail"
+    },
+    {
+      "label": "step1a-3162318e2",
+      "source_revision": "3162318e27754ccf5cb64ae4f04bd8675505edfa",
+      "structurally_valid": true,
+      "samples": 36,
+      "commands": 8,
+      "baseline_gate": "observed_fail",
+      "baseline_regressions": 17,
+      "baseline_missing": 0,
+      "allocation_vs_main": "observed_fail",
+      "criterion_vs_main": "observed_fail",
+      "create_conflicts_gate": "observed_fail"
+    },
+    {
+      "label": "step1b-1cf6a0b23",
+      "source_revision": "1cf6a0b236bf8f2fd357503a7d0762d6f1ea760b",
+      "structurally_valid": true,
+      "samples": 36,
+      "commands": 8,
+      "baseline_gate": "observed_fail",
+      "baseline_regressions": 21,
+      "baseline_missing": 0,
+      "allocation_vs_main": "observed_fail",
+      "criterion_vs_main": "observed_fail",
+      "create_conflicts_gate": "observed_fail"
+    },
+    {
+      "label": "step1-45c81aed5",
+      "source_revision": "45c81aed5c73f431e00549acb78c7f7582c725a1",
+      "structurally_valid": true,
+      "samples": 36,
+      "commands": 8,
+      "baseline_gate": "observed_fail",
+      "baseline_regressions": 8,
+      "baseline_missing": 0,
+      "allocation_vs_main": "observed_fail",
+      "criterion_vs_main": "observed_fail",
+      "create_conflicts_gate": "observed_fail"
+    },
+    {
+      "label": "step2-23c8fde54",
+      "source_revision": "23c8fde54a085ce99b6c10aa92c1ce2d52ac9cc0",
+      "structurally_valid": true,
+      "samples": 36,
+      "commands": 8,
+      "baseline_gate": "observed_fail",
+      "baseline_regressions": 8,
+      "baseline_missing": 0,
+      "allocation_vs_main": "observed_fail",
+      "criterion_vs_main": "observed_fail",
+      "create_conflicts_gate": "observed_fail"
+    },
+    {
+      "label": "step3-711555a37",
+      "source_revision": "711555a37a37b4c017e1753ea28f96beaaa757f2",
+      "structurally_valid": true,
+      "samples": 36,
+      "commands": 8,
+      "baseline_gate": "observed_fail",
+      "baseline_regressions": 13,
+      "baseline_missing": 0,
+      "allocation_vs_main": "observed_pass",
+      "criterion_vs_main": "observed_fail",
+      "create_conflicts_gate": "observed_pass"
+    },
+    {
+      "label": "step4-965fb4e6e",
+      "source_revision": "965fb4e6e65d3a0874b0e5964eee4fde2509ede3",
+      "structurally_valid": true,
+      "samples": 36,
+      "commands": 8,
+      "baseline_gate": "observed_fail",
+      "baseline_regressions": 13,
+      "baseline_missing": 0,
+      "allocation_vs_main": "observed_pass",
+      "criterion_vs_main": "observed_fail",
+      "create_conflicts_gate": "observed_pass"
+    },
+    {
+      "label": "step5-c2502fc5c",
+      "source_revision": "c2502fc5c1afd9e5f8013f11e3f0b35836548b6d",
+      "structurally_valid": true,
+      "samples": 36,
+      "commands": 8,
+      "baseline_gate": "observed_fail",
+      "baseline_regressions": 14,
+      "baseline_missing": 0,
+      "allocation_vs_main": "observed_fail",
+      "criterion_vs_main": "observed_fail",
+      "create_conflicts_gate": "observed_pass"
+    },
+    {
+      "label": "forcedread-d230f33fb",
+      "source_revision": "d230f33fb42881be8ae82322ae39dae74e869c68",
+      "structurally_valid": true,
+      "samples": 36,
+      "commands": 8,
+      "baseline_gate": "observed_fail",
+      "baseline_regressions": 14,
+      "baseline_missing": 0,
+      "allocation_vs_main": "observed_fail",
+      "criterion_vs_main": "observed_fail",
+      "create_conflicts_gate": "observed_pass"
+    },
+    {
+      "label": "arrival-bafceb60c",
+      "source_revision": "bafceb60c0d8c0f59482a212a719e7ac2f14fa6a",
+      "structurally_valid": true,
+      "samples": 36,
+      "commands": 8,
+      "baseline_gate": "observed_fail",
+      "baseline_regressions": 13,
+      "baseline_missing": 0,
+      "allocation_vs_main": "observed_fail",
+      "criterion_vs_main": "observed_fail",
+      "create_conflicts_gate": "observed_pass"
+    },
+    {
+      "label": "acpcounter-a4487cef0",
+      "source_revision": "a4487cef0752f822006e128618be3a99778a8878",
+      "structurally_valid": true,
+      "samples": 36,
+      "commands": 8,
+      "baseline_gate": "observed_fail",
+      "baseline_regressions": 13,
+      "baseline_missing": 0,
+      "allocation_vs_main": "observed_fail",
+      "criterion_vs_main": "observed_fail",
+      "create_conflicts_gate": "observed_pass"
+    },
+    {
+      "label": "docqueue-1ceaefaca",
+      "source_revision": "1ceaefaca54f684086cf218f5cc69470c59cbe5b",
+      "structurally_valid": true,
+      "samples": 36,
+      "commands": 8,
+      "baseline_gate": "observed_fail",
+      "baseline_regressions": 7,
+      "baseline_missing": 0,
+      "allocation_vs_main": "observed_fail",
+      "criterion_vs_main": "observed_fail",
+      "create_conflicts_gate": "observed_pass"
+    },
+    {
+      "label": "collectionlock-b33f571c7",
+      "source_revision": "b33f571c7b1f05e647d1ad6ab993c76abd1001b0",
+      "structurally_valid": true,
+      "samples": 36,
+      "commands": 8,
+      "baseline_gate": "observed_fail",
+      "baseline_regressions": 8,
+      "baseline_missing": 0,
+      "allocation_vs_main": "observed_fail",
+      "criterion_vs_main": "observed_fail",
+      "create_conflicts_gate": "observed_pass"
+    },
+    {
+      "label": "peergeneration-6262270d1",
+      "source_revision": "6262270d1aaa5a92fafefc15a341dd4b0acd49c8",
+      "structurally_valid": true,
+      "samples": 36,
+      "commands": 8,
+      "baseline_gate": "observed_fail",
+      "baseline_regressions": 7,
+      "baseline_missing": 0,
+      "allocation_vs_main": "observed_fail",
+      "criterion_vs_main": "observed_fail",
+      "create_conflicts_gate": "observed_pass"
+    },
+    {
+      "label": "acpengine-d7d8d0c17",
+      "source_revision": "d7d8d0c1764a0091242e368d72ae23c946130781",
+      "structurally_valid": true,
+      "samples": 36,
+      "commands": 8,
+      "baseline_gate": "observed_fail",
+      "baseline_regressions": 8,
+      "baseline_missing": 0,
+      "allocation_vs_main": "observed_fail",
+      "criterion_vs_main": "observed_fail",
+      "create_conflicts_gate": "observed_pass"
+    },
+    {
+      "label": "deferredacp-5ae8448a4",
+      "source_revision": "5ae8448a4dc3b27dc60d1034dfdcf46c9f697fea",
+      "structurally_valid": true,
+      "samples": 36,
+      "commands": 8,
+      "baseline_gate": "observed_fail",
+      "baseline_regressions": 7,
+      "baseline_missing": 0,
+      "allocation_vs_main": "observed_fail",
+      "criterion_vs_main": "observed_fail",
+      "create_conflicts_gate": "observed_pass"
+    },
+    {
+      "label": "headcache-5af484fb3",
+      "source_revision": "5af484fb3ffd85108423fcdd2313480625fd2aaa",
+      "structurally_valid": true,
+      "samples": 36,
+      "commands": 8,
+      "baseline_gate": "observed_fail",
+      "baseline_regressions": 7,
+      "baseline_missing": 0,
+      "allocation_vs_main": "observed_fail",
+      "criterion_vs_main": "observed_fail",
+      "create_conflicts_gate": "observed_pass"
+    },
+    {
+      "label": "step6-47a35b111",
+      "source_revision": "47a35b11180a503394f23d7c511d65cc650a5245",
+      "structurally_valid": true,
+      "samples": 36,
+      "commands": 8,
+      "baseline_gate": "observed_fail",
+      "baseline_regressions": 8,
+      "baseline_missing": 0,
+      "allocation_vs_main": "observed_fail",
+      "criterion_vs_main": "observed_fail",
+      "create_conflicts_gate": "observed_pass"
+    },
+    {
+      "label": "step7-11b71efcd",
+      "source_revision": "11b71efcdc6d6ceefc74984c6184c1e1e90aed90",
+      "structurally_valid": true,
+      "samples": 36,
+      "commands": 8,
+      "baseline_gate": "observed_fail",
+      "baseline_regressions": 7,
+      "baseline_missing": 0,
+      "allocation_vs_main": "observed_fail",
+      "criterion_vs_main": "observed_fail",
+      "create_conflicts_gate": "observed_pass"
+    },
+    {
+      "label": "step8-051fd5fc3",
+      "source_revision": "051fd5fc3d794844d083feba219c8d5e2b0eb710",
+      "structurally_valid": true,
+      "samples": 36,
+      "commands": 8,
+      "baseline_gate": "observed_fail",
+      "baseline_regressions": 8,
+      "baseline_missing": 0,
+      "allocation_vs_main": "observed_fail",
+      "criterion_vs_main": "observed_fail",
+      "create_conflicts_gate": "observed_pass"
+    },
+    {
+      "label": "createfast-3a90482b2",
+      "source_revision": "3a90482b2fd1b333a88892d1b0921d9be8fa8116",
+      "structurally_valid": true,
+      "samples": 36,
+      "commands": 8,
+      "baseline_gate": "observed_fail",
+      "baseline_regressions": 8,
+      "baseline_missing": 0,
+      "allocation_vs_main": "observed_fail",
+      "criterion_vs_main": "observed_fail",
+      "create_conflicts_gate": "observed_pass"
+    }
+  ]
+}
