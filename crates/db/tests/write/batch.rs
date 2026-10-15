@@ -1,6 +1,5 @@
 use crate::common::fixture::make_test_db_with_bus;
 use crate::common::schema::test_collection;
-use async_lock::Mutex as TokioMutex;
 use db::write::autocommit::batch::*;
 use document::Document;
 use events::EventName;
@@ -34,8 +33,7 @@ async fn batch_create_publishes_event_on_commit() {
     let mut sub = bus.subscribe(&[EventName::Update]);
 
     let txn = db.new_txn(false).await.expect("new_txn");
-    let txn_arc = Arc::new(TokioMutex::new(Some(txn)));
-    let mutator = BatchMutator::new(Arc::clone(&db), Arc::clone(&txn_arc)).await;
+    let mutator = BatchMutator::new(Arc::clone(&db), Arc::new(txn)).await;
 
     let doc = Document::from_json_str(r#"{"x": 1}"#).expect("doc");
     let result = mutator.create("TestDoc", doc).await.expect("create");
@@ -76,8 +74,7 @@ async fn batch_create_registers_external_acp_before_ordered_event() {
         acp::MemoryAcpStore::new(),
     )));
     let txn = db.new_txn(false).await.expect("new_txn");
-    let txn_arc = Arc::new(TokioMutex::new(Some(txn)));
-    let mutator = Arc::new(BatchMutator::new(Arc::clone(&db), txn_arc).await);
+    let mutator = Arc::new(BatchMutator::new(Arc::clone(&db), Arc::new(txn)).await);
     // The database gates a non-transactional provider itself.
     mutator.set_document_acp(acp.clone());
     let mut sub = bus.subscribe(&[EventName::Update]);
@@ -118,8 +115,7 @@ async fn batch_delete_missing_doc_publishes_no_event_and_writes_no_block() {
     let mut sub = bus.subscribe(&[EventName::Update]);
 
     let txn = db.new_txn(false).await.expect("new_txn");
-    let txn_arc = Arc::new(TokioMutex::new(Some(txn)));
-    let mutator = BatchMutator::new(Arc::clone(&db), Arc::clone(&txn_arc)).await;
+    let mutator = BatchMutator::new(Arc::clone(&db), Arc::new(txn)).await;
 
     let missing_doc_id = document::DocID::new_v0_from_seed("missing-doc");
 
@@ -150,8 +146,7 @@ async fn batch_delete_branchable_surfaces_collection_block_for_broadcast() {
         .expect("schema");
 
     let txn = db.new_txn(false).await.expect("new_txn");
-    let txn_arc = Arc::new(TokioMutex::new(Some(txn)));
-    let mutator = BatchMutator::new(Arc::clone(&db), Arc::clone(&txn_arc)).await;
+    let mutator = BatchMutator::new(Arc::clone(&db), Arc::new(txn)).await;
 
     let doc = Document::from_json_str(r#"{"x": 1}"#).expect("doc");
     let create_result = mutator.create("TestBranchable", doc).await.expect("create");

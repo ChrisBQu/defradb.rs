@@ -1,8 +1,6 @@
 mod unit_tests {
-    use async_lock::Mutex as TokioMutex;
     use db::*;
     use document::NormalValue;
-    use std::sync::Arc;
     use storage::RegolithStore;
 
     fn commit(doc_id: &str, field_name: &str) -> Document {
@@ -25,7 +23,7 @@ mod unit_tests {
 
     #[test]
     fn sort_commits_preserves_document_discovery_order() {
-        let fetcher = CommitsFetcher::<RegolithStore>::new(Arc::new(TokioMutex::new(None)));
+        let fetcher = CommitsFetcher::<RegolithStore>::detached();
         let mut commits = vec![
             commit("z-first", "_C"),
             commit("z-first", "name"),
@@ -86,7 +84,6 @@ mod shared_owner_tests {
     use std::sync::Arc;
     use storage::RegolithStore;
 
-    use async_lock::Mutex;
     use defra_core::{
         Block, CrdtDelta, LwwDeltaPayload, Signature, SignatureHeader, SignatureType,
     };
@@ -151,7 +148,7 @@ mod shared_owner_tests {
         txn.commit().await.unwrap();
 
         let commits_txn = db.new_txn(true).await.unwrap();
-        let commits = CommitsFetcher::new(Arc::new(Mutex::new(Some(commits_txn))))
+        let commits = CommitsFetcher::new(Arc::new(commits_txn))
             .fetch_commits(&CommitsQueryOptions {
                 depth: Some(1),
                 ..Default::default()
@@ -206,7 +203,7 @@ mod shared_owner_tests {
         txn.commit().await.unwrap();
 
         let commits_txn = db.new_txn(true).await.unwrap();
-        let commits = CommitsFetcher::new(Arc::new(Mutex::new(Some(commits_txn))))
+        let commits = CommitsFetcher::new(Arc::new(commits_txn))
             .fetch_commits(&CommitsQueryOptions {
                 cid: Some(cid.to_string()),
                 ..Default::default()
@@ -220,7 +217,7 @@ mod shared_owner_tests {
         assert_eq!(commit_owners, owners.iter().map(String::as_str).collect());
 
         let version_txn = db.new_txn(true).await.unwrap();
-        let documents = VersionedFetcher::new(Arc::new(Mutex::new(Some(version_txn))))
+        let documents = VersionedFetcher::new(Arc::new(version_txn))
             .get_documents_at_cid(&cid.to_string(), None, None)
             .await
             .unwrap();
@@ -276,7 +273,7 @@ mod shared_owner_tests {
         txn.commit().await.unwrap();
 
         let commits_txn = db.new_txn(true).await.unwrap();
-        let commits = CommitsFetcher::new(Arc::new(Mutex::new(Some(commits_txn))))
+        let commits = CommitsFetcher::new(Arc::new(commits_txn))
             .fetch_commits(&CommitsQueryOptions {
                 cid: Some(cid.to_string()),
                 ..Default::default()

@@ -98,7 +98,7 @@ impl<S: Store> crate::database::DB<S> {
         // repository forbids a collection as soon as its last local version is
         // deleted, even for transactions whose storage snapshot still contains
         // the old schema. Allow those transactions to redeclare it.
-        if let Some(existing) = txn.get_collection(&name).await?.cloned() {
+        if let Some(existing) = txn.get_collection(&name).await? {
             if self.is_collection_forbidden(existing.collection_id())? {
                 txn.uncache_collection(&name);
             } else {

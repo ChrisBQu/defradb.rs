@@ -44,7 +44,7 @@ impl<S: Store> DB<S> {
         let source_version_id = config.source_schema_version_id.clone();
         let config_for_persistence = config.clone();
 
-        let mut txn = self.new_txn(false).await?;
+        let txn = self.new_txn(false).await?;
 
         let (source_col, mut dst_col) = {
             let systemstore = txn.systemstore()?;

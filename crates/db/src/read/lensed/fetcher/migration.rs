@@ -18,7 +18,7 @@ use crate::definition::migration::helpers::{
 
 use super::{History, LensedDocFetcher, VersionFacts};
 
-impl<S: Store> LensedDocFetcher<S> {
+impl<S: Store + 'static> LensedDocFetcher<S> {
     /// Check if any version in a list of collection versions has migrations registered.
     ///
     /// A collection has migrations if any version in its history has a transform
@@ -118,14 +118,11 @@ impl<S: Store> LensedDocFetcher<S> {
         collection: &Collection,
     ) -> query::error::Result<(Arc<[CollectionVersion]>, bool)> {
         let collection_id = &collection.schema().collection_id;
-        let generation = self.version_cache.generation();
+        let generation = self.caches.version.generation();
 
         // Load all versions from systemstore
-        let txn_guard = self.txn.lock().await;
         let (readonly, systemstore) = {
-            let txn = txn_guard.as_ref().ok_or_else(|| {
-                query::error::QueryError::execution("transaction not available for version lookup")
-            })?;
+            let txn = &*self.shared_txn()?;
             let readonly = txn
                 .is_readonly()
                 .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
@@ -135,7 +132,7 @@ impl<S: Store> LensedDocFetcher<S> {
             (readonly, systemstore)
         };
         if readonly {
-            if let Some(facts) = self.version_cache.get(generation, collection_id) {
+            if let Some(facts) = self.caches.version.get(generation, collection_id) {
                 return Ok(VersionFacts::clone(&facts));
             }
         }
@@ -152,10 +149,10 @@ impl<S: Store> LensedDocFetcher<S> {
         let has_migrations = Self::versions_have_migrations(&versions);
         let facts = (Arc::from(versions), has_migrations);
         if readonly {
-            self.version_cache
+            self.caches
+                .version
                 .publish(generation, collection_id, &Arc::new(facts.clone()));
         }
-        drop(txn_guard);
         Ok(facts)
     }
 
@@ -170,8 +167,8 @@ impl<S: Store> LensedDocFetcher<S> {
         let target_version_id = &collection.schema().version_id;
         let cache_key = format!("{}:{}", collection_id, target_version_id);
 
-        let generation = self.history_cache.generation();
-        if let Some(history) = self.history_cache.get(generation, &cache_key) {
+        let generation = self.caches.history.generation();
+        if let Some(history) = self.caches.history.get(generation, &cache_key) {
             return Ok(history);
         }
 
@@ -195,7 +192,9 @@ impl<S: Store> LensedDocFetcher<S> {
             })?;
 
         let history = Arc::new(history);
-        self.history_cache.publish(generation, &cache_key, &history);
+        self.caches
+            .history
+            .publish(generation, &cache_key, &history);
         Ok(history)
     }
 
@@ -318,10 +317,7 @@ impl<S: Store> LensedDocFetcher<S> {
         _source_doc: &Document,
         migrated_doc: &Document,
     ) -> query::error::Result<()> {
-        let txn_guard = self.txn.lock().await;
-        let txn = txn_guard.as_ref().ok_or_else(|| {
-            query::error::QueryError::execution("transaction not available for lens write-back")
-        })?;
+        let txn = &*self.shared_txn()?;
         if txn.is_readonly().map_err(|e| {
             query::error::QueryError::execution(format!(
                 "failed to inspect lens write-back transaction: {}",

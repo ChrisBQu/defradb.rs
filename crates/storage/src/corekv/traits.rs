@@ -122,20 +122,24 @@ pub trait Reader: MaybeSendSync + private::Sealed {
 
 /// Writer trait for write operations.
 ///
-/// This trait provides the core write operations: set and delete.
+/// Every write has two forms. The `_shared` one takes `&self`, as the engine
+/// takes its writes: it is how the handles that share one transaction (its
+/// namespace views) write without a lock, and it is what an implementation
+/// provides. The plain one takes `&mut self`, for a handle its caller holds
+/// alone, and does the same write.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait Writer: MaybeSendSync + private::Sealed {
-    /// Apply an operator-defined operand without reading the value first.
-    async fn merge(&mut self, _key: &[u8], _operand: &[u8]) -> Result<()> {
+    /// [`merge`](Self::merge) through a shared reference.
+    async fn merge_shared(&self, _key: &[u8], _operand: &[u8]) -> Result<()> {
         Err(super::errors::Error::Other(
             "value merges are unsupported by this store".into(),
         ))
     }
 
-    /// Queue an entry whose position becomes visible only after commit.
-    async fn append(
-        &mut self,
+    /// [`append`](Self::append) through a shared reference.
+    async fn append_shared(
+        &self,
         _log: &super::types::AppendLog,
         _entry: &[u8],
         _once_key: Option<&[u8]>,
@@ -143,6 +147,27 @@ pub trait Writer: MaybeSendSync + private::Sealed {
         Err(super::errors::Error::Other(
             "commit-ordered append is unsupported by this store".into(),
         ))
+    }
+
+    /// [`set`](Self::set) through a shared reference.
+    async fn set_shared(&self, key: &[u8], value: &[u8]) -> Result<()>;
+
+    /// [`delete`](Self::delete) through a shared reference.
+    async fn delete_shared(&self, key: &[u8]) -> Result<()>;
+
+    /// Apply an operator-defined operand without reading the value first.
+    async fn merge(&mut self, key: &[u8], operand: &[u8]) -> Result<()> {
+        self.merge_shared(key, operand).await
+    }
+
+    /// Queue an entry whose position becomes visible only after commit.
+    async fn append(
+        &mut self,
+        log: &super::types::AppendLog,
+        entry: &[u8],
+        once_key: Option<&[u8]>,
+    ) -> Result<()> {
+        self.append_shared(log, entry, once_key).await
     }
 
     /// Store a key-value pair.
@@ -160,7 +185,9 @@ pub trait Writer: MaybeSendSync + private::Sealed {
     /// * `Err(Error::EmptyKey)` if the key is empty
     /// * `Err(Error::ReadOnlyTxn)` if called on a read-only transaction
     /// * `Err(Error)` for other errors
-    async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()>;
+    async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+        self.set_shared(key, value).await
+    }
 
     /// Delete a key from the store.
     ///
@@ -176,7 +203,9 @@ pub trait Writer: MaybeSendSync + private::Sealed {
     /// * `Err(Error::EmptyKey)` if the key is empty
     /// * `Err(Error::ReadOnlyTxn)` if called on a read-only transaction
     /// * `Err(Error)` for other errors
-    async fn delete(&mut self, key: &[u8]) -> Result<()>;
+    async fn delete(&mut self, key: &[u8]) -> Result<()> {
+        self.delete_shared(key).await
+    }
 }
 
 /// ReaderWriter trait combining read and write operations.
@@ -441,24 +470,24 @@ impl Reader for Box<dyn Txn> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Writer for Box<dyn Txn> {
-    async fn merge(&mut self, key: &[u8], operand: &[u8]) -> Result<()> {
-        (**self).merge(key, operand).await
+    async fn merge_shared(&self, key: &[u8], operand: &[u8]) -> Result<()> {
+        (**self).merge_shared(key, operand).await
     }
 
-    async fn append(
-        &mut self,
+    async fn append_shared(
+        &self,
         log: &super::types::AppendLog,
         entry: &[u8],
         once_key: Option<&[u8]>,
     ) -> Result<()> {
-        (**self).append(log, entry, once_key).await
+        (**self).append_shared(log, entry, once_key).await
     }
 
-    async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
-        (**self).set(key, value).await
+    async fn set_shared(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        (**self).set_shared(key, value).await
     }
 
-    async fn delete(&mut self, key: &[u8]) -> Result<()> {
-        (**self).delete(key).await
+    async fn delete_shared(&self, key: &[u8]) -> Result<()> {
+        (**self).delete_shared(key).await
     }
 }

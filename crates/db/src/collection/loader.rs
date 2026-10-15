@@ -3,9 +3,6 @@
 //! This module provides common functions for loading collections from the SystemStore,
 //! used by both DbDocFetcher and DbDocMutator.
 
-use std::sync::Arc;
-
-use async_lock::Mutex as TokioMutex;
 use datastore::NamespaceView;
 use schema::CollectionVersion;
 use storage::corekv::{Key, Store};
@@ -306,79 +303,35 @@ fn exact_schema_wire_matches(
 ///
 /// Returns the collection, datastore, and systemstore (for DocID <-> short-ID
 /// resolution) for document operations.
-/// The database's resident DiskANN codes, as the transaction carries them.
-pub async fn vector_codes<S: Store + 'static>(
-    txn: &Arc<TokioMutex<Option<DbTxn<S>>>>,
-) -> query::error::Result<Arc<crate::index::vector::engine::diskann::CodeCaches>> {
-    txn.lock()
-        .await
-        .as_ref()
-        .map(|txn| txn.vector_codes().clone())
-        .ok_or_else(|| query::error::QueryError::execution("transaction already consumed"))
-}
-
 pub async fn get_collection_with_lazy_load<S: Store + 'static>(
-    txn: &Arc<TokioMutex<Option<DbTxn<S>>>>,
+    txn: &DbTxn<S>,
     collection_name: &str,
 ) -> query::error::Result<(Collection, NamespaceView, NamespaceView)> {
-    // Extract what we need from the transaction while holding the lock briefly
-    let (collection_opt, shared, systemstore, datastore) = {
-        let txn_guard = txn.lock().await;
-        let db_txn = txn_guard
-            .as_ref()
-            .ok_or_else(|| query::error::QueryError::execution("transaction already consumed"))?;
-        let collection_opt = db_txn.collection_cache().get(collection_name).cloned();
-        let shared = collection_opt
-            .is_none()
-            .then(|| db_txn.shared_collection(collection_name))
-            .flatten();
-        let systemstore = db_txn.systemstore().map_err(|e| {
-            query::error::QueryError::execution(format!(
-                "failed to get systemstore for collection '{}': {}",
-                collection_name, e
-            ))
-        })?;
-        let datastore = db_txn.datastore().map_err(|e| {
-            query::error::QueryError::execution(format!(
-                "failed to get datastore for collection '{}': {}",
-                collection_name, e
-            ))
-        })?;
-        (collection_opt, shared, systemstore, datastore)
-    };
+    let systemstore = txn.systemstore().map_err(|e| {
+        query::error::QueryError::execution(format!(
+            "failed to get systemstore for collection '{}': {}",
+            collection_name, e
+        ))
+    })?;
+    let datastore = txn.datastore().map_err(|e| {
+        query::error::QueryError::execution(format!(
+            "failed to get datastore for collection '{}': {}",
+            collection_name, e
+        ))
+    })?;
+    if let Some(collection) = txn.cached_collection(collection_name) {
+        return Ok((collection, datastore, systemstore));
+    }
 
-    // Return cached collection if found
-    let collection = if let Some(col) = collection_opt {
-        col
-    } else {
-        // Cache miss: load from SystemStore. A definition byte-equal to the
-        // database's committed handle reuses that handle's decoded schema and
-        // part-ID map instead of parsing them again.
-        let loaded =
-            load_collection_from_systemstore_impl(&systemstore, collection_name, shared.as_ref())
-                .await?;
-        let collection = loaded
+    // Cache miss: load from SystemStore. A definition byte-equal to the
+    // database's committed handle reuses that handle's decoded schema and
+    // part-ID map instead of parsing them again.
+    let shared = txn.shared_collection(collection_name);
+    let collection =
+        load_collection_from_systemstore_impl(&systemstore, collection_name, shared.as_ref())
+            .await?
             .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
-
-        // Add to cache - warn if transaction was consumed during load
-        {
-            let mut txn_guard = txn.lock().await;
-            match txn_guard.as_mut() {
-                Some(db_txn) => {
-                    db_txn.cache_collection(collection.clone());
-                }
-                None => {
-                    warn!(
-                        collection_name = %collection_name,
-                        "Transaction was consumed during collection load - cache not updated"
-                    );
-                }
-            }
-        }
-
-        collection
-    };
-
+    txn.cache_collection(collection.clone());
     Ok((collection, datastore, systemstore))
 }
 
@@ -391,7 +344,7 @@ pub async fn get_collection_with_lazy_load<S: Store + 'static>(
 /// Returns the collection, datastore, systemstore, and IndexManager for
 /// document operations.
 pub async fn get_collection_with_index_manager<S: Store + 'static>(
-    txn: &Arc<TokioMutex<Option<DbTxn<S>>>>,
+    txn: &DbTxn<S>,
     collection_name: &str,
 ) -> query::error::Result<(Collection, NamespaceView, NamespaceView, IndexManager)> {
     let (collection, datastore, systemstore) =

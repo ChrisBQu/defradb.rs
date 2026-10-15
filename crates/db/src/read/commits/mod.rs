@@ -6,18 +6,16 @@
 mod conversion;
 mod delta;
 
-use async_lock::Mutex as TokioMutex;
 use cid::Cid;
 use document::Document;
 use rapidhash::{HashMapExt, HashSetExt, RapidHashSet};
 use std::collections::BTreeSet;
 use std::str::FromStr;
-use std::sync::Arc;
 use storage::corekv::{IterOptions, Store};
 use storage::keys::HeadstorePriorityKey;
 
 use crate::error::{Error, Result};
-use crate::txn::DbTxn;
+use crate::txn::{DbTxn, LentTxn};
 
 /// Options for commits queries
 #[derive(Debug, Clone, Default)]
@@ -38,19 +36,25 @@ pub struct CommitsQueryOptions {
 
 /// Fetcher for commit history from the merkle DAG
 pub struct CommitsFetcher<S: Store> {
-    txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
+    /// The transaction it reads; a detached fetcher has none and only orders
+    /// commits it is given.
+    txn: Option<LentTxn<S>>,
 }
 
 impl<S: Store> CommitsFetcher<S> {
     /// Create a new commits fetcher with a shared transaction
-    pub fn new(txn: Arc<TokioMutex<Option<DbTxn<S>>>>) -> Self {
-        Self { txn }
+    pub fn new(txn: LentTxn<S>) -> Self {
+        Self { txn: Some(txn) }
+    }
+
+    /// A fetcher with no transaction, for ordering commits it is given.
+    pub fn detached() -> Self {
+        Self { txn: None }
     }
 
     /// Fetch all commits matching the given options
     pub async fn fetch_commits(&self, options: &CommitsQueryOptions) -> Result<Vec<Document>> {
-        let mut guard = self.txn.lock().await;
-        let txn = guard.as_mut().ok_or(Error::TxnNotActive)?;
+        let txn = self.txn.as_deref().ok_or(Error::TxnNotActive)?;
 
         if let Some(ref cid_str) = options.cid {
             return self.fetch_commit_by_cid(txn, cid_str, options).await;
@@ -69,7 +73,7 @@ impl<S: Store> CommitsFetcher<S> {
     /// Fetch a single commit by its CID
     async fn fetch_commit_by_cid(
         &self,
-        txn: &mut DbTxn<S>,
+        txn: &DbTxn<S>,
         cid_str: &str,
         options: &CommitsQueryOptions,
     ) -> Result<Vec<Document>> {
@@ -134,7 +138,7 @@ impl<S: Store> CommitsFetcher<S> {
     /// Fetch commits starting from all heads
     async fn fetch_commits_from_heads(
         &self,
-        txn: &mut DbTxn<S>,
+        txn: &DbTxn<S>,
         options: &CommitsQueryOptions,
     ) -> Result<Vec<Document>> {
         let head_cids = self.get_head_cids(txn, options).await?;
@@ -195,7 +199,7 @@ impl<S: Store> CommitsFetcher<S> {
     /// Fetch commits through the secondary `(doc_id, priority) -> cid` index.
     async fn fetch_commits_by_height_range(
         &self,
-        txn: &mut DbTxn<S>,
+        txn: &DbTxn<S>,
         options: &CommitsQueryOptions,
     ) -> Result<Vec<Document>> {
         let doc_id = options.doc_id.as_ref().ok_or_else(|| {
@@ -304,7 +308,7 @@ impl<S: Store> CommitsFetcher<S> {
     /// Traverse depth from a starting block
     async fn traverse_depth(
         &self,
-        txn: &mut DbTxn<S>,
+        txn: &DbTxn<S>,
         block: &defra_core::block::Block,
         remaining_depth: u64,
         commits: &mut Vec<Document>,
@@ -352,7 +356,7 @@ impl<S: Store> CommitsFetcher<S> {
     /// Get all head CIDs from headstore
     async fn get_head_cids(
         &self,
-        txn: &mut DbTxn<S>,
+        txn: &DbTxn<S>,
         options: &CommitsQueryOptions,
     ) -> Result<Vec<(Cid, Option<String>)>> {
         let headstore = txn.headstore()?;

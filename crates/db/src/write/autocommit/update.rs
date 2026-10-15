@@ -221,7 +221,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .begin_attempt_io()
             .map_err(|error| crate::error::commit_query_error(error.into()))?;
         let basic_txn = datastore::BasicTxn::from_retry_attempt_io(io, 0);
-        let mut txn = self.db.new_db_txn(basic_txn);
+        let txn = self.db.new_db_txn(basic_txn);
         let collection = txn
             .load_collection_for_write_attempt(&attempt.collection_name, &attempt.collection)
             .await
@@ -298,7 +298,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         if let Some(prepared) = attempt.input.write_preparation().cloned() {
             current_doc.set_write_preparation(prepared);
         }
-        let mut txn = fetcher.take_txn().await.ok_or_else(|| {
+        let txn = fetcher.take_txn().await.ok_or_else(|| {
             query::error::QueryError::execution("update transaction already consumed")
         })?;
         drop(fetcher);

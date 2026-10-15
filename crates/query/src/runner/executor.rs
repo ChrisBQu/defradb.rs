@@ -4,8 +4,7 @@ use async_trait::async_trait;
 use rapidhash::RapidHashMap;
 use serde_json::Value as JsonValue;
 use std::future::Future;
-use std::sync::Arc;
-use tracing::{instrument, warn};
+use tracing::instrument;
 
 use acp::nac::NodePermission;
 use identity::Did;
@@ -13,73 +12,48 @@ use identity::Did;
 use crate::error::{Result, TransactionError};
 use crate::executor::{GqlWarning, QueryExecutor, QueryRequest, QueryResponse, QueryResponseError};
 use crate::query_parse::{parse_request_with_limits, validate_parsed_operation, ParsedOperation};
-use crate::txn::{
-    GetTransactionResult, TransactionContext, TransactionHandle, TransactionRegistry,
-};
+use crate::txn::{TransactionHandle, TransactionRegistry};
 
+use super::turn::answered;
 use super::{DocFetcher, QueryRunner};
 
-struct StatementRollbackGuard {
-    transaction: Arc<dyn TransactionContext>,
-    armed: bool,
+/// `future`'s output, or why its deadline ended it first: `limit` passed, or
+/// the deadline could not be kept. The deadline is a timer of the worker
+/// pool's deadline queue: the calling worker's, or the fallback pool's off
+/// the pool. A browser keeps no deadline: the future runs to its end.
+pub async fn within_deadline<F: Future>(
+    limit: Option<std::time::Duration>,
+    future: F,
+) -> std::result::Result<F::Output, String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(limit) = limit {
+        return workers::timeout(limit, future)
+            .await
+            .map_err(|error| match error {
+                workers::Error::TimedOut => format!(
+                    "query execution timed out after {} seconds",
+                    limit.as_secs()
+                ),
+                error => format!("the query's deadline could not be kept: {error}"),
+            });
+    }
+    #[cfg(target_arch = "wasm32")]
+    let _ = limit;
+    Ok(future.await)
 }
 
-impl StatementRollbackGuard {
-    fn new(transaction: Arc<dyn TransactionContext>) -> Self {
-        Self {
-            transaction,
-            armed: true,
-        }
-    }
-
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for StatementRollbackGuard {
-    fn drop(&mut self) {
-        if self.armed {
-            self.transaction.mark_statement_rollback_pending();
-        }
-    }
-}
-
-/// Await a future with an optional timeout (native only, WASM always awaits
-/// directly). The deadline is a timer of the worker pool's deadline queue:
-/// the calling worker's, or the fallback pool's off the pool.
-#[cfg(not(target_arch = "wasm32"))]
+/// [`within_deadline`] for a query's own result.
 async fn await_with_timeout<T, F: Future<Output = Result<T>>>(
     future: F,
-    timeout_secs: u64,
+    limit: Option<std::time::Duration>,
 ) -> Result<T> {
-    if timeout_secs > 0 {
-        let timeout = std::time::Duration::from_secs(timeout_secs);
-        match workers::timeout(timeout, future).await {
-            Ok(r) => r,
-            Err(workers::Error::TimedOut) => Err(crate::error::QueryError::execution(format!(
-                "query execution timed out after {} seconds",
-                timeout_secs
-            ))),
-            Err(error) => Err(crate::error::QueryError::execution(format!(
-                "the query's deadline could not be kept: {error}"
-            ))),
-        }
-    } else {
-        future.await
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-async fn await_with_timeout<T, F: Future<Output = Result<T>>>(
-    future: F,
-    _timeout_secs: u64,
-) -> Result<T> {
-    future.await
+    within_deadline(limit, future)
+        .await
+        .map_err(crate::error::QueryError::execution)?
 }
 
 /// Map a parsed operation to the required NAC permission.
-fn permission_for_operation(parsed: &ParsedOperation) -> NodePermission {
+pub(super) fn permission_for_operation(parsed: &ParsedOperation) -> NodePermission {
     match parsed {
         ParsedOperation::Query { .. } => NodePermission::DocumentRead,
         ParsedOperation::Subscription { .. } => NodePermission::DocumentRead,
@@ -145,7 +119,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         &self,
         request: &QueryRequest,
     ) -> Result<Option<std::sync::Arc<crate::prepared::PreparedMutations>>> {
-        await_with_timeout(self.prepare_mutations(request), self.query_timeout).await
+        await_with_timeout(self.prepare_mutations(request), self.deadline()).await
     }
 
     async fn execute_prepared(
@@ -180,36 +154,22 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         };
 
         if matches!(&parsed, ParsedOperation::Query { .. }) {
-            match self.registry.begin_implicit_read().await {
-                Ok(handle) => {
-                    let response = self.execute_in_txn(request.clone(), &handle).await;
-                    let apply_read_effects = response.errors.is_empty();
-                    if let Err(error) = self
-                        .registry
-                        .finish_implicit_read(&handle, apply_read_effects)
-                        .await
-                    {
-                        if apply_read_effects {
-                            return QueryResponse::error(format!(
-                                "failed to finalize implicit read transaction: {}",
-                                error
-                            ));
-                        }
-                        warn!(
-                            txn_id = %handle,
-                            error = %error,
-                            "Failed to close implicit read-only transaction after query execution"
-                        );
-                    }
-                    return response;
-                }
+            // A standalone query reads a snapshot of its own on a worker,
+            // which nothing registers.
+            let deadline = self.deadline();
+            match self
+                .drive(&request, |job| self.registry.read(deadline, job))
+                .await
+            {
                 Err(TransactionError::NotSupported(_)) => {}
+                Err(error @ TransactionError::Execution(_)) => return answered(None, Err(error)),
                 Err(error) => {
                     return QueryResponse::error(format!(
                         "failed to create implicit read-only transaction: {}",
                         error
                     ));
                 }
+                outcome => return answered(None, outcome),
             }
         }
 
@@ -333,7 +293,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
             acting_identity,
             defra_core::signing::scope_broadcast_creator_did(
                 creator_did,
-                await_with_timeout(execution, self.query_timeout),
+                await_with_timeout(execution, self.deadline()),
             ),
         )
         .await;
@@ -419,292 +379,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         request: QueryRequest,
         handle: &TransactionHandle,
     ) -> QueryResponse {
-        let txn_ctx = match self.registry.get(handle) {
-            GetTransactionResult::Found(ctx) => ctx,
-            GetTransactionResult::NotFound => {
-                return QueryResponse::error(format!(
-                    "transaction '{}' not found or has been committed/rolled back",
-                    handle
-                ));
-            }
-            GetTransactionResult::LockPoisoned => {
-                return QueryResponse::error(format!(
-                    "transaction registry lock poisoned - system may be in corrupted state (transaction '{}')",
-                    handle
-                ));
-            }
-        };
-        let action_lock = txn_ctx.action_lock();
-        let _action_guard = match action_lock.as_ref() {
-            Some(lock) => Some(lock.lock().await),
-            None => None,
-        };
-
-        if let Err(error) = txn_ctx.recover_pending_statement() {
-            return QueryResponse::error(format!(
-                "failed to roll back cancelled transaction statement: {error}"
-            ));
-        }
-
-        // Convert variables from JSON to RapidHashMap format for the parser
-        let variables = convert_variables(&request.variables);
-
-        // Parse the request to determine if it's a query or mutation
-        let parsed = match parse_request_with_limits(
-            &request.query,
-            variables.as_ref(),
-            request.operation_name.as_deref(),
-            self.query_limits,
-        ) {
-            Ok(p) => p,
-            Err(e) => {
-                return QueryResponse {
-                    data: None,
-                    errors: vec![QueryResponseError {
-                        message: e.to_string(),
-                        path: None,
-                        locations: None,
-                        extensions: None,
-                        retry_input: None,
-                    }],
-                    extensions: None,
-                };
-            }
-        };
-
-        let txn_provider = txn_ctx.collection_provider();
-
-        // Validate that all referenced collections exist before execution.
-        // Use the transaction-scoped provider if available so uncommitted schemas are visible.
-        {
-            let validation_provider: &dyn crate::fetcher::CollectionProvider =
-                if let Some(ref p) = txn_provider {
-                    p.as_ref()
-                } else {
-                    self.collection_provider.as_ref()
-                };
-
-            if let Err(e) = validate_parsed_operation(&parsed, validation_provider).await {
-                return QueryResponse {
-                    data: None,
-                    errors: vec![QueryResponseError {
-                        message: e.to_string(),
-                        path: None,
-                        locations: None,
-                        extensions: None,
-                        retry_input: None,
-                    }],
-                    extensions: None,
-                };
-            }
-        }
-
-        let nac_identity = request.identity.clone().unwrap_or_else(Did::wildcard);
-        match txn_ctx
-            .doc_fetcher()
-            .check_node_permission(&nac_identity, permission_for_operation(&parsed))
-            .await
-        {
-            Ok(Some(false)) => return QueryResponse::success(serde_json::json!({})),
-            Ok(Some(true)) => {}
-            Ok(None) => {
-                if let Some(denial) = check_nac(self, &request.identity, &parsed).await {
-                    return denial;
-                }
-            }
-            Err(error) => return QueryResponse::error(error.to_string()),
-        }
-
-        // Resolve effective identity: request identity takes precedence over default
-        let identity = self.resolve_identity(request.identity);
-
-        let mut warnings: Vec<GqlWarning> = Vec::new();
-
-        let scoped_acp = match txn_ctx.doc_fetcher().scoped_acp(self.acp.clone()).await {
-            Ok(provider) => provider,
-            Err(error) => return QueryResponse::error(error.to_string()),
-        };
-        let mut scoped_runner = self.scoped_runner(scoped_acp);
-        if !scoped_runner.acp.supports_transactions() {
-            // Even transaction-context implementations without an ACP
-            // projection must never fall back to mutating an external provider
-            // before the storage transaction commits. The mutator's ordered
-            // hook registration will fail closed if it cannot retain hooks.
-            scoped_runner.acp_registration_projection = Some(
-                txn_ctx
-                    .acp_registration_projection()
-                    .unwrap_or_else(crate::txn::AcpRegistrationProjection::detached_shared),
-            );
-        }
-
-        let statement_guard = if !txn_ctx.is_readonly()
-            && matches!(&parsed, ParsedOperation::Mutation { explain: None, .. })
-        {
-            if let Err(error) = txn_ctx.set_statement_savepoint() {
-                return QueryResponse::error(format!(
-                    "failed to establish transaction statement savepoint: {error}"
-                ));
-            }
-            Some(StatementRollbackGuard::new(Arc::clone(&txn_ctx)))
-        } else {
-            None
-        };
-
-        // Route to appropriate handler based on operation type
-        let execution = async {
-            match parsed {
-                ParsedOperation::Query {
-                    mut selects,
-                    explain,
-                    exhaustive,
-                } => {
-                    if exhaustive {
-                        for s in &mut selects {
-                            s.exhaustive = true;
-                        }
-                    }
-                    let fetcher = txn_ctx.doc_fetcher();
-                    if let Some(explain_type) = explain {
-                        self.explain_query_with_identity_and_vars(
-                            &request.query,
-                            identity,
-                            explain_type,
-                            variables.as_ref(),
-                        )
-                        .await
-                    } else {
-                        scoped_runner
-                            .execute_selects_internal(
-                                selects,
-                                fetcher.as_ref(),
-                                identity,
-                                &mut warnings,
-                            )
-                            .await
-                    }
-                }
-                ParsedOperation::Mutation { explain, .. } => {
-                    if let Some(explain_type) = explain {
-                        // Return mutation plan instead of executing
-                        self.explain_mutation_with_identity(&request.query, identity, explain_type)
-                            .await
-                    } else {
-                        // Check if this is a read-only transaction
-                        if txn_ctx.is_readonly() {
-                            return Err(crate::error::QueryError::execution(
-                                "cannot execute mutation in read-only transaction",
-                            ));
-                        }
-
-                        // Get the transaction-scoped mutator
-                        let mutator = match txn_ctx.doc_mutator() {
-                            Some(m) => m,
-                            None => {
-                                return Err(crate::error::QueryError::execution(
-                                    "mutations not supported in this transaction context",
-                                ));
-                            }
-                        };
-
-                        mutator.set_document_acp(self.acp.clone());
-                        let txn_fetcher = txn_ctx.doc_fetcher();
-                        // A remote input the statement needs (an embedding)
-                        // is never fetched inside it: the statement ends, is
-                        // rolled back to its savepoint, the input is fetched
-                        // with nothing of the transaction in flight, and the
-                        // statement runs again reading it from the memo.
-                        let inputs = crate::prepared::PreparedInputMemo::default();
-                        loop {
-                            let attempt = mutator
-                                .with_prepared_inputs(inputs.clone())
-                                .unwrap_or_else(|| mutator.clone());
-                            match scoped_runner
-                                .execute_mutation_internal_with_vars(
-                                    &request.query,
-                                    attempt,
-                                    identity.clone(),
-                                    variables.as_ref(),
-                                    Some(Arc::clone(&txn_fetcher)),
-                                )
-                                .await
-                            {
-                                Err(crate::error::QueryError::NeedsInput(input)) => {
-                                    txn_ctx
-                                        .finish_statement_savepoint(false)
-                                        .map_err(crate::error::QueryError::execution)?;
-                                    inputs
-                                        .answer_wave(&input, |wave| {
-                                            mutator.resolve_prepared_inputs(wave)
-                                        })
-                                        .await?;
-                                    txn_ctx
-                                        .set_statement_savepoint()
-                                        .map_err(crate::error::QueryError::execution)?;
-                                }
-                                result => break result,
-                            }
-                        }
-                    }
-                }
-                ParsedOperation::Subscription { .. } => {
-                    // Subscriptions require SSE transport
-                    Err(crate::error::QueryError::parse(
-                        "Subscriptions must be executed via Server-Sent Events (SSE). \
-                         Send the request with Accept: text/event-stream header.",
-                    ))
-                }
-                ParsedOperation::Introspection { query } => {
-                    // Introspection queries are executed against the GraphQL schema
-                    self.execute_introspection(&query).await
-                }
-            }
-        };
-
-        // Collection schema reads retain their transaction-scoped provider;
-        // ACP projection is passed explicitly through the scoped runner.
-        let result = if let Some(provider) = txn_provider {
-            super::scope_txn_collection_provider(
-                provider,
-                await_with_timeout(execution, self.query_timeout),
-            )
-            .await
-        } else {
-            await_with_timeout(execution, self.query_timeout).await
-        };
-
-        let response = match result {
-            Ok(data) => QueryResponse {
-                data: Some(data),
-                errors: vec![],
-                extensions: None,
-            }
-            .with_warnings(warnings),
-            Err(e) => {
-                tracing::error!(
-                    query = %request.query,
-                    txn_id = %handle,
-                    error = %e,
-                    "Query execution failed in transaction"
-                );
-                QueryResponse {
-                    data: None,
-                    errors: vec![QueryResponseError::from_query_error(e)],
-                    extensions: None,
-                }
-                .with_warnings(warnings)
-            }
-        };
-
-        if let Some(mut guard) = statement_guard {
-            if let Err(error) = txn_ctx.finish_statement_savepoint(response.errors.is_empty()) {
-                return QueryResponse::error(format!(
-                    "failed to finish transaction statement savepoint: {error}"
-                ));
-            }
-            guard.disarm();
-        }
-
-        response
+        let deadline = self.deadline();
+        let outcome = self
+            .drive(&request, |job| self.registry.run(handle, deadline, job))
+            .await;
+        answered(Some(handle), outcome)
     }
 
     async fn begin_txn(
@@ -938,12 +617,9 @@ mod tests {
     use async_trait::async_trait;
     use document::Document;
     use serde_json::json;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
 
     use crate::fetcher::{DocFetcher, FetchByIdsResult};
     use crate::test_utils::{MockFetcher, MockTxnRegistry};
-    use crate::txn::{GetTransactionResult, TransactionContext, TransactionRegistry};
 
     #[test]
     fn truncate_uses_collection_truncate_permission() {
@@ -1041,194 +717,6 @@ mod tests {
         doc.set_id(document::DocID::new_v0_from_seed(name));
         doc.set("name", serde_json::Value::String(name.to_string()));
         doc
-    }
-
-    struct SerialOnlyFetcher {
-        in_flight: AtomicUsize,
-    }
-
-    impl SerialOnlyFetcher {
-        fn new() -> Self {
-            Self {
-                in_flight: AtomicUsize::new(0),
-            }
-        }
-    }
-
-    struct InFlightGuard<'a>(&'a AtomicUsize);
-
-    impl Drop for InFlightGuard<'_> {
-        fn drop(&mut self) {
-            self.0.fetch_sub(1, Ordering::SeqCst);
-        }
-    }
-
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-    impl DocFetcher for SerialOnlyFetcher {
-        /// A mock has no storage, so a document's short id is its 1-based position
-        /// in the collection, mirroring how the real allocator hands them out.
-        async fn stream_by_doc_short_ids(
-            &self,
-            collection_name: &str,
-            doc_short_ids: &[u64],
-            show_deleted: bool,
-        ) -> Result<Box<dyn crate::doc_stream::DocStream>> {
-            let all = self
-                .get_all_with_deleted(collection_name, show_deleted)
-                .await?;
-            let picked = doc_short_ids
-                .iter()
-                .filter_map(|id| all.get(id.checked_sub(1)? as usize).cloned())
-                .collect();
-            Ok(Box::new(crate::doc_stream::VecStream::new(picked)))
-        }
-        async fn get_all(&self, _collection_name: &str) -> Result<Vec<Document>> {
-            let active = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
-            let _guard = InFlightGuard(&self.in_flight);
-            if active > 1 {
-                return Err(crate::error::QueryError::execution(
-                    "transaction action overlapped",
-                ));
-            }
-
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            Ok(vec![make_users_doc("serial")])
-        }
-
-        /// In-memory mock: there is no storage to stream from.
-        async fn stream_all_with_deleted(
-            &self,
-            collection_name: &str,
-            show_deleted: bool,
-        ) -> Result<Box<dyn crate::doc_stream::DocStream>> {
-            Ok(Box::new(crate::doc_stream::VecStream::new(
-                self.get_all_with_deleted(collection_name, show_deleted)
-                    .await?,
-            )))
-        }
-
-        async fn get_by_ids(
-            &self,
-            collection_name: &str,
-            _doc_ids: &[String],
-        ) -> Result<FetchByIdsResult> {
-            let docs = self.get_all(collection_name).await?;
-            Ok(FetchByIdsResult::all_found(docs))
-        }
-
-        async fn get_by_field_value(
-            &self,
-            collection_name: &str,
-            _field_name: &str,
-            _value: &str,
-        ) -> Result<Vec<Document>> {
-            self.get_all(collection_name).await
-        }
-    }
-
-    struct SerialTxnContext {
-        id: String,
-        fetcher: Arc<dyn DocFetcher>,
-        action_lock: Arc<async_lock::Mutex<()>>,
-    }
-
-    impl TransactionContext for SerialTxnContext {
-        fn id(&self) -> &str {
-            &self.id
-        }
-
-        fn is_readonly(&self) -> bool {
-            true
-        }
-
-        fn doc_fetcher(&self) -> Arc<dyn DocFetcher> {
-            self.fetcher.clone()
-        }
-
-        fn action_lock(&self) -> Option<Arc<async_lock::Mutex<()>>> {
-            Some(self.action_lock.clone())
-        }
-    }
-
-    struct SerialTxnRegistry {
-        ctx: Arc<SerialTxnContext>,
-    }
-
-    impl SerialTxnRegistry {
-        fn new(fetcher: SerialOnlyFetcher) -> Self {
-            Self {
-                ctx: Arc::new(SerialTxnContext {
-                    id: "serial-txn".to_string(),
-                    fetcher: Arc::new(fetcher),
-                    action_lock: Arc::new(async_lock::Mutex::new(())),
-                }),
-            }
-        }
-    }
-
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-    impl TransactionRegistry for SerialTxnRegistry {
-        fn abandon(&self, _handle: &TransactionHandle) {}
-
-        async fn begin(
-            &self,
-            _readonly: bool,
-        ) -> std::result::Result<TransactionHandle, TransactionError> {
-            Ok(TransactionHandle::new(self.ctx.id.clone()))
-        }
-
-        fn get(&self, handle: &TransactionHandle) -> GetTransactionResult {
-            if handle.as_str() == self.ctx.id {
-                GetTransactionResult::Found(self.ctx.clone())
-            } else {
-                GetTransactionResult::NotFound
-            }
-        }
-
-        async fn commit(
-            &self,
-            _handle: &TransactionHandle,
-        ) -> std::result::Result<(), TransactionError> {
-            Ok(())
-        }
-
-        async fn rollback(
-            &self,
-            _handle: &TransactionHandle,
-        ) -> std::result::Result<(), TransactionError> {
-            Ok(())
-        }
-    }
-
-    #[tokio::test]
-    async fn execute_in_txn_serializes_concurrent_actions_on_same_handle() {
-        let collections = crate::parse_sdl("type Users { name: String }").expect("schema");
-        let txn_fetcher = SerialOnlyFetcher::new();
-
-        let runner = QueryRunner::with_registry(
-            MockFetcher::new(),
-            collections,
-            SerialTxnRegistry::new(txn_fetcher),
-        );
-        let handle = runner.begin_txn(true).await.expect("begin txn");
-
-        let (first, second) = tokio::join!(
-            runner.execute_in_txn(QueryRequest::new("query { Users { name } }"), &handle),
-            runner.execute_in_txn(QueryRequest::new("query { Users { name } }"), &handle)
-        );
-
-        assert!(
-            !first.has_errors(),
-            "first transaction action failed: {:?}",
-            first.errors
-        );
-        assert!(
-            !second.has_errors(),
-            "second transaction action failed: {:?}",
-            second.errors
-        );
     }
 
     #[tokio::test]

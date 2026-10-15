@@ -66,7 +66,7 @@ impl Drop for BroadcastDone {
 /// `internal/db/collection.go:789`, both of which publish the actual block bytes.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn register_update_event_callback<S>(
-    txn: &mut DbTxn<S>,
+    txn: &DbTxn<S>,
     bus: Option<&Arc<dyn Bus>>,
     broadcaster: Option<&Arc<dyn TxnBroadcaster>>,
     release: Option<&Arc<dyn LocalCommitRelease>>,
@@ -141,7 +141,7 @@ where
 
 /// Register a batch of committed events for receipt-ordered publication.
 pub(crate) fn register_ordered_events<S: Store>(
-    txn: &mut DbTxn<S>,
+    txn: &DbTxn<S>,
     bus: Option<&Arc<dyn Bus>>,
     messages: Vec<Message>,
 ) -> Result<()> {
