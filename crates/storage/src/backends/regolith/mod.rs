@@ -1,12 +1,13 @@
 //! regolith-backed storage: the one backend, on every target.
 
-mod background_errors;
 mod classifier;
 mod config;
 mod encryption;
 mod event_order;
 mod handle;
 pub(crate) mod iterator;
+mod listener;
+mod post_commit;
 mod slots;
 mod store;
 mod transaction;

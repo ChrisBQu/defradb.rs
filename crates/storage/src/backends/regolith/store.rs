@@ -13,9 +13,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use regolith::{OptimisticTransactionDb, TxnOptions};
 
-use super::background_errors::{BackgroundErrorListener, ConflictListener};
 use super::config::RegolithStoreOptions;
 use super::event_order::{Event, EventOrder};
+use super::listener::StoreListener;
 use super::slots::TxnSlots;
 use super::transaction::RegolithTxn;
 use crate::backends::shared::TransactionStatsHandle;
@@ -78,8 +78,7 @@ impl RegolithStore {
             .engine
             .clone()
             .statistics(Some(engine_stats))
-            .add_listener(Arc::new(BackgroundErrorListener))
-            .add_listener(Arc::new(ConflictListener(stats.clone())))
+            .add_listener(Arc::new(StoreListener(stats.clone())))
             .merge_operator(Some(Arc::new(crate::merge::DefraMergeOperator)));
         let db = OptimisticTransactionDb::open(&path, engine)
             .map_err(|error| Error::Backend(format!("failed to open regolith: {error}")))?
@@ -700,6 +699,28 @@ mod close_tests {
             .to_string()
             .contains("1 transaction(s) still in flight"));
         drop(held);
+    }
+}
+
+#[cfg(test)]
+mod listener_tests {
+    use super::*;
+    use telemetry::StorageEvent;
+
+    /// A store's flushes and table files reach the listener it opens with.
+    #[tokio::test]
+    async fn a_flush_and_its_table_file_are_counted() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = RegolithStore::open(directory.path()).unwrap();
+        let flushes = telemetry::storage_event_count(StorageEvent::Flush);
+        let tables = telemetry::storage_event_count(StorageEvent::TableFileCreated);
+        let mut txn = store.new_txn(false).await.unwrap();
+        txn.set(b"row", b"value").await.unwrap();
+        txn.commit().await.unwrap();
+        store.inner.db.db().flush().unwrap();
+        assert!(telemetry::storage_event_count(StorageEvent::Flush) > flushes);
+        assert!(telemetry::storage_event_count(StorageEvent::TableFileCreated) > tables);
+        store.close().await.unwrap();
     }
 }
 

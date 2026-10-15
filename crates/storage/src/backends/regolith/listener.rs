@@ -1,29 +1,70 @@
-//! Report regolith's background failures.
+//! What the engine reports, counted.
 //!
-//! regolith keeps running when a flush, compaction, manifest write or WAL
-//! write fails in the background, and retries later. A failure that never
-//! clears (an exhausted file-descriptor table, a full disk) is then visible
-//! only as a repeated log line inside the engine, while the store slowly
-//! wedges. This listener turns each one into a
-//! `defradb.storage.background.errors` metric labelled with its reason.
-//! regolith logs the failure itself, so this only counts it.
+//! regolith tells its listeners about every flush, compaction and table
+//! file, each background failure, each conflict, a transaction callback that
+//! panicked after its outcome, and a write-ahead-log tail an open dropped.
+//! This listener counts each one as `defradb.storage.events` by kind (with
+//! the bytes it moved), conflicts by reason as well, and says out loud the
+//! two a person should look at: a callback panic and a dropped log tail.
+//! regolith logs a background failure itself, so that one is only counted.
 
-use regolith::{BackgroundErrorReason, Error, EventListener};
+use regolith::{
+    BackgroundErrorReason, CompactionJobInfo, Conflict, Error, EventListener,
+    ExternalFileIngestionInfo, FlushJobInfo, TableFileCreationInfo, TableFileDeletionInfo,
+    WalTailDiscardedInfo,
+};
+use telemetry::StorageEvent;
 
-#[derive(Debug, Default)]
-pub(super) struct BackgroundErrorListener;
+use crate::backends::shared::TransactionStatsHandle;
 
-pub(super) struct ConflictListener(pub(super) crate::backends::shared::TransactionStatsHandle);
+pub(super) struct StoreListener(pub(super) TransactionStatsHandle);
 
-impl EventListener for ConflictListener {
-    fn on_conflict(&self, conflict: &regolith::Conflict) {
-        self.0.record_conflict(conflict);
+impl EventListener for StoreListener {
+    fn on_flush_completed(&self, info: &FlushJobInfo) {
+        telemetry::record_storage_event(StorageEvent::Flush, info.file_size);
     }
-}
 
-impl EventListener for BackgroundErrorListener {
+    fn on_compaction_begin(&self, _info: &CompactionJobInfo) {
+        telemetry::record_storage_event(StorageEvent::CompactionBegin, 0);
+    }
+
+    fn on_compaction_completed(&self, _info: &CompactionJobInfo) {
+        telemetry::record_storage_event(StorageEvent::Compaction, 0);
+    }
+
+    fn on_table_file_created(&self, info: &TableFileCreationInfo) {
+        telemetry::record_storage_event(StorageEvent::TableFileCreated, info.file_size);
+    }
+
+    fn on_table_file_deleted(&self, _info: &TableFileDeletionInfo) {
+        telemetry::record_storage_event(StorageEvent::TableFileDeleted, 0);
+    }
+
+    fn on_external_file_ingested(&self, info: &ExternalFileIngestionInfo) {
+        telemetry::record_storage_event(StorageEvent::Ingest, info.file_size);
+    }
+
     fn on_background_error(&self, reason: BackgroundErrorReason, _err: &Error) {
         telemetry::record_storage_background_error("regolith", reason_label(reason));
+    }
+
+    fn on_conflict(&self, conflict: &Conflict) {
+        self.0.record_conflict(conflict);
+    }
+
+    fn on_callback_panic(&self, callback: &'static str) {
+        super::post_commit::report(StorageEvent::PostCommitCallbackPanicked, &callback);
+    }
+
+    fn on_wal_tail_discarded(&self, info: &WalTailDiscardedInfo) {
+        tracing::warn!(
+            path = %info.file_path.display(),
+            offset = info.offset,
+            discarded_bytes = info.discarded_bytes,
+            last_sequence = info.last_sequence,
+            "Dropped an unusable write-ahead log tail at open; writes up to last_sequence are intact"
+        );
+        telemetry::record_storage_event(StorageEvent::WalTailDiscarded, info.discarded_bytes);
     }
 }
 
@@ -42,11 +83,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn each_failure_is_counted() {
+    fn each_background_failure_is_counted() {
+        let listener = StoreListener(TransactionStatsHandle::from_engine(Default::default()));
         let before = telemetry::storage_background_error_count();
         let err = Error::from(std::io::Error::other("Too many open files (os error 24)"));
-        BackgroundErrorListener.on_background_error(BackgroundErrorReason::Compaction, &err);
-        BackgroundErrorListener.on_background_error(BackgroundErrorReason::Flush, &err);
+        listener.on_background_error(BackgroundErrorReason::Compaction, &err);
+        listener.on_background_error(BackgroundErrorReason::Flush, &err);
         assert!(telemetry::storage_background_error_count() >= before + 2);
     }
 
@@ -59,7 +101,15 @@ mod tests {
             BackgroundErrorReason::WriteAheadLog,
         ]
         .map(reason_label);
-        let unique: std::collections::HashSet<_> = labels.iter().collect();
+        let unique: std::collections::BTreeSet<_> = labels.iter().collect();
         assert_eq!(unique.len(), labels.len());
+    }
+
+    #[test]
+    fn a_callback_panic_is_counted_as_post_commit_work_that_failed() {
+        let listener = StoreListener(TransactionStatsHandle::from_engine(Default::default()));
+        let before = telemetry::storage_event_count(StorageEvent::PostCommitCallbackPanicked);
+        listener.on_callback_panic("on_commit");
+        assert!(telemetry::storage_event_count(StorageEvent::PostCommitCallbackPanicked) > before);
     }
 }
