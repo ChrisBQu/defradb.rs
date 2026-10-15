@@ -29,34 +29,37 @@ The stack has the intended 11 PRs. Prep #1922 is already marked ready; the ten a
 | Step | Published implementation | Remaining work |
 |---|---|---|
 | 1 | Pinned API, engine encryption, classifier/DefraLevel in three PRs | Final stack validation and performance gates |
-| 2 | Transactional decision reads, local ACP, relationship/NAC/downsample decisions | Preserve these fences through batch integration |
+| 2 | Transactional decision reads, local ACP, relationship/NAC/downsample decisions | Final lower-checkpoint interoperability and stack gates |
 | 3 | Arrival append, ID allocation, field/counter/vector/full-text operators, head markers, read-only lenses and known-field write projections | General query/output and conditional reads remain conservative; no blanket zero-conflict claim |
-| 4 | Receipt-ordered events and fallible ordered ACP hooks | Preserve winner-only hooks and suppress events on hook failure in whole-batch retries |
-| 5 | Engine retries for individual/many writes, merges, lenses, backfill and pending DAG writes; bounded prepared inputs | Whole-batch conversion, bearer propagation and target/prepared-key separation published at `56ea4db1a`; removal of generic HTTP/embedded conflict replay and single-mutation engine-batch routing in progress |
-| 6 | Requested locks/cache/forced-read APIs removed; snapshot metadata, collection OCC, immutable ACP projections and peer generation fences replace them | Generation/incarnation admission, registration, failure, ACK and status fences validated; lock-free ACP projection validated. Exact-wire schema reuse optimization and performance gates pending |
+| 4 | Receipt-ordered events and fallible ordered ACP hooks | Final CI/performance gates; winner-only hooks and suppression on hook failure are covered |
+| 5 | Engine retries for individual/many writes, merges, lenses, backfill and pending DAG writes; bounded prepared inputs | Generic HTTP/embedded business-conflict replay removed; eligible single mutations now rerun selection inside engine batches. Final CI and performance gates remain |
+| 6 | Requested locks/cache/forced-read APIs removed; snapshot metadata, collection OCC, immutable ACP projections and peer generation fences replace them | Generation/incarnation admission, registration, failure, ACK and status fences validated; lock-free ACP projection and exact-wire schema reuse validated. Performance gates remain |
 | 7 | Native commit/policy tickers and bounded conflict reasons; caller instrumentation retained | Revalidate after lower-stack restack |
 | 8 | Obsolete cache/counter/queue proofs retired; HeadSet retained; pinned arrival proof and new adapter boundary models | Revalidate after lower-stack restack; models do not verify Rust or remote authorization |
 
 ### Immediate blockers
 
-1. Finish removing generic HTTP/embedded business-conflict replay above engine retries. Typed external-input resolution remains outside attempts. Route eligible single implicit mutations through the engine batch so conflict retries reselect their targets. This is active implementation work.
-2. Evaluate exact persisted-definition-byte reuse without dropping snapshot reads, runtime root-ID checks or current index-action statuses. The measured create allocation count remains above main.
-3. Revalidate and restack incoming changes, inspect current-head CI, and complete §5.3 performance gates. All nine repaired lock-removal checkpoints now build; their timing gates remain pending. No performance gate is waived.
+1. Complete fresh CLI interoperability/counter checks on the combined stack, and basic/ACP/encryption/counter checks on the four lower checkpoints whose draft CI skips those suites.
+2. Inspect current-head CI after publishing this restack. The previous step-6 CI failures (obsolete document-queue benchmark and unused dependencies) are fixed at their removal boundaries; native lint now includes all benchmarks and the CLI.
+3. Complete §5.3 timing and allocation gates. Nine removal checkpoints build; revised frozen executables are being prepared for measurements. No performance gate is waived. A small key-buffer capacity optimization is being evaluated separately.
 
 ## Validation evidence
 
 | Revision / scope | Result | Limit |
 |---|---|---|
-| Combined checkpoint `9afeb8447` | 2,360 DB/query/authorization/data tests pass, 33 ignored; storage 257, P2P 395, adapter 94 pass | Predates lock-free projection and pending front-door cleanup |
-| Fresh CLI at `9afeb8447` | External ACP 204 pass/16 ignored, basic 56, encryption 25; counter conformance 9 pass/8 ignored; real point-read write-skew regression passes | Exact Go pin `53f0e76a32d1761e3396a88ce607ebc3e37baa5a`; later code needs targeted reruns |
-| Projection checkpoint `2077620ca` and style-only successor `d19f72a57` | Five focused projection tests, query library 598 and DB write 63 pass; WASM lint and broad native all-target Clippy pass | Pending retry-surface/schema optimizations not covered |
-| Published step 5 `56ea4db1a` | Latest inspection has no failed CI checks; Go compatibility and browser checks pass | Native ACP/macOS jobs were running or queued; inspect live checks before merge |
-| Step 8 current proof suite | All 162 currently configured TLC cases have expected verdicts verified across full-suite and focused runs; five library/registry and two Lean contract checks pass | Finite boundary models, not Rust verification |
-| Repaired step-6 removal history | All nine checkpoint benchmark builds pass; final-tree-preserving history repair complete | Fresh timing measurements pending |
+| Combined `f0d3fd4d5` | 2,364 DB/query/authorization/data tests pass, 33 ignored; HTTP/embedded tests 358 pass, 5 ignored; benchmark accounting tests 5 pass | Fresh CLI external checks running |
+| Combined `f0d3fd4d5` | Broad native all-target Clippy includes CLI and benchmarks; WASM Clippy, cargo-machete, formatting and diff checks pass | Fresh remote CI remains required |
+| Step 5 alone `427da1b4e` | Batch retry tests 4/4, HTTP context tests 7/7, DB/query/HTTP all-target Clippy pass after workspace-cache cleanup | Does not include step-6 remote projection |
+| Earlier combined `9afeb8447` | Storage 257, P2P 395 and adapter 94 pass; external ACP 204 pass/16 ignored, basic 56, encryption 25; counter 9 pass/8 ignored; real point-read write-skew passes | Predates final retry-surface cleanup; exact Go pin `53f0e76a32d1761e3396a88ce607ebc3e37baa5a` |
+| Lower-stack CI inspection | Prep #1922 passes all 28 checks. Active checks pass on #1949/#1920/#1951/#1952; current completed checks pass on #1953/#1955/#1956 | Some lower draft suites are skipped; native ACP/macOS jobs were still pending on middle PRs |
+| Step 8 current proof suite | All 162 configured TLC cases have expected verdicts verified across full-suite and focused runs; five library/registry and two Lean contract checks pass | Finite boundary models, not Rust verification |
+| Repaired step-6 removal history | All nine checkpoint benchmark builds pass; queue benchmark removal and dependency cleanup moved to their removal boundaries | Fresh timing measurements pending |
 
-P2P validation includes admission backoff, exact marker generations, registration ordering, forget/re-add incarnation fencing, stale failure refresh, atomic ACK cleanup and conditional status transitions. Already-admitted external I/O cannot be revoked; durable side effects are fenced. Old SSI/SSI-range proofs referencing the removed ConflictTracker have been retired, while the real write-skew behavior test remains.
+The single-update regression verifies that a concurrent change causes the engine retry to reselect targets instead of overwriting the winner. Prepared node permissions use the same acting identity as execution; authoritative local NAC checks remain inside the transaction. The local ACP revocation regression retains READ access and revokes UPDATE during the first attempt, then verifies an explicit denial and unchanged stored data. Read-denied documents are intentionally invisible and may produce an empty mutation result.
 
-Earlier mixed Go/Rust parity failures passed all three local controls and ten mixed repeats; the fresh step-5 Go compatibility CI check also passes. Use current-head CI: cancelled or superseded rollups do not establish the final stack's status.
+P2P validation covers admission backoff, exact marker generations, registration ordering, forget/re-add incarnation fencing, stale failure refresh, atomic ACK cleanup and conditional status transitions. Already-admitted external I/O cannot be revoked; durable side effects are fenced. Obsolete SSI/SSI-range proofs referencing the removed ConflictTracker are retired, while the real write-skew behavior test remains.
+
+Earlier mixed Go/Rust parity failures passed all three local controls and ten mixed repeats; fresh step-5 Go compatibility CI also passed before this final restack. Use current-head runs, not cancelled or superseded rollups.
 
 ## Performance gates: not passed
 
@@ -80,7 +83,7 @@ The largest early increase is at step 3. Safe read-only fetching and one-pass de
 
 Fresh frozen step-3/4/5 binaries yield create medians **2980.7 / 2982.8 / 3411.4**, respectively (get-by-ID 269 at all three). The first two are slightly below the measured main create median; the step-5 increase remains under investigation. Exact raw samples, revisions and executable hashes are in the paired allocation artifact. All nine repaired lock-removal checkpoint binaries have built successfully; timing awaits a quiet-host window.
 
-[Sharing immutable create inputs](benchmarks/create-retry-sharing.md) reduces the next exact paired create median from 3296.4 to **3231.3**, with get-by-ID unchanged at **160**. This remains about 8% above main for creates. A snapshot-safe schema-byte reuse candidate is being evaluated.
+[Sharing immutable create inputs](benchmarks/create-retry-sharing.md) reduces the next exact paired create median from 3296.4 to **3231.3**, with get-by-ID unchanged at **160**. This remains about 8% above main for creates. The [schema-byte reuse pair](benchmarks/schema-wire-reuse.md) reduces its own five-run median from 3231.4 to 3189.3, with reads unchanged. That pair uses the default release profile; final release-fast gate measurements remain pending.
 
 Required timing evidence: before/after each step and lock-removal checkpoint, all writer counts/workloads/repetitions, commits/s, conflicts/commit, retries by layer, p50/p99, create benchmarks at 4/16 fields, branchable create at 14, and cold startup at 10 collections. Use `tools/perf-site/loadguard.py`, record its result and source revision, and do not treat a failed/missing guard as clean-host evidence.
 
