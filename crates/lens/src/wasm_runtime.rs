@@ -2,26 +2,22 @@
 //!
 //! Handles the actual execution of WASM modules for document transforms.
 
-use wasmtime::{
-    AsContext, AsContextMut, Engine, Linker, Module, Store as WasmStore, StoreLimits, TypedFunc,
-};
+use wasmtime::{AsContext, AsContextMut, Linker, Module, TypedFunc};
 
-use super::wasm::WasmSandboxConfig;
+use crate::engine::{LensEngine, Sandboxed};
 use crate::{Error, Result};
 
 /// Host state for batch transforms that feed multiple docs via lens::next.
 pub(crate) struct BatchHostState {
     input_docs: Vec<serde_json::Value>,
     current_index: usize,
-    pub(crate) limits: Option<StoreLimits>,
 }
 
 impl BatchHostState {
-    pub(crate) fn new(docs: Vec<serde_json::Value>, limits: Option<StoreLimits>) -> Self {
+    pub(crate) fn new(docs: Vec<serde_json::Value>) -> Self {
         Self {
             input_docs: docs,
             current_index: 0,
-            limits,
         }
     }
 
@@ -41,41 +37,24 @@ impl BatchHostState {
 ///
 /// This supports transforms that change document counts (aggregate N->1, multiply 1->N).
 ///
-/// When sandbox config is provided, resource limits (memory, fuel, epoch) are applied.
+/// The call runs under the engine's sandbox: its memory limit, fuel and epoch deadline.
 pub(crate) fn execute_batch_transform(
-    engine: &Engine,
+    engine: &LensEngine,
     module: &Module,
     input_docs: Vec<serde_json::Value>,
     arguments: Option<serde_json::Value>,
     inverse: bool,
-    limits: Option<StoreLimits>,
-    sandbox: &Option<WasmSandboxConfig>,
 ) -> Result<Vec<serde_json::Value>> {
-    let mut store = WasmStore::new(engine, BatchHostState::new(input_docs, limits));
+    let mut store = engine.store(BatchHostState::new(input_docs))?;
 
-    // Apply opt-in resource limits
-    if store.data().limits.is_some() {
-        store.limiter(|state| state.limits.as_mut().unwrap());
-    }
-    if let Some(ref sb) = sandbox {
-        if let Some(fuel) = sb.fuel_budget {
-            store
-                .set_fuel(fuel)
-                .map_err(|e| Error::WasmExecution(format!("failed to set fuel: {}", e)))?;
-        }
-        if let Some(ticks) = sb.epoch_deadline_ticks {
-            store.set_epoch_deadline(ticks);
-        }
-    }
-
-    let mut linker: Linker<BatchHostState> = Linker::new(engine);
+    let mut linker: Linker<Sandboxed<BatchHostState>> = Linker::new(engine.engine());
 
     // Add lens::next import that returns docs from the queue one at a time
     linker
         .func_wrap(
             "lens",
             "next",
-            |mut caller: wasmtime::Caller<'_, BatchHostState>| -> i32 {
+            |mut caller: wasmtime::Caller<'_, Sandboxed<BatchHostState>>| -> i32 {
                 let memory = match caller.get_export("memory") {
                     Some(wasmtime::Extern::Memory(mem)) => mem,
                     _ => return 0,
@@ -86,7 +65,7 @@ pub(crate) fn execute_batch_transform(
                     _ => return 0,
                 };
 
-                let doc = match caller.data_mut().next_input() {
+                let doc = match caller.data_mut().host.next_input() {
                     Some(d) => d,
                     None => {
                         // No more input docs -- write an EOS marker (type_id=127)
