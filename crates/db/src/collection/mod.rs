@@ -159,6 +159,9 @@ pub struct Collection {
     /// callers take a pointer clone of this instead of deep-copying the
     /// definition on every lookup.
     query_schema: Arc<CollectionVersion>,
+    /// This version's decoded part-ID map, shared with every handle built
+    /// from the same definition (see `parts`).
+    part_id_snapshot: Arc<parts::PartIdSnapshot>,
 }
 
 /// `def` with the queryable index set substituted in.
@@ -200,6 +203,7 @@ impl Collection {
             write_indexes: indexes.clone(),
             queryable_indexes: indexes,
             query_schema,
+            part_id_snapshot: Arc::default(),
         }
     }
 
@@ -209,9 +213,11 @@ impl Collection {
     ) -> Self {
         let def = Arc::new(def);
         let definition_wire = serialize_definition_hint(&def);
-        Self::with_index_actions_and_wire(def, definition_wire, actions)
+        Self::with_index_actions_and_wire(def, definition_wire, Arc::default(), actions)
     }
 
+    /// `expected`'s definition with fresh index statuses. The definition is
+    /// the same version, so its decoded part-ID map is shared as well.
     pub(crate) fn with_index_actions_reusing_schema(
         expected: &Self,
         actions: &rapidhash::RapidHashMap<u32, ActionStatus>,
@@ -219,6 +225,7 @@ impl Collection {
         Self::with_index_actions_and_wire(
             Arc::clone(&expected.def),
             expected.definition_wire.clone(),
+            Arc::clone(&expected.part_id_snapshot),
             actions,
         )
     }
@@ -226,6 +233,7 @@ impl Collection {
     fn with_index_actions_and_wire(
         def: Arc<CollectionVersion>,
         definition_wire: Option<Arc<[u8]>>,
+        part_id_snapshot: Arc<parts::PartIdSnapshot>,
         actions: &rapidhash::RapidHashMap<u32, ActionStatus>,
     ) -> Self {
         let write_indexes = def
@@ -247,6 +255,7 @@ impl Collection {
             write_indexes,
             queryable_indexes,
             query_schema,
+            part_id_snapshot,
         }
     }
 

@@ -33,14 +33,12 @@ impl Collection {
         let data = if full_value_read {
             datastore.get(&key).await
         } else {
-            let ids = self.part_ids(datastore).await?;
-            let parts = ids.as_ref().and_then(|ids| {
-                self.def
-                    .fields
-                    .iter()
-                    .map(|field| ids.get(&field.name).copied())
-                    .collect::<Option<Vec<_>>>()
-            });
+            let parts = self
+                .part_ids_of(
+                    datastore,
+                    self.def.fields.iter().map(|field| field.name.as_str()),
+                )
+                .await?;
             match parts {
                 Some(parts)
                     if !parts.is_empty() && version.as_deref() == Some(self.version_id()) =>
@@ -70,13 +68,9 @@ impl Collection {
             return Ok(None);
         }
         let version = self.load_version(datastore, doc_short_id).await?;
-        let ids = self.part_ids(datastore).await?;
-        let parts = ids.as_ref().and_then(|ids| {
-            fields
-                .iter()
-                .map(|field| ids.get(field).copied())
-                .collect::<Option<Vec<_>>>()
-        });
+        let parts = self
+            .part_ids_of(datastore, fields.iter().map(String::as_str))
+            .await?;
         let key = self.doc_key(doc_short_id);
         // No fields is a read no decision rests on, never validated.
         let data = match (version.as_deref() == Some(self.version_id()), parts) {
