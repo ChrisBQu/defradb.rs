@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use edge::{Edge, Service};
 use futures::{SinkExt, StreamExt};
-use tokio::task::AbortHandle;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -15,14 +15,17 @@ const SUBSCRIPTION_QUERY: &str = "tm.event='Tx' AND message.module='acp'";
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 
+/// The event stream runs as a service of the network runtime: it stops
+/// when the subscriber is dropped or the runtime stops accepting.
 pub(super) struct CosmosEventSubscriber {
-    abort_handle: AbortHandle,
+    _service: Service,
 }
 
 impl CosmosEventSubscriber {
     pub(super) fn start(
         websocket_url: String,
         cache: Arc<AccessCache>,
+        edge: &Edge,
     ) -> Result<Self, ProviderError> {
         websocket_url
             .as_str()
@@ -30,25 +33,12 @@ impl CosmosEventSubscriber {
             .map_err(|error| {
                 ProviderError::Config(format!("invalid Vera events WebSocket URL: {error}"))
             })?;
-        let runtime = tokio::runtime::Handle::try_current().map_err(|error| {
-            ProviderError::Config(format!(
-                "Vera event invalidation requires a Tokio runtime: {error}"
-            ))
-        })?;
-        let task = runtime.spawn(run(websocket_url, cache));
-        Ok(Self {
-            abort_handle: task.abort_handle(),
-        })
+        let service = edge.spawn_service(run(edge.clone(), websocket_url, cache));
+        Ok(Self { _service: service })
     }
 }
 
-impl Drop for CosmosEventSubscriber {
-    fn drop(&mut self) {
-        self.abort_handle.abort();
-    }
-}
-
-async fn run(websocket_url: String, cache: Arc<AccessCache>) {
+async fn run(edge: Edge, websocket_url: String, cache: Arc<AccessCache>) {
     let mut reconnect_delay = INITIAL_RECONNECT_DELAY;
     loop {
         let mut session_duration = None;
@@ -89,7 +79,7 @@ async fn run(websocket_url: String, cache: Arc<AccessCache>) {
         }
 
         reconnect_delay = retry_delay_after_session(reconnect_delay, session_duration);
-        tokio::time::sleep(reconnect_delay).await;
+        edge.sleep(reconnect_delay).await;
         reconnect_delay = reconnect_delay.saturating_mul(2).min(MAX_RECONNECT_DELAY);
     }
 }
@@ -211,7 +201,11 @@ mod tests {
     #[tokio::test]
     async fn subscriber_rejects_invalid_urls_before_spawning() {
         let cache = Arc::new(AccessCache::new(Duration::from_secs(300)));
-        let result = CosmosEventSubscriber::start("not a websocket URL".into(), cache);
+        let result = CosmosEventSubscriber::start(
+            "not a websocket URL".into(),
+            cache,
+            &edge::testing::edge(),
+        );
 
         assert!(matches!(result, Err(ProviderError::Config(_))));
     }
@@ -228,6 +222,47 @@ mod tests {
         );
     }
 
+    /// Accepts the subscriber's connection on `listener`.
+    async fn accept_subscriber(
+        listener: &TcpListener,
+    ) -> tokio_tungstenite::WebSocketStream<tokio::net::TcpStream> {
+        let (stream, _) = timeout(Duration::from_secs(1), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        accept_async(stream).await.unwrap()
+    }
+
+    /// Completes once the subscriber's side of `socket` went away.
+    async fn assert_disconnects(
+        socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    ) {
+        timeout(Duration::from_secs(1), async {
+            while let Some(Ok(message)) = socket.next().await {
+                if matches!(message, Message::Close(_)) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("the subscriber must disconnect");
+    }
+
+    #[tokio::test]
+    async fn subscriber_stops_when_the_network_runtime_stops_accepting() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let websocket_url = format!("ws://{}/websocket", listener.local_addr().unwrap());
+        let cache = Arc::new(AccessCache::new(Duration::from_secs(300)));
+        let scope = edge::testing::edge().scope();
+
+        let _subscriber =
+            CosmosEventSubscriber::start(websocket_url, Arc::clone(&cache), scope.edge()).unwrap();
+        let mut socket = accept_subscriber(&listener).await;
+        scope.close();
+
+        assert_disconnects(&mut socket).await;
+    }
+
     #[tokio::test]
     async fn subscriber_processes_events_and_stops_on_drop() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -235,12 +270,10 @@ mod tests {
         let cache = Arc::new(AccessCache::new(Duration::from_secs(300)));
         cache.set("did:key:alice", "p1", "users", "doc1", "read", true);
 
-        let subscriber = CosmosEventSubscriber::start(websocket_url, Arc::clone(&cache)).unwrap();
-        let (stream, _) = timeout(Duration::from_secs(1), listener.accept())
-            .await
-            .unwrap()
-            .unwrap();
-        let mut socket = accept_async(stream).await.unwrap();
+        let subscriber =
+            CosmosEventSubscriber::start(websocket_url, Arc::clone(&cache), &edge::testing::edge())
+                .unwrap();
+        let mut socket = accept_subscriber(&listener).await;
 
         let request = timeout(Duration::from_secs(1), socket.next())
             .await
@@ -281,14 +314,7 @@ mod tests {
         .await
         .unwrap();
 
-        let abort_handle = subscriber.abort_handle.clone();
         drop(subscriber);
-        timeout(Duration::from_secs(1), async {
-            while !abort_handle.is_finished() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        assert_disconnects(&mut socket).await;
     }
 }

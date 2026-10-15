@@ -14213,6 +14213,7 @@ dependencies = [
  "cosmrs",
  "crypto",
  "defra-core",
+ "edge",
  "events",
  "futures",
  "hex",
