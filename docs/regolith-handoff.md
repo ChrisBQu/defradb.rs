@@ -15,7 +15,7 @@ Merge from the bottom upward, retargeting the next PR after each merge. The bran
 | 3 | 1b engine encryption | [#1920](https://github.com/sourcenetwork/defradb.rs/pull/1920) | `defralevel/s0-change-markers` | `chore/regolith-defralevel-api` |
 | 4 | 1c classifier / DefraLevel | [#1951](https://github.com/sourcenetwork/defradb.rs/pull/1951) | `defralevel/01c-key-classifier` | `defralevel/s0-change-markers` |
 | 5 | 2 transactional decisions | [#1952](https://github.com/sourcenetwork/defradb.rs/pull/1952) | `defralevel/02-transaction-decisions` | `defralevel/01c-key-classifier` |
-| 6 | 3 mechanisms, in progress | [#1953](https://github.com/sourcenetwork/defradb.rs/pull/1953) | `defralevel/03-engine-mechanisms` | `defralevel/02-transaction-decisions` |
+| 6 | 3 mechanisms | [#1953](https://github.com/sourcenetwork/defradb.rs/pull/1953) | `defralevel/03-engine-mechanisms` | `defralevel/02-transaction-decisions` |
 | 7 | 4 ordered events | [#1955](https://github.com/sourcenetwork/defradb.rs/pull/1955) | `defralevel/04-ordered-events` | `defralevel/03-engine-mechanisms` |
 | 8 | 5 engine-owned retries | [#1956](https://github.com/sourcenetwork/defradb.rs/pull/1956) | `defralevel/05-engine-retries` | `defralevel/04-ordered-events` |
 | 9 | 6 lock removal | [#1959](https://github.com/sourcenetwork/defradb.rs/pull/1959) | `defralevel/06-lock-removal` | `defralevel/05-engine-retries` |
@@ -32,41 +32,31 @@ The stack now has the intended 11 draft PRs. Split into two stacks if further ne
 | 2 | Transactional decision reads, local ACP, relationship/NAC/downsample decisions | Preserve these fences through batch integration |
 | 3 | Arrival append, ID allocation, field/counter/vector/full-text operators, head markers, read-only lenses and known-field write projections | General query/output and conditional reads remain conservative; no blanket zero-conflict claim |
 | 4 | Receipt-ordered events and fallible ordered ACP hooks | Preserve winner-only hooks and suppress events on hook failure in whole-batch retries |
-| 5 | Engine retries for individual/many writes, merges, lenses, backfill and pending DAG writes; bounded prepared inputs | Whole implicit GraphQL batch conversion, request bearer propagation and target/prepared-key separation published at `56ea4db1a`; final combined CI/performance pending |
-| 6 | Requested locks/cache/forced-read APIs removed; snapshot metadata, collection OCC, immutable ACP projections and peer generation fences replace them | Batch projection, global backfill fence, allocation changes, exact-generation admission, incarnation-guarded registration and stale-failure CAS integrated locally; final status-side-effect audit and combined validation pending |
+| 5 | Engine retries for individual/many writes, merges, lenses, backfill and pending DAG writes; bounded prepared inputs | Whole-batch conversion, bearer propagation and target/prepared-key separation published at `56ea4db1a`; removal of generic HTTP/embedded conflict replay and single-mutation engine-batch routing in progress |
+| 6 | Requested locks/cache/forced-read APIs removed; snapshot metadata, collection OCC, immutable ACP projections and peer generation fences replace them | Generation/incarnation admission, registration, failure, ACK and status fences validated; lock-free ACP projection validated. Exact-wire schema reuse optimization and performance gates pending |
 | 7 | Native commit/policy tickers and bounded conflict reasons; caller instrumentation retained | Revalidate after lower-stack restack |
 | 8 | Obsolete cache/counter/queue proofs retired; HeadSet retained; pinned arrival proof and new adapter boundary models | Revalidate after lower-stack restack; models do not verify Rust or remote authorization |
 
 ### Immediate blockers
 
-1. Finish combined validation. Plain update/upsert target membership is now tracked independently from optional key artifacts (`438cffd57`), fixing the DateTime/browser-relay preparation failure. Indexed/nonindexed DateTime tests and the hidden-target Upsert regression pass. Dedicated UpdateNode tests now accept keyed/plain prepared targets and reject an unprepared target. CI's mixed Go/Rust counter parity failure passed all three local runtime controls and ten additional mixed repeats, but remains unresolved until fresh CI.
-2. Publish the combined step-6 repairs after validation. P2P admission inversion is fixed (395 library tests pass); exact-generation admission helper passes 254 storage and 89 adapter tests. Recorder regressions cover backoff, forget/re-add and late terminal failures. Incarnation-guarded registration rejects delayed operations across forget/re-add and prevents old allocations replacing newer markers (256 storage and 89 adapter tests pass on that candidate). Failure refresh now uses source-generation CAS. Final audit is checking status updates following that CAS; final combined validation is pending. The allocation improvements preserve existing read dependencies and block ordering.
-3. Run final combined native/WASM, external interoperability, counter conformance and fresh CI after restacking. Checkpoint passes below are not final-tip passes.
-4. Repair the intermediate doc-queue, collection and peer lock-removal checkpoints after the whole-batch rebase. Their current benchmark builds expose missing batch-controller methods; later integration code fixes the tip. Move the required changes to the correct removal boundary, preserve the final tree, and rebuild every checkpoint.
-5. Complete §5.3 performance and allocation gates. Existing measurements show regressions; none is waived. Prepare isolated benchmark binaries, then measure with a fresh load guard and no concurrent builds/tests.
+1. Finish removing generic HTTP/embedded business-conflict replay above engine retries. Typed external-input resolution remains outside attempts. Route eligible single implicit mutations through the engine batch so conflict retries reselect their targets. This is active implementation work.
+2. Evaluate exact persisted-definition-byte reuse without dropping snapshot reads, runtime root-ID checks or current index-action statuses. The measured create allocation count remains above main.
+3. Revalidate and restack incoming changes, inspect current-head CI, and complete §5.3 performance gates. All nine repaired lock-removal checkpoints now build; their timing gates remain pending. No performance gate is waived.
 
 ## Validation evidence
 
 | Revision / scope | Result | Limit |
 |---|---|---|
-| Published step 3 `230c36c1`, prep `199daa57` | All reported CI checks pass at latest inspection | Does not cover later PRs |
-| Published step 4 `3c8bed28` | All reported CI checks pass at inspection | Check live CI |
-| Step 5 before new whole-batch work | Native DB/storage/P2P and WASM Clippy pass; read/search/transaction/vector/view/write and merge checkpoints pass | Needs final combined rerun |
-| Step 5 `d761f2fe` | ACP 204 pass/16 ignored, basic 56 pass, encryption 25 pass, counter 9 pass/8 ignored; mixed runtime parity controls 3 pass plus ten mixed repeats | Predates target-set fix |
-| Step 5 `438cffd57` / combined tip `731a90a5c` | Native all-target step-5 lint and combined-tip WASM lint pass; DateTime and hidden-target Upsert regressions pass | Final native/external suites and fresh CI pending |
-| Step 6 `0dc247b6c` | Native all-target and WASM Clippy pass; remote ACP winner-only conflict regression and three bearer-hook tests pass | Full combined tests running |
-| Independent query provider-boundary candidate | 744 query tests pass | Predates final combined batch/projection changes |
-| Step 6 before latest repairs | 679 DB tail tests pass (14 ignored); 1275 query/storage/authorization tests pass | Later race repairs and batch changes require rerun |
-| Step 6 external CLI | 204 ACP pass (16 ignored), 55 basic pass, 25 encryption pass; version-JSON smoke passes with clean DEFRA_ROOTDIR | Uses exact Go pin `53f0e76a32d1761e3396a88ce607ebc3e37baa5a`; predates final batch changes |
-| Step 6 counter conformance | 9 pass, 8 diagnostic/parity cases ignored | Predates final batch changes |
-| Snapshot metadata repair `36ac4cc8` | 59 index tests, four schema/OCC tests, native/WASM lint pass | Subsequent deterministic fence tests found and repaired additional races |
-| Global fence candidate `81e46176` | 61 index tests and schema-comparison unit test pass; fmt/diff checks pass | Local candidate, not published tip |
-| Step 7 | Three telemetry regressions and native/WASM Clippy pass | Revalidate after restack |
-| Step 8 expanded models | All 167 full-suite TLC verdicts match expectation; three additional registration-fence configurations match their expected verdicts; five library/registry and two Lean contract tests pass | 170 configurations total, across the full suite plus the three focused additions; boundary models, not Rust verification |
-| Combined checkpoint `731a90a5c` | 1889 core/adapter tests pass (23 ignored); external ACP 204 pass/16 ignored, basic 56, encryption 25; counter 9 pass/8 ignored; WASM lint passes | Predates latest allocation and P2P repairs |
-| P2P generation/incarnation candidates | Admission fix: 395 P2P tests; generation helper: 254 storage + 89 adapter; incarnation: 256 storage + 89 adapter; recorder lifecycle and stale-failure regressions pass | Final integrated rerun pending |
+| Combined checkpoint `9afeb8447` | 2,360 DB/query/authorization/data tests pass, 33 ignored; storage 257, P2P 395, adapter 94 pass | Predates lock-free projection and pending front-door cleanup |
+| Fresh CLI at `9afeb8447` | External ACP 204 pass/16 ignored, basic 56, encryption 25; counter conformance 9 pass/8 ignored; real point-read write-skew regression passes | Exact Go pin `53f0e76a32d1761e3396a88ce607ebc3e37baa5a`; later code needs targeted reruns |
+| Projection checkpoint `2077620ca` and style-only successor `d19f72a57` | Five focused projection tests, query library 598 and DB write 63 pass; WASM lint and broad native all-target Clippy pass | Pending retry-surface/schema optimizations not covered |
+| Published step 5 `56ea4db1a` | Latest inspection has no failed CI checks; Go compatibility and browser checks pass | Native ACP/macOS jobs were running or queued; inspect live checks before merge |
+| Step 8 current proof suite | All 162 currently configured TLC cases have expected verdicts verified across full-suite and focused runs; five library/registry and two Lean contract checks pass | Finite boundary models, not Rust verification |
+| Repaired step-6 removal history | All nine checkpoint benchmark builds pass; final-tree-preserving history repair complete | Fresh timing measurements pending |
 
-Step-5 CI exposed an unused telemetry dependency (removed locally at `0f219851`, cargo-machete passes) and concurrent HTTP retry-test counter interference (serialized in the batch candidate, focused tests pass). Lower middle PRs run current lint/feature checks while full suites may be skipped by stack-scope policy. Historical cancelled runs may remain in rollups; use current head checks.
+P2P validation includes admission backoff, exact marker generations, registration ordering, forget/re-add incarnation fencing, stale failure refresh, atomic ACK cleanup and conditional status transitions. Already-admitted external I/O cannot be revoked; durable side effects are fenced. Old SSI/SSI-range proofs referencing the removed ConflictTracker have been retired, while the real write-skew behavior test remains.
+
+Earlier mixed Go/Rust parity failures passed all three local controls and ten mixed repeats; the fresh step-5 Go compatibility CI check also passes. Use current-head CI: cancelled or superseded rollups do not establish the final stack's status.
 
 ## Performance gates: not passed
 
@@ -88,7 +78,9 @@ The largest early increase is at step 3. Safe read-only fetching and one-pass de
 
 [Paired allocation results](benchmarks/allocation-sort-and-schema.md): CID-string sort caching reduces create allocations from 4237.8 to 3588.4 on its exact baseline pair. On a separate exact pair, immutable schema sharing reduces 3612.3 to 3346.4 and get-by-ID 198 to 160. Downsample filtering before cloning reduces creates to 3307.4; reserving computed-create buffers reduces them further to 3296.3. Block ordering tests (61) and collection/definition/index suites (232) pass. These counts do not establish final-tip or throughput gates.
 
-Fresh frozen step-3/4/5 binaries yield create medians **2980.7 / 2982.8 / 3411.4**, respectively (get-by-ID 269 at all three). The first two are slightly below the measured main create median; the step-5 increase remains under investigation. Exact raw samples, revisions and executable hashes are in the paired allocation artifact. Lock-removal checkpoint binaries are being built before a quiet-host timing window.
+Fresh frozen step-3/4/5 binaries yield create medians **2980.7 / 2982.8 / 3411.4**, respectively (get-by-ID 269 at all three). The first two are slightly below the measured main create median; the step-5 increase remains under investigation. Exact raw samples, revisions and executable hashes are in the paired allocation artifact. All nine repaired lock-removal checkpoint binaries have built successfully; timing awaits a quiet-host window.
+
+[Sharing immutable create inputs](benchmarks/create-retry-sharing.md) reduces the next exact paired create median from 3296.4 to **3231.3**, with get-by-ID unchanged at **160**. This remains about 8% above main for creates. A snapshot-safe schema-byte reuse candidate is being evaluated.
 
 Required timing evidence: before/after each step and lock-removal checkpoint, all writer counts/workloads/repetitions, commits/s, conflicts/commit, retries by layer, p50/p99, create benchmarks at 4/16 fields, branchable create at 14, and cold startup at 10 collections. Use `tools/perf-site/loadguard.py`, record its result and source revision, and do not treat a failed/missing guard as clean-host evidence.
 
