@@ -38,6 +38,13 @@ impl AcpRegistrationProjection {
         Self::default()
     }
 
+    /// A detached projection to share. It is not `Sync` in the single-threaded
+    /// browser build, where nothing shares it across threads.
+    #[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
+    pub fn detached_shared() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self::detached())
+    }
+
     /// The creator a registration is owed to, as this transaction sees it.
     pub async fn owed_creator(
         &self,

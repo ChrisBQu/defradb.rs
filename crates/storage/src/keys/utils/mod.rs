@@ -88,20 +88,21 @@ pub fn encode_uvarint_ascending(mut buf: Vec<u8>, value: u64) -> Vec<u8> {
 /// ends can afford it anywhere.
 pub(crate) fn read_uvarint(buf: &[u8]) -> Option<(usize, u64)> {
     let first = *buf.first()?;
-    let width = match first {
-        0..=0xEF => 1,
-        0xF0..=0xF7 => 2,
-        _ => 1 + usize::from(first - 0xF7),
-    };
-    let encoded = buf.get(..width)?;
-    let value = match width {
-        1 => u64::from(first),
-        2 => 240 + (u64::from(first - 0xF0) << 8) + u64::from(encoded[1]),
-        _ => encoded[1..]
-            .iter()
-            .fold(0, |value, byte| (value << 8) | u64::from(*byte)),
-    };
-    Some((width, value))
+    match first {
+        0..=0xEF => Some((1, u64::from(first))),
+        0xF0..=0xF7 => {
+            let low = *buf.get(1)?;
+            Some((2, 240 + (u64::from(first - 0xF0) << 8) + u64::from(low)))
+        }
+        _ => {
+            let width = 1 + usize::from(first - 0xF7);
+            let value = buf
+                .get(1..width)?
+                .iter()
+                .fold(0, |value, byte| (value << 8) | u64::from(*byte));
+            Some((width, value))
+        }
+    }
 }
 
 /// The length of the uvarint `buf` starts with, or `None` when `buf` is

@@ -61,7 +61,12 @@ async fn update_in_explicit_txn(db: &CountingDb, doc_id: &DocID, field: &str, va
 #[tokio::test]
 async fn an_update_reads_its_part_id_map_at_most_once() {
     let (db, doc_id) = seeded().await;
-    let version = db.get_collection("Parted").unwrap().unwrap().version_id().to_string();
+    let version = db
+        .get_collection("Parted")
+        .unwrap()
+        .unwrap()
+        .version_id()
+        .to_string();
     let mut part_key = vec![Namespace::Systemstore.prefix()];
     part_key.extend_from_slice(format!("/parts/{version}").as_bytes());
 
@@ -103,5 +108,8 @@ async fn an_update_scans_the_document_heads_once() {
         .iter()
         .filter(|prefix| **prefix == heads_prefix)
         .count();
-    assert_eq!(scans, 1, "an update scanned its document's heads {scans} times");
+    assert_eq!(
+        scans, 1,
+        "an update scanned its document's heads {scans} times"
+    );
 }

@@ -46,7 +46,10 @@ async fn an_update_at_the_same_version_does_not_rewrite_the_version_key() {
         .unwrap();
     creator.take_txn().await.unwrap().commit().await.unwrap();
     assert!(
-        db.store().take_written_keys().iter().any(|key| is_version_key(key)),
+        db.store()
+            .take_written_keys()
+            .iter()
+            .any(|key| is_version_key(key)),
         "a create writes its version key"
     );
 
