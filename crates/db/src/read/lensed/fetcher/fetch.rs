@@ -121,7 +121,7 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
         // its dependency set is available to the query planner.
         if !self
             .db
-            .downsample_plans(None, Some(collection_name))
+            .local_downsample_targets_for_source(collection_name)
             .map_err(crate::error::commit_query_error)?
             .is_empty()
         {
