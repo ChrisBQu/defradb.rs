@@ -572,6 +572,9 @@ where
         .await
         .map_err(|error| anyhow!("failed to open database: {error}"))?;
     database.set_event_bus(event_bus.clone());
+    if let Some(edge) = config.edge.as_ref() {
+        database.set_network(edge.clone());
+    }
     #[cfg(feature = "iroh")]
     if let Some(hooks) = &access_hooks {
         hooks.install(&database);

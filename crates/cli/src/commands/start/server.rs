@@ -124,6 +124,7 @@ impl Node {
         let event_bus: Arc<dyn events::Bus> = Arc::new(events::ChannelBus::new());
         database.set_event_bus(event_bus.clone());
         info!("Event bus configured for subscriptions");
+        database.set_network(edge.clone());
 
         let database = Arc::new(database);
 

@@ -1435,6 +1435,9 @@ impl NodeBuilder {
 
         // Wire event bus so mutations publish events
         database.set_event_bus(event_bus.clone());
+        if let Some(network) = network.as_ref() {
+            database.set_network(network.edge().clone());
+        }
         let database = Arc::new(database);
 
         // Node Access Control: only installed when explicitly enabled. The node
