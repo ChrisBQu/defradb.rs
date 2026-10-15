@@ -1359,6 +1359,73 @@ async fn shared_counter_block_is_applied_once_per_document() {
     }
 }
 
+/// A counter block two stored documents share lands once on each of them,
+/// also after the first one marked it merged: each counter ends at its own
+/// value plus 5.
+#[tokio::test]
+async fn a_shared_counter_block_lands_once_on_each_stored_document() {
+    let (handler, blockstore) = make_handler_with_counter_schema().await;
+    let db = Arc::clone(handler.db());
+    let registry = DbTransactionRegistry::new(Arc::clone(&db));
+    let mut docs = Vec::new();
+    for seed in [0_i64, 10] {
+        let handle = registry.begin(false).await.expect("begin seed");
+        let ctx = registry.get(&handle).into_result().unwrap().unwrap();
+        let mutator = ctx.doc_mutator().expect("mutator");
+        let created = mutator
+            .create(
+                "Counters",
+                Document::from_json_str(&format!(r#"{{"score": {seed}}}"#)).unwrap(),
+            )
+            .await
+            .expect("create seed");
+        docs.push((created.doc_id.to_string(), seed));
+        drop(mutator);
+        drop(ctx);
+        registry.commit(&handle).await.expect("commit seed");
+    }
+    let (cid, payload) = put_counter_delta_block(&blockstore, &docs[0].0, 5, 1, 7).await;
+
+    for (index, (doc_id, _)) in docs.iter().enumerate() {
+        let txn = db.new_txn(false).await.unwrap();
+        let doc_short_id = {
+            let systemstore = txn.systemstore().unwrap();
+            db::docid::map::get_doc_ref(&systemstore, doc_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .doc_short_id
+        };
+        {
+            let mut datastore = txn.datastore().unwrap();
+            let headstore = txn.headstore().unwrap();
+            for attempt in 0..2 {
+                let result = handler
+                    .process_counter_delta_in_txn(
+                        &mut datastore,
+                        &headstore,
+                        &cid,
+                        &payload,
+                        Some("col-counters"),
+                        doc_id,
+                        doc_short_id,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(result.applied(), attempt == 0, "{doc_id}");
+            }
+        }
+        txn.force_commit().await.unwrap();
+        if index == 0 {
+            blockstore.mark_as_merged(&cid).await.unwrap();
+        }
+    }
+
+    for (doc_id, seed) in &docs {
+        assert_eq!(read_counter_value(&db, doc_id, "score").await, seed + 5);
+    }
+}
+
 #[tokio::test]
 async fn composite_merge_skips_locally_merged_counter_parent() {
     let (handler, blockstore) = make_handler_with_counter_schema().await;
