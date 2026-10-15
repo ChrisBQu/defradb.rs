@@ -46,6 +46,8 @@ pub use read_gate::{DbBlockClassifier, DbBlockReadGate};
 pub use replication_events::publish_replication_result;
 pub use replicator_status::{
     load_persisted_replicators, set_persisted_replicator_status,
+    set_persisted_replicator_status_for_incarnation,
+    set_persisted_replicator_status_for_incarnation_with_marker_state,
     set_persisted_replicator_status_for_scope_generation,
 };
 #[cfg(any(feature = "iroh", feature = "libp2p"))]

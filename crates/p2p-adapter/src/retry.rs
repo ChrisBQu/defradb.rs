@@ -164,11 +164,7 @@ pub fn spawn_failure_recorder<S: storage::corekv::Store + 'static>(
             };
 
             let _ = durable_tx.map(|tx| tx.send(marker_generation));
-            if failure.acknowledged {
-                if marker_generation.is_some() {
-                    let _ = peerstore.clear_retry_peer(&failure.peer_id).await;
-                }
-            } else if failure.create_retry {
+            if !failure.acknowledged && failure.create_retry {
                 if let Some(generation) = marker_generation {
                     if let Err(error) = crate::set_persisted_replicator_status_for_scope_generation(
                         &peerstore,
@@ -345,6 +341,14 @@ pub async fn run_retry_pass<S, T>(
             tracing::warn!(peer_id = %peer_id_str, %error, "invalid retry info");
             continue;
         }
+        let incarnation = match peerstore.get_replicator_incarnation(&peer_id_str).await {
+            Ok(Some(incarnation)) => incarnation,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::debug!(peer_id = %peer_id_str, %error, "failed to load peer incarnation");
+                continue;
+            }
+        };
         let peer_id = PeerId::new(peer_id_str.clone());
 
         let markers = match peerstore.get_retry_documents(&peer_id_str).await {
@@ -355,7 +359,7 @@ pub async fn run_retry_pass<S, T>(
             }
         };
         if markers.is_empty() {
-            finish_peer(peerstore, &peer_id_str, true).await;
+            finish_peer(peerstore, &peer_id_str, incarnation, true).await;
             continue;
         }
         if !markers.iter().any(|marker| {
@@ -374,8 +378,10 @@ pub async fn run_retry_pass<S, T>(
                 // second two-second redial clock for markers whose ladder has not
                 // elapsed yet. `run_reconnect_pass` owns the off-ladder probing.
                 redial_replicator(peerstore, transport, &peer_id).await;
-                let _ = peerstore.reschedule_retry_peer(&peer_id_str, None, 1).await;
-                finish_peer(peerstore, &peer_id_str, false).await;
+                let _ = peerstore
+                    .reschedule_retry_peer_for_incarnation(&peer_id_str, incarnation, None, 1)
+                    .await;
+                finish_peer(peerstore, &peer_id_str, incarnation, false).await;
                 continue;
             }
             Ok(_) => {}
@@ -466,7 +472,12 @@ pub async fn run_retry_pass<S, T>(
                             .is_some_and(|info| !info.is_backpressure_elapsed());
                         let delay = if hinted { Duration::ZERO } else { delay };
                         let _ = peerstore
-                            .reschedule_retry_peer(&peer_id_str, Some(delay), attempted as u64)
+                            .reschedule_retry_peer_for_incarnation(
+                                &peer_id_str,
+                                incarnation,
+                                Some(delay),
+                                attempted as u64,
+                            )
                             .await;
                         // Receiver saturation applies to the peer, not just
                         // this scope.  Rotate the durable cursor and wait for
@@ -496,11 +507,16 @@ pub async fn run_retry_pass<S, T>(
             // was unreachable.
             let _ = if progressed {
                 peerstore
-                    .restart_retry_peer(&peer_id_str, attempted as u64)
+                    .restart_retry_peer_for_incarnation(&peer_id_str, incarnation, attempted as u64)
                     .await
             } else {
                 peerstore
-                    .reschedule_retry_peer(&peer_id_str, None, attempted as u64)
+                    .reschedule_retry_peer_for_incarnation(
+                        &peer_id_str,
+                        incarnation,
+                        None,
+                        attempted as u64,
+                    )
                     .await
             };
         }
@@ -509,7 +525,7 @@ pub async fn run_retry_pass<S, T>(
             .get_retry_documents(&peer_id_str)
             .await
             .is_ok_and(|markers| markers.is_empty());
-        finish_peer(peerstore, &peer_id_str, complete).await;
+        finish_peer(peerstore, &peer_id_str, incarnation, complete).await;
     }
 }
 
@@ -552,15 +568,25 @@ impl PassReport {
 async fn finish_peer<S: storage::corekv::Store>(
     peerstore: &storage::stores::Peerstore<S>,
     peer_id: &str,
+    incarnation: u64,
     complete: bool,
 ) {
     let status = if complete {
-        let _ = peerstore.clear_retry_peer(peer_id).await;
+        let _ = peerstore
+            .clear_retry_peer_for_incarnation(peer_id, incarnation)
+            .await;
         p2p::ReplicatorStatus::Active
     } else {
         p2p::ReplicatorStatus::Inactive
     };
-    let _ = crate::set_persisted_replicator_status(peerstore, peer_id, status).await;
+    let _ = crate::set_persisted_replicator_status_for_incarnation_with_marker_state(
+        peerstore,
+        peer_id,
+        incarnation,
+        status,
+        complete,
+    )
+    .await;
 }
 
 /// Run the one durable retry clock used by CLI, embedded, and defra-node.

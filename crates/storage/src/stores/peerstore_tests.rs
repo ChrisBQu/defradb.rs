@@ -810,7 +810,6 @@ async fn completing_one_scope_preserves_other_scope_and_peer_clock() {
         .complete_retry_document("peer", doc)
         .await
         .unwrap();
-    peerstore.clear_retry_peer("peer").await.unwrap();
 
     let remaining = peerstore.get_retry_documents("peer").await.unwrap();
     assert_eq!(remaining.len(), 1);
@@ -821,7 +820,6 @@ async fn completing_one_scope_preserves_other_scope_and_peer_clock() {
         .complete_retry_document("peer", &remaining[0])
         .await
         .unwrap();
-    peerstore.clear_retry_peer("peer").await.unwrap();
     assert!(peerstore.get_all_retry_peers().await.unwrap().is_empty());
 }
 
