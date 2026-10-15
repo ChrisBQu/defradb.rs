@@ -3,6 +3,7 @@
 mod common;
 
 mod acp;
+mod activation;
 mod cache;
 mod delete;
 mod index_actions;

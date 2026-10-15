@@ -4,6 +4,7 @@ pub mod backfill;
 pub mod create;
 pub mod error;
 pub mod manager;
+pub(crate) mod pages;
 pub mod vector;
 
 pub use error::{Error, Result};

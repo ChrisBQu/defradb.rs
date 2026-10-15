@@ -375,8 +375,13 @@ impl<S: Store> crate::database::DB<S> {
                     .set(&name_key.bytes(), new_version_id.as_bytes())
                     .await
                     .map_err(Error::Storage)?;
-                crate::definition::migration::owe_reindex(&systemstore, collection_id, None)
-                    .await?;
+                crate::definition::migration::owe_reindex(
+                    &systemstore,
+                    &self.collections,
+                    collection_id,
+                    None,
+                )
+                .await?;
             }
 
             // 4. Add version index at /collection/version/{collection_id}/{new_version_id}

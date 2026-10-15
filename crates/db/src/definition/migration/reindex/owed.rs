@@ -4,20 +4,30 @@
 //! first; rebuilding the collection's secondary indexes over the documents the
 //! change migrates follows. That rebuild can fail (a lens that cannot run yet, a
 //! storage error), and the change stands regardless. So the committing
-//! transaction records the reindex it owes the collection, and only a rebuild
-//! that succeeds clears the record, in the transaction that rebuilds. The
-//! follow-up after the commit settles it; one that fails is reported and stays
-//! owed, settled again after the next schema change commits and at every open.
-//! A crash between the commit and the rebuild loses nothing.
+//! transaction records the reindex it owes the collection, and only the rebuild
+//! page that finishes clears the record, in its own transaction. The follow-up
+//! after the commit settles it; one that fails is reported and stays owed,
+//! settled again after the next schema change commits and at every open, from
+//! the last page that committed. A crash between the commit and the rebuild
+//! loses nothing.
 //!
 //! Each record carries a random token, and a settle clears only the record it
 //! read: a reindex owed by a later change is never cleared by a rebuild that
 //! ran before it.
+//!
+//! While a record stands, none of the collection's indexes answers queries
+//! ([`reindex_owed`], read wherever index statuses are), so a query plans a
+//! scan instead of reading entries that may describe documents at an older
+//! version or be half rebuilt. Writing or clearing a record republishes the
+//! cached collection when the transaction commits, in commit order.
+
+use std::sync::Arc;
 
 use datastore::NamespaceView;
 use serde::{Deserialize, Serialize};
-use storage::corekv::{IterOptions, Store};
+use storage::corekv::{IterOptions, OnCommit, Store};
 
+use crate::collection::epoch::EpochedCollections;
 use crate::error::{Error, Result};
 use crate::DB;
 
@@ -25,8 +35,8 @@ use crate::DB;
 const OWED_PREFIX: &[u8] = b"/reindex/owed/";
 
 #[derive(Serialize, Deserialize)]
-struct OwedReindex {
-    token: u64,
+pub(super) struct OwedReindex {
+    pub(super) token: u64,
     /// The destination version of the migration that owes the reindex: the
     /// rebuild is needed only while the active version's history contains it.
     /// `None` after a version switch, which always needs it.
@@ -37,7 +47,7 @@ fn owed_key(collection_id: &str) -> Vec<u8> {
     [OWED_PREFIX, collection_id.as_bytes()].concat()
 }
 
-async fn read_owed(
+pub(super) async fn read_owed(
     systemstore: &NamespaceView,
     collection_id: &str,
 ) -> Result<Option<OwedReindex>> {
@@ -52,43 +62,126 @@ async fn read_owed(
         .transpose()
 }
 
-/// Records, in the caller's transaction, the reindex a schema change owes
-/// `collection_id`.
-pub(crate) async fn owe_reindex(
-    systemstore: &NamespaceView,
-    collection_id: &str,
-    migration_destination: Option<&str>,
-) -> Result<()> {
-    let owed = OwedReindex {
-        token: rand::random(),
-        migration_destination: migration_destination.map(str::to_owned),
-    };
-    let bytes = serde_json::to_vec(&owed)
-        .map_err(|error| Error::Other(format!("failed to encode an owed reindex: {error}")))?;
+/// Whether a schema change owes `collection_id` a reindex that has not
+/// settled, in which case none of its indexes answers queries.
+pub(crate) async fn reindex_owed(systemstore: &NamespaceView, collection_id: &str) -> Result<bool> {
     systemstore
-        .set(&owed_key(collection_id), &bytes)
+        .has(&owed_key(collection_id))
         .await
         .map_err(Error::Storage)
 }
 
-/// Clears, in the caller's transaction, the reindex owed to `collection_id` if
-/// its record is still the one with `token`. The read is validated, so a later
-/// change that owes the collection again aborts the clearing transaction.
-pub(crate) async fn clear_owed_reindex(
+/// Records, in the transaction of `systemstore`, the reindex a schema change
+/// owes `collection_id`.
+pub(crate) async fn owe_reindex(
     systemstore: &NamespaceView,
+    collections: &Arc<EpochedCollections>,
+    collection_id: &str,
+    migration_destination: Option<&str>,
+) -> Result<()> {
+    write_owed(
+        systemstore,
+        collections,
+        collection_id,
+        &OwedReindex {
+            token: rand::random(),
+            migration_destination: migration_destination.map(str::to_owned),
+        },
+    )
+    .await
+}
+
+/// Records, in the transaction of `systemstore`, a reindex of every index
+/// `collection_id` has, owed under `token` by the rebuild that writes it.
+pub(super) async fn owe_full_reindex(
+    systemstore: &NamespaceView,
+    collections: &Arc<EpochedCollections>,
     collection_id: &str,
     token: u64,
 ) -> Result<()> {
-    if read_owed(systemstore, collection_id)
+    write_owed(
+        systemstore,
+        collections,
+        collection_id,
+        &OwedReindex {
+            token,
+            migration_destination: None,
+        },
+    )
+    .await
+}
+
+async fn write_owed(
+    systemstore: &NamespaceView,
+    collections: &Arc<EpochedCollections>,
+    collection_id: &str,
+    owed: &OwedReindex,
+) -> Result<()> {
+    let bytes = serde_json::to_vec(owed)
+        .map_err(|error| Error::Other(format!("failed to encode an owed reindex: {error}")))?;
+    systemstore
+        .set(&owed_key(collection_id), &bytes)
+        .await
+        .map_err(Error::Storage)?;
+    publish_reindex_owed(systemstore, collections, collection_id, true).await
+}
+
+/// Whether the reindex owed to `collection_id` is still the one with `token`.
+/// The read is validated, so a later change that owes the collection again
+/// aborts a transaction that relied on it.
+pub(super) async fn owes(
+    systemstore: &NamespaceView,
+    collection_id: &str,
+    token: u64,
+) -> Result<bool> {
+    Ok(read_owed(systemstore, collection_id)
         .await?
-        .is_some_and(|owed| owed.token == token)
-    {
+        .is_some_and(|owed| owed.token == token))
+}
+
+/// Clears, in the transaction of `systemstore`, the reindex owed to
+/// `collection_id` if its record is still the one with `token`. The read is
+/// validated, so a later change that owes the collection again aborts the
+/// clearing transaction.
+pub(super) async fn clear_owed_reindex(
+    systemstore: &NamespaceView,
+    collections: &Arc<EpochedCollections>,
+    collection_id: &str,
+    token: u64,
+) -> Result<()> {
+    if owes(systemstore, collection_id, token).await? {
         systemstore
             .delete(&owed_key(collection_id))
             .await
             .map_err(Error::Storage)?;
+        super::progress::clear(systemstore, collection_id).await?;
+        publish_reindex_owed(systemstore, collections, collection_id, false).await?;
     }
     Ok(())
+}
+
+/// Once the transaction of `systemstore` commits, the cached collection
+/// `collection_id` answers queries from its indexes again, or stops.
+async fn publish_reindex_owed(
+    systemstore: &NamespaceView,
+    collections: &Arc<EpochedCollections>,
+    collection_id: &str,
+    owed: bool,
+) -> Result<()> {
+    let collections = Arc::clone(collections);
+    let collection_id = collection_id.to_owned();
+    systemstore
+        .on_commit(OnCommit::Ordered(Box::new(move || {
+            collections.rcu(|cache| {
+                let mut cache = cache.clone();
+                cache.update(&collection_id, |collection| {
+                    collection.with_reindex_owed(owed)
+                });
+                cache
+            });
+        })))
+        .await
+        .map_err(Error::Storage)
 }
 
 /// What one settle pass did.
@@ -175,13 +268,16 @@ where
             None => None,
         };
         match rebuild {
-            Some(name) => {
-                self.rebuild_settling(&name, collection_id, owed.token)
-                    .await
-            }
+            Some(name) => self.rebuild_settling(&name, owed.token).await,
             None => {
                 let txn = self.new_txn(false).await?;
-                clear_owed_reindex(&txn.systemstore()?, collection_id, owed.token).await?;
+                clear_owed_reindex(
+                    &txn.systemstore()?,
+                    &self.collections,
+                    collection_id,
+                    owed.token,
+                )
+                .await?;
                 txn.commit().await
             }
         }
