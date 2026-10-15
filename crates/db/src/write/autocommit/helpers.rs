@@ -48,7 +48,9 @@ pub(crate) async fn write_branchable_collection_block<S: storage::corekv::Store 
 /// Persist a local UPDATE: write the document's changed parts and maintain
 /// indexes. A counter increment is a blind operand on the counter's part of
 /// the document value, its only stored copy. When requested, embeddings use
-/// the final field values before persistence.
+/// the final field values before persistence. `heads` is the snapshot the
+/// update also builds its blocks from, so the document is scanned for its
+/// heads once.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn write_local_update(
     datastore: &NamespaceView,
@@ -57,6 +59,7 @@ pub(crate) async fn write_local_update(
     doc_short_id: u64,
     index_manager: &IndexManager,
     modified_fields: &mut rapidhash::RapidHashSet<String>,
+    heads: &crate::block::builder::DocHeadsSnapshot,
     embedding_config: Option<&crate::search::EmbeddingClientConfig>,
     prepared_inputs: Option<&query::prepared::PreparedInputMemo>,
 ) -> query::error::Result<()> {
@@ -95,7 +98,7 @@ pub(crate) async fn write_local_update(
             doc,
             doc_short_id,
             index_manager,
-            Some(modified_fields),
+            Some((&*modified_fields, heads)),
         )
         .await
         .map_err(|e| match e {
@@ -125,6 +128,22 @@ pub(crate) async fn write_local_create(
         .await
         .map(|_| ())
         .map_err(|e| crate::error::index_write_query_error("create", e))
+}
+
+/// The heads of the document an update writes, read once for both its value
+/// operands and its blocks.
+pub(crate) async fn load_update_heads(
+    datastore: &NamespaceView,
+    doc_short_id: u64,
+) -> query::error::Result<crate::block::builder::DocHeadsSnapshot> {
+    crate::block::builder::DocHeadsSnapshot::load(
+        &datastore.sibling(storage::namespace::Namespace::Headstore),
+        doc_short_id,
+    )
+    .await
+    .map_err(|error| {
+        query::error::QueryError::execution(format!("failed to read document heads: {error}"))
+    })
 }
 
 /// Register the identity of a freshly created document (Go `save()` isAdd):

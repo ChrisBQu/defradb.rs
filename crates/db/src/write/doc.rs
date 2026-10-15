@@ -10,7 +10,9 @@ use std::sync::Arc;
 use storage::corekv::Store;
 
 use crate::block::builder::DocStorageIdentity;
-use crate::block::builder::{write_delete_block, write_document_blocks};
+use crate::block::builder::{
+    write_delete_block, write_document_blocks, write_document_blocks_with_inputs,
+};
 use crate::collection::loader::{get_collection_with_index_manager, get_collection_with_lazy_load};
 use crate::collection::Collection;
 use crate::database::DB;
@@ -395,6 +397,8 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
+        let heads =
+            crate::write::autocommit::helpers::load_update_heads(&datastore, doc_short_id).await?;
         crate::write::autocommit::helpers::write_local_update(
             &datastore,
             &collection,
@@ -402,6 +406,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             doc_short_id,
             &index_manager,
             &mut modified_fields,
+            &heads,
             None,
             None,
         )
@@ -425,7 +430,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             let sign_config = get_signing_config();
             let kms = self.db.kms();
 
-            let block_result = write_document_blocks(
+            let block_result = write_document_blocks_with_inputs(
                 &blockstore,
                 &headstore,
                 &doc,
@@ -435,6 +440,8 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 enc_config.as_ref(),
                 sign_config.as_ref(),
                 kms.as_ref(),
+                None,
+                Some(&heads),
             )
             .await
             .map_err(|e| {

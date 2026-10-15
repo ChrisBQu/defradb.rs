@@ -356,6 +356,8 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     )
                     .await
                     .map_err(|error| query::error::QueryError::execution(error.to_string()))?;
+                let heads =
+                    super::helpers::load_update_heads(&datastore, doc_short_id).await?;
                 write_local_update(
                     &datastore,
                     &collection,
@@ -363,6 +365,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     doc_short_id,
                     &index_manager,
                     &mut modified_fields,
+                    &heads,
                     Some(&embedding_config),
                     attempt.prepared_inputs.as_ref(),
                 )
@@ -378,6 +381,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     attempt.signing_config.as_ref(),
                     self.db.kms().as_ref(),
                     attempt.prepared_inputs.as_ref(),
+                    Some(&heads),
                 )
                 .await
                 .map_err(|error| match error {

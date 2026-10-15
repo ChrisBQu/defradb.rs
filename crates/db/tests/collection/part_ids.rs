@@ -1,5 +1,6 @@
 //! An update reads what it needs once: its collection version's part-ID map is
-//! decoded once and shared.
+//! decoded once and shared, and the document's heads are scanned once for both
+//! its value operands and its blocks.
 
 use std::sync::Arc;
 
@@ -8,6 +9,7 @@ use document::{DocID, Document, NormalValue};
 use query::mutator::DocMutator;
 use rapidhash::RapidHashSet;
 use schema::{CollectionVersion, FieldDescription, FieldKind};
+use storage::keys::HeadstoreDocKey;
 use storage::namespace::Namespace;
 use storage::RegolithStore;
 
@@ -77,4 +79,29 @@ async fn an_update_reads_its_part_id_map_at_most_once() {
             "an update of {field} read the part-ID map {reads} times"
         );
     }
+}
+
+#[tokio::test]
+async fn an_update_scans_the_document_heads_once() {
+    let (db, doc_id) = seeded().await;
+    let collection = db.get_collection("Parted").unwrap().unwrap();
+    let txn = db.new_txn(true).await.unwrap();
+    let short_id = collection
+        .resolve_doc_short_id(&txn.systemstore().unwrap(), &doc_id)
+        .await
+        .unwrap()
+        .unwrap();
+    txn.discard().unwrap();
+    let mut heads_prefix = vec![Namespace::Headstore.prefix()];
+    heads_prefix.extend_from_slice(&HeadstoreDocKey::document_prefix(short_id));
+
+    db.store().take_scan_prefixes();
+    update_in_explicit_txn(&db, &doc_id, "left", 1).await;
+    let scans = db
+        .store()
+        .take_scan_prefixes()
+        .iter()
+        .filter(|prefix| **prefix == heads_prefix)
+        .count();
+    assert_eq!(scans, 1, "an update scanned its document's heads {scans} times");
 }

@@ -52,14 +52,21 @@ impl Collection {
             .await
     }
 
+    /// With `update`, a partial update of those fields, written as operands
+    /// ordered by the document heads it builds its blocks from; without, a
+    /// structural rewrite of the whole value.
     pub(crate) async fn update_with_indexes_parts(
         &self,
         datastore: &NamespaceView,
         doc: &Document,
         doc_short_id: u64,
         index_manager: &IndexManager,
-        modified: Option<&rapidhash::RapidHashSet<String>>,
+        update: Option<(
+            &rapidhash::RapidHashSet<String>,
+            &crate::block::builder::DocHeadsSnapshot,
+        )>,
     ) -> Result<()> {
+        let modified = update.map(|(fields, _)| fields);
         // Validate document against schema
         self.validate_document(doc)?;
 
@@ -143,9 +150,9 @@ impl Collection {
             self.claim_series(datastore, doc).await?;
         }
 
-        match modified {
-            Some(fields) => {
-                self.merge_local_document_value(datastore, doc_short_id, doc, fields)
+        match update {
+            Some((fields, heads)) => {
+                self.merge_local_document_value(datastore, doc_short_id, doc, fields, heads)
                     .await?
             }
             None => {

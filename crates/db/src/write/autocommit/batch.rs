@@ -414,6 +414,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 sign_config.as_ref(),
                 self.db.kms().as_ref(),
                 self.prepared_inputs.as_ref(),
+                None,
             )
             .await
             .map_err(|error| match error {
@@ -538,6 +539,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
+        let heads = super::helpers::load_update_heads(&datastore, doc_short_id).await?;
         write_local_update(
             &datastore,
             &collection,
@@ -545,6 +547,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             doc_short_id,
             &index_manager,
             &mut modified_fields,
+            &heads,
             None,
             self.prepared_inputs.as_ref(),
         )
@@ -583,6 +586,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 sign_config.as_ref(),
                 self.db.kms().as_ref(),
                 self.prepared_inputs.as_ref(),
+                Some(&heads),
             )
             .await
             .map_err(|error| match error {

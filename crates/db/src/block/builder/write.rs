@@ -311,11 +311,15 @@ pub async fn write_document_blocks(
         signing_config,
         kms,
         None,
+        None,
     )
     .await
     .map_err(|error| error.to_string())
 }
 
+/// [`write_document_blocks`] with prepared remote inputs. An update that has
+/// already read the document's heads passes them in `heads`, so they are not
+/// scanned a second time; without them an update reads them here.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn write_document_blocks_with_inputs(
     blockstore: &NamespaceView,
@@ -328,6 +332,7 @@ pub(crate) async fn write_document_blocks_with_inputs(
     signing_config: Option<&SigningConfig>,
     kms: Option<&std::sync::Arc<dyn kms::KmsService>>,
     prepared_inputs: Option<&query::prepared::PreparedInputMemo>,
+    heads: Option<&DocHeadsSnapshot>,
 ) -> Result<BlockResult, BuildError> {
     let doc_ref_bytes = identity.doc_ref_bytes();
 
@@ -337,10 +342,14 @@ pub(crate) async fn write_document_blocks_with_inputs(
     let mut encryption_cids: Vec<Cid> = Vec::new();
 
     let is_create = modified_fields.is_none();
-    let snapshot = if is_create {
-        None
-    } else {
-        Some(DocHeadsSnapshot::load(headstore, identity.doc_short_id).await?)
+    let loaded;
+    let snapshot = match heads {
+        _ if is_create => None,
+        Some(heads) => Some(heads),
+        None => {
+            loaded = DocHeadsSnapshot::load(headstore, identity.doc_short_id).await?;
+            Some(&loaded)
+        }
     };
     let composite_priority: u64 = if is_create {
         1
