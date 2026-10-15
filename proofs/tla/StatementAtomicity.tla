@@ -104,7 +104,7 @@ OpenStatement ==
         acpProjection, successful, aborted, committedWrites,
         committedCallbacks, committedEvents, committedCreatedIds,
         committedAcpProjection
-    >>
+        >>
 
 StageStatementEffects ==
     /\ state = "Open"
@@ -119,7 +119,7 @@ StageStatementEffects ==
         saveCreatedIds, saveAcpProjection, successful, aborted,
         committedWrites, committedCallbacks, committedEvents,
         committedCreatedIds, committedAcpProjection
-    >>
+        >>
 
 FinishStatement ==
     /\ state = "Open"
@@ -138,7 +138,7 @@ FinishStatement ==
         saveCreatedIds, saveAcpProjection, aborted, committedWrites,
         committedCallbacks, committedEvents, committedCreatedIds,
         committedAcpProjection
-    >>
+        >>
 
 RestoreSavepoint ==
     /\ writes' = IF RestoreWrites THEN saveWrites ELSE writes
@@ -160,7 +160,7 @@ FailStatement ==
         successful, saveWrites, saveCallbacks, saveEvents, saveCreatedIds,
         saveAcpProjection, committedWrites, committedCallbacks,
         committedEvents, committedCreatedIds, committedAcpProjection
-    >>
+        >>
 
 CancelStatement ==
     /\ state = "Open"
@@ -174,7 +174,7 @@ CancelStatement ==
         saveCreatedIds, saveAcpProjection, successful, committedWrites,
         committedCallbacks, committedEvents, committedCreatedIds,
         committedAcpProjection
-    >>
+        >>
 
 RecoverCancellation ==
     /\ state = "CancelledPending"
@@ -190,7 +190,7 @@ RecoverCancellation ==
         saveCreatedIds, saveAcpProjection, committedWrites,
         committedCallbacks, committedEvents, committedCreatedIds,
         committedAcpProjection
-    >>
+        >>
 
 BeginWithoutRecovery ==
     /\ state = "CancelledPending"
@@ -210,7 +210,7 @@ BeginWithoutRecovery ==
         writes, callbacks, orderedEvents, createdIds, acpProjection,
         successful, aborted, committedWrites, committedCallbacks,
         committedEvents, committedCreatedIds, committedAcpProjection
-    >>
+        >>
 
 Commit ==
     /\ ((state = "Ready" /\ nextStatement = 3)
@@ -226,7 +226,7 @@ Commit ==
         writes, callbacks, orderedEvents, createdIds, acpProjection,
         saveWrites, saveCallbacks, saveEvents, saveCreatedIds,
         saveAcpProjection, successful, aborted
-    >>
+        >>
 
 Next ==
     \/ OpenStatement
