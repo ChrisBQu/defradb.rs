@@ -169,6 +169,54 @@ async fn test_simple_index_delete() {
 }
 
 #[tokio::test]
+async fn remove_page_clears_an_index_in_bounded_pages_from_its_cursor() {
+    let store = RegolithStore::in_memory().unwrap();
+    let simple = SimpleIndex::new(1, test_index_description(false));
+    let other = SimpleIndex::new(1, composite_index_description(false));
+    let mut txn = store.new_txn(false).await.unwrap();
+    for (id, name) in ["a", "b", "c", "d", "e"].into_iter().enumerate() {
+        simple
+            .save(&mut txn, id as u64 + 1, &[NormalValue::String(name.into())])
+            .await
+            .unwrap();
+    }
+    other
+        .save(
+            &mut txn,
+            9,
+            &[NormalValue::String("x".into()), NormalValue::Int(1)],
+        )
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+
+    let mut removed = Vec::new();
+    let mut after = None;
+    loop {
+        let mut txn = store.new_txn(false).await.unwrap();
+        let (count, last) = simple
+            .remove_page(&mut txn, after.as_deref(), 2)
+            .await
+            .unwrap();
+        txn.commit().await.unwrap();
+        removed.push(count);
+        if count < 2 {
+            break;
+        }
+        after = last;
+    }
+
+    assert_eq!(removed, vec![2, 2, 1], "pages of two, the last one short");
+    let txn = store.new_txn(true).await.unwrap();
+    assert_eq!(count_entries(txn.as_ref(), &simple.key_prefix()).await, 0);
+    assert_eq!(
+        count_entries(txn.as_ref(), &other.key_prefix()).await,
+        1,
+        "another index keeps its entries"
+    );
+}
+
+#[tokio::test]
 async fn test_simple_index_remove_all() {
     let store = RegolithStore::in_memory().unwrap();
     let mut txn = store.new_txn(false).await.unwrap();

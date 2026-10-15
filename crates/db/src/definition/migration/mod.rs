@@ -9,7 +9,6 @@ mod counters;
 pub mod document_parts;
 pub mod format;
 pub mod helpers;
-mod owed_reindex;
 mod reindex;
 mod set;
 mod shortid;
@@ -22,8 +21,8 @@ use storage::corekv::Store;
 use crate::error::Result;
 use crate::DB;
 
-pub use owed_reindex::ReindexReport;
-pub(crate) use owed_reindex::{owe_reindex, reindex_owed};
+pub use reindex::ReindexReport;
+pub(crate) use reindex::{owe_reindex, reindex_owed};
 
 impl<S: Store> DB<S> {
     /// Run the ordered database-open migration pipeline.

@@ -139,6 +139,22 @@ impl IndexType {
         }
     }
 
+    /// Removes up to `limit` of this index's keys after `after`
+    /// ([`CollectionIndex::remove_page`]).
+    pub async fn remove_page<T: Reader + Writer + MaybeSend>(
+        &self,
+        txn: &mut T,
+        after: Option<&[u8]>,
+        limit: usize,
+    ) -> Result<(usize, Option<Vec<u8>>)> {
+        match self {
+            IndexType::Simple(idx) => idx.remove_page(txn, after, limit).await,
+            IndexType::Unique(idx) => idx.remove_page(txn, after, limit).await,
+            IndexType::FullText(idx) => idx.remove_page(txn, after, limit).await,
+            IndexType::Vector(idx) => idx.remove_page(txn, after, limit).await,
+        }
+    }
+
     /// RemoveAll removes all entries for this index.
     pub async fn remove_all<T: Reader + Writer + MaybeSend>(&self, txn: &mut T) -> Result<()> {
         match self {

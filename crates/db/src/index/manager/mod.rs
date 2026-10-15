@@ -19,6 +19,7 @@ use storage::corekv::Key;
 use storage::index::FullTextIndex;
 
 mod index_type;
+mod rebuild;
 pub use index_type::IndexType;
 use storage::keys::IndexIDSequenceKey;
 
@@ -545,79 +546,6 @@ impl IndexManager {
         self.indexes
             .get(index_name)
             .ok_or_else(|| Error::Other(format!("index '{}' not found", index_name)))
-    }
-
-    /// Rebuild an index, preserving existing conflicts but rejecting migration-created ones.
-    pub(crate) async fn bulk_index_resolving_unique_conflicts(
-        &self,
-        datastore: &NamespaceView,
-        systemstore: &NamespaceView,
-        index_name: &str,
-        documents: &[(u64, Document)],
-        schema: &CollectionVersion,
-        original_keys: &RapidHashMap<u64, rapidhash::RapidHashSet<Vec<u8>>>,
-    ) -> Result<()> {
-        let index = self.index_named(index_name)?;
-
-        let IndexType::Unique(unique) = index else {
-            self.bulk_index(datastore, index_name, documents, schema)
-                .await?;
-            return Ok(());
-        };
-
-        let mut mutable_datastore = datastore.clone();
-
-        // Conflict resolution is a read-modify-write operation on the shared
-        // transaction. Running these writes concurrently can make the winner
-        // depend on scheduling instead of the public DocID ordering.
-        for (doc_short_id, doc) in documents {
-            if *doc_short_id == 0 {
-                continue;
-            }
-            let doc_id = doc
-                .id()
-                .ok_or_else(|| Error::InvalidDocument("document must have an ID".to_string()))?
-                .to_string();
-            let value_sets = self.extract_index_values(doc, index.description(), schema)?;
-            for values in &value_sets {
-                let holder = if original_keys.is_empty() {
-                    None
-                } else {
-                    unique
-                        .conflicting_doc_id(&mutable_datastore, values)
-                        .await
-                        .map_err(Error::Storage)?
-                };
-                if let Some(holder) = holder {
-                    let key = self.encode_index_key(index.description(), values)?;
-                    // Both documents must have held this value before the lens ran.
-                    // Missing snapshots denote documents with no transform to apply.
-                    if holder != *doc_short_id
-                        && [holder, *doc_short_id].iter().any(|id| {
-                            original_keys
-                                .get(id)
-                                .is_some_and(|keys| !keys.contains(&key))
-                        })
-                    {
-                        return Err(Error::Storage(
-                            storage::corekv::Error::UniqueConstraintViolation,
-                        ));
-                    }
-                }
-                self.save_resolving_unique_conflict(
-                    &mut mutable_datastore,
-                    systemstore,
-                    index,
-                    *doc_short_id,
-                    &doc_id,
-                    values,
-                )
-                .await
-                .map_err(Error::Storage)?;
-            }
-        }
-
-        Ok(())
     }
 
     /// Save an index entry, healing stale unique conflicts (#1111/#700).

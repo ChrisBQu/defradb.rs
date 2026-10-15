@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use document::NormalValue;
 use schema::IndexDescription;
 
-use crate::corekv::{MaybeSend, MaybeSendSync, Reader, Result, Writer};
+use crate::corekv::{IterOptions, MaybeSend, MaybeSendSync, Reader, Result, Writer};
 
 /// Trait for collection index implementations.
 ///
@@ -53,4 +53,44 @@ pub trait CollectionIndex: MaybeSendSync {
     ///
     /// Called when the index is dropped from the collection.
     async fn remove_all<T: Reader + Writer + MaybeSend>(&self, txn: &mut T) -> Result<()>;
+
+    /// The prefix every key this index stores starts with.
+    fn key_prefix(&self) -> Vec<u8>;
+
+    /// Removes this index's first `limit` keys (at least one) in key order
+    /// after `after`, or from its start when `after` is `None`. Returns how
+    /// many it removed and the last of them, so a caller clears a large
+    /// index in bounded transactions by passing that key back; fewer than
+    /// `limit` means none is left after `after`.
+    async fn remove_page<T: Reader + Writer + MaybeSend>(
+        &self,
+        txn: &mut T,
+        after: Option<&[u8]>,
+        limit: usize,
+    ) -> Result<(usize, Option<Vec<u8>>)> {
+        let limit = limit.max(1);
+        let mut options = IterOptions::default()
+            .with_prefix(self.key_prefix())
+            .with_keys_only(true);
+        if let Some(after) = after {
+            let mut start = after.to_vec();
+            start.push(0);
+            options = options.with_start(start);
+        }
+        let mut keys = Vec::new();
+        {
+            let mut iter = txn.iterator(options).await?;
+            while keys.len() < limit {
+                let Some(pair) = iter.next().await? else {
+                    break;
+                };
+                keys.push(pair.key);
+            }
+            iter.close().await?;
+        }
+        for key in &keys {
+            txn.delete(key).await?;
+        }
+        Ok((keys.len(), keys.pop()))
+    }
 }
