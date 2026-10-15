@@ -71,6 +71,15 @@ impl RegolithStoreOptions {
         }
     }
 
+    /// [`Self::engine_with_keys`] with what reading the store's data takes:
+    /// the merge operator its merged values fold with. The writable and the
+    /// read-only open both take their options from here, so a read-only open
+    /// reads a merged value as a writable one does.
+    pub(super) fn engine_for_open(&self) -> Options {
+        self.engine_with_keys()
+            .merge_operator(Some(Arc::new(super::merge::DefraMergeOperator)))
+    }
+
     /// Server defaults: DefraLevel, fsync on every commit.
     pub fn new() -> Self {
         Self {
@@ -157,5 +166,34 @@ impl std::fmt::Debug for RegolithStoreOptions {
             .field("durability", &self.engine.get_durability())
             .field("close_timeout", &self.close_timeout)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use crate::backends::RegolithTxn;
+    use crate::corekv::{Reader, Store};
+    use crate::merge::counter_i64;
+    use crate::{RegolithStore, RegolithStoreOptions};
+
+    /// A read-only open folds merged values as the writable open does. It
+    /// opened without the merge operator before, and the read failed.
+    #[tokio::test]
+    async fn a_read_only_open_reads_merged_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = RegolithStoreOptions::default();
+        let store = RegolithStore::open_with_options(dir.path(), options.clone()).unwrap();
+        for delta in [2, 3] {
+            let mut txn = store.new_txn(false).await.unwrap();
+            txn.merge(b"counter", &counter_i64(delta)).await.unwrap();
+            txn.commit().await.unwrap();
+        }
+        store.close().await.unwrap();
+        drop(store);
+        let txn = RegolithTxn::open_read_only(dir.path(), options).unwrap();
+        assert_eq!(
+            txn.get(b"counter").await.unwrap().as_deref(),
+            Some(5i64.to_be_bytes().as_slice())
+        );
     }
 }
