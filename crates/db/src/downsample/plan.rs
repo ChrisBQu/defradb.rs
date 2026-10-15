@@ -297,19 +297,21 @@ impl<S: Store> crate::database::DB<S> {
         let collections: Vec<CollectionVersion> = self.collections.peek(|cache| {
             cache
                 .values()
-                .map(|collection| collection.schema().clone())
+                .filter_map(|collection| {
+                    let schema = collection.schema();
+                    if schema.downsample_interval.is_none() {
+                        return None;
+                    }
+                    if names_filter.is_some_and(|names| !names.contains(&schema.name)) {
+                        return None;
+                    }
+                    Some(schema.clone())
+                })
                 .collect()
         });
 
         let mut plans = Vec::new();
         for collection in collections {
-            if collection.downsample_interval.is_none() {
-                continue;
-            }
-            if names_filter.is_some_and(|names| !names.contains(&collection.name)) {
-                continue;
-            }
-
             let plan = self.build_downsample_plan(&collection)?;
             if source_name_filter.is_some_and(|name| name != plan.source.name) {
                 continue;
