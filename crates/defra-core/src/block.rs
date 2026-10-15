@@ -88,9 +88,12 @@ impl Block {
             Some(sorted_heads)
         };
 
-        // Sort and normalize links
+        // Sort and normalize links. `DAGLink::cmp` formats both CIDs on every
+        // comparison. Stable secondary-then-primary sorts preserve its exact
+        // CID-string then name order while formatting each CID just once.
         let mut sorted_links = links;
-        sorted_links.sort();
+        sorted_links.sort_by(|left, right| left.name.cmp(&right.name));
+        sorted_links.sort_by_cached_key(|link| link.link.to_string());
         let links = if sorted_links.is_empty() {
             None
         } else {
