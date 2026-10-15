@@ -33,6 +33,7 @@ members = [
     "crates/defra-node",
     "crates/replication-filter",
     "crates/telemetry",
+    "crates/workers",
     "tools/lens-host",
     "tools/ffi-test",
     "tools/integration-test",
