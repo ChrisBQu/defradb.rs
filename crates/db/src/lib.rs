@@ -107,6 +107,7 @@ pub use read::lensed::autocommit::LensedAutoCommitFetcher;
 pub use read::lensed::fetcher::LensedDocFetcher;
 pub use read::versioned::VersionedFetcher;
 pub use txn::context::DbTransactionContext;
+pub use txn::owner::Sweep;
 pub use txn::registry::{
     CleanupResult, DbTransactionRegistry, DEFAULT_TRANSACTION_CLEANUP_INTERVAL,
     DEFAULT_TRANSACTION_IDLE_TIMEOUT,
