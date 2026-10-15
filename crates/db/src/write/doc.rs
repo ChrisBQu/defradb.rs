@@ -507,7 +507,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 sign_config.as_ref(),
                 kms.as_ref(),
                 Some(&self.prepared_inputs),
-                Some(&heads),
+                Some(heads),
             )
             .await
             .map_err(|error| {

@@ -376,7 +376,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     attempt.signing_config.as_ref(),
                     self.db.kms().as_ref(),
                     attempt.prepared_inputs.as_ref(),
-                    Some(&heads),
+                    Some(heads.into_owned()),
                 )
                 .await
                 .map_err(|error| {
