@@ -12849,7 +12849,6 @@ dependencies = [
  "futures",
  "getrandom 0.2.17",
  "hex",
- "n0-future",
  "proptest",
  "rapidhash",
  "regolith",
@@ -12864,6 +12863,7 @@ dependencies = [
  "tracing",
  "uuid",
  "web-time",
+ "workers",
  "zeroize",
 ]
 

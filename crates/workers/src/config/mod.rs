@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use crate::clock::Clock;
 use crate::hook::HookFactory;
+use crate::pool::MonitorDriver;
 use crate::topology::CpuSet;
 
 mod priority;
@@ -148,6 +149,9 @@ pub struct Config {
     /// Builds each worker's hook on the worker's own thread, polled between
     /// tasks (for regolith: the worker's `IoQueue`).
     pub hook: Option<HookFactory>,
+    /// Runs the stuck-poll scan on a timer outside the pool (the network
+    /// edge's); `None` has two workers run it on each other.
+    pub monitor: Option<MonitorDriver>,
 }
 
 impl Default for Config {
@@ -179,11 +183,27 @@ impl Default for Config {
             thread_name: "defra-worker".to_owned(),
             clock: None,
             hook: None,
+            monitor: None,
         }
     }
 }
 
 impl Config {
+    /// `workers` workers that leave the machine as they found it: unpinned,
+    /// at the priority and memory policy their threads start with, beside
+    /// one blocking thread. For a pool that runs beside other work rather
+    /// than owning the machine: a test, a one-shot tool, the fallback pool.
+    pub fn unplaced(workers: usize) -> Config {
+        Config {
+            workers: Workers::Count(workers.max(1)),
+            placement: Placement::Unpinned,
+            memory_policy: MemoryPolicy::Off,
+            priorities: Priorities::inherited(),
+            blocking_threads: 1,
+            ..Config::default()
+        }
+    }
+
     /// Rejects values no pool can run with.
     pub(crate) fn validate(&self) -> Result<(), crate::Error> {
         let positive = [
@@ -250,6 +270,7 @@ impl fmt::Debug for Config {
             .field("thread_name", &self.thread_name)
             .field("clock", &self.clock)
             .field("hook", &self.hook.as_ref().map(|_| "set"))
+            .field("monitor", &self.monitor.as_ref().map(|_| "set"))
             .finish()
     }
 }

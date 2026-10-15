@@ -23,6 +23,7 @@ use super::handle::Handle;
 use super::iterator::RegolithIterator;
 use super::post_commit::PostCommit;
 use super::slots::TxnSlot;
+use super::worker_io::settle;
 use crate::corekv::{
     CallbackMark, Error, IterOptions, Iterator, OnAbort, OnCommit, Reader, Result, Txn,
     TxnCallbacks, Writer,
@@ -73,21 +74,23 @@ impl RegolithTxn {
         slot: TxnSlot,
         event_order: Arc<EventOrder>,
     ) -> Result<Self> {
-        super::blocking(|| {
-            let handle = if readonly {
-                Handle::ReadOnly(db.db().snapshot())
-            } else {
-                Handle::Writable(Box::new(db.begin(&TxnOptions::new().isolation(isolation))))
-            };
-            Ok(Self {
-                handle: Some(Arc::new(handle)),
-                _slot: Some(slot),
-                callbacks: TxnCallbacks::new(readonly),
-                readonly,
-                savepoints: Vec::new(),
-                event_order,
-                scoped_attempt: false,
-            })
+        // On a pool worker the handle reads on the worker's own queue, so a
+        // cache miss suspends the task instead of the thread.
+        let mode = super::worker_io::read_mode_for(db);
+        let handle = if readonly {
+            Handle::ReadOnly(db.db().snapshot().with_read_mode(mode))
+        } else {
+            let options = TxnOptions::new().isolation(isolation).read_mode(mode);
+            Handle::Writable(Box::new(db.begin(&options)))
+        };
+        Ok(Self {
+            handle: Some(Arc::new(handle)),
+            _slot: Some(slot),
+            callbacks: TxnCallbacks::new(readonly),
+            readonly,
+            savepoints: Vec::new(),
+            event_order,
+            scoped_attempt: false,
         })
     }
 
@@ -197,8 +200,8 @@ impl Reader for RegolithTxn {
         // `Bytes::from_owner` adopts that borrow, so a read copies
         // nothing on the way to the caller.
         let slice = match self.handle()?.as_ref() {
-            Handle::ReadOnly(snapshot) => snapshot
-                .get_slice(key)
+            Handle::ReadOnly(snapshot) => settle(|| snapshot.get_slice(key))
+                .await
                 .map_err(|error| Error::Backend(error.to_string()))?,
             Handle::Writable(txn) => regolith::ready(|| txn.get_slice(key))
                 .await
@@ -212,8 +215,8 @@ impl Reader for RegolithTxn {
             return Err(Error::EmptyKey);
         }
         let slice = match self.handle()?.as_ref() {
-            Handle::ReadOnly(snapshot) => snapshot
-                .get_slice(key)
+            Handle::ReadOnly(snapshot) => settle(|| snapshot.get_slice(key))
+                .await
                 .map_err(|error| Error::Backend(error.to_string()))?,
             Handle::Writable(txn) => regolith::ready(|| txn.get_parts(key, parts))
                 .await
@@ -227,8 +230,8 @@ impl Reader for RegolithTxn {
             return Err(Error::EmptyKey);
         }
         match self.handle()?.as_ref() {
-            Handle::ReadOnly(snapshot) => snapshot
-                .has(key)
+            Handle::ReadOnly(snapshot) => settle(|| snapshot.has(key))
+                .await
                 .map_err(|error| Error::Backend(error.to_string())),
             // A writing transaction has to consult its own buffer, which
             // `has` on the snapshot underneath would miss.
@@ -244,8 +247,8 @@ impl Reader for RegolithTxn {
             return Err(Error::EmptyKey);
         }
         match self.handle()?.as_ref() {
-            Handle::ReadOnly(snapshot) => snapshot
-                .get_size(key)
+            Handle::ReadOnly(snapshot) => settle(|| snapshot.get_size(key))
+                .await
                 .map_err(|error| Error::Backend(error.to_string())),
             Handle::Writable(txn) => Ok(regolith::ready(|| txn.get_slice(key))
                 .await
@@ -352,7 +355,15 @@ impl Txn for RegolithTxn {
             return Ok(());
         };
         let work = PostCommit::bind(&self.event_order, &mut txn, callbacks);
-        match super::blocking(|| txn.commit()).map_err(map_txn_error) {
+        // A transaction on a worker's queue commits without waiting: the
+        // task awaits the ticket the worker's own queue completes. Anywhere
+        // else the commit syncs on the calling thread.
+        let outcome = if txn.io_queue().is_some() {
+            txn.commit_nowait().await
+        } else {
+            txn.commit()
+        };
+        match outcome.map_err(map_txn_error) {
             // Durable from here on: what follows can be reported, never
             // turned into a failed write.
             Ok(_) => {

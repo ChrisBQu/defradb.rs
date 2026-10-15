@@ -10,6 +10,8 @@
 
 #[cfg(not(target_family = "wasm"))]
 mod blocking;
+mod deadline;
+mod detached;
 mod driven;
 mod env;
 mod monitor;
@@ -28,8 +30,11 @@ use std::time::Duration;
 
 use regolith::sync::{Latch, LatchWait};
 
+pub use deadline::{delay, timeout};
+pub use detached::{fallback, spawn_detached};
 pub use driven::Driver;
 pub use env::PlacedEnv;
+pub use monitor::{Monitor, MonitorDriver};
 pub use placer::ThreadPlacement;
 pub use report::{Report, TopologySummary, WorkerReport};
 pub use routing::Target;
@@ -176,6 +181,54 @@ impl PoolShared {
     }
 }
 
+impl PoolShared {
+    /// Room for a job of `bytes` on a worker `target` allows, taken now;
+    /// else the worker `target` routes to, whose room a caller may wait for.
+    fn admit_now(
+        &self,
+        target: Target,
+        bytes: usize,
+    ) -> Result<Result<crate::worker::Admitted, &Arc<WorkerShared>>, Error> {
+        if self.closing.load(Ordering::Acquire) {
+            return Err(Error::ShutDown);
+        }
+        let routed = self.route(target)?;
+        Ok(routed
+            .try_admit(bytes)
+            .or_else(|| self.admit_anywhere(target, bytes))
+            .ok_or(routed))
+    }
+}
+
+/// Queues `make` on the worker `admitted` holds room on.
+fn enqueue<F, Fut>(
+    target: Target,
+    options: Submit,
+    admitted: crate::worker::Admitted,
+    make: F,
+) -> Completion<Fut::Output>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future + 'static,
+    Fut::Output: Send + 'static,
+{
+    let key = match target {
+        Target::Key(key) => Some(key),
+        _ => None,
+    };
+    let worker = admitted.worker().clone();
+    let name = options.name.unwrap_or(std::any::type_name::<F>());
+    let (job, completion) = Job::new(
+        make,
+        name,
+        key,
+        matches!(target, Target::Worker(_)),
+        admitted,
+    );
+    worker.push(job);
+    completion
+}
+
 /// Builds a worker's hook on the calling thread; a factory that panics is
 /// an error, not a dead thread.
 fn build_hook(factory: Option<&HookFactory>, id: WorkerId) -> Result<Option<Box<dyn Hook>>, Error> {
@@ -318,33 +371,34 @@ impl Pool {
         Fut::Output: Send + 'static,
     {
         let shared = &self.handle.shared;
-        if shared.closing.load(Ordering::Acquire) {
-            return Err(Error::ShutDown);
-        }
         let bytes = options.bytes.unwrap_or(std::mem::size_of::<F>());
-        let routed = shared.route(target)?;
-        let admitted = match routed
-            .try_admit(bytes)
-            .or_else(|| shared.admit_anywhere(target, bytes))
-        {
-            Some(admitted) => admitted,
-            None => routed.admit(bytes).await,
+        let admitted = match shared.admit_now(target, bytes)? {
+            Ok(admitted) => admitted,
+            Err(routed) => routed.admit(bytes).await,
         };
-        let key = match target {
-            Target::Key(key) => Some(key),
-            _ => None,
-        };
-        let worker = admitted.worker().clone();
-        let name = options.name.unwrap_or(std::any::type_name::<F>());
-        let (job, completion) = Job::new(
-            make,
-            name,
-            key,
-            matches!(target, Target::Worker(_)),
-            admitted,
-        );
-        worker.push(job);
-        Ok(completion)
+        Ok(enqueue(target, options, admitted, make))
+    }
+
+    /// [`submit_with`](Self::submit_with) for a caller that cannot wait:
+    /// [`Error::Full`] when no worker `target` allows has room now.
+    pub fn try_submit<F, Fut>(
+        &self,
+        target: Target,
+        options: Submit,
+        make: F,
+    ) -> Result<Completion<Fut::Output>, Error>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future + 'static,
+        Fut::Output: Send + 'static,
+    {
+        let bytes = options.bytes.unwrap_or(std::mem::size_of::<F>());
+        let admitted = self
+            .handle
+            .shared
+            .admit_now(target, bytes)?
+            .map_err(|_| Error::Full)?;
+        Ok(enqueue(target, options, admitted, make))
     }
 
     /// Submits from a plain thread and waits for the result: for the C FFI, a

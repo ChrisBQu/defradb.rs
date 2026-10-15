@@ -109,7 +109,7 @@ pub mod stores;
 // See #19 for transaction wrapper module
 
 // Re-export commonly used types for convenience.
-pub use backends::{RegolithStore, RegolithStoreOptions};
+pub use backends::{with_worker_io, RegolithStore, RegolithStoreOptions, WorkerIo};
 pub use corekv::{
     Error, IterOptions, Iterator, KvPair, Reader, ReaderWriter, Result, Store, Txn, Writer,
 };

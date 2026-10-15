@@ -16,6 +16,8 @@ defra-core = { path = "../defra-core" }
 document = { path = "../document" }
 schema = { path = "../schema" }
 regolith.workspace = true
+# The worker pool: each worker's regolith queues, detached callbacks.
+workers = { path = "../workers" }
 bytes.workspace = true
 chrono = { version = "0.4", features = ["serde"] }
 
@@ -40,8 +42,6 @@ sha2.workspace = true
 # At-rest keys
 zeroize = "1.8"
 
-# The deadline `close` waits with
-n0-future.workspace = true
 
 # Logging
 tracing.workspace = true

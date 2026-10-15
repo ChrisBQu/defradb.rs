@@ -20,6 +20,7 @@ use regolith::sync::{ArrayQueue, Semaphore};
 use super::heartbeat::Heartbeat;
 use super::signal::Signal;
 use crate::completion::{self, Completion, Fail};
+use crate::os::ContextSwitches;
 use crate::WorkerId;
 
 /// A task's future, built on the worker that runs it.
@@ -141,6 +142,9 @@ pub struct WorkerStats {
     pub load: usize,
     /// Whether a poll is running past the stuck limit now.
     pub stuck: bool,
+    /// How often the worker's thread was switched out so far; `None` where
+    /// the platform does not say (only Linux does, per thread).
+    pub switches: Option<ContextSwitches>,
 }
 
 pub(crate) struct WorkerShared {
@@ -162,6 +166,8 @@ pub(crate) struct WorkerShared {
     /// The worker has stopped: whoever finds a message after this fails it.
     exited: AtomicBool,
     pub counters: Counters,
+    /// The OS id of the thread running the worker, 0 until it starts.
+    thread: AtomicU64,
 }
 
 impl WorkerShared {
@@ -187,6 +193,22 @@ impl WorkerShared {
             abandon: AtomicBool::new(false),
             exited: AtomicBool::new(false),
             counters: Counters::default(),
+            thread: AtomicU64::new(0),
+        }
+    }
+
+    /// Records the calling thread as the one running this worker.
+    pub(crate) fn bind_thread(&self) {
+        if let Some(id) = crate::os::system().thread_id() {
+            self.thread.store(id, Ordering::Relaxed);
+        }
+    }
+
+    /// The context switches of the worker's thread so far, read from the OS.
+    fn switches(&self) -> Option<ContextSwitches> {
+        match self.thread.load(Ordering::Relaxed) {
+            0 => None,
+            id => crate::os::system().context_switches(id).ok(),
         }
     }
 
@@ -302,6 +324,7 @@ impl WorkerShared {
             priority_resets: read(&self.counters.priority_resets),
             load: self.load(),
             stuck: self.stuck.load(Ordering::Relaxed),
+            switches: self.switches(),
         }
     }
 }
