@@ -713,7 +713,12 @@ def summarize(rec: dict, normalized: dict) -> dict[str, Any]:
                           else 'observed_pass' if create_zero else 'observed_fail')
     allocations = [rec['manifest_validated']['commands'].get(f'allocs-{i}', {}).get(
         'document_create_allocations_per_op') for i in range(1, ALLOC_REPETITIONS + 1)]
-    alloc_median = statistics.median(allocations) if len(allocations) == ALLOC_REPETITIONS else None
+    valid_allocations = (
+        len(allocations) == ALLOC_REPETITIONS
+        and all(not isinstance(value, bool) and isinstance(value, (int, float))
+                and math.isfinite(value) and value > 0 for value in allocations)
+    )
+    alloc_median = statistics.median(allocations) if valid_allocations else None
     return {'schema': schema, 'groups': grouped, 'scaling': scaling,
             'create_sample_coverage_complete': creates_coverage,
             'current_create_conflicts_zero_proven': creates_zero,
