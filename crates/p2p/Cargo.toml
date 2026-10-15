@@ -28,6 +28,8 @@ kovan = { workspace = true }
 kovan-map = { workspace = true }
 kovan-queue = { workspace = true }
 kovan-channel = { workspace = true }
+# regolith::sync: waits that are part of the meaning, never a lock.
+regolith = { workspace = true }
 
 # libp2p transport
 libp2p = { workspace = true, features = ["tcp", "noise", "yamux", "identify", "request-response", "macros", "tokio", "gossipsub", "kad", "relay", "dns", "quic", "websocket", "memory-connection-limits"], optional = true }

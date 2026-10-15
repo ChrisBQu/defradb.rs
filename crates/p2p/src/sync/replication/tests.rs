@@ -2713,6 +2713,67 @@ async fn test_run_serializes_duplicate_cids() {
     }));
 }
 
+/// A merge claims nothing in the process queue: while another task owns the
+/// CID's fetch or ingest, the merge runs at once. One merge per CID comes
+/// from the merge transaction's race on the block's applied key.
+#[tokio::test]
+async fn a_merge_does_not_wait_for_the_owner_of_the_cid_fetch() {
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
+    let blockstore = Arc::new(DefraBlockstore::new(store, true));
+    let cid = test_cid();
+    blockstore.put(&cid, b"test data").await.unwrap();
+    let (coordinator, _events) = crate::sync::coordinator::SyncCoordinator::with_access_control(
+        NoopTransport::new(),
+        blockstore,
+        crate::sync::SyncConfig::default(),
+        AccessMode::Open,
+        Arc::new(crate::ReplicatorRegistry::new()),
+        Arc::new(crate::sync::collection_store::NoOpCollectionStorage),
+        Arc::new(EqOnlyFilterMatcher),
+    )
+    .await
+    .unwrap();
+    let fetch_owner = coordinator
+        .manager()
+        .process_queue()
+        .try_acquire_nowait(&cid)
+        .unwrap();
+
+    let handler = TestMergeHandler::new(true, false);
+    let event = SyncEvent::BlockReceived {
+        cid,
+        doc_id: "doc1".to_string(),
+        collection_id: "col1".to_string(),
+        creator: "peer1".to_string(),
+        sender_peer: Some("sender1".to_string()),
+        is_explicit_replicator: true,
+        explicit_replay_authorization: None,
+    };
+    let result = n0_future::time::timeout(
+        Duration::from_secs(5),
+        super::handlers::process_one_event(
+            &coordinator,
+            event,
+            &handler,
+            &ReplicationConfig::default(),
+        ),
+    )
+    .await
+    .expect("a merge must not wait for the owner of the CID's fetch");
+
+    assert!(
+        matches!(result, ReplicationResult::Merged { cid: merged, .. } if merged == cid),
+        "{result:?}"
+    );
+    assert_eq!(handler.calls(), 1);
+    assert!(
+        coordinator.manager().process_queue().is_active(&cid),
+        "the fetch owner keeps its claim"
+    );
+    drop(fetch_owner);
+    assert!(!coordinator.manager().process_queue().is_active(&cid));
+}
+
 // =========================================================================
 // Batch merge tests
 // =========================================================================

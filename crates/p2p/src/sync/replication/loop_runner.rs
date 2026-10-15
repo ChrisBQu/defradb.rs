@@ -25,8 +25,8 @@ use tokio::sync::mpsc;
 
 use super::config::ReplicationConfig;
 use super::handlers::{
-    has_duplicate_merge_cids, is_mergeable_event, process_event_serialized,
-    process_events_individually, process_merge_batch,
+    has_duplicate_merge_cids, is_mergeable_event, process_events_individually, process_merge_batch,
+    process_one_event,
 };
 use super::result::ReplicationResult;
 use crate::sync::coordinator::SyncCoordinator;
@@ -190,7 +190,7 @@ impl ReplicationLoop {
             None => return ReplicationResult::ChannelClosed,
         };
 
-        process_event_serialized(coordinator, event, handler, config).await
+        process_one_event(coordinator, event, handler, config).await
     }
 
     /// Process the next batch of sync events.
@@ -242,7 +242,7 @@ impl ReplicationLoop {
 
         // Process immediate events normally
         for event in immediate {
-            results.push(process_event_serialized(coordinator, event, handler, config).await);
+            results.push(process_one_event(coordinator, event, handler, config).await);
         }
 
         // Batch-process merge events
@@ -283,8 +283,7 @@ impl ReplicationLoop {
             match events.try_recv() {
                 Ok(event) => {
                     let result =
-                        process_event_serialized(&coordinator, event, handler.as_ref(), &config)
-                            .await;
+                        process_one_event(&coordinator, event, handler.as_ref(), &config).await;
                     results.push(result);
                 }
                 Err(mpsc::error::TryRecvError::Empty) => break,

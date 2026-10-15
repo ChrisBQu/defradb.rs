@@ -125,10 +125,9 @@ impl<B: Blockstore + 'static> SyncManager<B> {
 
     /// Wake the existing dispatch owner without creating another fetch owner.
     pub(crate) async fn pending_dag_ready(&self) {
-        tokio::select! {
-            _ = self.pending_dag_ready.notified() => {},
-            _ = self.process_queue.released() => {},
-        }
+        let registered = std::pin::pin!(self.pending_dag_ready.notified());
+        let released = std::pin::pin!(self.process_queue.released());
+        futures::future::select(registered, released).await;
     }
 
     /// Remember contention without retaining a transport task or CAR buffer.

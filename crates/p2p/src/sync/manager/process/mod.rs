@@ -90,7 +90,7 @@ pub struct SyncManager<B: Blockstore> {
     /// Blockstore for storing/retrieving blocks
     pub(super) blockstore: Arc<B>,
 
-    /// Process queue for serializing concurrent syncs
+    /// Single-flight owners of each CID's fetch and ingest.
     pub(super) process_queue: ProcessQueue,
 
     /// Channel for emitting sync events
@@ -104,7 +104,7 @@ pub struct SyncManager<B: Blockstore> {
     pub(super) pending_dags: Arc<SharedPendingDags>,
 
     /// Coalesced wakeup for the sole bounded receiver dispatch owner.
-    pub(super) pending_dag_ready: tokio::sync::Notify,
+    pub(super) pending_dag_ready: regolith::sync::Notify,
 
     /// Maps Bitswap QueryId → root CID for tracking completions.
     pub(super) query_to_root: HopscotchMap<QueryId, Cid, RandomState>,
@@ -340,7 +340,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             event_tx,
             peer_state,
             pending_dags: Arc::new(SharedPendingDags::default()),
-            pending_dag_ready: tokio::sync::Notify::new(),
+            pending_dag_ready: regolith::sync::Notify::new(),
             query_to_root: HopscotchMap::with_hasher(RandomState::default()),
             block_sync_completions: BlockSyncCompletionTracker::with_capacity(
                 config.max_pending_dags.max(1),
@@ -434,7 +434,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         }
     }
 
-    /// Get the process queue used to serialize work for the same CID.
+    /// The single-flight owners of each CID's fetch and ingest.
     pub(crate) fn process_queue(&self) -> ProcessQueue {
         self.process_queue.clone()
     }
