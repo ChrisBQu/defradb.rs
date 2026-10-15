@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use storage::corekv::{
     Reader, RetryAttemptError, RetryAttemptFuture, RetryAttemptValue, RetryOptions, RetryTxn,
-    Store, Txn, Writer,
+    Store, Writer,
 };
 use storage::RegolithStore;
 
