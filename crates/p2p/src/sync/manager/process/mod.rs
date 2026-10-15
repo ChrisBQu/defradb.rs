@@ -434,7 +434,9 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         }
     }
 
-    /// The single-flight owners of each CID's fetch and ingest.
+    /// The single-flight owners of each CID's fetch and ingest, for tests that
+    /// hold a CID's owner.
+    #[cfg(test)]
     pub(crate) fn process_queue(&self) -> ProcessQueue {
         self.process_queue.clone()
     }
