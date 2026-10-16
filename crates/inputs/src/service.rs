@@ -400,53 +400,70 @@ where
     }
 
     /// An inline call: the keys not cached go out from this task, batched by
-    /// group, with nothing spawned and no timer read.
+    /// group, with nothing spawned and no timer read. A key another inline
+    /// call is fetching is waited for, not asked again; if that call is
+    /// dropped before its answer comes, the key is fetched here.
     async fn inline(&self, keys: Vec<S::Key>) -> Vec<ResultOf<S>> {
         let start = self.runtime.now();
         Stats::add(&self.stats.requests, keys.len() as u64);
-        let generation = self.cache.generation();
         let mut results: Vec<Option<ResultOf<S>>> = (0..keys.len()).map(|_| None).collect();
-        let mut first_of: rapidhash::fast::RapidHashMap<S::Key, usize> =
-            rapidhash::fast::RapidHashMap::default();
-        let mut repeats = Vec::new();
-        let mut groups: Vec<(S::Group, Vec<(usize, S::Key)>)> = Vec::new();
-        for (index, key) in keys.into_iter().enumerate() {
-            if let Some(value) = self.cache.get(&key, start) {
-                Stats::add(&self.stats.cache_hits, 1);
-                results[index] = Some(Ok(value));
-                continue;
-            }
-            if let Some(&first) = first_of.get(&key) {
-                Stats::add(&self.stats.joined, 1);
-                repeats.push((index, first));
-                continue;
-            }
-            first_of.insert(key.clone(), index);
-            let group = self.source.group(&key);
-            match groups.iter_mut().find(|(seen, _)| *seen == group) {
-                Some((_, members)) => members.push((index, key)),
-                None => groups.push((group, vec![(index, key)])),
-            }
-        }
+        let mut pending: Vec<(usize, S::Key)> = keys.into_iter().enumerate().collect();
         let mut trips = 0u64;
-        for (group, members) in &groups {
-            for batch in members.chunks(self.config.max_batch) {
-                let keys: Vec<S::Key> = batch.iter().map(|(_, key)| key.clone()).collect();
-                self.trips.fetch_add(1, Ordering::Relaxed);
-                trips += 1;
-                let outcome = {
-                    let _permit = self.in_flight.acquire(1).await;
-                    self.round_trip(group, &keys).await
-                };
-                let now = self.runtime.now();
-                for ((index, key), answer) in batch.iter().zip(self.answers(keys.len(), outcome)) {
-                    self.cache_answer(key, &answer, now, generation);
-                    results[*index] = Some(answer);
+        while !pending.is_empty() {
+            let generation = self.cache.generation();
+            let mut owned = Owned {
+                inner: self,
+                flights: Vec::new(),
+            };
+            let mut joined = Vec::new();
+            let mut groups: Vec<(S::Group, Vec<(usize, S::Key)>)> = Vec::new();
+            for (index, key) in pending.drain(..) {
+                if let Some(value) = self.cache.get(&key, start) {
+                    Stats::add(&self.stats.cache_hits, 1);
+                    results[index] = Some(Ok(value));
+                    continue;
+                }
+                let fresh: FlightOf<S> = Arc::new(Flight::new(generation));
+                if let Some(existing) = self
+                    .flights
+                    .insert_if_absent(key.clone(), Arc::clone(&fresh))
+                {
+                    Stats::add(&self.stats.joined, 1);
+                    joined.push((index, key, existing));
+                    continue;
+                }
+                owned.flights.push((key.clone(), fresh));
+                let group = self.source.group(&key);
+                match groups.iter_mut().find(|(seen, _)| *seen == group) {
+                    Some((_, members)) => members.push((index, key)),
+                    None => groups.push((group, vec![(index, key)])),
                 }
             }
-        }
-        for (index, first) in repeats {
-            results[index] = results[first].clone();
+            for (group, members) in &groups {
+                for batch in members.chunks(self.config.max_batch) {
+                    let keys: Vec<S::Key> = batch.iter().map(|(_, key)| key.clone()).collect();
+                    let trip = self.trips.fetch_add(1, Ordering::Relaxed) + 1;
+                    trips += 1;
+                    let outcome = {
+                        let _permit = self.in_flight.acquire(1).await;
+                        self.round_trip(group, &keys).await
+                    };
+                    let answers = self.answers(keys.len(), outcome);
+                    for ((index, _), answer) in batch.iter().zip(&answers) {
+                        results[*index] = Some(answer.clone());
+                    }
+                    self.settle_all(keys, answers, trip);
+                }
+            }
+            drop(owned);
+            for (index, key, flight) in joined {
+                flight.settled().await;
+                match flight.answer().map(|answer| &answer.result) {
+                    // Its fetcher was dropped before the answer came.
+                    None | Some(Err(Error::Closed)) => pending.push((index, key)),
+                    Some(result) => results[index] = Some(result.clone()),
+                }
+            }
         }
         self.stats
             .wait_micros
@@ -618,5 +635,36 @@ where
         }
         let answers = closed.iter().map(|_| Err(Error::Closed)).collect();
         self.inner.settle_all(closed, answers, 0);
+    }
+}
+
+/// The flights an inline call registered and has not settled yet: dropped
+/// before their answers came (the call cancelled), it settles them as closed,
+/// so whoever joined them fetches the keys instead of waiting for ever.
+struct Owned<'a, S>
+where
+    S: Source,
+{
+    inner: &'a Inner<S>,
+    flights: Vec<(S::Key, FlightOf<S>)>,
+}
+
+impl<S> Drop for Owned<'_, S>
+where
+    S: Source,
+{
+    fn drop(&mut self) {
+        for (key, flight) in self.flights.drain(..) {
+            if flight.answer().is_some() {
+                continue;
+            }
+            flight.settle(Answer {
+                result: Err(Error::Closed),
+                trip: 0,
+            });
+            self.inner
+                .flights
+                .remove_if(&key, |current| Arc::ptr_eq(current, &flight));
+        }
     }
 }
