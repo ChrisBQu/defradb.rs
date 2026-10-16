@@ -320,10 +320,7 @@ pub struct Write {
 
 impl Write {
     fn then(&mut self, name: &[u8], func: Func) {
-        let held = self
-            .entries
-            .entry(name.to_vec())
-            .or_insert(Func::IDENTITY);
+        let held = self.entries.entry(name.to_vec()).or_insert(Func::IDENTITY);
         *held = held.then(func);
     }
 
@@ -398,7 +395,8 @@ impl Set {
 
     /// Whether `name` is live.
     pub fn is_live(&self, name: &[u8]) -> bool {
-        self.state(name).is_some_and(|state| matches!(state, State::Live(_)))
+        self.state(name)
+            .is_some_and(|state| matches!(state, State::Live(_)))
     }
 
     fn state(&self, name: &[u8]) -> Option<State> {

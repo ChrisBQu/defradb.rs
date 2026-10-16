@@ -64,10 +64,7 @@ async fn legacy_heads_and_markers_open_as_the_same_live_heads() {
         // b supersedes a; c is concurrent; an early child holds its parent
         // ahead; a reclaimed parent (its guard is there, its head is not) is
         // dropped.
-        headstore
-            .set(&document_marker(a, b), &[])
-            .await
-            .unwrap();
+        headstore.set(&document_marker(a, b), &[]).await.unwrap();
         headstore
             .set(&document_marker(early_parent, early_child), &[])
             .await

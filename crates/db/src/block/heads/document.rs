@@ -12,11 +12,11 @@
 
 use async_trait::async_trait;
 use cid::Cid;
+use std::collections::VecDeque;
 use storage::corekv::{Error, IterOptions, Iterator, Key, KvPair, Reader, Result};
 use storage::keys::doc_id_index::decode_doc_short_id_prefix;
 use storage::keys::headstore::{HeadstoreDocKey, HeadstoreDocSetKey};
 use storage::merge::head_set::{Set, Write};
-use std::collections::VecDeque;
 
 use super::{merge_set, read_set};
 use crate::block::builder::encode_priority_varint;
@@ -211,9 +211,8 @@ impl LiveHeads {
             }
             Source::Many(sets) => {
                 if let Some(pair) = sets.next().await? {
-                    let doc = HeadstoreDocSetKey::parse(&pair.key).ok_or_else(|| {
-                        Error::Iterator("a head set key is malformed".into())
-                    })?;
+                    let doc = HeadstoreDocSetKey::parse(&pair.key)
+                        .ok_or_else(|| Error::Iterator("a head set key is malformed".into()))?;
                     let set = Set::read(&pair.value)
                         .ok_or_else(|| Error::Iterator("a head set is malformed".into()))?;
                     loaded = Some((doc.doc_short_id, set));

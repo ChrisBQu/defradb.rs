@@ -2,8 +2,7 @@ use rapidhash::{HashSetExt, RapidHashSet};
 use std::sync::Arc;
 
 use storage::keys::{
-    DataStoreKey, DatastoreSE, HeadstorePriorityKey, InstanceType,
-    PrimaryDataStoreKey,
+    DataStoreKey, DatastoreSE, HeadstorePriorityKey, InstanceType, PrimaryDataStoreKey,
 };
 
 use super::*;

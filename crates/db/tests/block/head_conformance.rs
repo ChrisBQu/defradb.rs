@@ -255,7 +255,8 @@ async fn head_queries_match_executable_lean() {
                                 .map(|head| (0..64).find(|b| cid(*b) == *head).unwrap())
                                 .collect();
                             heads.sort_unstable();
-                            actual.push(json!({"heads": heads, "max_priority": found.max_priority}));
+                            actual
+                                .push(json!({"heads": heads, "max_priority": found.max_priority}));
                         }
                         _ => unreachable!(),
                     }

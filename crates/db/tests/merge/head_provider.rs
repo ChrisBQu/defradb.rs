@@ -19,11 +19,7 @@ use storage::RegolithStore;
 
 /// Drop a composite head from the document's head set, as a store missing its
 /// head index would be.
-async fn remove_composite_head(
-    headstore: &datastore::NamespaceView,
-    doc_short_id: u64,
-    cid: Cid,
-) {
+async fn remove_composite_head(headstore: &datastore::NamespaceView, doc_short_id: u64, cid: Cid) {
     let mut write = storage::merge::head_set::Write::default();
     write.supersede(&db::block::heads::document::name("C", &cid));
     db::block::heads::document::commit(headstore, doc_short_id, &write)

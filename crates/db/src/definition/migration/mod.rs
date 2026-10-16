@@ -6,9 +6,9 @@
 
 pub(crate) mod committed_lenses;
 mod counters;
-mod head_sets;
 pub mod document_parts;
 pub mod format;
+mod head_sets;
 pub mod helpers;
 mod reindex;
 mod set;

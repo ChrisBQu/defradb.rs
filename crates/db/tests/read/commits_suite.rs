@@ -127,10 +127,9 @@ mod shared_owner_tests {
                 .set(&child_cid.to_bytes(), &child.to_dag_cbor().unwrap())
                 .await
                 .unwrap();
-            for (cid, priority, parents) in [
-                (parent_cid, 1, vec![]),
-                (child_cid, 2, vec![parent_cid]),
-            ] {
+            for (cid, priority, parents) in
+                [(parent_cid, 1, vec![]), (child_cid, 2, vec![parent_cid])]
+            {
                 let set = db::block::heads::collection_set(&headstore, 1)
                     .await
                     .unwrap();
