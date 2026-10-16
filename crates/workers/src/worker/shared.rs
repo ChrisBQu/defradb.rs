@@ -59,12 +59,16 @@ impl Job {
         let (sender, completion) = completion::channel();
         let fail: Arc<dyn Fail + Send + Sync> = sender.shared();
         let start: Start = Box::new(move || {
-            // Its waiter gave up before it started: it never runs.
-            if sender.is_cancelled() {
-                return Box::pin(std::future::ready(()));
-            }
-            let slot = sender.into_slot();
-            Box::pin(async move { slot.send(make().await) })
+            Box::pin(async move {
+                // Checked at its first poll, when it starts, not when it is
+                // taken from the inbox: a worker takes a batch at once, and
+                // a waiter that gives up meanwhile is still in time.
+                if sender.is_cancelled() {
+                    return;
+                }
+                let slot = sender.into_slot();
+                slot.send(make().await)
+            })
         });
         (
             Job {
