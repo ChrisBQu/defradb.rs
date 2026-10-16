@@ -513,8 +513,9 @@ pub async fn run_retry_pass<S, T>(
                             .is_some_and(|info| !info.is_backpressure_elapsed());
                         let delay = if hinted { Duration::ZERO } else { delay };
                         let attempts = attempted as u64;
-                        let _ = reschedule(peerstore, &peer_id_str, incarnation, Some(delay), attempts)
-                            .await;
+                        let _ =
+                            reschedule(peerstore, &peer_id_str, incarnation, Some(delay), attempts)
+                                .await;
                         // Receiver saturation applies to the peer, not just
                         // this scope.  Rotate the durable cursor and wait for
                         // the paced sweep rather than hammering adjacent docs.
@@ -743,6 +744,10 @@ where
 #[cfg(test)]
 #[path = "retry_sweep_tests.rs"]
 mod sweep_tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "retry_pool_tests.rs"]
+mod pool_tests;
 
 #[cfg(test)]
 #[path = "../tests/unit/retry_hints.rs"]
