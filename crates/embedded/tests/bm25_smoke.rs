@@ -1,9 +1,8 @@
-#[macro_use]
 #[path = "support/outcome.rs"]
 mod outcome;
 
 use embedded::NodeBuilder;
-use outcome::{Context, Result};
+use outcome::Result;
 
 const ARTICLE_SDL: &str = r#"
 type Article {
@@ -82,7 +81,7 @@ async fn embedded_node_executes_bm25_queries() -> Result<()> {
         .as_ref()
         .and_then(|data| data.get("Article"))
         .and_then(|articles| articles.as_array())
-        .context("Article query response missing data")?;
+        .expect("Article query response missing data");
 
     assert_eq!(articles.len(), 2);
     assert_eq!(articles[0]["title"].as_str(), Some("Auth middleware"));
@@ -155,19 +154,19 @@ async fn embedded_node_executes_nested_bm25_queries() -> Result<()> {
         .as_ref()
         .and_then(|data| data.get("File"))
         .and_then(|rows| rows.as_array())
-        .context("File lookup response missing data")?;
+        .expect("File lookup response missing data");
     let auth_file_id = file_rows
         .iter()
         .find(|row| row["name"].as_str() == Some("auth.rs"))
         .and_then(|row| row.get("_docID"))
         .and_then(|id| id.as_str())
-        .context("auth file doc id missing")?;
+        .expect("auth file doc id missing");
     let utils_file_id = file_rows
         .iter()
         .find(|row| row["name"].as_str() == Some("utils.rs"))
         .and_then(|row| row.get("_docID"))
         .and_then(|id| id.as_str())
-        .context("utils file doc id missing")?;
+        .expect("utils file doc id missing");
 
     let auth_fn = node
         .execute(&format!(
@@ -223,7 +222,7 @@ async fn embedded_node_executes_nested_bm25_queries() -> Result<()> {
         .as_ref()
         .and_then(|data| data.get("File"))
         .and_then(|files| files.as_array())
-        .context("File query response missing data")?;
+        .expect("File query response missing data");
 
     assert_eq!(files.len(), 2);
     assert_eq!(files[0]["name"].as_str(), Some("auth.rs"));
@@ -308,19 +307,19 @@ async fn embedded_node_executes_nested_bm25_alias_filter_and_order_queries() -> 
         .as_ref()
         .and_then(|data| data.get("File"))
         .and_then(|rows| rows.as_array())
-        .context("File lookup response missing data")?;
+        .expect("File lookup response missing data");
     let auth_file_id = file_rows
         .iter()
         .find(|row| row["name"].as_str() == Some("auth.rs"))
         .and_then(|row| row.get("_docID"))
         .and_then(|id| id.as_str())
-        .context("auth file doc id missing")?;
+        .expect("auth file doc id missing");
     let utils_file_id = file_rows
         .iter()
         .find(|row| row["name"].as_str() == Some("utils.rs"))
         .and_then(|row| row.get("_docID"))
         .and_then(|id| id.as_str())
-        .context("utils file doc id missing")?;
+        .expect("utils file doc id missing");
 
     let auth_guard = node
         .execute(&format!(
@@ -396,7 +395,7 @@ async fn embedded_node_executes_nested_bm25_alias_filter_and_order_queries() -> 
         .as_ref()
         .and_then(|data| data.get("File"))
         .and_then(|files| files.as_array())
-        .context("File query response missing data")?;
+        .expect("File query response missing data");
 
     assert_eq!(files.len(), 2);
     assert_eq!(files[0]["name"].as_str(), Some("auth.rs"));
@@ -404,10 +403,10 @@ async fn embedded_node_executes_nested_bm25_alias_filter_and_order_queries() -> 
 
     let auth_functions = files[0]["functions"]
         .as_array()
-        .context("auth.rs functions missing")?;
+        .expect("auth.rs functions missing");
     let utils_functions = files[1]["functions"]
         .as_array()
-        .context("utils.rs functions missing")?;
+        .expect("utils.rs functions missing");
 
     assert_eq!(auth_functions.len(), 2);
     assert!(auth_functions
@@ -431,7 +430,7 @@ async fn embedded_node_executes_nested_bm25_alias_filter_and_order_queries() -> 
 
 fn ensure_success(response: &query::QueryResponse, operation: &str) -> Result<()> {
     if response.has_errors() {
-        bail!("{operation} returned errors: {:?}", response.errors);
+        panic!("{operation} returned errors: {:?}", response.errors);
     }
     Ok(())
 }

@@ -2,7 +2,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-#[macro_use]
 #[path = "support/outcome.rs"]
 mod outcome;
 
@@ -10,7 +9,7 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use cid::Cid;
 use embedded::{EmbeddedNode, EmbeddedStore, NodeBuilder};
-use outcome::{Context, Result};
+use outcome::Result;
 use serde_json::{json, Value};
 
 const OLD_TASK_1_ID: &str = "bae-7513a70e-b156-5803-b492-017180bd20b8";
@@ -30,25 +29,25 @@ fn materialize_fixture(directory: &Path) -> Result<PathBuf> {
         .collect();
     let compressed = BASE64_STANDARD
         .decode(encoded)
-        .context("decode v0.15 fixture base64")?;
+        .expect("decode v0.15 fixture base64");
     let archive =
-        zstd::stream::decode_all(compressed.as_slice()).context("decompress v0.15 fixture")?;
+        zstd::stream::decode_all(compressed.as_slice()).expect("decompress v0.15 fixture");
     let path = directory.join("v015_store");
-    fs::create_dir(&path).context("create disposable v0.15 store directory")?;
+    fs::create_dir(&path).expect("create disposable v0.15 store directory");
     tar::Archive::new(archive.as_slice())
         .unpack(&path)
-        .context("unpack disposable v0.15 store")?;
+        .expect("unpack disposable v0.15 store");
     Ok(path)
 }
 
 async fn execute_ok(node: &EmbeddedNode<EmbeddedStore>, query: &str) -> Result<Value> {
     let response = node.execute(query).await;
-    ensure!(
+    assert!(
         response.errors.is_empty(),
         "query failed: {:?}",
         response.errors
     );
-    response.data.context("successful query returned no data")
+    Ok(response.data.expect("successful query returned no data"))
 }
 
 #[tokio::test]
@@ -104,7 +103,7 @@ async fn migrates_populated_v015_store_and_reopens_idempotently() -> Result<()> 
     )
     .await?;
     assert_eq!(commits["_commits"].as_array().map(Vec::len), Some(7));
-    ensure!(
+    assert!(
         commits["_commits"]
             .as_array()
             .into_iter()
@@ -118,11 +117,11 @@ async fn migrates_populated_v015_store_and_reopens_idempotently() -> Result<()> 
             r#"mutation { create_Task(input: {task_id: "task-1", status: "duplicate", note: "must fail"}) { _docID } }"#,
         )
         .await;
-    ensure!(
+    assert!(
         duplicate.has_errors(),
         "unique-index duplicate was accepted"
     );
-    ensure!(
+    assert!(
         duplicate
             .errors
             .iter()
@@ -171,7 +170,7 @@ async fn malformed_v015_store_rolls_back_the_entire_migration() -> Result<()> {
     let path = materialize_fixture(directory.path())?;
 
     let store = Arc::new(storage::RegolithStore::open(
-        path.to_str().context("fixture path contains non-UTF-8")?,
+        path.to_str().expect("fixture path contains non-UTF-8"),
     )?);
     {
         let database = db::DB::from_arc(Arc::clone(&store))?;
@@ -184,11 +183,11 @@ async fn malformed_v015_store_rolls_back_the_entire_migration() -> Result<()> {
     let error = match db::DB::open_from_arc(Arc::clone(&store)).await {
         Ok(database) => {
             database.close().await?;
-            bail!("migration unexpectedly accepted a missing legacy block")
+            panic!("migration unexpectedly accepted a missing legacy block")
         }
         Err(error) => error,
     };
-    ensure!(
+    assert!(
         format!("{error:#}").contains("references missing block"),
         "migration failed for an unexpected reason: {error:#}"
     );
@@ -197,20 +196,20 @@ async fn malformed_v015_store_rolls_back_the_entire_migration() -> Result<()> {
     let txn = database.new_txn(true).await?;
     {
         let systemstore = txn.systemstore()?;
-        ensure!(
+        assert!(
             !systemstore.has(MIGRATION_MARKER).await?,
             "failed migration published its completion marker"
         );
-        ensure!(
+        assert!(
             !systemstore.has(b"/d/s/\x01").await?,
             "failed migration leaked a short-ID mapping"
         );
-        ensure!(
+        assert!(
             !systemstore.has(b"/seq/doc").await?,
             "failed migration advanced the short-ID sequence"
         );
         let legacy_key = format!("/d/{TASK_COLLECTION_ID}/{LAST_LEGACY_TASK_ID}");
-        ensure!(
+        assert!(
             txn.datastore()?.has(legacy_key.as_bytes()).await?,
             "failed migration deleted a legacy document"
         );

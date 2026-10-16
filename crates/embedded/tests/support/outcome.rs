@@ -1,62 +1,53 @@
-//! The result type of the integration tests: any error, with `context`, `bail!`
-//! and `ensure!` naming what was being done when it failed. Included by each
-//! test crate with `#[macro_use] #[path = "support/outcome.rs"] mod outcome;`.
-#![allow(dead_code, unused_macros, unused_imports)]
+//! The result type of the integration tests: the typed error of each call a
+//! test propagates with `?`. Included by each test crate with
+//! `#[path = "support/outcome.rs"] mod outcome;`.
+#![allow(dead_code)]
 
-use std::fmt::Display;
-
-pub type Result<T = (), E = Box<dyn std::error::Error + Send + Sync>> = std::result::Result<T, E>;
-
-pub trait Context<T> {
-    fn context(self, step: impl Display) -> Result<T>;
-
-    fn with_context<F, C>(self, step: F) -> Result<T>
-    where
-        F: FnOnce() -> C,
-        C: Display;
+#[derive(Debug, thiserror::Error)]
+pub enum TestError {
+    #[error(transparent)]
+    Embedded(#[from] embedded::Error),
+    #[error(transparent)]
+    Acp(#[from] acp::Error),
+    #[error(transparent)]
+    Zanzibar(#[from] zanzibar::error::Error),
+    #[error(transparent)]
+    Cid(#[from] cid::Error),
+    #[error(transparent)]
+    Crypto(#[from] crypto::Error),
+    #[error(transparent)]
+    Db(#[from] db::Error),
+    #[error(transparent)]
+    Identity(#[from] identity::Error),
+    #[error(transparent)]
+    Keyring(#[from] keyring::Error),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Storage(#[from] storage::Error),
+    #[error(transparent)]
+    SliceLength(#[from] std::array::TryFromSliceError),
+    #[error(transparent)]
+    Peer(#[from] defra_http::P2PError),
+    #[error("{0}")]
+    Remote(String),
+    #[cfg(feature = "libp2p")]
+    #[error(transparent)]
+    PeerIdParse(#[from] libp2p::identity::ParseError),
+    #[cfg(feature = "libp2p")]
+    #[error(transparent)]
+    PeerKeyDecode(#[from] libp2p::identity::DecodingError),
+    #[cfg(feature = "libp2p")]
+    #[error(transparent)]
+    PeerKeyType(#[from] libp2p::identity::OtherVariantError),
 }
 
-impl<T, E> Context<T> for std::result::Result<T, E>
-where
-    E: Display,
-{
-    fn context(self, step: impl Display) -> Result<T> {
-        self.map_err(|error| format!("{step}: {error}").into())
+impl From<String> for TestError {
+    fn from(message: String) -> Self {
+        Self::Remote(message)
     }
-
-    fn with_context<F, C>(self, step: F) -> Result<T>
-    where
-        F: FnOnce() -> C,
-        C: Display,
-    {
-        self.map_err(|error| format!("{}: {error}", step()).into())
-    }
 }
 
-impl<T> Context<T> for Option<T> {
-    fn context(self, step: impl Display) -> Result<T> {
-        self.ok_or_else(|| step.to_string().into())
-    }
-
-    fn with_context<F, C>(self, step: F) -> Result<T>
-    where
-        F: FnOnce() -> C,
-        C: Display,
-    {
-        self.ok_or_else(|| step().to_string().into())
-    }
-}
-
-macro_rules! bail {
-    ($($message:tt)+) => {
-        return Err(format!($($message)+).into())
-    };
-}
-
-macro_rules! ensure {
-    ($condition:expr, $($message:tt)+) => {
-        if !$condition {
-            bail!($($message)+);
-        }
-    };
-}
+pub type Result<T = (), E = TestError> = std::result::Result<T, E>;

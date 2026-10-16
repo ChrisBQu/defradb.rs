@@ -17,7 +17,7 @@ use crate::{
     EmbeddedNodeConfig, EmbeddedStore, ManagedP2PSystem, Persistence, SigningConfig, SigningKey,
     TransportConfig,
 };
-use anyhow::{anyhow, Context, Result};
+use crate::error::{Error, Result};
 #[cfg(feature = "libp2p")]
 use kovan_queue::seg_queue::SegQueue;
 #[cfg(any(feature = "libp2p", feature = "iroh"))]
@@ -41,9 +41,7 @@ pub(crate) type WireKmsCallback = Box<dyn FnOnce(Arc<dyn kms::KmsService>) + Sen
 fn resolve_creator_identity(context: &RequestContext) -> Result<Option<identity::Did>> {
     match context.identity() {
         Some(raw) => {
-            Ok(Some(identity::Did::new(raw).map_err(|error| {
-                anyhow!("malformed acting identity: {error}")
-            })?))
+            Ok(Some(identity::Did::new(raw).map_err(Error::InvalidActingIdentity)?))
         }
         None => Ok(None),
     }
@@ -118,9 +116,9 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
         let sdl = sdl.to_owned();
         self.on_pool(move || async move {
             let collections =
-                query::parse_sdl(&sdl).map_err(|error| anyhow!("SDL parse error: {error}"))?;
+                query::parse_sdl(&sdl).map_err(Error::SchemaParse)?;
             schema::definition_validation::validate_new_collections(&collections)
-                .map_err(|error| anyhow!("schema validation error: {error}"))?;
+                .map_err(Error::SchemaValidation)?;
             let creator = resolve_creator_identity(&context)?;
             database
                 .create_collections_atomic_with_acp_registration_as(
@@ -130,7 +128,7 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
                     creator,
                 )
                 .await
-                .map_err(|error| anyhow!("create collection error: {error}"))?;
+                .map_err(Error::CollectionCreate)?;
             Ok(())
         })
         .await
@@ -160,7 +158,7 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
     {
         workers::run_on(self.database.pool(), workers::Target::LeastLoaded, make)
             .await
-            .map_err(|error| anyhow!("the call did not run on the worker pool: {error}"))?
+            .map_err(Error::PoolRun)?
     }
 
     /// Shut the node down cleanly.
@@ -256,29 +254,25 @@ async fn add_encrypted_index<S: storage::corekv::Store + 'static>(
     let (collection, field_name) = (collection.as_str(), field_name.as_str());
     let col = database
         .get_collection(collection)
-        .map_err(|error| anyhow!("get collection error: {error}"))?
-        .ok_or_else(|| anyhow!("collection '{collection}' not found"))?;
+        .map_err(Error::CollectionLookup)?
+        .ok_or_else(|| Error::CollectionNotFound(collection.to_owned()))?;
     let schema = col.schema();
 
     if !schema.fields.iter().any(|f| f.name == field_name) {
-        return Err(anyhow!(
-            "encrypted index on non-existent field: {field_name}"
-        ));
+        return Err(Error::EncryptedIndexFieldMissing(field_name.to_owned()));
     }
     if schema
         .encrypted_indexes
         .iter()
         .any(|idx| idx.field_name == field_name)
     {
-        return Err(anyhow!(
-            "encrypted index already exists on field: {field_name}"
-        ));
+        return Err(Error::EncryptedIndexExists(field_name.to_owned()));
     }
 
     let txn = database
         .new_txn(false)
         .await
-        .map_err(|error| anyhow!("failed to create transaction: {error}"))?;
+        .map_err(Error::TxnCreate)?;
     {
         let mut updated_schema = schema.clone();
         updated_schema
@@ -288,27 +282,27 @@ async fn add_encrypted_index<S: storage::corekv::Store + 'static>(
         let collection_key =
             storage::keys::systemstore::CollectionKey::new(&updated_schema.version_id);
         let schema_data = serde_json::to_vec(&updated_schema)
-            .map_err(|error| anyhow!("failed to serialize schema: {error}"))?;
+            .map_err(Error::SchemaSerialize)?;
         let systemstore = txn
             .systemstore()
-            .map_err(|error| anyhow!("failed to get systemstore: {error}"))?;
+            .map_err(Error::SystemstoreOpen)?;
         systemstore
             .set(&collection_key.bytes(), &schema_data)
             .await
-            .map_err(|error| anyhow!("failed to save schema: {error}"))?;
+            .map_err(Error::SchemaSave)?;
         let name_key = storage::keys::systemstore::CollectionNameKey::new(collection);
         systemstore
             .set(&name_key.bytes(), updated_schema.version_id.as_bytes())
             .await
-            .map_err(|error| anyhow!("failed to save name mapping: {error}"))?;
+            .map_err(Error::NameMappingSave)?;
     }
     txn.commit()
         .await
-        .map_err(|error| anyhow!("failed to commit: {error}"))?;
+        .map_err(Error::Commit)?;
     database
         .reload_cache()
         .await
-        .map_err(|error| anyhow!("failed to reload cache: {error}"))?;
+        .map_err(Error::CacheReload)?;
     Ok(())
 }
 
@@ -440,7 +434,7 @@ impl NodeBuilder {
         match self.at_rest_encryption_key {
             Some(key) => options
                 .with_encryption_keys(key, self.previous_at_rest_encryption_keys.iter().copied())
-                .context("invalid at-rest encryption keys"),
+                .map_err(Error::AtRestKeys),
             None => Ok(options),
         }
     }
@@ -451,9 +445,12 @@ impl NodeBuilder {
         let pool = start_node_pool(self.workers.take(), self.config.edge.as_ref())?;
         let (store, persistence) = if let Some(path) = self.data_path.take() {
             if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent).await.with_context(|| {
-                    format!("failed to create parent directory for '{}'", path.display())
-                })?;
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(|source| Error::DataDirCreate {
+                        path: path.clone(),
+                        source,
+                    })?;
             }
 
             #[cfg(feature = "iroh")]
@@ -475,8 +472,9 @@ impl NodeBuilder {
             let opts = self
                 .with_at_rest_keys(storage::RegolithStoreOptions::embedded().placed_on(&pool))?;
             let store =
-                storage::RegolithStore::open_with_options(&path, opts).with_context(|| {
-                    format!("failed to open regolith store at '{}'", path.display())
+                storage::RegolithStore::open_with_options(&path, opts).map_err(|source| Error::StoreOpen {
+                    path: path.clone(),
+                    source,
                 })?;
 
             (EmbeddedStore::Regolith(store), Persistence::Persistent)
@@ -493,7 +491,7 @@ impl NodeBuilder {
                             storage::RegolithStoreOptions::memory().placed_on(&pool),
                         )?,
                     )
-                    .context("failed to open in-memory regolith store")?,
+                    .map_err(Error::MemoryStoreOpen)?,
                 ),
                 Persistence::Memory,
             )
@@ -596,7 +594,7 @@ pub fn start_node_pool(
     edge: Option<&edge::Edge>,
 ) -> Result<workers::Pool> {
     storage::start_pool(config.unwrap_or_default(), edge.map(edge::Edge::pool_monitor))
-        .map_err(|error| anyhow!("the worker pool did not start: {error}"))
+        .map_err(Error::PoolStart)
 }
 
 /// A node over a store the application opened, on a worker pool of the
@@ -634,7 +632,7 @@ fn check_access_hooks(
     hooks: Option<&crate::AccessHooks>,
 ) -> Result<()> {
     if hooks.is_some() && !matches!(config.transport, TransportConfig::Iroh(_)) {
-        return Err(anyhow!("access hooks require the iroh transport"));
+        return Err(Error::AccessHooksNeedIroh);
     }
     Ok(())
 }
@@ -680,7 +678,7 @@ where
 
     let mut database = db::DB::open_from_arc_with_options(store.clone(), db_options)
         .await
-        .map_err(|error| anyhow!("failed to open database: {error}"))?;
+        .map_err(Error::DbOpen)?;
     database.set_event_bus(event_bus.clone());
     if let Some(edge) = config.edge.as_ref() {
         database.set_network(edge.clone());
@@ -767,9 +765,7 @@ where
             .await
             .map(Some),
             #[cfg(any(feature = "libp2p", feature = "iroh"))]
-            (_, None) => Err(anyhow!(
-                "a P2P transport needs the network runtime: set EmbeddedNodeConfig::edge"
-            )),
+            (_, None) => Err(Error::NetworkRuntimeRequired),
         };
     let mut p2p_setup = match p2p_setup {
         Ok(setup) => setup,

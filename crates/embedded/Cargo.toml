@@ -84,6 +84,7 @@ edge = { path = "../edge", features = ["testing"] }
 base64 = { workspace = true }
 tempfile = "3.17"
 tokio = { workspace = true, features = ["rt-multi-thread"] }
+zanzibar = { path = "../zanzibar" }
 zstd = "0.13"
 tar = "0.4"
 

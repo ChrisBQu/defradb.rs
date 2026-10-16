@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::error::{Result, ResultExt};
+use crate::error::{Error, Result};
 
 use crate::Persistence;
 
@@ -32,7 +32,7 @@ where
                     &vera_config.chain_id,
                     &tuning,
                 )
-                .context("failed to create Vera provider")?,
+                .map_err(Error::VeraProvider)?,
             );
             let sh_acp = Arc::new(vera::VeraDocumentACP::tuned(provider, &tuning, network));
             Ok(DocumentAcpSetup {
@@ -56,7 +56,7 @@ where
                     &vera_config.chain_id,
                     &tuning,
                 )
-                .context("failed to create Vera provider")?,
+                .map_err(Error::VeraProvider)?,
             );
             let vera_acp = Arc::new(vera::VeraDocumentACP::tuned(provider, &tuning, network));
             Ok(DocumentAcpSetup {
@@ -132,7 +132,7 @@ where
     manager
         .initialize(None)
         .await
-        .context("failed to initialize NAC")?;
+        .map_err(Error::NacInit)?;
     Ok(manager)
 }
 

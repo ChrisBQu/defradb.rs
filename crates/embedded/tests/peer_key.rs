@@ -2,12 +2,11 @@
 
 use std::net::{IpAddr, Ipv4Addr};
 
-#[macro_use]
 #[path = "support/outcome.rs"]
 mod outcome;
 
 use embedded::{EmbeddedNode, EmbeddedStore, IrohConfig, NodeBuilder};
-use outcome::{Context, Result};
+use outcome::Result;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn libp2p_and_iroh_share_the_node_key() -> Result<()> {
@@ -37,7 +36,7 @@ async fn libp2p_and_iroh_share_the_node_key() -> Result<()> {
 
 async fn local_peer_id(node: &EmbeddedNode<EmbeddedStore>) -> Result<String> {
     node.p2p()
-        .context("node has no p2p system")?
+        .expect("node has no p2p system")
         .ops()
         .local_peer_id()
         .await

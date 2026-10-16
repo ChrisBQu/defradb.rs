@@ -5,7 +5,7 @@
 
 use std::net::{IpAddr, Ipv4Addr};
 
-use crate::outcome::{Context, Result};
+use crate::outcome::Result;
 use embedded::{EmbeddedNode, EmbeddedStore, IrohConfig};
 use serde_json::Value as JsonValue;
 use tokio::time::{sleep, Duration, Instant};
@@ -30,7 +30,7 @@ pub async fn create(node: &Node, collection: &str, input: &str) -> Result<(Strin
         ))
         .await;
     if response.has_errors() {
-        bail!("add_{collection} failed: {:?}", response.errors);
+        panic!("add_{collection} failed: {:?}", response.errors);
     }
     let created = response
         .data
@@ -38,24 +38,24 @@ pub async fn create(node: &Node, collection: &str, input: &str) -> Result<(Strin
         .and_then(|data| data.get(format!("add_{collection}")))
         .and_then(JsonValue::as_array)
         .and_then(|items| items.first())
-        .context("created document")?;
+        .expect("created document");
     let doc_id = created
         .get("_docID")
         .and_then(JsonValue::as_str)
-        .context("_docID")?;
+        .expect("_docID");
     let cid = created
         .get("_version")
         .and_then(JsonValue::as_array)
         .and_then(|versions| versions.first())
         .and_then(|version| version.get("cid"))
         .and_then(JsonValue::as_str)
-        .context("_version cid")?;
+        .expect("_version cid");
     Ok((doc_id.to_string(), cid.to_string()))
 }
 
 /// The address other nodes connect to `node` on.
 pub async fn listen_addr(node: &Node) -> Result<String> {
-    let ops = node.p2p().context("p2p")?.ops();
+    let ops = node.p2p().expect("p2p").ops();
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let addrs = ops.listen_addresses().await?;
@@ -66,7 +66,7 @@ pub async fn listen_addr(node: &Node) -> Result<String> {
             return Ok(addr);
         }
         if Instant::now() >= deadline {
-            bail!("no iroh listen address");
+            panic!("no iroh listen address");
         }
         sleep(Duration::from_millis(100)).await;
     }
@@ -74,8 +74,8 @@ pub async fn listen_addr(node: &Node) -> Result<String> {
 
 /// Connect `from` to `to` and return `to`'s peer ID.
 pub async fn connect(from: &Node, to: &Node) -> Result<String> {
-    let from = from.p2p().context("p2p")?;
-    let peer = to.p2p().context("p2p")?.ops().local_peer_id().await?;
+    let from = from.p2p().expect("p2p");
+    let peer = to.p2p().expect("p2p").ops().local_peer_id().await?;
     let addr = listen_addr(to).await?;
     let deadline = Instant::now() + Duration::from_secs(10);
     from.ops().connect_peer(&addr).await?;
@@ -85,7 +85,7 @@ pub async fn connect(from: &Node, to: &Node) -> Result<String> {
             return Ok(peer);
         }
         if Instant::now() >= deadline {
-            bail!("peer {peer} never connected");
+            panic!("peer {peer} never connected");
         }
         sleep(Duration::from_millis(100)).await;
     }
@@ -93,7 +93,7 @@ pub async fn connect(from: &Node, to: &Node) -> Result<String> {
 
 pub async fn sync(node: &Node, collection: &str, doc_ids: Vec<String>) -> Result<()> {
     node.p2p()
-        .context("p2p")?
+        .expect("p2p")
         .ops()
         .sync_documents(collection, doc_ids, None)
         .await
@@ -105,7 +105,7 @@ pub async fn doc_ids(node: &Node, collection: &str) -> Result<Vec<String>> {
         .execute(&format!("query {{ {collection} {{ _docID }} }}"))
         .await;
     if response.has_errors() {
-        bail!("{collection} query failed: {:?}", response.errors);
+        panic!("{collection} query failed: {:?}", response.errors);
     }
     let mut ids: Vec<String> = response
         .data
@@ -126,13 +126,13 @@ pub async fn doc_ids(node: &Node, collection: &str) -> Result<Vec<String>> {
 pub async fn replicate(from: &Node, to: &Node, collections: &[&str]) -> Result<()> {
     let collections: Vec<String> = collections.iter().map(|name| name.to_string()).collect();
     to.p2p()
-        .context("p2p")?
+        .expect("p2p")
         .ops()
         .add_collections(collections.clone())
         .await?;
     let addr = listen_addr(to).await?;
     from.p2p()
-        .context("p2p")?
+        .expect("p2p")
         .ops()
         .add_replicator(
             collections,
@@ -155,7 +155,7 @@ pub async fn wait_for_docs(node: &Node, collection: &str, expected: &[&str]) -> 
             return Ok(());
         }
         if Instant::now() >= deadline {
-            bail!("{collection} {ids:?}, expected {expected:?}");
+            panic!("{collection} {ids:?}, expected {expected:?}");
         }
         sleep(Duration::from_millis(200)).await;
     }

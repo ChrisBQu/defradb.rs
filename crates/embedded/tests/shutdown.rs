@@ -7,7 +7,6 @@
 //! 4. After `shutdown()`, the database reports `is_closed() == true`
 //! 5. Concurrent `shutdown()` callers block until teardown completes
 
-#[macro_use]
 #[path = "support/outcome.rs"]
 mod outcome;
 

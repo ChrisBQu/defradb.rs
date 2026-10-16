@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-#[macro_use]
 #[path = "support/outcome.rs"]
 mod outcome;
 

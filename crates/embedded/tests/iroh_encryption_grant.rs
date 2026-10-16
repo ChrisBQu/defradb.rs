@@ -3,7 +3,6 @@
 //! but for a `reader` grant to the peer's node identity.
 #![cfg(feature = "iroh")]
 
-#[macro_use]
 #[path = "support/outcome.rs"]
 mod outcome;
 mod support;
@@ -15,7 +14,7 @@ use std::time::Duration;
 use blockstore::Blockstore;
 use embedded::{EmbeddedNodeConfig, IrohConfig, SigningConfig, TransportConfig};
 use identity::Did;
-use outcome::{Context, Result};
+use outcome::Result;
 use tokio::time::{sleep, Instant};
 
 use support::{
@@ -83,7 +82,7 @@ async fn replicate_encrypted_doc(
     grantee: Option<&Did>,
 ) -> Result<String> {
     let policy_id = add_policy(node0).await?;
-    ensure!(
+    assert!(
         policy_id == add_policy(peer).await?,
         "policy ids must match"
     );
@@ -98,22 +97,22 @@ async fn replicate_encrypted_doc(
         let collection_id = node0
             .database
             .get_collection("Users")?
-            .context("Users collection missing on node 0")?
+            .expect("Users collection missing on node 0")
             .collection_id()
             .to_string();
         grant_collection_reader(node0, jack, grantee, &policy_id, &collection_id).await?;
         grant_collection_reader(peer, jack, grantee, &policy_id, &collection_id).await?;
     }
 
-    let addr0 = connectable_iroh_addr(node0.p2p().context("node 0 has no p2p")?).await?;
+    let addr0 = connectable_iroh_addr(node0.p2p().expect("node 0 has no p2p")).await?;
     peer.p2p()
-        .context("peer has no p2p")?
+        .expect("peer has no p2p")
         .ops()
         .connect_peer(&addr0)
         .await?;
     for node in [node0, peer] {
         node.p2p()
-            .context("node has no p2p")?
+            .expect("node has no p2p")
             .ops()
             .add_collections(vec!["Users".into()])
             .await?;
@@ -125,22 +124,22 @@ async fn replicate_encrypted_doc(
         )
         .await;
     if response.has_errors() {
-        bail!("create on node 0 failed: {:?}", response.errors);
+        panic!("create on node 0 failed: {:?}", response.errors);
     }
-    response
+    Ok(response
         .data
         .as_ref()
         .and_then(|data| data.pointer("/add_Users/0/_docID"))
         .and_then(|doc_id| doc_id.as_str())
         .map(str::to_string)
-        .context("add_Users response missing _docID")
+        .expect("add_Users response missing _docID"))
 }
 
 /// Without the head blocks on the peer, a missing plaintext would only show
 /// that nothing replicated.
 async fn assert_blocks_without_plaintext(pair: &Pair) -> Result<()> {
     let heads = db::merge::load_document_head_blocks(&pair.node0.database, &pair.doc_id).await?;
-    ensure!(!heads.is_empty(), "node 0 has no head for the document");
+    assert!(!heads.is_empty(), "node 0 has no head for the document");
 
     let peer_blocks =
         blockstore::DefraBlockstore::new(Arc::clone(pair.peer.database.store()), true);
@@ -154,7 +153,7 @@ async fn assert_blocks_without_plaintext(pair: &Pair) -> Result<()> {
             break;
         }
         if Instant::now() >= deadline {
-            bail!("the ungranted peer never received the document's head blocks");
+            panic!("the ungranted peer never received the document's head blocks");
         }
         sleep(Duration::from_millis(250)).await;
     }
@@ -173,7 +172,7 @@ async fn assert_blocks_without_plaintext(pair: &Pair) -> Result<()> {
                     .iter()
                     .any(|user| user.get("name") == Some(&serde_json::json!("Fred")))
             });
-        ensure!(!decrypted, "the ungranted peer decrypted the document");
+        assert!(!decrypted, "the ungranted peer decrypted the document");
         sleep(Duration::from_millis(250)).await;
     }
     Ok(())
@@ -206,7 +205,7 @@ async fn connectable_iroh_addr(system: &embedded::ManagedP2PSystem) -> Result<St
             return Ok(addr);
         }
         if Instant::now() >= deadline {
-            bail!("timed out waiting for a connectable iroh address");
+            panic!("timed out waiting for a connectable iroh address");
         }
         sleep(Duration::from_millis(100)).await;
     }

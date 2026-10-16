@@ -2,12 +2,11 @@
 
 use std::net::{IpAddr, Ipv4Addr};
 
-#[macro_use]
 #[path = "support/outcome.rs"]
 mod outcome;
 
 use embedded::{IrohConfig, NodeBuilder};
-use outcome::{Context, Result};
+use outcome::Result;
 use tokio::time::{sleep, Duration, Instant};
 
 const BOOK_SDL: &str = "type Book { title: String }";
@@ -27,8 +26,8 @@ async fn two_embedded_iroh_nodes_connect_and_replicate() -> Result<()> {
     node_a.add_schema(BOOK_SDL).await?;
     node_b.add_schema(BOOK_SDL).await?;
 
-    let p2p_b = node_b.p2p().cloned().context("node_b missing p2p system")?;
-    let p2p_a = node_a.p2p().cloned().context("node_a missing p2p system")?;
+    let p2p_b = node_b.p2p().cloned().expect("node_b missing p2p system");
+    let p2p_a = node_a.p2p().cloned().expect("node_a missing p2p system");
 
     let peer_a = p2p_a.ops().local_peer_id().await?;
     let connect_addr_a = wait_for_connectable_iroh_addr(&p2p_a).await?;
@@ -85,8 +84,8 @@ async fn an_explicit_allowlist_admits_the_peer_it_is_given() -> Result<()> {
     let listener_p2p = listener
         .p2p()
         .cloned()
-        .context("listener missing p2p system")?;
-    let dialer_p2p = dialer.p2p().cloned().context("dialer missing p2p system")?;
+        .expect("listener missing p2p system");
+    let dialer_p2p = dialer.p2p().cloned().expect("dialer missing p2p system");
 
     let dialer_peer = dialer_p2p.ops().local_peer_id().await?;
     let listener_addr = wait_for_connectable_iroh_addr(&listener_p2p).await?;
@@ -131,7 +130,7 @@ async fn wait_for_connectable_iroh_addr(system: &embedded::ManagedP2PSystem) -> 
             return Ok(addr);
         }
         if Instant::now() >= deadline {
-            bail!("timed out waiting for direct iroh listen address");
+            panic!("timed out waiting for direct iroh listen address");
         }
         sleep(Duration::from_millis(100)).await;
     }
@@ -149,7 +148,7 @@ async fn wait_for_connected_peer(system: &embedded::ManagedP2PSystem, peer_id: &
             return Ok(());
         }
         if Instant::now() >= deadline {
-            bail!("timed out waiting for peer connection to {peer_id}");
+            panic!("timed out waiting for peer connection to {peer_id}");
         }
         sleep(Duration::from_millis(100)).await;
     }
@@ -168,7 +167,7 @@ async fn wait_for_book_title(
             return Ok(());
         }
         if Instant::now() >= deadline {
-            bail!("timed out waiting for replicated title '{title}'");
+            panic!("timed out waiting for replicated title '{title}'");
         }
         sleep(Duration::from_millis(200)).await;
     }
@@ -176,7 +175,7 @@ async fn wait_for_book_title(
 
 fn ensure_success(response: &query::QueryResponse, operation: &str) -> Result<()> {
     if response.has_errors() {
-        bail!("{operation} returned errors: {:?}", response.errors);
+        panic!("{operation} returned errors: {:?}", response.errors);
     }
     Ok(())
 }
@@ -196,7 +195,7 @@ fn response_contains_title(response: &query::QueryResponse, title: &str) -> bool
 }
 
 fn extract_created_doc_id(response: &query::QueryResponse) -> Result<String> {
-    response
+    Ok(response
         .data
         .as_ref()
         .and_then(|data| data.get("add_Book"))
@@ -205,7 +204,5 @@ fn extract_created_doc_id(response: &query::QueryResponse) -> Result<String> {
         .and_then(|item| item.get("_docID"))
         .and_then(|value| value.as_str())
         .map(str::to_string)
-        .ok_or_else(|| {
-            Box::<dyn std::error::Error + Send + Sync>::from("add_Book response missing _docID")
-        })
+        .expect("add_Book response missing _docID"))
 }
