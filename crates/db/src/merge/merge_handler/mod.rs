@@ -104,7 +104,7 @@ pub struct DbMergeHandler<S: Store, B: blockstore::Blockstore> {
     /// Shared parent-chain depth policy for identity and merge traversals.
     max_merge_depth: usize,
     /// Optional merge hook for policy-specific behavior around composite merges.
-    composite_merge_hook: Arc<std::sync::OnceLock<Arc<dyn CompositeMergeHook>>>,
+    composite_merge_hook: Arc<regolith::sync::OnceCell<Arc<dyn CompositeMergeHook>>>,
     /// Tracks composite CIDs that have already been merged, preventing
     /// duplicate processing from concurrent dual-broadcast paths (doc topic
     /// + collection topic). Matches Go's `loadComposites` dedup guard.
@@ -115,16 +115,16 @@ pub struct DbMergeHandler<S: Store, B: blockstore::Blockstore> {
     /// Optional SE encryption key for generating search artifacts on replicated documents.
     /// When set, the merge handler generates SE artifacts after merging documents
     /// that belong to collections with encrypted indexes.
-    se_enc_key: Arc<std::sync::OnceLock<Zeroizing<Vec<u8>>>>,
+    se_enc_key: Arc<regolith::sync::OnceCell<Zeroizing<Vec<u8>>>>,
     /// Optional repusher for fanning SE artifacts to this node's replicators
     /// after a merge commits. Mirrors Go, where a merging node re-enters
     /// `SendUpdate` and runs the SE push handler (`internal/db/p2p/p2p.go:709`).
     #[cfg(not(target_arch = "wasm32"))]
-    se_repusher: Arc<std::sync::OnceLock<Arc<dyn crate::merge::SeArtifactRepusher>>>,
+    se_repusher: Arc<regolith::sync::OnceCell<Arc<dyn crate::merge::SeArtifactRepusher>>>,
     /// Optional KMS service. When set, `decrypt_block_data` routes DEK
     /// retrieval through the KMS (NAC/DAC-gated, cross-peer fetch) instead
     /// of reading the raw key directly from the Encryption block.
-    kms: Arc<std::sync::OnceLock<Arc<dyn kms::KmsService>>>,
+    kms: Arc<regolith::sync::OnceCell<Arc<dyn kms::KmsService>>>,
     /// Request-scoped DEKs prepared outside an engine-owned merge attempt.
     /// `None` means this handler is on the legacy non-retry path.
     retry_decryption_keys: Option<RetryDecryptionKeys>,
@@ -147,7 +147,7 @@ pub struct DbMergeHandler<S: Store, B: blockstore::Blockstore> {
     pub(crate) rejected_governed: Arc<CidSet>,
     /// Where composites merged by re-drive are reported, so they take the
     /// same post-merge path as a first-attempt merge.
-    redriven_sink: Arc<std::sync::OnceLock<Arc<dyn crate::merge::governance::RedrivenMergeSink>>>,
+    redriven_sink: Arc<regolith::sync::OnceCell<Arc<dyn crate::merge::governance::RedrivenMergeSink>>>,
 }
 
 impl<S: Store, B: blockstore::Blockstore> Clone for DbMergeHandler<S, B> {
@@ -274,20 +274,20 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             db,
             blockstore,
             max_merge_depth,
-            composite_merge_hook: Arc::new(std::sync::OnceLock::new()),
+            composite_merge_hook: Arc::new(regolith::sync::OnceCell::new()),
             merged_composites: Arc::new(cid_set()),
             merged_collections: Arc::new(cid_set()),
-            se_enc_key: Arc::new(std::sync::OnceLock::new()),
+            se_enc_key: Arc::new(regolith::sync::OnceCell::new()),
             #[cfg(not(target_arch = "wasm32"))]
-            se_repusher: Arc::new(std::sync::OnceLock::new()),
-            kms: Arc::new(std::sync::OnceLock::new()),
+            se_repusher: Arc::new(regolith::sync::OnceCell::new()),
+            kms: Arc::new(regolith::sync::OnceCell::new()),
             retry_decryption_keys: None,
             retry_prefetch_requested: None,
             prepared_keys: None,
             prefetched_dek_cids: Arc::new(cid_set()),
             deferred: Arc::new(Default::default()),
             rejected_governed: Arc::new(cid_set()),
-            redriven_sink: Arc::new(std::sync::OnceLock::new()),
+            redriven_sink: Arc::new(regolith::sync::OnceCell::new()),
         }
     }
 

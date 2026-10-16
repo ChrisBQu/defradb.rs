@@ -51,6 +51,7 @@ zeroize = { version = "1.8", features = ["derive"] }
 
 # Async
 async-trait.workspace = true
+regolith.workspace = true
 bytes.workspace = true
 
 # Logging
@@ -66,7 +67,6 @@ tokio = { workspace = true, features = ["rt", "macros"] }
 
 [dev-dependencies]
 futures.workspace = true
-regolith.workspace = true
 multihash-codetable.workspace = true
 
 [lints]

@@ -14,3 +14,4 @@ pub mod hnsw;
 pub mod ivf;
 pub mod select;
 pub mod ssg;
+pub(crate) mod trained_cache;

@@ -192,36 +192,36 @@ pub struct DB<S: Store> {
     /// encrypted-field DEKs through the KMS (which persists them in its
     /// KeyStore for cross-peer serving) instead of inline-and-blockstore.
     /// Set once at node startup via [`DB::set_kms`].
-    document_acp: std::sync::OnceLock<Arc<dyn acp::DocumentACP>>,
-    kms: std::sync::OnceLock<std::sync::Arc<dyn kms::KmsService>>,
+    document_acp: regolith::sync::OnceCell<Arc<dyn acp::DocumentACP>>,
+    kms: regolith::sync::OnceCell<std::sync::Arc<dyn kms::KmsService>>,
     /// Remote signatures and embeddings, each behind its own service.
     remote_inputs: crate::remote_inputs::RemoteInputs,
     /// Where the database's P2P work (pushes, replays, retries) runs its
     /// network waits: the node's network runtime. Set once at startup.
-    network: std::sync::OnceLock<p2p::network::Network>,
+    network: regolith::sync::OnceCell<p2p::network::Network>,
     /// Owning handle to the KMS durable blockstore. The KMS adapter
     /// (`DbEncBlockStore`) references this weakly to avoid the
     /// DB→KMS→`KeyStore`→adapter→blockstore→store Arc cycle that would pin the
     /// storage lock past node close (#976). Parking the owning `Arc` here means
     /// it shares the DB's lifetime — and its in-process block cache — and drops
     /// with the DB, releasing the lock. Set once at startup.
-    kms_blockstore: std::sync::OnceLock<Arc<blockstore::DefraBlockstore<S>>>,
+    kms_blockstore: regolith::sync::OnceCell<Arc<blockstore::DefraBlockstore<S>>>,
     /// Optional NAC manager. When set and enabled, node-level operations are
     /// gated through [`DB::check_node_access`]. Set once at node startup via
     /// [`DB::set_nac_manager`]. When unset, all `check_node_access` calls are
     /// no-ops (NAC not configured).
-    nac_manager: std::sync::OnceLock<std::sync::Arc<dyn NacManagerApi>>,
+    nac_manager: regolith::sync::OnceCell<std::sync::Arc<dyn NacManagerApi>>,
     /// Collections an app has claimed and the validator governing their
     /// replicated composites. Set once, before replication starts.
     ///
     /// Held by value: every reader borrows it, and on wasm the validator is
     /// `?Send`, so wrapping it in an `Arc` would be an `Arc` over a value that
     /// is neither `Send` nor `Sync`.
-    merge_governance: std::sync::OnceLock<crate::merge::governance::MergeGovernance>,
+    merge_governance: regolith::sync::OnceCell<crate::merge::governance::MergeGovernance>,
     /// Told about each composite a local write commits, so composites deferred
     /// awaiting what the write created are released.
     local_commit_release:
-        std::sync::OnceLock<Arc<dyn crate::merge::governance::LocalCommitRelease>>,
+        regolith::sync::OnceCell<Arc<dyn crate::merge::governance::LocalCommitRelease>>,
     /// Process-local document short-ID range allocator.
     doc_short_id_allocator: crate::docid::map::DocShortIdAllocator<S>,
     /// Process-local claims for collection-wide actions.
@@ -265,14 +265,14 @@ impl<S: Store> DB<S> {
             pending_migrations: HopscotchMap::with_hasher(RandomState::default()),
             schema_heads: Arc::new(HopscotchMap::with_hasher(RandomState::default())),
             forbidden_collection_ids: HopscotchMap::with_hasher(RandomState::default()),
-            document_acp: std::sync::OnceLock::new(),
-            kms: std::sync::OnceLock::new(),
+            document_acp: regolith::sync::OnceCell::new(),
+            kms: regolith::sync::OnceCell::new(),
             remote_inputs: Default::default(),
-            network: std::sync::OnceLock::new(),
-            kms_blockstore: std::sync::OnceLock::new(),
-            nac_manager: std::sync::OnceLock::new(),
-            merge_governance: std::sync::OnceLock::new(),
-            local_commit_release: std::sync::OnceLock::new(),
+            network: regolith::sync::OnceCell::new(),
+            kms_blockstore: regolith::sync::OnceCell::new(),
+            nac_manager: regolith::sync::OnceCell::new(),
+            merge_governance: regolith::sync::OnceCell::new(),
+            local_commit_release: regolith::sync::OnceCell::new(),
             active_actions: Arc::new(crate::database::action::ActionRegistry::default()),
         })
     }
@@ -333,14 +333,14 @@ impl<S: Store> DB<S> {
             pending_migrations: HopscotchMap::with_hasher(RandomState::default()),
             schema_heads: Arc::new(HopscotchMap::with_hasher(RandomState::default())),
             forbidden_collection_ids: HopscotchMap::with_hasher(RandomState::default()),
-            document_acp: std::sync::OnceLock::new(),
-            kms: std::sync::OnceLock::new(),
+            document_acp: regolith::sync::OnceCell::new(),
+            kms: regolith::sync::OnceCell::new(),
             remote_inputs: Default::default(),
-            network: std::sync::OnceLock::new(),
-            kms_blockstore: std::sync::OnceLock::new(),
-            nac_manager: std::sync::OnceLock::new(),
-            merge_governance: std::sync::OnceLock::new(),
-            local_commit_release: std::sync::OnceLock::new(),
+            network: regolith::sync::OnceCell::new(),
+            kms_blockstore: regolith::sync::OnceCell::new(),
+            nac_manager: regolith::sync::OnceCell::new(),
+            merge_governance: regolith::sync::OnceCell::new(),
+            local_commit_release: regolith::sync::OnceCell::new(),
             active_actions: Arc::new(crate::database::action::ActionRegistry::default()),
         })
     }
@@ -484,7 +484,7 @@ impl<S: Store> DB<S> {
         self.document_acp.get()
     }
 
-    /// Install the KMS service. First call wins (OnceLock); subsequent calls
+    /// Install the KMS service. First call wins (OnceCell); subsequent calls
     /// are silently discarded. Called once at node startup.
     /// True when no process-local action claim is held.
     pub fn has_no_active_actions(&self) -> bool {
@@ -532,7 +532,7 @@ impl<S: Store> DB<S> {
         &self.remote_inputs
     }
 
-    /// Install the NAC manager. First call wins (OnceLock); subsequent calls
+    /// Install the NAC manager. First call wins (OnceCell); subsequent calls
     /// are silently discarded. Called once at node startup. When unset, all
     /// `check_node_access` calls are no-ops (NAC not configured).
     pub fn set_nac_manager(&self, nac: std::sync::Arc<dyn NacManagerApi>) {

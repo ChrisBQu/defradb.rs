@@ -23,13 +23,14 @@ pub use params::{
 };
 
 use crate::index::error::{Error, Result};
+use crate::index::vector::engine::trained_cache::TrainedCache;
 use crate::index::vector::engine::ann::{Admit, EngineKind, Neighbor, VectorIndexEngine};
 use crate::index::vector::engine::flat::Flat;
 use crate::index::vector::quantize::Centroids;
 use crate::index::vector::quantize::ProductQuantizer;
 use crate::index::vector::store::{NodeId, VectorNodeStore};
 use defra_core::vector::{Element, Metric};
-use std::sync::OnceLock;
+
 
 /// A coarse-quantized, product-compressed index.
 #[derive(Debug, Clone)]
@@ -40,7 +41,7 @@ pub struct IvfPq<S> {
     seed: u64,
     /// Centroids and codebooks are fixed once trained, and decoding them costs
     /// more than scanning the lists they route to. Loaded once per engine.
-    trained_cache: OnceLock<(Centroids, ProductQuantizer)>,
+    trained_cache: TrainedCache<(Centroids, ProductQuantizer)>,
 }
 
 impl<S: VectorNodeStore> IvfPq<S> {
@@ -58,7 +59,7 @@ impl<S: VectorNodeStore> IvfPq<S> {
             metric,
             params,
             seed,
-            trained_cache: OnceLock::new(),
+            trained_cache: TrainedCache::new(),
         })
     }
 
@@ -106,7 +107,7 @@ impl<S: VectorNodeStore> IvfPq<S> {
             self.load_coarse_centroids(state).await?,
             self.load_quantizer(state).await?,
         );
-        Ok(self.trained_cache.get_or_init(|| parts))
+        Ok(self.trained_cache.get_or_init_racy(|| parts))
     }
 
     async fn load_quantizer(&self, state: &TrainedState) -> Result<ProductQuantizer> {

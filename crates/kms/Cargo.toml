@@ -30,6 +30,7 @@ bench = false
 
 [dependencies]
 bytes.workspace = true
+regolith.workspace = true
 ciborium.workspace = true
 defra-core = { path = "../defra-core" }
 crypto = { path = "../crypto" }
