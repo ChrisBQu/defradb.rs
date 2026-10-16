@@ -366,7 +366,6 @@ async fn embedding_server() -> (
 
 async fn embedded_database(url: &str) -> Arc<DB<RegolithStore>> {
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
-    db.set_network(edge::testing::edge());
     let mut collection = CollectionVersion::new(
         "Texts",
         "texts-v1",
@@ -632,4 +631,138 @@ async fn a_retry_after_a_conflict_builds_on_the_winner() {
         .unwrap()
         .unwrap();
     assert_eq!(stored.get("a"), Some(&NormalValue::String("loser".into())));
+}
+
+/// [`embedding_server`] on a thread of its own, with a runtime of its own, so
+/// the test's thread runs none. Dropped, the server stops and its thread
+/// ends.
+struct ServerApart {
+    url: String,
+    requests: Arc<AtomicUsize>,
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ServerApart {
+    fn start() -> Self {
+        let (started, ready) = std::sync::mpsc::channel();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async move {
+                    let (url, requests, _, server) = embedding_server().await;
+                    started.send((url, requests)).unwrap();
+                    let _ = stopped.await;
+                    server.abort();
+                });
+        });
+        let (url, requests) = ready.recv().unwrap();
+        Self {
+            url,
+            requests,
+            stop: Some(stop),
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for ServerApart {
+    fn drop(&mut self) {
+        drop(self.stop.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// A schema-declared embedding endpoint works for a database the node gave
+/// no network runtime, written from a thread that runs no runtime: the
+/// request goes out on the process's on-demand network runtime.
+#[test]
+fn a_database_given_no_network_runtime_embeds_from_a_thread_without_one() {
+    let server = ServerApart::start();
+    let created = n0_future::future::block_on(async {
+        let db = embedded_database(&server.url).await;
+        AutoCommitMutator::new(db)
+            .create("Texts", text_document("alpha"))
+            .await
+            .unwrap()
+    });
+
+    assert_eq!(server.requests.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        created.document.get("vector"),
+        Some(&NormalValue::Float64Array(vec![6.0, f64::from(b'a')])),
+        "the vector of \"alpha\\n\""
+    );
+}
+
+/// `set_embedding` and a hybrid search's query embedding both go through the
+/// embedding service on the network runtime, never from the calling task: a
+/// caller with no runtime gets its vectors.
+#[test]
+fn set_embedding_and_a_hybrid_query_embed_from_a_thread_without_a_runtime() {
+    use db::{DbCollectionProvider, DbTransactionRegistry, LensedAutoCommitFetcher};
+    use query::QueryExecutor;
+
+    let server = ServerApart::start();
+    n0_future::future::block_on(async {
+        let description = schema::VectorEmbeddingDescription {
+            field_name: "vector".to_string(),
+            fields: vec!["text".to_string()],
+            model: "test-model".to_string(),
+            provider: "openai".to_string(),
+            template: String::new(),
+            url: server.url.clone(),
+        };
+        let mut doc = text_document("bravo");
+        let generated = db::search::set_embedding(
+            &[description],
+            &mut doc,
+            true,
+            None,
+            &db::EmbeddingClientConfig::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(generated, vec!["vector"]);
+        assert_eq!(
+            doc.get("vector"),
+            Some(&NormalValue::Float64Array(vec![6.0, f64::from(b'b')]))
+        );
+
+        let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
+        for schema in query::parse_sdl("type Docs { text: String vector: [Float!] }").unwrap() {
+            db.create_collection(schema).await.unwrap();
+        }
+        let runner = query::QueryRunner::with_arc_registry_and_provider(
+            LensedAutoCommitFetcher::new(db.clone()),
+            DbCollectionProvider::new_arc(db.clone()),
+            Arc::new(DbTransactionRegistry::new(db.clone())),
+        )
+        .with_mutator(Arc::new(AutoCommitMutator::new(db)));
+        let created = runner
+            .execute(query::QueryRequest::new(
+                r#"mutation { add_Docs(input: {text: "question", vector: [1, 0]}) { _docID } }"#,
+            ))
+            .await;
+        assert!(!created.has_errors(), "{:?}", created.errors);
+        let request = db::DenseHybridSearchRequest::new("Docs", "question", "vector", ["text"])
+            .with_embedding_url(&server.url)
+            .with_embedding_model("test-model");
+        let result = db::hybrid_search_dense(&runner, &db::EmbeddingClientConfig::new(), &request)
+            .await
+            .unwrap();
+        assert_eq!(result.query_vector_dimensions, 2);
+        assert_eq!(result.hits.len(), 1);
+    });
+
+    assert_eq!(
+        server.requests.load(Ordering::SeqCst),
+        2,
+        "one request for the document, one for the query"
+    );
 }

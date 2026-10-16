@@ -39,11 +39,12 @@ pub unsafe extern "C" fn materialize_collection(
         node = node_ptr,
         identity = identity_did,
         database = database,
+        context = context,
         permission = NodePermission::CollectionPatch,
         collection_name => collection_name_str: "collection_name";
         {
             let count = database
-                .materialize_collection(&collection_name_str)
+                .materialize_collection_as(&context, &collection_name_str)
                 .await
                 .map_err(|e| format!("failed to materialize collection: {}", e))?;
 
@@ -90,13 +91,9 @@ pub unsafe extern "C" fn set_migration(
         let config_str = try_ffi!(require_c_str(config, "config"));
         let database = try_ffi!(get_node_database(node_ptr));
 
-        // Bind the caller's identity into the ambient context so the DB-layer NAC
-        // gate on set_migration resolves the actual caller instead of the
-        // wildcard. The body runs on this thread via `block_on`, so the
-        // thread-local is visible throughout it; the guard restores on drop.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
-        );
+        // The caller acts in the call's context, so the NAC checks the body
+        // reaches resolve the actual caller instead of the wildcard.
+        let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()));
 
         ffi_async!(rt, {
             // Parse the LensConfig from JSON
@@ -105,7 +102,7 @@ pub unsafe extern "C" fn set_migration(
 
             // Register the migration with the lens store
             let transform_id = database
-                .set_migration(lens_config, None)
+                .set_migration_as(&context, lens_config)
                 .await
                 .map_err(|e| format!("failed to set migration: {}", e))?;
 
@@ -158,13 +155,9 @@ pub unsafe extern "C" fn set_migration_in_txn(
             None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
         };
 
-        // Bind the caller's identity into the ambient context so the DB-layer NAC
-        // gate on set_migration_in_txn resolves the actual caller instead of the
-        // wildcard. The body runs on this thread via `block_on`, so the
-        // thread-local is visible throughout it; the guard restores on drop.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
-        );
+        // The caller acts in the call's context, so the NAC checks the body
+        // reaches resolve the actual caller instead of the wildcard.
+        let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()));
 
         ffi_async!(rt, {
             // Parse the LensConfig from JSON
@@ -173,7 +166,7 @@ pub unsafe extern "C" fn set_migration_in_txn(
 
             // Register the migration within the transaction
             let transform_id = registry
-                .set_migration_in_txn(&txn_str, lens_config, None)
+                .set_migration_in_txn_as(&context, &txn_str, lens_config)
                 .await
                 .map_err(|e| format!("failed to set migration in txn: {}", e))?;
 
@@ -217,18 +210,16 @@ pub unsafe extern "C" fn delete_collection_versions(
         let ids_str = try_ffi!(require_c_str(version_ids_json, "version_ids_json"));
         let database = try_ffi!(get_node_database(node_ptr));
 
-        // Bind the caller's identity so any DB-layer NAC gate reached by the body
-        // resolves the actual caller instead of the wildcard.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
-        );
+        // The caller acts in the call's context, so the NAC checks the body
+        // reaches resolve the actual caller instead of the wildcard.
+        let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()));
 
         ffi_async!(rt, {
             let version_ids: Vec<String> = serde_json::from_str(&ids_str)
                 .map_err(|e| format!("failed to parse version IDs JSON: {}", e))?;
 
             database
-                .delete_collection_versions_batch(version_ids)
+                .delete_collection_versions_batch_as(&context, version_ids)
                 .await
                 .map_err(|e| format!("failed to delete collection versions: {}", e))?;
 

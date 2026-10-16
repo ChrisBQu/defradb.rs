@@ -6,7 +6,6 @@ use defra_core::CompositeDeltaPayload;
 use defra_core::CrdtDelta;
 use std::sync::Arc;
 use storage::corekv::Key;
-use storage::keys::headstore::HeadstoreDocKey;
 use storage::keys::headstore::HeadstorePriorityKey;
 use storage::RegolithStore;
 
@@ -54,20 +53,10 @@ async fn current_composite_frontier_retains_lower_priority_sibling() {
         .set(&second_cid.to_bytes(), &second_bytes)
         .await
         .unwrap();
-    txn.headstore()
-        .unwrap()
-        .set(
-            &HeadstoreDocKey::new(doc_short_id, "C", first_cid).bytes(),
-            &[],
-        )
-        .await
-        .unwrap();
-    txn.headstore()
-        .unwrap()
-        .set(
-            &HeadstoreDocKey::new(doc_short_id, "C", second_cid).bytes(),
-            &[],
-        )
+    let mut heads = storage::merge::head_set::Write::default();
+    heads.add(&db::block::heads::document::name("C", &first_cid), 1);
+    heads.add(&db::block::heads::document::name("C", &second_cid), 2);
+    db::block::heads::document::commit(&txn.headstore().unwrap(), doc_short_id, &heads)
         .await
         .unwrap();
     txn.headstore()

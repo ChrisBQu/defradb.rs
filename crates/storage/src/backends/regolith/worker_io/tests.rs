@@ -167,3 +167,36 @@ fn a_dropped_database_leaves_no_queue_behind() {
     assert_eq!(left, 0);
     pool.shutdown_blocking().unwrap();
 }
+
+/// A call off the workers of a store's pool borrows a worker's queue: a cold
+/// read and a durable commit made from a plain thread complete without that
+/// thread reading the device or waiting for a sync, and each such call is
+/// counted as one that was not routed to the pool.
+#[test]
+fn a_call_off_the_pool_borrows_a_workers_queue_and_is_counted() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = pool(2);
+    let store = cold_store(dir.path(), 4, &pool);
+    let stats = store.transaction_stats_handle().unwrap();
+    assert_eq!(stats.snapshot().off_pool_calls, 0);
+
+    workers::block_on(async {
+        let reader = store.new_txn(true).await.unwrap();
+        assert_eq!(reader.get(b"cold/00").await.unwrap().unwrap().len(), 16384);
+        reader.discard();
+        let mut writer = store.new_txn(false).await.unwrap();
+        writer.set(b"off-pool", b"v").await.unwrap();
+        writer.commit().await.unwrap();
+    })
+    .unwrap();
+    assert_eq!(stats.snapshot().off_pool_calls, 2);
+
+    // A call routed to the pool is not counted.
+    let on_worker = store.clone();
+    pool.submit_and_wait(workers::Target::LeastLoaded, move || async move {
+        on_worker.new_txn(true).await.unwrap().discard();
+    })
+    .unwrap();
+    assert_eq!(stats.snapshot().off_pool_calls, 2);
+    pool.shutdown_blocking().unwrap();
+}

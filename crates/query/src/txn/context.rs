@@ -4,6 +4,7 @@ use acp::error::Result as AcpResult;
 use acp::DocumentACP;
 use acp::DocumentPermission;
 use acp::Identity;
+use defra_core::RequestContext;
 use identity::Did;
 use std::sync::Arc;
 use storage::corekv::MaybeSendSync;
@@ -134,7 +135,7 @@ pub async fn is_doc_registered_with_prepared_inputs(
     };
     let bearer = identity
         .did()
-        .and_then(|did| defra_core::signing::get_request_bearer_token(did.as_str()));
+        .and_then(|did| acp.bearer_token_for(did.as_str()));
     let exact_request = serde_json::to_vec(&(
         identity.did().map(Did::as_str).unwrap_or("anonymous"),
         "registered",
@@ -210,7 +211,7 @@ pub async fn check_doc_access_with_prepared_inputs(
     };
     let bearer = identity
         .did()
-        .and_then(|did| defra_core::signing::get_request_bearer_token(did.as_str()));
+        .and_then(|did| acp.bearer_token_for(did.as_str()));
     let exact_request = serde_json::to_vec(&(
         identity.did().map(Did::as_str).unwrap_or("anonymous"),
         permission.as_str(),
@@ -246,8 +247,42 @@ pub async fn check_doc_read_access_with_prepared_inputs(
     doc_id: &str,
     inputs: Option<&crate::prepared::PreparedInputMemo>,
 ) -> crate::error::Result<bool> {
+    check_doc_read_access_as(
+        &RequestContext::ambient(),
+        acp,
+        projection,
+        identity,
+        policy_id,
+        resource_name,
+        collection_id,
+        is_branchable,
+        doc_id,
+        inputs,
+    )
+    .await
+}
+
+/// [`check_doc_read_access_with_prepared_inputs`] for the request `context`
+/// serves: an authenticated reader whose node access grants it `bypass-dac`
+/// reads every document.
+#[allow(clippy::too_many_arguments)]
+pub async fn check_doc_read_access_as(
+    context: &RequestContext,
+    acp: &dyn DocumentACP,
+    projection: Option<&AcpRegistrationProjection>,
+    identity: &Identity,
+    policy_id: &str,
+    resource_name: &str,
+    collection_id: &str,
+    is_branchable: bool,
+    doc_id: &str,
+    inputs: Option<&crate::prepared::PreparedInputMemo>,
+) -> crate::error::Result<bool> {
     use acp::read_access::DocAccess;
 
+    if identity.is_authenticated() && context.dac_bypass() {
+        return Ok(true);
+    }
     let Some(inputs) = inputs.filter(|_| !acp.supports_transactions()) else {
         let checker = crate::txn::OverlayChecker {
             acp,
@@ -287,7 +322,7 @@ pub async fn check_doc_read_access_with_prepared_inputs(
 
         let bearer = identity
             .did()
-            .and_then(|did| defra_core::signing::get_request_bearer_token(did.as_str()));
+            .and_then(|did| acp.bearer_token_for(did.as_str()));
         let request_bytes = serde_json::to_vec(&(
             identity.did().map(Did::as_str).unwrap_or("anonymous"),
             "registered",
@@ -329,9 +364,6 @@ pub async fn check_doc_read_access_with_prepared_inputs(
         })
     }
 
-    if identity.is_authenticated() && defra_core::dac_bypass::get_dac_bypass() {
-        return Ok(true);
-    }
     if !doc_id.is_empty() {
         let object = access_for_object(
             acp,

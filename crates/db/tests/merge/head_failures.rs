@@ -6,8 +6,7 @@ use defra_core::block::{
     generate_cid_from_bytes, Block, CompositeDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload,
 };
 use defra_core::merge::{BlockMetadata, MergeBlock, MergeHandler};
-use kovan::Atom;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use storage::corekv::{
     intercept_retry_writes, private::Sealed, IterOptions, Iterator, Reader, Result, RetryAttempt,
     RetryAttemptError, RetryAttemptValue, RetryOptions, RetryWriteInterceptor, Store, Txn, Writer,
@@ -16,49 +15,49 @@ use storage::RegolithStore;
 
 mod collection;
 
-/// One headstore write, identified by the CID it records, that the store refuses.
+/// One headstore write, identified by the CID it records, that the store
+/// refuses. A head set is written by one merge per set, so the points that
+/// name a document's head, its parent or a collection's head or parent refuse
+/// the merge that carries that CID.
 #[derive(Clone, Copy, Debug)]
 enum FailPoint {
     SetHead(Cid),
     SupersedeHead(Cid),
     SetPriority(Cid),
-    /// The head key of a collection block.
+    /// The head set merge that adds a collection block.
     CollectionHead(Cid),
-    /// A marker that this collection block superseded one of its parents.
+    /// The head set merge that supersedes a parent for this collection block.
     CollectionSupersede(Cid),
 }
 
 impl FailPoint {
-    fn refuses(self, delete: bool, key: &[u8]) -> bool {
+    fn refuses(self, key: &[u8], value: Option<&[u8]>) -> bool {
         let Some(key) = key.strip_prefix(b"h") else {
             return false;
         };
-        let head = storage::keys::headstore::HeadstoreDocKey::parse(key);
+        let names = |cid: Cid| {
+            let text = cid.to_string();
+            value.is_some_and(|value| {
+                value
+                    .windows(text.len())
+                    .any(|window| window == text.as_bytes())
+            })
+        };
         match self {
-            Self::SetHead(cid) => !delete && head.is_some_and(|head| head.cid == cid),
-            Self::SupersedeHead(cid) => {
-                !delete
-                    && key.strip_prefix(b"/ds/").is_some_and(|rest| {
-                        let Some(last) = rest.iter().rposition(|byte| *byte == b'/') else {
-                            return false;
-                        };
-                        rest[..last].ends_with(cid.to_string().as_bytes())
-                    })
+            Self::SetHead(cid) | Self::SupersedeHead(cid) => {
+                key.starts_with(b"/hd/") && names(cid)
             }
             Self::SetPriority(cid) => {
-                !delete && key.starts_with(b"/p/") && key.ends_with(&cid.to_bytes())
+                value.is_some() && key.starts_with(b"/p/") && key.ends_with(&cid.to_bytes())
             }
-            Self::CollectionHead(cid) => {
-                !delete && key.starts_with(b"/c/") && key.ends_with(cid.to_string().as_bytes())
-            }
-            Self::CollectionSupersede(child) => {
-                !delete && key.starts_with(b"/cs/") && key.ends_with(child.to_string().as_bytes())
+            Self::CollectionHead(cid) | Self::CollectionSupersede(cid) => {
+                key.starts_with(b"/hc/") && names(cid)
             }
         }
     }
 }
 
-type FailSwitch = Arc<Atom<Vec<FailPoint>>>;
+type FailSwitch = Arc<Mutex<Vec<FailPoint>>>;
 
 struct FailingHeadStore {
     inner: Arc<RegolithStore>,
@@ -86,8 +85,12 @@ impl Store for FailingHeadStore {
     ) -> std::result::Result<RetryAttemptValue, RetryAttemptError> {
         let fail = self.fail.clone();
         let interceptor: RetryWriteInterceptor = Arc::new(move |key, value| {
-            let delete = value.is_none();
-            match fail.load().iter().find(|point| point.refuses(delete, key)) {
+            match fail
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|point| point.refuses(key, value))
+            {
                 Some(point) => Err(storage::Error::Other(format!(
                     "injected head write failure at {point:?}"
                 ))),
@@ -110,12 +113,13 @@ struct FailingHeadTxn {
 impl Sealed for FailingHeadTxn {}
 
 impl FailingHeadTxn {
-    fn check(&self, delete: bool, key: &[u8]) -> Result<()> {
+    fn check(&self, key: &[u8], value: Option<&[u8]>) -> Result<()> {
         match self
             .fail
-            .load()
+            .lock()
+            .unwrap()
             .iter()
-            .find(|point| point.refuses(delete, key))
+            .find(|point| point.refuses(key, value))
         {
             Some(point) => Err(storage::Error::Other(format!(
                 "injected head write failure at {point:?}"
@@ -145,6 +149,7 @@ impl Reader for FailingHeadTxn {
 #[async_trait]
 impl Writer for FailingHeadTxn {
     async fn merge_shared(&self, key: &[u8], operand: &[u8]) -> Result<()> {
+        self.check(key, Some(operand))?;
         self.inner.merge_shared(key, operand).await
     }
 
@@ -158,11 +163,11 @@ impl Writer for FailingHeadTxn {
     }
 
     async fn set_shared(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        self.check(false, key)?;
+        self.check(key, Some(value))?;
         self.inner.set_shared(key, value).await
     }
     async fn delete_shared(&self, key: &[u8]) -> Result<()> {
-        self.check(true, key)?;
+        self.check(key, None)?;
         self.inner.delete_shared(key).await
     }
 }
@@ -235,7 +240,7 @@ async fn fixture() -> Fixture {
 
 impl Fixture {
     fn fail_at(&self, points: &[FailPoint]) {
-        self.fail.store(points.to_vec());
+        *self.fail.lock().unwrap() = points.to_vec();
     }
 
     async fn merge(&self, block: &MergeBlock) -> std::result::Result<(), String> {

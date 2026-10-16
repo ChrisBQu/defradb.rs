@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, FixedOffset};
+use defra_core::RequestContext;
 use document::Document;
 use schema::CollectionVersion;
 use serde_json::Value as JsonValue;
@@ -172,6 +173,9 @@ pub struct CreateNode {
     collection_name: String,
     /// Document mutator for storage operations
     mutator: Arc<dyn DocMutator>,
+    /// The context of the request the creates serve: [`RequestContext::ambient`]
+    /// until [`CreateNode::with_context`] sets it
+    context: RequestContext,
     /// Document mapping for field positions
     document_mapping: DocumentMapping,
     /// Collection schema for schema-aware type coercion (e.g., DateTime parsing)
@@ -209,6 +213,7 @@ impl CreateNode {
         Self {
             collection_name: collection_name.into(),
             mutator,
+            context: RequestContext::ambient(),
             document_mapping,
             collection: None,
             request_time: None,
@@ -220,6 +225,12 @@ impl CreateNode {
             did_create: false,
             initialized: false,
         }
+    }
+
+    /// Serve the request `context` belongs to.
+    pub fn with_context(mut self, context: RequestContext) -> Self {
+        self.context = context;
+        self
     }
 
     /// Add an input document to create.
@@ -326,7 +337,7 @@ impl PlanNode for CreateNode {
             // Batch create: single transaction, single commit/fsync
             let results = self
                 .mutator
-                .create_many(&self.collection_name, docs)
+                .create_many_as(&self.context, &self.collection_name, docs)
                 .await?;
 
             for result in &results {

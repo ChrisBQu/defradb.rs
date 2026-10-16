@@ -1,12 +1,9 @@
-//! Query execution with thread-local signing and DAC bypass context.
+//! Query execution with the request's context.
 //!
-//! HTTP handlers must set `signing_config` and `dac_bypass` thread-locals
-//! before executing queries to match FFI behavior. A task on a
-//! multi-threaded runtime can move between OS threads at `.await` points,
-//! so a query that needs them runs pinned to one thread of the network
-//! runtime ([`Edge::spawn_pinned`]), the thread-locals set on it first.
+//! The acting identity, the signing config, the batch signing session and the
+//! DAC bypass travel in the request's `RequestContext`, so a query runs on the
+//! task that received it, with no hop to another thread.
 
-use std::future::Future;
 use std::sync::Arc;
 
 use defra_core::signing::SigningConfig;
@@ -21,31 +18,16 @@ use crate::router::AppState;
 pub async fn execute_with_context(
     state: &AppState,
     identity: &ExtractIdentity,
-    request: QueryRequest,
+    mut request: QueryRequest,
 ) -> QueryResponse {
-    let signing_config = resolve_signing_config(state, identity);
-
-    let dac_bypass = resolve_dac_bypass(state, identity).await;
-
-    // Fast path: when there is nothing to put on the thread-locals, skip
-    // spawn_blocking entirely.
-    if signing_config.is_none() && state.nac.is_none() && !dac_bypass {
-        return execute_prepared_request(state, request).await;
-    }
-    let executor = state.executor.clone();
-    let acting_did = identity.did().map(|d| d.as_str().to_string());
-    run_pinned_with_context(
-        &state.edge,
-        signing_config,
-        dac_bypass,
-        acting_did,
-        move || async move { execute_prepared_with_executor(executor.as_ref(), request).await },
-    )
-    .await
-}
-
-async fn execute_prepared_request(state: &AppState, request: QueryRequest) -> QueryResponse {
-    execute_prepared_with_executor(state.executor.as_ref(), request).await
+    request.context = request_context(state, identity).await;
+    let context = request.context.clone();
+    context
+        .mirror(execute_prepared_with_executor(
+            state.executor.as_ref(),
+            request,
+        ))
+        .await
 }
 
 async fn execute_prepared_with_executor(
@@ -101,83 +83,64 @@ async fn execute_prepared_request_resolving_inputs(
 pub async fn execute_in_txn_with_context(
     state: &AppState,
     identity: &ExtractIdentity,
-    request: QueryRequest,
+    mut request: QueryRequest,
     txn_handle: TransactionHandle,
 ) -> QueryResponse {
-    let signing_config = resolve_signing_config(state, identity);
-
-    let dac_bypass = resolve_dac_bypass(state, identity).await;
-
-    // Fast path: see the note in `execute_with_context`.
-    if signing_config.is_none() && state.nac.is_none() && !dac_bypass {
-        return state.executor.execute_in_txn(request, &txn_handle).await;
-    }
-
-    let executor = state.executor.clone();
-    let acting_did = identity.did().map(|d| d.as_str().to_string());
-    run_pinned_with_context(
-        &state.edge,
-        signing_config,
-        dac_bypass,
-        acting_did,
-        move || async move { executor.execute_in_txn(request, &txn_handle).await },
-    )
-    .await
+    request.context = request_context(state, identity).await;
+    let context = request.context.clone();
+    context
+        .mirror(state.executor.execute_in_txn(request, &txn_handle))
+        .await
 }
 
-/// Execute a query pinned to one thread with pre-resolved context values.
+/// Execute a query with pre-resolved context values, `acting_did` acting in
+/// it.
 ///
 /// Used by SSE streams where signing config and DAC bypass are resolved once
-/// at subscription setup time, then reused for each per-event query.
+/// at subscription setup time, then reused for each per-event query. The
+/// query runs on the calling task; `_edge` is unused.
 pub async fn execute_with_resolved_context(
-    edge: &Edge,
+    _edge: &Edge,
     executor: Arc<dyn QueryExecutor>,
-    request: QueryRequest,
+    mut request: QueryRequest,
     signing_config: Option<SigningConfig>,
     dac_bypass: bool,
     acting_did: Option<String>,
 ) -> QueryResponse {
-    run_pinned_with_context(
-        edge,
+    request.context = with_signing_and_bypass(
+        request.context.with_identity(acting_did),
         signing_config,
         dac_bypass,
-        acting_did,
-        move || async move { executor.execute(request).await },
-    )
-    .await
+    );
+    let context = request.context.clone();
+    context.mirror(executor.execute(request)).await
 }
 
-/// Runs the query `run` builds on one thread of the network runtime, with
-/// the request's signing config, batch session key, DAC bypass, acting
-/// identity and bearer token set on that thread first.
-async fn run_pinned_with_context<R, Fut>(
-    edge: &Edge,
+/// The context of the request `identity` acts in, with the signing config,
+/// batch session and DAC bypass it resolves to.
+async fn request_context(
+    state: &AppState,
+    identity: &ExtractIdentity,
+) -> defra_core::RequestContext {
+    with_signing_and_bypass(
+        identity.context(),
+        resolve_signing_config(state, identity),
+        resolve_dac_bypass(state, identity).await,
+    )
+}
+
+/// `context` signing with `signing_config`, collecting into its batch session,
+/// and with the DAC bypass `dac_bypass`.
+fn with_signing_and_bypass(
+    context: defra_core::RequestContext,
     signing_config: Option<SigningConfig>,
     dac_bypass: bool,
-    acting_did: Option<String>,
-    run: R,
-) -> QueryResponse
-where
-    R: FnOnce() -> Fut + Send + 'static,
-    Fut: Future<Output = QueryResponse> + 'static,
-{
-    let batch_session_key = signing_config.as_ref().map(|s| s.public_key_hex.clone());
-    let bearer = acting_did
-        .as_deref()
-        .and_then(defra_core::signing::get_request_bearer_token);
-    edge.spawn_pinned(move || {
-        let identity_guard =
-            defra_core::current_identity::scoped_current_identity(acting_did.clone());
-        defra_core::signing::set_signing_config(signing_config);
-        defra_core::batch_signing::set_batch_session_key(batch_session_key);
-        defra_core::dac_bypass::set_dac_bypass(dac_bypass);
-        async move {
-            let _identity_guard = identity_guard;
-            defra_core::signing::scope_request_bearer_token(acting_did, bearer, run()).await
-        }
-    })
-    .await
-    .unwrap_or_else(|error| QueryResponse::error(format!("query execution task failed: {error}")))
+) -> defra_core::RequestContext {
+    let batch_session = signing_config.as_ref().map(|s| s.public_key_hex.clone());
+    context
+        .with_dac_bypass(dac_bypass)
+        .with_signing(signing_config)
+        .with_batch_session(batch_session)
 }
 
 /// Resolve the signing config for a request identity.
@@ -541,5 +504,140 @@ mod tests {
                 Some("request-token")
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod context_tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use kovan_queue::seg_queue::SegQueue;
+    use query::error::{Result, TransactionError};
+
+    use super::*;
+    use crate::router::AppStateBuilder;
+
+    const OWNER_DID: &str = "did:key:z6MkTestNodeOwner";
+    const ADMIN_DID: &str = "did:key:z6MkDacBypassAdmin";
+
+    /// Records the context of every request it serves.
+    #[derive(Default)]
+    struct ContextRecorder {
+        contexts: SegQueue<defra_core::RequestContext>,
+    }
+
+    impl ContextRecorder {
+        fn last(&self) -> Option<defra_core::RequestContext> {
+            std::iter::from_fn(|| self.contexts.pop()).last()
+        }
+    }
+
+    #[async_trait]
+    impl QueryExecutor for ContextRecorder {
+        fn abandon_txn(&self, _handle: &TransactionHandle) {}
+
+        async fn execute(&self, request: QueryRequest) -> QueryResponse {
+            self.contexts.push(request.context);
+            QueryResponse::success(serde_json::json!({}))
+        }
+
+        async fn execute_in_txn(
+            &self,
+            request: QueryRequest,
+            _handle: &TransactionHandle,
+        ) -> QueryResponse {
+            self.contexts.push(request.context);
+            QueryResponse::success(serde_json::json!({}))
+        }
+
+        async fn begin_txn(
+            &self,
+            _readonly: bool,
+        ) -> std::result::Result<TransactionHandle, TransactionError> {
+            Err(TransactionError::not_supported("test executor"))
+        }
+
+        async fn commit_txn(
+            &self,
+            _handle: &TransactionHandle,
+        ) -> std::result::Result<(), TransactionError> {
+            Err(TransactionError::not_supported("test executor"))
+        }
+
+        async fn rollback_txn(
+            &self,
+            _handle: &TransactionHandle,
+        ) -> std::result::Result<(), TransactionError> {
+            Err(TransactionError::not_supported("test executor"))
+        }
+
+        async fn schema(&self) -> Result<String> {
+            Ok(String::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_nac_admin_with_bypass_dac_carries_the_bypass_and_identity_in_its_request() {
+        let admin = identity::Did::new_unchecked(ADMIN_DID.to_string());
+        let executor = Arc::new(ContextRecorder::default());
+        let state = AppStateBuilder::new(executor.clone(), edge::testing::edge())
+            .with_signing_enabled(false)
+            .with_nac(Arc::new(
+                crate::MockNodeAcpOperations::enabled_with_owner(identity::Did::new_unchecked(
+                    OWNER_DID.to_string(),
+                ))
+                .with_grant(admin.clone(), acp::nac::NodePermission::DacBypass),
+            ))
+            .build();
+        let caller = ExtractIdentity::from_did(Some(admin));
+
+        execute_with_context(&state, &caller, QueryRequest::new("{ __typename }")).await;
+        let context = executor.last().expect("the query ran");
+        assert!(context.dac_bypass());
+        assert_eq!(context.identity(), Some(ADMIN_DID));
+
+        execute_in_txn_with_context(
+            &state,
+            &caller,
+            QueryRequest::new("{ __typename }"),
+            TransactionHandle::new("txn".into()),
+        )
+        .await;
+        let context = executor.last().expect("the query ran");
+        assert!(context.dac_bypass());
+        assert_eq!(context.identity(), Some(ADMIN_DID));
+
+        execute_with_resolved_context(
+            &state.edge,
+            executor.clone(),
+            QueryRequest::new("{ __typename }"),
+            None,
+            true,
+            Some(ADMIN_DID.to_string()),
+        )
+        .await;
+        let context = executor.last().expect("the query ran");
+        assert!(context.dac_bypass());
+        assert_eq!(context.identity(), Some(ADMIN_DID));
+    }
+
+    #[tokio::test]
+    async fn a_stranger_carries_no_bypass_in_its_request() {
+        let executor = Arc::new(ContextRecorder::default());
+        let state = AppStateBuilder::new(executor.clone(), edge::testing::edge())
+            .with_signing_enabled(false)
+            .with_nac(Arc::new(crate::MockNodeAcpOperations::enabled_with_owner(
+                identity::Did::new_unchecked(OWNER_DID.to_string()),
+            )))
+            .build();
+        let stranger = ExtractIdentity::from_did(Some(identity::Did::new_unchecked(
+            "did:key:z6MkSomeoneElse".to_string(),
+        )));
+
+        execute_with_context(&state, &stranger, QueryRequest::new("{ __typename }")).await;
+        let context = executor.last().expect("the query ran");
+        assert!(!context.dac_bypass());
+        assert_eq!(context.identity(), Some("did:key:z6MkSomeoneElse"));
     }
 }

@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, FixedOffset, Utc};
+use defra_core::RequestContext;
 use document::{DocID, Document};
 use schema::{CType, CollectionVersion};
 use serde_json::Value as JsonValue;
@@ -132,6 +133,9 @@ pub struct UpsertNode {
     collection_name: String,
     /// Document mutator for storage operations
     mutator: Arc<dyn DocMutator>,
+    /// The context of the request the upserts serve: [`RequestContext::ambient`]
+    /// until [`UpsertNode::with_context`] sets it
+    context: RequestContext,
     /// Document mapping for field positions
     document_mapping: DocumentMapping,
     /// Collection schema for schema-aware type coercion (e.g., DateTime/UTC_NOW)
@@ -173,6 +177,7 @@ impl UpsertNode {
         Self {
             collection_name: collection_name.into(),
             mutator,
+            context: RequestContext::ambient(),
             document_mapping,
             collection: None,
             request_time: None,
@@ -189,6 +194,12 @@ impl UpsertNode {
             did_upsert: false,
             initialized: false,
         }
+    }
+
+    /// Serve the request `context` belongs to.
+    pub fn with_context(mut self, context: RequestContext) -> Self {
+        self.context = context;
+        self
     }
 
     pub fn with_prepared_writes(
@@ -308,7 +319,7 @@ impl UpsertNode {
             }
             let result = self
                 .mutator
-                .update(&self.collection_name, doc, modified_fields)
+                .update_as(&self.context, &self.collection_name, doc, modified_fields)
                 .await?;
 
             let plan_doc = self.result_to_doc(&result.document)?;
@@ -356,7 +367,10 @@ impl UpsertNode {
             }
 
             let doc = self.prepared_create(doc)?;
-            let result = self.mutator.create(&self.collection_name, doc).await?;
+            let result = self
+                .mutator
+                .create_as(&self.context, &self.collection_name, doc)
+                .await?;
 
             let plan_doc = self.result_to_doc(&result.document)?;
             self.upserted_docs.push(plan_doc);
@@ -389,7 +403,10 @@ impl UpsertNode {
         };
 
         let doc = self.prepared_create(doc)?;
-        let result = self.mutator.create(&self.collection_name, doc).await?;
+        let result = self
+            .mutator
+            .create_as(&self.context, &self.collection_name, doc)
+            .await?;
 
         let plan_doc = self.result_to_doc(&result.document)?;
         self.upserted_docs.push(plan_doc);

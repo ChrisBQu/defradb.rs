@@ -12,7 +12,8 @@ use workers::Clock;
 /// wait on it, and timers for deadlines and backoff.
 ///
 /// The network edge ([`edge::Edge`]) is the implementation a node passes at
-/// construction. A service given none runs inline ([`Runtime::inline`]).
+/// construction; a component given none reaches the process's on-demand
+/// runtime ([`Runtime::on_demand`]).
 pub trait Network: MaybeSendSync + 'static {
     /// Runs `work` to its end, whoever waits on it. A network that cannot
     /// run it drops it, which settles its keys as closed.
@@ -33,6 +34,40 @@ impl Network for edge::Edge {
 
     fn sleep(&self, duration: Duration) -> MaybeBoxFuture<'static, ()> {
         Box::pin(edge::Edge::sleep(self, duration))
+    }
+}
+
+/// The process's on-demand network runtime ([`edge::on_demand`]), started
+/// by the first round trip that needs it. A runtime that cannot start runs
+/// nothing: the round trip is dropped, which settles its keys as closed, and
+/// the reason is logged.
+#[cfg(not(target_arch = "wasm32"))]
+struct OnDemand;
+
+#[cfg(not(target_arch = "wasm32"))]
+impl OnDemand {
+    fn edge() -> Option<&'static edge::Edge> {
+        edge::on_demand()
+            .inspect_err(|error| tracing::error!(%error, "the network runtime did not start"))
+            .ok()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Network for OnDemand {
+    fn spawn(&self, work: MaybeBoxFuture<'static, ()>) {
+        if let Some(edge) = Self::edge() {
+            Network::spawn(edge, work);
+        }
+    }
+
+    fn sleep(&self, duration: Duration) -> MaybeBoxFuture<'static, ()> {
+        match Self::edge() {
+            Some(edge) => Network::sleep(edge, duration),
+            // Only a wait on work that never ran asks: its keys settle as
+            // closed, which ends the wait first.
+            None => Box::pin(std::future::pending()),
+        }
     }
 }
 
@@ -83,11 +118,11 @@ impl Stopwatch {
 
 /// A service's network and clock, passed together.
 ///
-/// With a network (the node's edge) round trips run as its tasks, shared by
-/// every caller that asks for a key in flight, and timed by its timers. Inline
-/// (no network given) a caller's round trips run in the caller's own task:
-/// nothing is spawned and no timer is read, so it never reaches for a runtime
-/// it was not given. Its keys are batched and cached as usual but shared with
+/// With a network (the node's edge, or the process's on-demand runtime)
+/// round trips run as its tasks, shared by every caller that asks for a key
+/// in flight, and timed by its timers. Inline a caller's round trips run in
+/// the caller's own task: nothing is spawned and no timer is read, so it
+/// never reaches for a runtime. Its keys are batched and cached as usual but shared with
 /// no other caller, a round trip is bounded only by the source's own
 /// timeouts, and a retry follows a failure at once.
 #[derive(Clone)]
@@ -109,6 +144,18 @@ impl Runtime {
     /// The network edge `edge` and its runtime's clock.
     pub fn edge(edge: edge::Edge) -> Self {
         Self::new(Arc::new(edge), Arc::new(RuntimeClock::new()))
+    }
+
+    /// The process's network runtime, started by the first round trip that
+    /// needs it ([`edge::on_demand`]): for a component given no edge, so it
+    /// reaches the network all the same and a process that never does starts
+    /// no threads. In a browser, where a request needs no runtime of its own,
+    /// [`inline`](Self::inline).
+    pub fn on_demand() -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        return Self::new(Arc::new(OnDemand), Arc::new(RuntimeClock::new()));
+        #[cfg(target_arch = "wasm32")]
+        Self::inline()
     }
 
     /// No network: each caller runs its own round trips in its own task.

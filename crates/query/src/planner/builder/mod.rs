@@ -83,6 +83,9 @@ pub struct Planner {
     acp_registration_projection: Option<Arc<crate::txn::AcpRegistrationProjection>>,
     /// Identity for ACP permission checks
     identity_did: Option<Did>,
+    /// The request's DAC bypass (`RequestContext::dac_bypass`); that of
+    /// `RequestContext::ambient` until `with_dac_bypass` sets it
+    dac_bypass: bool,
     /// App read validator, applied after ACP
     retry_inputs: Option<crate::prepared::PreparedInputMemo>,
     read_validator: Option<Arc<dyn crate::access_hooks::ReadValidator>>,
@@ -130,6 +133,7 @@ impl Planner {
             acp: None,
             acp_registration_projection: None,
             identity_did: None,
+            dac_bypass: defra_core::RequestContext::ambient().dac_bypass(),
             read_validator: None,
             retry_inputs: None,
             fts_scores: RapidHashMap::new(),
@@ -181,6 +185,12 @@ impl Planner {
         self
     }
 
+    /// Set the request's DAC bypass for permission filtering in plans.
+    pub fn with_dac_bypass(mut self, dac_bypass: bool) -> Self {
+        self.dac_bypass = dac_bypass;
+        self
+    }
+
     pub fn with_acp_registration_projection(
         mut self,
         projection: Option<Arc<crate::txn::AcpRegistrationProjection>>,
@@ -220,12 +230,13 @@ impl Planner {
         collection: &CollectionVersion,
     ) -> Box<dyn PlanNode> {
         let acp = match (&self.acp, &collection.policy) {
-            (Some(acp), Some(policy)) => Some((
-                acp.clone(),
-                acp::Identity::from(self.identity_did.clone()),
-                policy.id.clone(),
-                policy.resource_name.clone(),
-            )),
+            (Some(acp), Some(policy)) => Some(crate::plan::AcpRead {
+                acp: acp.clone(),
+                identity: acp::Identity::from(self.identity_did.clone()),
+                dac_bypass: self.dac_bypass,
+                policy_id: policy.id.clone(),
+                resource_name: policy.resource_name.clone(),
+            }),
             _ => None,
         };
         let app = crate::access_hooks::AppReadCheck::bind(

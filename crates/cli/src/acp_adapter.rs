@@ -56,6 +56,16 @@ fn policy_to_info(policy: &Policy) -> PolicyInfo {
 
 #[async_trait]
 impl AcpOperations for AcpAdapter {
+    fn bind_request(&self, context: &defra_core::RequestContext) -> Option<Arc<dyn AcpOperations>> {
+        Some(Arc::new(Self {
+            store: Arc::clone(&self.store),
+            nac_checker: db::bound_node_access_checker(
+                Arc::clone(&self.nac_checker),
+                context.clone(),
+            ),
+        }))
+    }
+
     async fn add_policy(&self, yaml: &str) -> Result<String, String> {
         self.nac_checker
             .check_node_access(acp::nac::NodePermission::DacPolicyAdd)

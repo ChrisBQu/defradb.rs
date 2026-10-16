@@ -24,6 +24,7 @@ pub async fn write_collection_block(
         doc_composite_cid,
         signing_config,
         None,
+        None,
     )
     .await
     .map_err(|error| error.to_string())
@@ -36,17 +37,16 @@ pub(crate) async fn write_collection_block_with_inputs(
     schema_version_id: &str,
     doc_composite_cid: Cid,
     signing_config: Option<&SigningConfig>,
+    batch_session: Option<&str>,
     prepared_inputs: Option<&query::prepared::PreparedInputMemo>,
 ) -> Result<(Cid, Bytes), BuildError> {
-    let found = crate::block::heads::live_collection_heads(headstore, collection_short_id)
+    let set = crate::block::heads::collection_set(headstore, collection_short_id)
         .await
         .map_err(|e| format!("Failed to read collection heads: {}", e))?;
-    let mut col_heads = found.live;
-
+    // Live names ascend by CID text, as Go's Block.New() sorts the heads.
+    let found = crate::block::heads::CollectionHeads::of(&set);
     let priority: u64 = found.max_priority + 1;
-
-    // Sort heads by CID string representation to match Go's Block.New() sorting.
-    col_heads.sort_by_cached_key(|a| a.to_string());
+    let col_heads = found.live;
 
     // Create the Collection delta payload
     let collection_payload = CollectionDeltaPayload {
@@ -57,11 +57,6 @@ pub(crate) async fn write_collection_block_with_inputs(
     // The collection block links to the document composite block
     // Go uses empty string for link name here, fieldName comes from linked block's delta
     let links = vec![DAGLink::new(String::new(), doc_composite_cid)];
-
-    // Kept because `Block::new` takes the heads by value and the markers below
-    // need to name each one. A collection's head set is one entry in the common
-    // case and a handful after a merge, so this is not the copy to worry about.
-    let superseded_parents = col_heads.clone();
 
     // Create the collection block
     let mut collection_block =
@@ -89,40 +84,18 @@ pub(crate) async fn write_collection_block_with_inputs(
         .await
         .map_err(|e| format!("Failed to store collection block: {}", e))?;
 
-    // Record that this block superseded each head it was built on, rather than
-    // deleting those heads.
-    //
-    // Every key written here ends in `collection_cid`, this writer's own block,
-    // so two writers appending concurrently never write the same key and the
-    // engine has nothing to reject. Deleting the parents instead makes both
-    // writers write the parent's key, which is a write-write conflict that
-    // regolith refuses at every isolation level. See `proofs/tla/HeadSet.tla`
-    // (`MC_HeadSet_Red_EagerDelete.cfg` is that defect) and
-    // `HeadSet.applyDerived_parents_not_head` for why this reaches the same
-    // head set without the shared write.
-    crate::block::heads::record_supersedes(
+    // One blind merge: this block is a head and its parents are not. Two
+    // writers appending at once both commit.
+    crate::block::heads::publish_collection_block(
         headstore,
         collection_short_id,
-        &superseded_parents,
+        &set,
         collection_cid,
+        priority,
+        collection_block.heads.as_deref().unwrap_or_default(),
     )
     .await
-    .map_err(|e| format!("Failed to record superseded collection head: {}", e))?;
-
-    // Write new collection head: /c/{collection_id}/{cid} → priority
-    let col_head_key = HeadstoreColKey::new(collection_short_id, collection_cid);
-    let priority_bytes = encode_priority_varint(priority);
-    headstore
-        .set(&col_head_key.bytes(), &priority_bytes)
-        .await
-        .map_err(|e| format!("Failed to write collection head: {}", e))?;
-    crate::block::heads::prune_superseded_heads(
-        headstore,
-        collection_short_id,
-        crate::block::heads::RECLAIM_MAX_KEYS,
-    )
-    .await
-    .map_err(|e| format!("Failed to reclaim superseded collection heads: {e}"))?;
+    .map_err(|e| format!("Failed to write collection head: {}", e))?;
 
     tracing::debug!(
         collection_id = collection_short_id,
@@ -132,7 +105,7 @@ pub(crate) async fn write_collection_block_with_inputs(
         "Built collection block for branchable collection"
     );
 
-    collect_on_commit(blockstore, [collection_cid]).await?;
+    collect_on_commit(blockstore, batch_session, [collection_cid]).await?;
 
     Ok((collection_cid, collection_bytes.into()))
 }

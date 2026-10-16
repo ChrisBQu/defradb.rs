@@ -73,10 +73,10 @@ impl RegolithTxn {
         isolation: IsolationLevel,
         slot: TxnSlot,
         event_order: Arc<EventOrder>,
+        mode: regolith::ReadMode,
     ) -> Result<Self> {
-        // On a pool worker the handle reads on the worker's own queue, so a
-        // cache miss suspends the task instead of the thread.
-        let mode = super::worker_io::read_mode_for(db);
+        // On a pool the handle reads on a worker's queue, so a cache miss
+        // suspends the task instead of the thread.
         let handle = if readonly {
             Handle::ReadOnly(db.db().snapshot().with_read_mode(mode))
         } else {

@@ -8,7 +8,7 @@ use crate::types::{c_str_to_string, FfiResult};
 use crate::{ffi_async, try_ffi, ERR_INVALID_NODE_HANDLE};
 
 use super::{
-    check_and_set_dac_bypass, nac_permission_for_query, subscription_accepts_doc_id,
+    nac_permission_for_query, resolve_dac_bypass, subscription_accepts_doc_id,
     subscription_doc_ids, subscription_to_scoped_query,
 };
 
@@ -96,9 +96,9 @@ pub unsafe extern "C" fn exec_request_with_signing(
             _ => None,
         };
 
-        // Set up thread-local signer for block signing during mutations.
-        // Matches Go's behavior: if signing is enabled and no explicit identity,
-        // fall back to node identity for block signing.
+        // The signer for block signing during mutations. Matches Go's
+        // behavior: if signing is enabled and no explicit identity, fall back
+        // to node identity for block signing.
         let (node_did, node_signing_enabled) = NODES
             .get(node_ptr, |state| (state.identity_did(), state.signing_enabled))
             .unwrap_or((None, false));
@@ -115,18 +115,14 @@ pub unsafe extern "C" fn exec_request_with_signing(
         );
         // Use caller-provided session ID if available; otherwise fall back to public key.
         let session_key = batch_session.or_else(|| signing.as_ref().map(|s| s.public_key_hex.clone()));
-        defra_core::batch_signing::set_batch_session_key(session_key);
-        defra_core::signing::set_signing_config(signing);
 
-        // Set the ambient acting identity so DB-layer NAC checks can resolve
-        // the caller. The guard clears it on scope exit so it never leaks into
-        // the next request on this pooled thread.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            identity_str.as_ref().filter(|s| !s.is_empty()).cloned(),
-        );
-
-        // Check if identity has DAC bypass (NAC admin/owner can read all documents)
-        check_and_set_dac_bypass(rt, node_ptr, identity_did);
+        // The caller acts in the request's context, so DB-layer NAC checks
+        // resolve it; a NAC admin/owner can read all documents.
+        let context = defra_core::RequestContext::default()
+            .with_identity(identity_str.as_ref().filter(|s| !s.is_empty()).cloned())
+            .with_dac_bypass(resolve_dac_bypass(rt, node_ptr, identity_did))
+            .with_signing(signing)
+            .with_batch_session(session_key);
 
         // Check if this is a subscription query - handle it separately from regular queries/mutations.
         // Subscriptions return status=2 with a handle that the Go side polls via poll_graphql_subscription.
@@ -175,16 +171,8 @@ pub unsafe extern "C" fn exec_request_with_signing(
             // Create result channel for buffering processed subscription results
             let (result_tx, result_rx) = kovan_channel::bounded::<String>(256);
 
-            // Capture signing config and DAC bypass before spawning.
-            // The thread-locals were set on this thread (lines 63-116) but the
-            // service runs on a thread of the network runtime.
-            let sub_signing_config = defra_core::signing::get_signing_config();
-            let sub_dac_bypass = defra_core::dac_bypass::get_dac_bypass();
-            let sub_acting_did = defra_core::current_identity::get_current_identity();
-
             // A background service processes events and executes queries at event time.
             // This ensures the DB state at query execution matches the event's state.
-            let edge = rt.clone();
             let service = rt.spawn_service(async move {
                 while let Some(message) = subscription.recv().await {
                     if let Some(update) = message.as_update() {
@@ -211,7 +199,8 @@ pub unsafe extern "C" fn exec_request_with_signing(
                             }
                         };
 
-                        let mut request = query::QueryRequest::new(query_text);
+                        let mut request =
+                            query::QueryRequest::new(query_text).with_context(context.clone());
                         if sub_identity.is_some() {
                             request = request.with_identity(sub_identity.clone());
                         }
@@ -222,33 +211,9 @@ pub unsafe extern "C" fn exec_request_with_signing(
                             request = request.with_variables(vars.clone());
                         }
 
-                        // Execute pinned to one thread to keep the thread-locals,
-                        // matching HTTP's execute_with_resolved_context pattern.
-                        let runner = query_runner.clone();
-                        let config = sub_signing_config.clone();
-                        let bypass = sub_dac_bypass;
-                        let acting_did = sub_acting_did.clone();
-                        let response = match edge
-                            .spawn_pinned(move || {
-                                let identity_guard =
-                                    defra_core::current_identity::scoped_current_identity(
-                                        acting_did,
-                                    );
-                                defra_core::signing::set_signing_config(config);
-                                defra_core::dac_bypass::set_dac_bypass(bypass);
-                                async move {
-                                    let _identity_guard = identity_guard;
-                                    runner.execute(request).await
-                                }
-                            })
-                            .await
-                        {
-                            Ok(r) => r,
-                            Err(error) => {
-                                tracing::warn!(%error, "subscription query did not run");
-                                continue;
-                            }
-                        };
+                        // The request carries its context, so it runs on this
+                        // service's own task.
+                        let response = query_runner.execute(request).await;
 
                         // Skip empty results (filter excluded the document)
                         if !crate::subscription::response_has_data(&response) {
@@ -303,7 +268,7 @@ pub unsafe extern "C" fn exec_request_with_signing(
 
         ffi_async!(rt, {
             // Build request
-            let mut request = query::QueryRequest::new(query_str);
+            let mut request = query::QueryRequest::new(query_str).with_context(context);
             if did.is_some() {
                 request = request.with_identity(did);
             }

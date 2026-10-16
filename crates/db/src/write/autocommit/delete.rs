@@ -10,7 +10,7 @@ struct DeleteRetryAttempt<S: Store> {
     collection_name: String,
     collection: Collection,
     doc_id: DocID,
-    signing_config: Option<defra_core::signing::SigningConfig>,
+    context: RequestContext,
     prepared_inputs: Option<query::prepared::PreparedInputMemo>,
     heads: super::base_heads::BaseHeads,
 }
@@ -20,7 +20,7 @@ struct DeleteManyRetryAttempt<S: Store> {
     collection_name: String,
     collection: Collection,
     doc_ids: Vec<DocID>,
-    signing_config: Option<defra_core::signing::SigningConfig>,
+    context: RequestContext,
     prepared_inputs: Option<query::prepared::PreparedInputMemo>,
     heads: super::base_heads::BaseHeads,
 }
@@ -64,11 +64,12 @@ impl<S: Store + 'static> storage::corekv::RetryAttemptFn for DeleteRetryAttempt<
 impl<S: Store + 'static> AutoCommitMutator<S> {
     pub(super) async fn delete_with_resolved_inputs(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         doc_id: &DocID,
     ) -> query::error::Result<DeleteResult> {
         if self.prepared_inputs.is_some() {
-            return self.delete_impl(collection_name, doc_id).await;
+            return self.delete_impl(context, collection_name, doc_id).await;
         }
         let inputs = query::prepared::PreparedInputMemo::default();
         let mutator = Self {
@@ -76,10 +77,12 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             prepared_inputs: Some(inputs.clone()),
         };
         loop {
-            match mutator.delete_impl(collection_name, doc_id).await {
+            match mutator.delete_impl(context, collection_name, doc_id).await {
                 Err(query::error::QueryError::NeedsInput(request)) => {
                     inputs
-                        .answer_wave(&request, |wave| self.resolve_prepared_inputs(wave))
+                        .answer_wave(&request, |wave| {
+                            self.resolve_prepared_inputs_as(context, wave)
+                        })
                         .await?;
                 }
                 result => return result,
@@ -87,13 +90,26 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         }
     }
 
+    /// [`Self::delete_many_impl_as`] in [`RequestContext::ambient`].
     pub async fn delete_many_impl(
         &self,
         collection_name: &str,
         doc_ids: &[DocID],
     ) -> query::error::Result<Vec<DeleteResult>> {
+        self.delete_many_impl_as(&RequestContext::ambient(), collection_name, doc_ids)
+            .await
+    }
+
+    pub async fn delete_many_impl_as(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        doc_ids: &[DocID],
+    ) -> query::error::Result<Vec<DeleteResult>> {
         if self.prepared_inputs.is_some() {
-            return self.delete_many_once_impl(collection_name, doc_ids).await;
+            return self
+                .delete_many_once_impl(context, collection_name, doc_ids)
+                .await;
         }
         let inputs = query::prepared::PreparedInputMemo::default();
         let mutator = Self {
@@ -102,12 +118,14 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         };
         loop {
             match mutator
-                .delete_many_once_impl(collection_name, doc_ids)
+                .delete_many_once_impl(context, collection_name, doc_ids)
                 .await
             {
                 Err(query::error::QueryError::NeedsInput(request)) => {
                     inputs
-                        .answer_wave(&request, |wave| self.resolve_prepared_inputs(wave))
+                        .answer_wave(&request, |wave| {
+                            self.resolve_prepared_inputs_as(context, wave)
+                        })
                         .await?;
                 }
                 result => return result,
@@ -117,11 +135,12 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
     pub(super) async fn delete_impl(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         doc_id: &DocID,
     ) -> query::error::Result<DeleteResult> {
         self.db
-            .check_node_access(None, acp::nac::NodePermission::DocumentDelete)
+            .check_node_access_as(context, acp::nac::NodePermission::DocumentDelete)
             .await
             .map_err(|e| query::error::QueryError::permission_denied(e.to_string()))?;
 
@@ -135,7 +154,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             collection_name: collection_name.to_string(),
             collection: collection.clone(),
             doc_id: doc_id.clone(),
-            signing_config: get_signing_config(),
+            context: context.clone(),
             prepared_inputs: Some(self.prepared_inputs.clone().unwrap_or_default()),
             heads,
         };
@@ -185,6 +204,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
         self.db
             .check_node_access_in_txn(
+                &attempt.context,
                 txn.acpstore().map_err(crate::error::commit_query_error)?,
                 acp::nac::NodePermission::DocumentDelete,
             )
@@ -247,7 +267,8 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 &doc_id_string,
                 doc_short_id,
                 collection.version_id(),
-                attempt.signing_config.as_ref(),
+                attempt.context.signing(),
+                attempt.context.batch_session(),
                 attempt.prepared_inputs.as_ref(),
                 Some(heads.into_owned()),
             )
@@ -268,7 +289,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 &headstore,
                 block_result.cid,
                 doc_short_id,
-                attempt.signing_config.as_ref(),
+                &attempt.context,
                 attempt.prepared_inputs.as_ref(),
             )
             .await?;
@@ -292,7 +313,8 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             }
         };
         if let Some((cid, block, col_data)) = &artifacts {
-            self.register_deleted_doc_with_acp(
+            self.register_deleted_doc_with_acp_as(
+                &attempt.context,
                 &mut txn,
                 &collection,
                 canonical_doc_id.to_string(),
@@ -344,6 +366,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
     /// with per-document transactions).
     async fn delete_many_once_impl(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         doc_ids: &[DocID],
     ) -> query::error::Result<Vec<DeleteResult>> {
@@ -353,7 +376,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
         if doc_ids.len() == 1 {
             return self
-                .delete_impl(collection_name, &doc_ids[0])
+                .delete_impl(context, collection_name, &doc_ids[0])
                 .await
                 .map(|r| vec![r]);
         }
@@ -365,7 +388,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             collection_name: collection_name.to_string(),
             collection: collection.clone(),
             doc_ids: doc_ids.to_vec(),
-            signing_config: get_signing_config(),
+            context: context.clone(),
             prepared_inputs: Some(self.prepared_inputs.clone().unwrap_or_default()),
             heads,
         };
@@ -410,6 +433,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
         self.db
             .check_node_access_in_txn(
+                &attempt.context,
                 txn.acpstore().map_err(crate::error::commit_query_error)?,
                 acp::nac::NodePermission::DocumentDelete,
             )
@@ -477,7 +501,8 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     &canonical_id.to_string(),
                     doc_short_id,
                     collection.version_id(),
-                    attempt.signing_config.as_ref(),
+                    attempt.context.signing(),
+                    attempt.context.batch_session(),
                     attempt.prepared_inputs.as_ref(),
                     Some(heads.into_owned()),
                 )
@@ -498,7 +523,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     &headstore,
                     block_result.cid,
                     doc_short_id,
-                    attempt.signing_config.as_ref(),
+                    &attempt.context,
                     attempt.prepared_inputs.as_ref(),
                 )
                 .await?;
@@ -524,7 +549,12 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         };
         for (doc_id, _, artifacts) in &results {
             if artifacts.is_some() {
-                self.register_deleted_doc_with_acp(&mut txn, &collection, doc_id.to_string())?;
+                self.register_deleted_doc_with_acp_as(
+                    &attempt.context,
+                    &mut txn,
+                    &collection,
+                    doc_id.to_string(),
+                )?;
             }
         }
         if let Some(bus) = self.db.event_bus().cloned() {

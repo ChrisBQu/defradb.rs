@@ -11,6 +11,7 @@ use serde::Deserialize;
 use crate::error::{http_error_from_backend_message, HttpError};
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
+use crate::request_scope::bound;
 use crate::router::{AppState, IndexInfo, NodePermission};
 use crate::validation::validate_identifier;
 
@@ -54,7 +55,7 @@ pub async fn create_index(
 ) -> Result<Json<IndexInfo>, HttpError> {
     require_permission(&state, &identity, NodePermission::IndexCreate).await?;
 
-    let index_ops = state.require_index()?;
+    let index_ops = bound(state.require_index()?, &identity.context());
 
     // Validate collection name
     validate_identifier(&request.collection).map_err(|_| {
@@ -116,7 +117,7 @@ pub async fn list_indexes(
 ) -> Result<Json<Vec<IndexInfo>>, HttpError> {
     require_permission(&state, &identity, NodePermission::IndexList).await?;
 
-    let index_ops = state.require_index()?;
+    let index_ops = bound(state.require_index()?, &identity.context());
 
     // Validate collection name if provided
     if let Some(ref col) = query.collection {
@@ -148,7 +149,7 @@ pub async fn delete_index(
 ) -> Result<Json<()>, HttpError> {
     require_permission(&state, &identity, NodePermission::IndexDelete).await?;
 
-    let index_ops = state.require_index()?;
+    let index_ops = bound(state.require_index()?, &identity.context());
 
     // Validate collection name
     validate_identifier(&query.collection).map_err(|_| {

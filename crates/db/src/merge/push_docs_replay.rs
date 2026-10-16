@@ -229,6 +229,7 @@ pub struct ReplayPushGate {
     outbound_push_semaphore: Arc<Semaphore>,
     peer_pacer: ReplayPeerPacer,
     send_timeout: Duration,
+    network: p2p::network::Network,
 }
 
 impl ReplayPushGate {
@@ -250,7 +251,14 @@ impl ReplayPushGate {
             )),
             peer_pacer: ReplayPeerPacer::new(config.per_peer_rate_limit_burst.max(1), rate),
             send_timeout: config.send_timeout.max(Duration::from_millis(1)),
+            network: p2p::network::Network::default(),
         }
+    }
+
+    /// Paces and times its sends on `network`'s clock.
+    pub fn on(mut self, network: p2p::network::Network) -> Self {
+        self.network = network;
+        self
     }
 
     pub(crate) async fn acquire_document_task(
@@ -287,7 +295,7 @@ impl ReplayPushGate {
             if let Some(retry_after) = self.peer_pacer.retry_after(peer_id.as_str()) {
                 return Err(ReplayPushSendError::Backpressure { retry_after });
             }
-            n0_future::time::sleep(delay).await;
+            self.network.sleep(delay).await;
         }
 
         let _permit = self.outbound_push_semaphore.acquire_owned(1).await;
@@ -296,7 +304,9 @@ impl ReplayPushGate {
             return Err(ReplayPushSendError::Backpressure { retry_after });
         }
         admission.await?;
-        let reply = n0_future::time::timeout(self.send_timeout, send)
+        let reply = self
+            .network
+            .timeout(self.send_timeout, send)
             .await
             .map_err(|_| ReplayPushSendError::Timeout {
                 timeout: self.send_timeout,

@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use blockstore::Blockstore;
 use bytes::Bytes;
 use cid::Cid;
+use defra_core::RequestContext;
 use document::{DocID, Document};
 use kovan_queue::seg_queue::SegQueue;
 use p2p::sync::SyncCoordinator;
@@ -38,6 +39,7 @@ struct PendingBroadcast {
 
 struct BroadcastCapture<'a> {
     collection_name: &'a str,
+    creator_did: Option<String>,
     doc_id: &'a str,
     commit_cid: Option<Cid>,
     commit_block: Option<&'a Bytes>,
@@ -121,6 +123,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport + 'static>
     async fn capture_broadcast(&self, capture: BroadcastCapture<'_>) -> query::error::Result<()> {
         let BroadcastCapture {
             collection_name,
+            creator_did,
             doc_id,
             commit_cid,
             commit_block,
@@ -151,7 +154,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport + 'static>
             collection_name: collection_name.to_string(),
             document_json,
             se_artifacts,
-            creator_did: defra_core::signing::get_broadcast_creator_did(),
+            creator_did,
             broadcast_cid,
             broadcast_block: broadcast_block.cloned(),
         });
@@ -294,7 +297,11 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
     }
 
     fn requires_write_preparation(&self) -> bool {
-        self.inner.requires_write_preparation()
+        self.requires_write_preparation_as(&RequestContext::ambient())
+    }
+
+    fn requires_write_preparation_as(&self, context: &RequestContext) -> bool {
+        self.inner.requires_write_preparation_as(context)
     }
 
     fn supports_projected_updates(&self) -> bool {
@@ -308,8 +315,24 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         modified_fields: Option<RapidHashSet<String>>,
         encryption: Option<defra_core::encryption::EncryptionConfig>,
     ) -> query::error::Result<Document> {
+        self.prepare_write_as(
+            &RequestContext::ambient().or_encryption(encryption),
+            collection_name,
+            doc,
+            modified_fields,
+        )
+        .await
+    }
+
+    async fn prepare_write_as(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        doc: Document,
+        modified_fields: Option<RapidHashSet<String>>,
+    ) -> query::error::Result<Document> {
         self.inner
-            .prepare_write(collection_name, doc, modified_fields, encryption)
+            .prepare_write_as(context, collection_name, doc, modified_fields)
             .await
     }
 
@@ -317,14 +340,34 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         &self,
         request: &query::prepared::PreparedInputRequest,
     ) -> query::error::Result<Arc<[u8]>> {
-        self.inner.resolve_prepared_input(request).await
+        self.resolve_prepared_input_as(&RequestContext::ambient(), request)
+            .await
+    }
+
+    async fn resolve_prepared_input_as(
+        &self,
+        context: &RequestContext,
+        request: &query::prepared::PreparedInputRequest,
+    ) -> query::error::Result<Arc<[u8]>> {
+        self.inner.resolve_prepared_input_as(context, request).await
     }
 
     async fn resolve_prepared_inputs(
         &self,
         requests: Vec<query::prepared::PreparedInputRequest>,
     ) -> query::error::Result<Vec<Arc<[u8]>>> {
-        self.inner.resolve_prepared_inputs(requests).await
+        self.resolve_prepared_inputs_as(&RequestContext::ambient(), requests)
+            .await
+    }
+
+    async fn resolve_prepared_inputs_as(
+        &self,
+        context: &RequestContext,
+        requests: Vec<query::prepared::PreparedInputRequest>,
+    ) -> query::error::Result<Vec<Arc<[u8]>>> {
+        self.inner
+            .resolve_prepared_inputs_as(context, requests)
+            .await
     }
 
     async fn prepared_embedding_request(
@@ -372,11 +415,22 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         collection_name: &str,
         doc: Document,
     ) -> query::error::Result<CreateResult> {
-        let result = self.inner.create(collection_name, doc).await?;
+        self.create_as(&RequestContext::ambient(), collection_name, doc)
+            .await
+    }
+
+    async fn create_as(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        doc: Document,
+    ) -> query::error::Result<CreateResult> {
+        let result = self.inner.create_as(context, collection_name, doc).await?;
         let doc_id = result.doc_id.to_string();
         let document_json = document_json_value(&result.document);
         self.capture_broadcast(BroadcastCapture {
             collection_name,
+            creator_did: context.creator().map(str::to_owned),
             doc_id: &doc_id,
             commit_cid: result.commit_cid,
             commit_block: result.commit_block.as_ref(),
@@ -395,10 +449,26 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         doc: Document,
         modified_fields: RapidHashSet<String>,
     ) -> query::error::Result<UpdateResult> {
+        self.update_as(
+            &RequestContext::ambient(),
+            collection_name,
+            doc,
+            modified_fields,
+        )
+        .await
+    }
+
+    async fn update_as(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        doc: Document,
+        modified_fields: RapidHashSet<String>,
+    ) -> query::error::Result<UpdateResult> {
         let se_fields: Vec<String> = modified_fields.iter().cloned().collect();
         let result = self
             .inner
-            .update(collection_name, doc, modified_fields)
+            .update_as(context, collection_name, doc, modified_fields)
             .await?;
 
         if let Some(doc_id) = result.document.id() {
@@ -406,6 +476,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             let document_json = document_json_value(&result.document);
             self.capture_broadcast(BroadcastCapture {
                 collection_name,
+                creator_did: context.creator().map(str::to_owned),
                 doc_id: &doc_id,
                 commit_cid: result.commit_cid,
                 commit_block: result.commit_block.as_ref(),
@@ -434,18 +505,32 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         collection_name: &str,
         doc_id: &DocID,
     ) -> query::error::Result<DeleteResult> {
+        self.delete_as(&RequestContext::ambient(), collection_name, doc_id)
+            .await
+    }
+
+    async fn delete_as(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        doc_id: &DocID,
+    ) -> query::error::Result<DeleteResult> {
         let document_json = self
             .inner
             .get_for_update(collection_name, doc_id)
             .await?
             .and_then(|doc| document_json_value(&doc));
-        let result = self.inner.delete(collection_name, doc_id).await?;
+        let result = self
+            .inner
+            .delete_as(context, collection_name, doc_id)
+            .await?;
         let doc_id = result.doc_id.to_string();
         // Pass through the branchable collection block so it gets broadcast
         // alongside the composite delete (matches the non-batch BroadcastMutator
         // path and Go's two-update emit for branchable mutations).
         self.capture_broadcast(BroadcastCapture {
             collection_name,
+            creator_did: context.creator().map(str::to_owned),
             doc_id: &doc_id,
             commit_cid: result.commit_cid,
             commit_block: result.commit_block.as_ref(),

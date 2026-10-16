@@ -106,27 +106,3 @@ fn parse_key_type(key_type: &str) -> Result<(IdentityKeyType, SigningKeyType)> {
         ))),
     }
 }
-
-/// Installs a signing config for as long as it is held.
-///
-/// The config is a thread-local the write path reads, and blocks arriving from
-/// peers must not be signed with this key, so it is installed around a
-/// local write and taken away again.
-///
-/// One writer at a time: the caller holds the mutation lock, because a guard
-/// dropped while another mutation is still in flight would leave that one
-/// writing unsigned blocks.
-pub(crate) struct SigningGuard;
-
-impl SigningGuard {
-    pub(crate) fn install(identity: Option<&ClientIdentity>) -> Self {
-        defra_core::signing::set_signing_config(identity.map(ClientIdentity::signing_config));
-        Self
-    }
-}
-
-impl Drop for SigningGuard {
-    fn drop(&mut self) {
-        defra_core::signing::set_signing_config(None);
-    }
-}

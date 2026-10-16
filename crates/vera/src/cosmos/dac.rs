@@ -29,6 +29,9 @@ pub struct VeraDocumentACP {
     decisions: inputs::Service<RemoteDecisions>,
     #[cfg(not(target_arch = "wasm32"))]
     event_subscriber: Option<super::event_subscriber::CosmosEventSubscriber>,
+    /// The request this ACP serves, for one bound to it: the bearer tokens
+    /// its callers write with.
+    context: Option<defra_core::RequestContext>,
 }
 
 /// How long a remote decision may take when the caller sets nothing else.
@@ -45,11 +48,12 @@ impl VeraDocumentACP {
 
     fn with_cache(provider: Arc<dyn VeraProvider>, access_cache: Option<Arc<AccessCache>>) -> Self {
         Self {
-            decisions: Self::decisions(&provider, inputs::Runtime::inline(), DECISION_TIMEOUT),
+            decisions: Self::decisions(&provider, inputs::Runtime::on_demand(), DECISION_TIMEOUT),
             provider,
             access_cache,
             #[cfg(not(target_arch = "wasm32"))]
             event_subscriber: None,
+            context: None,
         }
     }
 
@@ -68,29 +72,30 @@ impl VeraDocumentACP {
     }
 
     /// A cached ACP as `tuning` sets it, its remote decisions on the network
-    /// runtime `network` when the node has one.
+    /// runtime `network` when the node has one, else on the process's
+    /// on-demand runtime.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn tuned(
         provider: Arc<dyn VeraProvider>,
         tuning: &crate::AcpTuning,
         network: Option<&edge::Edge>,
     ) -> Self {
-        let acp = Self::new(provider, tuning.cache_ttl);
-        match network {
-            Some(edge) => acp.on_network(edge, tuning.request_timeout),
-            None => acp,
-        }
+        let runtime = network.map_or_else(inputs::Runtime::on_demand, |edge| {
+            inputs::Runtime::edge(edge.clone())
+        });
+        Self::new(provider, tuning.cache_ttl).on_runtime(runtime, tuning.request_timeout)
     }
 
     /// Remote decisions run on the network runtime `edge`, each within twice
     /// `request_timeout` (one retry).
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn on_network(mut self, edge: &edge::Edge, request_timeout: Duration) -> Self {
-        self.decisions = Self::decisions(
-            &self.provider,
-            inputs::Runtime::edge(edge.clone()),
-            request_timeout,
-        );
+    pub fn on_network(self, edge: &edge::Edge, request_timeout: Duration) -> Self {
+        self.on_runtime(inputs::Runtime::edge(edge.clone()), request_timeout)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn on_runtime(mut self, runtime: inputs::Runtime, request_timeout: Duration) -> Self {
+        self.decisions = Self::decisions(&self.provider, runtime, request_timeout);
         self
     }
 
@@ -201,8 +206,9 @@ impl VeraDocumentACP {
     }
 
     async fn create_bearer_token(&self, did: &str) -> std::result::Result<String, acp::Error> {
+        let context = defra_core::RequestContext::bound_or_ambient(self.context.as_ref());
         self.provider
-            .create_bearer_token(did)
+            .create_bearer_token_as(&context, did)
             .await
             .map_err(provider_err)
     }
@@ -240,6 +246,21 @@ fn provider_err(e: impl std::fmt::Display) -> acp::Error {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl DocumentACP for VeraDocumentACP {
+    fn bind_request(&self, context: &defra_core::RequestContext) -> Option<Arc<dyn DocumentACP>> {
+        Some(Arc::new(Self {
+            provider: Arc::clone(&self.provider),
+            access_cache: self.access_cache.clone(),
+            decisions: self.decisions.clone(),
+            #[cfg(not(target_arch = "wasm32"))]
+            event_subscriber: None,
+            context: Some(context.clone()),
+        }))
+    }
+
+    fn bearer_token_for(&self, did: &str) -> Option<String> {
+        defra_core::RequestContext::bound_or_ambient(self.context.as_ref()).bearer_token_for(did)
+    }
+
     fn unregistered_documents_are_public(&self) -> bool {
         self.provider.unregistered_documents_are_public()
     }

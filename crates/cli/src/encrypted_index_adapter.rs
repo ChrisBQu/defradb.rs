@@ -1,6 +1,8 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use defra_core::RequestContext;
 
 use defra_http::router::{EncryptedIndexInfo, EncryptedIndexOperations};
 use storage::corekv::{Key, Store};
@@ -8,23 +10,39 @@ use storage::corekv::{Key, Store};
 /// Adapter that implements EncryptedIndexOperations using database SE support.
 pub struct EncryptedIndexAdapter<S: Store> {
     database: Arc<db::DB<S>>,
+    /// The request this adapter serves, for one bound to it.
+    context: Option<RequestContext>,
 }
 
 impl<S: Store + 'static> EncryptedIndexAdapter<S> {
     pub fn new_arc(database: Arc<db::DB<S>>) -> Arc<dyn EncryptedIndexOperations> {
-        Arc::new(Self { database })
+        Arc::new(Self {
+            database,
+            context: None,
+        })
+    }
+
+    fn context(&self) -> Cow<'_, RequestContext> {
+        RequestContext::bound_or_ambient(self.context.as_ref())
     }
 }
 
 #[async_trait]
 impl<S: Store + 'static> EncryptedIndexOperations for EncryptedIndexAdapter<S> {
+    fn bind_request(&self, context: &RequestContext) -> Option<Arc<dyn EncryptedIndexOperations>> {
+        Some(Arc::new(Self {
+            database: Arc::clone(&self.database),
+            context: Some(context.clone()),
+        }))
+    }
+
     async fn add_encrypted_index(
         &self,
         collection: &str,
         field_name: &str,
     ) -> Result<EncryptedIndexInfo, String> {
         self.database
-            .check_node_access(None, acp::nac::NodePermission::EncryptedIndexAdd)
+            .check_node_access_as(&self.context(), acp::nac::NodePermission::EncryptedIndexAdd)
             .await
             .map_err(|e| format!("{}", e))?;
 
@@ -111,7 +129,10 @@ impl<S: Store + 'static> EncryptedIndexOperations for EncryptedIndexAdapter<S> {
         match collection {
             Some(name) => {
                 self.database
-                    .check_node_access(None, acp::nac::NodePermission::EncryptedIndexList)
+                    .check_node_access_as(
+                        &self.context(),
+                        acp::nac::NodePermission::EncryptedIndexList,
+                    )
                     .await
                     .map_err(|e| format!("{}", e))?;
 
@@ -134,7 +155,10 @@ impl<S: Store + 'static> EncryptedIndexOperations for EncryptedIndexAdapter<S> {
             }
             None => {
                 self.database
-                    .check_node_access(None, acp::nac::NodePermission::EncryptedIndexListAll)
+                    .check_node_access_as(
+                        &self.context(),
+                        acp::nac::NodePermission::EncryptedIndexListAll,
+                    )
                     .await
                     .map_err(|e| format!("{}", e))?;
 
@@ -166,7 +190,10 @@ impl<S: Store + 'static> EncryptedIndexOperations for EncryptedIndexAdapter<S> {
         field_name: &str,
     ) -> Result<(), String> {
         self.database
-            .check_node_access(None, acp::nac::NodePermission::EncryptedIndexDelete)
+            .check_node_access_as(
+                &self.context(),
+                acp::nac::NodePermission::EncryptedIndexDelete,
+            )
             .await
             .map_err(|e| format!("{}", e))?;
 

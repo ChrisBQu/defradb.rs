@@ -18,8 +18,7 @@ struct UpdateRetryAttempt<S: Store> {
     modified_fields: rapidhash::RapidHashSet<String>,
     input_doc_id: DocID,
     canonical_doc_id: String,
-    signing_config: Option<defra_core::signing::SigningConfig>,
-    encryption_config: Option<defra_core::encryption::EncryptionConfig>,
+    context: RequestContext,
     prepared_inputs: Option<query::prepared::PreparedInputMemo>,
     heads: super::base_heads::BaseHeads,
 }
@@ -46,17 +45,26 @@ impl<S: Store + 'static> storage::corekv::RetryAttemptFn for UpdateRetryAttempt<
 impl<S: Store + 'static> AutoCommitMutator<S> {
     pub(super) async fn update_with_resolved_inputs(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         expected: Option<Document>,
         doc: Document,
         fields: rapidhash::RapidHashSet<String>,
     ) -> query::error::Result<UpdateResult> {
-        self.update_with_projected_resolved_inputs(collection_name, expected, None, doc, fields)
-            .await
+        self.update_with_projected_resolved_inputs(
+            context,
+            collection_name,
+            expected,
+            None,
+            doc,
+            fields,
+        )
+        .await
     }
 
     pub(super) async fn update_with_projected_resolved_inputs(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         expected: Option<Document>,
         expected_fields: Option<rapidhash::RapidHashSet<String>>,
@@ -65,7 +73,14 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
     ) -> query::error::Result<UpdateResult> {
         if self.prepared_inputs.is_some() {
             return self
-                .update_impl(collection_name, expected, expected_fields, doc, fields)
+                .update_impl(
+                    context,
+                    collection_name,
+                    expected,
+                    expected_fields,
+                    doc,
+                    fields,
+                )
                 .await;
         }
         let inputs = query::prepared::PreparedInputMemo::default();
@@ -76,6 +91,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         loop {
             match mutator
                 .update_impl(
+                    context,
                     collection_name,
                     expected.clone(),
                     expected_fields.clone(),
@@ -86,7 +102,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             {
                 Err(query::error::QueryError::NeedsInput(request)) => {
                     inputs
-                        .answer_wave(&request, |wave| self.resolve_prepared_inputs(wave))
+                        .answer_wave(&request, |wave| {
+                            self.resolve_prepared_inputs_as(context, wave)
+                        })
                         .await?;
                 }
                 result => return result,
@@ -96,6 +114,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
     pub(super) async fn update_impl(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         expected: Option<Document>,
         expected_fields: Option<rapidhash::RapidHashSet<String>>,
@@ -103,7 +122,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         modified_fields: rapidhash::RapidHashSet<String>,
     ) -> query::error::Result<UpdateResult> {
         self.db
-            .check_node_access(None, acp::nac::NodePermission::DocumentUpdate)
+            .check_node_access_as(context, acp::nac::NodePermission::DocumentUpdate)
             .await
             .map_err(|error| query::error::QueryError::permission_denied(error.to_string()))?;
 
@@ -166,8 +185,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             modified_fields,
             input_doc_id,
             canonical_doc_id,
-            signing_config: get_signing_config(),
-            encryption_config: get_encryption_config(),
+            context: context.clone(),
             prepared_inputs: Some(self.prepared_inputs.clone().unwrap_or_default()),
             heads,
         };
@@ -228,6 +246,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .map_err(crate::error::commit_query_error)?;
         self.db
             .check_node_access_in_txn(
+                &attempt.context,
                 txn.acpstore().map_err(crate::error::commit_query_error)?,
                 acp::nac::NodePermission::DocumentUpdate,
             )
@@ -372,8 +391,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     collection.version_id(),
                     DocStorageIdentity::new(collection.resolved_root_id(), doc_short_id),
                     Some(&modified_fields),
-                    attempt.encryption_config.as_ref(),
-                    attempt.signing_config.as_ref(),
+                    attempt.context.encryption(),
+                    attempt.context.signing(),
+                    attempt.context.batch_session(),
                     self.db.kms().as_ref(),
                     attempt.prepared_inputs.as_ref(),
                     Some(heads.into_owned()),
@@ -396,7 +416,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     &headstore,
                     block_result.cid,
                     doc_short_id,
-                    attempt.signing_config.as_ref(),
+                    &attempt.context,
                     attempt.prepared_inputs.as_ref(),
                 )
                 .await?;

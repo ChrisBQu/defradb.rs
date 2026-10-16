@@ -87,6 +87,16 @@ pub struct Mutation {
 }
 
 impl Mutation {
+    /// The encryption this mutation asks its writes for, if it asks for any.
+    pub fn encryption(&self) -> Option<defra_core::encryption::EncryptionConfig> {
+        (self.encrypt_doc || !self.encrypt_fields.is_empty()).then(|| {
+            defra_core::encryption::EncryptionConfig {
+                encrypt_doc: self.encrypt_doc,
+                encrypt_fields: self.encrypt_fields.clone(),
+            }
+        })
+    }
+
     /// Create a new CREATE mutation.
     pub fn create(collection_name: impl Into<String>) -> Self {
         Self {

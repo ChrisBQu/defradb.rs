@@ -88,12 +88,6 @@ pub unsafe extern "C" fn add_dac_policy(
             NodePermission::DacPolicyAdd
         ));
 
-        // Bind the caller's identity so any NAC-gated method reached by the body's
-        // block_on resolves the actual caller instead of the wildcard.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            crate::types::c_str_to_string(_identity_did).filter(|s| !s.is_empty()),
-        );
-
         let policy_str = try_ffi!(require_c_str(policy, "policy"));
 
         let identity_str = c_str_to_string(_identity_did).unwrap_or_default();
@@ -308,12 +302,6 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
             NodePermission::DacRelationAdd
         ));
 
-        // Bind the caller's identity so any NAC-gated method reached by the body
-        // resolves the actual caller instead of the wildcard.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            crate::types::c_str_to_string(requestor_did).filter(|s| !s.is_empty()),
-        );
-
         let requestor_str = try_ffi!(require_c_str(requestor_did, "requestor_did"));
         let target_str = try_ffi!(require_c_str(target_did, "target_did"));
         let collection_id_str = try_ffi!(require_c_str(collection_id, "collection_id"));
@@ -463,12 +451,6 @@ pub unsafe extern "C" fn delete_dac_actor_relationship(
             requestor_did,
             NodePermission::DacRelationDelete
         ));
-
-        // Bind the caller's identity so any NAC-gated method reached by the body
-        // resolves the actual caller instead of the wildcard.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            crate::types::c_str_to_string(requestor_did).filter(|s| !s.is_empty()),
-        );
 
         let requestor_str = try_ffi!(require_c_str(requestor_did, "requestor_did"));
         let target_str = try_ffi!(require_c_str(target_did, "target_did"));

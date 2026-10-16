@@ -7,6 +7,7 @@ use rapidhash::{HashMapExt, RapidHashMap};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use defra_core::RequestContext;
 use document::DocID;
 use tracing;
 
@@ -42,6 +43,9 @@ pub struct DeleteNode {
     collection_name: String,
     /// Document mutator for storage operations
     mutator: Arc<dyn DocMutator>,
+    /// The context of the request the deletes serve: [`RequestContext::ambient`]
+    /// until [`DeleteNode::with_context`] sets it
+    context: RequestContext,
     /// Document fetcher for resolving filters and getting all documents
     fetcher: Arc<dyn DocFetcher>,
     /// Document mapping for field positions
@@ -82,6 +86,7 @@ impl DeleteNode {
         Self {
             collection_name: collection_name.into(),
             mutator,
+            context: RequestContext::ambient(),
             fetcher,
             document_mapping,
             doc_ids: None,
@@ -93,6 +98,12 @@ impl DeleteNode {
             did_delete: false,
             initialized: false,
         }
+    }
+
+    /// Serve the request `context` belongs to.
+    pub fn with_context(mut self, context: RequestContext) -> Self {
+        self.context = context;
+        self
     }
 
     /// Set specific document IDs to delete.
@@ -197,7 +208,10 @@ impl PlanNode for DeleteNode {
                 }
 
                 for (doc_id_str, doc_id) in parsed_ids {
-                    let result = self.mutator.delete(&self.collection_name, &doc_id).await?;
+                    let result = self
+                        .mutator
+                        .delete_as(&self.context, &self.collection_name, &doc_id)
+                        .await?;
 
                     if result.existed {
                         let plan_doc = if let Some(storage_doc) = doc_map.get(&doc_id_str) {
@@ -236,7 +250,10 @@ impl PlanNode for DeleteNode {
                             QueryError::execution(format!("Invalid DocID '{}': {}", id, e))
                         })?;
 
-                        let result = self.mutator.delete(&self.collection_name, &doc_id).await?;
+                        let result = self
+                            .mutator
+                            .delete_as(&self.context, &self.collection_name, &doc_id)
+                            .await?;
 
                         if result.existed {
                             let plan_doc = self.create_deleted_doc_from_document(storage_doc)?;

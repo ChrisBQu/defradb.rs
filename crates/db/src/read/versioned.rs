@@ -612,12 +612,16 @@ impl<S: Store> VersionedFetcher<S> {
             .map_err(|_| "invalid AES-256 encryption key".to_string()))
     }
 
+    /// The KMS request a read key is fetched under: the identity reading, or
+    /// the one acting in [`defra_core::RequestContext::ambient`] when the
+    /// fetcher names none.
     pub fn kms_request_context(&self) -> kms::RequestContext {
         self.caller_identity
             .clone()
             .or_else(|| {
-                defra_core::current_identity::get_effective_identity()
-                    .and_then(|did| identity::Did::new(&did).ok())
+                defra_core::RequestContext::ambient()
+                    .identity()
+                    .and_then(|did| identity::Did::new(did).ok())
             })
             .map(kms::RequestContext::with_user)
             .unwrap_or_else(kms::RequestContext::anonymous)

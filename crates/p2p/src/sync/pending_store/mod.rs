@@ -24,6 +24,7 @@
 //! no remote retry state is destroyed by their acks, so restart loss is
 //! recoverable by re-issuing the pull.
 
+mod pooled;
 mod slots;
 mod store;
 #[cfg(test)]
@@ -40,6 +41,7 @@ use web_time::{SystemTime, UNIX_EPOCH};
 use crate::error::{Error, Result};
 use crate::ExplicitReplayAuthorization;
 
+pub use pooled::pooled_pending_store;
 pub use store::PendingDagStore;
 pub use view::PersistedView;
 

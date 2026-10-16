@@ -27,6 +27,7 @@ server = [
     "dep:tokio-stream",
     "dep:tower",
     "dep:tower-http",
+    "dep:workers",
 ]
 test-utils = ["server"]
 
@@ -53,6 +54,8 @@ cid.workspace = true
 
 # Async runtime: requests run on the network runtime the server is given.
 edge = { path = "../edge", optional = true }
+# The worker pool the data-path routes run on.
+workers = { path = "../workers", optional = true }
 tokio = { workspace = true, features = ["rt", "net", "time"], optional = true }
 tokio-stream = { workspace = true, optional = true }
 async-trait.workspace = true
@@ -93,6 +96,7 @@ telemetry = { path = "../telemetry", optional = true }
 db = { path = "../db", default-features = false, features = ["native"] }
 
 [dev-dependencies]
+defra-core = { path = "../defra-core", features = ["ambient"] }
 edge = { path = "../edge", features = ["testing"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "test-util"] }
 tower = { workspace = true, features = ["util"] }

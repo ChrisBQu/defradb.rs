@@ -19,8 +19,9 @@ mod tests;
 pub use collections::TxnCollections;
 pub use context::{
     check_doc_access_with_prepared_inputs, check_doc_access_with_projection,
-    check_doc_read_access_with_prepared_inputs, is_doc_registered_with_prepared_inputs,
-    is_doc_registered_with_projection, AcpRegistrationProjection, TransactionContext,
+    check_doc_read_access_as, check_doc_read_access_with_prepared_inputs,
+    is_doc_registered_with_prepared_inputs, is_doc_registered_with_projection,
+    AcpRegistrationProjection, TransactionContext,
 };
 pub use guard::TransactionGuard;
 pub use handle::TransactionHandle;

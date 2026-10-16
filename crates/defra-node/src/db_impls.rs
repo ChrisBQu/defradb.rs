@@ -1,8 +1,8 @@
 //! Trait implementations bridging DB to the embedded node's type-erased traits.
 
-use crate::Result;
 use std::sync::Arc;
 
+use defra_core::RequestContext;
 use identity::Did;
 use lens::{LensConfig, TransformId};
 use schema::CollectionVersion;
@@ -65,7 +65,7 @@ impl<S: storage::corekv::Store + 'static> BlockOps for DbBlockOps<S> {
         &self,
         cid: &str,
         caller_did: Option<&str>,
-    ) -> Result<(Vec<u8>, Vec<u8>)> {
+    ) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
         let caller_did = caller_did
             .map(|did| Did::try_from(did.to_string()))
             .transpose()?;
@@ -77,10 +77,10 @@ impl<S: storage::corekv::Store + 'static> BlockOps for DbBlockOps<S> {
             &caller_identity,
         )
         .await
-        .map_err(crate::Error::from)
+        .map_err(anyhow::Error::msg)
     }
 
-    async fn verified_signer_did(&self, cid: &str) -> Result<String> {
+    async fn verified_signer_did(&self, cid: &str) -> anyhow::Result<String> {
         db::block::verify::verified_block_signer_did(
             &self.database,
             self.document_acp.as_ref(),
@@ -88,23 +88,25 @@ impl<S: storage::corekv::Store + 'static> BlockOps for DbBlockOps<S> {
             &self.caller_identity,
         )
         .await
-        .map_err(crate::Error::from)
+        .map_err(anyhow::Error::msg)
     }
 
     async fn verified_signer_did_in_txn(
         &self,
+        context: &RequestContext,
         cid: &str,
         transaction: &query::TransactionHandle,
-    ) -> Result<String> {
+    ) -> anyhow::Result<String> {
         self.transaction_registry
-            .verified_block_signer_did_in_txn(
+            .verified_block_signer_did_in_txn_as(
+                context,
                 transaction.as_str(),
                 self.document_acp.clone(),
                 cid,
                 &self.caller_identity,
             )
             .await
-            .map_err(crate::Error::from)
+            .map_err(anyhow::Error::new)
     }
 }
 
@@ -133,27 +135,27 @@ impl<S: storage::corekv::Store + 'static> DbSchemaOps<S> {
     /// Reject any `@policy` directive that does not resolve to a usable resource
     /// in the policy store, so a permissioned collection is never created public.
     /// Collections without a policy never touch the store.
-    async fn validate_policies(&self, collections: &[CollectionVersion]) -> Result<()> {
+    async fn validate_policies(&self, collections: &[CollectionVersion]) -> anyhow::Result<()> {
         for collection in collections {
             let Some(policy) = &collection.policy else {
                 continue;
             };
             let stored = self.policy_lookup.get_policy(&policy.id).await?;
             acp::validate_resource_interface(&policy.id, &policy.resource_name, stored.as_ref())
-                .map_err(|e| crate::err!("schema policy validation error: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("schema policy validation error: {}", e))?;
         }
         Ok(())
     }
 
-    /// Resolve the ambient identity into a creator DID. Returns `Ok(None)` when
-    /// no identity is present (collection stays public), but fails closed when an
-    /// identity string is present yet malformed, so a permissioned collection is
-    /// never silently created unregistered.
-    fn current_identity() -> Result<Option<Did>> {
-        match defra_core::current_identity::get_effective_identity() {
+    /// Resolve the identity acting in `context` into a creator DID. Returns
+    /// `Ok(None)` when no identity is present (collection stays public), but
+    /// fails closed when an identity string is present yet malformed, so a
+    /// permissioned collection is never silently created unregistered.
+    fn creator(context: &RequestContext) -> anyhow::Result<Option<Did>> {
+        match context.identity() {
             Some(raw) => {
                 Ok(Some(Did::new(raw).map_err(|e| {
-                    crate::err!("malformed ambient identity: {}", e)
+                    anyhow::anyhow!("malformed acting identity: {}", e)
                 })?))
             }
             None => Ok(None),
@@ -163,38 +165,48 @@ impl<S: storage::corekv::Store + 'static> DbSchemaOps<S> {
 
 #[async_trait::async_trait]
 impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
-    async fn add_schema(&self, sdl: &str) -> Result<Vec<CollectionVersion>> {
-        let creator = Self::current_identity()?;
+    async fn add_schema(
+        &self,
+        context: &RequestContext,
+        sdl: &str,
+    ) -> anyhow::Result<Vec<CollectionVersion>> {
+        let creator = Self::creator(context)?;
         self.database
-            .check_node_access(None, acp::nac::NodePermission::CollectionPatch)
+            .check_node_access_as(context, acp::nac::NodePermission::CollectionPatch)
             .await
-            .map_err(crate::Error::from)?;
+            .map_err(anyhow::Error::new)?;
 
         let collections =
-            query::parse_sdl(sdl).map_err(|e| crate::err!("SDL parse error: {}", e))?;
+            query::parse_sdl(sdl).map_err(|e| anyhow::anyhow!("SDL parse error: {}", e))?;
 
         schema::definition_validation::validate_new_collections(&collections)
-            .map_err(|e| crate::err!("schema validation error: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("schema validation error: {}", e))?;
 
         self.validate_policies(&collections).await?;
 
         let created = self
             .database
-            .create_collections_atomic_with_acp_registration(
+            .create_collections_atomic_with_acp_registration_as(
+                context,
                 collections,
                 self.document_acp.clone(),
                 creator,
             )
             .await
-            .map_err(|e| crate::err!("create collection error: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("create collection error: {}", e))?;
         Ok(created)
     }
 
-    async fn add_view(&self, source_query: &str, target_sdl: &str) -> Result<()> {
+    async fn add_view(
+        &self,
+        context: &RequestContext,
+        source_query: &str,
+        target_sdl: &str,
+    ) -> anyhow::Result<()> {
         self.database
-            .check_node_access(None, acp::nac::NodePermission::ViewAdd)
+            .check_node_access_as(context, acp::nac::NodePermission::ViewAdd)
             .await
-            .map_err(crate::Error::from)?;
+            .map_err(anyhow::Error::new)?;
 
         let known_types: rapidhash::RapidHashSet<String> = db::DB::list_collections(&self.database)
             .unwrap_or_default()
@@ -202,15 +214,15 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
             .collect();
 
         let mut collections = query::parse_sdl_with_known_types(target_sdl, known_types)
-            .map_err(|e| crate::err!("view SDL parse error: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("view SDL parse error: {}", e))?;
 
         let wrapped_query = format!("query {{ {} }}", source_query.trim());
         let selects = query::parse_query_with_limits(&wrapped_query, None, self.query_limits)
-            .map_err(|e| crate::err!("view query parse error: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("view query parse error: {}", e))?;
         let select = selects
             .into_iter()
             .next()
-            .ok_or_else(|| crate::err!("invalid view query: no selections found"))?;
+            .ok_or_else(|| anyhow::anyhow!("invalid view query: no selections found"))?;
         let query_source = schema::QuerySource::new(query::select_to_go_json(&select));
 
         let mut materialized_names = Vec::new();
@@ -221,7 +233,7 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
                 collection.downsample_source = Some(query_source.clone());
                 self.database
                     .validate_downsample_collection(collection)
-                    .map_err(|e| crate::err!("invalid downsample definition: {}", e))?;
+                    .map_err(|e| anyhow::anyhow!("invalid downsample definition: {}", e))?;
             } else {
                 collection.query = Some(query_source.clone());
             }
@@ -240,28 +252,29 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
 
         self.validate_policies(&collections).await?;
 
-        let creator = Self::current_identity()?;
+        let creator = Self::creator(context)?;
         self.database
-            .create_collections_atomic_with_acp_registration(
+            .create_collections_atomic_with_acp_registration_as(
+                context,
                 collections,
                 self.document_acp.clone(),
                 creator,
             )
             .await
-            .map_err(|e| crate::err!("create view collection error: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("create view collection error: {}", e))?;
 
         if !materialized_names.is_empty() {
             self.database
                 .refresh_views(db::CollectionSelector::with_names(materialized_names))
                 .await
-                .map_err(|e| crate::err!("refresh materialized views error: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("refresh materialized views error: {}", e))?;
         }
 
         if !downsample_names.is_empty() {
             self.database
-                .bootstrap_downsamples(Some(&downsample_names))
+                .bootstrap_downsamples_as(context, Some(&downsample_names))
                 .await
-                .map_err(|e| crate::err!("bootstrap downsample collections error: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("bootstrap downsample collections error: {}", e))?;
         }
 
         Ok(())
@@ -269,62 +282,75 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
 
     async fn patch_collection(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         patch: &str,
-    ) -> Result<CollectionVersion> {
-        db::DB::patch_collection(&self.database, collection_name, patch, None)
+    ) -> anyhow::Result<CollectionVersion> {
+        db::DB::patch_collection_as(&self.database, context, collection_name, patch)
             .await
-            .map_err(crate::Error::from)
+            .map_err(anyhow::Error::new)
     }
 
-    async fn set_active_collection_version(&self, version_id: &str) -> Result<()> {
+    async fn set_active_collection_version(
+        &self,
+        context: &RequestContext,
+        version_id: &str,
+    ) -> anyhow::Result<()> {
         self.database
-            .check_node_access(None, acp::nac::NodePermission::CollectionPatch)
+            .check_node_access_as(context, acp::nac::NodePermission::CollectionPatch)
             .await
-            .map_err(crate::Error::from)?;
+            .map_err(anyhow::Error::new)?;
 
-        db::DB::set_active_collection_version(&self.database, version_id)
+        db::DB::set_active_collection_version_as(&self.database, context, version_id)
             .await
-            .map_err(crate::Error::from)
+            .map_err(anyhow::Error::new)
     }
 
-    async fn set_migration(&self, config: LensConfig) -> Result<TransformId> {
-        db::DB::set_migration(&self.database, config, None)
+    async fn set_migration(
+        &self,
+        context: &RequestContext,
+        config: LensConfig,
+    ) -> anyhow::Result<TransformId> {
+        db::DB::set_migration_as(&self.database, context, config)
             .await
-            .map_err(crate::Error::from)
+            .map_err(anyhow::Error::new)
     }
 
-    async fn materialize_collection(&self, collection_name: &str) -> Result<usize> {
-        db::DB::materialize_collection(&self.database, collection_name)
+    async fn materialize_collection(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+    ) -> anyhow::Result<usize> {
+        db::DB::materialize_collection_as(&self.database, context, collection_name)
             .await
-            .map_err(crate::Error::from)
+            .map_err(anyhow::Error::new)
     }
 
-    fn list_collections(&self) -> Result<Vec<String>> {
-        db::DB::list_collections(&self.database).map_err(crate::Error::from)
+    fn list_collections(&self) -> anyhow::Result<Vec<String>> {
+        db::DB::list_collections(&self.database).map_err(anyhow::Error::new)
     }
 
-    fn get_collection(&self, name: &str) -> Result<Option<CollectionVersion>> {
+    fn get_collection(&self, name: &str) -> anyhow::Result<Option<CollectionVersion>> {
         Ok(db::DB::get_collection(&self.database, name)
-            .map_err(crate::Error::from)?
+            .map_err(anyhow::Error::new)?
             .map(|collection| collection.schema().clone()))
     }
 
     async fn get_collection_by_version_id(
         &self,
         version_id: &str,
-    ) -> Result<Option<CollectionVersion>> {
+    ) -> anyhow::Result<Option<CollectionVersion>> {
         Ok(
             db::DB::get_collection_by_version_id_full(&self.database, version_id)
                 .await
-                .map_err(crate::Error::from)?
+                .map_err(anyhow::Error::new)?
                 .map(|collection| collection.schema().clone()),
         )
     }
 
-    async fn get_all_collection_versions(&self) -> Result<Vec<CollectionVersion>> {
+    async fn get_all_collection_versions(&self) -> anyhow::Result<Vec<CollectionVersion>> {
         db::DB::get_all_collection_versions(&self.database)
             .await
-            .map_err(crate::Error::from)
+            .map_err(anyhow::Error::new)
     }
 }

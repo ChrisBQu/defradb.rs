@@ -113,7 +113,9 @@ pub(crate) async fn broadcast_with_retry_with_creator<B: Blockstore + 'static, T
                         delay_ms = delay_ms,
                         "Retrying broadcast after collection-topic InsufficientPeers"
                     );
-                    n0_future::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    sync.network()
+                        .sleep(std::time::Duration::from_millis(delay_ms))
+                        .await;
                     continue;
                 }
                 tracing::warn!(
@@ -180,7 +182,9 @@ pub(crate) async fn broadcast_with_retry_with_creator<B: Blockstore + 'static, T
                         delay_ms = delay_ms,
                         "Retrying broadcast after InsufficientPeers"
                     );
-                    n0_future::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    sync.network()
+                        .sleep(std::time::Duration::from_millis(delay_ms))
+                        .await;
                     continue;
                 }
                 if err_str.contains("InsufficientPeers") && connected_peers == 0 {

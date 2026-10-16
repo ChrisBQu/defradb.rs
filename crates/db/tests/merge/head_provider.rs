@@ -1,3 +1,4 @@
+use cid::Cid;
 use db::merge::head_provider::*;
 use db::AutoCommitMutator;
 use db::DB;
@@ -13,9 +14,22 @@ use schema::FieldDescription;
 use schema::FieldKind;
 use std::sync::Arc;
 use storage::corekv::Key;
-use storage::keys::headstore::HeadstoreDocKey;
 use storage::keys::headstore::HeadstorePriorityKey;
 use storage::RegolithStore;
+
+/// Drop a composite head from the document's head set, as a store missing its
+/// head index would be.
+async fn remove_composite_head(
+    headstore: &datastore::NamespaceView,
+    doc_short_id: u64,
+    cid: Cid,
+) {
+    let mut write = storage::merge::head_set::Write::default();
+    write.supersede(&db::block::heads::document::name("C", &cid));
+    db::block::heads::document::commit(headstore, doc_short_id, &write)
+        .await
+        .unwrap();
+}
 
 #[tokio::test]
 async fn batch_create_docs_expose_composite_heads() {
@@ -84,11 +98,7 @@ async fn falls_back_to_priority_index_when_composite_head_entry_is_missing() {
     let doc_short_id = doc_short_id_for(&db, &doc_id).await;
 
     let txn = db.new_txn(false).await.unwrap();
-    txn.headstore()
-        .unwrap()
-        .delete(&HeadstoreDocKey::new(doc_short_id, "C", commit_cid).bytes())
-        .await
-        .unwrap();
+    remove_composite_head(&txn.headstore().unwrap(), doc_short_id, commit_cid).await;
     txn.commit().await.unwrap();
 
     let provider = DbHeadProvider::new(db);
@@ -130,11 +140,7 @@ async fn falls_back_to_blockstore_scan_when_head_indexes_are_missing() {
     let doc_short_id = doc_short_id_for(&db, &doc_id).await;
 
     let txn = db.new_txn(false).await.unwrap();
-    txn.headstore()
-        .unwrap()
-        .delete(&HeadstoreDocKey::new(doc_short_id, "C", commit_cid).bytes())
-        .await
-        .unwrap();
+    remove_composite_head(&txn.headstore().unwrap(), doc_short_id, commit_cid).await;
     txn.headstore()
         .unwrap()
         .delete(&HeadstorePriorityKey::new(doc_short_id, priority, commit_cid).bytes())

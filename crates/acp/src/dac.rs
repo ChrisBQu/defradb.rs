@@ -3,6 +3,7 @@
 //! This trait defines the interface for document-level access control.
 
 use async_trait::async_trait;
+use defra_core::RequestContext;
 use identity::Did;
 use storage::corekv::MaybeSendSync;
 use zanzibar::types::Subject;
@@ -33,6 +34,21 @@ pub trait DocumentACP: MaybeSendSync {
         _view: datastore::NamespaceView,
     ) -> Option<std::sync::Arc<dyn DocumentACP>> {
         None
+    }
+
+    /// This provider serving the request `context` serves: one that acts on
+    /// its callers' behalf with the credentials the request carries (see
+    /// [`RequestContext::bearer_token_for`]). Providers that present no
+    /// request credentials return None and serve every request as they are.
+    fn bind_request(&self, _context: &RequestContext) -> Option<std::sync::Arc<dyn DocumentACP>> {
+        None
+    }
+
+    /// The bearer token `did` presents to this provider: the one of the
+    /// request it is bound to, or of [`RequestContext::ambient`] when it is
+    /// bound to none.
+    fn bearer_token_for(&self, did: &str) -> Option<String> {
+        RequestContext::ambient().bearer_token_for(did)
     }
 
     /// Whether missing registrations allow public access or require a collection grant.
@@ -315,4 +331,32 @@ pub trait DocumentACP: MaybeSendSync {
         resource_name: &str,
         doc_id: &str,
     ) -> Result<()>;
+}
+
+/// `acp` serving the request `context` serves (see
+/// [`DocumentACP::bind_request`]).
+pub fn bound_to_request(
+    acp: &std::sync::Arc<dyn DocumentACP>,
+    context: &RequestContext,
+) -> std::sync::Arc<dyn DocumentACP> {
+    acp.bind_request(context)
+        .unwrap_or_else(|| std::sync::Arc::clone(acp))
+}
+
+/// Runs `call` against `acp` for `did` presenting `token`, outside the
+/// request that captured them (a hook a commit runs later): `acp` bound to a
+/// context carrying that bearer, which [`RequestContext::mirror`] also
+/// installs for test doubles that read it the old way.
+pub async fn with_request_bearer<T, F, Fut>(
+    acp: &std::sync::Arc<dyn DocumentACP>,
+    did: Option<String>,
+    token: Option<String>,
+    call: F,
+) -> T
+where
+    F: FnOnce(std::sync::Arc<dyn DocumentACP>) -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    let context = RequestContext::ambient().with_bearer(did, token);
+    context.mirror(call(bound_to_request(acp, &context))).await
 }

@@ -46,13 +46,9 @@ pub unsafe extern "C" fn delete_documents(
             NodePermission::DocumentDelete
         ));
 
-        // Bind the caller's identity so the NAC-gated document mutator delete
-        // resolves the actual caller instead of the wildcard. The body runs on
-        // this thread via `block_on`, so the thread-local is visible throughout;
-        // the guard restores on drop.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            c_str_to_string(identity_did).filter(|s| !s.is_empty()),
-        );
+        // The caller acts in the call's context, so the NAC checks the body
+        // reaches resolve the actual caller instead of the wildcard.
+        let context = defra_core::RequestContext::default().with_identity(c_str_to_string(identity_did).filter(|s| !s.is_empty()));
 
         let col_name = try_ffi!(require_c_str(collection_name, "collection_name"));
         let ids_json = try_ffi!(require_c_str(doc_ids_json, "doc_ids_json"));
@@ -71,7 +67,7 @@ pub unsafe extern "C" fn delete_documents(
                 .collect::<Result<Vec<_>, _>>()?;
 
             let results = mutator
-                .delete_many_impl(&col_name, &doc_ids)
+                .delete_many_impl_as(&context, &col_name, &doc_ids)
                 .await
                 .map_err(|e| format!("batch delete failed: {}", e))?;
 

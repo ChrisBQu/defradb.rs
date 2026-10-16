@@ -19,9 +19,11 @@ use vera_modules::acp::types::PolicyRecord;
 use super::abi::{IAcp, ACP_ADDRESS};
 use super::bearer;
 use super::client::VeraRsClient;
+#[cfg(test)]
+use super::provider_commands::resolve_registered_or_passthrough_bearer_token;
 use super::provider_commands::{
     encode_archive_object_cmd, encode_delete_relationship_cmd, encode_register_object_cmd,
-    encode_set_relationship_cmd, resolve_registered_or_passthrough_bearer_token,
+    encode_set_relationship_cmd, resolve_registered_or_passthrough_bearer_token_as,
 };
 use super::worker::NativeWorker;
 
@@ -213,6 +215,15 @@ impl VeraProvider for VeraRsProvider {
     }
 
     async fn create_bearer_token(&self, did: &str) -> Result<String, ProviderError> {
+        self.create_bearer_token_as(&defra_core::RequestContext::ambient(), did)
+            .await
+    }
+
+    async fn create_bearer_token_as(
+        &self,
+        context: &defra_core::RequestContext,
+        did: &str,
+    ) -> Result<String, ProviderError> {
         if Some(did.to_string()) == self.self_did() {
             return bearer::create_bearer_token(
                 &self.signing_key,
@@ -226,9 +237,12 @@ impl VeraProvider for VeraRsProvider {
             });
         }
 
-        if let Some(token) =
-            resolve_registered_or_passthrough_bearer_token(did, &self.worker_did, self.deployment)?
-        {
+        if let Some(token) = resolve_registered_or_passthrough_bearer_token_as(
+            context,
+            did,
+            &self.worker_did,
+            self.deployment,
+        )? {
             return Ok(token);
         }
 

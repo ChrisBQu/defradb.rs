@@ -92,18 +92,6 @@ pub fn cid_set() -> CidSet {
     CidSet::with_hasher(RandomState::default())
 }
 
-/// Encode a priority value as a varint (matches Go's binary.PutUvarint).
-pub(crate) fn encode_priority_varint(priority: u64) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(10);
-    let mut n = priority;
-    while n >= 0x80 {
-        buf.push((n as u8) | 0x80);
-        n >>= 7;
-    }
-    buf.push(n as u8);
-    buf
-}
-
 /// Database merge handler that processes incoming P2P blocks.
 ///
 /// This handler decodes IPLD blocks, extracts CRDT deltas, and applies

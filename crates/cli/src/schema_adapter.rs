@@ -1,8 +1,10 @@
 //! Adapter to bridge database schema operations to HTTP and PG wire protocol.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use defra_core::RequestContext;
 
 use defra_http::router::{AcpOperations, SchemaOperations};
 use identity::Did;
@@ -23,6 +25,8 @@ pub struct SchemaAdapter<S: Store> {
     acp: Option<Arc<dyn AcpOperations>>,
     /// Optional document ACP handle for branchable collection object registration.
     document_acp: Option<Arc<dyn acp::DocumentACP>>,
+    /// The request this adapter serves, for one bound to it.
+    context: Option<RequestContext>,
 }
 
 impl<S: Store + 'static> SchemaAdapter<S> {
@@ -32,6 +36,7 @@ impl<S: Store + 'static> SchemaAdapter<S> {
             database,
             acp: None,
             document_acp: None,
+            context: None,
         }
     }
 
@@ -45,7 +50,12 @@ impl<S: Store + 'static> SchemaAdapter<S> {
             database,
             acp: Some(acp),
             document_acp: Some(document_acp),
+            context: None,
         }
+    }
+
+    fn context(&self) -> Cow<'_, RequestContext> {
+        RequestContext::bound_or_ambient(self.context.as_ref())
     }
 
     /// Create an Arc-wrapped adapter for HTTP schema operations.
@@ -87,11 +97,12 @@ impl<S: Store + 'static> SchemaAdapter<S> {
     }
 
     async fn add_schema_inner(&self, sdl: &str) -> Result<Vec<CollectionVersion>, String> {
-        // Fail closed: a present-but-malformed ambient identity must error, not
+        // Fail closed: a present-but-malformed acting identity must error, not
         // silently degrade a permissioned collection to public (unregistered).
-        let creator = match defra_core::current_identity::get_effective_identity() {
+        let context = self.context();
+        let creator = match context.identity() {
             Some(raw) => {
-                Some(Did::new(raw).map_err(|e| format!("malformed ambient identity: {}", e))?)
+                Some(Did::new(raw).map_err(|e| format!("malformed acting identity: {}", e))?)
             }
             None => None,
         };
@@ -125,14 +136,17 @@ impl<S: Store + 'static> SchemaAdapter<S> {
 
         let created = if let Some(document_acp) = &self.document_acp {
             self.database
-                .create_collections_atomic_with_acp_registration(
+                .create_collections_atomic_with_acp_registration_as(
+                    &context,
                     collections,
                     document_acp.clone(),
                     creator,
                 )
                 .await
         } else {
-            self.database.create_collections_atomic(collections).await
+            self.database
+                .create_collections_atomic_as(&context, collections)
+                .await
         }
         .map_err(|e| format!("failed to create collection: {}", e))?;
 
@@ -142,6 +156,15 @@ impl<S: Store + 'static> SchemaAdapter<S> {
 
 #[async_trait]
 impl<S: Store + 'static> SchemaOperations for SchemaAdapter<S> {
+    fn bind_request(&self, context: &RequestContext) -> Option<Arc<dyn SchemaOperations>> {
+        Some(Arc::new(Self {
+            database: Arc::clone(&self.database),
+            acp: self.acp.clone(),
+            document_acp: self.document_acp.clone(),
+            context: Some(context.clone()),
+        }))
+    }
+
     async fn add_schema(&self, sdl: &str) -> Result<Vec<CollectionVersion>, String> {
         self.add_schema_inner(sdl).await
     }

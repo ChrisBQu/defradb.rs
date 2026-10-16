@@ -19,10 +19,7 @@ use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value as JsonValue};
 
-use crate::search::{
-    embedding::{embed_text_with_provider, normalized_embedding_url},
-    EmbeddingClientConfig,
-};
+use crate::search::{embedding::normalized_embedding_url, EmbeddingClientConfig};
 
 const DEFAULT_LIMIT: usize = 10;
 const DEFAULT_CANDIDATE_LIMIT: usize = 0;
@@ -201,7 +198,9 @@ pub async fn hybrid_search_dense<E: query::QueryExecutor + ?Sized>(
             request_config.api_key.clear();
         }
     }
-    let query_vector = embed_text_with_provider(
+    // The query's text goes through the process's embedding service, on its
+    // network runtime, never from the calling task.
+    let query_vector = crate::search::embedding::embed_query(
         &request_config,
         request.embedding_provider.as_deref().unwrap_or("openai"),
         &request.query_text,

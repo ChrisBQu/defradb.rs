@@ -33,13 +33,15 @@ struct OwedAcpRegistration {
 impl OwedAcpRegistration {
     async fn run(self) -> Result<()> {
         let creator = self.creator;
-        let result = defra_core::signing::scope_request_bearer_token(
+        let schemas = self.schemas;
+        acp::with_request_bearer(
+            &self.acp,
             Some(creator.to_string()),
             self.request_bearer_token,
-            async {
-                for schema in &self.schemas {
+            |acp| async move {
+                for schema in &schemas {
                     crate::collection::acp::register_collection_if_needed(
-                        self.acp.as_ref(),
+                        acp.as_ref(),
                         Some(&creator),
                         schema,
                     )
@@ -48,9 +50,8 @@ impl OwedAcpRegistration {
                 Ok::<_, acp::Error>(())
             },
         )
-        .await;
-
-        result.map_err(Error::from)
+        .await
+        .map_err(Error::from)
     }
 }
 
@@ -759,6 +760,7 @@ impl<S: Store> DbTxn<S> {
     /// Stage branchable collection ACP registration to run before commit.
     pub(crate) fn stage_collection_acp_registration(
         &self,
+        context: &defra_core::RequestContext,
         acp: Arc<dyn acp::DocumentACP>,
         creator: identity::Did,
         schemas: Vec<CollectionVersion>,
@@ -766,7 +768,7 @@ impl<S: Store> DbTxn<S> {
         if schemas.is_empty() {
             return;
         }
-        let request_bearer_token = defra_core::signing::get_request_bearer_token(creator.as_str());
+        let request_bearer_token = context.bearer_token_for(creator.as_str());
         self.catalog.owe(OwedAcpRegistration {
             acp,
             creator,

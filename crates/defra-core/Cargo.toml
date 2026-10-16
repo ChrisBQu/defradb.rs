@@ -13,6 +13,12 @@ ignored = ["tracing"]
 [lib]
 bench = false
 
+[features]
+# Test-only: keeps the thread-local request state tests set the old way and
+# lets a call that arrives without a RequestContext run in it. Enable it from
+# dev-dependencies only, never from a production dependency.
+ambient = ["dep:tokio"]
+
 [dependencies]
 # Error handling
 thiserror.workspace = true
@@ -50,10 +56,10 @@ bytes.workspace = true
 # Logging
 tracing.workspace = true
 
-# Request-scoped ambient identity (task_local). Not needed on wasm, where the
-# runtime is single-threaded and HTTP-server-side scoping does not apply.
+# The task-locals the test-only `ambient` feature keeps (see src/ambient.rs).
+# Not needed on wasm, which is single-threaded.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = { workspace = true, features = ["rt"] }
+tokio = { workspace = true, features = ["rt"], optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }

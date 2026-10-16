@@ -212,6 +212,18 @@ where
         true
     }
 
+    fn bind_request(&self, context: &defra_core::RequestContext) -> Option<Arc<dyn DocumentACP>> {
+        let provider = self.provider.bind_request(context)?;
+        Some(Arc::new(Self {
+            provider,
+            store: NamespacedStore::new(Arc::clone(self.store.inner()), self.store.namespace()),
+        }))
+    }
+
+    fn bearer_token_for(&self, did: &str) -> Option<String> {
+        self.provider.bearer_token_for(did)
+    }
+
     async fn redrive_registration(
         &self,
         policy_id: &str,

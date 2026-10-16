@@ -3,7 +3,7 @@
 use super::*;
 
 impl<S: Store + 'static> DbTransactionRegistry<S> {
-    /// Verify a block signature using the existing transaction's blockstore view.
+    /// [`Self::verify_block_signature_in_txn_as`] in [`RequestContext::ambient`].
     pub async fn verify_block_signature_in_txn(
         &self,
         txn_id: &str,
@@ -13,16 +13,41 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         key_type: crypto::KeyType,
         caller_identity: &acp::Identity,
     ) -> Result<()> {
+        self.verify_block_signature_in_txn_as(
+            &RequestContext::ambient(),
+            txn_id,
+            document_acp,
+            cid_str,
+            public_key_hex,
+            key_type,
+            caller_identity,
+        )
+        .await
+    }
+
+    /// Verify a block signature using the existing transaction's blockstore view.
+    pub async fn verify_block_signature_in_txn_as(
+        &self,
+        context: &RequestContext,
+        txn_id: &str,
+        document_acp: Arc<dyn acp::DocumentACP>,
+        cid_str: &str,
+        public_key_hex: &str,
+        key_type: crypto::KeyType,
+        caller_identity: &acp::Identity,
+    ) -> Result<()> {
         let db = self.db.clone();
+        let request = context.clone();
         let (cid_str, public_key_hex, caller_identity) = (
             cid_str.to_owned(),
             public_key_hex.to_owned(),
             caller_identity.clone(),
         );
-        self.in_txn(txn_id, move |owned| {
+        self.in_txn(context, txn_id, move |owned| {
             Box::pin(async move {
                 let txn = owned.alone()?;
-                crate::block::verify::verify_block_signature_in_txn(
+                crate::block::verify::verify_block_signature_in_txn_as(
+                    &request,
                     &db,
                     document_acp.as_ref(),
                     txn,
@@ -38,8 +63,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         .await
     }
 
-    /// Verify a block's embedded signature inside an active transaction and
-    /// return the signer DID.
+    /// [`Self::verified_block_signer_did_in_txn_as`] in [`RequestContext::ambient`].
     pub async fn verified_block_signer_did_in_txn(
         &self,
         txn_id: &str,
@@ -47,9 +71,30 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         cid_str: &str,
         caller_identity: &acp::Identity,
     ) -> Result<String> {
+        self.verified_block_signer_did_in_txn_as(
+            &RequestContext::ambient(),
+            txn_id,
+            document_acp,
+            cid_str,
+            caller_identity,
+        )
+        .await
+    }
+
+    /// Verify a block's embedded signature inside an active transaction and
+    /// return the signer DID.
+    pub async fn verified_block_signer_did_in_txn_as(
+        &self,
+        context: &RequestContext,
+        txn_id: &str,
+        document_acp: Arc<dyn acp::DocumentACP>,
+        cid_str: &str,
+        caller_identity: &acp::Identity,
+    ) -> Result<String> {
         let db = self.db.clone();
+        let dac_bypass = context.dac_bypass();
         let (cid_str, caller_identity) = (cid_str.to_owned(), caller_identity.clone());
-        self.in_txn(txn_id, move |owned| {
+        self.in_txn(context, txn_id, move |owned| {
             Box::pin(async move {
                 let (blockstore, systemstore) = {
                     let txn = owned.alone()?;
@@ -62,6 +107,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
                     systemstore,
                     &cid_str,
                     &caller_identity,
+                    dac_bypass,
                 )
                 .await
                 .map_err(Error::Other)

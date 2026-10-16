@@ -4129,6 +4129,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "urlencoding",
+ "workers",
 ]
 
 [[package]]
@@ -4212,6 +4213,7 @@ dependencies = [
  "tokio",
  "tracing",
  "web-time",
+ "workers",
  "zeroize",
 ]
 
@@ -9526,6 +9528,7 @@ dependencies = [
  "unsigned-varint 0.8.0",
  "uuid",
  "web-time",
+ "workers",
 ]
 
 [[package]]

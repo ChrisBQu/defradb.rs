@@ -51,9 +51,9 @@ async fn graphql_write_records_collection_head_under_persisted_id() {
         .get_collection("Note")
         .expect("get collection")
         .expect("collection exists");
-    let persisted_prefix = format!("/c/{}/", collection.resolved_root_id());
+    let persisted_prefix = format!("/hc/{}", collection.resolved_root_id());
     let legacy_prefix = format!(
-        "/c/{}/",
+        "/hc/{}",
         schema::legacy_collection_short_id(&collection.collection_id)
     );
     node.shutdown().await;
@@ -81,15 +81,15 @@ async fn graphql_write_records_collection_head_under_persisted_id() {
     let mut col_head_keys = Vec::new();
     while let Some(pair) = iter.next().await.expect("iterate") {
         let key = String::from_utf8_lossy(&pair.key).into_owned();
-        if key.contains("/c/") {
+        if key.contains("/hc/") {
             col_head_keys.push(key);
         }
     }
 
     assert!(
-        col_head_keys.iter().any(|k| k.contains(&persisted_prefix)),
+        col_head_keys.iter().any(|k| k.ends_with(&persisted_prefix)),
         "no collection head under the persisted prefix {persisted_prefix:?} \
-         (legacy hash prefix would be {legacy_prefix:?}); '/c/' keys found: {col_head_keys:?}"
+         (legacy hash prefix would be {legacy_prefix:?}); '/hc/' keys found: {col_head_keys:?}"
     );
 }
 
@@ -137,9 +137,9 @@ async fn signed_graphql_write_records_collection_head_under_persisted_id() {
         .get_collection("Note")
         .expect("get collection")
         .expect("collection exists");
-    let persisted_prefix = format!("/c/{}/", collection.resolved_root_id());
+    let persisted_prefix = format!("/hc/{}", collection.resolved_root_id());
     let legacy_prefix = format!(
-        "/c/{}/",
+        "/hc/{}",
         schema::legacy_collection_short_id(&collection.collection_id)
     );
     node.shutdown().await;
@@ -165,15 +165,15 @@ async fn signed_graphql_write_records_collection_head_under_persisted_id() {
     let mut col_head_keys = Vec::new();
     while let Some(pair) = iter.next().await.expect("iterate") {
         let key = String::from_utf8_lossy(&pair.key).into_owned();
-        if key.contains("/c/") {
+        if key.contains("/hc/") {
             col_head_keys.push(key);
         }
     }
 
     assert!(
-        col_head_keys.iter().any(|k| k.contains(&persisted_prefix)),
+        col_head_keys.iter().any(|k| k.ends_with(&persisted_prefix)),
         "signed write left no collection head under the persisted prefix \
          {persisted_prefix:?} (legacy hash prefix would be {legacy_prefix:?}); \
-         '/c/' keys found: {col_head_keys:?}"
+         '/hc/' keys found: {col_head_keys:?}"
     );
 }
