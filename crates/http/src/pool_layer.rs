@@ -8,12 +8,17 @@
 //! runs on that document's worker, where every write to it runs; every other
 //! request runs on the least-loaded worker.
 //!
+//! The document ACP routes run there too when the ACP is the node's own
+//! store ([`OnPool::with_local_acp`]); a remote provider is reached through
+//! the network.
+//!
 //! Every other route stays on the network edge: the explicit transaction
 //! routes (their requests go to the worker that owns the transaction), the
-//! P2P and document ACP routes (they reach peers and remote ACP providers
-//! through the network), event and GraphQL subscription streams, and the
-//! routes with no storage behind them. GraphQL requests reach the pool
-//! through the query executor.
+//! P2P routes (they reach peers through the network), event and GraphQL
+//! subscription streams, and the routes with no storage behind them. GraphQL
+//! requests reach the pool with their permission check in one task (see
+//! `handlers::graphql`), and the storage parts of the other edge routes reach
+//! it through their operations.
 
 use std::convert::Infallible;
 use std::future::Future;
@@ -27,7 +32,7 @@ use tower::{Layer, Service, ServiceExt};
 
 /// The route prefixes, under each API prefix (`go_paths::API_PREFIXES`),
 /// whose requests run on the pool.
-pub const ON_POOL: [&str; 9] = [
+pub const ON_POOL: [&str; 10] = [
     "/collections",
     "/index",
     "/backup",
@@ -37,21 +42,34 @@ pub const ON_POOL: [&str; 9] = [
     "/lens",
     "/acp/node",
     "/actions",
+    "/debug",
 ];
 
 /// Whether the route `path` (as matched) runs on the pool.
 pub fn runs_on_pool(path: &str) -> bool {
+    api_route(path, |route| {
+        route == "/schema" || ON_POOL.iter().any(|prefix| under(route, prefix))
+    })
+}
+
+/// Whether the route `path` (as matched) is a document ACP route.
+pub fn is_acp_route(path: &str) -> bool {
+    api_route(path, |route| under(route, "/acp"))
+}
+
+/// Whether `path`, below one of the API prefixes, is a route `matches`.
+fn api_route(path: &str, matches: impl Fn(&str) -> bool) -> bool {
     crate::go_paths::API_PREFIXES
         .iter()
         .filter_map(|api| path.strip_prefix(api))
-        .any(|route| {
-            route == "/schema"
-                || ON_POOL.iter().any(|prefix| {
-                    route
-                        .strip_prefix(prefix)
-                        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
-                })
-        })
+        .any(matches)
+}
+
+/// Whether `route` is `prefix` or below it.
+fn under(route: &str, prefix: &str) -> bool {
+    route
+        .strip_prefix(prefix)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
 /// The worker a request runs on: its document's, when its path names one
@@ -75,12 +93,23 @@ pub fn route_target(path: &str) -> workers::Target {
 #[derive(Clone)]
 pub struct OnPool {
     pool: workers::Pool,
+    local_acp: bool,
 }
 
 impl OnPool {
     /// Runs the data-path routes of the router it is laid over on `pool`.
     pub fn new(pool: workers::Pool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            local_acp: false,
+        }
+    }
+
+    /// Runs the document ACP routes on the pool too: the ACP is the node's
+    /// own store.
+    pub fn with_local_acp(mut self) -> Self {
+        self.local_acp = true;
+        self
     }
 }
 
@@ -91,6 +120,7 @@ impl<S> Layer<S> for OnPool {
         OnPoolService {
             inner,
             pool: self.pool.clone(),
+            local_acp: self.local_acp,
         }
     }
 }
@@ -100,6 +130,7 @@ impl<S> Layer<S> for OnPool {
 pub struct OnPoolService<S> {
     inner: S,
     pool: workers::Pool,
+    local_acp: bool,
 }
 
 impl<S> Service<Request> for OnPoolService<S>
@@ -121,7 +152,9 @@ where
             .get::<MatchedPath>()
             .map(|matched| matched.as_str().to_owned());
         let inner = self.inner.clone();
-        let Some(path) = path.filter(|path| runs_on_pool(path)) else {
+        let local_acp = self.local_acp;
+        let on_pool = |path: &String| runs_on_pool(path) || (local_acp && is_acp_route(path));
+        let Some(path) = path.filter(on_pool) else {
             return Box::pin(inner.oneshot(request));
         };
         let target = route_target(request.uri().path());

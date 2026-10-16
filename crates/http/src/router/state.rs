@@ -34,6 +34,9 @@ pub struct AppState {
     pub executor: Arc<dyn QueryExecutor>,
     /// The network runtime request work runs on.
     pub edge: Edge,
+    /// The worker pool a request's storage work runs on, when the node has
+    /// one.
+    pub pool: Option<workers::Pool>,
     pub rest: Option<Arc<dyn RestOperations>>,
     pub p2p: Option<Arc<dyn P2POperations>>,
     pub manage: Option<Arc<dyn ManageRequester>>,
@@ -276,6 +279,7 @@ impl AppState {
 pub struct AppStateBuilder {
     executor: Arc<dyn QueryExecutor>,
     edge: Edge,
+    pool: Option<workers::Pool>,
     rest: Option<Arc<dyn RestOperations>>,
     p2p: Option<Arc<dyn P2POperations>>,
     manage: Option<Arc<dyn ManageRequester>>,
@@ -308,6 +312,7 @@ impl AppStateBuilder {
         Self {
             executor,
             edge,
+            pool: None,
             rest: None,
             p2p: None,
             manage: None,
@@ -332,6 +337,12 @@ impl AppStateBuilder {
             dev_mode: false,
             query_limits: QueryLimits::default(),
         }
+    }
+
+    /// Run the requests' storage work on `pool`.
+    pub fn with_pool(mut self, pool: Option<workers::Pool>) -> Self {
+        self.pool = pool;
+        self
     }
 
     /// Set REST operations.
@@ -491,6 +502,7 @@ impl AppStateBuilder {
         AppState {
             executor: self.executor,
             edge: self.edge,
+            pool: self.pool,
             rest: self.rest,
             p2p: self.p2p,
             manage: self.manage,

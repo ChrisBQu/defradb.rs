@@ -29,7 +29,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-pub use route::document_key;
+pub use route::{document_key, request_target};
 
 use defra_core::thread_bounds::MaybeBoxFuture;
 use defra_core::RequestContext;
@@ -107,6 +107,10 @@ impl QueryExecutor for PooledExecutor {
         request: QueryRequest,
         prepared: Option<Arc<PreparedMutations>>,
     ) -> QueryResponse {
+        // Already on a worker (its routed task): no hop, no routing.
+        if workers::on_worker() {
+            return self.inner.execute_prepared(request, prepared).await;
+        }
         let target = route::request_target(&request);
         let request = leaving_the_caller(request);
         self.on_pool(target, move |inner| async move {
@@ -128,6 +132,9 @@ impl QueryExecutor for PooledExecutor {
     }
 
     async fn execute(&self, request: QueryRequest) -> QueryResponse {
+        if workers::on_worker() {
+            return self.inner.execute(request).await;
+        }
         let target = route::request_target(&request);
         let request = leaving_the_caller(request);
         self.on_pool(

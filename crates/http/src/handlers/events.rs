@@ -98,14 +98,19 @@ impl EventAccessContext {
             return Ok(false);
         };
 
-        let collection = collection_mgmt
+        // The version lookup reads the store for a version the cache does not
+        // hold: only when the ID is not a known collection's.
+        let collection = match collection_mgmt
             .find_collection_by_id(collection_id)
             .await
             .map_err(HttpError::Internal)?
-            .or(collection_mgmt
+        {
+            Some(collection) => Some(collection),
+            None => collection_mgmt
                 .get_collection_by_version_id(collection_id)
                 .await
-                .map_err(HttpError::Internal)?);
+                .map_err(HttpError::Internal)?,
+        };
 
         let Some(collection) = collection else {
             return Ok(false);

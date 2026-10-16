@@ -270,7 +270,6 @@ pub async fn graphql_transactional(
 
     // Enforce NAC permission before executing the query
     let permission = graphql_required_permission(&request.query, state.query_limits);
-    require_permission(&state, &identity, permission).await?;
 
     // Check if this is a subscription query.
     // Fast path: skip the full GraphQL parse for mutations/queries (the common case).
@@ -283,6 +282,7 @@ pub async fn graphql_transactional(
             state.query_limits,
         )
     {
+        require_permission(&state, &identity, permission).await?;
         if !wants_sse(&headers) {
             return Err(HttpError::NotAcceptable(
                 "invalid subscription transport".to_string(),
@@ -315,6 +315,7 @@ pub async fn graphql_transactional(
 
     let response = match txn_id {
         Some(txn_id_str) => {
+            require_permission(&state, &identity, permission).await?;
             let handle = match txn_id_str.parse() {
                 Ok(h) => h,
                 Err(_) => {
@@ -327,7 +328,21 @@ pub async fn graphql_transactional(
             };
             execute_in_txn_with_context(&state, &identity, query_request, handle).await
         }
-        None => execute_with_context(&state, &identity, query_request).await,
+        // The permission check and the query run as one task on the query's
+        // worker, its storage reads with it.
+        None => {
+            let target = query::pooled::request_target(&query_request);
+            let pool = state.pool.clone();
+            let ran = workers::run_on(pool.as_ref(), target, move || async move {
+                require_permission(&state, &identity, permission).await?;
+                Ok::<_, HttpError>(execute_with_context(&state, &identity, query_request).await)
+            })
+            .await;
+            ran.map_err(|error| {
+                tracing::warn!(%error, "a GraphQL request did not run on the worker pool");
+                HttpError::ServiceUnavailable("the node is shutting down; try again".into())
+            })??
+        }
     };
 
     record_response_metrics(&response);

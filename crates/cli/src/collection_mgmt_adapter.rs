@@ -149,11 +149,19 @@ impl<S: Store + 'static> CollectionManagementOperations for CollectionManagement
         &self,
         version_id: &str,
     ) -> Result<Option<schema::CollectionVersion>, String> {
-        self.database
-            .get_collection_by_version_id_full(version_id)
-            .await
-            .map(|opt| opt.map(|c| c.schema().clone()))
-            .map_err(|e| format!("{}", e))
+        // A version the cache does not hold is read from the store: on the
+        // pool, for a caller on the network edge (an event stream).
+        let (database, version_id) = (Arc::clone(&self.database), version_id.to_owned());
+        let pool = self.database.pool();
+        workers::run_on(pool, workers::Target::LeastLoaded, move || async move {
+            database
+                .get_collection_by_version_id_full(&version_id)
+                .await
+                .map(|opt| opt.map(|c| c.schema().clone()))
+                .map_err(|e| format!("{}", e))
+        })
+        .await
+        .map_err(|_| "the node is shutting down; try again".to_string())?
     }
 
     async fn delete_collection_versions(&self, version_ids: Vec<String>) -> Result<(), String> {
