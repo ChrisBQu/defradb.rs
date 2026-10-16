@@ -64,10 +64,11 @@ impl Default for MockBitswapStore {
 #[async_trait]
 impl Store for MockBitswapStore {
     async fn get_size(&self, cid: &Cid) -> Result<usize> {
-        self.blocks
+        Ok(self
+            .blocks
             .get(cid)
             .map(|data| data.len())
-            .ok_or_else(|| crate::Error::BlockNotFound(cid.to_string()))
+            .ok_or_else(|| crate::Error::BlockNotFound(cid.to_string()))?)
     }
 
     async fn get(&self, cid: &Cid) -> Result<Block> {
