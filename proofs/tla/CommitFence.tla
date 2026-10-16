@@ -4,10 +4,10 @@
 \* An explicit transaction lives on one worker, its owner. To commit it, the
 \* caller hands the commit to the owner and waits for the answer. The caller
 \* can stop waiting at any moment (its future is dropped: the client went
-\* away, a timeout fired). Stopping does not undo a commit the owner already
-\* began: that commit still lands, only a little later. The danger: a read or
-\* a new transaction that begins after the caller stopped could take its
-\* snapshot before the commit lands, and miss it.
+\* away, a timeout fired). Stopping does not undo a commit it handed over:
+\* the owner runs it all the same, and it lands a little later. The danger:
+\* a read or a new transaction that begins after the caller stopped could
+\* take its snapshot before the commit lands, and miss it.
 \*
 \* The fix is a fence. The database keeps one count, `outstanding`: how many
 \* commits are still landing after their caller stopped waiting. Each commit
@@ -36,7 +36,9 @@
 \*      count - INV_SettledExact;
 \*   5. the count stays above zero for good (a leaked fence)
 \*      - LIVE_NoFenceLeak;
-\*   6. a reader waits forever - LIVE_ReaderProceeds.
+\*   6. a reader waits forever - LIVE_ReaderProceeds;
+\*   7. a caller that stops waiting undoes the commit it handed over (the
+\*      owner skips it) - INV_CancelNeverUndoes.
 \*
 \* Every way a commit can end is a path here: it lands, it fails, the owner
 \* shuts down (its request dropped unrun, or the commit dropped before it
@@ -56,11 +58,11 @@
 \*   | Send              | owner/mod.rs Owners::finish: table.take, Fence::new,        |
 \*   |                   | mailbox.try_send(Message::Finish)                           |
 \*   | DropEarly         | the finish future dropped before it ran: nothing handed over|
-\*   | Drop, CallerSwap, | owner/mod.rs AbandonOnDrop::drop -> fence.rs Fence::abandon:|
+\*   | Drop, CallerSwap, | owner/mod.rs FenceOnDrop::drop -> fence.rs Fence::abandon:  |
 \*   | Undo, UndoWake    | CommitFences::raise, compare_exchange(PENDING, ABANDONED),  |
 \*   |                   | on failure CommitFences::lower                              |
 \*   | Receive           | Owners::finish: answer.recv_async() returns, then disarm    |
-\*   | OwnerStart        | owner/actor.rs own, the Message::Finish arm: abandoned()    |
+\*   | OwnerStart        | owner/actor.rs own, the Message::Finish arm: idle.pop()     |
 \*   | OwnerLand/Fail    | last(txn).await: OwnedTxn::commit or rollback, Ok or Err    |
 \*   | OwnerReply        | reply.try_send inside the registry's `last`                 |
 \*   | OwnerShutdown     | the Finish dropped unrun: the actor's drain when it ends    |
@@ -78,13 +80,16 @@
 \*   | ReaderWaits       | the wait in DB::new_txn (RED: none)                         |
 \*   | ResolveFailed     | Landing resolves on every end (RED: not on a failure)       |
 \*   | WakeOnUndo        | lower() wakes at zero on the caller's undo too (RED: not)   |
+\*   | RunCancelled      | the Finish arm runs whatever the state word says (RED:      |
+\*   |                   | skips the commit when its caller left first)                |
 
 EXTENDS Integers, FiniteSets
 \* Integers gives numbers that can go below zero (so a RED run can show it);
 \* FiniteSets gives Cardinality, the size of a set.
 
-CONSTANTS NC, RaiseFirst, OwnerSwaps, ReaderWaits, ResolveFailed, WakeOnUndo
-\* NC is how many commits the model runs. The five switches are all TRUE in
+CONSTANTS NC, RaiseFirst, OwnerSwaps, ReaderWaits, ResolveFailed, WakeOnUndo,
+          RunCancelled
+\* NC is how many commits the model runs. The six switches are all TRUE in
 \* the real design; each RED configuration turns one off.
 
 ASSUME /\ NC \in 1..3
@@ -93,6 +98,7 @@ ASSUME /\ NC \in 1..3
        /\ ReaderWaits \in BOOLEAN
        /\ ResolveFailed \in BOOLEAN
        /\ WakeOnUndo \in BOOLEAN
+       /\ RunCancelled \in BOOLEAN
 \* A small number of commits, and each switch either on or off.
 
 Commits == 1..NC
@@ -109,11 +115,12 @@ CallerStates == {"idle", "waiting", "raised", "late", "undo", "unotify", "gone",
 \*   gone     - it stopped waiting, and everything it had to do is done;
 \*   replied  - it got its answer and never stopped waiting.
 
-OwnerStates == {"none", "queued", "running", "landed", "failed", "swap", "dec", "notify", "resolved"}
+OwnerStates == {"none", "queued", "running", "skipped", "landed", "failed", "swap", "dec", "notify", "resolved"}
 \* Where the owner's side of one commit can be:
 \*   none     - nothing was handed to it;
 \*   queued   - the commit waits in the owner's mailbox;
 \*   running  - the owner is committing it;
+\*   skipped  - (RED only) the owner dropped it unrun because its caller left;
 \*   landed   - the commit is in: a snapshot taken from now on sees it;
 \*   failed   - the commit failed: it will never land;
 \*   swap     - the owner is finished with it and tries pending -> done next;
@@ -252,15 +259,15 @@ Receive(c) == /\ callerPc[c] = "waiting"
 \* ----------------------------------------------------------------- owner
 
 OwnerStart(c) == /\ ownerPc[c] = "queued"
-                 /\ IF state[c] = "abandoned"
-                       THEN /\ ownerPc' = [ownerPc EXCEPT ![c] = "swap"]
+                 /\ IF ~RunCancelled /\ state[c] = "abandoned"
+                       THEN /\ ownerPc' = [ownerPc EXCEPT ![c] = "skipped"]
                             /\ answered' = [answered EXCEPT ![c] = TRUE]
                        ELSE /\ ownerPc' = [ownerPc EXCEPT ![c] = "running"]
                             /\ UNCHANGED answered
                  /\ UNCHANGED <<callerPc, state, sent, landed, net, outstanding, gen, rpc, rgen, seen, snap>>
-\* The owner takes the commit from its mailbox. If the caller had left
-\* already, it abandons the transaction instead of committing it (nothing
-\* lands) and goes straight to its swap; otherwise it starts committing.
+\* The owner takes the commit from its mailbox and starts committing it,
+\* whether or not its caller is still waiting. (The RED switch skips the
+\* commit when the caller left first: nothing lands.)
 
 OwnerLand(c) == /\ ownerPc[c] = "running"
                 /\ landed' = [landed EXCEPT ![c] = TRUE]
@@ -290,7 +297,7 @@ OwnerShutdown(c) == /\ ownerPc[c] \in {"queued", "running"}
 \* unrun, or the commit is dropped mid-way. Nothing lands, the caller hears
 \* "not found", and the dropped request still does its swap.
 
-OwnerSwap(c) == /\ ownerPc[c] = "swap"
+OwnerSwap(c) == /\ ownerPc[c] \in {"swap", "skipped"}
                 /\ IF OwnerSwaps
                       THEN IF state[c] = "pending"
                               THEN /\ state' = [state EXCEPT ![c] = "done"]
@@ -432,6 +439,11 @@ Settled(c) == callerPc[c] \in {"gone", "replied"} /\ ownerPc[c] \in {"none", "re
 INV_SettledExact == \A c \in Commits : Settled(c) => net[c] = 0
 \* Promise: once both sides are done with a commit, it holds no part of the
 \* count: every raise was matched by exactly one lowering.
+
+INV_CancelNeverUndoes == \A c \in Commits : ownerPc[c] # "skipped"
+\* Promise: the owner runs every commit handed to it; a caller that stops
+\* waiting never decides whether it lands. Only the commit itself (it lands
+\* or fails) or the owner going away does.
 
 LIVE_NoFenceLeak == <>[](outstanding = 0)
 \* Promise: the count comes back to zero and stays there once every commit

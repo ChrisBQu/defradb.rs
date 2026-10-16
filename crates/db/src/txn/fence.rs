@@ -118,9 +118,9 @@ impl Fence {
         })
     }
 
-    /// Whether the caller stopped waiting before the owner began: the owner
-    /// abandons the transaction instead of finishing it.
-    pub(crate) fn abandoned(&self) -> bool {
+    /// Whether the caller stopped waiting before the owner was done.
+    #[cfg(test)]
+    fn abandoned(&self) -> bool {
         self.state.load(Ordering::Acquire) == ABANDONED
     }
 
@@ -152,8 +152,8 @@ impl Fence {
 }
 
 /// The owner's hold on a [`Fence`], carried in the request: dropping it
-/// finishes the fence, however the request ends (run to the end, abandoned,
-/// dropped unrun, or dropped mid-commit when the worker stops).
+/// finishes the fence, however the request ends (run to the end, dropped
+/// unrun, or dropped mid-commit when the worker stops).
 pub(crate) struct Landing(Arc<Fence>);
 
 impl Landing {
@@ -161,8 +161,9 @@ impl Landing {
         Self(fence)
     }
 
-    /// Whether the caller stopped waiting before the owner began.
-    pub(crate) fn abandoned(&self) -> bool {
+    /// Whether the caller stopped waiting before the owner was done.
+    #[cfg(test)]
+    fn abandoned(&self) -> bool {
         self.0.abandoned()
     }
 }

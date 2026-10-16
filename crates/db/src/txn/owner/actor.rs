@@ -41,10 +41,10 @@ pub(super) type Last<T> = Box<dyn FnOnce(T) -> LocalBoxFuture<'static, ()>>;
 pub(super) enum Message<T> {
     /// A request.
     Run(Work<T>),
-    /// The transaction's end: commit or rollback. A caller that stopped
-    /// waiting before its end began gets an abandon instead. Dropping the
-    /// `fence`, once the end is done or the message is dropped unrun, lets
-    /// go of what a caller that stopped waiting fenced.
+    /// The transaction's end: commit or rollback, run even when its caller
+    /// stopped waiting. Dropping the `fence`, once the end is done or the
+    /// message is dropped unrun, lets go of what a caller that stopped
+    /// waiting fenced.
     Finish { last: Last<T>, fence: Landing },
     /// The caller let go of the transaction without finishing it.
     Abandon,
@@ -107,9 +107,6 @@ pub(super) async fn own<T, K>(
             }
             Message::Finish { last, fence } => {
                 taker_seen = true;
-                if fence.abandoned() {
-                    break;
-                }
                 let Some(txn) = idle.pop() else { break };
                 leave();
                 last(txn).await;
