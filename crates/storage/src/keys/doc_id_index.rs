@@ -1,4 +1,4 @@
-use super::utils::{decode_uvarint_ascending, encode_uvarint_ascending};
+use super::utils::{decode_uvarint_ascending, encode_uvarint_ascending, read_uvarint};
 use crate::corekv::{Error, Key, Result};
 use crate::encoding::{
     decode_uvarint_ascending as decode_go_uvarint_ascending,
@@ -20,10 +20,16 @@ const BLOCK_CID_TO_DOC_ID: &str = "b";
 /// Returns an empty vector for 0: short IDs start at 1 and 0 marks
 /// "unset" (Go parity).
 pub fn encode_doc_short_id(doc_short_id: u64) -> Vec<u8> {
-    if doc_short_id == 0 {
-        return Vec::new();
+    let mut buf = Vec::new();
+    push_doc_short_id(&mut buf, doc_short_id);
+    buf
+}
+
+/// Appends [`encode_doc_short_id`]'s bytes to `buf`.
+pub fn push_doc_short_id(buf: &mut Vec<u8>, doc_short_id: u64) {
+    if doc_short_id != 0 {
+        *buf = encode_uvarint_ascending(std::mem::take(buf), doc_short_id);
     }
-    encode_uvarint_ascending(Vec::new(), doc_short_id)
 }
 
 /// Decode a document short ID, requiring the buffer to be fully consumed.
@@ -35,13 +41,30 @@ pub fn decode_doc_short_id(data: &[u8]) -> Result<u64> {
     Ok(doc_short_id)
 }
 
+/// The width and value of the document short ID `data` starts with: an
+/// ordered uvarint, never zero. Allocates nothing.
+fn read_doc_short_id(data: &[u8]) -> Option<(usize, u64)> {
+    read_uvarint(data).filter(|(_, doc_short_id)| *doc_short_id != 0)
+}
+
 /// Decode a document short ID prefix, returning the remaining bytes.
 pub fn decode_doc_short_id_prefix(data: &[u8]) -> Result<(&[u8], u64)> {
-    let (rest, doc_short_id) = decode_uvarint_ascending(data)?;
-    if doc_short_id == 0 {
-        return Err(Error::Other("doc short ID cannot be 0".into()));
+    match read_doc_short_id(data) {
+        Some((width, doc_short_id)) => Ok((&data[width..], doc_short_id)),
+        None => {
+            // Either the uvarint itself is cut short, which its decoder says,
+            // or it holds zero.
+            decode_uvarint_ascending(data)?;
+            Err(Error::Other("doc short ID cannot be 0".into()))
+        }
     }
-    Ok((rest, doc_short_id))
+}
+
+/// The length of the document short ID `data` starts with, or `None` where
+/// [`decode_doc_short_id_prefix`] fails. Allocates nothing, for a caller that
+/// only needs to know where the ID ends.
+pub fn doc_short_id_len(data: &[u8]) -> Option<usize> {
+    read_doc_short_id(data).map(|(width, _)| width)
 }
 
 /// Reference from a public DocID to its node-local storage identity.
@@ -94,7 +117,14 @@ impl DocRef {
 }
 
 fn doc_id_index_key(segments: &[&[u8]]) -> Vec<u8> {
-    let mut result = DOC_ID_INDEX.as_bytes().to_vec();
+    let capacity = DOC_ID_INDEX.len()
+        + segments
+            .iter()
+            .filter(|segment| !segment.is_empty())
+            .map(|segment| 1 + segment.len())
+            .sum::<usize>();
+    let mut result = Vec::with_capacity(capacity);
+    result.extend_from_slice(DOC_ID_INDEX.as_bytes());
     for segment in segments {
         if !segment.is_empty() {
             result.push(b'/');
@@ -232,6 +262,15 @@ impl BlockCIDToDocIDKey {
         }
     }
 
+    /// The key's bytes for `block_cid` and `doc_id`, without building the key.
+    pub fn bytes_for(block_cid: &str, doc_id: &str) -> Vec<u8> {
+        doc_id_index_key(&[
+            BLOCK_CID_TO_DOC_ID.as_bytes(),
+            block_cid.as_bytes(),
+            doc_id.as_bytes(),
+        ])
+    }
+
     /// Prefix covering every DocID owning a block (trailing '/').
     pub fn block_prefix(block_cid: &str) -> Vec<u8> {
         let mut prefix = doc_id_index_key(&[BLOCK_CID_TO_DOC_ID.as_bytes(), block_cid.as_bytes()]);
@@ -242,11 +281,7 @@ impl BlockCIDToDocIDKey {
 
 impl Key for BlockCIDToDocIDKey {
     fn bytes(&self) -> Vec<u8> {
-        doc_id_index_key(&[
-            BLOCK_CID_TO_DOC_ID.as_bytes(),
-            self.block_cid.as_bytes(),
-            self.doc_id.as_bytes(),
-        ])
+        Self::bytes_for(&self.block_cid, &self.doc_id)
     }
 
     fn to_string(&self) -> String {
@@ -295,6 +330,29 @@ mod tests {
         assert!(encode_doc_short_id(0).is_empty());
         assert!(decode_doc_short_id(&[0x00]).is_err());
         assert!(decode_doc_short_id(&[]).is_err());
+    }
+
+    /// The length a reader that only needs the ID's end gets agrees with the
+    /// decoder, for every width, and both refuse what the other refuses.
+    #[test]
+    fn test_doc_short_id_len_agrees_with_decode() {
+        for id in [1u64, 47, 239, 240, 287, 2287, 2288, 65_535, u64::MAX] {
+            let mut encoded = encode_doc_short_id(id);
+            let width = encoded.len();
+            encoded.extend_from_slice(b"/rest");
+            let (rest, decoded) = decode_doc_short_id_prefix(&encoded).unwrap();
+            assert_eq!(decoded, id);
+            assert_eq!(doc_short_id_len(&encoded), Some(width));
+            assert_eq!(rest, b"/rest");
+            for cut in 0..width {
+                assert_eq!(doc_short_id_len(&encoded[..cut]), None);
+                assert!(decode_doc_short_id_prefix(&encoded[..cut]).is_err());
+            }
+        }
+        for zero in [&[0x00][..], &[0xF8, 0x00][..], &[0xF9, 0x00, 0x00][..]] {
+            assert_eq!(doc_short_id_len(zero), None);
+            assert!(decode_doc_short_id_prefix(zero).is_err());
+        }
     }
 
     #[test]

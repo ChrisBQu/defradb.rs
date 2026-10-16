@@ -188,7 +188,7 @@ async fn fan_in_pushlog_admission_no_silent_divergence() {
         let result = hub
             .query("query { User { _docID } }")
             .expect("query hub Users");
-        let present: std::collections::HashSet<&str> = result["User"]
+        let present: rapidhash::RapidHashSet<&str> = result["User"]
             .as_array()
             .map(|rows| {
                 rows.iter()
@@ -259,7 +259,7 @@ async fn fan_in_pushlog_admission_no_silent_divergence() {
             .unwrap()
             .join("logs/stdout.log");
         let log = std::fs::read_to_string(path).expect("pusher log");
-        let deadlines: std::collections::HashSet<u64> = log
+        let deadlines: rapidhash::RapidHashSet<u64> = log
             .lines()
             .filter(|line| line.contains("Persisting negotiated PushLog retry-after"))
             .map(|line| {

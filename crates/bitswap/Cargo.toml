@@ -15,7 +15,6 @@ bench = false
 workspace = true
 
 [dependencies]
-anyhow = { workspace = true }
 asynchronous-codec = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }

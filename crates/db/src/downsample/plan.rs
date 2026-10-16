@@ -110,7 +110,7 @@ impl<S: Store> crate::database::DB<S> {
 
         require_scalar_kind(
             target,
-            "source_doc_id",
+            SERIES_FIELD,
             &[ScalarKind::String, ScalarKind::DocID],
         )?;
         require_scalar_kind(target, "source_height", &[ScalarKind::Int])?;
@@ -156,7 +156,7 @@ impl<S: Store> crate::database::DB<S> {
                 !matches!(
                     field.name.as_str(),
                     "_docID"
-                        | "source_doc_id"
+                        | SERIES_FIELD
                         | "source_height"
                         | "window_start"
                         | "window_end"
@@ -305,12 +305,14 @@ impl<S: Store> crate::database::DB<S> {
         let collections: Vec<CollectionVersion> = self.collections.peek(|cache| {
             cache
                 .values()
-                .filter(|collection| {
+                .filter_map(|collection| {
                     let schema = collection.schema();
-                    schema.downsample_interval.is_some()
-                        && names_filter.is_none_or(|names| names.contains(&schema.name))
+                    schema.downsample_interval.as_ref()?;
+                    if names_filter.is_some_and(|names| !names.contains(&schema.name)) {
+                        return None;
+                    }
+                    Some(schema.clone())
                 })
-                .map(|collection| collection.schema().clone())
                 .collect()
         });
 

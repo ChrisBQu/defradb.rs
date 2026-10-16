@@ -73,6 +73,10 @@ async fn info(peerstore: &Peerstore<RegolithStore>) -> RetryInfo {
 #[tokio::test]
 async fn no_hint_registration_preserves_supplied_rung_and_cursor() {
     let peerstore = Peerstore::new(Arc::new(RegolithStore::in_memory().unwrap()));
+    peerstore
+        .create_replicator("peer", b"replicator")
+        .await
+        .unwrap();
     let mut requested = RetryInfo::new_initial();
     requested.num_retries = 3;
     requested.dispatch_cursor = 17;
@@ -211,10 +215,11 @@ async fn last_scope_ack_preserves_peer_hint_until_expiry_or_forget() {
         .await
         .unwrap();
     let deadline = info(&peerstore).await.not_before_unix;
-    peerstore
-        .complete_retry_scope("peer", "doc", "collection", false, &[])
+    let doc_generation = peerstore.get_retry_documents("peer").await.unwrap()[0].generation;
+    assert!(peerstore
+        .complete_retry_scope("peer", "doc", "collection", false, doc_generation, &[])
         .await
-        .unwrap();
+        .unwrap());
     peerstore.clear_retry_peer("peer").await.unwrap();
     assert!(peerstore
         .get_retry_documents("peer")
@@ -227,10 +232,11 @@ async fn last_scope_ack_preserves_peer_hint_until_expiry_or_forget() {
         .await
         .unwrap();
     assert!(!info(&peerstore).await.is_backpressure_elapsed());
-    peerstore
-        .complete_retry_scope("peer", "new", "collection", false, &[])
+    let new_generation = peerstore.get_retry_documents("peer").await.unwrap()[0].generation;
+    assert!(peerstore
+        .complete_retry_scope("peer", "new", "collection", false, new_generation, &[])
         .await
-        .unwrap();
+        .unwrap());
 
     // Move only the persisted deadline into the past; no wall-clock sleep.
     let mut expired = info(&peerstore).await;
@@ -334,9 +340,11 @@ async fn acknowledged_heads_follow_markers_and_replicator_lifetime() {
         None
     );
 
-    peerstore
-        .observe_push_head("peer", "doc", "collection")
+    // A marker completes only at the generation it was registered with.
+    let generation = peerstore
+        .observe_push_head_with_generation("peer", "doc", "collection")
         .await
+        .unwrap()
         .unwrap();
     peerstore
         .complete_retry_scope(
@@ -344,6 +352,7 @@ async fn acknowledged_heads_follow_markers_and_replicator_lifetime() {
             "doc",
             "collection",
             false,
+            generation,
             &["b".into(), "a".into()],
         )
         .await
@@ -357,9 +366,10 @@ async fn acknowledged_heads_follow_markers_and_replicator_lifetime() {
     );
 
     // A newer push hides the old acknowledgement until it completes.
-    peerstore
-        .observe_push_head("peer", "doc", "collection")
+    let generation = peerstore
+        .observe_push_head_with_generation("peer", "doc", "collection")
         .await
+        .unwrap()
         .unwrap();
     assert_eq!(
         peerstore
@@ -371,7 +381,7 @@ async fn acknowledged_heads_follow_markers_and_replicator_lifetime() {
 
     // A scope completed without delivery (filtered out or deleted) clears it.
     peerstore
-        .complete_retry_scope("peer", "doc", "collection", false, &[])
+        .complete_retry_scope("peer", "doc", "collection", false, generation, &[])
         .await
         .unwrap();
     assert_eq!(
@@ -382,8 +392,13 @@ async fn acknowledged_heads_follow_markers_and_replicator_lifetime() {
         None
     );
 
+    let generation = peerstore
+        .observe_push_head_with_generation("peer", "", "collection")
+        .await
+        .unwrap()
+        .unwrap();
     peerstore
-        .complete_retry_scope("peer", "", "collection", true, &["c".into()])
+        .complete_retry_scope("peer", "", "collection", true, generation, &["c".into()])
         .await
         .unwrap();
     peerstore.delete_replicator("peer").await.unwrap();

@@ -1,6 +1,6 @@
 use std::ffi::c_char;
 
-use crate::helpers::{get_rt, require_c_str};
+use crate::helpers::require_c_str;
 use crate::nac_check::check_nac_for_node;
 use crate::state::NODES;
 use crate::types::{c_str_to_string, FfiResult};
@@ -28,26 +28,18 @@ use acp::normalize_auth_error;
 #[no_mangle]
 pub unsafe extern "C" fn get_nac_status(node_ptr: usize, identity_did: *const c_char) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::NacStatus
         ));
-
-        // Bind the caller's identity so any NAC-gated method reached by the body
-        // resolves the actual caller instead of the wildcard.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
-        );
 
         let nac_manager = match NODES.get(node_ptr, |state| state.nac_manager.clone()) {
             Some(m) => m,
             None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
         };
 
-        ffi_async!(rt, {
+        ffi_async!(node_ptr, {
             let info = nac_manager.info().await;
             let json = serde_json::to_string(&info)
                 .map_err(|e| format!("failed to serialize NAC info: {}", e))?;
@@ -67,7 +59,6 @@ pub unsafe extern "C" fn get_nac_status(node_ptr: usize, identity_did: *const c_
 #[no_mangle]
 pub unsafe extern "C" fn disable_nac(node_ptr: usize, requestor_did: *const c_char) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         let requestor_str = try_ffi!(require_c_str(requestor_did, "requestor_did"));
 
         let nac_manager = match NODES.get(node_ptr, |state| state.nac_manager.clone()) {
@@ -75,7 +66,7 @@ pub unsafe extern "C" fn disable_nac(node_ptr: usize, requestor_did: *const c_ch
             None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
         };
 
-        ffi_async_ok!(rt, {
+        ffi_async_ok!(node_ptr, {
             // Check NAC state before validating DID (Go checks state first)
             let status = nac_manager.status().await;
             if status == acp::nac::NacStatus::NotConfigured {
@@ -113,7 +104,6 @@ pub unsafe extern "C" fn disable_nac(node_ptr: usize, requestor_did: *const c_ch
 #[no_mangle]
 pub unsafe extern "C" fn re_enable_nac(node_ptr: usize, requestor_did: *const c_char) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         let requestor_str = try_ffi!(require_c_str(requestor_did, "requestor_did"));
 
         let nac_manager = match NODES.get(node_ptr, |state| state.nac_manager.clone()) {
@@ -121,7 +111,7 @@ pub unsafe extern "C" fn re_enable_nac(node_ptr: usize, requestor_did: *const c_
             None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
         };
 
-        ffi_async_ok!(rt, {
+        ffi_async_ok!(node_ptr, {
             // Check NAC state before validating DID (Go checks state first)
             let status = nac_manager.status().await;
             if status == acp::nac::NacStatus::NotConfigured {
@@ -174,7 +164,6 @@ pub unsafe extern "C" fn re_enable_nac(node_ptr: usize, requestor_did: *const c_
 #[no_mangle]
 pub unsafe extern "C" fn enable_nac(node_ptr: usize, owner_did: *const c_char) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         let owner_str = try_ffi!(require_c_str(owner_did, "owner_did"));
 
         let nac_manager = match NODES.get(node_ptr, |state| state.nac_manager.clone()) {
@@ -182,7 +171,7 @@ pub unsafe extern "C" fn enable_nac(node_ptr: usize, owner_did: *const c_char) -
             None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
         };
 
-        ffi_async_ok!(rt, {
+        ffi_async_ok!(node_ptr, {
             let owner = identity::Did::new(&owner_str)
                 .map_err(|e| format!("invalid DID '{}': {}", owner_str, e))?;
 
@@ -217,7 +206,6 @@ pub unsafe extern "C" fn add_nac_actor_relationship(
     target_did: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         let requestor_str = try_ffi!(require_c_str(requestor_did, "requestor_did"));
 
         let relation_str = match c_str_to_string(relation) {
@@ -232,7 +220,7 @@ pub unsafe extern "C" fn add_nac_actor_relationship(
             None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
         };
 
-        ffi_async!(rt, {
+        ffi_async!(node_ptr, {
             // Check NAC state before validating DID (Go checks state first)
             let status = nac_manager.status().await;
             if status == acp::nac::NacStatus::NotConfigured {
@@ -330,7 +318,6 @@ pub unsafe extern "C" fn delete_nac_actor_relationship(
     target_did: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         let requestor_str = try_ffi!(require_c_str(requestor_did, "requestor_did"));
 
         let relation_str = match c_str_to_string(relation) {
@@ -345,7 +332,7 @@ pub unsafe extern "C" fn delete_nac_actor_relationship(
             None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
         };
 
-        ffi_async!(rt, {
+        ffi_async!(node_ptr, {
             // Check NAC state before validating DID (Go checks state first)
             let status = nac_manager.status().await;
             if status == acp::nac::NacStatus::NotConfigured {

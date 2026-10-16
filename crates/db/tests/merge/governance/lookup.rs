@@ -30,8 +30,8 @@ impl Node {
 async fn immutable_fields_reads_one_document_not_the_collection() {
     let validator = Arc::new(ReadImmutable {
         collection: "Grants",
-        doc_id: Mutex::new(String::new()),
-        read: Mutex::new(None),
+        doc_id: Atom::new(String::new()),
+        read: Atom::new(None),
     });
     let node = Node::with_immutable_grants(validator.clone()).await;
     let writer = signer();
@@ -48,11 +48,11 @@ async fn immutable_fields_reads_one_document_not_the_collection() {
         .await
         .is_err());
 
-    *validator.doc_id.lock().unwrap() = grant.doc_id.clone();
+    validator.doc_id.store(grant.doc_id.clone());
     let note = genesis("col-notes", "grant", "anything", &writer);
     assert_eq!(note.merge(&node, &writer.did).await, MergeOutcome::Merged);
     assert_eq!(
-        validator.read.lock().unwrap().clone().unwrap(),
+        validator.read.load_clone().unwrap(),
         Some(vec![(
             "writer".to_string(),
             NormalValue::String(writer.did.clone())
@@ -65,30 +65,31 @@ type Lookups = Vec<(String, Result<Vec<String>, String>)>;
 /// Defers a grant held by "gated" until the composite `gate` is held, and
 /// on a note looks every probe value up on each of `fields`.
 struct Probe {
-    gate: Mutex<Cid>,
+    gate: Atom<Cid>,
     fields: &'static [&'static str],
-    values: Mutex<Vec<String>>,
-    found: Mutex<Lookups>,
+    values: Atom<Vec<String>>,
+    found: Atom<Lookups>,
 }
 
 impl Probe {
     fn new(fields: &'static [&'static str]) -> Arc<Self> {
         Arc::new(Self {
-            gate: Mutex::new(Cid::default()),
+            gate: Atom::new(Cid::default()),
             fields,
-            values: Mutex::new(Vec::new()),
-            found: Mutex::new(Vec::new()),
+            values: Atom::new(Vec::new()),
+            found: Atom::new(Vec::new()),
         })
     }
 
     /// What a note's verdict finds for `values`, by `field=value`.
     async fn lookups(&self, node: &Node, values: &[&str]) -> Lookups {
-        *self.values.lock().unwrap() = values.iter().map(|value| value.to_string()).collect();
-        self.found.lock().unwrap().clear();
+        self.values
+            .store(values.iter().map(|value| value.to_string()).collect());
+        self.found.store(Vec::new());
         let writer = signer();
         let note = genesis("col-notes", "grant", &values.join(","), &writer);
         assert_eq!(note.merge(node, &writer.did).await, MergeOutcome::Merged);
-        self.found.lock().unwrap().clone()
+        self.found.load_clone()
     }
 }
 
@@ -107,13 +108,13 @@ impl MergeValidator for Probe {
             let gated = fields.iter().any(|(name, value)| {
                 name == "holder" && *value == FieldValue::Value(NormalValue::String("gated".into()))
             });
-            let gate = *self.gate.lock().unwrap();
+            let gate = *self.gate.load();
             if gated && view.composite_fields(&gate).await?.is_none() {
                 return Ok(MergeVerdict::defer("gate not held", [gate]));
             }
             return Ok(MergeVerdict::Accept);
         }
-        let values = self.values.lock().unwrap().clone();
+        let values = self.values.load_clone();
         for value in values {
             for field in self.fields {
                 let mut found = view
@@ -122,10 +123,7 @@ impl MergeValidator for Probe {
                 if let Ok(ids) = &mut found {
                     ids.sort();
                 }
-                self.found
-                    .lock()
-                    .unwrap()
-                    .push((format!("{field}={value}"), found));
+                push(&self.found, (format!("{field}={value}"), found));
             }
         }
         Ok(MergeVerdict::Accept)
@@ -240,7 +238,7 @@ async fn find_documents_through_an_index_finds_redriven_and_local_documents() {
     let node = Node::with_indexed_grants(probe.clone()).await;
     let peer = signer();
     let gate = grant("gate", "open", &peer);
-    *probe.gate.lock().unwrap() = gate.cid;
+    probe.gate.store(gate.cid);
 
     let redriven = grant("shared", "gated", &peer);
     assert_eq!(
@@ -326,4 +324,100 @@ async fn find_documents_still_finds_a_deleted_document_on_both_paths() {
     assert_eq!(ids("twin=gone"), vec![gone.doc_id.clone()]);
     assert_eq!(ids("writer=kept"), vec![kept.doc_id.clone()]);
     assert!(ids("writer=absent").is_empty());
+}
+
+/// On a note, looks every value up on each of `fields`, all at once through
+/// the one view.
+struct JoinedProbe {
+    fields: &'static [&'static str],
+    values: Atom<Vec<String>>,
+    found: Atom<Lookups>,
+}
+
+impl JoinedProbe {
+    fn new(fields: &'static [&'static str]) -> Arc<Self> {
+        Arc::new(Self {
+            fields,
+            values: Atom::new(Vec::new()),
+            found: Atom::new(Vec::new()),
+        })
+    }
+
+    /// What a note's verdict finds for `values`, by `field=value`.
+    async fn lookups(&self, node: &Node, values: &[&str]) -> Lookups {
+        self.values
+            .store(values.iter().map(|value| value.to_string()).collect());
+        let writer = signer();
+        let note = genesis("col-notes", "grant", &values.join(","), &writer);
+        assert_eq!(note.merge(node, &writer.did).await, MergeOutcome::Merged);
+        self.found.load_clone()
+    }
+}
+
+#[async_trait]
+impl MergeValidator for JoinedProbe {
+    async fn validate(
+        &self,
+        candidate: &MergeCandidate<'_>,
+        view: &dyn MergeView,
+    ) -> Result<MergeVerdict, String> {
+        if candidate.collection.name == "Grants" {
+            return Ok(MergeVerdict::Accept);
+        }
+        let values = self.values.load_clone();
+        let probes: Vec<(&str, String)> = values
+            .iter()
+            .flat_map(|value| self.fields.iter().map(move |field| (*field, value.clone())))
+            .collect();
+        let found =
+            futures::future::join_all(probes.into_iter().map(|(field, value)| async move {
+                let mut found = view
+                    .find_documents("Grants", field, &NormalValue::String(value.clone()))
+                    .await;
+                if let Ok(ids) = &mut found {
+                    ids.sort();
+                }
+                (format!("{field}={value}"), found)
+            }))
+            .await;
+        self.found.store(found);
+        Ok(MergeVerdict::Accept)
+    }
+}
+
+/// A validator may run its reads concurrently through one view: they open one
+/// snapshot between them, fill the per-verdict index and deleted-row memos
+/// at once, and answer exactly as the same reads made one after another.
+#[tokio::test]
+async fn concurrent_lookups_through_one_view_answer_as_sequential_ones() {
+    let probe = JoinedProbe::new(&["writer", "twin"]);
+    let node = Node::with_indexed_grants(probe.clone()).await;
+    let peer = signer();
+    let forked = grant("shared", "a", &peer);
+    assert_eq!(forked.merge(&node, &peer.did).await, MergeOutcome::Merged);
+    node.create_locally(
+        "Grants",
+        r#"{"writer": "shared", "twin": "shared", "holder": "b"}"#,
+    )
+    .await;
+    let gone = grant("gone", "c", &peer);
+    assert_eq!(gone.merge(&node, &peer.did).await, MergeOutcome::Merged);
+    node.delete_locally("Grants", &gone.doc_id).await;
+
+    let found = probe.lookups(&node, &["shared", "gone", "absent"]).await;
+    assert_eq!(found.len(), 6);
+    let ids = |key: &str| {
+        let (_, ids) = found.iter().find(|(found, _)| found == key).unwrap();
+        ids.clone().unwrap()
+    };
+    assert_eq!(ids("writer=shared").len(), 2);
+    assert!(ids("writer=shared").contains(&forked.doc_id));
+    assert_eq!(ids("writer=gone"), vec![gone.doc_id.clone()]);
+    assert!(ids("writer=absent").is_empty());
+    for value in ["shared", "gone", "absent"] {
+        assert_eq!(
+            ids(&format!("writer={value}")),
+            ids(&format!("twin={value}"))
+        );
+    }
 }

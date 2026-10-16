@@ -1,120 +1,79 @@
 use super::composite::{CompositeMergeContext, CompositeMergeState};
 use super::*;
+use storage::keys::headstore::HeadstoreDocKey;
 
 impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
+    /// Publish the composite and each field block it merged into the
+    /// document's head set, in one operand.
     pub(crate) async fn update_heads(
         &self,
         headstore: &NamespaceView,
         context: &CompositeMergeContext<'_, '_>,
-        state: &CompositeMergeState,
+        state: &mut CompositeMergeState,
     ) -> std::result::Result<(), MergeError> {
-        let priority_bytes = encode_priority_varint(context.payload.priority);
-
-        if let Some(heads) = &context.block.heads {
-            for parent_cid in heads {
-                let parent_key = storage::keys::headstore::HeadstoreDocKey::new(
-                    context.doc_short_id,
-                    "C",
-                    *parent_cid,
-                );
-                headstore
-                    .delete(
-                        &<storage::keys::headstore::HeadstoreDocKey as storage::corekv::Key>::bytes(
-                            &parent_key,
-                        ),
-                    )
-                    .await
-                    .map_err(|e| MergeError::Storage(e.to_string()))?;
-            }
-        }
-
-        let composite_head_key =
-            storage::keys::headstore::HeadstoreDocKey::new(context.doc_short_id, "C", *context.cid);
-        headstore
-            .set(
-                &<storage::keys::headstore::HeadstoreDocKey as storage::corekv::Key>::bytes(
-                    &composite_head_key,
-                ),
-                &priority_bytes,
-            )
+        let storage_error = |e: storage::corekv::Error| MergeError::Storage(e.to_string());
+        let set = state
+            .reads
+            .heads(headstore, context.doc_short_id)
             .await
-            .map_err(|e| MergeError::Storage(e.to_string()))?;
-
-        let composite_priority_key = storage::keys::headstore::HeadstorePriorityKey::new(
-            context.doc_short_id,
+            .map_err(storage_error)?;
+        let mut write = storage::merge::head_set::Write::default();
+        let head = HeadstoreDocKey::new(context.doc_short_id, "C", *context.cid);
+        crate::block::heads::document::publish(
+            headstore,
+            set,
+            &mut write,
+            &head,
             context.payload.priority,
-            *context.cid,
-        );
-        headstore
-            .set(
-                &<storage::keys::headstore::HeadstorePriorityKey as storage::corekv::Key>::bytes(
-                    &composite_priority_key,
-                ),
-                &[],
-            )
-            .await
-            .map_err(|e| MergeError::Storage(e.to_string()))?;
+            context.block.heads.as_deref().unwrap_or_default(),
+        )
+        .await
+        .map_err(storage_error)?;
 
         if let Some(links) = &context.block.links {
-            for dag_link in links {
-                if !state.linked_field_cids.contains(&dag_link.link) {
+            for link in links {
+                if !state.linked_field_cids.contains(&link.link) {
                     continue;
                 }
-                if let Some(parent_cids) = state.field_block_heads.get(&dag_link.name) {
-                    for parent_cid in parent_cids {
-                        let parent_key = storage::keys::headstore::HeadstoreDocKey::new(
-                            context.doc_short_id,
-                            &dag_link.name,
-                            *parent_cid,
-                        );
-                        headstore
-                            .delete(
-                                &<storage::keys::headstore::HeadstoreDocKey as storage::corekv::Key>::bytes(
-                                    &parent_key,
-                                ),
-                            )
-                            .await.map_err(|e| MergeError::Storage(e.to_string()))?;
-                    }
-                }
-
                 // An Immutable block is the head of every field it carries, so
                 // a peer holding one of them as mutable chains its update to it.
-                let head_names = match state.immutable_block_fields.get(&dag_link.link) {
+                let names: Vec<&str> = match state.immutable_block_fields.get(&link.link) {
                     Some(fields) => fields.iter().map(String::as_str).collect(),
-                    None => vec![dag_link.name.as_str()],
+                    None => vec![link.name.as_str()],
                 };
-                for head_name in head_names {
-                    let field_head_key = storage::keys::headstore::HeadstoreDocKey::new(
-                        context.doc_short_id,
-                        head_name,
-                        dag_link.link,
-                    );
-                    headstore
-                        .set(
-                            &<storage::keys::headstore::HeadstoreDocKey as storage::corekv::Key>::bytes(
-                                &field_head_key,
-                            ),
-                            &priority_bytes,
-                        )
-                        .await
-                        .map_err(|e| MergeError::Storage(e.to_string()))?;
+                let Some((first, others)) = names.split_first() else {
+                    continue;
+                };
+                let priority = state.field_block_priorities[&link.link];
+                let head = HeadstoreDocKey::new(context.doc_short_id, *first, link.link);
+                let published = crate::block::heads::document::publish(
+                    headstore,
+                    set,
+                    &mut write,
+                    &head,
+                    priority,
+                    state
+                        .field_block_heads
+                        .get(&link.name)
+                        .map(Vec::as_slice)
+                        .unwrap_or_default(),
+                )
+                .await
+                .map_err(storage_error)?;
+                if published {
+                    for other in others {
+                        write.add(
+                            &crate::block::heads::document::name(other, &link.link),
+                            priority,
+                        );
+                    }
                 }
-
-                let field_priority_key = storage::keys::headstore::HeadstorePriorityKey::new(
-                    context.doc_short_id,
-                    context.payload.priority,
-                    dag_link.link,
-                );
-                headstore
-                    .set(
-                        &<storage::keys::headstore::HeadstorePriorityKey as storage::corekv::Key>::bytes(
-                            &field_priority_key,
-                        ),
-                        &[],
-                    )
-                    .await.map_err(|e| MergeError::Storage(e.to_string()))?;
             }
         }
+        crate::block::heads::document::commit(headstore, context.doc_short_id, &write)
+            .await
+            .map_err(storage_error)?;
+        state.reads.wrote_heads();
         Ok(())
     }
 }

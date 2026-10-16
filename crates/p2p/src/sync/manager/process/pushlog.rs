@@ -13,7 +13,6 @@
 //! `pending_capacity_sheds_unrelated_blocks_but_accepts_missing_dependency`.
 
 use rapidhash::{HashSetExt, RapidHashSet};
-use std::time::Duration;
 use web_time::Instant;
 
 use cid::Cid;
@@ -22,14 +21,14 @@ use blockstore::{verify_block_cid, Blockstore};
 
 use crate::error::{Error, Result};
 use crate::message::PushLogBroadcast;
+use crate::sync::head_scope::ScopeDecision;
 use crate::sync::manager::events::SyncEvent;
 use crate::sync::manager::links::find_all_missing_links;
 use crate::sync::manager::pending::PendingDag;
+use crate::sync::pending_store::{Admission, PersistedPendingDag, Registration};
 use crate::ExplicitReplayAuthorization;
 
 use super::SyncManager;
-
-const MAX_RETRIABLE_PUSHLOG_ATTEMPTS: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AnnouncedBlockKind {
@@ -58,46 +57,7 @@ fn announced_block_kind(bytes: &[u8]) -> AnnouncedBlockKind {
     }
 }
 
-fn retriable_pushlog_delay(attempt: usize) -> Duration {
-    match attempt {
-        1 => Duration::from_millis(10),
-        2 => Duration::from_millis(25),
-        _ => Duration::from_millis(50),
-    }
-}
-
 impl<B: Blockstore + 'static> SyncManager<B> {
-    async fn retry_retriable_pushlog_op<T, F, Fut>(
-        &self,
-        cid: &Cid,
-        op_name: &'static str,
-        mut op: F,
-    ) -> Result<T>
-    where
-        F: FnMut() -> Fut,
-        Fut: std::future::Future<Output = Result<T>>,
-    {
-        let mut attempt = 1;
-        loop {
-            match op().await {
-                Ok(value) => return Ok(value),
-                Err(error) if error.is_retriable() && attempt < MAX_RETRIABLE_PUSHLOG_ATTEMPTS => {
-                    tracing::debug!(
-                        cid = %cid,
-                        op_name,
-                        attempt,
-                        max_attempts = MAX_RETRIABLE_PUSHLOG_ATTEMPTS,
-                        error = %error,
-                        "Retryable PushLog storage operation failed; backing off and retrying"
-                    );
-                    n0_future::time::sleep(retriable_pushlog_delay(attempt)).await;
-                    attempt += 1;
-                }
-                Err(error) => return Err(error),
-            }
-        }
-    }
-
     async fn emit_sync_error(&self, cid: &Cid, error: &Error) -> Result<()> {
         if self
             .event_tx
@@ -207,13 +167,10 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 }
 
                 match self
-                    .retry_retriable_pushlog_op(&cid, "suppressed_is_merged", || async {
-                        self.blockstore
-                            .is_merged(&cid)
-                            .await
-                            .map_err(Error::from_blockstore)
-                    })
+                    .blockstore
+                    .is_merged(&cid)
                     .await
+                    .map_err(Error::from_blockstore)
                 {
                     Ok(true) => {
                         self.diagnostics.record_already_merged_fast_path();
@@ -247,7 +204,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     /// means it is merged, registered as pending, or covered by a newer head
     /// already durable for the same sender scope. The sender stops retrying on
     /// success, and only those states leave something on this side to finish
-    /// the work, so acking without one loses the update for good — silently,
+    /// the work, so acking without one loses the update for good, silently,
     /// because nothing failed.
     ///
     /// A block that carries no head is exempt. A peer may push a field or a
@@ -313,13 +270,10 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     ) -> Result<()> {
         // Check if already merged
         match self
-            .retry_retriable_pushlog_op(cid, "is_merged", || async {
-                self.blockstore
-                    .is_merged(cid)
-                    .await
-                    .map_err(Error::from_blockstore)
-            })
+            .blockstore
+            .is_merged(cid)
             .await
+            .map_err(Error::from_blockstore)
         {
             Ok(true) => {
                 self.diagnostics.record_already_merged_fast_path();
@@ -345,7 +299,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         // own: `can_process_pushlog` admits it only while a registered root
         // waits on it, so unawaited bytes stay inside the cap.
         if !self.can_process_pushlog(cid)
-            && !self.persisted_roots.contains_key(cid)
+            && !self.persisted.contains(cid)
             && !self.scope_head_is_refresh_or_newer(
                 *cid,
                 sender_peer,
@@ -388,13 +342,10 @@ impl<B: Blockstore + 'static> SyncManager<B> {
 
         // Store the block (marked as unmerged in P2P mode)
         if let Err(e) = self
-            .retry_retriable_pushlog_op(cid, "put_block", || async {
-                self.blockstore
-                    .put(cid, &msg.block)
-                    .await
-                    .map_err(Error::from_blockstore)
-            })
+            .blockstore
+            .put(cid, &msg.block)
             .await
+            .map_err(Error::from_blockstore)
         {
             self.emit_sync_error(cid, &e).await?;
             return Err(e);
@@ -468,17 +419,13 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             // DAG, enters the same durable receiver clock. The clock emits the
             // merge work and keeps the registration until merge or quarantine
             // reaches a durable terminal disposition.
-            // Different CIDs for one sender/scope must make one serialized
-            // durable replacement decision. Otherwise concurrent heartbeats
-            // can both observe the old head and recreate a per-root ledger.
-            let _metadata_writer = self.pending_metadata_writer.lock().await;
+            //
             // The root may have completed through another arrival after the
-            // initial is_merged check but before this durable registration.
-            // Terminal merge uses this same writer for pending cleanup, so a
-            // second check here prevents recreating an already-discharged
-            // receiver obligation from a stale PushLog traversal.
+            // initial is_merged check. A merge that marks it after this check
+            // and before the registration below commits finds no record to
+            // discharge, so the registration looks again once it committed.
             if self.is_merged(cid).await? {
-                self.reconcile_merged_pending_inner(cid).await;
+                self.discharge_merged(cid).await;
                 tracing::debug!(
                     cid = %cid,
                     doc_id = %msg.doc_id,
@@ -493,89 +440,18 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             // collection-authorized peer replace its recovery provider, reset
             // its backoff, or rewrite its authorization metadata merely by
             // replaying the same signed head bytes.
-            let existing = self.pending_dag_snapshot(cid);
-            if let Some(mut existing) = existing {
-                // A stronger explicit-replay authorization may arrive through
-                // the same authenticated provider after an ordinary hint. Keep
-                // the provider/backoff owner, but durably upgrade the merge
-                // authorization before acknowledging that replay.
-                let same_provider = existing.source_peer.as_deref() == sender_peer;
-                let upgrades_authorization = same_provider
-                    && explicit_replay_authorization.is_some()
-                    && (existing.explicit_replay_authorization != explicit_replay_authorization
-                        || !existing.is_explicit_replicator);
-                // Exact-root equality alone is not availability evidence: a
-                // gossip relay may hold only the envelope head. Admit a new
-                // durable provider only through authenticated direct PushLog
-                // delivery (including configured or signed two-stream
-                // replicators). Honest downstream fanout crosses this seam
-                // only after the sender has merged the complete DAG.
-                let new_alternate = sender_peer.filter(|provider| {
-                    recovery_provider_evidenced
-                        && existing.source_peer.as_deref() != Some(*provider)
-                        && !existing
-                            .alternate_providers
-                            .iter()
-                            .any(|candidate| candidate == *provider)
-                        && existing.alternate_providers.len()
-                            < crate::sync::pending_store::MAX_PENDING_DAG_ALTERNATE_PROVIDERS
-                });
-                if upgrades_authorization || new_alternate.is_some() {
-                    if let Some(provider) = new_alternate {
-                        existing.alternate_providers.push(provider.to_owned());
-                        existing.alternate_providers.sort_unstable();
-                        existing.alternate_providers.dedup();
-                    }
-                    if upgrades_authorization {
-                        existing.is_explicit_replicator = true;
-                        existing.explicit_replay_authorization =
-                            explicit_replay_authorization.clone();
-                    }
-                    if let Some(store) = self.pending_store() {
-                        let record = crate::sync::pending_store::PersistedPendingDag {
-                            doc_id: existing.doc_id.clone(),
-                            collection_id: existing.collection_id.clone(),
-                            head_priority: existing.head_priority,
-                            creator: existing.creator.clone(),
-                            source_peer: existing.source_peer.clone(),
-                            alternate_providers: existing.alternate_providers.clone(),
-                            is_explicit_replicator: existing.is_explicit_replicator,
-                            explicit_replay_authorization: existing
-                                .explicit_replay_authorization
-                                .as_ref()
-                                .map(Into::into),
-                        };
-                        store.replace_scope_head(None, cid, &record).await?;
-                    }
-                    self.pending_dags.update(|pending| {
-                        if let Some(current) = pending.get_mut(cid) {
-                            current.alternate_providers = existing.alternate_providers.clone();
-                            if upgrades_authorization {
-                                current.is_explicit_replicator = true;
-                                current.explicit_replay_authorization =
-                                    explicit_replay_authorization.clone();
-                            }
-                        }
-                    });
-                    tracing::debug!(
-                        cid = %cid,
-                        source_peer = ?sender_peer,
-                        alternate_count = existing.alternate_providers.len(),
-                        authorization_upgraded = upgrades_authorization,
-                        "Extended receiver-owned root recovery without replacing its provider"
-                    );
-                    return Ok(());
-                }
-                tracing::debug!(
-                    cid = %cid,
-                    doc_id = %msg.doc_id,
-                    collection_id = %msg.collection_id,
-                    announced_source_peer = ?sender_peer,
-                    "Incoming root is already receiver-owned; retaining its recovery provider"
-                );
-                return Ok(());
+            if let Some(existing) = self.pending_dag_snapshot(cid) {
+                return self
+                    .extend_registered_root(
+                        cid,
+                        existing,
+                        sender_peer,
+                        explicit_replay_authorization,
+                        recovery_provider_evidenced,
+                    )
+                    .await;
             }
-            if self.persisted_roots.contains_key(cid) {
+            if self.persisted.contains(cid) {
                 tracing::debug!(
                     cid = %cid,
                     announced_source_peer = ?sender_peer,
@@ -583,27 +459,25 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                 );
                 return Ok(());
             }
-            let durable_superseded_root = match self.persisted_scope_decision(
-                *cid,
-                sender_peer,
-                &msg.collection_id,
-                &msg.doc_id,
-                head_priority,
+            if matches!(
+                self.persisted.scope_decision(
+                    *cid,
+                    sender_peer,
+                    &msg.collection_id,
+                    &msg.doc_id,
+                    head_priority,
+                ),
+                ScopeDecision::CoveredByCurrent
             ) {
-                super::PersistedScopeDecision::CoveredByCurrent => {
-                    tracing::debug!(
-                        cid = %cid,
-                        doc_id = %msg.doc_id,
-                        collection_id = %msg.collection_id,
-                        source_peer = ?sender_peer,
-                        "Incoming head is covered by a newer durable sender/scope obligation"
-                    );
-                    return Ok(());
-                }
-                super::PersistedScopeDecision::Supersedes(root) => Some(root),
-                super::PersistedScopeDecision::Independent
-                | super::PersistedScopeDecision::Current => None,
-            };
+                tracing::debug!(
+                    cid = %cid,
+                    doc_id = %msg.doc_id,
+                    collection_id = %msg.collection_id,
+                    source_peer = ?sender_peer,
+                    "Incoming head is covered by a newer durable sender/scope obligation"
+                );
+                return Ok(());
+            }
 
             // Track this DAG as pending (enforces TTL eviction, capacity, and
             // current-head retirement for one sender/document-or-collection scope).
@@ -676,8 +550,6 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                     }
                 }
             };
-            let superseded_root =
-                durable_superseded_root.or_else(|| superseded.as_ref().map(|(root, _)| *root));
 
             // Persist the registration before the caller acks success: the
             // ack destroys the pusher's retry record, so an unpersisted
@@ -686,52 +558,11 @@ impl<B: Blockstore + 'static> SyncManager<B> {
             // Durable records outlive TTL-evicted map entries, so they carry
             // their own larger cap; at the cap the obligation is refused
             // (backpressure nack) while the pusher still owns retry state.
-            let has_durable_registration = if let Some(store) = self.pending_store() {
-                let durable_cap = self
-                    .max_pending_dags
-                    .saturating_mul(super::PERSISTED_PENDING_CAP_FACTOR);
-                // Check-and-reserve is serialized by the metadata writer held
-                // above, so the cap is hard under concurrent PushLogs; a
-                // failed put below releases the reservation. `newly_reserved`
-                // is false when the root already holds a record (re-push
-                // refresh).
-                enum DurableAdmission {
-                    Reserved,
-                    AlreadyPresent,
-                    AtCapacity,
-                }
-                let roots = &self.persisted_roots;
-                let admission = if roots.contains_key(cid) {
-                    DurableAdmission::AlreadyPresent
-                } else if roots.len() >= durable_cap
-                    && superseded_root.is_none_or(|old| !roots.contains_key(&old))
-                {
-                    DurableAdmission::AtCapacity
-                } else {
-                    roots.insert_if_absent(*cid, ());
-                    if let Some(old) = superseded_root {
-                        roots.remove(&old);
-                    }
-                    DurableAdmission::Reserved
-                };
-                if matches!(admission, DurableAdmission::AtCapacity) {
-                    self.diagnostics.record_pending_dag_capacity_shed();
-                    self.pending_dags.update(|pending| {
-                        pending.remove(cid);
-                        if let Some((old_root, old_dag)) = superseded.clone() {
-                            pending.insert(old_root, old_dag);
-                        }
-                    });
-                    tracing::warn!(
-                        cid = %cid,
-                        doc_id = %msg.doc_id,
-                        durable_cap,
-                        "Durable pending DAG registrations at capacity, rejecting PushLog DAG registration"
-                    );
-                    return Err(Error::PendingDagCapacity { max: durable_cap });
-                }
-                let newly_reserved = matches!(admission, DurableAdmission::Reserved);
-                let record = crate::sync::pending_store::PersistedPendingDag {
+            // The cap, the retirement of the older durable head of the
+            // sender scope and the record are one engine transaction.
+            if let Some(store) = self.pending_store() {
+                let durable_cap = self.persisted_pending_capacity();
+                let record = PersistedPendingDag {
                     doc_id: msg.doc_id.clone(),
                     collection_id: msg.collection_id.clone(),
                     head_priority,
@@ -743,74 +574,76 @@ impl<B: Blockstore + 'static> SyncManager<B> {
                         .as_ref()
                         .map(Into::into),
                 };
-                if let Err(error) = store
-                    .replace_scope_head(superseded_root.as_ref(), cid, &record)
-                    .await
-                {
-                    if newly_reserved {
-                        self.persisted_roots.remove(cid);
-                        if let Some(old) = superseded_root {
-                            self.persisted_roots.insert_if_absent(old, ());
-                        }
+                let registration = Registration {
+                    root: *cid,
+                    record: &record,
+                    capacity: durable_cap,
+                };
+                let refusal = match store.register(registration, &self.persisted).await {
+                    Ok(Admission::Registered) => None,
+                    Ok(Admission::Covered) => {
+                        tracing::debug!(
+                            cid = %cid,
+                            doc_id = %msg.doc_id,
+                            collection_id = %msg.collection_id,
+                            source_peer = ?sender_peer,
+                            "Incoming head is covered by a newer durable sender/scope obligation"
+                        );
+                        Some(Ok(()))
                     }
+                    Ok(Admission::AtCapacity) => {
+                        self.diagnostics.record_pending_dag_capacity_shed();
+                        tracing::warn!(
+                            cid = %cid,
+                            doc_id = %msg.doc_id,
+                            durable_cap,
+                            "Durable pending DAG registrations at capacity, rejecting PushLog DAG registration"
+                        );
+                        Some(Err(Error::PendingDagCapacity { max: durable_cap }))
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            cid = %cid,
+                            doc_id = %msg.doc_id,
+                            error = %error,
+                            "Failed to persist pending DAG registration; nacking push"
+                        );
+                        Some(Err(Error::Storage(format!(
+                            "failed to persist pending DAG registration: {error}"
+                        ))))
+                    }
+                };
+                if let Some(outcome) = refusal {
                     self.pending_dags.update(|pending| {
                         pending.remove(cid);
                         if let Some((old_root, old_dag)) = superseded.clone() {
                             pending.insert(old_root, old_dag);
                         }
                     });
-                    tracing::warn!(
-                        cid = %cid,
-                        doc_id = %msg.doc_id,
-                        error = %error,
-                        "Failed to persist pending DAG registration; nacking push"
-                    );
-                    return Err(Error::Storage(format!(
-                        "failed to persist pending DAG registration: {error}"
-                    )));
+                    return outcome;
                 }
                 self.diagnostics
-                    .observe_persisted_pending_dag_depth(self.persisted_roots.len());
-                self.remember_persisted_scope_head(
-                    *cid,
-                    sender_peer,
-                    &msg.collection_id,
-                    &msg.doc_id,
-                    head_priority,
-                );
+                    .observe_persisted_pending_dag_depth(self.persisted.len());
                 self.diagnostics.record_pending_dag_registered();
-                self.mark_pending_dag_recovery_registered(cid, inserted_at);
-                if let Some(old) = superseded_root {
-                    tracing::debug!(
-                        old_root_cid = %old,
-                        root_cid = %cid,
-                        doc_id = %msg.doc_id,
-                        collection_id = %msg.collection_id,
-                        source_peer = ?sender_peer,
-                        "Durably superseded older pending head for sender/scope"
-                    );
-                }
                 tracing::debug!(
                     target: "p2p::sync::restart_recovery",
                     cid = %cid,
                     doc_id = %msg.doc_id,
                     "Persisted pending DAG registration"
                 );
-                true
-            } else {
-                false
-            };
-
-            if !has_durable_registration {
-                self.mark_pending_dag_recovery_registered(cid, inserted_at);
+                if matches!(self.is_merged(cid).await, Ok(true)) {
+                    self.discharge_merged(cid).await;
+                    return Ok(());
+                }
             }
+            self.mark_pending_dag_recovery_registered(cid, inserted_at);
 
             // Registration ends after the durable obligation is made due.
             // The #1123 per-root clock is the sole fetch dispatcher: waiting
             // here to enqueue a DagNeedsFetch event retains the transport
-            // reply and the pending-state writer behind merge/fetch work. A
-            // successful reply is already honest because the durable record,
-            // not an in-flight fetch task, owns completion from this point.
+            // reply behind merge/fetch work. A successful reply is already
+            // honest because the durable record, not an in-flight fetch task,
+            // owns completion from this point.
             tracing::debug!(
                 cid = %cid,
                 doc_id = %msg.doc_id,
@@ -835,6 +668,104 @@ impl<B: Blockstore + 'static> SyncManager<B> {
         Ok(())
     }
 
+    /// A root this receiver owns, announced again: it keeps its provider and
+    /// backoff, and gains an authenticated alternate provider or a stronger
+    /// explicit-replay authorization, durably before the ack.
+    async fn extend_registered_root(
+        &self,
+        cid: &Cid,
+        mut existing: PendingDag,
+        sender_peer: Option<&str>,
+        explicit_replay_authorization: Option<ExplicitReplayAuthorization>,
+        recovery_provider_evidenced: bool,
+    ) -> Result<()> {
+        // A stronger explicit-replay authorization may arrive through the
+        // same authenticated provider after an ordinary hint. Keep the
+        // provider/backoff owner, but durably upgrade the merge
+        // authorization before acknowledging that replay.
+        let same_provider = existing.source_peer.as_deref() == sender_peer;
+        let upgrades_authorization = same_provider
+            && explicit_replay_authorization.is_some()
+            && (existing.explicit_replay_authorization != explicit_replay_authorization
+                || !existing.is_explicit_replicator);
+        // Exact-root equality alone is not availability evidence: a gossip
+        // relay may hold only the envelope head. Admit a new durable provider
+        // only through authenticated direct PushLog delivery (including
+        // configured or signed two-stream replicators). Honest downstream
+        // fanout crosses this seam only after the sender has merged the
+        // complete DAG.
+        let new_alternate = sender_peer.filter(|provider| {
+            recovery_provider_evidenced
+                && existing.source_peer.as_deref() != Some(*provider)
+                && !existing
+                    .alternate_providers
+                    .iter()
+                    .any(|candidate| candidate == *provider)
+                && existing.alternate_providers.len()
+                    < crate::sync::pending_store::MAX_PENDING_DAG_ALTERNATE_PROVIDERS
+        });
+        if !upgrades_authorization && new_alternate.is_none() {
+            tracing::debug!(
+                cid = %cid,
+                doc_id = %existing.doc_id,
+                collection_id = %existing.collection_id,
+                announced_source_peer = ?sender_peer,
+                "Incoming root is already receiver-owned; retaining its recovery provider"
+            );
+            return Ok(());
+        }
+        if let Some(provider) = new_alternate {
+            existing.alternate_providers.push(provider.to_owned());
+            existing.alternate_providers.sort_unstable();
+            existing.alternate_providers.dedup();
+        }
+        if upgrades_authorization {
+            existing.is_explicit_replicator = true;
+            existing.explicit_replay_authorization = explicit_replay_authorization.clone();
+        }
+        if let Some(store) = self.pending_store() {
+            let record = PersistedPendingDag {
+                doc_id: existing.doc_id.clone(),
+                collection_id: existing.collection_id.clone(),
+                head_priority: existing.head_priority,
+                creator: existing.creator.clone(),
+                source_peer: existing.source_peer.clone(),
+                alternate_providers: existing.alternate_providers.clone(),
+                is_explicit_replicator: existing.is_explicit_replicator,
+                explicit_replay_authorization: existing
+                    .explicit_replay_authorization
+                    .as_ref()
+                    .map(Into::into),
+            };
+            let capacity = self.persisted_pending_capacity();
+            let registration = Registration {
+                root: *cid,
+                record: &record,
+                capacity,
+            };
+            if store.register(registration, &self.persisted).await? == Admission::AtCapacity {
+                return Err(Error::PendingDagCapacity { max: capacity });
+            }
+        }
+        self.pending_dags.update(|pending| {
+            if let Some(current) = pending.get_mut(cid) {
+                current.alternate_providers = existing.alternate_providers.clone();
+                if upgrades_authorization {
+                    current.is_explicit_replicator = true;
+                    current.explicit_replay_authorization = explicit_replay_authorization.clone();
+                }
+            }
+        });
+        tracing::debug!(
+            cid = %cid,
+            source_peer = ?sender_peer,
+            alternate_count = existing.alternate_providers.len(),
+            authorization_upgraded = upgrades_authorization,
+            "Extended receiver-owned root recovery without replacing its provider"
+        );
+        Ok(())
+    }
+
     /// Get connected providers with positive evidence for at least one of the
     /// requested CIDs. Merely being connected or having announced the root is
     /// not evidence that a peer can serve linked descendants (#1512).
@@ -856,6 +787,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use std::time::Duration;
 
     use async_trait::async_trait;
     use blockstore::DefraBlockstore;
@@ -868,21 +800,23 @@ mod tests {
 
     use crate::sync::pending_store::{
         PendingDagStorage, PendingDagStore, PersistedPendingDag, PersistedQuarantinedDag,
+        PersistedView,
     };
     use crate::sync::{PeerStateTracker, SyncConfig};
 
+    /// Holds each registration until the test releases it.
     struct BlockingPendingDagStore {
         inner: PendingDagStore<RegolithStore>,
-        replace_entered: Notify,
-        replace_release: Notify,
+        register_entered: Notify,
+        register_release: Notify,
     }
 
     impl BlockingPendingDagStore {
         fn new(store: Arc<RegolithStore>) -> Self {
             Self {
                 inner: PendingDagStore::new(store),
-                replace_entered: Notify::new(),
-                replace_release: Notify::new(),
+                register_entered: Notify::new(),
+                register_release: Notify::new(),
             }
         }
     }
@@ -890,33 +824,42 @@ mod tests {
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     impl PendingDagStorage for BlockingPendingDagStore {
+        async fn register(
+            &self,
+            registration: Registration<'_>,
+            view: &Arc<PersistedView>,
+        ) -> Result<Admission> {
+            self.register_entered.notify_one();
+            self.register_release.notified().await;
+            self.inner.register(registration, view).await
+        }
+
+        async fn remove(&self, root_cid: &Cid, view: &Arc<PersistedView>) -> Result<bool> {
+            self.inner.remove(root_cid, view).await
+        }
+
+        async fn quarantine(
+            &self,
+            root_cid: &Cid,
+            entry: &PersistedQuarantinedDag,
+            view: &Arc<PersistedView>,
+        ) -> Result<bool> {
+            self.inner.quarantine(root_cid, entry, view).await
+        }
+
+        async fn sweep(
+            &self,
+            view: &Arc<PersistedView>,
+        ) -> Result<Vec<(Cid, PersistedPendingDag)>> {
+            self.inner.sweep(view).await
+        }
+
         async fn put(&self, root_cid: &Cid, record: &PersistedPendingDag) -> Result<()> {
             self.inner.put(root_cid, record).await
         }
 
-        async fn replace_scope_head(
-            &self,
-            superseded_root: Option<&Cid>,
-            root_cid: &Cid,
-            record: &PersistedPendingDag,
-        ) -> Result<()> {
-            self.replace_entered.notify_one();
-            self.replace_release.notified().await;
-            self.inner
-                .replace_scope_head(superseded_root, root_cid, record)
-                .await
-        }
-
-        async fn remove(&self, root_cid: &Cid) -> Result<()> {
-            self.inner.remove(root_cid).await
-        }
-
         async fn load_all(&self) -> Result<Vec<(Cid, PersistedPendingDag)>> {
             self.inner.load_all().await
-        }
-
-        async fn quarantine(&self, root_cid: &Cid, entry: &PersistedQuarantinedDag) -> Result<()> {
-            self.inner.quarantine(root_cid, entry).await
         }
 
         async fn is_quarantined(&self, root_cid: &Cid) -> Result<bool> {
@@ -1014,7 +957,7 @@ mod tests {
 
     /// The third state that honours the contract: a head retired because a
     /// newer one from the same sender scope is already registered. Nothing is
-    /// lost — the newer head carries the document forward — so nacking it
+    /// lost, the newer head carries the document forward, so nacking it
     /// would put the sender in a retry loop over work already owned.
     #[tokio::test]
     async fn a_head_superseded_by_a_newer_scope_head_is_acked() {
@@ -1048,7 +991,7 @@ mod tests {
     ///
     /// A block that came out of processing neither merged nor pending has
     /// nothing left to finish it, and a success reply would stop the sender
-    /// re-pushing it — the shape of the lost update seen in CI, where a node
+    /// re-pushing it, the shape of the lost update seen in CI, where a node
     /// answered a push and then did nothing at all for the rest of the test.
     #[tokio::test]
     async fn a_block_left_neither_merged_nor_pending_is_nacked_not_acked() {
@@ -1215,14 +1158,14 @@ mod tests {
                 .await
         });
 
-        pending_store.replace_entered.notified().await;
+        pending_store.register_entered.notified().await;
         let claimed = manager.claim_due_pending_dag_retries(n0_future::time::Instant::now());
         assert_eq!(
             claimed.len(),
             0,
             "the receiver clock must not claim before durable registration"
         );
-        pending_store.replace_release.notify_one();
+        pending_store.register_release.notify_one();
 
         process
             .await
@@ -1310,7 +1253,7 @@ mod tests {
                 .await
         });
 
-        pending_store.replace_entered.notified().await;
+        pending_store.register_entered.notified().await;
         assert_eq!(manager.pending_dag_count(), 1);
 
         let mut suppressed = Vec::new();
@@ -1347,7 +1290,7 @@ mod tests {
         assert_eq!(manager.pending_dag_count(), 1);
         assert_eq!(manager.process_queue.active_count(), 1);
 
-        pending_store.replace_release.notify_one();
+        pending_store.register_release.notify_one();
         owner
             .await
             .expect("owner task should not panic")

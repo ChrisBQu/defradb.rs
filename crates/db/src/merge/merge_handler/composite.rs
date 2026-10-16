@@ -1,4 +1,5 @@
 use super::batch::{PendingFieldBlockFinalization, PendingMergeEvent, PendingPostCommitAction};
+use super::frame_source::FrameSource;
 use super::*;
 use crate::merge::governance::{GovernedFrame, Judgement};
 
@@ -52,6 +53,8 @@ impl<'a, 'b> CompositeMergeContext<'a, 'b> {
 
 #[derive(Default)]
 pub struct CompositeMergeState {
+    pub(crate) field_block_priorities: RapidHashMap<Cid, u64>,
+    pub(crate) field_priorities: RapidHashMap<String, crate::collection::value::FieldOrder>,
     pub(crate) field_values: RapidHashMap<String, NormalValue>,
     pub(crate) any_field_applied: bool,
     pub(crate) encrypted_policy_checked: bool,
@@ -62,6 +65,8 @@ pub struct CompositeMergeState {
     /// Fields of each linked Immutable block: their heads are the block.
     pub(crate) immutable_block_fields: RapidHashMap<Cid, Vec<String>>,
     pub(crate) is_branchable: bool,
+    /// The document's head set and stored value, read once for the block.
+    pub(crate) reads: super::block_reads::BlockReads,
     /// Unique-index collisions this merge resolved, published after commit.
     pub(crate) unique_conflicts: Vec<events::UniqueIndexConflictData>,
 }
@@ -78,11 +83,8 @@ enum CompositeMergePreparation {
 enum CompositeMergeFrame {
     Enter {
         cid: Cid,
-        block: Option<Block>,
-        payload: Option<defra_core::block::CompositeDeltaPayload>,
-        child_cid: Option<Cid>,
+        source: FrameSource<defra_core::block::CompositeDeltaPayload>,
         depth: usize,
-        is_root: bool,
     },
     Exit {
         cid: Cid,
@@ -128,34 +130,9 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             Err(error) => {
                 return self
                     .defer_unresolved_document(cid, block, payload, metadata, error)
-                    .await
+                    .await;
             }
         };
-
-        let collection = self
-            .block_collection(&payload.schema_version_id, metadata.collection_id)
-            .await?;
-        // Lock order: collection read guard, then merge queue, then transaction
-        // (matches local writes via DB::collection_read_guard); reversed, a
-        // truncate waiting on the write lock can deadlock against a write that
-        // holds this read guard while waiting on the merge queue.
-        let _collection_guard = match collection.as_ref() {
-            Some(collection) => Some(
-                self.db
-                    .collection_read_guard(collection.collection_id())
-                    .await?,
-            ),
-            None => None,
-        };
-        let _arrival_guard = match collection.as_ref() {
-            Some(collection) => Some(
-                self.merge_queue
-                    .acquire_arrival(collection.collection_id())
-                    .await,
-            ),
-            None => None,
-        };
-        let _guard = self.merge_queue.acquire(&doc_id_str).await;
 
         self.process_composite_delta_locked(
             cid,
@@ -175,31 +152,6 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
 
     fn has_batch_merged_composite(batch_merged: &CidSet, cid: &Cid) -> bool {
         batch_merged.contains_key(cid)
-    }
-
-    async fn load_parent_composite(&self, parent_cid: &Cid, child_cid: &Cid) -> Option<Block> {
-        let data = match self.blockstore.get(parent_cid).await {
-            Ok(Some(data)) => data,
-            Ok(None) => {
-                tracing::debug!(
-                    %parent_cid,
-                    %child_cid,
-                    "Parent composite not in blockstore, skipping"
-                );
-                return None;
-            }
-            Err(error) => {
-                tracing::debug!(
-                    %parent_cid,
-                    %child_cid,
-                    %error,
-                    "Failed to load parent composite, skipping"
-                );
-                return None;
-            }
-        };
-
-        Block::from_dag_cbor(&data).ok()
     }
 
     async fn prepare_composite_merge(
@@ -288,7 +240,14 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                     }
 
                     if let Some(outcome) = self
-                        .check_protected_update(cid, block, payload, doc_id, collection.schema())
+                        .check_protected_update(
+                            cid,
+                            block,
+                            payload,
+                            doc_id,
+                            collection.schema(),
+                            None,
+                        )
                         .await?
                     {
                         return Ok(CompositeMergePreparation::Complete(outcome));
@@ -322,23 +281,14 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         let doc_id_for_index = doc_id_str.clone();
         let mut frames = vec![CompositeMergeFrame::Enter {
             cid: *cid,
-            block: Some(block.clone()),
-            payload: Some(payload.clone()),
-            child_cid: None,
+            source: FrameSource::root(block, payload),
             depth,
-            is_root: true,
         }];
 
         while let Some(frame) = frames.pop() {
             match frame {
-                CompositeMergeFrame::Enter {
-                    cid,
-                    block,
-                    payload,
-                    child_cid,
-                    depth,
-                    is_root,
-                } => {
+                CompositeMergeFrame::Enter { cid, source, depth } => {
+                    let is_root = source.is_root();
                     self.ensure_merge_depth(&cid, depth)?;
                     if self.has_merged_composite(&cid) {
                         if is_root {
@@ -347,29 +297,8 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                         continue;
                     }
 
-                    let block = match block {
-                        Some(block) => block,
-                        None => {
-                            let Some(block) = self
-                                .load_parent_composite(
-                                    &cid,
-                                    &child_cid.expect("parent frame has a child CID"),
-                                )
-                                .await
-                            else {
-                                continue;
-                            };
-                            block
-                        }
-                    };
-                    let payload = match payload {
-                        Some(payload) => payload,
-                        None => {
-                            let CrdtDelta::Composite(payload) = &block.delta else {
-                                continue;
-                            };
-                            payload.clone()
-                        }
+                    let Some((block, payload)) = self.frame_block(&cid, source).await else {
+                        continue;
                     };
 
                     match self
@@ -397,11 +326,8 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                                 for parent_cid in heads.into_iter().rev() {
                                     frames.push(CompositeMergeFrame::Enter {
                                         cid: parent_cid,
-                                        block: None,
-                                        payload: None,
-                                        child_cid: Some(cid),
+                                        source: FrameSource::Parent { child_cid: cid },
                                         depth: depth + 1,
-                                        is_root: false,
                                     });
                                 }
                             }
@@ -453,6 +379,8 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         Ok(MergeOutcome::terminal_skip("already merged"))
     }
 
+    /// Merges one composite in its own transaction, with every key its
+    /// fields decrypt with fetched before the transaction opens.
     #[allow(clippy::too_many_arguments)]
     async fn process_composite_delta_body(
         &self,
@@ -465,7 +393,39 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         doc_id_str: &str,
         collection_lookup: Option<Collection>,
     ) -> std::result::Result<MergeOutcome, MergeError> {
+        self.with_merge_keys(block, Some(metadata))
+            .await
+            .process_composite_delta_keyed(
+                cid,
+                block,
+                payload,
+                metadata,
+                from_collection,
+                is_root,
+                doc_id_str,
+                collection_lookup,
+            )
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn process_composite_delta_keyed(
+        &self,
+        cid: &Cid,
+        block: &Block,
+        payload: &defra_core::block::CompositeDeltaPayload,
+        metadata: &BlockMetadata<'_>,
+        from_collection: bool,
+        is_root: bool,
+        doc_id_str: &str,
+        collection_lookup: Option<Collection>,
+    ) -> std::result::Result<MergeOutcome, MergeError> {
         let txn = self.db.new_txn(false).await?;
+        if let Some(collection) = collection_lookup.as_ref() {
+            txn.validate_collection_schema_for_write(collection)
+                .await
+                .map_err(MergeError::Database)?;
+        }
         let doc_short_id = {
             let collection = collection_lookup.as_ref().ok_or_else(|| {
                 MergeError::MissingMetadata(format!(
@@ -544,8 +504,9 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                     .persist_merged_document(&mut datastore, &systemstore, &context, &mut state)
                     .await
                 {
-                    Ok(()) => self
-                        .update_heads(&headstore, &context, &state)
+                    Ok(Some(outcome)) => Ok(Some(outcome)),
+                    Ok(None) => self
+                        .update_heads(&headstore, &context, &mut state)
                         .await
                         .map(|()| None),
                     Err(MergeError::UniqueConstraintViolation(reason)) => {
@@ -599,6 +560,48 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                         error
                     ))
                 })?;
+                // Resolved unique-index collisions go out ahead of the update.
+                let mut committed_events: Vec<Message> = state
+                    .unique_conflicts
+                    .drain(..)
+                    .map(Message::unique_index_conflict)
+                    .collect();
+                committed_events.push(Message::update(Update::new(
+                    doc_id_str.to_string(),
+                    *cid,
+                    payload.schema_version_id.clone(),
+                    event_block,
+                    false,
+                    true,
+                )));
+                committed_events.push(Message::merge_complete(MergeCompleteData {
+                    doc_id: doc_id_str.to_string(),
+                    subject_doc_id: None,
+                    cid: *cid,
+                    collection_id: metadata
+                        .collection_id
+                        .unwrap_or(&payload.schema_version_id)
+                        .to_string(),
+                    by_peer: metadata.sender_peer.unwrap_or("").to_string(),
+                }));
+                if state.is_branchable {
+                    committed_events.push(Message::merge_complete(MergeCompleteData {
+                        doc_id: String::new(),
+                        subject_doc_id: Some(doc_id_str.to_string()),
+                        cid: *cid,
+                        collection_id: metadata
+                            .collection_id
+                            .unwrap_or(&payload.schema_version_id)
+                            .to_string(),
+                        by_peer: metadata.sender_peer.unwrap_or("").to_string(),
+                    }));
+                }
+                crate::event::emission::register_ordered_events(
+                    &txn,
+                    self.db.event_bus(),
+                    committed_events,
+                )
+                .map_err(MergeError::Database)?;
                 txn.force_commit().await?;
 
                 self.best_effort_finalize_linked_field_blocks(&state.linked_field_cids)
@@ -650,49 +653,6 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                                 "Post-commit SE artifact push failed"
                             );
                         }
-                    }
-                }
-
-                if let Some(bus) = self.db.event_bus() {
-                    for conflict in state.unique_conflicts.drain(..) {
-                        bus.publish(Message::unique_index_conflict(conflict));
-                    }
-                    let update = Update::new(
-                        doc_id_str.to_string(),
-                        *cid,
-                        payload.schema_version_id.clone(),
-                        event_block,
-                        false,
-                        true,
-                    );
-                    bus.publish(Message::update(update));
-
-                    if !from_collection {
-                        let merge_complete = MergeCompleteData {
-                            doc_id: doc_id_str.to_string(),
-                            subject_doc_id: None,
-                            cid: *cid,
-                            collection_id: metadata
-                                .collection_id
-                                .unwrap_or(&payload.schema_version_id)
-                                .to_string(),
-                            by_peer: metadata.sender_peer.unwrap_or("").to_string(),
-                        };
-                        bus.publish(Message::merge_complete(merge_complete));
-                    }
-
-                    if state.is_branchable {
-                        let merge_complete = MergeCompleteData {
-                            doc_id: String::new(),
-                            subject_doc_id: Some(doc_id_str.to_string()),
-                            cid: *cid,
-                            collection_id: metadata
-                                .collection_id
-                                .unwrap_or(&payload.schema_version_id)
-                                .to_string(),
-                            by_peer: metadata.sender_peer.unwrap_or("").to_string(),
-                        };
-                        bus.publish(Message::merge_complete(merge_complete));
                     }
                 }
 
@@ -755,30 +715,21 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             Err(error) => {
                 return self
                     .defer_unresolved_document(cid, block, payload, metadata, error)
-                    .await
+                    .await;
             }
         };
         let root_cid = *cid;
         let doc_id_for_index = doc_id.clone();
         let mut frames = vec![CompositeMergeFrame::Enter {
             cid: *cid,
-            block: Some(block.clone()),
-            payload: Some(payload.clone()),
-            child_cid: None,
+            source: FrameSource::root(block, payload),
             depth,
-            is_root: true,
         }];
 
         while let Some(frame) = frames.pop() {
             match frame {
-                CompositeMergeFrame::Enter {
-                    cid,
-                    block,
-                    payload,
-                    child_cid,
-                    depth,
-                    is_root,
-                } => {
+                CompositeMergeFrame::Enter { cid, source, depth } => {
+                    let is_root = source.is_root();
                     self.ensure_merge_depth(&cid, depth)?;
                     if self.has_merged_composite(&cid)
                         || Self::has_batch_merged_composite(batch_merged, &cid)
@@ -789,29 +740,8 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                         continue;
                     }
 
-                    let block = match block {
-                        Some(block) => block,
-                        None => {
-                            let Some(block) = self
-                                .load_parent_composite(
-                                    &cid,
-                                    &child_cid.expect("parent frame has a child CID"),
-                                )
-                                .await
-                            else {
-                                continue;
-                            };
-                            block
-                        }
-                    };
-                    let payload = match payload {
-                        Some(payload) => payload,
-                        None => {
-                            let CrdtDelta::Composite(payload) = &block.delta else {
-                                continue;
-                            };
-                            payload.clone()
-                        }
+                    let Some((block, payload)) = self.frame_block(&cid, source).await else {
+                        continue;
                     };
                     let doc_id = doc_id.clone();
 
@@ -840,11 +770,8 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                                 for parent_cid in heads.into_iter().rev() {
                                     frames.push(CompositeMergeFrame::Enter {
                                         cid: parent_cid,
-                                        block: None,
-                                        payload: None,
-                                        child_cid: Some(cid),
+                                        source: FrameSource::Parent { child_cid: cid },
                                         depth: depth + 1,
-                                        is_root: false,
                                     });
                                 }
                             }
@@ -974,7 +901,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                     .persist_merged_document(&mut datastore, systemstore, &context, &mut state)
                     .await
                 {
-                    Ok(()) => Ok(None),
+                    Ok(outcome) => Ok(outcome),
                     Err(MergeError::UniqueConstraintViolation(reason)) => {
                         Ok(Some(MergeOutcome::rejected(reason)))
                     }
@@ -1007,7 +934,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                 Ok(outcome)
             }
             Ok(None) => {
-                self.update_heads(headstore, &context, &state).await?;
+                self.update_heads(headstore, &context, &mut state).await?;
                 self.record_block_ownership(
                     systemstore,
                     doc_id_str,

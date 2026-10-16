@@ -40,6 +40,8 @@ mod graph;
 mod merge;
 mod params;
 
+#[cfg(test)]
+pub(crate) use cache::BUILT as CODE_CACHES_BUILT;
 pub use cache::{CodeCache, CodeCaches, Codes};
 pub use codec::State;
 pub use merge::MergePlan;
@@ -48,7 +50,7 @@ pub use params::{
     MAX_R, MERGE_MIN_BATCH, SLACK_PERCENT, TRAIN_THRESHOLD,
 };
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use codec::{GraphState, Trained};
 
@@ -56,6 +58,7 @@ use crate::index::error::{Error, Result};
 use crate::index::vector::engine::ann::{Admit, EngineKind, Neighbor, VectorIndexEngine};
 use crate::index::vector::engine::flat::Flat;
 use crate::index::vector::engine::ivf;
+use crate::index::vector::engine::trained_cache::TrainedCache;
 use crate::index::vector::quantize::{ProductQuantizer, Quantizer};
 use crate::index::vector::store::{NodeId, VectorNodeStore};
 use defra_core::vector::{Element, Metric};
@@ -68,7 +71,7 @@ pub struct DiskAnn<S> {
     seed: u64,
     /// Fixed once trained. Shared so a write can hold it while borrowing the
     /// store mutably.
-    quantizer: OnceLock<Arc<ProductQuantizer>>,
+    quantizer: TrainedCache<Arc<ProductQuantizer>>,
     /// Where a resident-codes search reads codes; without it each code is a
     /// point read.
     codes: Option<Arc<CodeCache>>,
@@ -87,7 +90,7 @@ impl<S: VectorNodeStore> DiskAnn<S> {
             metric,
             params,
             seed,
-            quantizer: OnceLock::new(),
+            quantizer: TrainedCache::new(),
             codes: None,
         })
     }
@@ -155,7 +158,7 @@ impl<S: VectorNodeStore> DiskAnn<S> {
             trained.dimensions as usize,
             books,
         )?);
-        Ok(self.quantizer.get_or_init(|| quantizer).clone())
+        Ok(self.quantizer.get_or_init_racy(|| quantizer).clone())
     }
 }
 

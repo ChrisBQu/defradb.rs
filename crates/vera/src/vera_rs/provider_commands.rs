@@ -59,7 +59,27 @@ pub(crate) fn encode_delete_relationship_cmd(
     .unwrap_or_default()
 }
 
+/// [`resolve_registered_or_passthrough_bearer_token_as`] in
+/// [`defra_core::RequestContext::ambient`].
+#[cfg(test)]
 pub(crate) fn resolve_registered_or_passthrough_bearer_token(
+    did: &str,
+    submitter: &str,
+    deployment_id: u64,
+) -> Result<Option<String>, crate::provider::ProviderError> {
+    resolve_registered_or_passthrough_bearer_token_as(
+        &defra_core::RequestContext::ambient(),
+        did,
+        submitter,
+        deployment_id,
+    )
+}
+
+/// The bearer token `did` acts with in the request `context` serves: one
+/// built from its registered secp256k1 key when the node holds it, the token
+/// the request carries for it otherwise.
+pub(crate) fn resolve_registered_or_passthrough_bearer_token_as(
+    context: &defra_core::RequestContext,
     did: &str,
     submitter: &str,
     deployment_id: u64,
@@ -85,7 +105,7 @@ pub(crate) fn resolve_registered_or_passthrough_bearer_token(
         }
     }
 
-    Ok(defra_core::signing::get_request_bearer_token(did))
+    Ok(context.bearer_token_for(did))
 }
 
 #[cfg(test)]
@@ -146,5 +166,37 @@ mod tests {
                 }
             })
         );
+    }
+}
+
+#[cfg(test)]
+mod request_bearer_tests {
+    use super::*;
+
+    #[test]
+    fn a_remote_identity_acts_with_the_token_its_request_carries() {
+        let did = "did:key:z6MkVeraRsRequestBearer";
+        defra_core::signing::set_request_bearer_token(did, "stored");
+        let request = defra_core::RequestContext::default()
+            .with_bearer(Some(did.to_string()), Some("request".to_string()));
+
+        let own = resolve_registered_or_passthrough_bearer_token_as(
+            &request,
+            did,
+            "did:key:submitter",
+            9001,
+        )
+        .unwrap();
+        let unscoped = resolve_registered_or_passthrough_bearer_token_as(
+            &defra_core::RequestContext::default(),
+            did,
+            "did:key:submitter",
+            9001,
+        )
+        .unwrap();
+        defra_core::signing::clear_request_bearer_token(did);
+
+        assert_eq!(own.as_deref(), Some("request"));
+        assert_eq!(unscoped.as_deref(), Some("stored"));
     }
 }

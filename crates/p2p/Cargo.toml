@@ -17,16 +17,24 @@ defra-core = { path = "../defra-core" }
 document = { path = "../document" }
 crypto = { path = "../crypto" }
 blockstore = { path = "../blockstore" }
+datastore = { path = "../datastore" }
 storage = { path = "../storage" }
 identity = { path = "../identity" }
 acp = { path = "../acp" }
 kms = { path = "../kms", optional = true }
+# The network runtime: every network task, sleep and deadline of this layer
+# goes through it (`network`).
+edge = { path = "../edge" }
+# Whether a caller is a worker of the data path's pool, which has no reactor.
+workers = { path = "../workers" }
 
 # Lock-free shared state (see the workspace manifest).
 kovan = { workspace = true }
 kovan-map = { workspace = true }
 kovan-queue = { workspace = true }
 kovan-channel = { workspace = true }
+# regolith::sync: waits that are part of the meaning, never a lock.
+regolith = { workspace = true }
 
 # libp2p transport
 libp2p = { workspace = true, features = ["tcp", "noise", "yamux", "identify", "request-response", "macros", "tokio", "gossipsub", "kad", "relay", "dns", "quic", "websocket", "memory-connection-limits"], optional = true }
@@ -67,7 +75,6 @@ serde_ipld_dagcbor = { workspace = true }
 
 # Errors
 thiserror = { workspace = true }
-anyhow = { workspace = true }
 tracing = { workspace = true }
 rlimit = { version = "0.9", optional = true }
 sysinfo = { version = "0.33", optional = true }
@@ -126,6 +133,7 @@ tokio = { workspace = true, features = ["fs"] }
 getrandom = { version = "0.3", features = ["wasm_js"] }
 
 [dev-dependencies]
+edge = { path = "../edge", features = ["testing"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
 
 [package.metadata.cargo-machete]

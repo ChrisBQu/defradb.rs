@@ -2,11 +2,18 @@
 
 use std::fmt::Debug;
 
-use anyhow::Result;
 use async_trait::async_trait;
 use cid::Cid;
 
 use crate::block::Block;
+
+/// Why a store did not serve a block: it is absent, or could not be read.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct StoreError(pub String);
+
+/// The result of a store read.
+pub type Result<T> = std::result::Result<T, StoreError>;
 
 /// Read access to a block store; any error means the block is absent.
 #[async_trait]

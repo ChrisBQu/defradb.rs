@@ -4,7 +4,7 @@
 //! This is the only place that builds, signs, encodes or tampers blocks. Tests
 //! ask for a scenario and push the `Fragment` they get back.
 
-use std::collections::HashMap;
+use rapidhash::RapidHashMap;
 
 use cid::Cid;
 use crypto::keys::PrivateKey;
@@ -80,11 +80,11 @@ pub struct Fragment {
 pub struct Parent {
     doc_id: String,
     composite: Cid,
-    fields: HashMap<String, Cid>,
+    fields: RapidHashMap<String, Cid>,
     height: u64,
 }
 
-pub fn genesis_parent(doc_id: &str, composite: Cid, fields: HashMap<String, Cid>) -> Parent {
+pub fn genesis_parent(doc_id: &str, composite: Cid, fields: RapidHashMap<String, Cid>) -> Parent {
     Parent {
         doc_id: doc_id.to_string(),
         composite,
@@ -280,7 +280,7 @@ fn commit(
     }
 }
 
-fn field_cids(fragment: &Fragment) -> HashMap<String, Cid> {
+fn field_cids(fragment: &Fragment) -> RapidHashMap<String, Cid> {
     fragment
         .blocks
         .iter()

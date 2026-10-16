@@ -233,12 +233,21 @@ fn for_each_parallel<T: Send>(slots: &mut [T], work: impl Fn(usize, &mut T) + Sy
         return;
     }
     let per = slots.len().div_ceil(threads);
-    let chunks = std::sync::Mutex::new(slots.chunks_mut(per).enumerate());
-    let drain = || loop {
-        let next = chunks.lock().unwrap_or_else(|e| e.into_inner()).next();
-        let Some((chunk, part)) = next else { return };
+    let run = |(chunk, part): (usize, &mut [T])| {
         for (i, slot) in part.iter_mut().enumerate() {
             work(chunk * per + i, slot);
+        }
+    };
+    let chunks = regolith::sync::ArrayQueue::new(slots.len().div_ceil(per));
+    for chunk in slots.chunks_mut(per).enumerate() {
+        // The queue is sized for every chunk; one that did not fit runs here.
+        if let Err(chunk) = chunks.push(chunk) {
+            run(chunk);
+        }
+    }
+    let drain = || {
+        while let Some(chunk) = chunks.pop() {
+            run(chunk);
         }
     };
     std::thread::scope(|scope| {

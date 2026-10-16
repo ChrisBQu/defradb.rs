@@ -2,6 +2,11 @@ use chrono::{DateTime, FixedOffset};
 use rapidhash::RapidHashSet;
 use schema::CollectionVersion;
 
+/// The field of a downsample target naming the source document whose series
+/// it rolls up. A source collection that is itself a downsample target names
+/// its own series with it; any other source is its own series.
+pub(crate) const SERIES_FIELD: &str = "source_doc_id";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AggregateField {
     Count,

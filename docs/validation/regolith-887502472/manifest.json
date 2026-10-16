@@ -1,0 +1,57 @@
+{
+  "revision": "887502472c23f547eef75354decc2d44dfaf0c1f",
+  "tree": "8cc2110d35da13ba1e29236feb7defe77868f04a",
+  "go_revision": "53f0e76a32d1761e3396a88ce607ebc3e37baa5a",
+  "logs": [
+    {
+      "file": "defra-final-surface-887502472-bench-integration.log.gz",
+      "uncompressed_sha256": "ddd6c5eeb90b22175236f5de4e82bb8090b6360debf00d681772bec22034d776",
+      "sha256": "e1aa9b75d11faaa89e304d40945700807a01729827692f998790df6b94e68e58"
+    },
+    {
+      "file": "defra-final-surface-887502472-cli-build.log.gz",
+      "uncompressed_sha256": "3181a49394e66f90f74114ae7ec73d0e221c287ac5fbbeb26b3ccb52b7b6ed2b",
+      "sha256": "df26a64879e8afea7a59eca97700d193da759a33f5d169c73a7ff6e0dd816d6a"
+    },
+    {
+      "file": "defra-final-surface-887502472-core.log.gz",
+      "uncompressed_sha256": "b1e7536197979614379a6f0ed1a9b11039ec93a8def4ded27c361028a0a7647f",
+      "sha256": "f65198b28e7e175bc68a27cd965c7d2b3de6ba863efd17cf3f458e63d15a31e2"
+    },
+    {
+      "file": "defra-final-surface-887502472-counter.log.gz",
+      "uncompressed_sha256": "c3d8239c5b7922dd9301d205f9dcf553effc1eaebab81d10b07f749d8c2fac92",
+      "sha256": "28e1bb864a6106a52a533576557cc50a4508218a0b375436fca69d9287f77f0b"
+    },
+    {
+      "file": "defra-final-surface-887502472-external.log.gz",
+      "uncompressed_sha256": "35abd72bdb56f1198e9947063574f2e49e2cfa1ea0481a1c00a80c2e2ef54b06",
+      "sha256": "85a62344ce54fcfaa0a2fff04ed61afe9d522ec7f74787afd619f6458e37d68c"
+    },
+    {
+      "file": "defra-final-surface-887502472-frontdoors.log.gz",
+      "uncompressed_sha256": "9fabc6bba01d5f9dca247670d596fdf8c15263e7682d2018ec6c3523c3d3a575",
+      "sha256": "4f60ccb09fcfcdbc9d29c4e21e1fb78b52f3a57bc85d71c56762cc5f8d670486"
+    },
+    {
+      "file": "defra-final-surface-887502472-native-clippy.log.gz",
+      "uncompressed_sha256": "59807f2ce128233fcd5f15e70a584738029cf8f92c7a1d452fb14b38b03fad98",
+      "sha256": "1bd7e2861e5e611764ca6596c8c4b23f459e97f25569dd2a941fa0ec45eb6b4d"
+    },
+    {
+      "file": "defra-final-surface-887502472-write-skew.log.gz",
+      "uncompressed_sha256": "50d9de44dd352909796457a71c224a543ebf18405b363e1b595e75d442fe254e",
+      "sha256": "5364e9ca5e3abac884f5d1d739e7dc7a2b07180c884ea637c2f1bf3a530575fd"
+    },
+    {
+      "file": "defra-final-887-wasm-clippy.log.gz",
+      "uncompressed_sha256": "6b005b8f571a597a6e6138b50898841d53689ddaa425a4bf7f2f6adc731ddad8",
+      "sha256": "a9707dd7f51ab69442ef9ee0e877822ff28b236fedbfea40bb575a87d91dc8a2"
+    },
+    {
+      "file": "defra-final-887-full-driver.log.gz",
+      "uncompressed_sha256": "9cc0657cf2d2c378feafe7b98033808f89cc9882fae56b250d222663b73fa126",
+      "sha256": "78de89d5653a164eb8816e9bb0265f071655b3030f622f1c4e5b808965830cf1"
+    }
+  ]
+}

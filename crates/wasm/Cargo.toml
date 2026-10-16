@@ -54,6 +54,10 @@ schema = { path = "../schema" }
 document = { path = "../document" }
 query = { path = "../query" }
 defra-core = { path = "../defra-core" }
+# The browser's event loop behind the network runtime handle P2P runs on.
+edge = { path = "../edge" }
+# The page's one worker, driven by the browser's event loop.
+workers = { path = "../workers" }
 crypto = { path = "../crypto" }
 identity = { path = "../identity" }
 zeroize = "1.8"

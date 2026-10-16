@@ -15,64 +15,7 @@ use defra_core::thread_bounds::{MaybeSend, MaybeSendSync};
 
 use crate::index::error::Result;
 
-/// Identifies one vector in the graph.
-///
-/// The adapter maps its own identifiers (a document short id) onto this; the
-/// engine attaches no meaning to the value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct NodeId(pub u64);
-
-/// The persisted form of a graph node.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Node {
-    pub id: NodeId,
-    /// Normalized under the cosine metric, which is the only one the query
-    /// surface exposes.
-    pub vector: Vec<f32>,
-    /// `layers[l]` holds the neighbor ids at layer `l`, so `layers.len()` is
-    /// the node's top layer plus one.
-    pub layers: Vec<Vec<NodeId>>,
-    /// Tombstone. The node stays linked so traversal through it is preserved,
-    /// but it is never returned from a search.
-    pub deleted: bool,
-}
-
-impl Node {
-    /// A node of the given height with no links yet.
-    pub fn new(id: NodeId, vector: Vec<f32>, top_layer: usize) -> Self {
-        Self {
-            id,
-            vector,
-            layers: vec![Vec::new(); top_layer + 1],
-            deleted: false,
-        }
-    }
-
-    /// Neighbors at `layer`, empty when the node does not reach that high.
-    pub fn neighbors(&self, layer: usize) -> &[NodeId] {
-        self.layers.get(layer).map_or(&[], Vec::as_slice)
-    }
-}
-
-/// The graph's global state.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Meta {
-    /// Where every search starts.
-    pub entry_point: NodeId,
-    /// Highest layer any node currently occupies.
-    pub top_layer: usize,
-    /// Live nodes counted since the store began. Approximate bookkeeping for
-    /// the rebuild trigger, not a queryable census: a meta decoded from an
-    /// older layout reads zero here until the next rebuild recounts.
-    pub live: u64,
-    /// Tombstones since the last rebuild. The unit the rebuild trigger is
-    /// priced in: one tombstone, or one stale link a rebuild would drop.
-    pub waste: u64,
-    /// Rebuilds this build of the graph has been through. Zero on a graph
-    /// last written before self-link-free inserts, which marks it as owed a
-    /// healing rebuild; a graph created by the current code starts at one.
-    pub rebuilds: u32,
-}
+pub use storage::vector::{Meta, Node, NodeId};
 
 /// Where a graph lives.
 ///
@@ -84,12 +27,53 @@ pub trait VectorNodeStore: MaybeSendSync {
     /// `None` when no such node has been stored.
     async fn get_node(&self, id: NodeId) -> Result<Option<Node>>;
 
+    /// Advisory graph traversal; no decision may depend on adjacency remaining unchanged.
+    async fn get_node_advisory(&self, id: NodeId) -> Result<Option<Node>> {
+        self.get_node(id).await
+    }
+
+    /// Validate node structure while allowing concurrent adjacency additions.
+    async fn get_node_for_links(&self, id: NodeId) -> Result<Option<Node>> {
+        self.get_node(id).await
+    }
+
+    async fn add_link(&mut self, id: NodeId, layer: usize, neighbor: NodeId) -> Result<()> {
+        if let Some(mut node) = self.get_node_for_links(id).await? {
+            let links = node
+                .layers
+                .get_mut(layer)
+                .ok_or_else(|| crate::index::error::Error::Other("link layer is absent".into()))?;
+            links.retain(|link| *link != id);
+            if neighbor != id {
+                links.push(neighbor);
+            }
+            links.sort_unstable();
+            links.dedup();
+            self.put_node(node).await?;
+        }
+        Ok(())
+    }
+
     /// Stores `node`, replacing any node with the same id.
     async fn put_node(&mut self, node: Node) -> Result<()>;
 
     /// `None` when no graph has been built yet, so there is no entry point to
     /// start from.
     async fn get_meta(&self) -> Result<Option<Meta>>;
+
+    /// Advisory routing metadata; a structural replacement must re-read with get_meta.
+    async fn get_meta_advisory(&self) -> Result<Option<Meta>> {
+        self.get_meta().await
+    }
+
+    async fn add_counts(&mut self, live: i64, waste: u64) -> Result<()> {
+        if let Some(mut meta) = self.get_meta().await? {
+            meta.live = meta.live.saturating_add_signed(live);
+            meta.waste = meta.waste.saturating_add(waste);
+            self.put_meta(meta).await?;
+        }
+        Ok(())
+    }
 
     /// Stores `meta`, replacing any previous value.
     async fn put_meta(&mut self, meta: Meta) -> Result<()>;

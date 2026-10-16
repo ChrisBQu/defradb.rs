@@ -4,6 +4,8 @@
 //! The HTTP crate depends on this trait, allowing parallel development of HTTP and query execution.
 
 use async_trait::async_trait;
+use defra_core::thread_bounds::{MaybeBoxFuture, MaybeSend};
+use defra_core::RequestContext;
 use identity::Did;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -12,8 +14,19 @@ use storage::corekv::MaybeSendSync;
 use crate::error::{Result, TransactionError};
 use crate::txn::TransactionHandle;
 
+/// Where an asynchronous request's response goes: called once, on the
+/// thread that finished the request (see [`QueryExecutor::execute_then`]).
+/// `Send` on native targets, not required to be in the browser.
+pub trait Respond: FnOnce(QueryResponse) + MaybeSend + 'static {}
+
+impl<F> Respond for F where F: FnOnce(QueryResponse) + MaybeSend + 'static {}
+
+/// A boxed [`Respond`].
+pub type ResponseCallback = Box<dyn Respond>;
+
 /// Stable GraphQL extension code for retryable transaction conflicts.
 pub const TXN_CONFLICT_ERROR_CODE: &str = "TXN_CONFLICT";
+pub const TXN_RETRY_EXHAUSTED_ERROR_CODE: &str = "TXN_RETRY_EXHAUSTED";
 
 /// Stable conflict message recognized by the remote DefraDB client.
 pub const TXN_CONFLICT_MESSAGE: &str = "transaction conflict. Please retry";
@@ -52,6 +65,10 @@ pub struct QueryRequest {
     /// This is set by the HTTP layer from the Authorization header.
     #[serde(skip)]
     pub identity: Option<Did>,
+
+    /// The request's context, built by the boundary that received it.
+    #[serde(skip)]
+    pub context: RequestContext,
 }
 
 impl QueryRequest {
@@ -62,6 +79,7 @@ impl QueryRequest {
             operation_name: None,
             variables: None,
             identity: None,
+            context: RequestContext::default(),
         }
     }
 
@@ -80,6 +98,12 @@ impl QueryRequest {
     /// Set the identity for ACP permission checks.
     pub fn with_identity(mut self, identity: Option<Did>) -> Self {
         self.identity = identity;
+        self
+    }
+
+    /// Set the request's context.
+    pub fn with_context(mut self, context: RequestContext) -> Self {
+        self.context = context;
         self
     }
 }
@@ -108,6 +132,11 @@ impl QueryResponse {
             errors: Vec::new(),
             extensions: None,
         }
+    }
+
+    /// Internal control request for an autocommit retry, omitted from JSON.
+    pub fn retry_input(&self) -> Option<&crate::prepared::PreparedInputRequest> {
+        self.errors.iter().find_map(QueryResponseError::retry_input)
     }
 
     /// Create an error response.
@@ -143,6 +172,14 @@ impl QueryResponse {
         self.data.is_none()
             && self.errors.len() == 1
             && self.errors[0].code() == Some(TXN_CONFLICT_ERROR_CODE)
+    }
+
+    /// Whether engine-owned transaction retries reached their limit. This is
+    /// final and must not be retried by the HTTP conflict loop.
+    pub fn is_transaction_retry_exhausted(&self) -> bool {
+        self.data.is_none()
+            && self.errors.len() == 1
+            && self.errors[0].code() == Some(TXN_RETRY_EXHAUSTED_ERROR_CODE)
     }
 
     /// Attach warnings, dropping the member entirely when there are none so an
@@ -206,6 +243,10 @@ pub struct QueryResponseError {
     /// Machine-readable GraphQL error metadata.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<QueryResponseErrorExtensions>,
+
+    /// Internal retry control. Never serialized to client responses.
+    #[serde(skip)]
+    pub(crate) retry_input: Option<crate::prepared::PreparedInputRequest>,
 }
 
 impl QueryResponseError {
@@ -216,6 +257,7 @@ impl QueryResponseError {
             path: None,
             locations: None,
             extensions: None,
+            retry_input: None,
         }
     }
 
@@ -248,12 +290,50 @@ impl QueryResponseError {
     pub fn from_query_error(error: crate::error::QueryError) -> Self {
         let is_transaction_conflict =
             matches!(&error, crate::error::QueryError::TransactionConflict(_));
+        let is_transaction_retry_exhausted = matches!(
+            &error,
+            crate::error::QueryError::TransactionRetryExhausted(_)
+        );
+        let retry_input = match &error {
+            crate::error::QueryError::NeedsInput(request) => Some(request.clone()),
+            _ => None,
+        };
         let response_error = Self::new(error.to_string());
-        if is_transaction_conflict {
+        let mut response_error = if is_transaction_conflict {
             response_error.with_code(TXN_CONFLICT_ERROR_CODE)
+        } else if is_transaction_retry_exhausted {
+            response_error.with_code(TXN_RETRY_EXHAUSTED_ERROR_CODE)
         } else {
             response_error
-        }
+        };
+        response_error.retry_input = retry_input;
+        response_error
+    }
+
+    /// Internal retry control, omitted from serialized GraphQL errors.
+    pub fn retry_input(&self) -> Option<&crate::prepared::PreparedInputRequest> {
+        self.retry_input.as_ref()
+    }
+}
+
+#[cfg(test)]
+mod prepared_retry_tests {
+    use super::*;
+
+    #[test]
+    fn needs_input_is_internal_and_wire_bytes_are_not_serialized() {
+        let request = crate::prepared::PreparedInputRequest::new(
+            crate::prepared::PreparedInputKind::Embedding,
+            b"private source and provider context".as_slice(),
+        );
+        let error =
+            QueryResponseError::from_query_error(crate::error::QueryError::NeedsInput(request));
+
+        assert_eq!(error.message, "external input required");
+        assert!(error.retry_input().is_some());
+        let serialized = serde_json::to_string(&error).unwrap();
+        assert!(!serialized.contains("private source"));
+        assert!(!serialized.contains("retry_input"));
     }
 }
 
@@ -299,25 +379,57 @@ pub struct ErrorLocation {
 ///     executor: &E,
 ///     queries: Vec<QueryRequest>,
 /// ) -> Result<Vec<QueryResponse>, TransactionError> {
-///     let handle = executor.begin_txn(false).await?;
+///     let context = RequestContext::default();
+///     let handle = executor.begin_txn_as(&context, false).await?;
 ///     let mut responses = Vec::new();
 ///
 ///     for query in queries {
 ///         let resp = executor.execute_in_txn(query, &handle).await;
 ///         if resp.has_errors() {
-///             executor.rollback_txn(&handle).await.ok();
+///             executor.rollback_txn_as(&context, &handle).await.ok();
 ///             return Err(TransactionError::execution("query failed"));
 ///         }
 ///         responses.push(resp);
 ///     }
 ///
-///     executor.commit_txn(&handle).await?;
+///     executor.commit_txn_as(&context, &handle).await?;
 ///     Ok(responses)
 /// }
 /// ```
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait QueryExecutor: MaybeSendSync {
+    /// Resolve persistent write inputs before retrying request execution.
+    async fn prepare_request(
+        &self,
+        _request: &QueryRequest,
+    ) -> Result<Option<std::sync::Arc<crate::prepared::PreparedMutations>>> {
+        Ok(None)
+    }
+
+    /// Execute with immutable write inputs prepared for this logical request.
+    async fn execute_prepared(
+        &self,
+        request: QueryRequest,
+        _prepared: Option<std::sync::Arc<crate::prepared::PreparedMutations>>,
+    ) -> QueryResponse {
+        self.execute(request).await
+    }
+
+    /// Resolve a transaction-dependent input after its attempt has ended.
+    /// The returned capsule must memoize the exact response bytes so later
+    /// attempts with the same complete request do not call the provider again.
+    async fn resolve_retry_input(
+        &self,
+        _request: &QueryRequest,
+        _prepared: Option<std::sync::Arc<crate::prepared::PreparedMutations>>,
+        _input: &crate::prepared::PreparedInputRequest,
+    ) -> Result<Option<std::sync::Arc<crate::prepared::PreparedMutations>>> {
+        Err(crate::error::QueryError::execution(
+            "retry input resolution is not supported by this executor",
+        ))
+    }
+
     /// Execute a GraphQL query and return the response.
     ///
     /// This handles the full pipeline: parsing → planning → execution → response.
@@ -353,6 +465,17 @@ pub trait QueryExecutor: MaybeSendSync {
         readonly: bool,
     ) -> std::result::Result<TransactionHandle, TransactionError>;
 
+    /// [`Self::begin_txn`] for the request `context` serves: the transaction
+    /// belongs to its identity. The default runs `begin_txn` inside
+    /// [`RequestContext::mirror`].
+    async fn begin_txn_as(
+        &self,
+        context: &RequestContext,
+        readonly: bool,
+    ) -> std::result::Result<TransactionHandle, TransactionError> {
+        context.mirror(self.begin_txn(readonly)).await
+    }
+
     /// Commit a transaction.
     ///
     /// All operations performed within the transaction become permanent.
@@ -361,6 +484,16 @@ pub trait QueryExecutor: MaybeSendSync {
         &self,
         handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError>;
+
+    /// [`Self::commit_txn`] for the request `context` serves. The default runs
+    /// `commit_txn` inside [`RequestContext::mirror`].
+    async fn commit_txn_as(
+        &self,
+        context: &RequestContext,
+        handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError> {
+        context.mirror(self.commit_txn(handle)).await
+    }
 
     /// Rollback a transaction.
     ///
@@ -371,6 +504,16 @@ pub trait QueryExecutor: MaybeSendSync {
         handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError>;
 
+    /// [`Self::rollback_txn`] for the request `context` serves. The default
+    /// runs `rollback_txn` inside [`RequestContext::mirror`].
+    async fn rollback_txn_as(
+        &self,
+        context: &RequestContext,
+        handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError> {
+        context.mirror(self.rollback_txn(handle)).await
+    }
+
     /// Remove an abandoned transaction without committing or spawning cleanup.
     ///
     /// Called by `TransactionGuard::drop`, including during runtime shutdown.
@@ -380,6 +523,22 @@ pub trait QueryExecutor: MaybeSendSync {
 
     /// Get the GraphQL schema for introspection.
     async fn schema(&self) -> Result<String>;
+
+    /// [`execute`](Self::execute) for a caller that is called back instead
+    /// of waiting: runs `request` and calls `done` with its response. The
+    /// returned future completes once the request is under way, so its
+    /// caller waits at most for the request to be admitted. An executor
+    /// that runs requests elsewhere (a worker pool) calls `done` where the
+    /// request ran, and drops it uncalled only when the request never ran
+    /// (shutdown, or a panic); this default runs the request in the
+    /// returned future itself.
+    fn execute_then<'a>(
+        &'a self,
+        request: QueryRequest,
+        done: ResponseCallback,
+    ) -> MaybeBoxFuture<'a, ()> {
+        Box::pin(async move { done(self.execute(request).await) })
+    }
 }
 
 #[cfg(test)]
@@ -422,6 +581,21 @@ mod tests {
         assert_eq!(
             serde_json::to_value(response).unwrap()["errors"][0]["extensions"]["code"],
             TXN_CONFLICT_ERROR_CODE
+        );
+    }
+
+    #[test]
+    fn engine_retry_exhaustion_has_stable_final_error_code() {
+        let response = QueryResponseError::from_query_error(
+            crate::error::QueryError::transaction_retry_exhausted("engine retries exhausted"),
+        );
+        let response = QueryResponse::error(response);
+
+        assert!(response.is_transaction_retry_exhausted());
+        assert!(!response.is_transaction_conflict());
+        assert_eq!(
+            serde_json::to_value(response).unwrap()["errors"][0]["extensions"]["code"],
+            TXN_RETRY_EXHAUSTED_ERROR_CODE
         );
     }
 

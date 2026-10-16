@@ -20,10 +20,11 @@ pub(super) enum P2PTasks {
         replication_task: JoinHandle<()>,
         /// Host event handler task (processes P2P events through coordinator)
         event_handler_task: Option<JoinHandle<()>>,
-        /// Records push failures for retry
-        failure_recorder_task: JoinHandle<()>,
-        /// Periodically retries failed doc pushes with exponential backoff
-        retry_loop_task: JoinHandle<()>,
+        /// Records push failures for retry, on the worker pool
+        failure_recorder_task: workers::Background,
+        /// Periodically retries failed doc pushes with exponential backoff, on
+        /// the network edge
+        retry_loop_task: edge::Task<()>,
     },
     #[cfg(feature = "iroh")]
     Iroh {
@@ -36,11 +37,13 @@ pub(super) enum P2PTasks {
 
 /// Servers and background tasks produced by store/server initialization.
 pub(super) struct ServerSetup {
+    /// Closed last: it stops the worker pool, then closes the store.
+    pub database: Arc<db::DB<storage::DynStore>>,
     pub p2p_handle: Option<p2p::P2PHostHandle>,
     pub p2p_tasks: Option<P2PTasks>,
-    pub downsample_task: Option<JoinHandle<()>>,
-    pub vector_rebuild_task: Option<JoinHandle<()>>,
-    pub txn_cleanup_task: Option<JoinHandle<()>>,
+    pub downsample_task: Option<workers::Background>,
+    pub vector_rebuild_task: Option<workers::Background>,
+    pub txn_cleanup_task: Option<workers::Background>,
     pub http_server: defra_http::Server,
     #[cfg(feature = "postgres")]
     pub pg_server: Option<pg_compat::PgServer>,
@@ -51,11 +54,13 @@ pub(super) struct ServerSetup {
 #[doc(hidden)]
 pub struct Node {
     pub(super) config: Config,
+    /// The database, whose close stops the worker pool and then the store.
+    pub(super) database: Arc<db::DB<storage::DynStore>>,
     pub(super) p2p_handle: Option<p2p::P2PHostHandle>,
     pub(super) p2p_tasks: Option<P2PTasks>,
-    pub(super) downsample_task: Option<JoinHandle<()>>,
-    pub(super) vector_rebuild_task: Option<JoinHandle<()>>,
-    pub(super) txn_cleanup_task: Option<JoinHandle<()>>,
+    pub(super) downsample_task: Option<workers::Background>,
+    pub(super) vector_rebuild_task: Option<workers::Background>,
+    pub(super) txn_cleanup_task: Option<workers::Background>,
     pub(super) http_server: Option<defra_http::Server>,
     #[cfg(feature = "postgres")]
     pub(super) pg_server: Option<pg_compat::PgServer>,
@@ -70,11 +75,11 @@ pub struct Node {
 }
 
 impl Node {
-    /// Load the keyring `encryption-key`, generating and persisting a new
-    /// 32-byte AES-256 key on first use (Go's `getOrCreateEncryptionKey`).
+    /// Load the keyring `encryption-key`. Writable startup may generate and
+    /// persist a 32-byte key on first use; diagnostics require an existing key.
     ///
     /// Errors if the keyring is disabled or the stored key is not 32 bytes.
-    fn load_or_create_encryption_key(config: &Config) -> Result<[u8; 32]> {
+    fn load_encryption_key(config: &Config, create: bool) -> Result<[u8; 32]> {
         use crate::error::Error;
         use keyring::ENCRYPTION_KEY;
 
@@ -87,7 +92,7 @@ impl Node {
         let kr = crate::commands::open_keyring(config)?;
         let key_bytes: Vec<u8> = match kr.get(ENCRYPTION_KEY) {
             Ok(bytes) => bytes.to_vec(),
-            Err(keyring::Error::NotFound(_)) => {
+            Err(keyring::Error::NotFound(_)) if create => {
                 info!("Generating new at-rest encryption key");
                 let generated = crypto::generate_aes256().map_err(|e| {
                     Error::Keyring(format!("failed to generate encryption key: {}", e))
@@ -149,27 +154,46 @@ impl Node {
         Ok(Some(key))
     }
 
-    /// Wrap a concrete backend in a type-erased [`storage::DynStore`],
-    /// applying at-rest encryption when configured. The erasure keeps the
-    /// whole node stack at a single `S = DynStore` instantiation.
-    pub(crate) fn wrap_store<S>(config: &Config, backend: S) -> Result<storage::DynStore>
-    where
-        S: storage::corekv::Store + 'static,
-    {
-        if config.datastore.at_rest_encryption {
-            info!("At-rest encryption enabled (value-only, AES-256-GCM)");
-            let key = Self::load_or_create_encryption_key(config)?;
-            Ok(storage::DynStore::new(Arc::new(
-                storage::encrypted_store::EncryptedStore::new(backend, key),
-            )))
-        } else {
-            Ok(storage::DynStore::new(Arc::new(backend)))
+    /// The keyring's previous at-rest keys, kept after a key rotation so the
+    /// files they sealed stay readable. None when the keyring has none.
+    fn load_previous_encryption_keys(config: &Config) -> Result<Vec<[u8; 32]>> {
+        use crate::error::Error;
+        use keyring::PREVIOUS_ENCRYPTION_KEYS;
+
+        let kr = crate::commands::open_keyring(config)?;
+        let bytes = match kr.get(PREVIOUS_ENCRYPTION_KEYS) {
+            Ok(bytes) => bytes,
+            Err(keyring::Error::NotFound(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(Error::Keyring(e.to_string())),
+        };
+        let (keys, rest) = bytes.as_chunks::<32>();
+        if !rest.is_empty() || keys.is_empty() {
+            return Err(Error::Keyring(format!(
+                "keyring {PREVIOUS_ENCRYPTION_KEYS} must hold one or more 32-byte keys, got {} bytes",
+                bytes.len()
+            )));
         }
+        Ok(keys.to_vec())
     }
 
-    /// Build the persistent ACP/Zanzibar stores from a shared store and start
-    /// the server. The store may wrap a bare backend or an [`EncryptedStore`];
-    /// both DB and ACP share the same instance so they encrypt uniformly.
+    /// Resolve encryption before opening the engine. Diagnostics never create keys.
+    pub(crate) fn encryption_options(
+        config: &Config,
+        options: storage::RegolithStoreOptions,
+        create: bool,
+    ) -> Result<storage::RegolithStoreOptions> {
+        if !config.datastore.at_rest_encryption {
+            return Ok(options);
+        }
+        let current = Self::load_encryption_key(config, create)?;
+        let previous = Self::load_previous_encryption_keys(config)?;
+        options
+            .with_encryption_keys(current, previous)
+            .map_err(|e| crate::error::Error::Keyring(e.to_string()))
+    }
+
+    /// Build ACP and database services over the same engine-encrypted store.
+    #[allow(clippy::too_many_arguments)]
     async fn init_persistent_store_and_server(
         store: Arc<storage::DynStore>,
         config: &Config,
@@ -177,6 +201,8 @@ impl Node {
         user_identity: Option<std::sync::Arc<identity::RawIdentity>>,
         node_identity: Option<Arc<identity::RawIdentity>>,
         se_key: Option<[u8; 32]>,
+        pool: &workers::Pool,
+        edge: &edge::Edge,
     ) -> Result<ServerSetup> {
         info!("Using unified ACP store (namespace isolated in main database)");
         let acp_store: Arc<dyn acp::AcpStore> =
@@ -192,15 +218,31 @@ impl Node {
             zanzibar_store,
             node_identity,
             se_key,
+            pool,
+            edge,
         )
         .await
     }
 
-    /// Create a new node
+    /// The worker pool the node's data path runs on, from the config's
+    /// `workers` section: each worker polls its regolith queues, and the
+    /// edge's timer runs the stuck-poll monitor.
+    fn start_pool(config: &Config, edge: &edge::Edge) -> Result<workers::Pool> {
+        storage::start_pool(config.workers.pool_config()?, Some(edge.pool_monitor())).map_err(
+            |error| {
+                crate::error::Error::InvalidConfig(format!(
+                    "the worker pool did not start: {error}"
+                ))
+            },
+        )
+    }
+
+    /// Create a new node, serving on the network runtime `edge`.
     #[doc(hidden)]
     pub async fn new(
         mut config: Config,
         user_identity: Option<std::sync::Arc<identity::RawIdentity>>,
+        edge: edge::Edge,
     ) -> Result<Self> {
         if config.api.pubkey_path.is_empty() && config.api.privkey_path.is_empty() {
             let cert = config.rootdir.join("certs/server.crt");
@@ -253,18 +295,29 @@ impl Node {
             warn!("{message}");
         }
 
+        // The data path's worker pool comes before the store, which places
+        // its compaction threads by the pool's plan.
+        let pool = Self::start_pool(&config, &edge)?;
+
         // Initialize storage, database, and set up P2P and HTTP server
         let mut servers = match config.datastore.store {
             DatastoreType::Memory => {
                 info!("Using in-memory datastore");
-                let acp_store: Arc<dyn acp::AcpStore> = Arc::new(acp::MemoryAcpStore::new());
+                let options = Self::encryption_options(
+                    &config,
+                    storage::RegolithStoreOptions::memory().placed_on(&pool),
+                    true,
+                )?;
+                let backend = storage::RegolithStore::open_with_options("memory", options)?;
+                let store = storage::DynStore::new(Arc::new(backend));
+                let store = Arc::new(store);
+                let acp_store: Arc<dyn acp::AcpStore> =
+                    Arc::new(acp::PersistentAcpStore::from_store(store.clone()));
                 let zanzibar_store: Arc<dyn acp::ZanzibarStore> =
-                    Arc::new(acp::MemoryZanzibarStore::new());
-                info!("Using in-memory ACP store");
-                let backend = storage::RegolithStore::in_memory()?;
-                let store = Self::wrap_store(&config, backend)?;
+                    Arc::new(acp::PersistentZanzibarStore::from_store(store.clone()));
+
                 Self::init_store_and_server(
-                    Arc::new(store),
+                    store,
                     &config,
                     peer_keypair,
                     user_identity.clone(),
@@ -272,6 +325,8 @@ impl Node {
                     zanzibar_store,
                     node_identity.clone(),
                     se_key,
+                    &pool,
+                    &edge,
                 )
                 .await?
             }
@@ -282,9 +337,13 @@ impl Node {
                 );
                 let backend = storage::RegolithStore::open_with_options(
                     config.data_path(),
-                    regolith_options(&config),
+                    Self::encryption_options(
+                        &config,
+                        regolith_options(&config).placed_on(&pool),
+                        true,
+                    )?,
                 )?;
-                let store = Self::wrap_store(&config, backend)?;
+                let store = storage::DynStore::new(Arc::new(backend));
                 Self::init_persistent_store_and_server(
                     Arc::new(store),
                     &config,
@@ -292,6 +351,8 @@ impl Node {
                     user_identity.clone(),
                     node_identity.clone(),
                     se_key,
+                    &pool,
+                    &edge,
                 )
                 .await?
             }
@@ -305,6 +366,7 @@ impl Node {
 
         Ok(Self {
             config,
+            database: servers.database,
             p2p_handle: servers.p2p_handle,
             p2p_tasks: servers.p2p_tasks,
             downsample_task: servers.downsample_task,
@@ -330,7 +392,7 @@ fn regolith_options(config: &Config) -> storage::RegolithStoreOptions {
     let mut opts =
         storage::RegolithStoreOptions::default().with_durability(config.datastore.durability);
     if let Some(bytes) = config.datastore.valuelogfilesize {
-        opts.engine.target_file_size = bytes;
+        opts.engine = opts.engine.target_file_size(bytes);
     }
     opts
 }
@@ -377,7 +439,7 @@ mod valuelogfilesize_tests {
     #[test]
     fn an_explicitly_set_value_reaches_the_engine() {
         let opts = regolith_options(&config_with(DatastoreType::Regolith, Some(4 * 1024 * 1024)));
-        assert_eq!(opts.engine.target_file_size, 4 * 1024 * 1024);
+        assert_eq!(opts.engine.get_target_file_size(), 4 * 1024 * 1024);
     }
 
     /// An unset flag must leave the profile's own value alone. Asserted
@@ -387,8 +449,8 @@ mod valuelogfilesize_tests {
     fn an_unset_flag_keeps_the_profile_default() {
         let expected = storage::RegolithStoreOptions::default()
             .engine
-            .target_file_size;
+            .get_target_file_size();
         let opts = regolith_options(&config_with(DatastoreType::Regolith, None));
-        assert_eq!(opts.engine.target_file_size, expected);
+        assert_eq!(opts.engine.get_target_file_size(), expected);
     }
 }

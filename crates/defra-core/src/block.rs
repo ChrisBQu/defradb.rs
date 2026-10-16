@@ -8,6 +8,7 @@ use multihash::Multihash;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::cid_encoding::CidText;
 use crate::{Error, Result};
 
 // Re-export delta payload types
@@ -82,16 +83,19 @@ impl Block {
     pub fn new(delta: CrdtDelta, heads: Vec<Cid>, links: Vec<DAGLink>) -> Self {
         // Sort and normalize heads. Go sorts by CID string, not raw CID bytes.
         let mut sorted_heads = heads;
-        sorted_heads.sort_by_cached_key(|cid| cid.to_string());
+        sorted_heads.sort_by_cached_key(CidText::new);
         let heads = if sorted_heads.is_empty() {
             None
         } else {
             Some(sorted_heads)
         };
 
-        // Sort and normalize links
+        // Sort and normalize links. `DAGLink::cmp` formats both CIDs on every
+        // comparison. Stable secondary-then-primary sorts preserve its exact
+        // CID-string then name order while formatting each CID just once.
         let mut sorted_links = links;
-        sorted_links.sort();
+        sorted_links.sort_by(|left, right| left.name.cmp(&right.name));
+        sorted_links.sort_by_cached_key(|link| CidText::new(&link.link));
         let links = if sorted_links.is_empty() {
             None
         } else {
@@ -123,7 +127,10 @@ impl Block {
 
     /// Serialize to DAG-CBOR bytes
     pub fn to_dag_cbor(&self) -> Result<Vec<u8>> {
-        Ok(serde_ipld_dagcbor::to_vec(self)?)
+        match crate::block_encode::encode(self) {
+            Some(encoded) => encoded,
+            None => Ok(serde_ipld_dagcbor::to_vec(self)?),
+        }
     }
 
     /// Deserialize from DAG-CBOR bytes
@@ -228,9 +235,8 @@ impl Ord for DAGLink {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // Go sorts DAG links by CID string. Raw CID byte ordering is not equivalent
         // for all CID values and changes block CIDs for those schemas.
-        self.link
-            .to_string()
-            .cmp(&other.link.to_string())
+        CidText::new(&self.link)
+            .cmp(&CidText::new(&other.link))
             .then_with(|| self.name.cmp(&other.name))
     }
 }

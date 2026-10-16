@@ -5,24 +5,26 @@
 
 mod config;
 mod doc;
+mod engine;
 mod error;
+mod feed;
 mod history;
 mod pipeline;
 mod store;
-mod unsupported_store;
 #[cfg(feature = "wasmtime-runtime")]
 mod wasm;
-#[cfg(feature = "wasmtime-runtime")]
-mod wasm_runtime;
 
 pub use config::{LensConfig, LensModule};
 pub use doc::{LensDoc, DELETED_FIELD, DOC_ID_FIELD};
+pub use engine::{default_store, default_store_on, UnsupportedTransformStore};
+#[cfg(feature = "wasmtime-runtime")]
+pub use engine::{EpochTick, PoolTicks, TickGuard, TickSource, Ticking, WasmSandboxConfig};
 pub use error::{Error, Result};
+pub use feed::{FeedStep, LensFeed};
 pub use history::{build_targeted_history, CollectionHistoryLink, TargetedHistoryLink};
-pub use pipeline::{Lens, LensInput};
+pub use pipeline::{transform_to_target, Lens, LensInput};
 pub use store::{
     LensDocResultStream, LensDocStream, MemoryTransformStore, TransformId, TransformStore,
 };
-pub use unsupported_store::UnsupportedTransformStore;
 #[cfg(feature = "wasmtime-runtime")]
-pub use wasm::{WasmSandboxConfig, WasmTransformStore};
+pub use wasm::WasmTransformStore;

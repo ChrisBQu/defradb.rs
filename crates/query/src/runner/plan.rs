@@ -12,7 +12,7 @@ use crate::fetcher::DocFetcher;
 use crate::limits::QueryLimits;
 use crate::mapper::{AggregateType, Filter, Requestable, Select};
 use crate::plan::{
-    AllDocsNode, ChildSelectMeta, GroupAlias, GroupByNode, LimitNode, OrderByNode,
+    AcpRead, AllDocsNode, ChildSelectMeta, GroupAlias, GroupByNode, LimitNode, OrderByNode,
     PermissionFilterNode, ScanNode, SelectNode,
 };
 use crate::planner::{Doc, PlanNode};
@@ -24,8 +24,10 @@ pub(crate) use super::plan_validation::validate_select;
 pub(crate) struct AcpFilter {
     pub acp: Arc<dyn DocumentACP>,
     pub identity: Identity,
+    pub dac_bypass: bool,
     pub policy_id: String,
     pub resource_name: String,
+    pub retry_inputs: Option<crate::prepared::PreparedInputMemo>,
 }
 
 /// Build the document mapping for a select operation.
@@ -313,10 +315,20 @@ pub(crate) fn build_plan(
 
     // Insert ACP permission filter after Select, before OrderBy/Limit/Aggregates.
     // This ensures aggregates (count, average, etc.) operate on filtered documents.
+    let retry_inputs = acp_filter
+        .as_ref()
+        .and_then(|filter| filter.retry_inputs.clone());
     plan = PermissionFilterNode::wrap(
         plan,
-        acp_filter.map(|acf| (acf.acp, acf.identity, acf.policy_id, acf.resource_name)),
+        acp_filter.map(|acf| AcpRead {
+            acp: acf.acp,
+            identity: acf.identity,
+            dac_bypass: acf.dac_bypass,
+            policy_id: acf.policy_id,
+            resource_name: acf.resource_name,
+        }),
         app_read,
+        retry_inputs,
     );
 
     // Check if we have GROUP BY
@@ -537,4 +549,19 @@ pub(crate) fn doc_to_json(doc: &Doc, mapping: &DocumentMapping) -> Result<JsonVa
     }
 
     Ok(JsonValue::Object(obj))
+}
+
+/// Hide physical indexes from planning when a fetcher transforms their values.
+pub(crate) async fn indexes_for_documents(
+    fetcher: &dyn crate::fetcher::DocFetcher,
+    mut collections: Vec<schema::CollectionVersion>,
+) -> crate::error::Result<Vec<schema::CollectionVersion>> {
+    for collection in &mut collections {
+        if !collection.indexes.is_empty()
+            && !fetcher.indexes_match_documents(&collection.name).await?
+        {
+            collection.indexes.clear();
+        }
+    }
+    Ok(collections)
 }

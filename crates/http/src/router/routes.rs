@@ -8,6 +8,7 @@ use axum::{
     Router,
 };
 
+use edge::Edge;
 use query::executor::QueryExecutor;
 use query::rest::RestOperations;
 
@@ -18,8 +19,8 @@ use crate::handlers;
 ///
 /// This creates a router with GraphQL endpoints only (no REST).
 /// Use `create_router_with_rest` to include REST endpoints.
-pub fn create_router(executor: Arc<dyn QueryExecutor>) -> Router {
-    let state = AppStateBuilder::new(executor).build();
+pub fn create_router(executor: Arc<dyn QueryExecutor>, edge: Edge) -> Router {
+    let state = AppStateBuilder::new(executor, edge).build();
     create_router_with_state(state)
 }
 
@@ -27,8 +28,9 @@ pub fn create_router(executor: Arc<dyn QueryExecutor>) -> Router {
 pub fn create_router_with_rest(
     executor: Arc<dyn QueryExecutor>,
     rest: Arc<dyn RestOperations>,
+    edge: Edge,
 ) -> Router {
-    let state = AppStateBuilder::new(executor).with_rest(rest).build();
+    let state = AppStateBuilder::new(executor, edge).with_rest(rest).build();
     create_router_with_state(state)
 }
 
@@ -467,7 +469,7 @@ mod tests {
     }
 
     async fn status_for(path: &str) -> axum::http::StatusCode {
-        let router = create_router(Arc::new(MockQueryExecutor::new()));
+        let router = create_router(Arc::new(MockQueryExecutor::new()), edge::testing::edge());
         router
             .oneshot(
                 Request::builder()
@@ -484,7 +486,9 @@ mod tests {
         let executor = Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>;
         let p2p = Arc::new(FailingMockP2POperations::new("injected p2p failure"))
             as Arc<dyn P2POperations>;
-        let state = AppStateBuilder::new(executor).with_p2p(p2p).build();
+        let state = AppStateBuilder::new(executor, edge::testing::edge())
+            .with_p2p(p2p)
+            .build();
         let router = create_router_with_state(state);
         router
             .oneshot(
@@ -535,7 +539,7 @@ mod tests {
     async fn collection_doc_ids_route_is_available_with_rest() {
         let executor = Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>;
         let rest = Arc::new(MockRestOperations::new()) as Arc<dyn RestOperations>;
-        let router = create_router_with_rest(executor, rest);
+        let router = create_router_with_rest(executor, rest, edge::testing::edge());
 
         for path in ["/api/v0/collections/Users", "/api/v1/collections/Users"] {
             let response = router
@@ -565,7 +569,9 @@ mod tests {
     async fn p2p_disconnect_removes_connected_peer() {
         let executor = Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>;
         let p2p = Arc::new(MockP2POperations::new().with_peer("12D3KooWtest"));
-        let state = AppStateBuilder::new(executor).with_p2p(p2p.clone()).build();
+        let state = AppStateBuilder::new(executor, edge::testing::edge())
+            .with_p2p(p2p.clone())
+            .build();
         let router = create_router_with_state(state);
 
         let response = router
@@ -591,7 +597,9 @@ mod tests {
         let executor = Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>;
         let doc_acp = Arc::new(MockDocumentAcpOperations::with_allowed(false))
             as Arc<dyn DocumentAcpOperations>;
-        let state = AppStateBuilder::new(executor).with_doc_acp(doc_acp).build();
+        let state = AppStateBuilder::new(executor, edge::testing::edge())
+            .with_doc_acp(doc_acp)
+            .build();
         let router = create_router_with_state(state);
 
         let response = router
@@ -630,7 +638,9 @@ mod tests {
             started: Arc::clone(&started),
             release: Arc::clone(&release),
         }) as Arc<dyn P2POperations>;
-        let state = AppStateBuilder::new(executor).with_p2p(p2p).build();
+        let state = AppStateBuilder::new(executor, edge::testing::edge())
+            .with_p2p(p2p)
+            .build();
         let router = create_router_with_state(state);
 
         let response_task = tokio::spawn(
@@ -702,7 +712,7 @@ mod tests {
     #[tokio::test]
     async fn p2p_manage_returns_service_unavailable_when_unset() {
         let executor = Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>;
-        let state = AppStateBuilder::new(executor).build();
+        let state = AppStateBuilder::new(executor, edge::testing::edge()).build();
         let body = r#"{"Target":"addr","AuthToken":"tok","Op":{"Kind":"CollectionAdd","collection_ids":["Users"]}}"#;
         assert_eq!(
             manage_status_with_state(state, body).await,
@@ -714,7 +724,9 @@ mod tests {
     async fn p2p_manage_maps_unauthorized_to_forbidden() {
         let executor = Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>;
         let manage = Arc::new(DenyingManageRequester) as Arc<dyn ManageRequester>;
-        let state = AppStateBuilder::new(executor).with_manage(manage).build();
+        let state = AppStateBuilder::new(executor, edge::testing::edge())
+            .with_manage(manage)
+            .build();
         let body = r#"{"Target":"addr","AuthToken":"tok","Op":{"Kind":"CollectionAdd","collection_ids":["Users"]}}"#;
         assert_eq!(
             manage_status_with_state(state, body).await,

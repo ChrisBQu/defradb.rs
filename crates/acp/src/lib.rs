@@ -28,10 +28,13 @@
 mod auth_error;
 mod dac;
 pub mod error;
+mod external;
 mod identity;
 mod local;
 pub mod nac;
+pub mod pending;
 mod permission;
+mod policy_cache;
 // Both persistent stores require `S: Store + Send + Sync`, which the wasm
 // LevelDB store cannot satisfy, so they are native-only.
 #[cfg(not(target_arch = "wasm32"))]
@@ -45,10 +48,12 @@ mod validation;
 pub mod zanzibar;
 
 pub use auth_error::normalize_auth_error;
-pub use dac::DocumentACP;
+pub use dac::{bound_to_request, with_request_bearer, DocumentACP};
 pub use error::{Error, Result};
+pub use external::{ExternalDocumentAcp, RedriveReport};
 pub use identity::Identity;
 pub use local::{LocalDocumentACP, MemoryAcpStore};
+pub use pending::{PendingRegistration, PendingRegistrations};
 pub use permission::DocumentPermission;
 #[cfg(not(target_arch = "wasm32"))]
 pub use persistent::PersistentAcpStore;

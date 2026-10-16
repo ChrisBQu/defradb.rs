@@ -20,6 +20,8 @@ use document::{DocID, Document, NormalValue};
 use multihash::Multihash;
 use sha2::{Digest, Sha256};
 
+mod common;
+
 const WIDTHS: [usize; 3] = [4, 16, 64];
 const SHA2_256: u64 = 0x12;
 const DAG_CBOR: u64 = 0x71;

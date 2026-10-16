@@ -2,146 +2,410 @@ use bytes::Bytes;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
 use super::*;
+
+struct EngineConflictAttempt {
+    store: Arc<RegolithStore>,
+    attempts: Arc<AtomicUsize>,
+}
+
+impl crate::corekv::RetryAttemptFn for EngineConflictAttempt {
+    fn run<'a>(
+        &'a mut self,
+        txn: &'a mut dyn crate::corekv::RetryTxn,
+    ) -> crate::corekv::RetryAttemptFuture<'a> {
+        let store = self.store.clone();
+        let attempts = self.attempts.clone();
+        Box::pin(async move {
+            let current = txn.get(b"engine-retry").await?;
+            let first = attempts.fetch_add(1, AtomicOrdering::Relaxed) == 0;
+            if first {
+                assert!(txn.previous_conflict().is_none());
+                txn.set(b"engine-retry", b"loser").await?;
+                let mut winner = store.new_txn(false).await?;
+                winner.set(b"engine-retry", b"winner").await?;
+                winner.commit().await?;
+            } else {
+                let conflict = txn
+                    .previous_conflict()
+                    .expect("retry retains conflict facts");
+                assert!(conflict.latest_seq > conflict.observed_seq);
+                assert_eq!(conflict.winning_write, regolith::WriteKind::Put);
+                assert_eq!(current.as_deref(), Some(b"winner".as_slice()));
+                txn.set(b"engine-retry", b"winner-retried").await?;
+            }
+            Ok(Box::new(()) as crate::corekv::RetryAttemptValue)
+        })
+    }
+}
+
+struct EngineAbortAttempt(Arc<AtomicUsize>);
+
+impl crate::corekv::RetryAttemptFn for EngineAbortAttempt {
+    fn run<'a>(
+        &'a mut self,
+        _txn: &'a mut dyn crate::corekv::RetryTxn,
+    ) -> crate::corekv::RetryAttemptFuture<'a> {
+        self.0.fetch_add(1, AtomicOrdering::Relaxed);
+        Box::pin(async {
+            Err(crate::corekv::RetryAttemptError::Abort(Box::new(
+                RetryAbortSentinel("needs-input"),
+            )))
+        })
+    }
+}
 use crate::backends::RegolithStore;
 use crate::corekv::Key;
 use crate::keys::peerstore::ReplicatorKey;
 
-#[test]
-fn retry_peer_lock_is_recreated_after_the_last_caller() {
-    let lock = retry_peer_lock("expired-retry-lock");
-    let original = Arc::downgrade(&lock);
-    drop(lock);
-    assert!(original.upgrade().is_none());
-    let next = retry_peer_lock("expired-retry-lock");
-    assert!(!Weak::ptr_eq(&original, &Arc::downgrade(&next)));
-    assert!(Arc::ptr_eq(&next, &retry_peer_lock("expired-retry-lock")));
-}
-
-#[test]
-fn concurrent_retry_callers_share_a_fresh_entry() {
-    const CALLERS: usize = 16;
-    let barrier = std::sync::Barrier::new(CALLERS);
-    std::thread::scope(|scope| {
-        let callers: Vec<_> = (0..CALLERS)
-            .map(|_| {
-                scope.spawn(|| {
-                    barrier.wait();
-                    retry_peer_lock("concurrent-retry-lock")
-                })
-            })
-            .collect();
-        let locks: Vec<_> = callers
-            .into_iter()
-            .map(|caller| caller.join().unwrap())
-            .collect();
-        assert!(locks.iter().all(|lock| Arc::ptr_eq(lock, &locks[0])));
-    });
-    assert!(!Arc::ptr_eq(
-        &retry_peer_lock("concurrent-retry-lock"),
-        &retry_peer_lock("other-retry-lock")
-    ));
-}
-
-#[test]
-fn expired_entry_cleanup_preserves_a_live_successor() {
-    let locks = RetryPeerLocks::with_hasher(RandomState::default());
-    let expired = Arc::new(RetryPeerLock::new(()));
-    locks.insert("peer".to_string(), Arc::downgrade(&expired));
-    drop(expired);
-    let (observed, wait_observed) = std::sync::mpsc::channel();
-    let (resume, wait_resume) = std::sync::mpsc::channel();
-    let timeout = std::time::Duration::from_secs(5);
-
-    std::thread::scope(|scope| {
-        let locks = &locks;
-        let delayed = scope.spawn(move || {
-            let candidate = Arc::new(RetryPeerLock::new(()));
-            let stale = locks.get_or_insert("peer".to_string(), Arc::downgrade(&candidate));
-            assert!(stale.upgrade().is_none());
-            observed.send(()).unwrap();
-            wait_resume.recv_timeout(timeout).unwrap();
-
-            remove_expired_retry_peer_lock(locks, "peer");
-            retry_peer_lock_from(locks, "peer")
-        });
-        wait_observed.recv_timeout(timeout).unwrap();
-        let live = retry_peer_lock_from(locks, "peer");
-        resume.send(()).unwrap();
-        let resumed = delayed.join().unwrap();
-        assert!(Arc::ptr_eq(&live, &resumed));
-        assert!(Arc::ptr_eq(&live, &retry_peer_lock_from(locks, "peer")));
-    });
-}
-
 #[tokio::test]
-async fn push_transaction_conflicts_retry_to_success() {
-    let attempts = AtomicUsize::new(0);
-
-    retry_push_txn_conflicts(|| async {
-        if attempts.fetch_add(1, AtomicOrdering::Relaxed) < 2 {
-            Err(crate::corekv::Error::TxnConflict)
-        } else {
-            Ok(())
-        }
-    })
-    .await
-    .unwrap();
-
-    assert_eq!(attempts.load(AtomicOrdering::Relaxed), 3);
-}
-
-#[tokio::test]
-async fn push_transaction_conflicts_stop_at_bound() {
-    let attempts = AtomicUsize::new(0);
-
-    let error = retry_push_txn_conflicts(|| async {
-        attempts.fetch_add(1, AtomicOrdering::Relaxed);
-        Err::<(), _>(crate::corekv::Error::TxnConflict)
-    })
-    .await
-    .unwrap_err();
-
-    assert!(error.is_txn_conflict());
-    assert_eq!(
-        attempts.load(AtomicOrdering::Relaxed),
-        PUSH_RETRY_TXN_MAX_ATTEMPTS
-    );
-}
-
-#[tokio::test]
-async fn transient_marker_io_failure_recovers_durable_scopes() {
+async fn engine_retry_attempt_restarts_after_commit_conflict() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
+    let interfering_store = store.clone();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let attempt_count = attempts.clone();
+
+    let result = store
+        .transact_retry(
+            crate::corekv::RetryOptions::new(3),
+            Box::new(EngineConflictAttempt {
+                store: interfering_store,
+                attempts: attempt_count,
+            }),
+        )
+        .await
+        .unwrap();
+
+    result.downcast::<()>().unwrap();
+    assert_eq!(attempts.load(AtomicOrdering::Relaxed), 2);
+    let read = store.new_txn(true).await.unwrap();
+    assert_eq!(
+        read.get(b"engine-retry").await.unwrap().as_deref(),
+        Some(b"winner-retried".as_slice())
+    );
+    read.discard();
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct RetryAbortSentinel(&'static str);
+
+#[tokio::test]
+async fn engine_retry_attempt_returns_typed_business_abort_unchanged() {
+    let store = RegolithStore::in_memory().unwrap();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let attempt_count = attempts.clone();
+    let result = store
+        .transact_retry(
+            crate::corekv::RetryOptions::new(3),
+            Box::new(EngineAbortAttempt(attempt_count)),
+        )
+        .await;
+
+    let Err(error) = result else {
+        panic!("attempt should abort with its typed business outcome");
+    };
+    assert_eq!(
+        error.downcast_abort::<RetryAbortSentinel>().unwrap(),
+        RetryAbortSentinel("needs-input")
+    );
+    assert_eq!(attempts.load(AtomicOrdering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn scoped_retry_io_restores_the_real_transaction_before_engine_commit() {
+    let store = RegolithStore::in_memory().unwrap();
+    let result = store
+        .transact_retry(
+            crate::corekv::RetryOptions::new(2),
+            Box::new(ScopedRetryIoAttempt {
+                retain_iterator: false,
+                abort_after_write: false,
+            }),
+        )
+        .await
+        .unwrap();
+    result.downcast::<()>().unwrap();
+
+    let txn = store.new_txn(true).await.unwrap();
+    assert_eq!(
+        txn.get(b"scoped-retry").await.unwrap().as_deref(),
+        Some(b"persisted".as_slice())
+    );
+    txn.discard();
+}
+
+#[tokio::test]
+async fn scoped_retry_io_rejects_an_iterator_retained_past_attempt() {
+    let store = RegolithStore::in_memory().unwrap();
+    let result = store
+        .transact_retry(
+            crate::corekv::RetryOptions::new(2),
+            Box::new(ScopedRetryIoAttempt {
+                retain_iterator: true,
+                abort_after_write: false,
+            }),
+        )
+        .await;
+    assert!(result.is_err());
+
+    let txn = store.new_txn(true).await.unwrap();
+    assert_eq!(txn.get(b"must-rollback").await.unwrap(), None);
+    txn.discard();
+}
+
+#[tokio::test]
+async fn scoped_retry_io_business_abort_rolls_back_actual_transaction() {
+    let store = RegolithStore::in_memory().unwrap();
+    let result = store
+        .transact_retry(
+            crate::corekv::RetryOptions::new(2),
+            Box::new(ScopedRetryIoAttempt {
+                retain_iterator: false,
+                abort_after_write: true,
+            }),
+        )
+        .await;
+    assert!(matches!(
+        result,
+        Err(crate::corekv::RetryAttemptError::Abort(_))
+    ));
+
+    let txn = store.new_txn(true).await.unwrap();
+    assert_eq!(txn.get(b"scoped-retry").await.unwrap(), None);
+    txn.discard();
+}
+
+struct ScopedRetryIoAttempt {
+    retain_iterator: bool,
+    abort_after_write: bool,
+}
+
+impl crate::corekv::RetryAttemptFn for ScopedRetryIoAttempt {
+    fn run<'a>(
+        &'a mut self,
+        retry: &'a mut dyn crate::corekv::RetryTxn,
+    ) -> crate::corekv::RetryAttemptFuture<'a> {
+        Box::pin(async move {
+            let mut io = retry.begin_attempt_io()?;
+            let key = if self.retain_iterator {
+                b"must-rollback".as_slice()
+            } else {
+                b"scoped-retry".as_slice()
+            };
+            let value = if self.retain_iterator {
+                b"value".as_slice()
+            } else {
+                b"persisted".as_slice()
+            };
+            io.set(key, value).await?;
+            if self.abort_after_write {
+                return Err(crate::corekv::RetryAttemptError::Abort(Box::new(
+                    RetryAbortSentinel("scoped-abort"),
+                )));
+            }
+            if !self.retain_iterator {
+                assert_eq!(io.get(key).await?.as_deref(), Some(value));
+            }
+            let _retained = if self.retain_iterator {
+                Some(io.iterator(crate::corekv::IterOptions::default()).await?)
+            } else {
+                None
+            };
+            retry.finish_attempt_io(io, crate::corekv::TxnCallbacks::default())?;
+            Ok(Box::new(()) as crate::corekv::RetryAttemptValue)
+        })
+    }
+}
+
+/// A store whose engine-owned transactions fail with an error (an I/O error
+/// unless told otherwise) a given number of times, or lose a conflict a given
+/// number of times, before they reach the real store. Plain transactions pass
+/// straight through.
+struct FaultyTransactStore {
+    inner: Arc<RegolithStore>,
+    failure: crate::corekv::Error,
+    io_failures: AtomicUsize,
+    conflicts: AtomicUsize,
+    attempts: Arc<AtomicUsize>,
+}
+
+impl FaultyTransactStore {
+    fn new(io_failures: usize, conflicts: usize) -> Arc<Self> {
+        Self::over(
+            Arc::new(RegolithStore::in_memory().unwrap()),
+            crate::corekv::Error::Io("injected marker write failure".into()),
+            io_failures,
+            conflicts,
+        )
+    }
+
+    /// Over `inner`, failing the next `failures` engine transactions with
+    /// `failure`.
+    fn over(
+        inner: Arc<RegolithStore>,
+        failure: crate::corekv::Error,
+        failures: usize,
+        conflicts: usize,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            failure,
+            io_failures: AtomicUsize::new(failures),
+            conflicts: AtomicUsize::new(conflicts),
+            attempts: Arc::new(AtomicUsize::new(0)),
+        })
+    }
+
+    fn take(counter: &AtomicUsize) -> bool {
+        counter
+            .try_update(AtomicOrdering::SeqCst, AtomicOrdering::SeqCst, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok()
+    }
+}
+
+impl crate::corekv::private::Sealed for FaultyTransactStore {}
+
+#[async_trait]
+impl Store for FaultyTransactStore {
+    async fn allocate(&self, key: &[u8], count: u64) -> Result<std::ops::Range<u64>> {
+        self.inner.allocate(key, count).await
+    }
+
+    async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>> {
+        self.inner.new_txn(readonly).await
+    }
+
+    async fn transact_retry(
+        &self,
+        options: RetryOptions,
+        attempt: crate::corekv::RetryAttempt,
+    ) -> std::result::Result<crate::corekv::RetryAttemptValue, crate::corekv::RetryAttemptError>
+    {
+        if Self::take(&self.io_failures) {
+            return Err(crate::corekv::RetryAttemptError::Storage(
+                self.failure.clone(),
+            ));
+        }
+        let conflicts = Self::take(&self.conflicts).then(|| Arc::clone(&self.inner));
+        let attempt = Box::new(LosingAttempt {
+            inner: attempt,
+            competitor: conflicts,
+            attempts: Arc::clone(&self.attempts),
+        });
+        self.inner.transact_retry(options, attempt).await
+    }
+
+    async fn close(&self) -> Result<()> {
+        self.inner.close().await
+    }
+}
+
+/// Runs the real attempt, then, while a conflict is still owed, commits a
+/// write of the replicator key the attempt read, so every one of its commits
+/// loses.
+struct LosingAttempt {
+    inner: crate::corekv::RetryAttempt,
+    competitor: Option<Arc<RegolithStore>>,
+    attempts: Arc<AtomicUsize>,
+}
+
+impl crate::corekv::RetryAttemptFn for LosingAttempt {
+    fn run<'a>(
+        &'a mut self,
+        txn: &'a mut dyn crate::corekv::RetryTxn,
+    ) -> crate::corekv::RetryAttemptFuture<'a> {
+        Box::pin(async move {
+            self.attempts.fetch_add(1, AtomicOrdering::SeqCst);
+            let output = self.inner.run(txn).await?;
+            if let Some(store) = &self.competitor {
+                let peers = NamespacedStore::new(Arc::clone(store), Namespace::Peerstore);
+                let mut competitor = peers.new_txn(false).await?;
+                competitor
+                    .set(&ReplicatorKey::new("peer").bytes(), b"replicator-rewritten")
+                    .await?;
+                competitor.commit().await?;
+            }
+            Ok(output)
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn marker_write_io_failure_is_returned_not_slept_on() {
+    let store = FaultyTransactStore::new(1, 0);
     let peerstore = Peerstore::new(store.clone());
+    peerstore
+        .create_replicator("peer", b"replicator")
+        .await
+        .unwrap();
     let retry_info = super::super::RetryInfo::new_initial().to_bytes().unwrap();
 
-    for (doc_id, collection_id, error) in [
+    let error = peerstore
+        .record_push_failure("peer", "doc", "collection", &retry_info)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, crate::corekv::Error::Io(_)), "{error:?}");
+    assert!(peerstore
+        .get_retry_documents("peer")
+        .await
+        .unwrap()
+        .is_empty());
+
+    peerstore
+        .record_push_failure("peer", "doc", "collection", &retry_info)
+        .await
+        .unwrap();
+    let markers = Peerstore::new(store.inner.clone())
+        .get_retry_documents("peer")
+        .await
+        .unwrap();
+    assert_eq!(markers.len(), 1);
+    assert_eq!(markers[0].doc_id, "doc");
+}
+
+/// A marker write that fails transiently, with an I/O or a backend error, is
+/// returned to its caller rather than retried here; the caller's next write
+/// lands, and both scopes, a document and a collection commit, are durable
+/// across a restart together with the peer's retry schedule.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transient_marker_io_failure_recovers_durable_scopes() {
+    let backing = Arc::new(RegolithStore::in_memory().unwrap());
+    Peerstore::new(backing.clone())
+        .create_replicator("peer", b"replicator")
+        .await
+        .unwrap();
+    let retry_info = super::super::RetryInfo::new_initial().to_bytes().unwrap();
+
+    for (doc_id, failure) in [
         (
             "doc",
-            "collection",
             crate::corekv::Error::Io("injected transient marker failure".to_string()),
         ),
         (
             "",
-            "collection",
             crate::corekv::Error::Backend("injected transient marker failure".to_string()),
         ),
     ] {
-        let attempts = AtomicUsize::new(0);
-        retry_scope_marker_write(|| async {
-            if attempts.fetch_add(1, AtomicOrdering::Relaxed) == 0 {
-                Err(error.clone())
-            } else {
-                peerstore
-                    .register_scope_marker_once("peer", doc_id, collection_id, &retry_info)
-                    .await
-            }
-        })
-        .await
-        .unwrap();
-        assert_eq!(attempts.load(AtomicOrdering::Relaxed), 2);
+        let peerstore = Peerstore::new(FaultyTransactStore::over(backing.clone(), failure, 1, 0));
+        let error = peerstore
+            .record_push_failure("peer", doc_id, "collection", &retry_info)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                crate::corekv::Error::Io(_) | crate::corekv::Error::Backend(_)
+            ),
+            "{error:?}"
+        );
+        peerstore
+            .record_push_failure("peer", doc_id, "collection", &retry_info)
+            .await
+            .unwrap();
     }
 
-    let restarted = Peerstore::new(store);
+    let restarted = Peerstore::new(backing);
     assert!(restarted.get_retry_info("peer").await.unwrap().is_some());
     let markers = restarted.get_retry_documents("peer").await.unwrap();
     assert_eq!(markers.len(), 2);
@@ -149,24 +413,78 @@ async fn transient_marker_io_failure_recovers_durable_scopes() {
     assert!(markers.iter().any(|marker| marker.is_collection_commit()));
 }
 
-#[tokio::test]
-async fn marker_io_failures_stop_at_bound() {
-    let attempts = AtomicUsize::new(0);
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn marker_conflicts_run_under_the_configured_retry_budget() {
+    let store = FaultyTransactStore::new(0, 1);
+    let peerstore = Peerstore::new(store.clone()).with_max_txn_retries(0);
+    peerstore
+        .create_replicator("peer", b"replicator")
+        .await
+        .unwrap();
+    let retry_info = super::super::RetryInfo::new_initial().to_bytes().unwrap();
 
-    let error = retry_scope_marker_write(|| async {
-        attempts.fetch_add(1, AtomicOrdering::Relaxed);
-        Err::<(), _>(crate::corekv::Error::Backend(
-            "injected persistent marker failure".to_string(),
-        ))
-    })
-    .await
-    .unwrap_err();
-
-    assert!(matches!(error, crate::corekv::Error::Backend(_)));
-    assert_eq!(
-        attempts.load(AtomicOrdering::Relaxed),
-        PUSH_RETRY_TXN_MAX_ATTEMPTS
+    let error = peerstore
+        .record_push_failure("peer", "doc", "collection", &retry_info)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, crate::corekv::Error::TxnRetryExhausted(_)),
+        "{error:?}"
     );
+    assert_eq!(store.attempts.load(AtomicOrdering::SeqCst), 1);
+
+    let store = FaultyTransactStore::new(0, 1);
+    let peerstore = Peerstore::new(store.clone()).with_max_txn_retries(1);
+    peerstore
+        .create_replicator("peer", b"replicator")
+        .await
+        .unwrap();
+    peerstore
+        .record_push_failure("peer", "doc", "collection", &retry_info)
+        .await
+        .unwrap();
+    assert_eq!(store.attempts.load(AtomicOrdering::SeqCst), 2);
+}
+
+/// The push-marker retry layer counts the engine re-runs of a peerstore
+/// transaction: the re-run, the retried sequence that commits, and the one
+/// that runs out of budget. The counters are process-wide, so the test reads
+/// how much each one grew.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn marker_conflict_retries_are_counted_in_the_push_marker_layer() {
+    let retry_info = super::super::RetryInfo::new_initial().to_bytes().unwrap();
+    let before = telemetry::conflict_metrics_snapshot().push_marker;
+
+    let store = FaultyTransactStore::new(0, 1);
+    let peerstore = Peerstore::new(store).with_max_txn_retries(1);
+    peerstore
+        .create_replicator("peer", b"replicator")
+        .await
+        .unwrap();
+    peerstore
+        .record_push_failure("peer", "doc", "collection", &retry_info)
+        .await
+        .unwrap();
+    let retried = telemetry::conflict_metrics_snapshot().push_marker;
+    assert!(retried.attempts > before.attempts, "{retried:?}");
+    assert!(retried.successes > before.successes, "{retried:?}");
+
+    let store = FaultyTransactStore::new(0, 1);
+    let peerstore = Peerstore::new(store).with_max_txn_retries(0);
+    peerstore
+        .create_replicator("peer", b"replicator")
+        .await
+        .unwrap();
+    let error = peerstore
+        .record_push_failure("peer", "doc", "collection", &retry_info)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, crate::corekv::Error::TxnRetryExhausted(_)),
+        "{error:?}"
+    );
+    let exhausted = telemetry::conflict_metrics_snapshot().push_marker;
+    assert!(exhausted.exhaustions > retried.exhaustions, "{exhausted:?}");
 }
 
 #[tokio::test]
@@ -241,11 +559,10 @@ async fn test_delete_replicator() {
         .await
         .unwrap()
         .is_empty());
-    assert_eq!(peerstore.migrate_legacy_push_retries().await.unwrap(), 0);
 }
 
 #[tokio::test]
-async fn forget_waits_for_selected_retry_and_blocks_future_retries() {
+async fn forget_and_readd_preserves_marker_generation_fencing() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store.clone());
     let peer_id = "coordinated-peer";
@@ -254,38 +571,63 @@ async fn forget_waits_for_selected_retry_and_blocks_future_retries() {
         .await
         .unwrap();
 
-    let retry_guard = peerstore
-        .acquire_replicator_retry_guard(peer_id)
+    let old_generation = peerstore
+        .observe_push_head_with_generation(peer_id, "doc", "collection")
         .await
         .unwrap()
-        .expect("replicator should be eligible for retry");
-    let delete_store = Peerstore::new(store);
-    let mut delete_task =
-        tokio::spawn(async move { delete_store.delete_replicator(peer_id).await });
-
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(25), &mut delete_task)
-            .await
-            .is_err(),
-        "forget completed while a retry still held permission to replay"
-    );
-
-    drop(retry_guard);
-    tokio::time::timeout(std::time::Duration::from_secs(1), delete_task)
+        .unwrap();
+    peerstore.delete_replicator(peer_id).await.unwrap();
+    peerstore
+        .create_replicator(peer_id, b"new replicator incarnation")
         .await
-        .expect("forget remained blocked after retry completed")
-        .expect("forget task panicked")
-        .expect("forget failed");
-
-    assert!(peerstore
-        .acquire_replicator_retry_guard(peer_id)
+        .unwrap();
+    let new_generation = peerstore
+        .observe_push_head_with_generation(peer_id, "doc", "collection")
         .await
         .unwrap()
-        .is_none());
+        .unwrap();
+    assert!(new_generation > old_generation);
+    assert!(!peerstore
+        .complete_retry_scope(peer_id, "doc", "collection", false, old_generation, &[])
+        .await
+        .unwrap());
+    let markers = peerstore.get_retry_documents(peer_id).await.unwrap();
+    assert_eq!(markers[0].generation, new_generation);
 }
 
 #[tokio::test]
-async fn same_peer_retry_transitions_have_one_storage_owner() {
+async fn live_push_admission_rejects_malformed_marker_generation() {
+    use crate::keys::peerstore::ReplicatorRetryDocIDKey;
+
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
+    let peerstore = Peerstore::new(store.clone());
+    peerstore
+        .create_replicator("peer", b"replicator")
+        .await
+        .unwrap();
+    let generation = peerstore
+        .observe_push_head_with_generation("peer", "doc", "collection")
+        .await
+        .unwrap()
+        .unwrap();
+
+    let mut txn = peerstore.store.new_txn(false).await.unwrap();
+    txn.set(
+        &ReplicatorRetryDocIDKey::new("peer", "doc").bytes(),
+        b"malformed generation",
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    assert!(!peerstore
+        .admit_push_scope("peer", "doc", "collection", generation)
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn concurrent_scope_registrations_get_distinct_generations() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store.clone());
     peerstore
@@ -293,85 +635,192 @@ async fn same_peer_retry_transitions_have_one_storage_owner() {
         .await
         .unwrap();
 
-    let first = peerstore
-        .acquire_replicator_retry_guard("peer")
+    let (first, second) = tokio::join!(
+        peerstore.observe_push_head_with_generation("peer", "doc", "collection"),
+        peerstore.observe_push_head_with_generation("peer", "doc", "collection"),
+    );
+    let first = first.unwrap().unwrap();
+    let second = second.unwrap().unwrap();
+    assert_ne!(first, second);
+    let current = peerstore.get_retry_documents("peer").await.unwrap()[0].generation;
+    assert!(current == first || current == second);
+    let stale = if current == first { second } else { first };
+    assert!(!peerstore
+        .complete_retry_scope("peer", "doc", "collection", false, stale, &[])
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn stale_scope_registration_cannot_replace_newer_marker_or_schedule() {
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
+    let peerstore = Peerstore::new(store);
+    peerstore
+        .create_replicator("peer", b"replicator")
+        .await
+        .unwrap();
+    let current_generation = peerstore
+        .observe_push_head_with_generation("peer", "doc", "collection")
         .await
         .unwrap()
         .unwrap();
-    let second_store = Peerstore::new(store);
-    let mut second = tokio::spawn(async move {
-        second_store
-            .acquire_replicator_retry_guard("peer")
+    let incarnation_key = crate::keys::peerstore::ReplicatorIncarnationKey::new("peer");
+    let incarnation_txn = peerstore.store.new_txn(true).await.unwrap();
+    let incarnation = decode_retry_marker_generation(
+        &incarnation_txn
+            .get(&incarnation_key.bytes())
             .await
             .unwrap()
-    });
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(25), &mut second)
-            .await
-            .is_err(),
-        "two same-peer marker writers acquired ownership concurrently"
-    );
+            .unwrap(),
+    )
+    .unwrap();
+    incarnation_txn.discard();
+    let schedule_before = peerstore.get_retry_info("peer").await.unwrap();
+    let stale_attempt = RegisterScopeMarkerAttempt {
+        peer_id: "peer".to_string(),
+        expected_incarnation: incarnation,
+        doc_id: "doc".to_string(),
+        collection_id: "collection".to_string(),
+        retry_info_bytes: super::super::RetryInfo::new_initial().to_bytes().unwrap(),
+        retry_schedule: super::super::RetrySchedule::default(),
+        generation: current_generation.saturating_sub(1),
+    };
 
-    drop(first);
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_secs(1), second)
-            .await
-            .unwrap()
-            .unwrap()
-            .is_some()
+    let result: Option<u64> = peerstore
+        .transact_conflicts(Box::new(stale_attempt))
+        .await
+        .unwrap();
+
+    assert_eq!(result, None);
+    let marker = peerstore.get_retry_documents("peer").await.unwrap();
+    assert_eq!(marker.len(), 1);
+    assert_eq!(marker[0].generation, current_generation);
+    assert_eq!(
+        peerstore.get_retry_info("peer").await.unwrap(),
+        schedule_before
     );
 }
 
 #[tokio::test]
-async fn reconnect_activation_uses_the_same_peer_retry_writer() {
-    let store = Arc::new(RegolithStore::in_memory().unwrap());
-    let peerstore = Peerstore::new(store.clone());
-    let peer_id = "peer";
+async fn stale_scope_registration_cannot_cross_peer_forget_and_readd() {
+    let peerstore = Peerstore::new(Arc::new(RegolithStore::in_memory().unwrap()));
     peerstore
-        .create_replicator(peer_id, b"replicator")
+        .create_replicator("peer", b"same config")
         .await
         .unwrap();
+    let old_incarnation_key = crate::keys::peerstore::ReplicatorIncarnationKey::new("peer");
+    let old_txn = peerstore.store.new_txn(true).await.unwrap();
+    let old_incarnation = decode_retry_marker_generation(
+        &old_txn
+            .get(&old_incarnation_key.bytes())
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    old_txn.discard();
+    peerstore.delete_replicator("peer").await.unwrap();
     peerstore
-        .observe_push_head(peer_id, "doc", "collection")
+        .create_replicator("peer", b"same config")
+        .await
+        .unwrap();
+    let new_txn = peerstore.store.new_txn(true).await.unwrap();
+    let new_incarnation = decode_retry_marker_generation(
+        &new_txn
+            .get(&old_incarnation_key.bytes())
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    new_txn.discard();
+    assert!(new_incarnation > old_incarnation);
+
+    let result: Option<u64> = peerstore
+        .transact_conflicts(Box::new(RegisterScopeMarkerAttempt {
+            peer_id: "peer".to_string(),
+            expected_incarnation: old_incarnation,
+            doc_id: "doc".to_string(),
+            collection_id: "collection".to_string(),
+            retry_info_bytes: super::super::RetryInfo::new_initial().to_bytes().unwrap(),
+            retry_schedule: super::super::RetrySchedule::default(),
+            generation: old_incarnation,
+        }))
         .await
         .unwrap();
 
-    let writer = peerstore
-        .acquire_replicator_retry_guard(peer_id)
+    assert_eq!(result, None);
+    assert!(peerstore
+        .get_retry_documents("peer")
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(peerstore.get_retry_info("peer").await.unwrap().is_none());
+}
+
+#[test]
+fn peer_incarnation_keys_cannot_alias_allocator_state() {
+    let sequence_key = b"/rep/incarnation/sequence".to_vec();
+    for peer_id in ["sequence", "id", "generation"] {
+        assert_ne!(
+            crate::keys::peerstore::ReplicatorIncarnationKey::new(peer_id).bytes(),
+            sequence_key,
+            "peer id must not overlap the incarnation allocator key"
+        );
+    }
+}
+
+#[tokio::test]
+async fn stale_ack_cannot_erase_a_concurrent_dirty_registration() {
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
+    let peerstore = Peerstore::new(store.clone());
+    peerstore
+        .create_replicator("peer", b"replicator")
+        .await
+        .unwrap();
+    let old_generation = peerstore
+        .observe_push_head_with_generation("peer", "doc", "collection")
         .await
         .unwrap()
         .unwrap();
-    let activation_store = Peerstore::new(store);
-    let mut activation =
-        tokio::spawn(async move { activation_store.activate_retry_peer(peer_id).await });
 
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(25), &mut activation)
-            .await
-            .is_err(),
-        "reconnect activation bypassed the peer retry writer"
+    let ack_store = Peerstore::new(store.clone());
+    let update_store = Peerstore::new(store);
+    let (ack, update) = tokio::join!(
+        ack_store.complete_retry_scope("peer", "doc", "collection", false, old_generation, &[]),
+        update_store.observe_push_head_with_generation("peer", "doc", "collection"),
     );
-
-    drop(writer);
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_secs(1), activation)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap()
-    );
+    let _ = ack.unwrap();
+    let update_generation = update.unwrap().unwrap();
+    let markers = peerstore.get_retry_documents("peer").await.unwrap();
+    assert_eq!(markers.len(), 1);
+    assert_eq!(markers[0].generation, update_generation);
+    assert_ne!(update_generation, old_generation);
 }
 
 #[tokio::test]
 async fn delete_replicator_clears_orphaned_retry_state() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
+    let system_store = crate::namespace::NamespacedStore::new(
+        store.clone(),
+        crate::namespace::Namespace::Systemstore,
+    );
     let peerstore = Peerstore::new(store);
     let retry_info = super::super::RetryInfo::new_initial().to_bytes().unwrap();
+
+    peerstore
+        .create_replicator("orphan", b"replicator")
+        .await
+        .unwrap();
 
     peerstore
         .record_push_failure("orphan", "doc", "collection", &retry_info)
         .await
         .unwrap();
+    let unrelated_key = b"/rep/retry/doc/orphan/unrelated";
+    let mut unrelated = system_store.new_txn(false).await.unwrap();
+    unrelated.set(unrelated_key, b"keep").await.unwrap();
+    unrelated.commit().await.unwrap();
     peerstore.delete_replicator("orphan").await.unwrap();
 
     assert!(peerstore.get_all_retry_peers().await.unwrap().is_empty());
@@ -380,6 +829,9 @@ async fn delete_replicator_clears_orphaned_retry_state() {
         .await
         .unwrap()
         .is_empty());
+    let unrelated = system_store.new_txn(true).await.unwrap();
+    assert_eq!(unrelated.get(unrelated_key).await.unwrap().unwrap(), "keep");
+    unrelated.discard();
 }
 
 #[tokio::test]
@@ -390,14 +842,15 @@ async fn retry_sweep_peers_require_persisted_replicators() {
 
     for peer_id in ["active", "orphan"] {
         peerstore
+            .create_replicator(peer_id, b"replicator")
+            .await
+            .unwrap();
+        peerstore
             .record_push_failure(peer_id, "doc", "collection", &retry_info)
             .await
             .unwrap();
     }
-    peerstore
-        .create_replicator("active", b"replicator")
-        .await
-        .unwrap();
+    peerstore.delete_replicator("orphan").await.unwrap();
 
     let peers = peerstore.get_replicator_retry_peers().await.unwrap();
     assert_eq!(peers.len(), 1);
@@ -472,9 +925,13 @@ async fn test_update_replicator() {
 }
 
 #[tokio::test]
-async fn scope_markers_are_presence_only_and_share_the_peer_clock() {
+async fn scope_markers_are_generation_fenced_and_share_the_peer_clock() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store);
+    peerstore
+        .create_replicator("peer", b"replicator")
+        .await
+        .unwrap();
     let initial = super::super::RetryInfo::new_initial().to_bytes().unwrap();
 
     peerstore
@@ -491,18 +948,19 @@ async fn scope_markers_are_presence_only_and_share_the_peer_clock() {
         .unwrap();
 
     let txn = peerstore.store.new_txn(true).await.unwrap();
-    assert_eq!(
-        txn.get(&ReplicatorRetryDocIDKey::new("peer", "doc").bytes())
-            .await
-            .unwrap(),
-        Some(Bytes::new())
-    );
-    assert_eq!(
-        txn.get(&ReplicatorRetryCollectionKey::new("peer", "collection").bytes())
-            .await
-            .unwrap(),
-        Some(Bytes::new())
-    );
+    let document_marker = txn
+        .get(&ReplicatorRetryDocIDKey::new("peer", "doc").bytes())
+        .await
+        .unwrap()
+        .unwrap();
+    let collection_marker = txn
+        .get(&ReplicatorRetryCollectionKey::new("peer", "collection").bytes())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(decode_retry_marker_generation(&document_marker).is_some());
+    assert!(decode_retry_marker_generation(&collection_marker).is_some());
+    assert_ne!(document_marker, collection_marker);
     drop(txn);
 
     let retries = peerstore.get_retry_documents("peer").await.unwrap();
@@ -517,6 +975,10 @@ async fn scope_markers_are_presence_only_and_share_the_peer_clock() {
 async fn completing_one_scope_preserves_other_scope_and_peer_clock() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store);
+    peerstore
+        .create_replicator("peer", b"replicator")
+        .await
+        .unwrap();
     let initial = super::super::RetryInfo::new_initial().to_bytes().unwrap();
 
     peerstore
@@ -537,7 +999,6 @@ async fn completing_one_scope_preserves_other_scope_and_peer_clock() {
         .complete_retry_document("peer", doc)
         .await
         .unwrap();
-    peerstore.clear_retry_peer("peer").await.unwrap();
 
     let remaining = peerstore.get_retry_documents("peer").await.unwrap();
     assert_eq!(remaining.len(), 1);
@@ -548,7 +1009,6 @@ async fn completing_one_scope_preserves_other_scope_and_peer_clock() {
         .complete_retry_document("peer", &remaining[0])
         .await
         .unwrap();
-    peerstore.clear_retry_peer("peer").await.unwrap();
     assert!(peerstore.get_all_retry_peers().await.unwrap().is_empty());
 }
 
@@ -556,6 +1016,10 @@ async fn completing_one_scope_preserves_other_scope_and_peer_clock() {
 async fn collection_updates_coalesce_to_one_rederivable_scope() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store);
+    peerstore
+        .create_replicator("peer", b"replicator")
+        .await
+        .unwrap();
     let initial = super::super::RetryInfo::new_initial().to_bytes().unwrap();
 
     peerstore
@@ -577,6 +1041,12 @@ async fn collection_updates_coalesce_to_one_rederivable_scope() {
 async fn retry_marker_stats_report_scope_counts_and_oldest_peer_clock() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store);
+    for peer_id in ["peer-a", "peer-b"] {
+        peerstore
+            .create_replicator(peer_id, b"replicator")
+            .await
+            .unwrap();
+    }
     let initial = super::super::RetryInfo::new_initial().to_bytes().unwrap();
 
     peerstore
@@ -618,41 +1088,6 @@ async fn versionless_empty_document_failure_creates_no_retry_state() {
         .await
         .unwrap()
         .is_empty());
-}
-
-#[tokio::test]
-async fn dormant_legacy_payload_document_retry_migrates_and_arms_due_schedule() {
-    let store = Arc::new(RegolithStore::in_memory().unwrap());
-    let peerstore = Peerstore::new(store);
-    let mut txn = peerstore.store.new_txn(false).await.unwrap();
-    txn.set(
-        &ReplicatorRetryDocIDKey::new("peer", "doc").bytes(),
-        b"collection",
-    )
-    .await
-    .unwrap();
-    txn.commit().await.unwrap();
-
-    assert_eq!(peerstore.migrate_legacy_push_retries().await.unwrap(), 1);
-    let legacy = peerstore.get_retry_documents("peer").await.unwrap();
-    assert_eq!(legacy.len(), 1);
-    assert_eq!(legacy[0].doc_id, "doc");
-    assert!(legacy[0].collection_id.is_empty());
-    let txn = peerstore.store.new_txn(true).await.unwrap();
-    assert_eq!(
-        txn.get(&ReplicatorRetryDocIDKey::new("peer", "doc").bytes())
-            .await
-            .unwrap(),
-        Some(Bytes::new())
-    );
-    let schedule = txn
-        .get(&ReplicatorRetryIDKey::new("peer").bytes())
-        .await
-        .unwrap()
-        .expect("migration must reactivate a dormant legacy document marker");
-    let schedule = super::super::RetryInfo::from_bytes(&schedule).unwrap();
-    assert!(schedule.is_due());
-    assert_eq!(schedule.num_retries, 0);
 }
 
 #[tokio::test]
@@ -724,46 +1159,13 @@ async fn capacity_reschedule_rotates_without_advancing_failure_ladder() {
 }
 
 #[tokio::test]
-async fn legacy_cid_scoped_commits_collapse_to_one_collection_marker() {
-    let store = Arc::new(RegolithStore::in_memory().unwrap());
-    let peerstore = Peerstore::new(store);
-    let mut txn = peerstore.store.new_txn(false).await.unwrap();
-    for cid in ["commit-a", "commit-b"] {
-        txn.set(
-            &legacy_retry_commit_key("peer", "collection", cid),
-            b"legacy-payload",
-        )
-        .await
-        .unwrap();
-    }
-    txn.commit().await.unwrap();
-
-    assert_eq!(peerstore.migrate_legacy_push_retries().await.unwrap(), 2);
-    let retries = peerstore.get_retry_documents("peer").await.unwrap();
-    assert_eq!(retries.len(), 1);
-    assert!(retries[0].is_collection_commit());
-    assert_eq!(retries[0].collection_id, "collection");
-
-    let txn = peerstore.store.new_txn(true).await.unwrap();
-    for cid in ["commit-a", "commit-b"] {
-        assert!(txn
-            .get(&legacy_retry_commit_key("peer", "collection", cid))
-            .await
-            .unwrap()
-            .is_none());
-    }
-    assert_eq!(
-        txn.get(&ReplicatorRetryCollectionKey::new("peer", "collection").bytes())
-            .await
-            .unwrap(),
-        Some(Bytes::new())
-    );
-}
-
-#[tokio::test]
 async fn sweep_clear_removes_preexisting_empty_document_retry() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store);
+    peerstore
+        .create_replicator("peer", b"replicator")
+        .await
+        .unwrap();
     let mut txn = peerstore.store.new_txn(false).await.unwrap();
     txn.set(
         &ReplicatorRetryIDKey::new("peer").bytes(),
@@ -797,6 +1199,9 @@ async fn sweep_clear_cannot_orphan_a_concurrently_registered_marker() {
     let register_store = Peerstore::new(Arc::clone(&store));
     let peerstore = Peerstore::new(store);
     let mut txn = peerstore.store.new_txn(false).await.unwrap();
+    txn.set(&ReplicatorKey::new("peer").bytes(), b"replicator")
+        .await
+        .unwrap();
     txn.set(
         &ReplicatorRetryIDKey::new("peer").bytes(),
         &super::super::RetryInfo::new_initial().to_bytes().unwrap(),
@@ -823,6 +1228,10 @@ async fn sweep_clear_cannot_orphan_a_concurrently_registered_marker() {
 async fn peer_reconnect_activates_schedule_without_resetting_ladder() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let peerstore = Peerstore::new(store);
+    peerstore
+        .create_replicator("peer", b"replicator")
+        .await
+        .unwrap();
     let mut retry = super::super::RetryInfo::new_initial();
     retry.bump();
     retry.bump();

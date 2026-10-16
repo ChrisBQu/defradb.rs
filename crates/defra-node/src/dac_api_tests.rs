@@ -30,12 +30,11 @@ async fn node_with_protected_users() -> (EmbeddedNode, String) {
 
     let did_a = identity::Did::new(DID_A).unwrap();
     let create = node
-        .execute_request_with_retry(
+        .execute_request(
             query::QueryRequest::new(
                 "mutation { add_Users(input: {name: \"secret\"}) { _docID } }",
             )
             .with_identity(Some(did_a)),
-            Default::default(),
         )
         .await;
     assert!(!create.has_errors(), "{:?}", create.errors);
@@ -72,9 +71,8 @@ fn register_local_node_identity() -> String {
 
 async fn visible_users(node: &EmbeddedNode, identity: Option<identity::Did>) -> usize {
     let response = node
-        .execute_request_with_retry(
+        .execute_request(
             query::QueryRequest::new("query { Users { name } }").with_identity(identity),
-            Default::default(),
         )
         .await;
     assert!(!response.has_errors(), "{:?}", response.errors);
@@ -311,12 +309,11 @@ async fn node_identity_does_not_bypass_protected_history_reads() {
     .unwrap();
 
     let create = node
-        .execute_request_with_retry(
+        .execute_request(
             query::QueryRequest::new(
                 "mutation { add_Users(input: {name: \"secret\"}) { _docID } }",
             )
             .with_identity(Some(owner.clone())),
-            Default::default(),
         )
         .await;
     assert!(!create.has_errors(), "{:?}", create.errors);
@@ -330,9 +327,8 @@ async fn node_identity_does_not_bypass_protected_history_reads() {
         r#"query {{ _commits(docID: "{doc_id}", filter: {{fieldName: {{_eq: "_C"}}}}) {{ cid }} }}"#
     );
     let node_commits = node
-        .execute_request_with_retry(
+        .execute_request(
             query::QueryRequest::new(&commits_query).with_identity(Some(node_identity.clone())),
-            Default::default(),
         )
         .await;
     assert!(!node_commits.has_errors(), "{:?}", node_commits.errors);
@@ -342,10 +338,7 @@ async fn node_identity_does_not_bypass_protected_history_reads() {
         .is_empty());
 
     let owner_commits = node
-        .execute_request_with_retry(
-            query::QueryRequest::new(&commits_query).with_identity(Some(owner)),
-            Default::default(),
-        )
+        .execute_request(query::QueryRequest::new(&commits_query).with_identity(Some(owner)))
         .await;
     assert!(!owner_commits.has_errors(), "{:?}", owner_commits.errors);
     let cid = owner_commits.data.unwrap()["_commits"][0]["cid"]
@@ -428,4 +421,44 @@ async fn policy_id_reproducible_with_explicit_counter() {
         .unwrap();
     creator.shutdown().await;
     follower.shutdown().await;
+}
+
+/// N identical policies added at once through the embedded API get N distinct
+/// IDs, and IDs stay distinct after the node restarts over the same store.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_identical_policy_adds_get_distinct_ids_across_a_restart() {
+    const ADDS: usize = 8;
+    let dir = tempfile::tempdir().unwrap();
+    let mut ids = Vec::new();
+    {
+        let node = std::sync::Arc::new(
+            EmbeddedNode::builder()
+                .data_path(dir.path())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let adds: Vec<_> = (0..ADDS)
+            .map(|_| {
+                let node = std::sync::Arc::clone(&node);
+                tokio::spawn(async move { node.add_dac_policy(DID_A, POLICY_YAML).await })
+            })
+            .collect();
+        for add in adds {
+            ids.push(add.await.unwrap().unwrap());
+        }
+        node.shutdown().await;
+    }
+    let node = EmbeddedNode::builder()
+        .data_path(dir.path())
+        .build()
+        .await
+        .unwrap();
+    ids.push(node.add_dac_policy(DID_A, POLICY_YAML).await.unwrap());
+    node.shutdown().await;
+
+    let mut distinct = ids.clone();
+    distinct.sort();
+    distinct.dedup();
+    assert_eq!(distinct.len(), ADDS + 1, "repeated policy IDs: {ids:?}");
 }

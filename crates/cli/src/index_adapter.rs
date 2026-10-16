@@ -1,8 +1,10 @@
 //! Adapter to bridge database index operations to HTTP's IndexOperations trait.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use defra_core::RequestContext;
 
 use db::IndexManager;
 use defra_http::router::{IndexFieldInfo, IndexInfo, IndexOperations};
@@ -13,11 +15,20 @@ use storage::keys::systemstore::CollectionKey;
 /// Adapter that implements IndexOperations using the database.
 pub struct IndexAdapter<S: Store> {
     database: Arc<db::DB<S>>,
+    /// The request this adapter serves, for one bound to it.
+    context: Option<RequestContext>,
 }
 
 impl<S: Store + 'static> IndexAdapter<S> {
     pub fn new(database: Arc<db::DB<S>>) -> Self {
-        Self { database }
+        Self {
+            database,
+            context: None,
+        }
+    }
+
+    fn context(&self) -> Cow<'_, RequestContext> {
+        RequestContext::bound_or_ambient(self.context.as_ref())
     }
 
     pub fn new_arc(database: Arc<db::DB<S>>) -> Arc<dyn IndexOperations> {
@@ -27,6 +38,13 @@ impl<S: Store + 'static> IndexAdapter<S> {
 
 #[async_trait]
 impl<S: Store + 'static> IndexOperations for IndexAdapter<S> {
+    fn bind_request(&self, context: &RequestContext) -> Option<Arc<dyn IndexOperations>> {
+        Some(Arc::new(Self {
+            database: Arc::clone(&self.database),
+            context: Some(context.clone()),
+        }))
+    }
+
     async fn create_index(
         &self,
         collection: &str,
@@ -36,7 +54,7 @@ impl<S: Store + 'static> IndexOperations for IndexAdapter<S> {
         vector: Option<schema::VectorIndexDescription>,
     ) -> Result<IndexInfo, String> {
         self.database
-            .check_node_access(None, acp::nac::NodePermission::IndexCreate)
+            .check_node_access_as(&self.context(), acp::nac::NodePermission::IndexCreate)
             .await
             .map_err(|e| format!("{}", e))?;
 
@@ -85,7 +103,7 @@ impl<S: Store + 'static> IndexOperations for IndexAdapter<S> {
 
     async fn list_indexes(&self, collection: Option<&str>) -> Result<Vec<IndexInfo>, String> {
         self.database
-            .check_node_access(None, acp::nac::NodePermission::IndexList)
+            .check_node_access_as(&self.context(), acp::nac::NodePermission::IndexList)
             .await
             .map_err(|e| format!("{}", e))?;
 
@@ -144,7 +162,7 @@ impl<S: Store + 'static> IndexOperations for IndexAdapter<S> {
 
     async fn delete_index(&self, collection: &str, name: &str) -> Result<(), String> {
         self.database
-            .check_node_access(None, acp::nac::NodePermission::IndexDelete)
+            .check_node_access_as(&self.context(), acp::nac::NodePermission::IndexDelete)
             .await
             .map_err(|e| format!("{}", e))?;
 

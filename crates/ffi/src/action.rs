@@ -16,10 +16,11 @@ pub unsafe extern "C" fn list_actions(node_ptr: usize, identity_did: *const c_ch
         node = node_ptr,
         identity = identity_did,
         database = database,
+        context = context,
         permission = NodePermission::ActionList;
         {
             let actions = database
-                .list_actions()
+                .list_actions_as(&context)
                 .await
                 .map_err(|e| format!("failed to list actions: {}", e))?;
 

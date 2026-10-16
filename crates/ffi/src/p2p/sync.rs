@@ -26,7 +26,6 @@ pub unsafe extern "C" fn p2p_sync_documents(
     ffi_entry! {
         let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::P2pSyncDocuments
@@ -39,11 +38,9 @@ pub unsafe extern "C" fn p2p_sync_documents(
             Err(error) => return FfiResult::error(error.message),
         };
 
-        // Bind the caller's identity so any NAC-gated method reached by the body's
-        // block_on resolves the actual caller instead of the wildcard.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
-        );
+        // The caller acts in the call's context, so the NAC checks the body
+        // reaches resolve the actual caller instead of the wildcard.
+        let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()));
 
         let result = NODES
             .get(node_ptr, |state| {
@@ -54,9 +51,9 @@ pub unsafe extern "C" fn p2p_sync_documents(
 
                 let collection_name = collection_name_str.clone();
                 let doc_ids = doc_ids.clone();
-                rt.block_on(async move {
+                crate::helpers::block_on(rt, async move {
                     p2p.system
-                        .ops()
+                        .ops_for(&context)
                         .sync_documents(&collection_name, doc_ids, None)
                         .await
                         .map_err(FfiP2PError::from)
@@ -83,7 +80,6 @@ pub unsafe extern "C" fn p2p_sync_branchable_collection(
     ffi_entry! {
         let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::P2pSyncBranchableCollection
@@ -91,11 +87,9 @@ pub unsafe extern "C" fn p2p_sync_branchable_collection(
 
         let collection_id_str = try_ffi!(require_c_str(collection_id, "collection_id"));
 
-        // Bind the caller's identity so any NAC-gated method reached by the body's
-        // block_on resolves the actual caller instead of the wildcard.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
-        );
+        // The caller acts in the call's context, so the NAC checks the body
+        // reaches resolve the actual caller instead of the wildcard.
+        let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()));
 
         let result = NODES
             .get(node_ptr, |state| {
@@ -105,9 +99,9 @@ pub unsafe extern "C" fn p2p_sync_branchable_collection(
                 };
 
                 let collection_id = collection_id_str.clone();
-                rt.block_on(async move {
+                crate::helpers::block_on(rt, async move {
                     p2p.system
-                        .ops()
+                        .ops_for(&context)
                         .sync_branchable_collection(&collection_id)
                         .await
                         .map_err(FfiP2PError::from)

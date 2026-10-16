@@ -20,7 +20,7 @@ Status of the effort across the 40-crate surface, from the per-crate survey in
 are plumbing covered by integration tests / Go-FFI parity / unit tests. The point of this
 section is the **diff**: what is proven vs. the accepted gap.
 
-### Modeled — 22 families (proven)
+### Modeled — 27 families (bounded model claims)
 | Family | Tool | Crates it covers |
 |---|---|---|
 | B3 filtered replication | TLA+ | p2p, db-merge |
@@ -34,7 +34,7 @@ section is the **diff**: what is proven vs. the accepted gap.
 | Encrypted LWW restart/replay | TLA+ + existing LWW Lean law | kms, p2p, db-merge, crdt |
 | Management-channel auth (NAC gate) | TLA+ | http, db-nac, pg-compat |
 | ACP soundness + revocation + dual-path commits | TLA+ & Lean | acp, zanzibar, vera, query, db |
-| Storage SSI serializability (point + range/scan carve-out) | TLA+ | storage |
+| Storage transaction validation | TLA+ | storage |
 | P2P explicit-replay capability gate | TLA+ | p2p |
 | NAC lifecycle privilege-escalation | TLA+ | acp, db-nac |
 | Transaction & merge-queue concurrency | TLA+ | db, db-merge |
@@ -45,13 +45,19 @@ section is the **diff**: what is proven vs. the accepted gap.
 | Order-preserving key encoding | Lean | storage |
 | Index-maintenance consistency | Lean + TLA+ | db-index, db-merge |
 | Concurrent collection-head transitions | TLA+ & Lean | db-block-builder, storage |
+| Commit-ordered document arrivals | TLA+ | db, storage (pinned regolith) |
+| Retry input and marker fencing | TLA+ | db, query, storage |
+| Collection schema-version OCC | TLA+ | db |
+| Explicit transaction statement atomicity | TLA+ | query, db, storage |
 
-### Backlog — want to model: **none**
-**The medium-and-up correctness surface is fully modeled.** All 2 high + 11 medium backlog
-items from the 40-crate survey are now in *Modeled* above (built across three
-builder→verifier batches, each integrator-verified). The remaining work is the explicitly
-deferred low-priority Lean-lemma appendix below; new modelable surfaces would come from a
-re-survey as the code evolves.
+### Backlog — current retry-era gaps
+This inventory includes legacy models and does not mean every current mechanism is
+proven. Engine OCC remains an implementation boundary. `HeadSet.tla` models derived head
+keys and scan/write conflicts, not collection-version validation. Remote ACP/Vera checks,
+dynamic KMS policy/scope changes, cold
+read-time decryption, and complete attempt-level preparation coverage also remain audit
+gaps. The new retry input and peer marker models cover only their stated protocol
+abstractions. Reconcile these surfaces against the survey before making completeness claims.
 
 ### Deferred — Lean-lemma appendix (13 low)
 Low-risk hardening lemmas parked for later: index-extraction determinism, cartesian-product
@@ -119,10 +125,10 @@ headstore); go↔go vs rust↔rust parity (`parity.rs`) localized it to Rust.
 | Replicator lifecycle | Behavioral | `replicator_lifecycle.rs` (backfill no-loss + resume across node restart) |
 | Sync ownership transfer | Boundary + external integration | deterministic full-DAG/head-hint A/B fence; `p2p_admission_restart`; marker migration/storage tests; mixed Go/Rust PushLog fixture. These run in repository CI, not this conformance binary's `tests/behavioral/` harness. |
 | ACP soundness + revocation + commits | Behavioral + Contract | `acp.rs`; `RelationExpression` vocab |
-| Storage SSI serializability | Behavioral | `ssi.rs` (real `409 Conflict` on write-skew) |
+| Storage transaction validation | Behavioral | `ssi.rs` (real `409 Conflict` on write-skew) |
 | Management-channel auth (NAC gate) | Behavioral | `nac.rs` |
 | NAC lifecycle priv-escalation | Behavioral | `nac_lifecycle.rs` |
-| Transaction & merge-queue concurrency | Behavioral + Boundary | `partition::{convergence_concurrent_pncounter_signed_deltas_sum,convergence_restart_pncounter_signed_deltas_sum,convergence_concurrent_pncounter_same_doc_merge_storm}` (PNCounter exact signed sum across live, restart, and storm); `partition::convergence_concurrent_same_doc_merge_storm` (no-loss/no-double-apply exact-sum oracle); `partition::{convergence_concurrent_mixed_lww_and_counter_fields_merge,convergence_restart_mixed_lww_and_counter_fields_merge,convergence_mixed_lww_and_counter_3node_full_mesh}` (mixed Counter×LWW exact-state); `MC_MixedFieldMaterialization_{Red_WholeDoc,Green}`; the internal "≤1 worker in the critical section" + txn-registry sweep stay Boundary |
+| Transaction & merge-queue concurrency | Behavioral + Boundary | `partition::{convergence_concurrent_pncounter_signed_deltas_sum,convergence_restart_pncounter_signed_deltas_sum,convergence_concurrent_pncounter_same_doc_merge_storm}` (PNCounter exact signed sum across live, restart, and storm); `partition::convergence_concurrent_same_doc_merge_storm` (no-loss/no-double-apply exact-sum oracle); `partition::{convergence_concurrent_mixed_lww_and_counter_fields_merge,convergence_restart_mixed_lww_and_counter_fields_merge,convergence_mixed_lww_and_counter_3node_full_mesh}` (mixed Counter×LWW exact-state); `MC_MixedFieldMaterialization_{Red_WholeDoc,Green}`; engine OCC and the txn-registry sweep stay Boundary |
 | Document materialization status convergence | Behavioral | `partition::convergence_delete_update_race_preserves_tombstone`; `MC_DocumentMaterialization_{Red_Overwrite,Green}`; `DefraConvergence.DocumentMaterialization` |
 | Deferred-ACP overlay | Behavioral | `deferred_acp.rs` (txn-local gating) |
 | CID determinism | Behavioral | `cid.rs` |
@@ -189,3 +195,49 @@ Read this before trusting a verdict; it states the model's honest reach.
   the TLA axis drives the selected DefraDB binary. What conformance does **not** reach is marked
   `Boundary` in the registry (crypto, eventual connectivity, bounded-N, the gents
   claim substrate): assumed, never asserted against the artifact.
+
+## Regolith adoption bindings
+
+Document arrivals use the pinned engine's `Transaction::append`, with the document
+arrival marker as `once_key`. `crates/db/src/event/arrivals.rs` never allocates a
+position itself; rows and their cursor positions appear only after commit. The
+binding in `src/registry.rs` is to
+[CommitOrderedAppend.tla](https://github.com/sourcenetwork/regolith/blob/e844baefe838f3af76403afd46c4b42f1a0b98a5/proofs/tla/CommitOrderedAppend.tla).
+Its GREEN Groups/Pipeline/Faults configurations cover dense numbering, commit
+order, at-most-once keys and snapshot prefixes. Counter, OnceFromView and
+AssignBeforeValidation are negative controls. The engine's model is kept at the
+same revision as Cargo.lock rather than copied into this repository. DefraDB's
+`arrival_transactions` tests exercise reverse commit order, rollback, duplicate
+once keys and reopen through the adapter.
+
+`RetryPreparedInputs.tla` models exact-context provider answers resolved outside
+an attempt and reused after a commit conflict; its RED cases run provider work
+inside an attempt or clear the memo and repeat provider work. It does not establish that every remote ACP/Vera/KMS/decrypt call
+is lifted out of retry attempts. `RetryMarkerGeneration.tla` models generation
+compare-delete and the peer-incarnation fence on clear across forget/re-add.
+`RetryPushAdmission.tla` checks that queued pushes still own the exact live marker
+and satisfy backpressure at admission. Its mutants remove presence, generation
+or deadline checks; already-admitted external I/O is outside that boundary. Their
+conformance tier is deliberately `Boundary`: these models are not driven against
+the public binary. The focused storage and DB tests remain the implementation
+checks. `CollectionVersionOCC.tla` separately models why a writer selected against
+an old schema version must abort after a concurrent structural put. It remains a
+boundary model and does not prove storage's implementation of validation.
+
+`HeadSetCache.tla`, its configurations and `HeadSet/Cache.lean` are retired with
+the adapter cache and publication lock. `HeadSet.tla` and `HeadSet/Core.lean`
+remain the head-route soundness basis. The Rust/Lean conformance test now imports
+Core directly and retains the sibling, pruning, abort and old-snapshot cases.
+`InteractiveTxnCounter.tla` and its configurations are retired with counter finalization and `batch_gate`. The historical `MergeQueue` model is also retired with `DocWriteQueue`: its no-mutex RED describes the removed read-modify-write implementation, not engine merge operands. Exactly-once application now relies on ordinary transaction markers, and counter/document mirror dependencies remain validated. The explicit counter-versus-merge regression exercises conflict, rollback and retry convergence. Engine OCC remains a boundary; this retirement does not claim that an old mutex model proves the replacement.
+
+`RetryRegistrationFence.tla` separates token allocation from registration commit.
+It checks that a delayed registration cannot cross forget/re-add or replace a
+newer pending marker. Its negative variants remove the incarnation or ordering
+check. This finite model does not verify the Rust implementation.
+
+The adapter-owned `Ssi.tla` and `SsiRange.tla` families and their eight TLC
+configurations are retired. They modeled the removed `ConflictTracker`, including
+its old document-scan carve-out. The real point-read write-skew regression remains
+bound to regolith's pinned `DefraLevel.tla` as an engine boundary; it does not
+claim that every DefraLevel read class provides serializable scans. Historical
+survey material describes the retired implementation and is retained as such.

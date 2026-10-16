@@ -7,6 +7,7 @@ use rapidhash::{HashMapExt, RapidHashMap, RapidHashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use defra_core::RequestContext;
 use document::{DocID, Document, NormalValue};
 use schema::{CType, CollectionVersion};
 use serde_json::Value as JsonValue;
@@ -21,6 +22,14 @@ use crate::planner::{Doc, PlanNode};
 
 use super::create_conversions::{json_to_normal_value_with_kind_and_time, normal_value_to_json};
 use chrono::{DateTime, FixedOffset};
+
+fn is_known_prepared_update_target(
+    targets: Option<&RapidHashSet<String>>,
+    writes: &RapidHashMap<String, Arc<document::WritePreparation>>,
+    id: &str,
+) -> bool {
+    targets.map_or_else(|| writes.contains_key(id), |targets| targets.contains(id))
+}
 
 /// Input for an update mutation - field values to patch on existing documents.
 #[derive(Debug, Clone)]
@@ -183,6 +192,9 @@ pub struct UpdateNode {
     collection_name: String,
     /// Document mutator for storage operations
     mutator: Arc<dyn DocMutator>,
+    /// The context of the request the updates serve: [`RequestContext::ambient`]
+    /// until [`UpdateNode::with_context`] sets it
+    context: RequestContext,
     /// Document fetcher for resolving filters and getting all documents
     fetcher: Arc<dyn DocFetcher>,
     /// Document mapping for field positions
@@ -197,6 +209,10 @@ pub struct UpdateNode {
     filter: Option<Filter>,
     /// Update input (fields to patch)
     input: UpdateInput,
+    prepared_writes: Option<RapidHashMap<String, Arc<document::WritePreparation>>>,
+    prepared_update_targets: Option<RapidHashSet<String>>,
+    prepared_embeddings: Option<RapidHashMap<String, Vec<crate::prepared::PreparedEmbedding>>>,
+    prepared_inputs: Option<crate::prepared::PreparedInputMemo>,
     /// Updated documents (populated after first next())
     updated_docs: Vec<Doc>,
     /// Document IDs that were requested but not found
@@ -229,6 +245,7 @@ impl UpdateNode {
         Self {
             collection_name: collection_name.into(),
             mutator,
+            context: RequestContext::ambient(),
             fetcher,
             document_mapping,
             collection: None,
@@ -236,6 +253,10 @@ impl UpdateNode {
             doc_ids: None,
             filter: None,
             input: UpdateInput::new(),
+            prepared_writes: None,
+            prepared_update_targets: None,
+            prepared_embeddings: None,
+            prepared_inputs: None,
             updated_docs: Vec::new(),
             not_found_ids: Vec::new(),
             position: 0,
@@ -243,6 +264,12 @@ impl UpdateNode {
             did_update: false,
             initialized: false,
         }
+    }
+
+    /// Serve the request `context` belongs to.
+    pub fn with_context(mut self, context: RequestContext) -> Self {
+        self.context = context;
+        self
     }
 
     /// Set specific document IDs to update.
@@ -260,6 +287,29 @@ impl UpdateNode {
     /// Set the update input (fields to patch).
     pub fn with_input(mut self, input: UpdateInput) -> Self {
         self.input = input;
+        self
+    }
+
+    pub fn with_prepared_writes(
+        mut self,
+        writes: Option<RapidHashMap<String, Arc<document::WritePreparation>>>,
+    ) -> Self {
+        self.prepared_writes = writes;
+        self
+    }
+
+    pub fn with_prepared_update_targets(mut self, targets: Option<RapidHashSet<String>>) -> Self {
+        self.prepared_update_targets = targets;
+        self
+    }
+
+    pub fn with_prepared_embeddings(
+        mut self,
+        embeddings: Option<RapidHashMap<String, Vec<crate::prepared::PreparedEmbedding>>>,
+        inputs: Option<crate::prepared::PreparedInputMemo>,
+    ) -> Self {
+        self.prepared_embeddings = embeddings;
+        self.prepared_inputs = inputs;
         self
     }
 
@@ -311,6 +361,19 @@ impl UpdateNode {
 
         Ok(doc)
     }
+
+    /// The parts this update decides on, or `None` when it reads its
+    /// documents whole (see [`crate::update_parts`]).
+    fn projected_update_fields(&self) -> Option<RapidHashSet<String>> {
+        if !self.mutator.supports_projected_updates() {
+            return None;
+        }
+        let collection = self.collection.as_deref()?;
+        let patch: RapidHashSet<String> = self.input.fields.keys().cloned().collect();
+        self.mutator
+            .update_run()
+            .planned(collection, &patch, self.filter.as_ref())
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -338,13 +401,21 @@ impl PlanNode for UpdateNode {
 
         // On first call, perform all updates
         if !self.did_update {
+            let decided_on = self.projected_update_fields();
             // Get document IDs to update
             let doc_ids_to_update = if let Some(ref ids) = self.doc_ids {
                 // Explicit doc_ids provided
                 ids.clone()
             } else {
                 // No doc_ids - fetch documents and optionally filter
-                let all_docs = self.fetcher.get_all(&self.collection_name).await?;
+                let all_docs = match &decided_on {
+                    Some(fields) => {
+                        self.fetcher
+                            .get_all_projected(&self.collection_name, fields)
+                            .await?
+                    }
+                    None => self.fetcher.get_all(&self.collection_name).await?,
+                };
                 let mut matching_ids = Vec::new();
 
                 for doc in all_docs {
@@ -381,10 +452,26 @@ impl PlanNode for UpdateNode {
                 // the lensedFetcher migrates documents on read, ensuring migrated
                 // field values (e.g., SetDefault) are present before the update
                 // patch is applied and the result is returned.
-                let fetch_result = self
-                    .fetcher
-                    .get_by_ids(&self.collection_name, std::slice::from_ref(&doc_id_str))
-                    .await?;
+                let projected_result = if let Some(fields) = &decided_on {
+                    self.fetcher
+                        .get_by_ids_projected(
+                            &self.collection_name,
+                            std::slice::from_ref(&doc_id_str),
+                            fields,
+                        )
+                        .await?
+                } else {
+                    None
+                };
+                let (fetch_result, projected_fields) = match projected_result {
+                    Some(result) => (result, decided_on.clone()),
+                    None => (
+                        self.fetcher
+                            .get_by_ids(&self.collection_name, std::slice::from_ref(&doc_id_str))
+                            .await?,
+                        None,
+                    ),
+                };
                 let doc_opt = fetch_result.into_docs().into_iter().next();
 
                 if let Some(mut doc) = doc_opt {
@@ -393,17 +480,13 @@ impl PlanNode for UpdateNode {
                     // Revalidate against the exact snapshot used for the
                     // update so a document that stopped matching is skipped.
                     if let Some(ref filter) = self.filter {
-                        let filter_mapping = if let Some(collection) = &self.collection {
-                            let mut mapping = DocumentMapping::new();
-                            for (index, field) in collection.fields.iter().enumerate() {
-                                mapping.add(index, &field.name);
-                            }
-                            mapping
+                        let matches = if let Some(collection) = &self.collection {
+                            crate::document::matches_document_filter(&doc, collection, filter)?
                         } else {
-                            self.document_mapping.clone()
+                            let plan_doc = document_to_plan_doc(&doc, &self.document_mapping)?;
+                            filter.matches(plan_doc.fields(), &self.document_mapping)?
                         };
-                        let plan_doc = document_to_plan_doc(&doc, &filter_mapping)?;
-                        if !filter.matches(plan_doc.fields(), &filter_mapping)? {
+                        if !matches {
                             continue;
                         }
                     }
@@ -417,14 +500,99 @@ impl PlanNode for UpdateNode {
                     )?;
 
                     // Collect the modified field names for block creation
-                    let modified_fields: RapidHashSet<String> =
+                    let mut modified_fields: RapidHashSet<String> =
                         self.input.fields.keys().cloned().collect();
 
+                    if let Some(embeddings) = &self.prepared_embeddings {
+                        let id = doc.id().map(ToString::to_string).unwrap_or_default();
+                        if let Some(prepared) = embeddings.get(&id) {
+                            for embedding in prepared {
+                                let dependencies_match = embedding
+                                    .dependencies
+                                    .iter()
+                                    .all(|(field, value)| doc.get(field) == Some(value));
+                                let Some(request) = self
+                                    .mutator
+                                    .prepared_embedding_request(
+                                        &self.collection_name,
+                                        &embedding.field,
+                                        &doc,
+                                    )
+                                    .await?
+                                else {
+                                    continue;
+                                };
+                                if dependencies_match && embedding.request == request {
+                                    doc.set(embedding.field.clone(), embedding.value.clone());
+                                    modified_fields.insert(embedding.field.clone());
+                                    continue;
+                                }
+
+                                let Some(response) = self
+                                    .prepared_inputs
+                                    .as_ref()
+                                    .and_then(|memo| memo.get(&request))
+                                else {
+                                    if !dependencies_match {
+                                        crate::prepared::record_dependency_rerun();
+                                    }
+                                    return Err(QueryError::NeedsInput(request));
+                                };
+                                let vector: Vec<f64> =
+                                    serde_json::from_slice(&response).map_err(|error| {
+                                        QueryError::execution(format!(
+                                            "invalid prepared embedding response: {error}"
+                                        ))
+                                    })?;
+                                doc.set(
+                                    embedding.field.clone(),
+                                    document::NormalValue::Float64Array(vector),
+                                );
+                                modified_fields.insert(embedding.field.clone());
+                            }
+                        }
+                    }
+
+                    if let Some(writes) = &self.prepared_writes {
+                        let id = doc.id().map(ToString::to_string).unwrap_or_default();
+                        let known_target = is_known_prepared_update_target(
+                            self.prepared_update_targets.as_ref(),
+                            writes,
+                            &id,
+                        );
+                        if !known_target {
+                            return Err(QueryError::transaction_conflict(
+                                "mutation target changed after key preparation",
+                            ));
+                        }
+                        if let Some(prepared) = writes.get(&id) {
+                            doc.set_write_preparation(Arc::clone(prepared));
+                        }
+                    }
+
                     // Persist update with modified field tracking
-                    let result = self
-                        .mutator
-                        .update_if_unchanged(&self.collection_name, expected, doc, modified_fields)
-                        .await?;
+                    let result = if let Some(expected_fields) = projected_fields {
+                        self.mutator
+                            .update_if_fields_unchanged_as(
+                                &self.context,
+                                &self.collection_name,
+                                expected,
+                                expected_fields,
+                                doc,
+                                modified_fields,
+                            )
+                            .await?
+                    } else {
+                        self.mutator
+                            .update_if_unchanged_as(
+                                &self.context,
+                                &self.collection_name,
+                                expected,
+                                doc,
+                                modified_fields,
+                            )
+                            .await?
+                    };
 
                     // Convert to plan Doc
                     let plan_doc = self.update_result_to_doc(&result)?;
@@ -523,5 +691,155 @@ impl PlanNode for UpdateNode {
         }
 
         JsonValue::Object(obj)
+    }
+}
+
+#[cfg(test)]
+mod prepared_target_tests {
+    use super::*;
+    use crate::{
+        mutator::{CreateResult, DeleteResult},
+        planner::PlanNode,
+        test_utils::MockFetcher,
+    };
+    use async_trait::async_trait;
+    use document::DocID;
+    use kovan::Atom;
+
+    #[derive(Default)]
+    struct RecordingMutator {
+        updates: Atom<Vec<(String, bool)>>,
+    }
+
+    #[async_trait]
+    impl DocMutator for RecordingMutator {
+        async fn create(&self, _collection: &str, _doc: Document) -> Result<CreateResult> {
+            Err(QueryError::execution("unused in update target test"))
+        }
+
+        async fn update(
+            &self,
+            _collection: &str,
+            doc: Document,
+            fields: RapidHashSet<String>,
+        ) -> Result<UpdateResult> {
+            let recorded = (
+                doc.id().unwrap().to_string(),
+                doc.write_preparation().is_some(),
+            );
+            self.updates.rcu(|updates| {
+                let mut next = updates.clone();
+                next.push(recorded.clone());
+                next
+            });
+            Ok(UpdateResult::new(doc, fields.len()))
+        }
+
+        async fn delete(&self, _collection: &str, id: &DocID) -> Result<DeleteResult> {
+            Ok(DeleteResult::new(id.clone(), false))
+        }
+
+        async fn exists(&self, _collection: &str, _id: &DocID) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn get_for_update(&self, _collection: &str, _id: &DocID) -> Result<Option<Document>> {
+            Ok(None)
+        }
+    }
+
+    fn doc(seed: &str) -> Document {
+        let mut doc = Document::from_json_str(r#"{"value":"before"}"#).unwrap();
+        doc.set_id(DocID::new_v0_from_seed(seed));
+        doc
+    }
+
+    fn make_node(
+        docs: &[Document],
+        ids: &[DocID],
+        targets: RapidHashSet<String>,
+        writes: RapidHashMap<String, Arc<document::WritePreparation>>,
+        mutator: Arc<RecordingMutator>,
+    ) -> UpdateNode {
+        let fetcher = Arc::new(MockFetcher::new());
+        for doc in docs {
+            fetcher.add_doc("Things", doc.clone());
+        }
+        let mut mapping = DocumentMapping::new();
+        mapping.add(0, "_docID");
+        mapping.add(1, "value");
+        UpdateNode::new("Things", mutator, fetcher, mapping)
+            .with_doc_ids(ids.iter().map(ToString::to_string).collect())
+            .with_input(UpdateInput::new().with_field("value", serde_json::json!("after")))
+            .with_prepared_writes(Some(writes))
+            .with_prepared_update_targets(Some(targets))
+    }
+
+    #[test]
+    fn update_node_accepts_matched_plain_and_keyed_targets() {
+        futures::executor::block_on(async {
+            let keyed_doc = doc("keyed-doc");
+            let plain_doc = doc("plain-doc");
+            let keyed = keyed_doc.id().unwrap().clone();
+            let plain = plain_doc.id().unwrap().clone();
+            let mut targets = RapidHashSet::default();
+            targets.insert(keyed.to_string());
+            targets.insert(plain.to_string());
+            let mut writes = RapidHashMap::default();
+            writes.insert(
+                keyed.to_string(),
+                Arc::new(document::WritePreparation::new(1, 1)),
+            );
+            let mutator = Arc::new(RecordingMutator::default());
+            let mut node = make_node(
+                &[keyed_doc, plain_doc],
+                &[keyed.clone(), plain.clone()],
+                targets,
+                writes,
+                Arc::clone(&mutator),
+            );
+            node.init().await.unwrap();
+            assert!(node.next().await.unwrap());
+            assert_eq!(node.updated_count(), 2);
+            let updates = mutator.updates.load_clone();
+            assert!(updates.contains(&(keyed.to_string(), true)));
+            assert!(updates.contains(&(plain.to_string(), false)));
+        });
+    }
+
+    #[test]
+    fn update_node_rejects_a_target_absent_from_prepared_target_set() {
+        futures::executor::block_on(async {
+            let keyed_doc = doc("keyed-doc");
+            let plain_doc = doc("plain-doc");
+            let appeared_doc = doc("appeared-after-preparation");
+            let keyed = keyed_doc.id().unwrap().clone();
+            let plain = plain_doc.id().unwrap().clone();
+            let appeared = appeared_doc.id().unwrap().clone();
+            let mut targets = RapidHashSet::default();
+            targets.insert(keyed.to_string());
+            targets.insert(plain.to_string());
+            let mut writes = RapidHashMap::default();
+            writes.insert(
+                keyed.to_string(),
+                Arc::new(document::WritePreparation::new(1, 1)),
+            );
+            let mutator = Arc::new(RecordingMutator::default());
+            let mut node = make_node(
+                &[keyed_doc, plain_doc, appeared_doc],
+                &[keyed.clone(), plain.clone(), appeared.clone()],
+                targets,
+                writes,
+                Arc::clone(&mutator),
+            );
+            node.init().await.unwrap();
+            let error = node.next().await.unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("mutation target changed after key preparation"));
+            let updates = mutator.updates.load_clone();
+            assert_eq!(updates.len(), 2);
+            assert!(!updates.iter().any(|(id, _)| id == &appeared.to_string()));
+        });
     }
 }

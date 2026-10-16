@@ -1,24 +1,24 @@
 //! Document mutator for transaction-scoped mutations.
 
-use async_lock::Mutex as TokioMutex;
 use async_trait::async_trait;
 use bytes::Bytes;
 use cid::Cid;
 use document::{DocID, Document};
 use query::mutator::{CreateResult, DeleteResult, DocMutator, UpdateResult};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use storage::corekv::Store;
+use storage::corekv::{OnCommit, Store};
 
 use crate::block::builder::DocStorageIdentity;
-use crate::block::builder::{write_delete_block, write_document_blocks};
+use crate::block::builder::{write_delete_block_with_inputs, write_document_blocks_with_inputs};
 use crate::collection::loader::{get_collection_with_index_manager, get_collection_with_lazy_load};
 use crate::collection::Collection;
 use crate::database::DB;
 use crate::event::emission::register_update_event_callback;
-use crate::txn::DbTxn;
+use crate::txn::held::Held;
+use crate::txn::{DbTxn, LentTxn};
 use crate::write::autocommit::helpers::write_branchable_collection_block;
-use defra_core::encryption::get_encryption_config;
-use defra_core::signing::get_signing_config;
+use defra_core::RequestContext;
 
 fn document_json_value(doc: &Document) -> Option<serde_json::Value> {
     Some(serde_json::Value::Object(
@@ -33,18 +33,10 @@ fn document_json_value(doc: &Document) -> Option<serde_json::Value> {
 ///
 /// # Ownership Model
 ///
-/// The transaction is wrapped in `Arc<TokioMutex<Option<...>>>` because:
-/// - `Arc`: Enables the mutator to be cloned and shared across multiple mutation
-///   operations within the same transaction
-/// - `TokioMutex`: Async-safe interior mutability for concurrent access
-/// - `Option`: Enables `take_txn()` to extract the transaction for commit/rollback
-///
-/// The mutator can share its transaction with `DbDocFetcher` when created via
-/// `from_shared_txn()`, allowing both read and write operations within the same
-/// transaction context.
-///
-/// After `take_txn()` is called, all mutator operations will return an error
-/// indicating the transaction was consumed. Use `is_consumed()` to check state.
+/// The mutator holds a transaction lent to it ([`LentTxn`]): it shares the
+/// transaction through `&self`, with no lock, with the other handles of one
+/// request (a fetcher made with the same transaction, a collection
+/// provider). [`take_txn`](Self::take_txn) gives it back once they are gone.
 ///
 /// # Collection Access
 ///
@@ -53,54 +45,123 @@ fn document_json_value(doc: &Document) -> Option<serde_json::Value> {
 /// duration of the transaction. Note: This provides transaction-level caching,
 /// not true snapshot isolation - if collections are accessed at different times,
 /// they reflect the store state at the time of first access.
-pub struct DbDocMutator<S: Store> {
+///
+/// # Remote inputs
+///
+/// A write's remote inputs (embeddings, KMS keys, remote signatures) are never
+/// fetched inside the transaction: they come from the mutator's memo of
+/// prepared inputs (see [`DocMutator::with_prepared_inputs`]).
+/// A miss ends the write with [`query::error::QueryError::NeedsInput`]; the
+/// caller rolls the statement back to its savepoint, fetches the input with
+/// [`DocMutator::resolve_prepared_input`], records it in the memo and runs the
+/// statement again. A create keeps the short ID its first run drew, so the
+/// inputs keyed by it are found on the next run.
+pub struct DbDocMutator<S: Store + 'static> {
     db: Arc<DB<S>>,
-    txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
+    txn: Held<S>,
     broadcaster: Option<Arc<dyn crate::event::emission::TxnBroadcaster>>,
+    prepared_inputs: query::prepared::PreparedInputMemo,
+    /// Creates this attempt has made: the ordinal that names a create's
+    /// short ID in the memo.
+    creates: AtomicU64,
 }
 
-impl<S: Store> DbDocMutator<S> {
+impl<S: Store + 'static> DbDocMutator<S> {
     /// Create a new transaction-scoped document mutator.
     ///
     /// Collections will be loaded lazily from the transaction's cache.
     pub fn new(db: Arc<DB<S>>, txn: DbTxn<S>) -> Self {
-        Self {
-            db,
-            txn: Arc::new(TokioMutex::new(Some(txn))),
-            broadcaster: None,
-        }
+        Self::holding(db, Held::new(Arc::new(txn)), None)
     }
 
     /// Create a mutator that shares a transaction and (optionally) forwards
     /// committed writes to a `TxnBroadcaster`. When `broadcaster` is `Some`,
-    /// each per-mutation `on_success_async` callback both publishes to the
+    /// each per-mutation `on_commit(OnCommit::Async(..))` callback both publishes to the
     /// local event bus and asks the broadcaster to push to P2P peers.
     pub fn from_shared_txn_with_broadcaster(
         db: Arc<DB<S>>,
-        txn: Arc<TokioMutex<Option<DbTxn<S>>>>,
+        txn: LentTxn<S>,
+        broadcaster: Option<Arc<dyn crate::event::emission::TxnBroadcaster>>,
+    ) -> Self {
+        Self::holding(db, Held::new(txn), broadcaster)
+    }
+
+    /// A mutator over a transaction lent to it, which its lender keeps and
+    /// takes back: [`take_txn`](Self::take_txn) finds nothing.
+    pub(crate) fn lent_with_broadcaster(
+        db: Arc<DB<S>>,
+        txn: &LentTxn<S>,
+        broadcaster: Option<Arc<dyn crate::event::emission::TxnBroadcaster>>,
+    ) -> Self {
+        Self::holding(db, Held::borrowed(txn), broadcaster)
+    }
+
+    fn holding(
+        db: Arc<DB<S>>,
+        txn: Held<S>,
         broadcaster: Option<Arc<dyn crate::event::emission::TxnBroadcaster>>,
     ) -> Self {
         Self {
             db,
             txn,
             broadcaster,
+            prepared_inputs: query::prepared::PreparedInputMemo::default(),
+            creates: AtomicU64::new(0),
         }
     }
 
-    /// Take the transaction out of the mutator (for commit/rollback).
-    ///
-    /// After calling this, `is_consumed()` will return `true` and all
-    /// mutator operations will return an error.
+    /// Take the transaction out of the mutator (for commit/rollback). `None`
+    /// once it was taken, or while another handle still holds it.
     pub async fn take_txn(&self) -> Option<DbTxn<S>> {
-        self.txn.lock().await.take()
+        self.txn.take()
     }
 
     /// Check if the transaction has been consumed (via `take_txn()`).
-    ///
-    /// Returns `true` if `take_txn()` was called and the transaction is
-    /// no longer available for mutations.
     pub async fn is_consumed(&self) -> bool {
-        self.txn.lock().await.is_none()
+        self.txn.is_taken()
+    }
+
+    /// The transaction, for an operation or another handle to share.
+    pub(crate) fn shared_txn(&self) -> query::error::Result<LentTxn<S>> {
+        self.txn
+            .get()
+            .ok_or_else(|| query::error::QueryError::execution("transaction is no longer active"))
+    }
+
+    /// The storage identity of this attempt's next create. The short ID is
+    /// drawn once per create of the statement and kept in the memo, so a run
+    /// after a missing input gives each create the ID the first run gave it,
+    /// and the KMS keys requested for that document are found.
+    async fn next_create_identity(
+        &self,
+        collection: &Collection,
+    ) -> query::error::Result<DocStorageIdentity> {
+        let ordinal = self.creates.fetch_add(1, Ordering::Relaxed);
+        let request = query::prepared::PreparedInputRequest::new(
+            query::prepared::PreparedInputKind::Allocation,
+            [b"doc-short-id-v1".as_slice(), &ordinal.to_be_bytes()].concat(),
+        );
+        let drawn = match self.prepared_inputs.get(&request) {
+            Some(drawn) => drawn,
+            None => {
+                let short_id = self
+                    .db
+                    .next_doc_short_id()
+                    .await
+                    .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+                self.prepared_inputs
+                    .insert(request, short_id.to_be_bytes().as_slice())
+            }
+        };
+        let short_id = <[u8; 8]>::try_from(drawn.as_ref())
+            .map(u64::from_be_bytes)
+            .map_err(|_| {
+                query::error::QueryError::execution("invalid prepared document short ID")
+            })?;
+        Ok(DocStorageIdentity::new(
+            collection.resolved_root_id(),
+            short_id,
+        ))
     }
 
     async fn ensure_collection_can_write(
@@ -108,18 +169,12 @@ impl<S: Store> DbDocMutator<S> {
         collection_name: &str,
         collection: &Collection,
     ) -> query::error::Result<()> {
-        self.db
-            .acquire_collection_read_lock(&self.txn, collection)
+        let txn = &*self.shared_txn()?;
+        txn.validate_collection_for_write(collection)
             .await
-            .map_err(|error| query::error::QueryError::execution(error.to_string()))?;
+            .map_err(crate::error::commit_query_error)?;
 
-        let was_created_in_txn = {
-            let txn_guard = self.txn.lock().await;
-            let txn = txn_guard.as_ref().ok_or_else(|| {
-                query::error::QueryError::execution("transaction is no longer active")
-            })?;
-            txn.was_collection_created(collection.collection_id())
-        };
+        let was_created_in_txn = txn.was_collection_created(collection.collection_id());
 
         if was_created_in_txn {
             return Ok(());
@@ -152,12 +207,9 @@ impl<S: Store + 'static> DbDocMutator<S> {
         doc_block: Bytes,
         document_json: Option<serde_json::Value>,
         collection_block: Option<(Cid, Bytes)>,
+        creator_did: Option<String>,
     ) -> query::error::Result<()> {
-        let mut txn_guard = self.txn.lock().await;
-        let txn = txn_guard.as_mut().ok_or_else(|| {
-            query::error::QueryError::execution("transaction is no longer active")
-        })?;
-        let creator_did = defra_core::signing::get_broadcast_creator_did();
+        let txn = &*self.shared_txn()?;
         register_update_event_callback(
             txn,
             self.db.event_bus(),
@@ -184,50 +236,122 @@ impl<S: Store + 'static> DbDocMutator<S> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
+    fn supports_projected_updates(&self) -> bool {
+        true
+    }
+
+    fn with_prepared_inputs(
+        &self,
+        inputs: query::prepared::PreparedInputMemo,
+    ) -> Option<Arc<dyn DocMutator>> {
+        Some(Arc::new(Self {
+            db: Arc::clone(&self.db),
+            txn: self.txn.get().map_or_else(Held::none, Held::new),
+            broadcaster: self.broadcaster.clone(),
+            prepared_inputs: inputs,
+            creates: AtomicU64::new(0),
+        }))
+    }
+
+    async fn resolve_prepared_input(
+        &self,
+        request: &query::prepared::PreparedInputRequest,
+    ) -> query::error::Result<Arc<[u8]>> {
+        self.resolve_prepared_input_as(&RequestContext::ambient(), request)
+            .await
+    }
+
+    async fn resolve_prepared_input_as(
+        &self,
+        context: &RequestContext,
+        request: &query::prepared::PreparedInputRequest,
+    ) -> query::error::Result<Arc<[u8]>> {
+        crate::write::prepare::resolve_input(&self.db, context, request).await
+    }
+
+    async fn resolve_prepared_inputs(
+        &self,
+        requests: Vec<query::prepared::PreparedInputRequest>,
+    ) -> query::error::Result<Vec<Arc<[u8]>>> {
+        self.resolve_prepared_inputs_as(&RequestContext::ambient(), requests)
+            .await
+    }
+
+    async fn resolve_prepared_inputs_as(
+        &self,
+        context: &RequestContext,
+        requests: Vec<query::prepared::PreparedInputRequest>,
+    ) -> query::error::Result<Vec<Arc<[u8]>>> {
+        crate::write::prepare::resolve_inputs(&self.db, context, requests).await
+    }
+
+    fn set_document_acp(&self, provider: Arc<dyn acp::DocumentACP>) {
+        self.db.set_document_acp(provider);
+    }
+
+    async fn register_ordered_async_hook(
+        &self,
+        callback: storage::corekv::CommitHook,
+    ) -> query::error::Result<()> {
+        let txn = &*self.shared_txn()?;
+        txn.on_commit(OnCommit::OrderedAsync(callback))
+            .map_err(|error| query::error::QueryError::execution(error.to_string()))
+    }
+
     async fn create(
         &self,
+        collection_name: &str,
+        doc: Document,
+    ) -> query::error::Result<CreateResult> {
+        self.create_as(&RequestContext::ambient(), collection_name, doc)
+            .await
+    }
+
+    async fn create_as(
+        &self,
+        context: &RequestContext,
         collection_name: &str,
         mut doc: Document,
     ) -> query::error::Result<CreateResult> {
         self.db
-            .check_node_access(None, acp::nac::NodePermission::DocumentUpdate)
+            .check_node_access_as(context, acp::nac::NodePermission::DocumentUpdate)
             .await
             .map_err(|e| query::error::QueryError::permission_denied(e.to_string()))?;
 
         let (collection, datastore, systemstore, index_manager) =
-            get_collection_with_index_manager(&self.txn, collection_name).await?;
+            get_collection_with_index_manager(&*self.shared_txn()?, collection_name).await?;
+        self.db
+            .check_node_access_in_txn(
+                context,
+                systemstore.sibling(storage::namespace::Namespace::Acpstore),
+                acp::nac::NodePermission::DocumentUpdate,
+            )
+            .await
+            .map_err(crate::error::commit_query_error)?;
         self.ensure_collection_can_write(collection_name, &collection)
             .await?;
 
-        crate::search::set_embedding(
+        crate::search::embedding::set_embedding_from_inputs(
             &collection.schema().vector_embeddings,
             &mut doc,
             true,
-            None,
+            &rapidhash::RapidHashSet::default(),
             &self.db.options().embedding_config(),
-        )
-        .await
-        .map_err(|e| query::error::QueryError::execution(format!("embedding error: {}", e)))?;
+            &self.prepared_inputs,
+        )?;
 
         self.db
-            .validate_downsample_write(&datastore, &systemstore, collection.schema(), &doc, None)
+            .validate_downsample_write(&datastore, &systemstore, &collection, &doc, None)
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
-        let doc_short_id = self
-            .db
-            .next_doc_short_id()
-            .await
-            .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
-        let identity = DocStorageIdentity::new(collection.resolved_root_id(), doc_short_id);
+        let identity = self.next_create_identity(&collection).await?;
+        let doc_short_id = identity.doc_short_id;
 
         // Blocks first: the public DocID is derived from the genesis composite
         // block CID (Go #4838).
         let (doc_id, doc_cid, doc_block, col_block_data) = {
-            let txn_guard = self.txn.lock().await;
-            let txn = txn_guard.as_ref().ok_or_else(|| {
-                query::error::QueryError::execution("transaction is no longer active")
-            })?;
+            let txn = &*self.shared_txn()?;
 
             let blockstore = txn.blockstore().map_err(|e| {
                 query::error::QueryError::execution(format!("failed to get blockstore: {}", e))
@@ -236,54 +360,34 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 query::error::QueryError::execution(format!("failed to get headstore: {}", e))
             })?;
 
-            let enc_config = get_encryption_config();
-            let sign_config = get_signing_config();
+            let enc_config = context.encryption();
+            let sign_config = context.signing();
             let kms = self.db.kms();
 
-            let block_result = write_document_blocks(
+            let block_result = write_document_blocks_with_inputs(
                 &blockstore,
                 &headstore,
                 &doc,
                 collection.schema(),
                 identity,
                 None,
-                enc_config.as_ref(),
-                sign_config.as_ref(),
+                enc_config,
+                sign_config,
+                context.batch_session(),
                 kms.as_ref(),
+                Some(&self.prepared_inputs),
+                None,
             )
             .await
-            .map_err(|e| {
-                query::error::QueryError::execution(format!(
-                    "failed to write document blocks for transaction create on collection {}: {}",
-                    collection_name, e
+            .map_err(|error| {
+                error.into_query_error_in(&format!(
+                    "failed to write document blocks for transaction create on collection {collection_name}"
                 ))
             })?;
 
-            // Two creates with the same field value encode to the same
-            // byte-identical delta and so to the same content-addressed key,
-            // which the engine may treat as a non-conflicting blind write.
-            // `has_for_update` records the read even though this txn just
-            // wrote the block, so the second commit is validated against it
-            // and aborts (#1599).
-            //
-            // Interactive creates only: autocommit, batch and merge keep the
-            // blind write, and interactive updates rely on that to let
-            // distinct documents share a delta block (#1194). Encryption
-            // blocks stay out: the KMS commits the DEK in its own txn, so
-            // reading it back aborts every encrypted create.
-            for cid in block_result.field_cids.iter().chain([&block_result.cid]) {
-                blockstore
-                    .has_for_update(&cid.to_bytes())
-                    .await
-                    .map_err(|e| {
-                        query::error::QueryError::execution(format!(
-                            "failed to record block read for {}: {}",
-                            cid, e
-                        ))
-                    })?;
-            }
-
             let doc_id = crate::write::autocommit::helpers::register_created_doc(
+                self.db.document_acp(),
+                context.creator(),
                 &systemstore,
                 &datastore,
                 &collection,
@@ -300,19 +404,16 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 &blockstore,
                 &headstore,
                 block_result.cid,
-                sign_config.as_ref(),
+                doc_short_id,
+                context,
+                Some(&self.prepared_inputs),
             )
             .await?;
 
             (doc_id, block_result.cid, block_result.block, col_block_data)
         };
 
-        // #1044 record-then-finalize: write the doc blob + indexes WITHOUT seeding
-        // the counter store and WITHOUT taking any per-doc guard/batch gate. The
-        // counter-store seeding (and its per-doc guard) is deferred to the
-        // commit-time finalize so an interactive txn holds no gate over its
-        // user-controlled lifetime. See `InteractiveTxnCounter.tla`.
-        crate::write::autocommit::helpers::write_local_create_deferred(
+        crate::write::autocommit::helpers::write_local_create(
             &datastore,
             &collection,
             &doc,
@@ -320,38 +421,6 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             &index_manager,
         )
         .await?;
-
-        // Record a seed op for each counter field present so the finalize seeds
-        // the authoritative accumulation store (the created value is absolute).
-        {
-            let mut counter_ops = Vec::new();
-            for field in &collection.schema().fields {
-                if !field.crdt_type.is_counter() {
-                    continue;
-                }
-                let Some(value) = doc.get(&field.name) else {
-                    continue;
-                };
-                counter_ops.push(crate::txn::PendingCounterOp {
-                    collection_name: collection_name.to_string(),
-                    schema_version_id: collection.version_id().to_string(),
-                    doc_id: doc_id.to_string(),
-                    field: field.name.clone(),
-                    delta: value.clone(),
-                    base: None,
-                    is_create: true,
-                });
-            }
-            if !counter_ops.is_empty() {
-                let mut txn_guard = self.txn.lock().await;
-                let txn = txn_guard.as_mut().ok_or_else(|| {
-                    query::error::QueryError::execution("transaction is no longer active")
-                })?;
-                for op in counter_ops {
-                    txn.record_counter_op(op);
-                }
-            }
-        }
 
         self.register_update_callback(
             collection_name.to_string(),
@@ -361,6 +430,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             doc_block,
             document_json_value(&doc),
             col_block_data,
+            context.creator().map(str::to_owned),
         )
         .await?;
 
@@ -370,16 +440,40 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
     async fn update(
         &self,
         collection_name: &str,
+        doc: Document,
+        modified_fields: rapidhash::RapidHashSet<String>,
+    ) -> query::error::Result<UpdateResult> {
+        self.update_as(
+            &RequestContext::ambient(),
+            collection_name,
+            doc,
+            modified_fields,
+        )
+        .await
+    }
+
+    async fn update_as(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
         mut doc: Document,
         mut modified_fields: rapidhash::RapidHashSet<String>,
     ) -> query::error::Result<UpdateResult> {
         self.db
-            .check_node_access(None, acp::nac::NodePermission::DocumentUpdate)
+            .check_node_access_as(context, acp::nac::NodePermission::DocumentUpdate)
             .await
             .map_err(|e| query::error::QueryError::permission_denied(e.to_string()))?;
 
         let (collection, datastore, systemstore, index_manager) =
-            get_collection_with_index_manager(&self.txn, collection_name).await?;
+            get_collection_with_index_manager(&*self.shared_txn()?, collection_name).await?;
+        self.db
+            .check_node_access_in_txn(
+                context,
+                systemstore.sibling(storage::namespace::Namespace::Acpstore),
+                acp::nac::NodePermission::DocumentUpdate,
+            )
+            .await
+            .map_err(crate::error::commit_query_error)?;
         self.ensure_collection_can_write(collection_name, &collection)
             .await?;
 
@@ -398,120 +492,89 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             })?;
         doc.set_id(canonical_doc_id.clone());
 
-        // Read the PRE-WRITE committed doc ONCE (before the provisional blob
-        // write below). It decides which fields actually change, and each
-        // counter op records its value as the reconcile base, replicating the
-        // inline `apply_local_counter_deltas` semantics. Re-reading at finalize
-        // would observe the already-overwritten provisional blob and
-        // double-apply the delta for a PCounter (#1044).
-        let committed_pre_write = collection
-            .get_with_datastore(&datastore, doc_short_id, &canonical_doc_id)
-            .await
-            .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
-
         // A field that already holds the written value needs no block: its
         // LWW priority would only re-assert the current state. Counter inputs
         // are deltas, an explicit encryption config re-keys every field, and a
         // downsample source records every write as a sample. A document stored
         // under an older version is compared only after lensing, which this
-        // raw read skips, so it is written in full.
+        // raw read skips, so it is written in full. The compared fields are
+        // read as parts the write decides on anyway, so a concurrent change of
+        // one conflicts.
         let downsample_source = self
             .db
             .is_downsample_source(collection_name)
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
-        if get_encryption_config().is_none() && !downsample_source {
-            if let Some(committed) = committed_pre_write
-                .as_ref()
-                .filter(|d| d.schema_version_id() == Some(collection.version_id()))
-            {
+        let skips = context.encryption().is_none() && !downsample_source;
+        let compared: rapidhash::RapidHashSet<String> = if skips {
+            modified_fields
+                .iter()
+                .filter(|field_name| doc.get_counter_delta(field_name).is_none())
+                .cloned()
+                .collect()
+        } else {
+            rapidhash::RapidHashSet::default()
+        };
+        // Counter increments alone compare nothing; an update of no field is
+        // still a no-op on a document that exists.
+        if skips && (!compared.is_empty() || modified_fields.is_empty()) {
+            let version = collection
+                .load_version(&datastore, doc_short_id)
+                .await
+                .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
+            let committed = if version.as_deref() == Some(collection.version_id()) {
+                collection
+                    .get_with_datastore_fields_at(
+                        &datastore,
+                        doc_short_id,
+                        &canonical_doc_id,
+                        &compared,
+                        version,
+                    )
+                    .await
+                    .map_err(|e| query::error::QueryError::execution(e.to_string()))?
+            } else {
+                None
+            };
+            if let Some(committed) = committed {
                 modified_fields.retain(|field_name| {
-                    doc.get_counter_delta(field_name).is_some()
+                    !compared.contains(field_name)
                         || doc.get(field_name) != committed.get(field_name)
                 });
                 if modified_fields.is_empty() {
-                    return Ok(UpdateResult::new(committed.clone(), 0));
+                    return Ok(UpdateResult::new(doc, 0));
                 }
             }
         }
-
-        let generated = crate::search::set_embedding(
-            &collection.schema().vector_embeddings,
-            &mut doc,
-            false,
-            Some(&modified_fields),
-            &self.db.options().embedding_config(),
-        )
-        .await
-        .map_err(|e| query::error::QueryError::execution(format!("embedding error: {}", e)))?;
-        modified_fields.extend(generated);
 
         self.db
             .validate_downsample_write(
                 &datastore,
                 &systemstore,
-                collection.schema(),
+                &collection,
                 &doc,
                 Some(&modified_fields),
             )
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
-        // #1044 record-then-finalize: write the doc blob + indexes with the
-        // query-plan's provisional counter value, but do NOT do the counter RMW
-        // here and take NO per-doc guard/batch gate. Each counter field carrying a
-        // delta is RECORDED on the txn; the RMW (under a per-doc guard) and the
-        // blob correction happen at the commit-time finalize. This keeps an
-        // interactive txn from holding the process-wide gate over its
-        // user-controlled lifetime. See `InteractiveTxnCounter.tla`.
-        let mut counter_ops = Vec::new();
-        for field in &collection.schema().fields {
-            if !field.crdt_type.is_counter() {
-                continue;
-            }
-            let Some(delta) = doc.get_counter_delta(&field.name) else {
-                continue;
-            };
-            if let Some(id) = doc.id().map(|id| id.to_string()) {
-                let base = committed_pre_write
-                    .as_ref()
-                    .and_then(|d| d.get(&field.name))
-                    .cloned();
-                counter_ops.push(crate::txn::PendingCounterOp {
-                    collection_name: collection_name.to_string(),
-                    schema_version_id: collection.version_id().to_string(),
-                    doc_id: id,
-                    field: field.name.clone(),
-                    delta: delta.clone(),
-                    base,
-                    is_create: false,
-                });
-            }
-        }
-
-        crate::write::autocommit::helpers::write_local_update_deferred(
+        let heads =
+            crate::write::autocommit::helpers::load_update_heads(&datastore, doc_short_id).await?;
+        crate::write::autocommit::helpers::write_local_update(
             &datastore,
             &collection,
-            &doc,
+            &mut doc,
             doc_short_id,
             &index_manager,
+            &mut modified_fields,
+            &heads,
+            query::update_parts::Run::First,
+            &self.db.options().embedding_config(),
+            &self.prepared_inputs,
         )
         .await?;
 
-        if !counter_ops.is_empty() {
-            let mut txn_guard = self.txn.lock().await;
-            let txn = txn_guard.as_mut().ok_or_else(|| {
-                query::error::QueryError::execution("transaction is no longer active")
-            })?;
-            for op in counter_ops {
-                txn.record_counter_op(op);
-            }
-        }
-
         let (doc_cid, doc_block, col_block_data) = {
-            let txn_guard = self.txn.lock().await;
-            let txn = txn_guard.as_ref().ok_or_else(|| {
-                query::error::QueryError::execution("transaction is no longer active")
-            })?;
+            let txn = &*self.shared_txn()?;
 
             let blockstore = txn.blockstore().map_err(|e| {
                 query::error::QueryError::execution(format!("failed to get blockstore: {}", e))
@@ -520,26 +583,28 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 query::error::QueryError::execution(format!("failed to get headstore: {}", e))
             })?;
 
-            let enc_config = get_encryption_config();
-            let sign_config = get_signing_config();
+            let enc_config = context.encryption();
+            let sign_config = context.signing();
             let kms = self.db.kms();
 
-            let block_result = write_document_blocks(
+            let block_result = write_document_blocks_with_inputs(
                 &blockstore,
                 &headstore,
                 &doc,
                 collection.schema(),
                 DocStorageIdentity::new(collection.resolved_root_id(), doc_short_id),
                 Some(&modified_fields),
-                enc_config.as_ref(),
-                sign_config.as_ref(),
+                enc_config,
+                sign_config,
+                context.batch_session(),
                 kms.as_ref(),
+                Some(&self.prepared_inputs),
+                Some(heads),
             )
             .await
-            .map_err(|e| {
-                query::error::QueryError::execution(format!(
-                    "failed to write document blocks for transaction update on collection {}: {}",
-                    collection_name, e
+            .map_err(|error| {
+                error.into_query_error_in(&format!(
+                    "failed to write document blocks for transaction update on collection {collection_name}"
                 ))
             })?;
 
@@ -557,7 +622,9 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 &blockstore,
                 &headstore,
                 block_result.cid,
-                sign_config.as_ref(),
+                doc_short_id,
+                context,
+                Some(&self.prepared_inputs),
             )
             .await?;
 
@@ -573,6 +640,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 doc_block,
                 document_json_value(&doc),
                 col_block_data,
+                context.creator().map(str::to_owned),
             )
             .await?;
         }
@@ -586,13 +654,31 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         collection_name: &str,
         doc_id: &DocID,
     ) -> query::error::Result<DeleteResult> {
+        self.delete_as(&RequestContext::ambient(), collection_name, doc_id)
+            .await
+    }
+
+    async fn delete_as(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        doc_id: &DocID,
+    ) -> query::error::Result<DeleteResult> {
         self.db
-            .check_node_access(None, acp::nac::NodePermission::DocumentDelete)
+            .check_node_access_as(context, acp::nac::NodePermission::DocumentDelete)
             .await
             .map_err(|e| query::error::QueryError::permission_denied(e.to_string()))?;
 
         let (collection, datastore, systemstore, index_manager) =
-            get_collection_with_index_manager(&self.txn, collection_name).await?;
+            get_collection_with_index_manager(&*self.shared_txn()?, collection_name).await?;
+        self.db
+            .check_node_access_in_txn(
+                context,
+                systemstore.sibling(storage::namespace::Namespace::Acpstore),
+                acp::nac::NodePermission::DocumentDelete,
+            )
+            .await
+            .map_err(crate::error::commit_query_error)?;
         self.ensure_collection_can_write(collection_name, &collection)
             .await?;
 
@@ -620,12 +706,16 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         if !existed {
             return Ok(DeleteResult::new(canonical_doc_id, existed));
         }
+        crate::write::autocommit::helpers::unregister_deleted_doc(
+            self.db.document_acp(),
+            &systemstore,
+            &collection,
+            &canonical_doc_id,
+        )
+        .await?;
 
         let (doc_cid, doc_block, col_block_data) = {
-            let txn_guard = self.txn.lock().await;
-            let txn = txn_guard.as_ref().ok_or_else(|| {
-                query::error::QueryError::execution("transaction is no longer active")
-            })?;
+            let txn = &*self.shared_txn()?;
 
             let blockstore = txn.blockstore().map_err(|e| {
                 query::error::QueryError::execution(format!("failed to get blockstore: {}", e))
@@ -635,21 +725,23 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             })?;
 
             let schema_version_id = collection.version_id();
-            let sign_config = get_signing_config();
+            let sign_config = context.signing();
 
-            let block_result = write_delete_block(
+            let block_result = write_delete_block_with_inputs(
                 &blockstore,
                 &headstore,
                 &canonical_doc_id.to_string(),
                 doc_short_id,
                 schema_version_id,
-                sign_config.as_ref(),
+                sign_config,
+                context.batch_session(),
+                Some(&self.prepared_inputs),
+                None,
             )
             .await
-            .map_err(|e| {
-                query::error::QueryError::execution(format!(
-                    "failed to write delete block for transaction delete on collection {}: {}",
-                    collection_name, e
+            .map_err(|error| {
+                error.into_query_error_in(&format!(
+                    "failed to write delete block for transaction delete on collection {collection_name}"
                 ))
             })?;
 
@@ -668,7 +760,9 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 &blockstore,
                 &headstore,
                 block_result.cid,
-                sign_config.as_ref(),
+                doc_short_id,
+                context,
+                Some(&self.prepared_inputs),
             )
             .await?;
 
@@ -683,6 +777,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             doc_block,
             pre_delete_document_json,
             col_block_data,
+            context.creator().map(str::to_owned),
         )
         .await?;
 
@@ -691,7 +786,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
 
     async fn exists(&self, collection_name: &str, doc_id: &DocID) -> query::error::Result<bool> {
         let (collection, datastore, systemstore) =
-            get_collection_with_lazy_load(&self.txn, collection_name).await?;
+            get_collection_with_lazy_load(&*self.shared_txn()?, collection_name).await?;
 
         collection
             .exists_by_doc_id(&datastore, &systemstore, doc_id)
@@ -705,7 +800,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         doc_id: &DocID,
     ) -> query::error::Result<Option<Document>> {
         let (collection, datastore, systemstore) =
-            get_collection_with_lazy_load(&self.txn, collection_name).await?;
+            get_collection_with_lazy_load(&*self.shared_txn()?, collection_name).await?;
 
         collection
             .get_by_doc_id(&datastore, &systemstore, doc_id)

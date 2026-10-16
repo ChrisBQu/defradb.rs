@@ -104,8 +104,24 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             mapping.add(i, &field.name);
         }
 
-        // Get all documents from the collection
-        let all_docs = fetcher.get_all(&mutation.collection_name).await?;
+        // Get all documents from the collection. An update reads them for the
+        // parts its filter and writes decide on, so the documents it then
+        // writes are not validated over their other fields.
+        let decided_on = (mutation.mutation_type == crate::mapper::MutationType::Update)
+            .then(|| {
+                let patch: rapidhash::RapidHashSet<String> =
+                    mutation.update_input.keys().cloned().collect();
+                crate::update_parts::planned(&collection, &patch, Some(filter))
+            })
+            .flatten();
+        let all_docs = match &decided_on {
+            Some(fields) => {
+                fetcher
+                    .get_all_projected(&mutation.collection_name, fields)
+                    .await?
+            }
+            None => fetcher.get_all(&mutation.collection_name).await?,
+        };
 
         // Apply filter to find matching documents
         let mut matching_ids = Vec::new();

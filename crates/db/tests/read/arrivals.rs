@@ -88,7 +88,7 @@ async fn hidden_arrivals_advance_page_without_disclosing_document_ids() {
 }
 
 #[tokio::test]
-async fn explicit_transaction_sees_arrival_and_rollback_hides_both() {
+async fn explicit_transaction_arrival_is_invisible_and_rollback_discards_it() {
     use query::fetcher::{DocFetcher, DocumentArrivalOptions};
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
     db.create_collection(users_schema()).await.unwrap();
@@ -104,8 +104,8 @@ async fn explicit_transaction_sees_arrival_and_rollback_hides_both() {
         doc_ids: None,
     };
     let page = reader.get_document_arrivals(&options).await.unwrap();
-    assert_eq!(page.head, 1);
-    assert_eq!(page.entries[0].doc_id, id.to_string());
+    assert_eq!(page.head, 0);
+    assert!(page.entries.is_empty());
     reader.take_txn().await.unwrap().discard().unwrap();
     let reader = LensedAutoCommitFetcher::new(db);
     assert_eq!(
@@ -134,7 +134,7 @@ async fn concurrent_autocommit_arrivals_are_contiguous() {
             AutoCommitMutator::new(db).create("Users", doc).await
         });
     }
-    let mut ids = std::collections::HashSet::new();
+    let mut ids = rapidhash::RapidHashSet::default();
     while let Some(created) = creates.join_next().await {
         ids.insert(created.unwrap().unwrap().doc_id.to_string());
     }
@@ -155,4 +155,73 @@ async fn concurrent_autocommit_arrivals_are_contiguous() {
         assert!(ids.remove(&entry.doc_id));
     }
     assert!(ids.is_empty());
+}
+
+#[tokio::test]
+async fn overlapping_explicit_transaction_creates_both_commit() {
+    use query::fetcher::{DocFetcher, DocumentArrivalOptions};
+    let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
+    db.create_collection(users_schema()).await.unwrap();
+    let first = db::DbDocMutator::new(db.clone(), db.new_txn(false).await.unwrap());
+    let second = db::DbDocMutator::new(db.clone(), db.new_txn(false).await.unwrap());
+    let mut one = Document::new();
+    one.set("name", "first");
+    let mut two = Document::new();
+    two.set("name", "second");
+    let first_id = first.create("Users", one).await.unwrap().doc_id.to_string();
+    let second_id = second
+        .create("Users", two)
+        .await
+        .unwrap()
+        .doc_id
+        .to_string();
+    second.take_txn().await.unwrap().commit().await.unwrap();
+    first.take_txn().await.unwrap().commit().await.unwrap();
+    let reader = LensedAutoCommitFetcher::new(db);
+    let page = reader
+        .get_document_arrivals(&DocumentArrivalOptions {
+            collection: "Users".into(),
+            after: 0,
+            limit: 10,
+            doc_ids: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(page.head, 2);
+    assert_eq!(page.entries[0].doc_id, second_id);
+    assert_eq!(page.entries[1].doc_id, first_id);
+}
+
+#[tokio::test]
+async fn explicit_transaction_arrival_gets_a_cursor_only_on_commit() {
+    use query::fetcher::{DocFetcher, DocumentArrivalOptions};
+    let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).unwrap());
+    db.create_collection(users_schema()).await.unwrap();
+    let mutator = db::DbDocMutator::new(db.clone(), db.new_txn(false).await.unwrap());
+    let mut doc = Document::new();
+    doc.set("name", "pending");
+    let id = mutator
+        .create("Users", doc)
+        .await
+        .unwrap()
+        .doc_id
+        .to_string();
+    let reader = db::DbDocFetcher::new(mutator.take_txn().await.unwrap());
+    let options = DocumentArrivalOptions {
+        collection: "Users".into(),
+        after: 0,
+        limit: 10,
+        doc_ids: Some(vec![id.clone()]),
+    };
+    assert!(reader
+        .get_document_arrivals(&options)
+        .await
+        .unwrap()
+        .entries
+        .is_empty());
+    reader.take_txn().await.unwrap().commit().await.unwrap();
+    let reader = LensedAutoCommitFetcher::new(db);
+    let page = reader.get_document_arrivals(&options).await.unwrap();
+    assert_eq!(page.entries[0].cursor, 1);
+    assert_eq!(page.entries[0].doc_id, id);
 }

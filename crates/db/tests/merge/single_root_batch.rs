@@ -88,7 +88,7 @@ async fn single_root_history_uses_bounded_commits_not_one_per_revision() {
     let commits = stats.snapshot().commits - before;
     assert_eq!(
         commits, 2,
-        "one document transaction plus one field-marker transaction"
+        "one document transaction, which also reclaims superseded heads, and one field-marker transaction"
     );
     let batch = observation.await.unwrap();
     assert_eq!(batch.changes.len(), 1);

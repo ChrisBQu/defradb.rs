@@ -2,8 +2,8 @@
 
 use std::time::Duration;
 
+use crate::outcome::Result;
 use acp::StorePolicyOptions;
-use anyhow::{anyhow, bail, Result};
 use defra_core::current_identity::with_scoped_identity;
 use embedded::EmbeddedNode;
 use identity::{Did, Identity};
@@ -55,10 +55,10 @@ pub async fn add_policy(node: &Node) -> Result<String> {
     let store = node
         .local_zanzibar_store
         .as_ref()
-        .ok_or_else(|| anyhow!("local zanzibar store missing"))?;
-    let parsed = acp::policy_yaml::parse_policy_yaml(POLICY).map_err(|e| anyhow!(e))?;
+        .expect("local zanzibar store missing");
+    let parsed = acp::policy_yaml::parse_policy_yaml(POLICY)?;
     let counter = store.next_policy_counter().await?;
-    let policy = acp::policy_yaml::build_policy(&parsed, counter).map_err(|e| anyhow!(e))?;
+    let policy = acp::policy_yaml::build_policy(&parsed, counter)?;
     let options = StorePolicyOptions::new()
         .with_validation()
         .with_dpi_enforcement();
@@ -67,9 +67,9 @@ pub async fn add_policy(node: &Node) -> Result<String> {
 }
 
 pub async fn add_schema(node: &Node, sdl: &str, creator: &Did) -> Result<()> {
-    let collections = query::parse_sdl(sdl).map_err(|e| anyhow!("SDL parse error: {e}"))?;
+    let collections = query::parse_sdl(sdl).expect("SDL parse error");
     schema::definition_validation::validate_new_collections(&collections)
-        .map_err(|e| anyhow!("schema validation error: {e}"))?;
+        .expect("schema validation error");
     with_scoped_identity(Some(creator.to_string()), async {
         node.database
             .create_collections_atomic_with_acp_registration(
@@ -127,10 +127,9 @@ pub async fn wait_for_fred(node: &Node, reader: &Did) -> Result<()> {
             return Ok(());
         }
         if Instant::now() >= deadline {
-            bail!(
+            panic!(
                 "peer never returned Fred as the reader; last response: data={:?} errors={:?}",
-                response.data,
-                response.errors
+                response.data, response.errors
             );
         }
         sleep(Duration::from_millis(250)).await;

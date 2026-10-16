@@ -564,6 +564,12 @@ integration:
 integration-suite suite *args:
     cargo test -p integration-test --test {{ suite }} --profile {{ profile }} {{ args }}
 
+# The basic and query areas with every node's data path on a one-worker pool
+# (`DEFRA_WORKERS=1`): the same suites the default pool runs, on one worker.
+[group('test')]
+integration-one-worker *args:
+    DEFRA_WORKERS=1 cargo test -p integration-test --test basic --test query --profile {{ profile }} {{ args }}
+
 # The pure-Rust half of the P2P topologies, serialized. `--skip ::go_` drops the
 # dual-runtime variants; the harness port allocator has a bind race in parallel
 # (see the P2P Integration job's comment in ci.yml).

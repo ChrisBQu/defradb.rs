@@ -15,6 +15,7 @@ default = []
 
 [dev-dependencies]
 rapidhash.workspace = true
+regolith.workspace = true
 bytes.workspace = true
 criterion.workspace = true
 tokio = { workspace = true, features = [
@@ -43,6 +44,7 @@ datastore = { path = "../crates/datastore" }
 db = { path = "../crates/db" }
 defra-core = { path = "../crates/defra-core" }
 defra-http = { path = "../crates/http", features = ["test-utils"] }
+edge = { path = "../crates/edge", features = ["testing"] }
 document = { path = "../crates/document" }
 query = { path = "../crates/query" }
 schema = { path = "../crates/schema" }
@@ -60,6 +62,10 @@ replication-filter = { path = "../crates/replication-filter" }
 events = { path = "../crates/events", features = ["channel"] }
 identity = { path = "../crates/identity" }
 x25519-dalek = "2"
+
+# The process allocator of every bench, the one the defra binaries ship with.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+mimalloc.workspace = true
 
 [[bench]]
 name = "acp"

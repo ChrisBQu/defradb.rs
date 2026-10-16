@@ -237,6 +237,23 @@ impl<B: Blockstore + 'static> P2PAdapter<B> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<B: Blockstore + 'static> P2POperations for P2PAdapter<B> {
+    fn bind_request(&self, context: &defra_core::RequestContext) -> Option<Arc<dyn P2POperations>> {
+        Some(Arc::new(Self {
+            handle: self.handle.clone(),
+            sync_coordinator: self.sync_coordinator.clone(),
+            doc_pusher: self.doc_pusher.clone(),
+            event_bus: self.event_bus.clone(),
+            version_syncer: self.version_syncer.clone(),
+            replicator_push_options: self.replicator_push_options.clone(),
+            peer_addresses: Arc::clone(&self.peer_addresses),
+            tracked_documents: Arc::clone(&self.tracked_documents),
+            nac_checker: self
+                .nac_checker
+                .as_ref()
+                .map(|checker| db::bound_node_access_checker(Arc::clone(checker), context.clone())),
+        }))
+    }
+
     async fn sync_status(&self) -> P2PResult<serde_json::Value> {
         let Some(coordinator) = self.sync_coordinator.as_ref() else {
             return Ok(serde_json::Value::Null);

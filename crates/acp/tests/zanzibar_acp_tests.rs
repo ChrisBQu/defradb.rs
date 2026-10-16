@@ -60,6 +60,10 @@ async fn test_register_document() {
     let result = acp
         .register_doc_object(&owner, "policy1", "documents", "doc1")
         .await;
+    result.unwrap();
+    let result = acp
+        .register_doc_object(&test_did2(), "policy1", "documents", "doc1")
+        .await;
     assert!(matches!(result, Err(Error::DocumentAlreadyRegistered(_))));
 }
 

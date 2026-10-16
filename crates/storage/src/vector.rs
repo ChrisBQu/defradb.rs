@@ -1,0 +1,268 @@
+//! Byte layout of a stored node and of the graph's meta singleton.
+//!
+//! Byte-identical to Go's `hnsw.MarshalNode` / `MarshalMeta`, little-endian
+//! throughout. Not required -- an index never crosses the wire -- but free, and
+//! it makes the test fixtures bytes Go produced rather than bytes we agree
+//! with ourselves about.
+//!
+//! ```text
+//! Node   1  version            4  vector length n
+//!        8  id                4n  vector elements, f32 bits
+//!        1  deleted            4  layer count L
+//!                                 per layer: 4 neighbor count, then 8 per id
+//!
+//! Meta   1  version    8  entry point    4  top layer (i32)
+//! ```
+//!
+//! A stored `Meta` always describes a real graph, so there is nothing to encode
+//! for "no graph yet": that is the absence of the key.
+
+use crate::{Error, Result};
+
+/// Identifies one vector in the graph.
+///
+/// The adapter maps its own identifiers (a document short id) onto this; the
+/// engine attaches no meaning to the value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NodeId(pub u64);
+
+/// The persisted form of a graph node.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Node {
+    pub id: NodeId,
+    /// Normalized under the cosine metric, which is the only one the query
+    /// surface exposes.
+    pub vector: Vec<f32>,
+    /// `layers[l]` holds the neighbor ids at layer `l`, so `layers.len()` is
+    /// the node's top layer plus one.
+    pub layers: Vec<Vec<NodeId>>,
+    /// Tombstone. The node stays linked so traversal through it is preserved,
+    /// but it is never returned from a search.
+    pub deleted: bool,
+}
+
+impl Node {
+    /// A node of the given height with no links yet.
+    pub fn new(id: NodeId, vector: Vec<f32>, top_layer: usize) -> Self {
+        Self {
+            id,
+            vector,
+            layers: vec![Vec::new(); top_layer + 1],
+            deleted: false,
+        }
+    }
+
+    /// Neighbors at `layer`, empty when the node does not reach that high.
+    pub fn neighbors(&self, layer: usize) -> &[NodeId] {
+        self.layers.get(layer).map_or(&[], Vec::as_slice)
+    }
+}
+
+/// The graph's global state.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Meta {
+    /// Where every search starts.
+    pub entry_point: NodeId,
+    /// Highest layer any node currently occupies.
+    pub top_layer: usize,
+    /// Live nodes counted since the store began. Approximate bookkeeping for
+    /// the rebuild trigger, not a queryable census: a meta decoded from an
+    /// older layout reads zero here until the next rebuild recounts.
+    pub live: u64,
+    /// Tombstones since the last rebuild. The unit the rebuild trigger is
+    /// priced in: one tombstone, or one stale link a rebuild would drop.
+    pub waste: u64,
+    /// Rebuilds this build of the graph has been through. Zero on a graph
+    /// last written before self-link-free inserts, which marks it as owed a
+    /// healing rebuild; a graph created by the current code starts at one.
+    pub rebuilds: u32,
+}
+
+/// First byte of both encodings, so a layout change is rejected not misread.
+const NODE_VERSION: u8 = 0x01;
+const META_VERSION: u8 = 0x02;
+/// Metas written before the rebuild counters existed. Still readable: the
+/// counters decode as zeroed, which reads as "never rebuilt".
+const META_V1_VERSION: u8 = 0x01;
+
+/// Named so the size arithmetic and the offset advances cannot drift apart.
+const VERSION_WIDTH: usize = 1;
+const FLAG_WIDTH: usize = 1;
+const COUNT_WIDTH: usize = 4;
+const F32_WIDTH: usize = 4;
+const NODE_ID_WIDTH: usize = 8;
+const TOP_LAYER_WIDTH: usize = 4;
+
+const META_LEN: usize = VERSION_WIDTH + NODE_ID_WIDTH + TOP_LAYER_WIDTH;
+/// The live, waste and rebuild counters the rebuild pass reads and writes.
+const META_COUNTER_WIDTH: usize = 8 + 8 + 4;
+const META_V1_LEN: usize = META_LEN;
+const META_V2_LEN: usize = META_LEN + META_COUNTER_WIDTH;
+
+/// Smallest valid encoded node, before any vector element or layer.
+const NODE_HEADER_LEN: usize = VERSION_WIDTH + NODE_ID_WIDTH + FLAG_WIDTH + COUNT_WIDTH * 2;
+
+/// Encodes `node` for storage as a single value.
+pub fn encode_node(node: &Node) -> Vec<u8> {
+    let mut size = NODE_HEADER_LEN + F32_WIDTH * node.vector.len();
+    for layer in &node.layers {
+        size += COUNT_WIDTH + NODE_ID_WIDTH * layer.len();
+    }
+
+    let mut buf = Vec::with_capacity(size);
+    buf.push(NODE_VERSION);
+    buf.extend_from_slice(&node.id.0.to_le_bytes());
+    buf.push(u8::from(node.deleted));
+    buf.extend_from_slice(&(node.vector.len() as u32).to_le_bytes());
+    for component in &node.vector {
+        buf.extend_from_slice(&component.to_bits().to_le_bytes());
+    }
+    buf.extend_from_slice(&(node.layers.len() as u32).to_le_bytes());
+    for layer in &node.layers {
+        buf.extend_from_slice(&(layer.len() as u32).to_le_bytes());
+        for neighbor in layer {
+            buf.extend_from_slice(&neighbor.0.to_le_bytes());
+        }
+    }
+    buf
+}
+
+/// Decodes a value written by [`encode_node`].
+///
+/// Every length is checked against what remains before it is used to allocate,
+/// so a corrupt value is an error rather than a huge allocation.
+pub fn decode_node(bytes: &[u8]) -> Result<Node> {
+    let mut cursor = Cursor::new(bytes);
+
+    if cursor.take_u8()? != NODE_VERSION {
+        return Err(invalid("unsupported node encoding version"));
+    }
+    let id = NodeId(cursor.take_u64()?);
+    let deleted = cursor.take_u8()? != 0;
+
+    let dimensions = cursor.take_u32()? as usize;
+    cursor.ensure(dimensions.saturating_mul(F32_WIDTH))?;
+    let mut vector = Vec::with_capacity(dimensions);
+    for _ in 0..dimensions {
+        vector.push(f32::from_bits(cursor.take_u32()?));
+    }
+
+    let layer_count = cursor.take_u32()? as usize;
+    // Each layer carries at least a count prefix, which bounds the allocation.
+    cursor.ensure(layer_count.saturating_mul(COUNT_WIDTH))?;
+    let mut layers = Vec::with_capacity(layer_count);
+    for _ in 0..layer_count {
+        let neighbor_count = cursor.take_u32()? as usize;
+        cursor.ensure(neighbor_count.saturating_mul(NODE_ID_WIDTH))?;
+        let mut neighbors = Vec::with_capacity(neighbor_count);
+        for _ in 0..neighbor_count {
+            neighbors.push(NodeId(cursor.take_u64()?));
+        }
+        layers.push(neighbors);
+    }
+
+    if cursor.offset != bytes.len() {
+        return Err(invalid("node encoding has trailing bytes"));
+    }
+    Ok(Node {
+        id,
+        vector,
+        layers,
+        deleted,
+    })
+}
+
+/// Encodes `meta` for storage as a single value.
+pub fn encode_meta(meta: &Meta) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(META_V2_LEN);
+    buf.push(META_VERSION);
+    buf.extend_from_slice(&meta.entry_point.0.to_le_bytes());
+    buf.extend_from_slice(&(meta.top_layer as u32).to_le_bytes());
+    buf.extend_from_slice(&meta.live.to_le_bytes());
+    buf.extend_from_slice(&meta.waste.to_le_bytes());
+    buf.extend_from_slice(&meta.rebuilds.to_le_bytes());
+    buf
+}
+
+/// Decodes a value written by [`encode_meta`], or by an older layout, whose
+/// counters read as zeroed.
+pub fn decode_meta(bytes: &[u8]) -> Result<Meta> {
+    if bytes.len() != META_V2_LEN && bytes.len() != META_V1_LEN {
+        return Err(invalid("meta encoding has the wrong length"));
+    }
+    let mut cursor = Cursor::new(bytes);
+    let version = cursor.take_u8()?;
+    if version != META_VERSION && version != META_V1_VERSION {
+        return Err(invalid("unsupported meta encoding version"));
+    }
+    if (version == META_VERSION && bytes.len() != META_V2_LEN)
+        || (version == META_V1_VERSION && bytes.len() != META_V1_LEN)
+    {
+        return Err(invalid("meta version does not match its length"));
+    }
+    let entry_point = NodeId(cursor.take_u64()?);
+    // Stored as an int32; negative would wrap into a huge `usize`.
+    let top_layer = cursor.take_u32()? as i32;
+    if top_layer < 0 {
+        return Err(invalid("meta has a negative top layer"));
+    }
+    let (live, waste, rebuilds) = if version == META_V1_VERSION {
+        (0, 0, 0)
+    } else {
+        let live = cursor.take_u64()?;
+        let waste = cursor.take_u64()?;
+        let rebuilds = cursor.take_u32()?;
+        (live, waste, rebuilds)
+    };
+    Ok(Meta {
+        entry_point,
+        top_layer: top_layer as usize,
+        live,
+        waste,
+        rebuilds,
+    })
+}
+
+fn invalid(reason: &str) -> Error {
+    Error::Other(format!("vector index: {reason}"))
+}
+
+/// Reads forward through a buffer, refusing to run off the end.
+struct Cursor<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> Cursor<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    /// Errors unless `width` more bytes remain.
+    fn ensure(&self, width: usize) -> Result<()> {
+        if self.bytes.len() - self.offset < width {
+            return Err(invalid("encoding is truncated"));
+        }
+        Ok(())
+    }
+
+    fn take<const N: usize>(&mut self) -> Result<[u8; N]> {
+        self.ensure(N)?;
+        let mut out = [0u8; N];
+        out.copy_from_slice(&self.bytes[self.offset..self.offset + N]);
+        self.offset += N;
+        Ok(out)
+    }
+
+    fn take_u8(&mut self) -> Result<u8> {
+        Ok(self.take::<1>()?[0])
+    }
+
+    fn take_u32(&mut self) -> Result<u32> {
+        Ok(u32::from_le_bytes(self.take::<4>()?))
+    }
+
+    fn take_u64(&mut self) -> Result<u64> {
+        Ok(u64::from_le_bytes(self.take::<8>()?))
+    }
+}

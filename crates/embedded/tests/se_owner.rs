@@ -14,8 +14,11 @@
 //! docIDs from the artifacts A pushed). Both hold the same 32-byte SE key.
 #![cfg(any(feature = "libp2p", feature = "iroh"))]
 
-use anyhow::{bail, Context, Result};
+#[path = "support/outcome.rs"]
+mod outcome;
+
 use embedded::{EmbeddedNode, EmbeddedStore, NodeBuilder, ReplicatorPushOptions};
+use outcome::Result;
 use tokio::time::{sleep, Duration, Instant};
 use zeroize::Zeroizing;
 
@@ -51,37 +54,27 @@ async fn embedded_libp2p_se_owner_queries_replicator() -> Result<()> {
     set_se_key(&owner, SHARED_SE_KEY)?;
     set_se_key(&replicator, SHARED_SE_KEY)?;
 
-    let p2p_owner = owner.p2p().cloned().context("owner missing p2p system")?;
+    let p2p_owner = owner.p2p().cloned().expect("owner missing p2p system");
     let p2p_replicator = replicator
         .p2p()
         .cloned()
-        .context("replicator missing p2p system")?;
+        .expect("replicator missing p2p system");
 
-    let replicator_peer = p2p_replicator
-        .ops()
-        .local_peer_id()
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
+    let replicator_peer = p2p_replicator.ops().local_peer_id().await?;
     let replicator_addr = wait_for_shareable_addr(&p2p_replicator, &replicator_peer).await?;
 
     // Owner connects to replicator and registers it as the User replicator.
-    p2p_owner
-        .ops()
-        .connect_peer(&replicator_addr)
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
+    p2p_owner.ops().connect_peer(&replicator_addr).await?;
     wait_for_connected_peer(&p2p_owner, &replicator_peer).await?;
 
     p2p_owner
         .ops()
         .add_collections(vec!["User".to_string()])
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
+        .await?;
     p2p_replicator
         .ops()
         .add_collections(vec!["User".to_string()])
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
+        .await?;
     p2p_owner
         .ops()
         .add_replicator(
@@ -91,15 +84,14 @@ async fn embedded_libp2p_se_owner_queries_replicator() -> Result<()> {
             Vec::new(),
             None,
         )
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
+        .await?;
 
     // Owner writes the encrypted-indexed doc; this pushes the SE artifact to B.
     let created = owner
         .execute(r#"mutation { add_User(input: {name: "John", age: 21, city: "NYC"}) { _docID } }"#)
         .await;
     if created.has_errors() {
-        bail!("add_User returned errors: {:?}", created.errors);
+        panic!("add_User returned errors: {:?}", created.errors);
     }
     let doc_id = created
         .data
@@ -110,7 +102,7 @@ async fn embedded_libp2p_se_owner_queries_replicator() -> Result<()> {
         .and_then(|item| item.get("_docID"))
         .and_then(|v| v.as_str())
         .map(str::to_string)
-        .context("add_User response missing _docID")?;
+        .expect("add_User response missing _docID");
 
     // Query runs on the OWNER (node A); A fans the tag out to replicator B.
     wait_for_se_query(&owner, "User", r#"{name: {_eq: "John"}}"#, &doc_id).await?;
@@ -158,36 +150,26 @@ async fn embedded_iroh_se_owner_queries_replicator() -> Result<()> {
     set_se_key(&owner, SHARED_SE_KEY)?;
     set_se_key(&replicator, SHARED_SE_KEY)?;
 
-    let p2p_owner = owner.p2p().cloned().context("owner missing p2p system")?;
+    let p2p_owner = owner.p2p().cloned().expect("owner missing p2p system");
     let p2p_replicator = replicator
         .p2p()
         .cloned()
-        .context("replicator missing p2p system")?;
+        .expect("replicator missing p2p system");
 
-    let replicator_peer = p2p_replicator
-        .ops()
-        .local_peer_id()
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
+    let replicator_peer = p2p_replicator.ops().local_peer_id().await?;
     let replicator_addr = wait_for_iroh_addr(&p2p_replicator).await?;
 
-    p2p_owner
-        .ops()
-        .connect_peer(&replicator_addr)
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
+    p2p_owner.ops().connect_peer(&replicator_addr).await?;
     wait_for_connected_peer(&p2p_owner, &replicator_peer).await?;
 
     p2p_owner
         .ops()
         .add_collections(vec!["User".to_string()])
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
+        .await?;
     p2p_replicator
         .ops()
         .add_collections(vec!["User".to_string()])
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
+        .await?;
     p2p_owner
         .ops()
         .add_replicator(
@@ -197,14 +179,13 @@ async fn embedded_iroh_se_owner_queries_replicator() -> Result<()> {
             Vec::new(),
             None,
         )
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
+        .await?;
 
     let created = owner
         .execute(r#"mutation { add_User(input: {name: "John", age: 21, city: "NYC"}) { _docID } }"#)
         .await;
     if created.has_errors() {
-        bail!("add_User returned errors: {:?}", created.errors);
+        panic!("add_User returned errors: {:?}", created.errors);
     }
     let doc_id = created
         .data
@@ -215,7 +196,7 @@ async fn embedded_iroh_se_owner_queries_replicator() -> Result<()> {
         .and_then(|item| item.get("_docID"))
         .and_then(|v| v.as_str())
         .map(str::to_string)
-        .context("add_User response missing _docID")?;
+        .expect("add_User response missing _docID");
 
     wait_for_se_query(&owner, "User", r#"{name: {_eq: "John"}}"#, &doc_id).await?;
 
@@ -230,11 +211,7 @@ async fn embedded_iroh_se_owner_queries_replicator() -> Result<()> {
 async fn wait_for_iroh_addr(system: &embedded::ManagedP2PSystem) -> Result<String> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let addrs = system
-            .ops()
-            .listen_addresses()
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
+        let addrs = system.ops().listen_addresses().await?;
         if let Some(addr) = addrs
             .into_iter()
             .find(|addr| addr.contains("/p2p/") || addr.starts_with("endpoint"))
@@ -242,19 +219,19 @@ async fn wait_for_iroh_addr(system: &embedded::ManagedP2PSystem) -> Result<Strin
             return Ok(addr);
         }
         if Instant::now() >= deadline {
-            bail!("timed out waiting for direct iroh listen address");
+            panic!("timed out waiting for direct iroh listen address");
         }
         sleep(Duration::from_millis(100)).await;
     }
 }
 
 fn set_se_key(node: &EmbeddedNode<EmbeddedStore>, key: [u8; 32]) -> Result<()> {
-    let p2p = node.p2p().context("node missing p2p system")?;
+    let p2p = node.p2p().expect("node missing p2p system");
     p2p.set_replicator_push_options(ReplicatorPushOptions {
         se_encryption_key: Some(Zeroizing::new(key.to_vec())),
         se_identity_pubkey: None,
     })
-    .map_err(|e| anyhow::anyhow!(e))
+    .map_err(Into::into)
 }
 
 #[cfg(feature = "libp2p")]
@@ -264,22 +241,13 @@ async fn wait_for_shareable_addr(
 ) -> Result<String> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if let Some(addr) = system
-            .ops()
-            .shareable_address()
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?
-        {
+        if let Some(addr) = system.ops().shareable_address().await? {
             return Ok(addr);
         }
         // libp2p listen addresses lack the /p2p/<peer_id> suffix; append it
         // (mirrors the HTTP /p2p/info handler). Skip the unspecified 0.0.0.0
         // bind addr in favour of a concrete loopback address.
-        let addrs = system
-            .ops()
-            .listen_addresses()
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
+        let addrs = system.ops().listen_addresses().await?;
         if let Some(addr) = addrs
             .into_iter()
             .filter(|a| a.starts_with('/') && !a.contains("/0.0.0.0/"))
@@ -288,7 +256,7 @@ async fn wait_for_shareable_addr(
             return Ok(format!("{addr}/p2p/{peer_id}"));
         }
         if Instant::now() >= deadline {
-            bail!("timed out waiting for a shareable libp2p address");
+            panic!("timed out waiting for a shareable libp2p address");
         }
         sleep(Duration::from_millis(100)).await;
     }
@@ -297,16 +265,12 @@ async fn wait_for_shareable_addr(
 async fn wait_for_connected_peer(system: &embedded::ManagedP2PSystem, peer_id: &str) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let peers = system
-            .ops()
-            .connected_peers()
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
+        let peers = system.ops().connected_peers().await?;
         if peers.iter().any(|peer| peer.contains(peer_id)) {
             return Ok(());
         }
         if Instant::now() >= deadline {
-            bail!("timed out waiting for peer connection to {peer_id}");
+            panic!("timed out waiting for peer connection to {peer_id}");
         }
         sleep(Duration::from_millis(100)).await;
     }
@@ -324,7 +288,7 @@ async fn wait_for_se_query(
     loop {
         let response = node.execute(&query).await;
         if response.has_errors() {
-            bail!("encrypted query returned errors: {:?}", response.errors);
+            panic!("encrypted query returned errors: {:?}", response.errors);
         }
         let found = response
             .data
@@ -344,7 +308,7 @@ async fn wait_for_se_query(
             return Ok(());
         }
         if Instant::now() >= deadline {
-            bail!("SE query did not return doc {expected_doc_id} within timeout");
+            panic!("SE query did not return doc {expected_doc_id} within timeout");
         }
         sleep(Duration::from_millis(250)).await;
     }

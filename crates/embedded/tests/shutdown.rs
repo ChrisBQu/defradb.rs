@@ -7,7 +7,9 @@
 //! 4. After `shutdown()`, the database reports `is_closed() == true`
 //! 5. Concurrent `shutdown()` callers block until teardown completes
 
-use anyhow::Result;
+#[path = "support/outcome.rs"]
+mod outcome;
+
 use async_trait::async_trait;
 #[cfg(feature = "iroh")]
 use embedded::IrohConfig;
@@ -16,6 +18,7 @@ use embedded::Libp2pConfig;
 use embedded::{EmbeddedNodeConfig, NodeBuilder};
 #[cfg(any(feature = "libp2p", feature = "iroh"))]
 use embedded::{Persistence, TransportConfig};
+use outcome::Result;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -90,6 +93,7 @@ async fn p2p_shutdown_releases_persistent_store() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("data.regolith");
     let config = EmbeddedNodeConfig {
+        edge: Some(edge::testing::edge()),
         persistence: Persistence::Persistent,
         transport: TransportConfig::Libp2p(Libp2pConfig {
             listen_addr: "/ip4/127.0.0.1/tcp/0".to_string(),
@@ -114,6 +118,7 @@ async fn iroh_shutdown_releases_persistent_store() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("data.regolith");
     let config = EmbeddedNodeConfig {
+        edge: Some(edge::testing::edge()),
         persistence: Persistence::Persistent,
         transport: TransportConfig::Iroh(IrohConfig {
             bind_addr: Some(std::net::Ipv4Addr::LOCALHOST.into()),
@@ -144,6 +149,7 @@ async fn failed_p2p_setup_releases_persistent_store() -> Result<()> {
     let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
     let port = listener.local_addr()?.port();
     let config = EmbeddedNodeConfig {
+        edge: Some(edge::testing::edge()),
         persistence: Persistence::Persistent,
         transport: TransportConfig::Libp2p(Libp2pConfig {
             listen_addr: format!("/ip4/127.0.0.1/tcp/{port}"),
@@ -201,8 +207,21 @@ impl storage::corekv::private::Sealed for SlowCloseStore {}
 
 #[async_trait]
 impl storage::Store for SlowCloseStore {
+    async fn allocate(&self, key: &[u8], count: u64) -> storage::Result<std::ops::Range<u64>> {
+        self.inner.allocate(key, count).await
+    }
+
     async fn new_txn(&self, readonly: bool) -> storage::Result<Box<dyn storage::Txn>> {
         self.inner.new_txn(readonly).await
+    }
+
+    async fn transact_retry(
+        &self,
+        options: storage::corekv::RetryOptions,
+        attempt: storage::corekv::RetryAttempt,
+    ) -> std::result::Result<storage::corekv::RetryAttemptValue, storage::corekv::RetryAttemptError>
+    {
+        self.inner.transact_retry(options, attempt).await
     }
 
     async fn close(&self) -> storage::Result<()> {

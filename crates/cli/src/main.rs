@@ -12,9 +12,33 @@ use cli::cli::{Cli, Command};
 use cli::config::Config;
 use cli::error::Result;
 
-#[tokio::main]
-async fn main() -> ExitCode {
-    match run().await {
+/// The process allocator: a heap per thread, and a block freed on another
+/// thread goes back to its own heap without a lock, which the node's workers
+/// do whenever a value crosses cores.
+#[cfg(not(target_arch = "wasm32"))]
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+/// The process's one network runtime is started here and every command runs
+/// on it. Once the command returns, this thread waits while it shuts down in
+/// order, its owner thread dropping it outside any async context.
+fn main() -> ExitCode {
+    let runtime = match edge::EdgeRuntime::start(edge::EdgeConfig::default()) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("Error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let edge = runtime.edge().clone();
+    let outcome = edge
+        .block_on(run(edge.clone()))
+        .map_err(|error| error.to_string())
+        .and_then(|result| result.map_err(|error| error.to_string()));
+    if let Err(error) = runtime.shutdown() {
+        error!(%error, "network runtime did not shut down cleanly");
+    }
+    match outcome {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             error!("{e}");
@@ -39,7 +63,7 @@ fn install_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
-async fn run() -> Result<()> {
+async fn run(edge: edge::Edge) -> Result<()> {
     install_crypto_provider();
 
     let cli = Cli::parse();
@@ -53,7 +77,7 @@ async fn run() -> Result<()> {
     let logging = cli::logging::init(&config, should_profile(&cli), enable_telemetry(&cli))?;
 
     // Execute the command
-    let result = cli.execute(config).await;
+    let result = cli.execute(config, edge).await;
     logging.finish();
     result
 }

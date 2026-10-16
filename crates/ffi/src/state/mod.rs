@@ -41,9 +41,33 @@ impl storage::corekv::private::Sealed for FfiStore {}
 
 #[async_trait]
 impl storage::Store for FfiStore {
+    async fn allocate(&self, key: &[u8], count: u64) -> storage::Result<std::ops::Range<u64>> {
+        match self {
+            FfiStore::Regolith(store) => store.allocate(key, count).await,
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn transaction_stats_handle(&self) -> Option<storage::backends::TransactionStatsHandle> {
+        match self {
+            FfiStore::Regolith(store) => store.transaction_stats_handle(),
+        }
+    }
+
     async fn new_txn(&self, readonly: bool) -> storage::Result<Box<dyn storage::Txn>> {
         match self {
             FfiStore::Regolith(s) => s.new_txn(readonly).await,
+        }
+    }
+
+    async fn transact_retry(
+        &self,
+        options: storage::corekv::RetryOptions,
+        attempt: storage::corekv::RetryAttempt,
+    ) -> std::result::Result<storage::corekv::RetryAttemptValue, storage::corekv::RetryAttemptError>
+    {
+        match self {
+            FfiStore::Regolith(store) => store.transact_retry(options, attempt).await,
         }
     }
 
@@ -144,9 +168,10 @@ impl NodeState {
 
 /// State held for each FFI subscription.
 pub struct SubscriptionState {
-    /// The underlying events subscription. `events::Subscription::try_recv`
-    /// takes `&mut self`, so polling needs exclusive access to this one value.
-    pub subscription: parking_lot::Mutex<events::Subscription>,
+    /// The underlying events subscription, polled through a shared
+    /// reference (`try_take`): polls of one handle never wait on each other,
+    /// and each event goes to exactly one of them.
+    pub subscription: events::Subscription,
     /// The node handle this subscription belongs to.
     pub node_handle: NodeHandle,
     /// Optional collection name filter (None = all collections).
@@ -156,8 +181,8 @@ pub struct SubscriptionState {
 /// State held for each GraphQL subscription (used by poll_graphql_subscription).
 ///
 /// Subscription queries are re-executed at **event time** (not poll time) to ensure
-/// the DB state matches the event. A background tokio task processes events as they
-/// arrive, executes the subscription query scoped to the changed document, and
+/// the DB state matches the event. A background network service processes events as
+/// they arrive, executes the subscription query scoped to the changed document, and
 /// buffers the full GraphQL JSON results for polling.
 pub struct GraphQLSubscriptionState {
     /// Receiver for fully-processed GraphQL result JSON strings.
@@ -166,6 +191,7 @@ pub struct GraphQLSubscriptionState {
     pub node_handle: NodeHandle,
     /// The event bus subscription ID (for cleanup/unsubscribe).
     pub event_sub_id: u64,
-    /// Abort handle for the background event processing task.
-    pub task_abort: tokio::task::AbortHandle,
+    /// The background event processing service; stopping or dropping it
+    /// stops the processing.
+    pub service: edge::Service,
 }

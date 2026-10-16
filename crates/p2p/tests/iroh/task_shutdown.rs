@@ -104,7 +104,7 @@ async fn concurrent_spawn_and_shutdown_release_all_resources() {
     let tasks = registry();
     let resource = Arc::new(());
     let retained = Arc::downgrade(&resource);
-    let barrier = Arc::new(tokio::sync::Barrier::new(65));
+    let barrier = Arc::new(regolith::sync::Barrier::new(65));
     let mut callers = tokio::task::JoinSet::new();
     for _ in 0..64 {
         let tasks = tasks.clone();

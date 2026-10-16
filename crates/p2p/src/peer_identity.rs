@@ -58,7 +58,7 @@ struct CachedIrohPeerIdentity {
 }
 
 #[cfg(feature = "iroh-transport")]
-type IrohIdentityFlight = std::sync::Arc<tokio::sync::OnceCell<Option<identity::Did>>>;
+type IrohIdentityFlight = std::sync::Arc<regolith::sync::OnceCell<Option<identity::Did>>>;
 
 #[cfg(feature = "iroh-transport")]
 type IrohIdentityFlights = std::sync::Arc<
@@ -114,7 +114,7 @@ impl IrohPeerIdentityState {
             }
             None => self.in_flight.get_or_insert(
                 peer_id.clone(),
-                std::sync::Arc::new(tokio::sync::OnceCell::new()),
+                std::sync::Arc::new(regolith::sync::OnceCell::new()),
             ),
         };
 
@@ -124,9 +124,9 @@ impl IrohPeerIdentityState {
         // reused for retries.
         let mut resolved_here = false;
         let result = flight
-            .get_or_init(|| {
+            .get_or_init(async {
                 resolved_here = true;
-                resolve()
+                resolve().await
             })
             .await
             .clone();
@@ -267,7 +267,7 @@ mod tests {
         let state = IrohPeerIdentityState::new();
         let peer = PeerId::new("peer-a".to_string());
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(17));
+        let barrier = std::sync::Arc::new(regolith::sync::Barrier::new(17));
         let mut tasks = tokio::task::JoinSet::new();
 
         for _ in 0..16 {

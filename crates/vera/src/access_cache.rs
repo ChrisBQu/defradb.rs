@@ -1,8 +1,25 @@
 use kovan_map::HopscotchMap;
+use kovan_queue::seg_queue::SegQueue;
 use rapidhash::fast::RandomState;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
+
+use regolith::sync::OnceCell;
 use std::time::{Duration, Instant};
+
+/// The bytes cached decisions may take, counted by their keys.
+const DECISION_BYTES: usize = 8 << 20;
+
+/// What one cached decision costs beyond its key's strings: the map slot,
+/// the shared entry and its place in the eviction order.
+const DECISION_OVERHEAD: usize = 128;
+
+/// The bytes cached registrations may take.
+const REGISTRATION_BYTES: usize = 2 << 20;
+
+/// When the eviction order holds this many records per cached decision
+/// (plus slack), records of decisions already gone are dropped.
+const ORDER_SLACK: usize = 64;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct CacheKey {
@@ -14,7 +31,7 @@ struct CacheKey {
 }
 
 struct CachedDecision {
-    allowed: OnceLock<bool>,
+    allowed: OnceCell<bool>,
     cached_at: Instant,
     pending: AtomicUsize,
 }
@@ -30,7 +47,15 @@ pub(crate) struct PendingDecision<'a> {
 impl PendingDecision<'_> {
     pub(crate) fn complete(self, allowed: bool) {
         // An invalidated entry stays detached; completion never reinserts it.
-        let _ = self.entry.allowed.set(allowed);
+        if self.entry.allowed.set(allowed).is_ok()
+            && self
+                .cache
+                .entries
+                .get(&self.key)
+                .is_some_and(|current| Arc::ptr_eq(&current, &self.entry))
+        {
+            self.cache.admit(&self.key);
+        }
     }
 }
 
@@ -62,9 +87,41 @@ impl Drop for PendingDecision<'_> {
 /// `(actor, policy, resource, doc_id, permission)`. Entries expire
 /// after a configurable TTL. Relationship mutations eagerly invalidate
 /// all entries for their policy so indirect grants cannot remain cached.
+///
+/// Settled decisions are bounded by bytes: past the budget the oldest are
+/// evicted. Denials, and the registration lookups that make an unregistered
+/// document public, are cached only once invalidation events reach this
+/// cache ([`receive_events`](Self::receive_events)): a cached denial delays
+/// seeing a grant, as a cached allow delays seeing a revocation, each bounded
+/// by the TTL and cut short by the events (D36).
 pub(crate) struct AccessCache {
     ttl: Duration,
     entries: HopscotchMap<CacheKey, Arc<CachedDecision>, RandomState>,
+    /// Settled decisions in the order they were cached.
+    order: SegQueue<CacheKey>,
+    bytes: AtomicUsize,
+    budget: usize,
+    events: AtomicBool,
+    registrations: inputs::Cache<RegistrationKey, bool>,
+    origin: Instant,
+}
+
+/// The document a registration lookup is about.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct RegistrationKey {
+    policy_id: String,
+    resource: String,
+    doc_id: String,
+}
+
+/// The bytes a cached decision is charged.
+fn charge(key: &CacheKey) -> usize {
+    key.actor_did.len()
+        + key.policy_id.len()
+        + key.resource.len()
+        + key.doc_id.len()
+        + key.permission.len()
+        + DECISION_OVERHEAD
 }
 
 fn cache_key(
@@ -88,6 +145,137 @@ impl AccessCache {
         Self {
             ttl,
             entries: HopscotchMap::with_hasher(RandomState::default()),
+            order: SegQueue::new(),
+            bytes: AtomicUsize::new(0),
+            budget: DECISION_BYTES,
+            events: AtomicBool::new(false),
+            registrations: inputs::Cache::new(REGISTRATION_BYTES, Some(ttl)),
+            origin: Instant::now(),
+        }
+    }
+
+    /// Invalidation events reach this cache from now on: denials and
+    /// registrations are cached too.
+    pub(crate) fn receive_events(&self) {
+        self.events.store(true, Ordering::Release);
+    }
+
+    /// Whether a denial may be cached.
+    pub(crate) fn caches_denials(&self) -> bool {
+        self.events.load(Ordering::Acquire)
+    }
+
+    fn now_micros(&self) -> u64 {
+        u64::try_from(self.origin.elapsed().as_micros()).unwrap_or(u64::MAX)
+    }
+
+    /// Whether the document is registered, as a lookup cached while events
+    /// reach this cache found it; `None` when it must be looked up.
+    pub(crate) fn registration(
+        &self,
+        policy_id: &str,
+        resource: &str,
+        doc_id: &str,
+    ) -> Option<bool> {
+        if !self.caches_denials() {
+            return None;
+        }
+        self.registrations.get(
+            &RegistrationKey {
+                policy_id: policy_id.to_string(),
+                resource: resource.to_string(),
+                doc_id: doc_id.to_string(),
+            },
+            self.now_micros(),
+        )
+    }
+
+    /// Caches a registration lookup whose answer was read since
+    /// `generation` ([`registration_generation`](Self::registration_generation)),
+    /// while events reach this cache.
+    pub(crate) fn remember_registration(
+        &self,
+        policy_id: &str,
+        resource: &str,
+        doc_id: &str,
+        registered: bool,
+        generation: u64,
+    ) {
+        if !self.caches_denials() {
+            return;
+        }
+        let bytes = policy_id.len() + resource.len() + doc_id.len();
+        self.registrations.insert(
+            RegistrationKey {
+                policy_id: policy_id.to_string(),
+                resource: resource.to_string(),
+                doc_id: doc_id.to_string(),
+            },
+            registered,
+            bytes,
+            self.now_micros(),
+            generation,
+        );
+    }
+
+    /// The generation a registration lookup notes before it asks.
+    pub(crate) fn registration_generation(&self) -> u64 {
+        self.registrations.generation()
+    }
+
+    /// Charges a settled decision and evicts the oldest past the budget.
+    fn admit(&self, key: &CacheKey) {
+        self.bytes.fetch_add(charge(key), Ordering::AcqRel);
+        self.order.push(key.clone());
+        while self.bytes.load(Ordering::Acquire) > self.budget {
+            let Some(oldest) = self.order.pop() else {
+                break;
+            };
+            self.remove_settled(&oldest);
+        }
+        // Records of decisions already gone: drop them once they outnumber
+        // the cached decisions, so the order stays proportional to the cache.
+        let mut passes = self.order.len();
+        while self.order.len()
+            > self
+                .entries
+                .len()
+                .saturating_mul(2)
+                .saturating_add(ORDER_SLACK)
+            && passes > 0
+        {
+            passes -= 1;
+            let Some(record) = self.order.pop() else {
+                break;
+            };
+            if self
+                .entries
+                .get(&record)
+                .is_some_and(|entry| entry.allowed.get().is_some())
+            {
+                self.order.push(record);
+            }
+        }
+    }
+
+    /// Removes `key`'s decision if it is settled, refunding its charge. A
+    /// check in progress is never evicted.
+    fn remove_settled(&self, key: &CacheKey) {
+        if self
+            .entries
+            .remove_if(key, |entry| entry.allowed.get().is_some())
+            .is_some()
+        {
+            self.bytes.fetch_sub(charge(key), Ordering::AcqRel);
+        }
+    }
+
+    /// Removes `key`'s entry, refunding the charge of a settled one.
+    fn remove_entry(&self, key: &CacheKey) {
+        if let Some(entry) = self.entries.force_remove(key) {
+            if entry.allowed.get().is_some() {
+                self.bytes.fetch_sub(charge(key), Ordering::AcqRel);
+            }
         }
     }
 
@@ -120,7 +308,7 @@ impl AccessCache {
         let key = cache_key(actor_did, policy_id, resource, doc_id, permission);
         let entry = loop {
             let fresh = Arc::new(CachedDecision {
-                allowed: OnceLock::new(),
+                allowed: OnceCell::new(),
                 cached_at: Instant::now(),
                 pending: AtomicUsize::new(0),
             });
@@ -174,6 +362,9 @@ impl AccessCache {
     /// Used for remote registration, archive, and unarchive events. Local
     /// mutations invalidate the whole policy to include inherited grants.
     pub(crate) fn invalidate_object(&self, policy_id: &str, resource: &str, doc_id: &str) -> usize {
+        self.registrations.invalidate(|key| {
+            key.policy_id == policy_id && key.resource == resource && key.doc_id == doc_id
+        });
         let stale: Vec<CacheKey> = self
             .entries
             .keys()
@@ -183,12 +374,14 @@ impl AccessCache {
             .collect();
         let count = stale.len();
         for key in &stale {
-            self.entries.force_remove(key);
+            self.remove_entry(key);
         }
         count
     }
 
     pub(crate) fn invalidate_policy(&self, policy_id: &str) -> usize {
+        self.registrations
+            .invalidate(|key| key.policy_id == policy_id);
         let stale: Vec<CacheKey> = self
             .entries
             .keys()
@@ -196,14 +389,17 @@ impl AccessCache {
             .collect();
         let count = stale.len();
         for key in &stale {
-            self.entries.force_remove(key);
+            self.remove_entry(key);
         }
         count
     }
 
     pub(crate) fn clear(&self) -> usize {
+        self.registrations.clear();
         let count = self.entries.len();
         self.entries.clear();
+        self.bytes.store(0, Ordering::Release);
+        while self.order.pop().is_some() {}
         count
     }
 }

@@ -1,6 +1,5 @@
 //! Pull-based document source over a collection's blob prefix.
 
-use async_lock::Mutex;
 use async_trait::async_trait;
 use datastore::NamespaceView;
 use document::Document;
@@ -15,15 +14,11 @@ use crate::collection::Collection;
 ///
 /// Owns its storage handles: the collection loader returns owned values and
 /// `Box<dyn Iterator>` is `'static`, so nothing here borrows the transaction.
-/// The iterator is wrapped in a `Mutex` purely so the (`Send`-but-not-`Sync`)
-/// trait object doesn't stop `CollectionDocStream` satisfying `DocStream`'s
-/// `MaybeSendSync` bound; every access goes through `&mut self`, so it never
-/// actually contends.
 pub struct CollectionDocStream {
     collection: Collection,
     datastore: NamespaceView,
     systemstore: NamespaceView,
-    iter: Mutex<Box<dyn KvIterator>>,
+    iter: Box<dyn KvIterator>,
     prefix_len: usize,
     show_deleted: bool,
     exhausted: bool,
@@ -45,7 +40,7 @@ impl CollectionDocStream {
             collection,
             datastore,
             systemstore,
-            iter: Mutex::new(iter),
+            iter,
             prefix_len,
             show_deleted,
             exhausted: false,
@@ -80,7 +75,7 @@ impl DocStream for CollectionDocStream {
         }
 
         loop {
-            let pair = match self.iter.get_mut().next().await {
+            let pair = match self.iter.next().await {
                 Ok(Some(pair)) => pair,
                 Ok(None) => {
                     self.exhausted = true;
@@ -99,7 +94,7 @@ impl DocStream for CollectionDocStream {
                 continue;
             };
 
-            let mut doc = Document::from_cbor(&pair.value)
+            let mut doc = Document::from_storage_cbor(&pair.value)
                 .map_err(|e| self.fuse_err("document decode error", e))?;
 
             let Some(doc_id_str) = crate::docid::map::get_doc_id(&self.systemstore, doc_short_id)
@@ -139,7 +134,6 @@ impl DocStream for CollectionDocStream {
     async fn close(&mut self) -> query::error::Result<()> {
         self.exhausted = true;
         self.iter
-            .get_mut()
             .close()
             .await
             .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))

@@ -1,0 +1,1462 @@
+{
+  "scope": "Isolated head-cache removal candidate before step 5 retry integration; not a final step 6 performance gate",
+  "before": "c29a923b",
+  "after": "14e7264a",
+  "profile": "release-fast",
+  "durability": "Immediate",
+  "operations_per_writer": 256,
+  "repetitions": 3,
+  "writers": [
+    1,
+    4,
+    16,
+    64
+  ],
+  "environment": "Local macOS host with unrelated coding-data and fseventsd CPU load. Agents held builds/tests idle. Not an isolated host.",
+  "samples": {
+    "before": [
+      {
+        "commits": 256,
+        "elapsed_seconds": 1.0042115,
+        "metrics": {
+          "HTTP conflicts": 0.0,
+          "HTTP retries": 0.0,
+          "commits": 254.92637756090224,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 3.97925,
+          "latency p99": 6.160708,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 0,
+        "requests": 256,
+        "workload": "creates",
+        "writers": 1
+      },
+      {
+        "commits": 256,
+        "elapsed_seconds": 1.036078041,
+        "metrics": {
+          "HTTP conflicts": 0.0,
+          "HTTP retries": 0.0,
+          "commits": 247.085634353291,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 4.03375,
+          "latency p99": 7.792542,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 1,
+        "requests": 256,
+        "workload": "creates",
+        "writers": 1
+      },
+      {
+        "commits": 256,
+        "elapsed_seconds": 1.006111875,
+        "metrics": {
+          "HTTP conflicts": 0.0,
+          "HTTP retries": 0.0,
+          "commits": 254.4448647919994,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 4.013084,
+          "latency p99": 4.199541,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 2,
+        "requests": 256,
+        "workload": "creates",
+        "writers": 1
+      },
+      {
+        "commits": 1024,
+        "elapsed_seconds": 3.832826708,
+        "metrics": {
+          "HTTP conflicts": 0.0,
+          "HTTP retries": 0.0,
+          "commits": 267.1657442437129,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 14.984458,
+          "latency p99": 18.930374999999998,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 0,
+        "requests": 1024,
+        "workload": "creates",
+        "writers": 4
+      },
+      {
+        "commits": 1024,
+        "elapsed_seconds": 3.896803375,
+        "metrics": {
+          "HTTP conflicts": 0.0,
+          "HTTP retries": 0.0,
+          "commits": 262.7794890985486,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 15.002333,
+          "latency p99": 22.813667,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 1,
+        "requests": 1024,
+        "workload": "creates",
+        "writers": 4
+      },
+      {
+        "commits": 1024,
+        "elapsed_seconds": 3.781997666,
+        "metrics": {
+          "HTTP conflicts": 0.0,
+          "HTTP retries": 0.0,
+          "commits": 270.7563807364867,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 14.922875000000001,
+          "latency p99": 18.80675,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 2,
+        "requests": 1024,
+        "workload": "creates",
+        "writers": 4
+      },
+      {
+        "commits": 4096,
+        "elapsed_seconds": 15.3691075,
+        "metrics": {
+          "HTTP conflicts": 0.0,
+          "HTTP retries": 0.0,
+          "commits": 266.50864404455496,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 58.025959,
+          "latency p99": 70.227333,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 0,
+        "requests": 4096,
+        "workload": "creates",
+        "writers": 16
+      },
+      {
+        "commits": 4096,
+        "elapsed_seconds": 15.269890875,
+        "metrics": {
+          "HTTP conflicts": 0.0,
+          "HTTP retries": 0.0,
+          "commits": 268.2402928436121,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 58.062833,
+          "latency p99": 73.938459,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 1,
+        "requests": 4096,
+        "workload": "creates",
+        "writers": 16
+      },
+      {
+        "commits": 4096,
+        "elapsed_seconds": 15.662148458,
+        "metrics": {
+          "HTTP conflicts": 0.0,
+          "HTTP retries": 0.0,
+          "commits": 261.5222305537413,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 59.911333,
+          "latency p99": 80.887958,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 2,
+        "requests": 4096,
+        "workload": "creates",
+        "writers": 16
+      },
+      {
+        "commits": 16384,
+        "elapsed_seconds": 62.335253667,
+        "metrics": {
+          "HTTP conflicts": 0.0,
+          "HTTP retries": 0.0,
+          "commits": 262.83682244279714,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 238.94933300000002,
+          "latency p99": 478.075541,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 0,
+        "requests": 16384,
+        "workload": "creates",
+        "writers": 64
+      },
+      {
+        "commits": 16384,
+        "elapsed_seconds": 66.096885,
+        "metrics": {
+          "HTTP conflicts": 0.0,
+          "HTTP retries": 0.0,
+          "commits": 247.87854979852682,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 250.59675,
+          "latency p99": 508.142875,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 1,
+        "requests": 16384,
+        "workload": "creates",
+        "writers": 64
+      },
+      {
+        "commits": 16384,
+        "elapsed_seconds": 71.983145958,
+        "metrics": {
+          "HTTP conflicts": 0.0,
+          "HTTP retries": 0.0,
+          "commits": 227.60883512314913,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 252.018084,
+          "latency p99": 575.283416,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 2,
+        "requests": 16384,
+        "workload": "creates",
+        "writers": 64
+      },
+      {
+        "commits": 256,
+        "elapsed_seconds": 1.984521167,
+        "metrics": {
+          "HTTP conflicts": 0.0,
+          "HTTP retries": 0.0,
+          "commits": 128.998372129734,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 6.963667,
+          "latency p99": 18.165792,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 0,
+        "requests": 256,
+        "workload": "shared_updates",
+        "writers": 1
+      },
+      {
+        "commits": 256,
+        "elapsed_seconds": 1.8892295,
+        "metrics": {
+          "HTTP conflicts": 0.0,
+          "HTTP retries": 0.0,
+          "commits": 135.50497702899517,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 7.102583,
+          "latency p99": 20.4645,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 1,
+        "requests": 256,
+        "workload": "shared_updates",
+        "writers": 1
+      },
+      {
+        "commits": 256,
+        "elapsed_seconds": 1.2628737079999999,
+        "metrics": {
+          "HTTP conflicts": 0.0,
+          "HTTP retries": 0.0,
+          "commits": 202.7122731103687,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 4.051375,
+          "latency p99": 52.092958,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 2,
+        "requests": 256,
+        "workload": "shared_updates",
+        "writers": 1
+      },
+      {
+        "commits": 1024,
+        "elapsed_seconds": 3.917230917,
+        "metrics": {
+          "HTTP conflicts": 0.0234375,
+          "HTTP retries": 0.0234375,
+          "commits": 261.4091488852609,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 14.041583,
+          "latency p99": 37.589042000000006,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 0,
+        "requests": 1024,
+        "workload": "shared_updates",
+        "writers": 4
+      },
+      {
+        "commits": 1024,
+        "elapsed_seconds": 3.920007333,
+        "metrics": {
+          "HTTP conflicts": 0.021484375,
+          "HTTP retries": 0.021484375,
+          "commits": 261.2240011337754,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 14.971375,
+          "latency p99": 31.007292,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 1,
+        "requests": 1024,
+        "workload": "shared_updates",
+        "writers": 4
+      },
+      {
+        "commits": 1024,
+        "elapsed_seconds": 4.199047208,
+        "metrics": {
+          "HTTP conflicts": 0.021484375,
+          "HTTP retries": 0.021484375,
+          "commits": 243.86484582718703,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 14.043750000000001,
+          "latency p99": 54.021584,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 2,
+        "requests": 1024,
+        "workload": "shared_updates",
+        "writers": 4
+      },
+      {
+        "commits": 4096,
+        "elapsed_seconds": 16.695822917,
+        "metrics": {
+          "HTTP conflicts": 0.617919921875,
+          "HTTP retries": 0.617919921875,
+          "commits": 245.3308243841863,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 26.812791999999998,
+          "latency p99": 596.8818339999999,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 0,
+        "requests": 4096,
+        "workload": "shared_updates",
+        "writers": 16
+      },
+      {
+        "commits": 4095,
+        "elapsed_seconds": 16.71911225,
+        "metrics": {
+          "HTTP conflicts": 0.5677655677655677,
+          "HTTP retries": 0.5675213675213675,
+          "commits": 244.9292724857446,
+          "embedded retries": 0.0,
+          "exhausted requests": 1.0,
+          "latency p50": 25.914083,
+          "latency p99": 740.0015840000001,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 1,
+        "requests": 4096,
+        "workload": "shared_updates",
+        "writers": 16
+      },
+      {
+        "commits": 4095,
+        "elapsed_seconds": 17.172101958,
+        "metrics": {
+          "HTTP conflicts": 0.5807081807081808,
+          "HTTP retries": 0.5804639804639805,
+          "commits": 238.46818578271106,
+          "embedded retries": 0.0,
+          "exhausted requests": 1.0,
+          "latency p50": 25.888832999999998,
+          "latency p99": 759.150959,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 2,
+        "requests": 4096,
+        "workload": "shared_updates",
+        "writers": 16
+      },
+      {
+        "commits": 15630,
+        "elapsed_seconds": 70.97707275,
+        "metrics": {
+          "HTTP conflicts": 1.969737683941139,
+          "HTTP retries": 1.9214971209213052,
+          "commits": 220.21195569804615,
+          "embedded retries": 0.0,
+          "exhausted requests": 754.0,
+          "latency p50": 32.054209,
+          "latency p99": 2942.476,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 0,
+        "requests": 16384,
+        "workload": "shared_updates",
+        "writers": 64
+      },
+      {
+        "commits": 15623,
+        "elapsed_seconds": 74.578753959,
+        "metrics": {
+          "HTTP conflicts": 2.04019714523459,
+          "HTTP retries": 1.9914869103245216,
+          "commits": 209.48325321429766,
+          "embedded retries": 0.0,
+          "exhausted requests": 761.0,
+          "latency p50": 35.002542,
+          "latency p99": 2933.3372080000004,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 1,
+        "requests": 16384,
+        "workload": "shared_updates",
+        "writers": 64
+      },
+      {
+        "commits": 15557,
+        "elapsed_seconds": 78.768898,
+        "metrics": {
+          "HTTP conflicts": 2.0410104775985087,
+          "HTTP retries": 1.9878511281095328,
+          "commits": 197.50181093050205,
+          "embedded retries": 0.0,
+          "exhausted requests": 827.0,
+          "latency p50": 34.975375,
+          "latency p99": 3137.7604579999997,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 2,
+        "requests": 16384,
+        "workload": "shared_updates",
+        "writers": 64
+      },
+      {
+        "commits": 256,
+        "elapsed_seconds": 1.136907917,
+        "metrics": {
+          "HTTP conflicts": 0.0,
+          "HTTP retries": 0.0,
+          "commits": 225.1721499798475,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 4.091084,
+          "latency p99": 8.265459,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 0,
+        "requests": 256,
+        "workload": "counters_indexes",
+        "writers": 1
+      },
+      {
+        "commits": 256,
+        "elapsed_seconds": 1.116520291,
+        "metrics": {
+          "HTTP conflicts": 0.0,
+          "HTTP retries": 0.0,
+          "commits": 229.2837864780014,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 4.092499999999999,
+          "latency p99": 8.240291000000001,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 1,
+        "requests": 256,
+        "workload": "counters_indexes",
+        "writers": 1
+      },
+      {
+        "commits": 256,
+        "elapsed_seconds": 1.150964708,
+        "metrics": {
+          "HTTP conflicts": 0.0,
+          "HTTP retries": 0.0,
+          "commits": 222.4221109653694,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 4.085333,
+          "latency p99": 11.474875,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 2,
+        "requests": 256,
+        "workload": "counters_indexes",
+        "writers": 1
+      },
+      {
+        "commits": 1024,
+        "elapsed_seconds": 4.351906083,
+        "metrics": {
+          "HTTP conflicts": 0.0166015625,
+          "HTTP retries": 0.0166015625,
+          "commits": 235.2991954491128,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 15.02775,
+          "latency p99": 44.244958000000004,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 0,
+        "requests": 1024,
+        "workload": "counters_indexes",
+        "writers": 4
+      },
+      {
+        "commits": 1024,
+        "elapsed_seconds": 4.4511825,
+        "metrics": {
+          "HTTP conflicts": 0.02734375,
+          "HTTP retries": 0.02734375,
+          "commits": 230.05122796021058,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 14.999625,
+          "latency p99": 63.99316700000001,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 1,
+        "requests": 1024,
+        "workload": "counters_indexes",
+        "writers": 4
+      },
+      {
+        "commits": 1024,
+        "elapsed_seconds": 4.366020708,
+        "metrics": {
+          "HTTP conflicts": 0.015625,
+          "HTTP retries": 0.015625,
+          "commits": 234.53851195064007,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 15.065125,
+          "latency p99": 47.368959000000004,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 2,
+        "requests": 1024,
+        "workload": "counters_indexes",
+        "writers": 4
+      },
+      {
+        "commits": 4096,
+        "elapsed_seconds": 19.200666375,
+        "metrics": {
+          "HTTP conflicts": 0.603271484375,
+          "HTTP retries": 0.603271484375,
+          "commits": 213.3259294236344,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 30.907666,
+          "latency p99": 813.0973329999999,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 0,
+        "requests": 4096,
+        "workload": "counters_indexes",
+        "writers": 16
+      },
+      {
+        "commits": 4096,
+        "elapsed_seconds": 19.040958709,
+        "metrics": {
+          "HTTP conflicts": 0.60205078125,
+          "HTTP retries": 0.60205078125,
+          "commits": 215.11521886048536,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 31.31,
+          "latency p99": 781.482083,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 1,
+        "requests": 4096,
+        "workload": "counters_indexes",
+        "writers": 16
+      },
+      {
+        "commits": 4096,
+        "elapsed_seconds": 19.063440167,
+        "metrics": {
+          "HTTP conflicts": 0.5986328125,
+          "HTTP retries": 0.5986328125,
+          "commits": 214.8615341259565,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 31.00475,
+          "latency p99": 740.872333,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 2,
+        "requests": 4096,
+        "workload": "counters_indexes",
+        "writers": 16
+      },
+      {
+        "commits": 15813,
+        "elapsed_seconds": 85.003999458,
+        "metrics": {
+          "HTTP conflicts": 2.363435148295706,
+          "HTTP retries": 2.3273256181622717,
+          "commits": 186.0265411136698,
+          "embedded retries": 0.0,
+          "exhausted requests": 571.0,
+          "latency p50": 46.151709,
+          "latency p99": 3566.631625,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 0,
+        "requests": 16384,
+        "workload": "counters_indexes",
+        "writers": 64
+      },
+      {
+        "commits": 15814,
+        "elapsed_seconds": 78.894314,
+        "metrics": {
+          "HTTP conflicts": 2.269634501074997,
+          "HTTP retries": 2.233590489439737,
+          "commits": 200.44537049907046,
+          "embedded retries": 0.0,
+          "exhausted requests": 570.0,
+          "latency p50": 44.020583,
+          "latency p99": 2799.515583,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 1,
+        "requests": 16384,
+        "workload": "counters_indexes",
+        "writers": 64
+      },
+      {
+        "commits": 15831,
+        "elapsed_seconds": 77.335067917,
+        "metrics": {
+          "HTTP conflicts": 2.280020213505148,
+          "HTTP retries": 2.245088749921041,
+          "commits": 204.70661533511094,
+          "embedded retries": 0.0,
+          "exhausted requests": 553.0,
+          "latency p50": 43.021375,
+          "latency p99": 2778.8765,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 2,
+        "requests": 16384,
+        "workload": "counters_indexes",
+        "writers": 64
+      }
+    ],
+    "after": [
+      {
+        "commits": 256,
+        "elapsed_seconds": 1.003634875,
+        "metrics": {
+          "HTTP conflicts": 0.0,
+          "HTTP retries": 0.0,
+          "commits": 255.07284210306065,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 4.05725,
+          "latency p99": 4.997292000000001,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 0,
+        "requests": 256,
+        "workload": "creates",
+        "writers": 1
+      },
+      {
+        "commits": 256,
+        "elapsed_seconds": 1.000383834,
+        "metrics": {
+          "HTTP conflicts": 0.0,
+          "HTTP retries": 0.0,
+          "commits": 255.90177619763497,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 4.039,
+          "latency p99": 6.210208,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 1,
+        "requests": 256,
+        "workload": "creates",
+        "writers": 1
+      },
+      {
+        "commits": 256,
+        "elapsed_seconds": 0.992057584,
+        "metrics": {
+          "HTTP conflicts": 0.0,
+          "HTTP retries": 0.0,
+          "commits": 258.0495367696317,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 4.034875,
+          "latency p99": 4.198,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 2,
+        "requests": 256,
+        "workload": "creates",
+        "writers": 1
+      },
+      {
+        "commits": 1024,
+        "elapsed_seconds": 3.793064875,
+        "metrics": {
+          "HTTP conflicts": 0.0,
+          "HTTP retries": 0.0,
+          "commits": 269.96638173767064,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 14.957958,
+          "latency p99": 19.064375000000002,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 0,
+        "requests": 1024,
+        "workload": "creates",
+        "writers": 4
+      },
+      {
+        "commits": 1024,
+        "elapsed_seconds": 3.948683834,
+        "metrics": {
+          "HTTP conflicts": 0.0,
+          "HTTP retries": 0.0,
+          "commits": 259.32691576440857,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 15.162125,
+          "latency p99": 20.123834,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 1,
+        "requests": 1024,
+        "workload": "creates",
+        "writers": 4
+      },
+      {
+        "commits": 1024,
+        "elapsed_seconds": 4.018816,
+        "metrics": {
+          "HTTP conflicts": 0.0,
+          "HTTP retries": 0.0,
+          "commits": 254.8014141478485,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 14.963125000000002,
+          "latency p99": 22.853749999999998,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 2,
+        "requests": 1024,
+        "workload": "creates",
+        "writers": 4
+      },
+      {
+        "commits": 4096,
+        "elapsed_seconds": 15.54168675,
+        "metrics": {
+          "HTTP conflicts": 0.0,
+          "HTTP retries": 0.0,
+          "commits": 263.54925729023586,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 59.079042,
+          "latency p99": 71.714833,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 0,
+        "requests": 4096,
+        "workload": "creates",
+        "writers": 16
+      },
+      {
+        "commits": 4096,
+        "elapsed_seconds": 16.615114666,
+        "metrics": {
+          "HTTP conflicts": 0.0,
+          "HTTP retries": 0.0,
+          "commits": 246.52252375854894,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 62.768541,
+          "latency p99": 90.196417,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 1,
+        "requests": 4096,
+        "workload": "creates",
+        "writers": 16
+      },
+      {
+        "commits": 4096,
+        "elapsed_seconds": 15.528203375,
+        "metrics": {
+          "HTTP conflicts": 0.0,
+          "HTTP retries": 0.0,
+          "commits": 263.77810111596375,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 59.063333,
+          "latency p99": 72.958625,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 2,
+        "requests": 4096,
+        "workload": "creates",
+        "writers": 16
+      },
+      {
+        "commits": 16384,
+        "elapsed_seconds": 62.944041625,
+        "metrics": {
+          "HTTP conflicts": 0.0,
+          "HTTP retries": 0.0,
+          "commits": 260.29469314364195,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 238.11225,
+          "latency p99": 517.143542,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 0,
+        "requests": 16384,
+        "workload": "creates",
+        "writers": 64
+      },
+      {
+        "commits": 16384,
+        "elapsed_seconds": 62.602793791,
+        "metrics": {
+          "HTTP conflicts": 0.0,
+          "HTTP retries": 0.0,
+          "commits": 261.71355953694547,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 238.751625,
+          "latency p99": 525.003834,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 1,
+        "requests": 16384,
+        "workload": "creates",
+        "writers": 64
+      },
+      {
+        "commits": 16384,
+        "elapsed_seconds": 63.768045083,
+        "metrics": {
+          "HTTP conflicts": 0.0,
+          "HTTP retries": 0.0,
+          "commits": 256.9311945924438,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 241.98366700000003,
+          "latency p99": 513.887792,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 2,
+        "requests": 16384,
+        "workload": "creates",
+        "writers": 64
+      },
+      {
+        "commits": 256,
+        "elapsed_seconds": 1.602859333,
+        "metrics": {
+          "HTTP conflicts": 0.0,
+          "HTTP retries": 0.0,
+          "commits": 159.71457677502883,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 4.099417,
+          "latency p99": 59.516,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 0,
+        "requests": 256,
+        "workload": "shared_updates",
+        "writers": 1
+      },
+      {
+        "commits": 256,
+        "elapsed_seconds": 1.11903725,
+        "metrics": {
+          "HTTP conflicts": 0.0,
+          "HTTP retries": 0.0,
+          "commits": 228.76807720207702,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 4.074000000000001,
+          "latency p99": 9.771709,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 1,
+        "requests": 256,
+        "workload": "shared_updates",
+        "writers": 1
+      },
+      {
+        "commits": 256,
+        "elapsed_seconds": 1.105892375,
+        "metrics": {
+          "HTTP conflicts": 0.0,
+          "HTTP retries": 0.0,
+          "commits": 231.48726384879902,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 4.070833,
+          "latency p99": 9.213292,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 2,
+        "requests": 256,
+        "workload": "shared_updates",
+        "writers": 1
+      },
+      {
+        "commits": 1024,
+        "elapsed_seconds": 2.174262958,
+        "metrics": {
+          "HTTP conflicts": 0.05078125,
+          "HTTP retries": 0.05078125,
+          "commits": 470.9641932831935,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 7.147667,
+          "latency p99": 31.220625,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 0,
+        "requests": 1024,
+        "workload": "shared_updates",
+        "writers": 4
+      },
+      {
+        "commits": 1024,
+        "elapsed_seconds": 2.220121917,
+        "metrics": {
+          "HTTP conflicts": 0.0517578125,
+          "HTTP retries": 0.0517578125,
+          "commits": 461.23593130583913,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 7.247833,
+          "latency p99": 24.857042,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 1,
+        "requests": 1024,
+        "workload": "shared_updates",
+        "writers": 4
+      },
+      {
+        "commits": 1024,
+        "elapsed_seconds": 2.355750833,
+        "metrics": {
+          "HTTP conflicts": 0.041015625,
+          "HTTP retries": 0.041015625,
+          "commits": 434.6809457331093,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 7.843209,
+          "latency p99": 25.896958,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 2,
+        "requests": 1024,
+        "workload": "shared_updates",
+        "writers": 4
+      },
+      {
+        "commits": 4096,
+        "elapsed_seconds": 6.445918208,
+        "metrics": {
+          "HTTP conflicts": 0.346435546875,
+          "HTTP retries": 0.346435546875,
+          "commits": 635.4408895409924,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 7.3259170000000005,
+          "latency p99": 343.957958,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 0,
+        "requests": 4096,
+        "workload": "shared_updates",
+        "writers": 16
+      },
+      {
+        "commits": 4096,
+        "elapsed_seconds": 6.68207825,
+        "metrics": {
+          "HTTP conflicts": 0.365234375,
+          "HTTP retries": 0.365234375,
+          "commits": 612.9829443407071,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 7.804667,
+          "latency p99": 291.012875,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 1,
+        "requests": 4096,
+        "workload": "shared_updates",
+        "writers": 16
+      },
+      {
+        "commits": 4096,
+        "elapsed_seconds": 6.416987459,
+        "metrics": {
+          "HTTP conflicts": 0.36279296875,
+          "HTTP retries": 0.36279296875,
+          "commits": 638.305751128631,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 7.3790000000000004,
+          "latency p99": 344.003375,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 2,
+        "requests": 4096,
+        "workload": "shared_updates",
+        "writers": 16
+      },
+      {
+        "commits": 16268,
+        "elapsed_seconds": 28.664078291,
+        "metrics": {
+          "HTTP conflicts": 1.4307843619375462,
+          "HTTP retries": 1.4236537988689453,
+          "commits": 567.5396164790639,
+          "embedded retries": 0.0,
+          "exhausted requests": 116.0,
+          "latency p50": 12.905,
+          "latency p99": 1504.069833,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 0,
+        "requests": 16384,
+        "workload": "shared_updates",
+        "writers": 64
+      },
+      {
+        "commits": 16282,
+        "elapsed_seconds": 29.039391,
+        "metrics": {
+          "HTTP conflicts": 1.437599803463948,
+          "HTTP retries": 1.4313352168038325,
+          "commits": 560.6866893317425,
+          "embedded retries": 0.0,
+          "exhausted requests": 102.0,
+          "latency p50": 13.026209,
+          "latency p99": 1510.8241659999999,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 1,
+        "requests": 16384,
+        "workload": "shared_updates",
+        "writers": 64
+      },
+      {
+        "commits": 16281,
+        "elapsed_seconds": 28.168365083,
+        "metrics": {
+          "HTTP conflicts": 1.4015109637000185,
+          "HTTP retries": 1.395184570972299,
+          "commits": 577.9888166042625,
+          "embedded retries": 0.0,
+          "exhausted requests": 103.0,
+          "latency p50": 12.810291,
+          "latency p99": 1456.223625,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 2,
+        "requests": 16384,
+        "workload": "shared_updates",
+        "writers": 64
+      },
+      {
+        "commits": 256,
+        "elapsed_seconds": 1.11996525,
+        "metrics": {
+          "HTTP conflicts": 0.0,
+          "HTTP retries": 0.0,
+          "commits": 228.578520628207,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 4.074584,
+          "latency p99": 8.251584,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 0,
+        "requests": 256,
+        "workload": "counters_indexes",
+        "writers": 1
+      },
+      {
+        "commits": 256,
+        "elapsed_seconds": 1.396006083,
+        "metrics": {
+          "HTTP conflicts": 0.0,
+          "HTTP retries": 0.0,
+          "commits": 183.38028975479756,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 4.084957999999999,
+          "latency p99": 57.217749999999995,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 1,
+        "requests": 256,
+        "workload": "counters_indexes",
+        "writers": 1
+      },
+      {
+        "commits": 256,
+        "elapsed_seconds": 1.113023542,
+        "metrics": {
+          "HTTP conflicts": 0.0,
+          "HTTP retries": 0.0,
+          "commits": 230.00411971519645,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 4.069417,
+          "latency p99": 8.877833,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 2,
+        "requests": 256,
+        "workload": "counters_indexes",
+        "writers": 1
+      },
+      {
+        "commits": 1024,
+        "elapsed_seconds": 2.146958291,
+        "metrics": {
+          "HTTP conflicts": 0.0556640625,
+          "HTTP retries": 0.0556640625,
+          "commits": 476.9538394353466,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 7.1215,
+          "latency p99": 24.907958,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 0,
+        "requests": 1024,
+        "workload": "counters_indexes",
+        "writers": 4
+      },
+      {
+        "commits": 1024,
+        "elapsed_seconds": 2.17689775,
+        "metrics": {
+          "HTTP conflicts": 0.0693359375,
+          "HTTP retries": 0.0693359375,
+          "commits": 470.39416527487333,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 7.216374999999999,
+          "latency p99": 31.063833,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 1,
+        "requests": 1024,
+        "workload": "counters_indexes",
+        "writers": 4
+      },
+      {
+        "commits": 1024,
+        "elapsed_seconds": 2.425652625,
+        "metrics": {
+          "HTTP conflicts": 0.068359375,
+          "HTTP retries": 0.068359375,
+          "commits": 422.1544294702956,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 7.321625,
+          "latency p99": 40.89575,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 2,
+        "requests": 1024,
+        "workload": "counters_indexes",
+        "writers": 4
+      },
+      {
+        "commits": 4096,
+        "elapsed_seconds": 6.770193041,
+        "metrics": {
+          "HTTP conflicts": 0.365966796875,
+          "HTTP retries": 0.365966796875,
+          "commits": 605.0049053542194,
+          "embedded retries": 0.0,
+          "exhausted requests": 0.0,
+          "latency p50": 7.2035,
+          "latency p99": 385.96745799999997,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 0,
+        "requests": 4096,
+        "workload": "counters_indexes",
+        "writers": 16
+      },
+      {
+        "commits": 4095,
+        "elapsed_seconds": 6.275821833,
+        "metrics": {
+          "HTTP conflicts": 0.34676434676434675,
+          "HTTP retries": 0.3465201465201465,
+          "commits": 652.5041833513121,
+          "embedded retries": 0.0,
+          "exhausted requests": 1.0,
+          "latency p50": 7.236167,
+          "latency p99": 380.841708,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 1,
+        "requests": 4096,
+        "workload": "counters_indexes",
+        "writers": 16
+      },
+      {
+        "commits": 4093,
+        "elapsed_seconds": 8.063115875,
+        "metrics": {
+          "HTTP conflicts": 0.3750305399462497,
+          "HTTP retries": 0.374297581236257,
+          "commits": 507.6201388461381,
+          "embedded retries": 0.0,
+          "exhausted requests": 3.0,
+          "latency p50": 7.77825,
+          "latency p99": 506.165584,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 2,
+        "requests": 4096,
+        "workload": "counters_indexes",
+        "writers": 16
+      },
+      {
+        "commits": 16210,
+        "elapsed_seconds": 37.752001417,
+        "metrics": {
+          "HTTP conflicts": 1.6819864281307835,
+          "HTTP retries": 1.6712523133867982,
+          "commits": 429.3812087191891,
+          "embedded retries": 0.0,
+          "exhausted requests": 174.0,
+          "latency p50": 18.304583,
+          "latency p99": 1701.049958,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 0,
+        "requests": 16384,
+        "workload": "counters_indexes",
+        "writers": 64
+      },
+      {
+        "commits": 16233,
+        "elapsed_seconds": 34.660974042,
+        "metrics": {
+          "HTTP conflicts": 1.6666666666666667,
+          "HTTP retries": 1.6573646276104232,
+          "commits": 468.3365210778516,
+          "embedded retries": 0.0,
+          "exhausted requests": 151.0,
+          "latency p50": 17.073542,
+          "latency p99": 1605.4495829999998,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 1,
+        "requests": 16384,
+        "workload": "counters_indexes",
+        "writers": 64
+      },
+      {
+        "commits": 16248,
+        "elapsed_seconds": 34.407986375,
+        "metrics": {
+          "HTTP conflicts": 1.6736213687838504,
+          "HTTP retries": 1.6652511078286558,
+          "commits": 472.21595076558737,
+          "embedded retries": 0.0,
+          "exhausted requests": 136.0,
+          "latency p50": 17.280167,
+          "latency p99": 1619.442166,
+          "merge retries": 0.0,
+          "push marker retries": 0.0,
+          "storage conflicts": 0.0
+        },
+        "repetition": 2,
+        "requests": 16384,
+        "workload": "counters_indexes",
+        "writers": 64
+      }
+    ]
+  }
+}

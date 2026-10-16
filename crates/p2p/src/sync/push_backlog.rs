@@ -60,6 +60,8 @@ pub struct PushJobSpec {
     pub root_cid: Cid,
     /// The current head block only. Linked blocks are receiver-pulled via CAR.
     pub head_block: Bytes,
+    /// Generation of the durable retry marker registered before queueing.
+    pub marker_generation: Option<u64>,
     key: JobKey,
     version: HeadVersion,
 }
@@ -97,6 +99,7 @@ impl PushJobSpec {
             creator,
             root_cid,
             head_block,
+            marker_generation: None,
             key,
             version: HeadVersion {
                 priority,

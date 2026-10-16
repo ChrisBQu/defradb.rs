@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use db::database::DB;
 use keyring::{FileKeyring, Keyring, ENCRYPTION_KEY, KEYRING_SECRET_ENV};
-use storage::encrypted_store::EncryptedStore;
 
 #[tokio::test]
 async fn server_dump_reads_encrypted_regolith_store() {
@@ -27,8 +26,13 @@ async fn server_dump_reads_encrypted_regolith_store() {
     .unwrap();
 
     let expected = {
-        let backend = storage::RegolithStore::open(config.data_path()).unwrap();
-        let store = Arc::new(EncryptedStore::new(backend, encryption_key));
+        let store = Arc::new(
+            storage::RegolithStore::open_with_options(
+                config.data_path(),
+                storage::RegolithStoreOptions::default().with_encryption_key(encryption_key),
+            )
+            .unwrap(),
+        );
         let database = DB::open_from_arc(store).await.unwrap();
         let collections = query::parse_sdl("type Users { name: String }").unwrap();
         database

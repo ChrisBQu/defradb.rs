@@ -25,13 +25,31 @@ impl<S: Store + 'static> query::CollectionTruncator for DbCollectionTruncator<S>
         filter: Option<query::Filter>,
         identity: Option<&identity::Did>,
     ) -> query::Result<()> {
+        self.truncate_as(
+            &crate::access::nac::ambient_as(identity),
+            collection_name,
+            filter,
+        )
+        .await
+    }
+
+    async fn truncate_as(
+        &self,
+        context: &defra_core::RequestContext,
+        collection_name: &str,
+        filter: Option<query::Filter>,
+    ) -> query::Result<()> {
         let result = match filter {
             Some(filter) => {
                 self.db
-                    .truncate_collection_with_filter(collection_name, filter, identity)
+                    .truncate_collection_with_filter_as(context, collection_name, filter)
                     .await
             }
-            None => self.db.truncate_collection(collection_name, identity).await,
+            None => {
+                self.db
+                    .truncate_collection_as(context, collection_name)
+                    .await
+            }
         };
         result.map_err(|error| query::QueryError::execution(error.to_string()))
     }

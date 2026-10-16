@@ -8,7 +8,7 @@
 //! - Hashing: `hash_to_hex()`
 
 use cid::Cid;
-use std::sync::LazyLock;
+use regolith::sync::Lazy;
 
 use crate::error::{QueryError, Result};
 use graphql_parser::schema::{Directive, Type};
@@ -20,15 +20,15 @@ use sha2::{Digest, Sha256};
 use super::directives::get_directive_arg;
 use super::parser::{ParsedType, PolicyConfig, EMPTY_TYPE_PLACEHOLDER};
 
-static TYPE_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| {
+static TYPE_BLOCK_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?:type|interface)\s+(\w+)(?:\s*@\w+(?:\([^)]*\))?)*\s*\{([^}]*)\}")
         .expect("valid regex literal")
 });
 
-static MISSING_FIELD_TYPE_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(\w+)\s*:\s*(?:\}|\n|$)").expect("valid regex literal"));
+static MISSING_FIELD_TYPE_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(\w+)\s*:\s*(?:\}|\n|$)").expect("valid regex literal"));
 
-static EMPTY_TYPE_RE: LazyLock<Regex> = LazyLock::new(|| {
+static EMPTY_TYPE_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(\b(?:type|interface)\s+\w+(?:\s*@\w+(?:\([^)]*\))?)*\s*)\{\s*\}")
         .expect("valid regex literal")
 });

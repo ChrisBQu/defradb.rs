@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use rapidhash::{HashMapExt, RapidHashMap, RapidHashSet};
 use std::convert::Infallible;
 use std::future::{ready, Future, Ready};
 use std::pin::Pin;
@@ -47,14 +47,16 @@ pub struct StepRun {
 
 type Verdict = Pin<Box<dyn Future<Output = bool> + Send + 'static>>;
 
-fn deny_filter(deny: HashSet<Cid>) -> impl Fn(&PeerId, &Cid) -> Verdict + Send + Sync + 'static {
+fn deny_filter(
+    deny: RapidHashSet<Cid>,
+) -> impl Fn(&PeerId, &Cid) -> Verdict + Send + Sync + 'static {
     move |_peer, cid| {
         let allowed = !deny.contains(cid);
         Box::pin(async move { allowed })
     }
 }
 
-fn server_swarm(store: MemStore, deny: HashSet<Cid>) -> Swarm<Bitswap<MemStore>> {
+fn server_swarm(store: MemStore, deny: RapidHashSet<Cid>) -> Swarm<Bitswap<MemStore>> {
     let keypair = libp2p::identity::Keypair::generate_ed25519();
     let peer_id = keypair.public().to_peer_id();
     let mut config = Config::default();
@@ -322,7 +324,7 @@ pub async fn run(scenario: &Value) -> Vec<StepRun> {
         .iter()
         .map(|b| Block::new(Bytes::from(hex::decode(s(b, "data_hex")).unwrap()), cid(b)))
         .collect();
-    let deny: HashSet<Cid> = scenario["deny"]
+    let deny: RapidHashSet<Cid> = scenario["deny"]
         .as_array()
         .unwrap()
         .iter()
@@ -374,7 +376,7 @@ pub async fn run(scenario: &Value) -> Vec<StepRun> {
     });
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    let mut streams: HashMap<u64, libp2p::Stream> = HashMap::new();
+    let mut streams: RapidHashMap<u64, libp2p::Stream> = RapidHashMap::new();
     let mut runs: Vec<StepRun> = Vec::new();
     let steps = scenario["steps"].as_array().unwrap();
     for st in steps {

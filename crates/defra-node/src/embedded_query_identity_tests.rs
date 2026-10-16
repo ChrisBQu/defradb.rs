@@ -6,7 +6,7 @@ use kovan::Atom;
 use query::{QueryRequest, TransactionError, TransactionHandle};
 
 use super::tests::{TestRemoteSigner, SIGNING_STORE_GUARD};
-use super::{EmbeddedNode, ExecuteRetryPolicy, QueryExecutor};
+use super::{EmbeddedNode, QueryExecutor};
 
 struct IdentityRecordingExecutor {
     identities: Atom<Vec<Option<String>>>,
@@ -103,10 +103,6 @@ async fn signed_node_with_executor(
     node
 }
 
-fn no_retry() -> ExecuteRetryPolicy {
-    ExecuteRetryPolicy::new(0, std::time::Duration::ZERO, std::time::Duration::ZERO)
-}
-
 #[tokio::test]
 async fn builder_rejects_invalid_node_identity_did() {
     let _serial = SIGNING_STORE_GUARD.lock().await;
@@ -145,9 +141,8 @@ async fn embedded_execute_defaults_node_identity_and_preserves_explicit_actor() 
     let defaulted = node.execute("query { defaulted }").await;
     assert!(!defaulted.has_errors(), "defaulted query failed");
     let explicit = node
-        .execute_request_with_retry(
+        .execute_request(
             QueryRequest::new("query { explicit }").with_identity(Some(explicit_did.clone())),
-            no_retry(),
         )
         .await;
     assert!(!explicit.has_errors(), "explicit-actor query failed");
@@ -161,28 +156,16 @@ async fn embedded_execute_defaults_node_identity_and_preserves_explicit_actor() 
 }
 
 #[tokio::test]
-async fn embedded_retry_keeps_node_identity_on_every_attempt() {
+async fn embedded_conflict_returns_after_one_attempt_with_node_identity() {
     let _serial = SIGNING_STORE_GUARD.lock().await;
     defra_core::signing::clear_identity_store();
     let node_did = "did:key:zEmbeddedRetryActor";
     let executor = Arc::new(IdentityRecordingExecutor::new(2));
     let node = signed_node_with_executor(node_did, executor.clone()).await;
 
-    let response = node
-        .execute_with_retry(
-            "mutation { retry }",
-            ExecuteRetryPolicy::new(2, std::time::Duration::ZERO, std::time::Duration::ZERO),
-        )
-        .await;
-    assert!(!response.has_errors(), "retry query failed");
-    assert_eq!(
-        executor.identities(),
-        vec![
-            Some(node_did.to_string()),
-            Some(node_did.to_string()),
-            Some(node_did.to_string()),
-        ]
-    );
+    let response = node.execute("mutation { retry }").await;
+    assert!(response.is_transaction_conflict(), "conflict must surface");
+    assert_eq!(executor.identities(), vec![Some(node_did.to_string())]);
 
     node.shutdown().await;
     defra_core::signing::clear_identity_store();
@@ -232,7 +215,7 @@ async fn unsigned_embedded_execution_remains_anonymous() {
     let handle = TransactionHandle::new("anonymous-test-txn".to_string());
 
     let direct = node.execute("query { direct }").await;
-    let retry = node.execute_with_retry("query { retry }", no_retry()).await;
+    let retry = node.execute("query { retry }").await;
     let transactional = node
         .execute_request_in_txn(QueryRequest::new("query { transaction }"), &handle)
         .await;

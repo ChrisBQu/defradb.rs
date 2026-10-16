@@ -216,18 +216,18 @@ fn test_compute_signature_rejects_local_secp256r1_block_signing() {
 
 /// The Go-verifiable policy is process-global, so tests that move it cannot run
 /// beside each other.
-fn go_verifiable_gate() -> std::sync::MutexGuard<'static, ()> {
-    static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let guard = GATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+async fn go_verifiable_gate() -> regolith::sync::MutexGuard<'static, ()> {
+    static GATE: regolith::sync::Mutex<()> = regolith::sync::Mutex::new(());
+    let guard = GATE.lock().await;
     defra_core::block::go_verifiable_policy::reset_for_test();
     guard
 }
 
 /// Denied by default. A Go peer refuses `ES256`, so a node that has not opted in
 /// must not put such a block on the wire. This is the guard #1456 removed.
-#[test]
-fn test_compute_signature_refuses_remote_secp256r1_without_the_gate() {
-    let _serial = go_verifiable_gate();
+#[tokio::test]
+async fn test_compute_signature_refuses_remote_secp256r1_without_the_gate() {
+    let _serial = go_verifiable_gate().await;
 
     let private_key = crypto::generate_secp256r1().expect("should generate secp256r1 key");
     let public_key = private_key.public_key();
@@ -260,9 +260,9 @@ fn test_compute_signature_refuses_remote_secp256r1_without_the_gate() {
     );
 }
 
-#[test]
-fn test_compute_signature_signs_remote_secp256r1_once_the_gate_is_open() {
-    let _serial = go_verifiable_gate();
+#[tokio::test]
+async fn test_compute_signature_signs_remote_secp256r1_once_the_gate_is_open() {
+    let _serial = go_verifiable_gate().await;
     defra_core::block::go_verifiable_policy::allow_non_go_verifiable_signing(true);
 
     let private_key = crypto::generate_secp256r1().expect("should generate secp256r1 key");
@@ -375,5 +375,29 @@ fn test_compute_signature_passes_signing_authorization_to_remote_signer() {
     assert_eq!(
         seen_authorization.load().map(|seen| seen.clone()),
         signer.signing_authorization
+    );
+}
+
+/// A block-write failure becomes a query error naming the write, and a missing
+/// input stays a request for it, so the statement can fetch it and run again.
+#[test]
+fn a_build_error_keeps_a_missing_input_and_names_the_write() {
+    use db::block::builder::BuildError;
+    let request = query::prepared::PreparedInputRequest::new(
+        query::prepared::PreparedInputKind::Signature,
+        b"block".as_slice(),
+    );
+    match BuildError::NeedsInput(request.clone()).into_query_error_in("failed to write") {
+        query::error::QueryError::NeedsInput(asked) => assert_eq!(asked, request),
+        other => panic!("expected an input request, got {other:?}"),
+    }
+    let error = BuildError::Message("disk full".to_string()).into_query_error_in("failed to write");
+    assert!(
+        !matches!(error, query::error::QueryError::NeedsInput(_)),
+        "{error:?}"
+    );
+    assert!(
+        error.to_string().contains("failed to write: disk full"),
+        "{error}"
     );
 }

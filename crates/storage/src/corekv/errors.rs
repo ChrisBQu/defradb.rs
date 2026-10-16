@@ -11,6 +11,54 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub const UNIQUE_CONSTRAINT_VIOLATION_MESSAGE: &str =
     "can not index a doc's field(s) that violates unique index.";
 
+/// Conflict facts from the engine that are safe to retain for retry policy
+/// and metrics. The user key is deliberately omitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransactionConflict {
+    pub access: regolith::Access,
+    pub winning_write: regolith::WriteKind,
+    pub observed_seq: u64,
+    pub latest_seq: u64,
+}
+
+impl From<&regolith::Conflict> for TransactionConflict {
+    fn from(conflict: &regolith::Conflict) -> Self {
+        Self {
+            access: conflict.mine(),
+            winning_write: conflict.theirs(),
+            observed_seq: conflict.observed_seq(),
+            latest_seq: conflict.latest_seq(),
+        }
+    }
+}
+
+/// The reason in plain words, without the key: what the losing transaction
+/// did and the newer write that won.
+impl std::fmt::Display for TransactionConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mine = match self.access {
+            regolith::Access::Read => "read",
+            regolith::Access::ReadParts => "partial read",
+            regolith::Access::ReadPresence => "presence check",
+            regolith::Access::ReadForUpdate => "read for update",
+            regolith::Access::ScannedThenWrote => "write after a scan",
+            regolith::Access::ScannedRange => "range scan",
+            regolith::Access::Put => "put",
+            regolith::Access::Delete => "delete",
+            regolith::Access::Merge => "merge",
+            _ => "access",
+        };
+        let theirs = match self.winning_write {
+            regolith::WriteKind::Put => "put",
+            regolith::WriteKind::Delete => "delete",
+            regolith::WriteKind::RangeDelete => "range delete",
+            regolith::WriteKind::Merge => "merge",
+            _ => "write",
+        };
+        write!(f, "a {mine} lost to a newer {theirs}")
+    }
+}
+
 /// CoreKV error types.
 ///
 /// These errors match the error types defined in the Go corekv package
@@ -56,6 +104,15 @@ pub enum Error {
     /// The transaction should typically be retried.
     #[error("transaction conflict. Please retry")]
     TxnConflict,
+
+    /// A transaction conflict with non-sensitive engine classification.
+    #[error("{0}: transaction conflict. Please retry")]
+    TxnConflictDetails(TransactionConflict),
+
+    /// The engine exhausted its own retry policy. Outer request retry loops
+    /// must not repeat the exact same stale attempt body.
+    #[error("transaction retry attempts exhausted: {0}")]
+    TxnRetryExhausted(TransactionConflict),
 
     /// Unique index constraint violation.
     #[error("can not index a doc's field(s) that violates unique index.")]
@@ -106,7 +163,7 @@ impl Error {
 
     /// Check if this error indicates a transaction conflict.
     pub fn is_txn_conflict(&self) -> bool {
-        matches!(self, Error::TxnConflict)
+        matches!(self, Error::TxnConflict | Error::TxnConflictDetails(_))
     }
 
     /// Check if this error indicates a unique index constraint violation.
@@ -160,6 +217,26 @@ mod tests {
         assert!(Error::TxnConflict.is_retriable());
         assert!(!Error::NotFound.is_retriable());
         assert!(!Error::DBClosed.is_retriable());
+    }
+
+    #[test]
+    fn conflict_errors_name_their_reason_and_keep_the_retry_wording() {
+        let conflict = TransactionConflict {
+            access: regolith::Access::ReadForUpdate,
+            winning_write: regolith::WriteKind::Delete,
+            observed_seq: 4,
+            latest_seq: 9,
+        };
+        let details = Error::TxnConflictDetails(conflict).to_string();
+        assert_eq!(
+            details,
+            "a read for update lost to a newer delete: transaction conflict. Please retry"
+        );
+        assert!(details.ends_with(&Error::TxnConflict.to_string()));
+        assert_eq!(
+            Error::TxnRetryExhausted(conflict).to_string(),
+            "transaction retry attempts exhausted: a read for update lost to a newer delete"
+        );
     }
 
     #[test]

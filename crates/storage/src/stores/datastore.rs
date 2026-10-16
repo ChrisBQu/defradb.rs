@@ -31,6 +31,10 @@ impl<S: Store> crate::corekv::private::Sealed for Datastore<S> {}
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store> Store for Datastore<S> {
+    async fn allocate(&self, key: &[u8], count: u64) -> Result<std::ops::Range<u64>> {
+        self.store.allocate(key, count).await
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     fn transaction_stats_handle(&self) -> Option<crate::backends::TransactionStatsHandle> {
         self.store.transaction_stats_handle()
@@ -39,6 +43,19 @@ impl<S: Store> Store for Datastore<S> {
     async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>> {
         let txn = self.store.new_txn(readonly).await?;
         Ok(Box::new(DatastoreTxn { txn }))
+    }
+
+    async fn transact_retry(
+        &self,
+        options: crate::corekv::RetryOptions,
+        attempt: crate::corekv::RetryAttempt,
+    ) -> std::result::Result<crate::corekv::RetryAttemptValue, crate::corekv::RetryAttemptError>
+    {
+        // RetryTxn exposes the same raw Reader/Writer operations as
+        // DatastoreTxn. Chunking is an explicit put/get_value helper rather
+        // than an implicit trait behavior, so namespace forwarding preserves
+        // its transaction semantics.
+        self.store.transact_retry(options, attempt).await
     }
 
     async fn close(&self) -> Result<()> {
@@ -263,6 +280,10 @@ impl Reader for DatastoreTxn {
         self.txn.get(key).await
     }
 
+    async fn get_parts(&self, key: &[u8], parts: &[u32]) -> Result<Option<Bytes>> {
+        self.txn.get_parts(key, parts).await
+    }
+
     async fn has(&self, key: &[u8]) -> Result<bool> {
         self.txn.has(key).await
     }
@@ -279,18 +300,43 @@ impl Reader for DatastoreTxn {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Writer for DatastoreTxn {
-    async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
-        self.txn.set(key, value).await
+    async fn merge_shared(&self, key: &[u8], operand: &[u8]) -> Result<()> {
+        self.txn.merge_shared(key, operand).await
     }
 
-    async fn delete(&mut self, key: &[u8]) -> Result<()> {
-        self.txn.delete(key).await
+    async fn append_shared(
+        &self,
+        log: &crate::corekv::AppendLog,
+        entry: &[u8],
+        once_key: Option<&[u8]>,
+    ) -> Result<()> {
+        self.txn.append_shared(log, entry, once_key).await
+    }
+
+    async fn set_shared(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        self.txn.set_shared(key, value).await
+    }
+
+    async fn delete_shared(&self, key: &[u8]) -> Result<()> {
+        self.txn.delete_shared(key).await
     }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Txn for DatastoreTxn {
+    fn set_savepoint(&mut self) -> Result<()> {
+        self.txn.set_savepoint()
+    }
+
+    fn rollback_to_savepoint(&mut self) -> Result<()> {
+        self.txn.rollback_to_savepoint()
+    }
+
+    fn release_savepoint(&mut self) -> Result<()> {
+        self.txn.release_savepoint()
+    }
+
     async fn commit(self: Box<Self>) -> Result<()> {
         self.txn.commit().await
     }
@@ -299,28 +345,16 @@ impl Txn for DatastoreTxn {
         self.txn.discard()
     }
 
-    fn on_success(&mut self, callback: crate::corekv::TxnCallback) {
-        self.txn.on_success(callback)
+    fn on_commit(&mut self, callback: crate::corekv::OnCommit) -> Result<()> {
+        self.txn.on_commit(callback)
     }
 
-    fn on_success_async(&mut self, callback: crate::corekv::AsyncTxnCallback) {
-        self.txn.on_success_async(callback)
+    fn on_abort(&mut self, callback: crate::corekv::OnAbort) {
+        self.txn.on_abort(callback)
     }
 
-    fn on_error(&mut self, callback: crate::corekv::TxnCallback) {
-        self.txn.on_error(callback)
-    }
-
-    fn on_error_async(&mut self, callback: crate::corekv::AsyncTxnCallback) {
-        self.txn.on_error_async(callback)
-    }
-
-    fn on_discard(&mut self, callback: crate::corekv::TxnCallback) {
-        self.txn.on_discard(callback)
-    }
-
-    fn on_discard_async(&mut self, callback: crate::corekv::AsyncTxnCallback) {
-        self.txn.on_discard_async(callback)
+    fn before_commit(&mut self, callback: crate::corekv::BeforeCommit) {
+        self.txn.before_commit(callback)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

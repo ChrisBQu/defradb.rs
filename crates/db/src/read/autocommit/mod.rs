@@ -5,7 +5,6 @@
 //! without explicit transaction management while still providing proper
 //! transactional semantics.
 
-use async_lock::Mutex as TokioMutex;
 use async_trait::async_trait;
 use bytes::Bytes;
 use document::Document;
@@ -43,12 +42,12 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
         &self,
         options: &query::fetcher::DocumentArrivalOptions,
     ) -> query::error::Result<query::fetcher::DocumentArrivalPage> {
-        let mut txn = self
+        let txn = self
             .db
             .new_txn(true)
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
-        let result = crate::event::arrivals::read(&mut txn, options)
+        let result = crate::event::arrivals::read(&txn, options)
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()));
         let _ = txn.discard();
@@ -170,16 +169,16 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
             query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
         })?;
 
-        Ok(Box::new(AutoCommitDocStream {
-            inner: Some(Box::new(crate::collection::stream::ShortIdDocStream::new(
+        Ok(Box::new(AutoCommitDocStream::new(
+            Box::new(crate::collection::stream::ShortIdDocStream::new(
                 collection,
                 datastore,
                 systemstore,
                 doc_short_ids.to_vec(),
                 show_deleted,
-            ))),
-            txn: std::sync::Mutex::new(Some(txn)),
-        }))
+            )),
+            txn,
+        )))
     }
 
     async fn stream_all_with_deleted(
@@ -228,10 +227,7 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
             show_deleted,
         );
 
-        Ok(Box::new(AutoCommitDocStream {
-            inner: Some(Box::new(inner)),
-            txn: std::sync::Mutex::new(Some(txn)),
-        }))
+        Ok(Box::new(AutoCommitDocStream::new(Box::new(inner), txn)))
     }
 
     async fn get_by_ids(
@@ -279,7 +275,7 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
             };
 
             match collection
-                .get_by_doc_id(&datastore, &systemstore, &doc_id)
+                .get_by_doc_id_read_only(&datastore, &systemstore, &doc_id)
                 .await
                 .map_err(|e| query::error::QueryError::execution(format!("storage error: {}", e)))?
             {
@@ -375,27 +371,18 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
         expected_doc_id: Option<&str>,
         caller_identity: Option<&identity::Did>,
     ) -> query::error::Result<Document> {
-        // Create a read-only transaction for the versioned fetcher
-        let txn = self.db.new_txn(true).await.map_err(|e| {
-            query::error::QueryError::execution(format!("failed to create txn: {}", e))
-        })?;
-
-        // Wrap in Arc<Mutex<Option>> for VersionedFetcher
-        let txn_holder: Arc<TokioMutex<Option<DbTxn<S>>>> = Arc::new(TokioMutex::new(Some(txn)));
-
-        let versioned_fetcher =
-            VersionedFetcher::with_kms(txn_holder.clone(), self.db.kms(), caller_identity.cloned());
-        let result = versioned_fetcher
-            .get_document_at_cid(cid, expected_doc_id)
+        let kms = self.db.kms();
+        self.db
+            .read_lent(|txn| async move {
+                VersionedFetcher::with_kms(Some(txn), kms, caller_identity.cloned())
+                    .get_document_at_cid(cid, expected_doc_id)
+                    .await
+            })
             .await
-            .map_err(|e| query::error::QueryError::execution(e.to_string()));
-
-        // Clean up transaction
-        if let Some(txn) = txn_holder.lock().await.take() {
-            let _ = txn.discard();
-        }
-
-        result
+            .map_err(|e| {
+                query::error::QueryError::execution(format!("failed to create txn: {}", e))
+            })?
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))
     }
 
     async fn get_documents_at_cid(
@@ -405,24 +392,18 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
         expected_doc_id: Option<&str>,
         caller_identity: Option<&identity::Did>,
     ) -> query::error::Result<Vec<Document>> {
-        let txn = self.db.new_txn(true).await.map_err(|e| {
-            query::error::QueryError::execution(format!("failed to create txn: {}", e))
-        })?;
-
-        let txn_holder: Arc<TokioMutex<Option<DbTxn<S>>>> = Arc::new(TokioMutex::new(Some(txn)));
-
-        let versioned_fetcher =
-            VersionedFetcher::with_kms(txn_holder.clone(), self.db.kms(), caller_identity.cloned());
-        let result = versioned_fetcher
-            .get_documents_at_cid(cid, expected_doc_id, Some(collection_short_id))
+        let kms = self.db.kms();
+        self.db
+            .read_lent(|txn| async move {
+                VersionedFetcher::with_kms(Some(txn), kms, caller_identity.cloned())
+                    .get_documents_at_cid(cid, expected_doc_id, Some(collection_short_id))
+                    .await
+            })
             .await
-            .map_err(|e| query::error::QueryError::execution(e.to_string()));
-
-        if let Some(txn) = txn_holder.lock().await.take() {
-            let _ = txn.discard();
-        }
-
-        result
+            .map_err(|e| {
+                query::error::QueryError::execution(format!("failed to create txn: {}", e))
+            })?
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))
     }
 
     async fn get_view_cache_items(&self, collection_id: u32) -> query::error::Result<Vec<Bytes>> {
@@ -470,14 +451,10 @@ impl<S: Store + 'static> DocFetcher for AutoCommitFetcher<S> {
 ///
 /// `release_read_txn` drops the inner stream first so its `NamespaceView`s
 /// give up their `Arc<SharedTxn>` clones, then discards the transaction -
-/// `BasicTxn::discard` requires sole ownership of that Arc. `txn` is wrapped
-/// in a `std::sync::Mutex` purely so `DbTxn`'s non-`Sync` callback storage
-/// doesn't stop this struct satisfying `DocStream`'s `MaybeSendSync` bound;
-/// every access goes through `&mut self` via `get_mut`, so it never actually
-/// locks.
+/// `BasicTxn::discard` requires sole ownership of that Arc.
 pub struct AutoCommitDocStream<S: Store + 'static> {
     inner: Option<Box<dyn DocStream>>,
-    txn: std::sync::Mutex<Option<DbTxn<S>>>,
+    txn: Option<DbTxn<S>>,
 }
 
 impl<S: Store + 'static> AutoCommitDocStream<S> {
@@ -485,7 +462,7 @@ impl<S: Store + 'static> AutoCommitDocStream<S> {
     pub fn new(inner: Box<dyn DocStream>, txn: DbTxn<S>) -> Self {
         Self {
             inner: Some(inner),
-            txn: std::sync::Mutex::new(Some(txn)),
+            txn: Some(txn),
         }
     }
 
@@ -493,25 +470,18 @@ impl<S: Store + 'static> AutoCommitDocStream<S> {
     pub fn without_txn(inner: Box<dyn DocStream>) -> Self {
         Self {
             inner: Some(inner),
-            txn: std::sync::Mutex::new(None),
+            txn: None,
         }
     }
 
     /// True once the read transaction has been released.
     pub fn txn_released(&self) -> bool {
-        self.txn
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .is_none()
+        self.txn.is_none()
     }
 
     fn release_read_txn(&mut self) {
         self.inner = None;
-        let slot = self
-            .txn
-            .get_mut()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(txn) = slot.take() {
+        if let Some(txn) = self.txn.take() {
             if let Err(e) = txn.discard() {
                 warn!(error = %e, "failed to discard auto-commit stream transaction");
             }

@@ -6,7 +6,6 @@ use p2p::bitswap::{LateBoundServeAcp, ServeAcp};
 use p2p::iroh::IrohTransport;
 use p2p::P2PTransport;
 use storage::corekv::Store;
-use storage::stores::Peerstore;
 
 use super::config::IrohPeerConfig;
 use super::events::spawn_event_handler;
@@ -58,6 +57,7 @@ impl<S: Store + 'static> IrohPeer<S> {
     ) -> p2p::Result<Self> {
         let IrohPeerConfig {
             endpoint,
+            edge,
             document_acp,
             strict_replicated_doc_access,
             sync,
@@ -75,7 +75,11 @@ impl<S: Store + 'static> IrohPeer<S> {
         let transport = IrohTransport::new(command_tx, secret_key);
         let local_peer_id = transport.local_peer_id().to_string();
 
-        let blockstore = Arc::new(IrohBlockstore::new(Arc::clone(&store), true));
+        let blockstore = Arc::new(
+            IrohBlockstore::new(Arc::clone(&store), true)
+                .with_max_txn_retries(database.options().max_txn_retries())
+                .placed_on(database.pool()),
+        );
         let serve_acp = Arc::new(LateBoundServeAcp::new());
         let (mut coordinator, sync_events) =
             match p2p::sync::SyncCoordinator::with_head_provider_and_serve_gate(
@@ -84,7 +88,10 @@ impl<S: Store + 'static> IrohPeer<S> {
                 sync,
                 access_mode,
                 replicators,
-                Arc::new(p2p::sync::P2PCollectionStore::new(Arc::clone(&store))),
+                Arc::new(
+                    p2p::sync::P2PCollectionStore::new(Arc::clone(&store))
+                        .with_max_txn_retries(database.options().max_txn_retries()),
+                ),
                 Arc::new(db::merge::create_head_provider(Arc::clone(&database))),
                 Arc::new(replication_filter::QueryReplicationFilterMatcher::new()),
                 DbBlockClassifier::new_arc(Arc::clone(&database)),
@@ -101,10 +108,18 @@ impl<S: Store + 'static> IrohPeer<S> {
 
         let failure_rx = db::merge::attach_failure_channel(&mut coordinator, 1024);
         let coordinator = Arc::new(coordinator);
+        // Its network work runs on the edge, also when a write on a pool
+        // worker hands it a broadcast.
+        coordinator.use_network(p2p::network::Network::on(edge.clone()));
+        // Its durable registrations change on the database's worker pool.
         coordinator
-            .install_pending_dag_store(Arc::new(p2p::sync::PendingDagStore::new(Arc::clone(
-                &store,
-            ))))
+            .install_pending_dag_store(p2p::sync::pooled_pending_store(
+                Arc::new(
+                    p2p::sync::PendingDagStore::new(Arc::clone(&store))
+                        .with_max_txn_retries(database.options().max_txn_retries()),
+                ),
+                database.pool(),
+            ))
             .await;
 
         // The requester's DID has to come from the iroh handshake: the KMS
@@ -114,6 +129,7 @@ impl<S: Store + 'static> IrohPeer<S> {
         let kms_transport = match p2p::kms::PubsubKeyTransport::new(
             transport.clone(),
             Arc::new(p2p::IrohPeerIdentityResolver::new(transport.clone())),
+            edge.clone(),
         )
         .await
         {
@@ -159,7 +175,9 @@ impl<S: Store + 'static> IrohPeer<S> {
             .set_document_acp(Arc::clone(&document_acp));
         doc_pusher_acp.set_document_acp(Arc::clone(&document_acp));
         replication.broadcast_mutator.set_document_acp(document_acp);
-        let doc_pusher: Arc<dyn TransportDocPusher> = doc_pusher_acp;
+        // Its storage calls run on the database's worker pool.
+        let doc_pusher: Arc<dyn TransportDocPusher> =
+            crate::pooled(doc_pusher_acp, database.pool());
 
         if load_persisted_collections {
             match db::merge::load_persisted_collections(&coordinator).await {
@@ -186,6 +204,11 @@ impl<S: Store + 'static> IrohPeer<S> {
         let manage_hooks = crate::manage::hooks::new_manage_hooks_cell();
 
         let replication_coordinator = Arc::clone(&coordinator);
+        // Natively each merge runs on the database's worker pool, on its
+        // document's worker; a browser's one worker is this thread.
+        #[cfg(not(target_arch = "wasm32"))]
+        let merge_handler = replication.merge_handler_on_pool();
+        #[cfg(target_arch = "wasm32")]
         let merge_handler = Arc::clone(&replication.merge_handler);
         let replication_bus = Arc::clone(&event_bus);
         let replication_peer = local_peer_id.clone();
@@ -230,21 +253,34 @@ impl<S: Store + 'static> IrohPeer<S> {
         // The fallback for a deferred verdict no arrival can release: one
         // named nothing, one past the index's capacity, and everything the
         // index held before this process started.
-        let sweep_handler = Arc::clone(&replication.merge_handler_inner);
-        let sweep_shutdown = coordinator.shutdown_handle();
-        coordinator.spawn_background_task("governance_sweep", async move {
-            db::merge::governance::run_governance_sweep(
-                sweep_handler,
-                db::merge::governance::SWEEP_INTERVAL,
-                sweep_shutdown,
-            )
-            .await;
-        });
+        // Natively it runs on the database's worker pool; in a browser the
+        // page's one worker is this thread, so the sweep is a task here.
+        // Either way it ends with the coordinator's shutdown.
+        #[cfg(not(target_arch = "wasm32"))]
+        drop(db::merge::governance::start_governance_sweep(
+            Arc::clone(&replication.merge_handler_inner),
+            db::merge::governance::SWEEP_INTERVAL,
+            coordinator.shutdown_handle(),
+        ));
+        #[cfg(target_arch = "wasm32")]
+        {
+            let sweep_handler = Arc::clone(&replication.merge_handler_inner);
+            let sweep_shutdown = coordinator.shutdown_handle();
+            coordinator.spawn_background_task("governance_sweep", async move {
+                db::merge::governance::run_governance_sweep(
+                    sweep_handler,
+                    db::merge::governance::SWEEP_INTERVAL,
+                    sweep_shutdown,
+                )
+                .await;
+            });
+        }
 
         let event_handler_task = spawn_event_handler(
             events,
             Arc::clone(&coordinator),
             Arc::clone(&store),
+            database.peerstore(),
             Arc::clone(&event_bus),
             transport.clone(),
             manage_hooks.clone(),
@@ -253,7 +289,9 @@ impl<S: Store + 'static> IrohPeer<S> {
         );
 
         let failure_recorder_task = crate::spawn_failure_recorder(
-            Peerstore::new(Arc::clone(&store)).with_retry_schedule(retry_schedule.clone()),
+            database
+                .peerstore()
+                .with_retry_schedule(retry_schedule.clone()),
             failure_rx,
         );
         let se_repusher: Arc<dyn db::merge::SeArtifactRepusher> =
@@ -263,10 +301,11 @@ impl<S: Store + 'static> IrohPeer<S> {
             .merge_handler_inner
             .set_se_repusher(se_repusher.clone());
         let retry_loop_task = crate::spawn_retry_loop(
-            Peerstore::new(Arc::clone(&store)).with_retry_schedule(retry_schedule),
+            database.peerstore().with_retry_schedule(retry_schedule),
             transport.clone(),
             Arc::clone(&doc_pusher),
             Some(se_repusher),
+            &edge,
         );
 
         let version_syncer = DbTransportVersionSyncer::new_arc(
@@ -308,7 +347,8 @@ impl<S: Store + 'static> IrohPeer<S> {
                 coordinator.shutdown_handle(),
                 endpoint_task,
                 retry_loop_task,
-                vec![event_handler_task, replication_task, failure_recorder_task],
+                vec![event_handler_task, replication_task],
+                failure_recorder_task,
             ),
             transport,
             coordinator,
@@ -342,6 +382,7 @@ impl<S: Store + 'static> IrohPeer<S> {
             self.se_correlator.clone(),
             Arc::clone(self.coordinator.replicators()),
             key,
+            self.coordinator.network(),
         ))
     }
 }

@@ -10,7 +10,7 @@ use acp::nac::NodePermission;
 use identity::Did;
 
 use crate::ffi_entry;
-use crate::helpers::{get_node_database, get_rt, require_c_str};
+use crate::helpers::{get_node_database, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::policy_yaml;
 use crate::state::{PolicyStore, NODES};
@@ -58,9 +58,7 @@ pub unsafe extern "C" fn add_schema(
     schema_sdl: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::CollectionPatch
@@ -79,13 +77,11 @@ pub unsafe extern "C" fn add_schema(
         };
         let (identity_str, creator) = try_ffi!(parse_optional_identity_did(identity_did));
 
-        // Bind the caller's identity into the ambient context so the DB-layer NAC
-        // gate on create_collection resolves the actual caller instead of the
-        // wildcard. The body runs on this thread via `block_on`, so the
-        // thread-local is visible throughout it; the guard restores on drop.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(identity_str);
+        // The caller acts in the call's context, so the NAC checks the body
+        // reaches resolve the actual caller instead of the wildcard.
+        let context = defra_core::RequestContext::default().with_identity(identity_str);
 
-        ffi_async!(rt, {
+        ffi_async!(node_ptr, {
             // Get existing collection names so the SDL parser can resolve external type references
             // (e.g., relations to already-created collections)
             let known_types: rapidhash::RapidHashSet<String> = database
@@ -110,11 +106,7 @@ pub unsafe extern "C" fn add_schema(
             }
 
             let created_versions = database
-                .create_collections_atomic_with_acp_registration(
-                    collections,
-                    document_acp.clone(),
-                    creator,
-                )
+                .create_collections_atomic_with_acp_registration_as(&context, collections, document_acp.clone(), creator)
                 .await
                 .map_err(|e| format!("failed to create collection: {}", e))?;
 
@@ -142,9 +134,7 @@ pub unsafe extern "C" fn add_schema_in_txn(
     schema_sdl: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::CollectionPatch
@@ -164,15 +154,13 @@ pub unsafe extern "C" fn add_schema_in_txn(
         };
         let (identity_str, creator) = try_ffi!(parse_optional_identity_did(identity_did));
 
-        // Bind the caller's identity into the ambient context so the registry-layer
-        // NAC gate on add_schema_in_txn resolves the actual caller instead of the
-        // wildcard. The body runs on this thread via `block_on`, so the
-        // thread-local is visible throughout it; the guard restores on drop.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(identity_str);
+        // The caller acts in the call's context, so the NAC checks the body
+        // reaches resolve the actual caller instead of the wildcard.
+        let context = defra_core::RequestContext::default().with_identity(identity_str);
 
-        ffi_async!(rt, {
+        ffi_async!(caller, {
             let known_types: rapidhash::RapidHashSet<String> = registry
-                .get_collections_in_txn(&txn_str)
+                .get_collections_in_txn_as(&context, &txn_str)
                 .await
                 .map_err(|e| format!("failed to get collections in txn: {}", e))?
                 .into_iter()
@@ -192,12 +180,7 @@ pub unsafe extern "C" fn add_schema_in_txn(
             }
 
             let created_versions = registry
-                .add_schema_in_txn_with_acp(
-                    &txn_str,
-                    &schema_str,
-                    Some(document_acp.clone()),
-                    creator.clone(),
-                )
+                .add_schema_in_txn_with_acp_as(&context, &txn_str, &schema_str, Some(document_acp.clone()), creator.clone())
                 .await
                 .map_err(|e| format!("failed to create collection in txn: {}", e))?;
 
@@ -222,22 +205,14 @@ pub unsafe extern "C" fn get_collections(
     identity_did: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::CollectionGet
         ));
         let database = try_ffi!(get_node_database(node_ptr));
 
-        // Bind the caller's identity so any DB-layer NAC gate reached by the body
-        // resolves the actual caller instead of the wildcard.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
-        );
-
-        ffi_async!(rt, {
+        ffi_async!(node_ptr, {
             // Return all collection versions from the system store (active + inactive + placeholders).
             // The Go wrapper handles GetInactive filtering on its side.
             let collections = database
@@ -269,9 +244,7 @@ pub unsafe extern "C" fn get_collections_in_txn(
     identity_did: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::CollectionGet
@@ -283,15 +256,13 @@ pub unsafe extern "C" fn get_collections_in_txn(
             None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
         };
 
-        // Bind the caller's identity so any registry-layer NAC gate reached by the
-        // body resolves the actual caller instead of the wildcard.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
-        );
+        // The caller acts in the call's context, so the NAC checks the body
+        // reaches resolve the actual caller instead of the wildcard.
+        let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()));
 
-        ffi_async!(rt, {
+        ffi_async!(caller, {
             let collections = registry
-                .get_collections_in_txn(&txn_str)
+                .get_collections_in_txn_as(&context, &txn_str)
                 .await
                 .map_err(|e| format!("failed to get collections in txn: {}", e))?;
 

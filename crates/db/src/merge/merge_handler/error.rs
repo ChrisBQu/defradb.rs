@@ -40,6 +40,12 @@ pub enum MergeError {
     #[error("unique constraint violation during merge: {0}")]
     UniqueConstraintViolation(String),
 
+    /// A single-block `_in_txn` merge rejected its content after staging
+    /// writes; the enclosing attempt is discarded and the original reason is
+    /// returned as the merge outcome.
+    #[error("{0}")]
+    RetryRejected(String),
+
     /// Database error.
     #[error("database error: {0}")]
     Database(#[from] crate::error::Error),
@@ -52,16 +58,24 @@ pub enum MergeError {
     #[error("KMS error: {0}")]
     Kms(#[from] kms::Error),
 
+    /// The current merge attempt needs this DEK from KMS. The retry driver
+    /// resolves it outside the engine attempt and starts a fresh attempt.
+    #[error("merge requires prepared encryption key for {0}")]
+    NeedsDecryptionKey(Cid),
+
+    /// The batch retry driver needs this block's DEK resolved outside the
+    /// engine-owned attempt. The index selects its exact authorization context.
+    #[error(
+        "batch merge requires prepared encryption key for block {block_index}: {encryption_cid}"
+    )]
+    NeedsBatchDecryptionKey {
+        block_index: usize,
+        encryption_cid: Cid,
+    },
+
     /// Block signature verification failed — block MUST be rejected.
     #[error("block signature verification failed for cid={cid}: {reason}")]
     SignatureVerificationFailed { cid: Cid, reason: String },
-
-    /// The shared per-doc batch gate is currently held (e.g. by a long-lived
-    /// local/interactive transaction). Batch merging is an optimization, so the
-    /// caller should degrade to the gate-free per-block merge path rather than
-    /// block node-wide. Transient signal, not a block-content rejection (#1041).
-    #[error("batch gate contended")]
-    GateContended,
 
     /// DAG traversal depth limit exceeded.
     ///
@@ -81,20 +95,6 @@ impl MergeError {
         MergeError::DepthExceeded { cid: *cid, depth }
     }
 
-    /// Check if this error is a transaction conflict that can be retried.
-    pub(crate) fn is_txn_conflict(&self) -> bool {
-        match self {
-            MergeError::Database(db_err) => match db_err {
-                crate::error::Error::Datastore(datastore::Error::Storage(storage_err)) => {
-                    storage_err.is_txn_conflict()
-                }
-                crate::error::Error::Storage(storage_err) => storage_err.is_txn_conflict(),
-                _ => false,
-            },
-            _ => false,
-        }
-    }
-
     /// Classify failures that cannot change while replaying the same block.
     pub(crate) fn disposition(&self) -> MergeErrorDisposition {
         match self {
@@ -103,6 +103,7 @@ impl MergeError {
             | Self::InvalidReplayAuthorization(_)
             | Self::ImmutableFieldChanged(_)
             | Self::UniqueConstraintViolation(_)
+            | Self::RetryRejected(_)
             | Self::SignatureVerificationFailed { .. }
             | Self::DepthExceeded { .. } => MergeErrorDisposition::Terminal,
             Self::MissingMetadata(_)
@@ -110,7 +111,8 @@ impl MergeError {
             | Self::Database(_)
             | Self::Storage(_)
             | Self::Kms(_)
-            | Self::GateContended => MergeErrorDisposition::Retryable,
+            | Self::NeedsDecryptionKey(_)
+            | Self::NeedsBatchDecryptionKey { .. } => MergeErrorDisposition::Retryable,
         }
     }
 }
@@ -118,6 +120,8 @@ impl MergeError {
 /// Result of processing an LWW delta, including whether it was applied
 /// and the value to use for document reconstruction.
 pub(crate) struct LwwMergeResult {
+    pub(crate) raw_value: Vec<u8>,
+    pub(crate) priority: u64,
     /// Whether the merge was applied (vs rejected/skipped)
     pub(crate) applied: bool,
     /// The winning value for document reconstruction (if applied, use incoming; else read from store)
@@ -127,15 +131,28 @@ pub(crate) struct LwwMergeResult {
 /// Result of processing a Counter delta, including whether it was applied
 /// and the accumulated value for document reconstruction.
 pub struct CounterMergeResult {
-    /// Whether the merge was applied (vs skipped due to nonce)
+    /// Whether the merge was applied (vs skipped as already applied)
     pub(crate) applied: bool,
-    /// The accumulated counter value after merge
+    /// The counter value after the merge
     pub(crate) value: Option<NormalValue>,
 }
 
 impl CounterMergeResult {
-    /// True when the delta was applied rather than skipped on nonce.
+    /// True when the delta was applied rather than skipped as already applied.
     pub fn applied(&self) -> bool {
         self.applied
+    }
+
+    /// The counter's value after the merge, as the merging transaction sees it.
+    pub fn value(&self) -> Option<&NormalValue> {
+        self.value.as_ref()
+    }
+}
+
+/// A merge the worker pool could not run (it was shutting down, or the task
+/// panicked) stays retryable: nothing of it was applied.
+impl From<workers::Error> for MergeError {
+    fn from(error: workers::Error) -> Self {
+        MergeError::Storage(format!("the merge did not run: {error}"))
     }
 }

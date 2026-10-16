@@ -1,5 +1,6 @@
 use super::*;
 use rapidhash::HashMapExt;
+use storage::corekv::OnCommit;
 
 impl<S: Store> crate::database::DB<S> {
     /// Create a collection within an existing transaction.
@@ -97,7 +98,7 @@ impl<S: Store> crate::database::DB<S> {
         // repository forbids a collection as soon as its last local version is
         // deleted, even for transactions whose storage snapshot still contains
         // the old schema. Allow those transactions to redeclare it.
-        if let Some(existing) = txn.get_collection(&name).await?.cloned() {
+        if let Some(existing) = txn.get_collection(&name).await? {
             if self.is_collection_forbidden(existing.collection_id())? {
                 txn.uncache_collection(&name);
             } else {
@@ -136,6 +137,8 @@ impl<S: Store> crate::database::DB<S> {
                 .await
                 .map_err(Error::Storage)?;
         }
+
+        crate::collection::parts::prepare(self.store().as_ref(), &systemstore, &schema).await?;
 
         // 1. Store full schema at /collection/id/{version_id}
         let collection_key = CollectionKey::new(version_id.as_str());
@@ -249,9 +252,13 @@ impl<S: Store> crate::database::DB<S> {
             .await
             .map_err(Error::Storage)?;
 
-        // Update schema_heads: new collection starts at height=1
+        // Publish the process-wide head only after this transaction commits.
         if let Ok(cid) = cid::Cid::try_from(version_id.as_str()) {
-            self.schema_heads.insert(name.clone(), (vec![cid], 1));
+            let schema_heads = std::sync::Arc::clone(&self.schema_heads);
+            let head_name = name.clone();
+            txn.on_commit(OnCommit::Ordered(Box::new(move || {
+                schema_heads.insert(head_name.clone(), (vec![cid], 1));
+            })))?;
         }
 
         // Add to transaction's cache
@@ -269,109 +276,166 @@ impl<S: Store> crate::database::DB<S> {
         Ok(schema)
     }
 
+    /// [`Self::create_collection_as`] in [`defra_core::RequestContext::ambient`].
+    pub async fn create_collection(&self, schema: CollectionVersion) -> Result<()> {
+        self.create_collection_as(&defra_core::RequestContext::ambient(), schema)
+            .await
+    }
+
     /// Create a new collection.
     ///
     /// This creates a new transaction, calls `create_collection_with_txn`, commits,
     /// and updates the process-wide cache.
     #[instrument(skip(self, schema), fields(collection = %schema.name), name = "db.create_collection_auto")]
-    pub async fn create_collection(&self, schema: CollectionVersion) -> Result<()> {
-        self.create_collection_inner(schema, None, None)
+    pub async fn create_collection_as(
+        &self,
+        context: &defra_core::RequestContext,
+        schema: CollectionVersion,
+    ) -> Result<()> {
+        self.create_collection_inner(context, schema, None, None)
             .await
             .map(|_| ())
     }
 
-    /// Create a new collection, registering branchable ACP before commit.
-    ///
-    /// If collection ACP registration fails, the DB transaction is discarded so
-    /// the protected collection is not persisted without its ACP object.
+    /// [`Self::create_collection_with_acp_registration_as`] in [`defra_core::RequestContext::ambient`].
     pub async fn create_collection_with_acp_registration(
         &self,
         schema: CollectionVersion,
         document_acp: std::sync::Arc<dyn acp::DocumentACP>,
         creator: Option<identity::Did>,
     ) -> Result<CollectionVersion> {
-        self.create_collection_inner(schema, Some(document_acp), creator)
+        self.create_collection_with_acp_registration_as(
+            &defra_core::RequestContext::ambient(),
+            schema,
+            document_acp,
+            creator,
+        )
+        .await
+    }
+
+    /// Create a new collection, registering branchable ACP before commit.
+    ///
+    /// If collection ACP registration fails, the DB transaction is discarded so
+    /// the protected collection is not persisted without its ACP object.
+    pub async fn create_collection_with_acp_registration_as(
+        &self,
+        context: &defra_core::RequestContext,
+        schema: CollectionVersion,
+        document_acp: std::sync::Arc<dyn acp::DocumentACP>,
+        creator: Option<identity::Did>,
+    ) -> Result<CollectionVersion> {
+        self.create_collection_inner(context, schema, Some(document_acp), creator)
             .await
     }
 
     async fn create_collection_inner(
         &self,
+        context: &defra_core::RequestContext,
         schema: CollectionVersion,
         document_acp: Option<std::sync::Arc<dyn acp::DocumentACP>>,
         creator: Option<identity::Did>,
     ) -> Result<CollectionVersion> {
-        self.check_node_access(None, acp::nac::NodePermission::CollectionPatch)
+        self.check_node_access_as(context, acp::nac::NodePermission::CollectionPatch)
             .await?;
-        let existing = self.get_all_collection_versions().await?;
+        let mut txn = self.new_txn(false).await?;
+        let existing = self.get_all_collection_versions_with_txn(&mut txn).await?;
         schema::definition_validation::validate_new_collections_with_existing(
             std::slice::from_ref(&schema),
             &existing,
         )
         .map_err(Error::Other)?;
 
-        let mut txn = self.new_txn(false).await?;
-
         let finalized_schema = self.create_collection_with_txn(&mut txn, schema).await?;
 
         if let (Some(document_acp), Some(creator)) = (document_acp, creator) {
             txn.stage_collection_acp_registration(
+                context,
                 document_acp,
                 creator,
                 vec![finalized_schema.clone()],
             );
         }
 
+        let collection =
+            Collection::load_index_actions(finalized_schema.clone(), &txn.systemstore()?).await?;
+        let cache = std::sync::Arc::clone(&self.collections);
+        txn.on_commit(OnCommit::Ordered(Box::new(move || {
+            cache.rcu(|old| {
+                let mut cache = old.clone();
+                cache.put(collection.clone());
+                cache
+            });
+        })))?;
         txn.commit().await?;
         self.unforbid_collection_id(finalized_schema.collection_id.as_str())?;
 
-        // Update the process-wide cache after successful commit
-        let collection = self
-            .collection_with_index_actions(finalized_schema.clone())
-            .await?;
-        self.collections.rcu(|old| {
-            let mut cache = old.clone();
-            cache.put(collection.clone());
-            cache
-        });
-
         Ok(finalized_schema)
+    }
+
+    /// [`Self::create_collections_atomic_as`] in [`defra_core::RequestContext::ambient`].
+    pub async fn create_collections_atomic(
+        &self,
+        schemas: Vec<CollectionVersion>,
+    ) -> Result<Vec<CollectionVersion>> {
+        self.create_collections_atomic_as(&defra_core::RequestContext::ambient(), schemas)
+            .await
     }
 
     /// Create multiple collections atomically in a single transaction.
     ///
     /// This is useful for creating related collections (e.g., with relations between them)
     /// where all must succeed or none should be created.
-    pub async fn create_collections_atomic(
+    pub async fn create_collections_atomic_as(
         &self,
+        context: &defra_core::RequestContext,
         schemas: Vec<CollectionVersion>,
     ) -> Result<Vec<CollectionVersion>> {
-        self.create_collections_atomic_inner(schemas, None, None)
+        self.create_collections_atomic_inner(context, schemas, None, None)
             .await
     }
 
-    /// Create multiple collections atomically, registering branchable ACP before commit.
-    ///
-    /// If any collection ACP registration fails, the DB transaction is discarded
-    /// and none of the collections are persisted.
+    /// [`Self::create_collections_atomic_with_acp_registration_as`] in [`defra_core::RequestContext::ambient`].
     pub async fn create_collections_atomic_with_acp_registration(
         &self,
         schemas: Vec<CollectionVersion>,
         document_acp: std::sync::Arc<dyn acp::DocumentACP>,
         creator: Option<identity::Did>,
     ) -> Result<Vec<CollectionVersion>> {
-        self.create_collections_atomic_inner(schemas, Some(document_acp), creator)
+        self.create_collections_atomic_with_acp_registration_as(
+            &defra_core::RequestContext::ambient(),
+            schemas,
+            document_acp,
+            creator,
+        )
+        .await
+    }
+
+    /// Create multiple collections atomically, registering branchable ACP before commit.
+    ///
+    /// If any collection ACP registration fails, the DB transaction is discarded
+    /// and none of the collections are persisted.
+    pub async fn create_collections_atomic_with_acp_registration_as(
+        &self,
+        context: &defra_core::RequestContext,
+        schemas: Vec<CollectionVersion>,
+        document_acp: std::sync::Arc<dyn acp::DocumentACP>,
+        creator: Option<identity::Did>,
+    ) -> Result<Vec<CollectionVersion>> {
+        self.create_collections_atomic_inner(context, schemas, Some(document_acp), creator)
             .await
     }
 
     async fn create_collections_atomic_inner(
         &self,
+        context: &defra_core::RequestContext,
         schemas: Vec<CollectionVersion>,
         document_acp: Option<std::sync::Arc<dyn acp::DocumentACP>>,
         creator: Option<identity::Did>,
     ) -> Result<Vec<CollectionVersion>> {
-        self.check_node_access(None, acp::nac::NodePermission::CollectionPatch)
+        self.check_node_access_as(context, acp::nac::NodePermission::CollectionPatch)
             .await?;
-        let existing = self.get_all_collection_versions().await?;
+        let mut txn = self.new_txn(false).await?;
+        let existing = self.get_all_collection_versions_with_txn(&mut txn).await?;
         schema::definition_validation::validate_new_collections_with_existing(&schemas, &existing)
             .map_err(Error::Other)?;
 
@@ -384,7 +448,6 @@ impl<S: Store> crate::database::DB<S> {
             .map(|s| (s.name.clone(), s.collection_id.clone()))
             .collect();
 
-        let mut txn = self.new_txn(false).await?;
         let mut finalized_schemas = Vec::with_capacity(schemas.len());
 
         for schema in schemas {
@@ -457,27 +520,57 @@ impl<S: Store> crate::database::DB<S> {
         }
 
         if let (Some(document_acp), Some(creator)) = (document_acp, creator) {
-            txn.stage_collection_acp_registration(document_acp, creator, finalized_schemas.clone());
+            txn.stage_collection_acp_registration(
+                context,
+                document_acp,
+                creator,
+                finalized_schemas.clone(),
+            );
         }
 
+        let mut collections = Vec::with_capacity(finalized_schemas.len());
+        for schema in &finalized_schemas {
+            collections
+                .push(Collection::load_index_actions(schema.clone(), &txn.systemstore()?).await?);
+        }
+        let cache = std::sync::Arc::clone(&self.collections);
+        txn.on_commit(OnCommit::Ordered(Box::new(move || {
+            cache.rcu(|old| {
+                let mut cache = old.clone();
+                for collection in &collections {
+                    cache.put(collection.clone());
+                }
+                cache
+            });
+        })))?;
         txn.commit().await?;
         for schema in &finalized_schemas {
             self.unforbid_collection_id(schema.collection_id.as_str())?;
         }
 
-        // Update the process-wide cache after successful commit
-        let mut collections = Vec::with_capacity(finalized_schemas.len());
-        for schema in &finalized_schemas {
-            collections.push(self.collection_with_index_actions(schema.clone()).await?);
-        }
-        self.collections.rcu(|old| {
-            let mut cache = old.clone();
-            for collection in &collections {
-                cache.put(collection.clone());
-            }
-            cache
-        });
-
         Ok(finalized_schemas)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    #[tokio::test]
+    async fn schema_head_is_not_published_when_collection_transaction_is_discarded() {
+        let db = crate::DB::new(storage::RegolithStore::in_memory().unwrap()).unwrap();
+        let schema = query::parse_sdl("type HeadPublicationProbe { value: String }")
+            .unwrap()
+            .remove(0);
+
+        let mut txn = db.new_txn(false).await.unwrap();
+        db.create_collection_with_txn(&mut txn, schema.clone())
+            .await
+            .unwrap();
+        assert!(db.schema_heads.get("HeadPublicationProbe").is_none());
+        txn.discard().unwrap();
+        assert!(db.schema_heads.get("HeadPublicationProbe").is_none());
+
+        db.create_collection(schema).await.unwrap();
+        assert!(db.schema_heads.get("HeadPublicationProbe").is_some());
     }
 }

@@ -44,7 +44,7 @@ impl CompositePostCommitAction for RegisterReplicatedDocAction {
 }
 
 pub struct AcpCompositeMergeHook {
-    document_acp: std::sync::OnceLock<Arc<dyn DocumentACP>>,
+    document_acp: regolith::sync::OnceCell<Arc<dyn DocumentACP>>,
     local_identity: Option<Identity>,
     strict_replicated_doc_access: AtomicBool,
 }
@@ -52,7 +52,7 @@ pub struct AcpCompositeMergeHook {
 impl AcpCompositeMergeHook {
     pub fn new(local_identity: Option<Identity>) -> Self {
         Self {
-            document_acp: std::sync::OnceLock::new(),
+            document_acp: regolith::sync::OnceCell::new(),
             local_identity,
             strict_replicated_doc_access: AtomicBool::new(false),
         }
@@ -104,6 +104,25 @@ const DELETED_STATUS: u8 = 2;
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl CompositeMergeHook for AcpCompositeMergeHook {
+    fn supports_transactions(&self) -> bool {
+        self.document_acp()
+            .is_some_and(|acp| acp.supports_transactions())
+    }
+
+    #[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
+    fn bind_transaction(
+        &self,
+        view: datastore::NamespaceView,
+    ) -> Option<Arc<dyn CompositeMergeHook>> {
+        let acp = self.document_acp()?.bind_transaction(view)?;
+        let hook = Self::new(self.local_identity.clone());
+        hook.set_document_acp(acp);
+        hook.set_strict_replicated_doc_access(
+            self.strict_replicated_doc_access.load(Ordering::Relaxed),
+        );
+        Some(Arc::new(hook))
+    }
+
     fn guards_protected_updates(&self) -> bool {
         self.document_acp().is_some()
     }
@@ -320,13 +339,24 @@ impl<S: Store, B: blockstore::Blockstore> AcpMergeHandler<S, B> {
         Self { inner, hook }
     }
 
-    pub fn with_document_acp(self, acp: Arc<dyn DocumentACP>) -> Self {
-        self.hook.set_document_acp(acp);
+    pub fn with_document_acp(self, acp: Arc<dyn DocumentACP>) -> Self
+    where
+        S: 'static,
+    {
+        self.set_document_acp(acp);
         self
     }
 
-    pub fn set_document_acp(&self, acp: Arc<dyn DocumentACP>) {
-        self.hook.set_document_acp(acp);
+    /// The hook decides with the provider as the database installed it, so an
+    /// external provider is gated by the registrations creates owe it.
+    pub fn set_document_acp(&self, acp: Arc<dyn DocumentACP>)
+    where
+        S: 'static,
+    {
+        self.inner.db.set_document_acp(acp);
+        if let Some(installed) = self.inner.db.document_acp() {
+            self.hook.set_document_acp(installed.clone());
+        }
     }
 
     pub fn set_strict_replicated_doc_access(&self, strict: bool) {

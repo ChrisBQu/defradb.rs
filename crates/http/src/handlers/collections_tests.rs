@@ -14,20 +14,30 @@ use std::sync::Arc;
 use tower::ServiceExt;
 
 fn create_state() -> AppState {
-    AppStateBuilder::new(Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>)
-        .with_rest(Arc::new(MockRestOperations::new()) as Arc<dyn RestOperations>)
-        .with_collection_mgmt(Arc::new(MockCollectionManagementOperations::new()))
-        .build()
+    AppStateBuilder::new(
+        Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>,
+        edge::testing::edge(),
+    )
+    .with_rest(Arc::new(MockRestOperations::new()) as Arc<dyn RestOperations>)
+    .with_collection_mgmt(Arc::new(MockCollectionManagementOperations::new()))
+    .build()
 }
 
 fn create_state_without_rest() -> AppState {
-    AppStateBuilder::new(Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>).build()
+    AppStateBuilder::new(
+        Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>,
+        edge::testing::edge(),
+    )
+    .build()
 }
 
 fn create_failing_state() -> AppState {
-    AppStateBuilder::new(Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>)
-        .with_rest(Arc::new(FailingMockRestOperations::new("test error")))
-        .build()
+    AppStateBuilder::new(
+        Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>,
+        edge::testing::edge(),
+    )
+    .with_rest(Arc::new(FailingMockRestOperations::new("test error")))
+    .build()
 }
 
 #[tokio::test]
@@ -85,16 +95,22 @@ fn router_with_collection_mgmt() -> axum::Router {
 fn router_with_collection_mgmt_operations(
     operations: Arc<dyn CollectionManagementOperations>,
 ) -> axum::Router {
-    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>)
-        .with_collection_mgmt(operations)
-        .build();
+    let state = AppStateBuilder::new(
+        Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>,
+        edge::testing::edge(),
+    )
+    .with_collection_mgmt(operations)
+    .build();
     crate::router::create_router_with_state(state)
 }
 
 fn router_with_rest() -> axum::Router {
-    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>)
-        .with_rest(Arc::new(MockRestOperations::new()) as Arc<dyn RestOperations>)
-        .build();
+    let state = AppStateBuilder::new(
+        Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>,
+        edge::testing::edge(),
+    )
+    .with_rest(Arc::new(MockRestOperations::new()) as Arc<dyn RestOperations>)
+    .build();
     crate::router::create_router_with_state(state)
 }
 

@@ -99,43 +99,57 @@ impl std::fmt::Display for StepResult {
 
 pub struct PermissionEngine<S: ZanzibarStore + ?Sized> {
     store: Arc<S>,
-    pub lookup: PolicyLookupTable,
+    pub lookup: Arc<PolicyLookupTable>,
+}
+
+impl<S: ZanzibarStore + ?Sized> Clone for PermissionEngine<S> {
+    fn clone(&self) -> Self {
+        Self {
+            store: self.store.clone(),
+            lookup: self.lookup.clone(),
+        }
+    }
 }
 
 impl<S: ZanzibarStore + ?Sized> PermissionEngine<S> {
     pub fn new(store: Arc<S>) -> Self {
         Self {
             store,
-            lookup: PolicyLookupTable::new(),
+            lookup: Arc::new(PolicyLookupTable::new()),
         }
     }
 
+    /// Build an evaluator over one immutable policy snapshot.
+    pub fn with_lookup(store: Arc<S>, lookup: Arc<PolicyLookupTable>) -> Self {
+        Self { store, lookup }
+    }
+
     pub fn add_policy(&mut self, policy: &Policy) {
-        self.lookup.add_policy(policy);
+        Arc::make_mut(&mut self.lookup).add_policy(policy);
     }
 
     pub fn remove_policy(&mut self, policy_id: &str) {
-        self.lookup.remove_policy(policy_id);
+        Arc::make_mut(&mut self.lookup).remove_policy(policy_id);
     }
 
     pub fn update_policy(&mut self, policy: &Policy) {
-        self.lookup.update_policy(policy);
+        Arc::make_mut(&mut self.lookup).update_policy(policy);
     }
 
     pub async fn load_policy(&mut self, policy_id: &str) -> Result<()> {
         if let Some(policy) = self.store.get_policy(policy_id).await? {
-            self.lookup.add_policy(&policy);
+            Arc::make_mut(&mut self.lookup).add_policy(&policy);
         }
         Ok(())
     }
 
     pub async fn reload_policy(&mut self, policy_id: &str) -> Result<()> {
-        self.lookup.remove_policy(policy_id);
+        Arc::make_mut(&mut self.lookup).remove_policy(policy_id);
         self.load_policy(policy_id).await
     }
 
     pub fn clear_cache(&mut self) {
-        self.lookup.clear();
+        Arc::make_mut(&mut self.lookup).clear();
     }
 
     /// Evaluate with deterministic depth and work limits; exhaustion returns an error.
@@ -162,27 +176,29 @@ impl<S: ZanzibarStore + ?Sized> PermissionEngine<S> {
         Ok(granted)
     }
 
-    /// Synchronous, runtime-free wrapper over [`check`](Self::check) for
+    /// Synchronous, runtime-free form of [`check`](Self::check) for
     /// consensus / deterministic evaluation (e.g. on-chain or replicated-log
     /// authorization), where no async reactor is available and every validator
     /// must independently reach the identical decision.
     ///
-    /// Drives the [`check`](Self::check) future to completion on the current
-    /// thread via [`futures::executor::block_on`], which needs no reactor.
+    /// Polls the [`check`](Self::check) future exactly once with a no-op
+    /// waker, so it never parks the thread.
     ///
     /// # Contract
     ///
-    /// Determinism holds only if the backing [`ZanzibarStore`] honours:
-    /// - **all-Ready**: every store future resolves without yielding to a
-    ///   reactor — no real I/O, timers, or network. A future that returns
-    ///   `Pending` awaiting an external event parks this thread indefinitely.
+    /// The backing [`ZanzibarStore`] must honour:
+    /// - **all-Ready**: every store future resolves on its first poll, with no
+    ///   real I/O, timers, or network. A check that has not finished after
+    ///   that one poll fails with [`Error::EvaluationPending`] instead of
+    ///   waiting.
     /// - **side-effect-free**: the check performs reads only and must not
     ///   mutate observable state.
     /// - **order-stable**: policy and relationship traversal is deterministically
     ///   ordered, so identical inputs yield the identical decision on every node.
     ///
-    /// `MemoryZanzibarStore` satisfies all three. A network- or disk-backed
-    /// store generally does not and must not be used through this entry point.
+    /// `MemoryZanzibarStore` satisfies all three.
+    ///
+    /// [`Error::EvaluationPending`]: crate::error::Error::EvaluationPending
     pub fn check_blocking(
         &self,
         policy_id: &str,
@@ -191,7 +207,13 @@ impl<S: ZanzibarStore + ?Sized> PermissionEngine<S> {
         relation: &str,
         subject: &Did,
     ) -> Result<bool> {
-        futures::executor::block_on(self.check(policy_id, resource, object_id, relation, subject))
+        let mut check =
+            std::pin::pin!(self.check(policy_id, resource, object_id, relation, subject));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        match std::future::Future::poll(check.as_mut(), &mut context) {
+            std::task::Poll::Ready(decision) => decision,
+            std::task::Poll::Pending => Err(crate::error::Error::EvaluationPending),
+        }
     }
 
     /// Evaluate a batch with one shared cache and work budget.
@@ -315,5 +337,141 @@ mod check_blocking_tests {
         assert!(!engine
             .check_blocking("policy1", "document", "doc1", "owner", &stranger_did())
             .unwrap());
+    }
+
+    /// A store whose direct-permission read is not ready on its first poll.
+    struct YieldingStore(MemoryZanzibarStore);
+
+    struct YieldOnce(bool);
+
+    impl std::future::Future for YieldOnce {
+        type Output = ();
+
+        fn poll(
+            mut self: std::pin::Pin<&mut Self>,
+            context: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<()> {
+            if self.0 {
+                return std::task::Poll::Ready(());
+            }
+            self.0 = true;
+            context.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl ZanzibarStore for YieldingStore {
+        async fn store_policy(&self, policy: &Policy) -> crate::error::Result<()> {
+            self.0.store_policy(policy).await
+        }
+        async fn get_policy(&self, policy_id: &str) -> crate::error::Result<Option<Policy>> {
+            self.0.get_policy(policy_id).await
+        }
+        async fn list_policies(&self) -> crate::error::Result<Vec<Policy>> {
+            self.0.list_policies().await
+        }
+        async fn next_policy_counter(&self) -> crate::error::Result<u64> {
+            self.0.next_policy_counter().await
+        }
+        async fn delete_policy(&self, policy_id: &str) -> crate::error::Result<bool> {
+            self.0.delete_policy(policy_id).await
+        }
+        async fn store_relationship(
+            &self,
+            policy_id: &str,
+            rel: &Relationship,
+        ) -> crate::error::Result<()> {
+            self.0.store_relationship(policy_id, rel).await
+        }
+        async fn delete_relationship(
+            &self,
+            policy_id: &str,
+            rel: &Relationship,
+        ) -> crate::error::Result<bool> {
+            self.0.delete_relationship(policy_id, rel).await
+        }
+        async fn has_relationship(
+            &self,
+            policy_id: &str,
+            resource: &str,
+            object_id: &str,
+            relation: &str,
+            subject: &crate::types::Subject,
+        ) -> crate::error::Result<bool> {
+            self.0
+                .has_relationship(policy_id, resource, object_id, relation, subject)
+                .await
+        }
+        async fn check_permission_direct(
+            &self,
+            policy_id: &str,
+            resource: &str,
+            object_id: &str,
+            relation: &str,
+            subject: &Did,
+        ) -> crate::error::Result<bool> {
+            YieldOnce(false).await;
+            self.0
+                .check_permission_direct(policy_id, resource, object_id, relation, subject)
+                .await
+        }
+        async fn get_relation_subjects(
+            &self,
+            policy_id: &str,
+            resource: &str,
+            object_id: &str,
+            relation: &str,
+        ) -> crate::error::Result<Vec<crate::types::Subject>> {
+            self.0
+                .get_relation_subjects(policy_id, resource, object_id, relation)
+                .await
+        }
+        async fn get_relation_targets(
+            &self,
+            policy_id: &str,
+            resource: &str,
+            object_id: &str,
+            relation: &str,
+        ) -> crate::error::Result<Vec<crate::types::ObjectRef>> {
+            self.0
+                .get_relation_targets(policy_id, resource, object_id, relation)
+                .await
+        }
+        async fn delete_object_relationships(
+            &self,
+            policy_id: &str,
+            resource: &str,
+            object_id: &str,
+        ) -> crate::error::Result<()> {
+            self.0
+                .delete_object_relationships(policy_id, resource, object_id)
+                .await
+        }
+    }
+
+    // The thread is never parked: a store read that is not ready fails the
+    // synchronous check at once, while the asynchronous check still decides.
+    #[test]
+    fn check_blocking_fails_loud_when_the_store_is_not_ready() {
+        let store = Arc::new(YieldingStore(MemoryZanzibarStore::new()));
+        let mut engine = PermissionEngine::new(store.clone());
+        engine.add_policy(
+            &Policy::new("policy1", "Test")
+                .with_resource(Resource::new("document").with_relation(Relation::direct("owner"))),
+        );
+        let owner = owner_did();
+        let rel = Relationship::with_entity("document", "doc1", "owner", owner.clone());
+        futures::executor::block_on(store.store_relationship("policy1", &rel)).unwrap();
+
+        assert!(matches!(
+            engine.check_blocking("policy1", "document", "doc1", "owner", &owner),
+            Err(crate::error::Error::EvaluationPending)
+        ));
+        assert!(futures::executor::block_on(
+            engine.check("policy1", "document", "doc1", "owner", &owner)
+        )
+        .unwrap());
     }
 }

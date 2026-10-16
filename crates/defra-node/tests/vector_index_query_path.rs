@@ -84,9 +84,7 @@ async fn protected_similarity_pages_count_only_authorized_documents() {
             "mutation {{ add_Note(input: {{title: \"n{i}\", embedding: [{i}, 1]}}) {{ _docID }} }}"
         ))
         .with_identity(Some(identity::Did::new(did).unwrap()));
-        let response = node
-            .execute_request_with_retry(request, Default::default())
-            .await;
+        let response = node.execute_request(request).await;
         assert!(response.errors.is_empty(), "{:?}", response.errors);
     }
     let query = "{ Note(limit: 3, offset: 1, order: {_alias: {sim: DESC}}) { title sim: SIMILARITY(embedding: {vector: [1, 0]}) } }";
@@ -99,8 +97,7 @@ async fn protected_similarity_pages_count_only_authorized_documents() {
             node.rollback_transaction(&handle).await.unwrap();
             result
         } else {
-            node.execute_request_with_retry(request, Default::default())
-                .await
+            node.execute_request(request).await
         };
         assert!(response.errors.is_empty(), "{:?}", response.errors);
         let data = response.data.unwrap();
@@ -113,10 +110,9 @@ async fn protected_similarity_pages_count_only_authorized_documents() {
         assert_eq!(titles, ["n8", "n7", "n6"]);
     }
     let response = node
-        .execute_request_with_retry(
+        .execute_request(
             QueryRequest::new(format!("query @explain(type: execute) {query}"))
                 .with_identity(Some(identity::Did::new(reader).unwrap())),
-            Default::default(),
         )
         .await;
     assert!(response.errors.is_empty(), "{:?}", response.errors);

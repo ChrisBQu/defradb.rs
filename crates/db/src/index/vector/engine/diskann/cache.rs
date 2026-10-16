@@ -65,9 +65,25 @@ impl CodeCache {
 }
 
 /// One [`CodeCache`] per resident-codes index, owned by the database.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct CodeCaches {
     by_index: HopscotchMap<(u32, u32), Arc<CodeCache>, RandomState>,
+}
+
+impl Default for CodeCaches {
+    fn default() -> Self {
+        #[cfg(test)]
+        BUILT.with(|built| built.set(built.get() + 1));
+        Self {
+            by_index: HopscotchMap::with_hasher(RandomState::default()),
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: the [`CodeCaches`] this thread built.
+    pub(crate) static BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 impl CodeCaches {

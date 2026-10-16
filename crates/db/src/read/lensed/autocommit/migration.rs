@@ -1,6 +1,7 @@
 //! Migration context loading and document migration logic.
 
 use rapidhash::{HashMapExt, RapidHashMap};
+use std::sync::Arc;
 
 use document::Document;
 use lens::{build_targeted_history, CollectionHistoryLink, Lens, LensDoc, TargetedHistoryLink};
@@ -9,21 +10,13 @@ use tracing::{debug, trace, warn};
 
 use crate::collection::Collection;
 use crate::definition::loader::get_collections_by_collection_id;
-use crate::definition::migration::helpers::{
-    cache_migrated_document_with_indexes, lens_doc_to_document,
-};
+use crate::definition::migration::helpers::lens_doc_to_document;
 
 use super::LensedAutoCommitFetcher;
 
 pub struct MigrationOutcome {
     pub document: Document,
     pub source_document: Option<Document>,
-}
-
-pub struct MigrationWriteBack {
-    pub source_document: Document,
-    pub migrated_document: Document,
-    pub migration_generation: u64,
 }
 
 impl<S: Store> LensedAutoCommitFetcher<S> {
@@ -41,14 +34,8 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
         let cache_key = format!("{}:{}", collection_id, target_version_id);
         loop {
             let generation = self.db.migration_generation();
-            if let Ok(mut cache) = self.migration_cache.lock() {
-                if cache.generation != generation {
-                    cache.generation = generation;
-                    cache.contexts.clear();
-                }
-                if let Some(cached) = cache.contexts.get(&cache_key) {
-                    return Ok((generation, cached.0, cached.1.clone()));
-                }
+            if let Some(context) = self.migration_cache.get(generation, &cache_key) {
+                return Ok((generation, context.0, context.1.clone()));
             }
 
             let history = self.load_collection_history(collection).await.ok();
@@ -57,21 +44,21 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
                 .as_ref()
                 .is_some_and(|h| h.values().any(|link| link.transform.is_some()));
 
-            let result = (has_migrations, if has_migrations { history } else { None });
+            let context = Arc::new((has_migrations, if has_migrations { history } else { None }));
 
             // A migration may have committed while history was being loaded.
             // Never publish a context under the wrong generation.
             if self.db.migration_generation() != generation {
                 continue;
             }
-            if let Ok(mut cache) = self.migration_cache.lock() {
-                if cache.generation != generation {
-                    continue;
-                }
-                cache.contexts.insert(cache_key.clone(), result.clone());
+            if !self
+                .migration_cache
+                .publish(generation, &cache_key, &context)
+            {
+                continue;
             }
 
-            return Ok((generation, result.0, result.1));
+            return Ok((generation, context.0, context.1.clone()));
         }
     }
 
@@ -336,209 +323,5 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
             document: migrated_doc,
             source_document: Some(doc),
         })
-    }
-
-    /// Persist documents that were transformed during a read.
-    ///
-    /// The initial query always uses a read-only transaction. Only documents
-    /// that actually traversed a lens path are escalated here. Per-document
-    /// write guards serialize this fresh re-read with local updates and P2P
-    /// merges, preventing a transform of a stale snapshot from overwriting a
-    /// concurrent mutation.
-    pub(crate) async fn persist_migrated_documents(
-        &self,
-        collection: &Collection,
-        candidates: Vec<MigrationWriteBack>,
-    ) -> query::error::Result<()> {
-        if !self.write_back_migrations || candidates.is_empty() {
-            return Ok(());
-        }
-
-        let batch_size = self.db.options().migration_write_back_batch_size();
-        let mut candidates = candidates.into_iter();
-        loop {
-            let batch: Vec<_> = candidates.by_ref().take(batch_size).collect();
-            if batch.is_empty() {
-                return Ok(());
-            }
-            self.persist_migrated_document_batch(collection, batch)
-                .await?;
-        }
-    }
-
-    async fn persist_migrated_document_batch(
-        &self,
-        collection: &Collection,
-        mut candidates: Vec<MigrationWriteBack>,
-    ) -> query::error::Result<()> {
-        candidates.sort_by_key(|candidate| {
-            candidate
-                .source_document
-                .id()
-                .map(ToString::to_string)
-                .unwrap_or_default()
-        });
-        candidates.dedup_by(|left, right| left.source_document.id() == right.source_document.id());
-
-        let queue = self.db.doc_write_queue();
-        let batch_gate = if candidates.len() > 1 {
-            Some(queue.acquire_batch_gate().await)
-        } else {
-            None
-        };
-        let mut guards = Vec::with_capacity(candidates.len());
-        for candidate in &candidates {
-            if let Some(doc_id) = candidate.source_document.id() {
-                guards.push(queue.acquire(&doc_id.to_string()).await);
-            }
-        }
-        drop(batch_gate);
-
-        let max_retries = self.db.options().max_txn_retries();
-        let mut retry = 0;
-        loop {
-            let active_collection = self.db.get_collection(collection.name()).map_err(|error| {
-                query::error::QueryError::execution(format!(
-                    "failed to inspect active collection before lens write-back: {}",
-                    error
-                ))
-            })?;
-            if active_collection
-                .as_ref()
-                .is_none_or(|active| active.version_id() != collection.version_id())
-            {
-                return Ok(());
-            }
-
-            let (generation, has_migrations, history) =
-                self.load_migration_context(collection).await?;
-            if !has_migrations {
-                return Ok(());
-            }
-
-            let txn = self.db.new_txn(false).await.map_err(|e| {
-                query::error::QueryError::execution(format!(
-                    "failed to create lens write-back transaction: {}",
-                    e
-                ))
-            })?;
-            let datastore = txn.datastore().map_err(|e| {
-                query::error::QueryError::execution(format!(
-                    "failed to get datastore for lens write-back: {}",
-                    e
-                ))
-            })?;
-            let systemstore = txn.systemstore().map_err(|e| {
-                query::error::QueryError::execution(format!(
-                    "failed to get systemstore for lens write-back: {}",
-                    e
-                ))
-            })?;
-
-            let write_result: query::error::Result<bool> = async {
-                let mut wrote = false;
-                for candidate in &candidates {
-                    let Some(doc_id) = candidate.source_document.id() else {
-                        continue;
-                    };
-                    let Some(current_doc) = collection
-                        .get_by_doc_id(&datastore, &systemstore, doc_id)
-                        .await
-                        .map_err(|e| {
-                            query::error::QueryError::execution(format!(
-                                "failed to re-read document for lens write-back: {}",
-                                e
-                            ))
-                        })?
-                    else {
-                        continue;
-                    };
-
-                    let unchanged_since_read = current_doc.schema_version_id()
-                        == candidate.source_document.schema_version_id()
-                        && current_doc.is_deleted() == candidate.source_document.is_deleted()
-                        && current_doc.values().len() == candidate.source_document.values().len()
-                        && candidate.source_document.values().iter().all(
-                            |(field_name, source_value)| {
-                                current_doc.get(field_name) == Some(source_value.value())
-                            },
-                        );
-
-                    let migrated_document =
-                        if unchanged_since_read && candidate.migration_generation == generation {
-                            candidate.migrated_document.clone()
-                        } else {
-                            let outcome = self
-                                .process_document(current_doc, collection, has_migrations, &history)
-                                .await?;
-                            let Some(_) = outcome.source_document else {
-                                continue;
-                            };
-                            outcome.document
-                        };
-
-                    wrote |= cache_migrated_document_with_indexes(
-                        &datastore,
-                        &systemstore,
-                        collection,
-                        &migrated_document,
-                    )
-                    .await
-                    .map_err(|e| {
-                        query::error::QueryError::execution(format!(
-                            "failed to cache migrated document and indexes: {}",
-                            e
-                        ))
-                    })?;
-                }
-                Ok(wrote)
-            }
-            .await;
-
-            drop(datastore);
-            drop(systemstore);
-
-            let wrote = match write_result {
-                Ok(wrote) => wrote,
-                Err(error) => {
-                    if let Err(discard_error) = txn.discard() {
-                        tracing::warn!(
-                            error = %discard_error,
-                            "failed to discard lens write-back transaction"
-                        );
-                    }
-                    return Err(error);
-                }
-            };
-
-            if !wrote {
-                txn.discard().map_err(|e| {
-                    query::error::QueryError::execution(format!(
-                        "failed to discard no-op lens write-back transaction: {}",
-                        e
-                    ))
-                })?;
-                return Ok(());
-            }
-
-            match txn.commit().await {
-                Ok(()) => return Ok(()),
-                Err(error) if error.is_txn_conflict() && retry < max_retries => {
-                    retry += 1;
-                    debug!(
-                        retry,
-                        max_retries,
-                        collection = %collection.name(),
-                        "Retrying conflicting lens write-back transaction"
-                    );
-                }
-                Err(error) => {
-                    return Err(query::error::QueryError::execution(format!(
-                        "failed to commit lens write-back transaction: {}",
-                        error
-                    )));
-                }
-            }
-        }
     }
 }

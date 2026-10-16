@@ -1,12 +1,13 @@
-//! `DB::create_index`: the definition waits on the collection write guard,
-//! the documents that already exist are indexed in batches that hold no
-//! guard, writers landing meanwhile keep the index exact, a batch that read
-//! a document that changed underneath aborts, and a restart resumes an
-//! interrupted backfill.
+//! `DB::create_index`: schema reads and index definitions share the transaction
+//! validation path, while backfill remains restartable and exact.
 
 use rapidhash::RapidHashSet;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
+use async_trait::async_trait;
 use db::index::backfill::{encode_progress, BACKFILL_BATCH_DOCS};
 use db::{AutoCommitMutator, BackfillSource, Collection, IndexManager, DB};
 use document::{DocID, Document, NormalValue};
@@ -15,15 +16,15 @@ use schema::{
     CollectionVersion, FieldDescription, FieldKind, IndexKind, IndexedFieldDescription,
     OrderedIndexDescription,
 };
-use storage::corekv::{IterOptions, Iterator, Key};
+use storage::corekv::{
+    IterOptions, Iterator, Key, Reader, Result as StorageResult, Store, Txn, Writer,
+};
 use storage::index::IndexIterator;
 use storage::keys::datastore::IndexDataStoreKey;
 use storage::keys::systemstore::{ActionProgressKey, CollectionKey, CollectionNameKey};
 use storage::RegolithStore;
 
-use crate::common::guard_events::{recorder, WRITE_HOLDING, WRITE_WAITING};
-
-fn users_schema(name: &str, version_id: &str, collection_id: &str) -> CollectionVersion {
+pub(super) fn users_schema(name: &str, version_id: &str, collection_id: &str) -> CollectionVersion {
     CollectionVersion::new(
         name,
         version_id,
@@ -35,7 +36,7 @@ fn users_schema(name: &str, version_id: &str, collection_id: &str) -> Collection
     )
 }
 
-fn by_name() -> (Vec<IndexedFieldDescription>, IndexKind) {
+pub(super) fn by_name() -> (Vec<IndexedFieldDescription>, IndexKind) {
     (
         vec![IndexedFieldDescription {
             name: "name".to_string(),
@@ -45,7 +46,7 @@ fn by_name() -> (Vec<IndexedFieldDescription>, IndexKind) {
     )
 }
 
-async fn open_with_collection(
+pub(super) async fn open_with_collection(
     name: &str,
     version_id: &str,
     collection_id: &str,
@@ -58,11 +59,14 @@ async fn open_with_collection(
     (store, db)
 }
 
-async fn create_user(
-    mutator: &AutoCommitMutator<RegolithStore>,
+pub(super) async fn create_user<S>(
+    mutator: &AutoCommitMutator<S>,
     collection: &str,
     name: &str,
-) -> DocID {
+) -> DocID
+where
+    S: Store + 'static,
+{
     let mut doc = Document::new();
     doc.set("name", NormalValue::String(name.to_owned()));
     mutator.create(collection, doc).await.unwrap().doc_id
@@ -87,7 +91,10 @@ where
     }
 }
 
-async fn index_entries(db: &DB<RegolithStore>, collection: &str, index_id: u32) -> usize {
+pub(super) async fn index_entries<S>(db: &DB<S>, collection: &str, index_id: u32) -> usize
+where
+    S: Store + 'static,
+{
     let short_id = db
         .require_collection(collection)
         .unwrap()
@@ -108,7 +115,10 @@ async fn index_entries(db: &DB<RegolithStore>, collection: &str, index_id: u32) 
     count
 }
 
-async fn entries_for(db: &DB<RegolithStore>, collection: &str, name: &str) -> usize {
+pub(super) async fn entries_for<S>(db: &DB<S>, collection: &str, name: &str) -> usize
+where
+    S: Store + 'static,
+{
     let collection = db.require_collection(collection).unwrap();
     let manager =
         IndexManager::from_collection(collection.schema().resolved_root_id(), collection.schema())
@@ -208,68 +218,22 @@ async fn create_index_backfills_more_documents_than_a_batch_holds() {
     );
 }
 
-/// Stand in for a truncate, delete or patch by holding the collection write
-/// guard; the definition must wait on it, write nothing meanwhile, and land
-/// once it is released. The guard events are counted per collection: the
-/// test's own acquisition is the first waiting and holding pair.
 #[tokio::test]
-async fn create_index_waits_for_the_collection_write_guard() {
-    const COLLECTION_ID: &str = "col-index-guard";
-    let recorder = recorder();
-    let (_store, db) = open_with_collection("Guarded", "guarded-v1", COLLECTION_ID).await;
+async fn create_index_commits_schema_and_publishes_cache() {
+    let (_store, db) = open_with_collection("Guarded", "guarded-v1", "col-index-guard").await;
     create_user(&AutoCommitMutator::new(db.clone()), "Guarded", "ada").await;
 
-    let guards = db
-        .collection_write_guards(std::iter::once(COLLECTION_ID.to_string()))
+    let (fields, kind) = by_name();
+    let index = db
+        .create_index("Guarded", Some("by_name"), fields, kind)
         .await
         .unwrap();
-    assert_eq!(recorder.count(COLLECTION_ID, WRITE_HOLDING), 1);
-
-    let creator = db.clone();
-    let mut task = tokio::spawn(async move {
-        let (fields, kind) = by_name();
-        creator
-            .create_index("Guarded", Some("by_name"), fields, kind)
-            .await
-    });
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while recorder.count(COLLECTION_ID, WRITE_WAITING) < 2 {
-        if task.is_finished() {
-            let outcome = (&mut task).await;
-            panic!("index creation ended without waiting on the collection guard: {outcome:?}");
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "index creation never reached the collection guard"
-        );
-        tokio::task::yield_now().await;
-    }
-    for _ in 0..64 {
-        tokio::task::yield_now().await;
-    }
-
-    assert_eq!(
-        recorder.count(COLLECTION_ID, WRITE_HOLDING),
-        1,
-        "index creation must not acquire the collection guard while it is held"
-    );
-    assert!(!task.is_finished());
-    assert!(
-        db.require_collection("Guarded")
-            .unwrap()
-            .get_indexes()
-            .is_empty(),
-        "no definition may land while the guard is held"
-    );
-
-    drop(guards);
-
-    let index = task
-        .await
-        .expect("index creation panicked")
-        .expect("index creation should succeed once the guard is released");
-    assert_eq!(recorder.count(COLLECTION_ID, WRITE_HOLDING), 2);
+    assert!(db
+        .require_collection("Guarded")
+        .unwrap()
+        .get_indexes()
+        .iter()
+        .any(|cached| cached.id == index.id));
     assert_eq!(index_entries(&db, "Guarded", index.id).await, 1);
 }
 
@@ -277,6 +241,57 @@ async fn create_index_waits_for_the_collection_write_guard() {
 /// batches have not reached yet and of ones they have, deletes. Afterwards
 /// every live document has exactly one entry, for its current value, and
 /// no other entry exists.
+#[tokio::test]
+async fn autocommit_writes_refresh_index_state_from_the_attempt_snapshot() {
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
+    let stale_db = Arc::new(DB::from_arc(store.clone()).unwrap());
+    stale_db
+        .create_collection(users_schema("Racing", "racing-v1", "col-index-racing"))
+        .await
+        .unwrap();
+    let mutator = AutoCommitMutator::new(stale_db.clone());
+    let updated_id = create_user(&mutator, "Racing", "before-update").await;
+    let deleted_id = create_user(&mutator, "Racing", "before-delete").await;
+
+    // This second DB handle commits the new index without publishing its cache
+    // into `stale_db`. The autocommit mutator therefore keeps the pre-index
+    // Collection while each engine attempt sees the post-index snapshot.
+    let index_db = Arc::new(DB::open_from_arc(store).await.unwrap());
+    let (fields, kind) = by_name();
+    let index = index_db
+        .create_index("Racing", Some("by_name"), fields, kind)
+        .await
+        .unwrap();
+
+    create_user(&mutator, "Racing", "created-after-index").await;
+    let mut update = Document::new();
+    update.set_id(updated_id);
+    update.set(
+        "name",
+        NormalValue::String("updated-after-index".to_string()),
+    );
+    mutator
+        .update(
+            "Racing",
+            update,
+            RapidHashSet::from_iter(["name".to_string()]),
+        )
+        .await
+        .unwrap();
+    mutator.delete("Racing", &deleted_id).await.unwrap();
+
+    assert_eq!(index_entries(&index_db, "Racing", index.id).await, 2);
+    assert_eq!(
+        entries_for(&index_db, "Racing", "created-after-index").await,
+        1
+    );
+    assert_eq!(
+        entries_for(&index_db, "Racing", "updated-after-index").await,
+        1
+    );
+    assert_eq!(entries_for(&index_db, "Racing", "before-delete").await, 0);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn create_index_keeps_pace_with_concurrent_writers() {
     let existing = 3 * BACKFILL_BATCH_DOCS;
@@ -370,7 +385,11 @@ async fn create_index_keeps_pace_with_concurrent_writers() {
         );
     }
     for i in created.clone() {
-        assert_eq!(entries_for(&db, "Racing", &format!("new-{i}")).await, 1);
+        assert_eq!(
+            entries_for(&db, "Racing", &format!("new-{i}")).await,
+            1,
+            "new-{i}"
+        );
     }
     assert_eq!(
         index_entries(&db, "Racing", index.id).await,
@@ -381,6 +400,215 @@ async fn create_index_keeps_pace_with_concurrent_writers() {
         .await
         .unwrap()
         .contains_key(&index.id));
+}
+
+#[tokio::test]
+async fn create_index_fence_includes_old_schema_writes_before_definition_commit() {
+    let inner = Arc::new(RegolithStore::in_memory().unwrap());
+    let gate = Arc::new(DefinitionCommitGate::default());
+    let store = Arc::new(PauseDefinitionCommitStore {
+        inner,
+        gate: Arc::clone(&gate),
+    });
+    let db = Arc::new(DB::from_arc(store).unwrap());
+    db.create_collection(users_schema("Racing", "racing-v1", "col-index-gate"))
+        .await
+        .unwrap();
+    let mutator = Arc::new(AutoCommitMutator::new(db.clone()));
+    create_user(&mutator, "Racing", "before").await;
+
+    gate.armed.store(true, Ordering::SeqCst);
+    let creator = db.clone();
+    let index_task = tokio::spawn(async move {
+        let (fields, kind) = by_name();
+        creator
+            .create_index("Racing", Some("by_name"), fields, kind)
+            .await
+    });
+
+    // The index definition has been staged, but its transaction has not
+    // published the new collection version or backfill action yet.
+    gate.entered.notified().await;
+    create_user(&mutator, "Racing", "during-definition-commit").await;
+    gate.release.notify_one();
+
+    let index = index_task.await.unwrap().unwrap();
+    assert_eq!(
+        entries_for(&db, "Racing", "during-definition-commit").await,
+        1,
+        "a pre-publication write above the fence must be included in backfill"
+    );
+    assert_eq!(index_entries(&db, "Racing", index.id).await, 2);
+}
+
+#[tokio::test]
+async fn create_index_fence_covers_other_handles_reserved_id_range() {
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
+    let index_db = Arc::new(DB::from_arc(store.clone()).unwrap());
+    index_db
+        .create_collection(users_schema("Racing", "racing-v1", "col-index-handles"))
+        .await
+        .unwrap();
+
+    // Keep an early range open on the index creator. A later handle reserves
+    // and uses a higher range, which the creator's local `peek` cannot see.
+    index_db.next_doc_short_id().await.unwrap();
+    let writer_db = Arc::new(DB::open_from_arc(store).await.unwrap());
+    let writer = AutoCommitMutator::new(writer_db);
+    create_user(&writer, "Racing", "other-handle-document").await;
+
+    let (fields, kind) = by_name();
+    let index = index_db
+        .create_index("Racing", Some("by_name"), fields, kind)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        entries_for(&index_db, "Racing", "other-handle-document").await,
+        1
+    );
+    assert_eq!(index_entries(&index_db, "Racing", index.id).await, 1);
+}
+
+#[derive(Default)]
+struct DefinitionCommitGate {
+    armed: AtomicBool,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+struct PauseDefinitionCommitStore {
+    inner: Arc<RegolithStore>,
+    gate: Arc<DefinitionCommitGate>,
+}
+
+impl storage::corekv::private::Sealed for PauseDefinitionCommitStore {}
+
+#[async_trait]
+impl Store for PauseDefinitionCommitStore {
+    async fn allocate(&self, key: &[u8], count: u64) -> StorageResult<std::ops::Range<u64>> {
+        self.inner.allocate(key, count).await
+    }
+
+    async fn new_txn(&self, readonly: bool) -> StorageResult<Box<dyn Txn>> {
+        Ok(Box::new(PauseDefinitionCommitTxn {
+            inner: self.inner.new_txn(readonly).await?,
+            gate: Arc::clone(&self.gate),
+        }))
+    }
+
+    async fn transact_retry(
+        &self,
+        options: storage::corekv::RetryOptions,
+        attempt: storage::corekv::RetryAttempt,
+    ) -> std::result::Result<storage::corekv::RetryAttemptValue, storage::corekv::RetryAttemptError>
+    {
+        self.inner.transact_retry(options, attempt).await
+    }
+
+    async fn close(&self) -> StorageResult<()> {
+        self.inner.close().await
+    }
+}
+
+struct PauseDefinitionCommitTxn {
+    inner: Box<dyn Txn>,
+    gate: Arc<DefinitionCommitGate>,
+}
+
+impl storage::corekv::private::Sealed for PauseDefinitionCommitTxn {}
+
+#[async_trait]
+impl Reader for PauseDefinitionCommitTxn {
+    async fn get(&self, key: &[u8]) -> StorageResult<Option<bytes::Bytes>> {
+        self.inner.get(key).await
+    }
+
+    async fn get_parts(&self, key: &[u8], parts: &[u32]) -> StorageResult<Option<bytes::Bytes>> {
+        self.inner.get_parts(key, parts).await
+    }
+
+    async fn has(&self, key: &[u8]) -> StorageResult<bool> {
+        self.inner.has(key).await
+    }
+
+    async fn get_size(&self, key: &[u8]) -> StorageResult<Option<usize>> {
+        self.inner.get_size(key).await
+    }
+
+    async fn iterator(
+        &self,
+        opts: IterOptions,
+    ) -> StorageResult<Box<dyn storage::corekv::Iterator>> {
+        self.inner.iterator(opts).await
+    }
+}
+
+#[async_trait]
+impl Writer for PauseDefinitionCommitTxn {
+    async fn merge_shared(&self, key: &[u8], operand: &[u8]) -> StorageResult<()> {
+        self.inner.merge_shared(key, operand).await
+    }
+
+    async fn append_shared(
+        &self,
+        log: &storage::corekv::AppendLog,
+        entry: &[u8],
+        once_key: Option<&[u8]>,
+    ) -> StorageResult<()> {
+        self.inner.append_shared(log, entry, once_key).await
+    }
+
+    async fn set_shared(&self, key: &[u8], value: &[u8]) -> StorageResult<()> {
+        self.inner.set_shared(key, value).await
+    }
+
+    async fn delete_shared(&self, key: &[u8]) -> StorageResult<()> {
+        self.inner.delete_shared(key).await
+    }
+}
+
+#[async_trait]
+impl Txn for PauseDefinitionCommitTxn {
+    async fn commit(self: Box<Self>) -> StorageResult<()> {
+        if !self.inner.is_readonly() && self.gate.armed.swap(false, Ordering::SeqCst) {
+            self.gate.entered.notify_one();
+            self.gate.release.notified().await;
+        }
+        self.inner.commit().await
+    }
+
+    fn discard(self: Box<Self>) {
+        self.inner.discard()
+    }
+
+    fn on_commit(&mut self, callback: storage::corekv::OnCommit) -> StorageResult<()> {
+        self.inner.on_commit(callback)
+    }
+
+    fn on_abort(&mut self, callback: storage::corekv::OnAbort) {
+        self.inner.on_abort(callback)
+    }
+
+    fn before_commit(&mut self, callback: storage::corekv::BeforeCommit) {
+        self.inner.before_commit(callback)
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn is_readonly(&self) -> bool {
+        self.inner.is_readonly()
+    }
+
+    fn callback_count(&self) -> usize {
+        self.inner.callback_count()
+    }
 }
 
 /// The batch scanned the document and observed it, so the commit sees the

@@ -3,35 +3,6 @@
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::ptr;
 
-/// Host callback used for non-exportable signing keys.
-///
-/// The host app keeps the private key and signs the payload on demand. This is
-/// intended for device-bound keys such as Secure Enclave-backed P-256 keys.
-///
-/// Contract:
-/// - `signer_handle` is an opaque host-managed context value.
-/// - `did` is the registered signing DID for this key.
-/// - `key_type` is the registered Defra key type, for example `secp256r1`.
-/// - `payload_ptr` / `payload_len` describe the exact message bytes to sign.
-/// - The callback must write the signature bytes into `out_signature_ptr`,
-///   set `out_signature_len`, and return `0` on success.
-///
-/// Signature format:
-/// - For ECDSA keys (`secp256r1`, `secp256k1`), Defra expects an ASN.1 DER /
-///   X9.62 ECDSA signature, not raw `r || s`.
-/// - For Secure Enclave P-256 keys on Apple platforms, use
-///   `SecKeyCreateSignature(..., .ecdsaSignatureMessageX962SHA256, ...)`.
-pub type DefraRemoteSignCallback = unsafe extern "C" fn(
-    signer_handle: usize,
-    did: *const c_char,
-    key_type: *const c_char,
-    payload_ptr: *const u8,
-    payload_len: usize,
-    out_signature_ptr: *mut u8,
-    out_signature_capacity: usize,
-    out_signature_len: *mut usize,
-) -> c_int;
-
 /// FFI result type matching Go's Result struct.
 ///
 /// Status codes:
@@ -88,6 +59,26 @@ impl FfiResult {
             status: 2,
             error: ptr::null_mut(),
             value: sanitize_to_cstring(id, "0").into_raw(),
+        }
+    }
+}
+
+/// A call's JSON value, or its error.
+impl From<Result<String, String>> for FfiResult {
+    fn from(result: Result<String, String>) -> Self {
+        match result {
+            Ok(json) => Self::success(json),
+            Err(error) => Self::error(error),
+        }
+    }
+}
+
+/// A call's success with no value, or its error.
+impl From<Result<(), String>> for FfiResult {
+    fn from(result: Result<(), String>) -> Self {
+        match result {
+            Ok(()) => Self::ok(),
+            Err(error) => Self::error(error),
         }
     }
 }

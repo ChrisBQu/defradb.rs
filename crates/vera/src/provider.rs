@@ -52,9 +52,32 @@ pub trait VeraProvider: MaybeSendSync {
         false
     }
 
+    /// Whether deleting a DefraDB document should archive the corresponding
+    /// object in the provider's shared authorization state.
+    ///
+    /// The default preserves the existing archive-on-delete behavior.
+    /// Providers with shared, replicated authorization state may
+    /// return `false`: a local tombstone can still be rejected by another
+    /// replica, so archiving here could revoke access before that decision.
+    /// Explicit provider archive operations remain available independently.
+    fn archive_object_on_document_delete(&self) -> bool {
+        true
+    }
+
     fn authorized_account(&self) -> String;
 
     async fn create_bearer_token(&self, did: &str) -> Result<String, ProviderError>;
+
+    /// [`Self::create_bearer_token`] for `did` acting in the request
+    /// `context` serves, which may carry the token `did` authenticated with
+    /// ([`RequestContext::bearer_token_for`](defra_core::RequestContext::bearer_token_for)).
+    async fn create_bearer_token_as(
+        &self,
+        _context: &defra_core::RequestContext,
+        did: &str,
+    ) -> Result<String, ProviderError> {
+        self.create_bearer_token(did).await
+    }
 
     fn self_did(&self) -> Option<String>;
 
@@ -192,6 +215,13 @@ pub trait VeraProvider: MaybeSendSync {
     ) -> Result<Option<String>, ProviderError> {
         let _ = (policy_id, resource, object_id, permission, actor_did);
         Ok(None)
+    }
+
+    /// The verified ACP state a decision is read at, when the provider
+    /// proves one (the vera.rs light client's module state root). A decision
+    /// cached under it is exact: a new state is a new key.
+    fn decision_state(&self) -> Option<String> {
+        None
     }
 
     fn acp_light_client_status(&self) -> Result<AcpLightClientStatus, ProviderError> {

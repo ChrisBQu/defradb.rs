@@ -11,7 +11,7 @@ impl<S: VectorNodeStore> Hnsw<S> {
         let vector = self.prepared(vector);
         let top_level = self.sampler.level(id.0, self.params.ml);
 
-        let Some(mut meta) = self.store.get_meta().await? else {
+        let Some(mut meta) = self.store.get_meta_advisory().await? else {
             self.store
                 .put_node(Node::new(id, vector, top_level))
                 .await?;
@@ -33,7 +33,7 @@ impl<S: VectorNodeStore> Hnsw<S> {
 
         // Corruption, not an empty graph: starting from nothing here would
         // silently build a second disconnected component.
-        let Some(entry) = self.store.get_node(meta.entry_point).await? else {
+        let Some(entry) = self.store.get_node_advisory(meta.entry_point).await? else {
             return Err(Error::VectorEntryPointNotFound {
                 entry_point: meta.entry_point.0,
             });
@@ -68,7 +68,7 @@ impl<S: VectorNodeStore> Hnsw<S> {
         // Replacing an entry point must not erase the routes used to find its
         // new neighbors. Keep the old links until the replacement is complete.
         let existing = self.store.get_node(id).await?;
-        let existed = existing.is_some();
+        let existed = existing.as_ref().is_some_and(|node| !node.deleted);
         let mut pending = existing.unwrap_or_else(|| Node::new(id, vector.clone(), top_level));
         pending.vector = vector.clone();
         pending.deleted = false;
@@ -121,21 +121,29 @@ impl<S: VectorNodeStore> Hnsw<S> {
             })
             .await?;
 
-        if top_level > meta.top_layer {
-            meta.entry_point = id;
-            meta.top_layer = top_level;
+        if top_level > meta.top_layer || isolated {
+            // Entry-point/height replacement must preserve concurrent counters
+            // and routing changes: validate the full record before a put.
+            meta = self
+                .store
+                .get_meta()
+                .await?
+                .ok_or_else(|| Error::Other("vector metadata disappeared".into()))?;
+            if top_level > meta.top_layer {
+                meta.entry_point = id;
+                meta.top_layer = top_level;
+            }
+            if isolated {
+                meta.entry_point = id;
+            }
+            meta.live = meta.live.saturating_add(u64::from(!existed));
+            meta.waste = meta.waste.saturating_add(purged_self_links);
+            self.store.put_meta(meta).await
+        } else {
+            self.store
+                .add_counts(i64::from(!existed), purged_self_links)
+                .await
         }
-        // Nothing to link to means everything reachable from the entry point is
-        // tombstoned, so this node would be unreachable. Promoting it keeps it
-        // findable and gives later inserts something live to attach to.
-        if isolated {
-            meta.entry_point = id;
-        }
-        if !existed {
-            meta.live += 1;
-        }
-        meta.waste += purged_self_links;
-        self.store.put_meta(meta).await
     }
 
     /// Adds a back-link from `from` to `to`, pruning `from` back to
@@ -148,9 +156,23 @@ impl<S: VectorNodeStore> Hnsw<S> {
         layer: usize,
         max_links: usize,
     ) -> Result<bool> {
-        let Some(mut node) = self.store.get_node(from).await? else {
+        let Some(mut node) = self.store.get_node_for_links(from).await? else {
             return Ok(false);
         };
+        let links = node.neighbors(layer);
+        let structural = layer >= node.layers.len()
+            || links.contains(&from)
+            || (!links.contains(&to) && links.len() >= max_links);
+        if !structural {
+            // Concurrent additions may temporarily exceed the degree target.
+            // The next pruning pass uses a validated replacement.
+            self.store.add_link(from, layer, to).await?;
+            return Ok(false);
+        }
+        let Some(validated) = self.store.get_node(from).await? else {
+            return Ok(false);
+        };
+        node = validated;
 
         // `from`'s own height was drawn at random and may be below `layer`.
         while node.layers.len() <= layer {

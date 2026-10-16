@@ -86,6 +86,14 @@ impl Subscription {
     /// or `Err(TryRecvError::Disconnected)` if the subscription is closed.
     #[cfg(feature = "channel")]
     pub fn try_recv(&mut self) -> Result<Message, TryRecvError> {
+        self.try_take()
+    }
+
+    /// [`try_recv`](Self::try_recv) through a shared reference: a handle
+    /// several threads poll needs no lock around it, and each message goes
+    /// to exactly one of them.
+    #[cfg(feature = "channel")]
+    pub fn try_take(&self) -> Result<Message, TryRecvError> {
         self.receiver.try_recv().map_err(|error| match error {
             async_channel::TryRecvError::Empty => TryRecvError::Empty,
             async_channel::TryRecvError::Closed => TryRecvError::Disconnected,

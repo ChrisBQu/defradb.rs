@@ -1,4 +1,3 @@
-use async_lock::RwLock;
 /// Transaction-aware Multistore for the datastore layer.
 ///
 /// Unlike the storage layer's Multistore which provides store-level access,
@@ -7,15 +6,94 @@ use async_lock::RwLock;
 use async_trait::async_trait;
 use bytes::Bytes;
 use std::sync::Arc;
-use storage::corekv::{Error, IterOptions, Iterator, Reader, Result, Txn, TxnCallback, Writer};
+use storage::corekv::{
+    Error, IterOptions, Iterator, OnCommit, QueuedCallbacks, Reader, Result, Txn, Writer,
+};
 use storage::namespace::Namespace;
 
-/// Shared transaction wrapper allowing multiple namespace views.
+/// One transaction shared by its namespace views.
+///
+/// Reads and writes take `&self` and go straight to the transaction, which
+/// takes them that way: views share it with no lock. A callback registered
+/// through a view waits in a queue, in order ([`QueuedCallbacks`]), until it
+/// is settled into the transaction. A savepoint takes `&mut self` and turning
+/// it back into the transaction takes `self`; only the holder of the one
+/// remaining reference gets either ([`Arc::get_mut`], [`Arc::try_unwrap`]), so
+/// a view still open at that moment is an error, never a wait. Each settles
+/// the queue first, so a savepoint's rollback takes back exactly what was
+/// registered after it, and so does a drop, so a transaction that ends with
+/// its last view still runs the abort callbacks registered through views.
 pub struct SharedTxn {
-    txn: RwLock<Box<dyn Txn>>,
+    /// `None` only once [`into_txn`](Self::into_txn) has taken it.
+    txn: Option<Box<dyn Txn>>,
+    queued: QueuedCallbacks,
 }
 
 impl SharedTxn {
+    fn txn(&self) -> Result<&dyn Txn> {
+        self.txn.as_deref().ok_or(Error::DiscardedTxn)
+    }
+
+    fn txn_mut(&mut self) -> Result<&mut Box<dyn Txn>> {
+        self.txn.as_mut().ok_or(Error::DiscardedTxn)
+    }
+
+    pub(crate) fn set_savepoint(&mut self) -> Result<()> {
+        self.settle()?;
+        self.txn_mut()?.set_savepoint()
+    }
+
+    pub(crate) fn rollback_to_savepoint(&mut self) -> Result<()> {
+        self.settle()?;
+        self.txn_mut()?.rollback_to_savepoint()
+    }
+
+    pub(crate) fn release_savepoint(&mut self) -> Result<()> {
+        self.settle()?;
+        self.txn_mut()?.release_savepoint()
+    }
+
+    /// Hands the callbacks registered through views to the transaction, in
+    /// order.
+    fn settle(&mut self) -> Result<()> {
+        let Some(txn) = self.txn.as_mut() else {
+            return Ok(());
+        };
+        self.queued.settle_into(txn)
+    }
+
+    /// Where callbacks registered through a shared handle wait.
+    pub(crate) fn queued(&self) -> &QueuedCallbacks {
+        &self.queued
+    }
+
+    pub(crate) fn try_into_txn(shared: Arc<Self>) -> Result<Box<dyn Txn>> {
+        let mut shared = Arc::try_unwrap(shared)
+            .map_err(|_| Error::Other("transaction still has namespace references".into()))?;
+        shared.settle()?;
+        shared.txn.take().ok_or(Error::DiscardedTxn)
+    }
+
+    pub async fn merge(&self, namespace: Namespace, key: &[u8], operand: &[u8]) -> Result<()> {
+        self.txn()?
+            .merge_shared(&prefix_key(namespace, key), operand)
+            .await
+    }
+
+    pub async fn append(
+        &self,
+        namespace: Namespace,
+        log: &storage::corekv::AppendLog,
+        entry: &[u8],
+        once_key: Option<&[u8]>,
+    ) -> Result<()> {
+        let log = log.prefixed(&[namespace.prefix()]);
+        let once_key = once_key.map(|key| prefix_key(namespace, key));
+        self.txn()?
+            .append_shared(&log, entry, once_key.as_deref())
+            .await
+    }
+
     /// Create a new shared transaction.
     // `Txn` drops its `Send + Sync` bounds on wasm32 (see `MaybeSendSync`), so
     // there the Arc wraps a non-Send value. That is sound in the
@@ -24,51 +102,48 @@ impl SharedTxn {
     #[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
     pub fn new(txn: Box<dyn Txn>) -> Arc<Self> {
         Arc::new(Self {
-            txn: RwLock::new(txn),
+            queued: QueuedCallbacks::new(txn.is_readonly()),
+            txn: Some(txn),
         })
     }
 
     /// Get a value with namespace prefix.
     pub async fn get(&self, namespace: Namespace, key: &[u8]) -> Result<Option<Bytes>> {
-        let prefixed = prefix_key(namespace, key);
-        let txn = self.txn.read().await;
-        txn.get(&prefixed).await
+        self.txn()?.get(&prefix_key(namespace, key)).await
+    }
+
+    /// Read selected logical parts through the shared engine transaction.
+    pub async fn get_parts(
+        &self,
+        namespace: Namespace,
+        key: &[u8],
+        parts: &[u32],
+    ) -> Result<Option<Bytes>> {
+        self.txn()?
+            .get_parts(&prefix_key(namespace, key), parts)
+            .await
     }
 
     /// Check if a key exists with namespace prefix.
     pub async fn has(&self, namespace: Namespace, key: &[u8]) -> Result<bool> {
-        let prefixed = prefix_key(namespace, key);
-        let txn = self.txn.read().await;
-        txn.has(&prefixed).await
-    }
-
-    /// Existence check that enters the key into the transaction's read set.
-    /// See [`storage::corekv::Reader::has_for_update`].
-    pub async fn has_for_update(&self, namespace: Namespace, key: &[u8]) -> Result<bool> {
-        let prefixed = prefix_key(namespace, key);
-        let txn = self.txn.read().await;
-        txn.has_for_update(&prefixed).await
+        self.txn()?.has(&prefix_key(namespace, key)).await
     }
 
     /// Get value size with namespace prefix.
     pub async fn get_size(&self, namespace: Namespace, key: &[u8]) -> Result<Option<usize>> {
-        let prefixed = prefix_key(namespace, key);
-        let txn = self.txn.read().await;
-        txn.get_size(&prefixed).await
+        self.txn()?.get_size(&prefix_key(namespace, key)).await
     }
 
     /// Set a value with namespace prefix.
     pub async fn set(&self, namespace: Namespace, key: &[u8], value: &[u8]) -> Result<()> {
-        let prefixed = prefix_key(namespace, key);
-        let mut txn = self.txn.write().await;
-        txn.set(&prefixed, value).await
+        self.txn()?
+            .set_shared(&prefix_key(namespace, key), value)
+            .await
     }
 
     /// Delete a key with namespace prefix.
     pub async fn delete(&self, namespace: Namespace, key: &[u8]) -> Result<()> {
-        let prefixed = prefix_key(namespace, key);
-        let mut txn = self.txn.write().await;
-        txn.delete(&prefixed).await
+        self.txn()?.delete_shared(&prefix_key(namespace, key)).await
     }
 
     /// Create an iterator with namespace prefix.
@@ -77,69 +152,80 @@ impl SharedTxn {
         namespace: Namespace,
         opts: IterOptions,
     ) -> Result<Box<dyn Iterator>> {
-        let prefixed_opts = prefix_iter_options(namespace, opts);
-        let txn = self.txn.read().await;
-        let iter = txn.iterator(prefixed_opts).await?;
-        Ok(Box::new(NamespacedIterator { iter, namespace }))
-    }
-
-    pub async fn collection_head_entries(
-        &self,
-        namespace: Namespace,
-        head_prefix: &[u8],
-        marker_prefix: &[u8],
-    ) -> Result<Option<storage::stores::headstore::CollectionHeadEntries>> {
-        let mut entries = self
-            .txn
-            .read()
-            .await
-            .collection_head_entries(
-                &prefix_key(namespace, head_prefix),
-                &prefix_key(namespace, marker_prefix),
-            )
+        let iter = self
+            .txn()?
+            .iterator(prefix_iter_options(namespace, opts))
             .await?;
-        if let Some(entries) = &mut entries {
-            for row in entries.heads.iter_mut().chain(&mut entries.markers) {
-                row.key = unprefix_key(namespace, &row.key)?;
-            }
-        }
-        Ok(entries)
+        Ok(Box::new(NamespacedIterator { iter, namespace }))
     }
 
     /// Get from rootstore (no namespace prefix).
     pub async fn root_get(&self, key: &[u8]) -> Result<Option<Bytes>> {
-        let txn = self.txn.read().await;
-        txn.get(key).await
+        self.txn()?.get(key).await
     }
 
     /// Set in rootstore (no namespace prefix).
     pub async fn root_set(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        let mut txn = self.txn.write().await;
-        txn.set(key, value).await
+        self.txn()?.set_shared(key, value).await
     }
 
     /// Delete from rootstore (no namespace prefix).
     pub async fn root_delete(&self, key: &[u8]) -> Result<()> {
-        let mut txn = self.txn.write().await;
-        txn.delete(key).await
+        self.txn()?.delete_shared(key).await
     }
 
-    /// Register a callback to run only if the transaction commits.
-    pub async fn on_success(&self, callback: TxnCallback) {
-        self.txn.write().await.on_success(callback);
+    /// Register `callback` to run once if the transaction commits. A
+    /// read-only transaction refuses ordered work.
+    pub async fn on_commit(&self, callback: OnCommit) -> Result<()> {
+        self.queued.on_commit(callback)
     }
 
     /// Check if readonly.
     pub async fn is_readonly(&self) -> bool {
-        let txn = self.txn.read().await;
-        txn.is_readonly()
+        self.txn.as_ref().is_none_or(|txn| txn.is_readonly())
     }
 
-    /// Consume self and return the underlying transaction.
-    ///
-    /// This takes ownership of the inner RwLock and extracts the transaction.
-    pub fn into_txn(self) -> Box<dyn Txn> {
-        self.txn.into_inner()
+    /// Consume self and return the underlying transaction, with the callbacks
+    /// registered through views settled into it.
+    pub fn into_txn(mut self) -> Box<dyn Txn> {
+        if let Err(error) = self.settle() {
+            // Unreachable: each callback was checked against this
+            // transaction when it was registered.
+            tracing::error!(%error, "a callback registered through a view was refused");
+        }
+        match self.txn.take() {
+            Some(txn) => txn,
+            // `txn` is taken only here, and this consumes `self`.
+            None => unreachable!("a shared transaction is turned back into its transaction once"),
+        }
+    }
+}
+
+impl Drop for SharedTxn {
+    /// Ending with its last view, the transaction still gets the callbacks
+    /// registered through views: its abort callbacks run when it drops.
+    fn drop(&mut self) {
+        if let Err(error) = self.settle() {
+            tracing::error!(%error, "a callback registered through a view was refused");
+        }
+    }
+}
+
+/// A [`NamespaceView`] that does not keep its transaction in use.
+#[derive(Clone)]
+pub struct WeakNamespaceView {
+    txn: std::sync::Weak<SharedTxn>,
+    namespace: Namespace,
+}
+
+impl WeakNamespaceView {
+    /// The view, while its transaction has not been committed, rolled back or
+    /// dropped.
+    pub fn upgrade(&self) -> Option<NamespaceView> {
+        self.txn.upgrade().map(|txn| NamespaceView {
+            txn,
+            namespace: self.namespace,
+        })
     }
 }
 
@@ -150,6 +236,19 @@ pub struct NamespaceView {
 }
 
 impl NamespaceView {
+    pub async fn merge(&self, key: &[u8], operand: &[u8]) -> Result<()> {
+        self.txn.merge(self.namespace, key, operand).await
+    }
+
+    pub async fn append(
+        &self,
+        log: &storage::corekv::AppendLog,
+        entry: &[u8],
+        once_key: Option<&[u8]>,
+    ) -> Result<()> {
+        self.txn.append(self.namespace, log, entry, once_key).await
+    }
+
     /// Create a new namespace view.
     pub fn new(txn: Arc<SharedTxn>, namespace: Namespace) -> Self {
         Self { txn, namespace }
@@ -166,20 +265,28 @@ impl NamespaceView {
         }
     }
 
+    /// A handle to this view that does not keep the transaction in use, so
+    /// the transaction can still commit or roll back while it is held.
+    pub fn downgrade(&self) -> WeakNamespaceView {
+        WeakNamespaceView {
+            txn: Arc::downgrade(&self.txn),
+            namespace: self.namespace,
+        }
+    }
+
     /// Get a value.
     pub async fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         self.txn.get(self.namespace, key).await
     }
 
+    /// Read logical parts while retaining this view's namespace.
+    pub async fn get_parts(&self, key: &[u8], parts: &[u32]) -> Result<Option<Bytes>> {
+        self.txn.get_parts(self.namespace, key, parts).await
+    }
+
     /// Check if a key exists.
     pub async fn has(&self, key: &[u8]) -> Result<bool> {
         self.txn.has(self.namespace, key).await
-    }
-
-    /// Existence check that enters the key into the transaction's read set.
-    /// See [`storage::corekv::Reader::has_for_update`].
-    pub async fn has_for_update(&self, key: &[u8]) -> Result<bool> {
-        self.txn.has_for_update(self.namespace, key).await
     }
 
     /// Get value size.
@@ -202,9 +309,9 @@ impl NamespaceView {
         self.txn.iterator(self.namespace, opts).await
     }
 
-    /// Register a callback to run only if the shared transaction commits.
-    pub async fn on_success(&self, callback: TxnCallback) {
-        self.txn.on_success(callback).await
+    /// Register `callback` to run once if the shared transaction commits.
+    pub async fn on_commit(&self, callback: OnCommit) -> Result<()> {
+        self.txn.on_commit(callback).await
     }
 }
 
@@ -227,12 +334,12 @@ impl Reader for NamespaceView {
         self.txn.get(self.namespace, key).await
     }
 
-    async fn has(&self, key: &[u8]) -> Result<bool> {
-        self.txn.has(self.namespace, key).await
+    async fn get_parts(&self, key: &[u8], parts: &[u32]) -> Result<Option<Bytes>> {
+        self.txn.get_parts(self.namespace, key, parts).await
     }
 
-    async fn has_for_update(&self, key: &[u8]) -> Result<bool> {
-        self.txn.has_for_update(self.namespace, key).await
+    async fn has(&self, key: &[u8]) -> Result<bool> {
+        self.txn.has(self.namespace, key).await
     }
 
     async fn get_size(&self, key: &[u8]) -> Result<Option<usize>> {
@@ -242,30 +349,32 @@ impl Reader for NamespaceView {
     async fn iterator(&self, opts: IterOptions) -> Result<Box<dyn Iterator>> {
         self.txn.iterator(self.namespace, opts).await
     }
-
-    async fn collection_head_entries(
-        &self,
-        head_prefix: &[u8],
-        marker_prefix: &[u8],
-    ) -> Result<Option<storage::stores::headstore::CollectionHeadEntries>> {
-        self.txn
-            .collection_head_entries(self.namespace, head_prefix, marker_prefix)
-            .await
-    }
 }
 
 /// Implement Writer trait for NamespaceView to enable index operations.
 ///
-/// The `&mut self` signature is required by the trait, but NamespaceView uses
-/// interior mutability (Arc<RwLock>) so actual mutation is handled internally.
+/// Writes go through the shared transaction, which takes them by `&self`.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Writer for NamespaceView {
-    async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+    async fn merge_shared(&self, key: &[u8], operand: &[u8]) -> Result<()> {
+        self.txn.merge(self.namespace, key, operand).await
+    }
+
+    async fn append_shared(
+        &self,
+        log: &storage::corekv::AppendLog,
+        entry: &[u8],
+        once_key: Option<&[u8]>,
+    ) -> Result<()> {
+        self.txn.append(self.namespace, log, entry, once_key).await
+    }
+
+    async fn set_shared(&self, key: &[u8], value: &[u8]) -> Result<()> {
         self.txn.set(self.namespace, key, value).await
     }
 
-    async fn delete(&mut self, key: &[u8]) -> Result<()> {
+    async fn delete_shared(&self, key: &[u8]) -> Result<()> {
         self.txn.delete(self.namespace, key).await
     }
 }
@@ -323,25 +432,13 @@ fn unprefix_key(namespace: Namespace, key: &[u8]) -> Result<Vec<u8>> {
 
 /// Helper to prefix iterator options.
 fn prefix_iter_options(namespace: Namespace, opts: IterOptions) -> IterOptions {
-    let mut prefixed_opts = IterOptions::new();
-
-    if let Some(prefix) = opts.prefix() {
-        prefixed_opts = prefixed_opts.with_prefix(prefix_key(namespace, prefix));
-    } else if opts.start().is_none() && opts.end().is_none() {
-        prefixed_opts = prefixed_opts.with_prefix(vec![namespace.prefix()]);
+    let unbounded = opts.prefix().is_none() && opts.start().is_none() && opts.end().is_none();
+    let prefixed_opts = opts.map_keys(|key| prefix_key(namespace, key));
+    if unbounded {
+        prefixed_opts.with_prefix(vec![namespace.prefix()])
+    } else {
+        prefixed_opts
     }
-
-    if let Some(start) = opts.start() {
-        prefixed_opts = prefixed_opts.with_start(prefix_key(namespace, start));
-    }
-    if let Some(end) = opts.end() {
-        prefixed_opts = prefixed_opts.with_end(prefix_key(namespace, end));
-    }
-    prefixed_opts = prefixed_opts
-        .with_reverse(opts.reverse())
-        .with_keys_only(opts.keys_only());
-
-    prefixed_opts
 }
 
 /// Iterator that strips namespace prefix from keys.

@@ -9,12 +9,13 @@ pub(crate) mod shared;
 pub mod regolith;
 
 // Public rather than `cfg(test)`: the suite is the backend contract, and an
-// integration test links the library without its test cfg. Gated off wasm
-// only because it drives concurrent transactions.
-#[cfg(not(target_arch = "wasm32"))]
+// integration test links the library without its test cfg, through the
+// `test-suite` feature. Gated off wasm because it drives concurrent
+// transactions from tokio tasks.
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-suite")))]
 pub mod test_suite;
 
-pub use regolith::{RegolithStore, RegolithStoreOptions, RegolithTxn};
-pub use shared::{
-    CallbackCounts, DurabilityMode, TransactionStatsHandle, TransactionStatsSnapshot,
-};
+#[cfg(not(target_arch = "wasm32"))]
+pub use regolith::start_pool;
+pub use regolith::{with_worker_io, RegolithStore, RegolithStoreOptions, RegolithTxn, WorkerIo};
+pub use shared::{DurabilityMode, TransactionStatsHandle, TransactionStatsSnapshot};

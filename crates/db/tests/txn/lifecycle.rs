@@ -9,7 +9,7 @@ use db::Error;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use storage::corekv::Key;
+use storage::corekv::{Key, OnAbort, OnCommit};
 use storage::keys::systemstore::CollectionID;
 use storage::keys::systemstore::CollectionIDSequenceKey;
 use storage::RegolithStore;
@@ -187,13 +187,13 @@ async fn test_db_txn_accessor_returns_all_stores() {
 async fn test_db_txn_callbacks_executed_on_commit() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
-    let mut txn = new_txn(basic_txn);
+    let txn = new_txn(basic_txn);
 
     let success_called = Arc::new(AtomicBool::new(false));
     let success_clone = success_called.clone();
-    txn.on_success(Box::new(move || {
+    txn.on_commit(OnCommit::Sync(Box::new(move || {
         success_clone.store(true, Ordering::SeqCst);
-    }))
+    })))
     .unwrap();
 
     txn.commit().await.unwrap();
@@ -204,13 +204,13 @@ async fn test_db_txn_callbacks_executed_on_commit() {
 async fn test_db_txn_callbacks_executed_on_discard() {
     let store = Arc::new(RegolithStore::in_memory().unwrap());
     let basic_txn = BasicTxn::new(&*store, 1, false).await.unwrap();
-    let mut txn = new_txn(basic_txn);
+    let txn = new_txn(basic_txn);
 
     let discard_called = Arc::new(AtomicBool::new(false));
     let discard_clone = discard_called.clone();
-    txn.on_discard(Box::new(move || {
+    txn.on_abort(OnAbort::Sync(Box::new(move || {
         discard_clone.store(true, Ordering::SeqCst);
-    }))
+    })))
     .unwrap();
 
     txn.discard().unwrap();
@@ -277,10 +277,7 @@ async fn test_persisted_collection_root_id_allocation_conflicts_instead_of_dupli
 
     let err = txn2.commit().await.unwrap_err();
     assert!(
-        matches!(
-            err,
-            Error::Datastore(datastore::Error::Storage(storage::Error::TxnConflict))
-        ),
+        err.is_txn_conflict(),
         "expected write-write conflict, got: {err}"
     );
 

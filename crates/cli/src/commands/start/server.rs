@@ -29,6 +29,8 @@ impl Node {
         zanzibar_store: Arc<dyn acp::ZanzibarStore>,
         node_identity: Option<Arc<identity::RawIdentity>>,
         se_key: Option<[u8; 32]>,
+        pool: &workers::Pool,
+        edge: &edge::Edge,
     ) -> Result<ServerSetup> {
         let user_did = match &user_identity {
             Some(identity) => Some(identity.did().map_err(|e| {
@@ -82,8 +84,9 @@ impl Node {
             info!("Stored node identity signing config for DID {}", did);
         }
 
-        let mut db_options =
-            db::DbOptions::new().with_max_txn_retries(config.datastore.max_txn_retries);
+        let mut db_options = db::DbOptions::new()
+            .with_max_txn_retries(config.datastore.max_txn_retries)
+            .with_pool(pool.clone());
         if let Some(identity) = node_identity.as_ref() {
             db_options = db_options.with_node_identity_arc(identity.clone());
             info!("Database configured with node identity");
@@ -123,6 +126,7 @@ impl Node {
         let event_bus: Arc<dyn events::Bus> = Arc::new(events::ChannelBus::new());
         database.set_event_bus(event_bus.clone());
         info!("Event bus configured for subscriptions");
+        database.set_network(edge.clone());
 
         let database = Arc::new(database);
 
@@ -142,9 +146,11 @@ impl Node {
             config,
             identity_key_bytes.as_deref(),
             acp_store,
+            store.clone(),
             zanzibar_store.clone(),
             event_bus.clone(),
             db::node_access_checker(database.clone()),
+            edge,
         )
         .await?;
 
@@ -157,6 +163,7 @@ impl Node {
             node_identity,
             se_key,
             acp_setup.document_acp.clone(),
+            edge,
         )
         .await?;
 
@@ -167,10 +174,16 @@ impl Node {
             set_acp(acp_setup.document_acp.clone());
         }
 
-        let nac_adapter = Self::setup_nac_manager(config, user_did.as_ref()).await?;
+        let nac_adapter = Self::setup_nac_manager(
+            config,
+            user_did.as_ref(),
+            database.store().clone(),
+            database.pool(),
+        )
+        .await?;
 
         // Wire the NAC manager into the DB so DB-layer `check_node_access` calls
-        // go live (first-call-wins via the DB's OnceLock). Without this the CLI
+        // go live (first-call-wins via the DB's OnceCell). Without this the CLI
         // server's DB-layer NAC checks are inert.
         if let Some(adapter) = nac_adapter.as_ref() {
             database.set_nac_manager(adapter.nac_manager());
@@ -210,7 +223,9 @@ impl Node {
             // the blockstore Arc (set_kms_blockstore) so the adapter can hold a
             // Weak and avoid the lock-pinning cycle (#976) while sharing the cache.
             let kms_blockstore = database.set_kms_blockstore(Arc::new(
-                blockstore::DefraBlockstore::new(store.clone(), true),
+                blockstore::DefraBlockstore::new(store.clone(), true)
+                    .with_max_txn_retries(database.options().max_txn_retries())
+                    .placed_on(database.pool()),
             ));
             let enc_block_store: Arc<dyn kms::EncBlockStore> =
                 Arc::new(db::DbEncBlockStore::new(database.clone(), kms_blockstore));
@@ -238,12 +253,13 @@ impl Node {
                 Some(t) => vec![t],
                 None => vec![],
             };
-            let kms_service: Arc<dyn kms::KmsService> = Arc::new(kms::DefraKms::new(
+            let kms_service: Arc<dyn kms::KmsService> = Arc::new(kms::DefraKms::with_inputs(
                 kms_store,
                 transports,
                 policy as Arc<dyn kms::AccessPolicy>,
                 Arc::new(db::DbBlockDocIDResolver::new(database.clone())),
                 node_did,
+                kms::KmsInputs::on(edge),
             ));
             kms_service.set_local_peer_id(p2p_setup.local_peer_id.clone());
 
@@ -325,10 +341,11 @@ impl Node {
             zanzibar_store,
             user_did: user_did.as_ref(),
             node_identity_did: node_did.map(|did| did.to_string()),
+            edge: edge.clone(),
         })?;
         #[cfg(feature = "postgres")]
         let pg_server = Self::build_pg_server(
-            database,
+            database.clone(),
             config,
             &query_setup,
             &acp_setup,
@@ -336,6 +353,7 @@ impl Node {
         )?;
 
         Ok(ServerSetup {
+            database,
             p2p_handle: p2p_setup.host_handle,
             p2p_tasks: p2p_setup.p2p_tasks,
             downsample_task,

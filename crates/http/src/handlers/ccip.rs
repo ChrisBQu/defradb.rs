@@ -86,6 +86,7 @@ async fn execute(
             operation_name: request.operation_name,
             variables: request.variables,
             identity: identity.did().cloned(),
+            context: Default::default(),
         },
     )
     .await;
@@ -119,7 +120,7 @@ mod tests {
     }
 
     async fn response(method: Method, uri: &str, body: Body) -> axum::response::Response {
-        create_router(Arc::new(MockQueryExecutor::new()))
+        create_router(Arc::new(MockQueryExecutor::new()), edge::testing::edge())
             .oneshot(
                 Request::builder()
                     .method(method)

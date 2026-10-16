@@ -247,6 +247,16 @@ impl Lww {
         Ok(MergeResult::Applied)
     }
 
+    /// Read the winning raw bytes, treating an absent value as its tombstone.
+    /// Storage failures still abort the transaction.
+    pub async fn value_or_tombstone(&self, reader: &dyn Reader) -> Result<Bytes> {
+        reader
+            .get(&self.value_key)
+            .await
+            .map(|value| value.unwrap_or_default())
+            .map_err(|error| Error::Storage(error.to_string()))
+    }
+
     /// Internal method to get current value
     async fn get_value_internal(&self, reader: &dyn Reader) -> Result<Bytes> {
         reader

@@ -11,6 +11,8 @@ repository.workspace = true
 bench = false
 
 [dependencies]
+# Query deadlines on the worker pool's deadline queue.
+workers = { path = "../workers" }
 bytes.workspace = true
 web-time.workspace = true
 
@@ -21,6 +23,9 @@ rapidhash.workspace = true
 kovan.workspace = true
 kovan-map.workspace = true
 kovan-queue.workspace = true
+regolith.workspace = true
+# Input-wait metrics share the remote-input histogram and stopwatch.
+inputs = { path = "../inputs" }
 
 # Internal crates
 cursor = { path = "../cursor" }
@@ -34,7 +39,6 @@ lens = { path = "../lens", default-features = false }
 
 # Async runtime
 async-trait.workspace = true
-async-lock.workspace = true
 futures.workspace = true
 sync_wrapper = "1"
 
@@ -75,6 +79,7 @@ chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1.35", default-features = false, features = ["rt", "time"] }
 
 [dev-dependencies]
+defra-core = { path = "../defra-core", features = ["ambient"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 
 [lints]

@@ -13,7 +13,7 @@ mod operations;
 use std::sync::Arc;
 use storage::corekv::MaybeSendSync;
 
-use async_lock::RwLock;
+use crate::policy_cache::PolicyCache;
 use async_trait::async_trait;
 use identity::Did;
 use kovan::{Atom, AtomOption};
@@ -23,7 +23,7 @@ use crate::nac::permission::NodePermission;
 use crate::nac::policy::{
     validate_node_policy, NODE_POLICY_ID, NODE_RESOURCE_NAME, OWNER_RELATION,
 };
-use zanzibar::{PermissionEngine, Subject, ZanzibarStore};
+use zanzibar::{Subject, ZanzibarStore};
 
 /// The fixed object ID for the node resource.
 /// There's only one "node" instance, so we use a constant ID.
@@ -71,21 +71,46 @@ impl std::fmt::Display for NacStatus {
 ///
 /// Uses a local Zanzibar store to manage node-level permissions.
 /// Unlike DAC, NAC is always local (no Vera option).
-pub struct NodeACP<S: ZanzibarStore + Send + Sync + 'static> {
+pub struct NodeACP<S: ZanzibarStore + ?Sized + 'static> {
     store: Arc<S>,
-    engine: RwLock<PermissionEngine<S>>,
+    engine: PolicyCache<S>,
     status: Atom<NacStatus>,
     owner: AtomOption<Did>,
 }
 
-impl<S: ZanzibarStore + Send + Sync + 'static> NodeACP<S> {
+impl<S: ZanzibarStore + ?Sized + 'static> NodeACP<S> {
+    pub async fn begin_scope(
+        &self,
+        readonly: bool,
+    ) -> zanzibar::error::Result<Option<Box<dyn zanzibar::store::ZanzibarScope>>> {
+        self.store.begin_scope(readonly).await
+    }
+
+    pub fn supports_transactions(&self) -> bool {
+        self.store.supports_transactions()
+    }
+
     /// Create a new NodeACP with the given store.
     ///
     /// Starts in NotConfigured status. Call `enable()` to activate.
     pub fn new(store: Arc<S>) -> Self {
         Self {
             store: store.clone(),
-            engine: RwLock::new(PermissionEngine::new(store)),
+            engine: PolicyCache::new(store),
+            status: Atom::new(NacStatus::NotConfigured),
+            owner: AtomOption::none(),
+        }
+    }
+
+    /// A NodeACP over `store` (a transaction or a scope) that shares this
+    /// one's policy snapshot. Its state is unknown until [`load`](Self::load).
+    pub fn scoped<T>(&self, store: Arc<T>) -> NodeACP<T>
+    where
+        T: ZanzibarStore + ?Sized + 'static,
+    {
+        NodeACP {
+            engine: self.engine.sharing(store.clone()),
+            store,
             status: Atom::new(NacStatus::NotConfigured),
             owner: AtomOption::none(),
         }
@@ -93,14 +118,24 @@ impl<S: ZanzibarStore + Send + Sync + 'static> NodeACP<S> {
 
     /// Load existing NAC state from the store.
     ///
-    /// Should be called during startup to restore NAC state.
+    /// Should be called during startup to restore NAC state. Whether NAC is
+    /// configured, its owner and its disabled flag are read from the store;
+    /// the policy body is parsed only when the shared snapshot lacks it. Only
+    /// `enable` writes that body, always [`create_node_policy`], so publishing
+    /// what a scope read cannot put a different body in the snapshot.
+    ///
+    /// [`create_node_policy`]: crate::nac::create_node_policy
     pub async fn load(&self) -> Result<()> {
-        if let Some(policy) = self.store.get_policy(NODE_POLICY_ID).await? {
+        let configured = if self.engine.snapshot().lookup.has_policy(NODE_POLICY_ID) {
+            self.store.has_policy(NODE_POLICY_ID).await?
+        } else if let Some(policy) = self.store.get_policy(NODE_POLICY_ID).await? {
             validate_node_policy(&policy).map_err(Error::InvalidPolicy)?;
-
-            let mut engine = self.engine.write().await;
-            engine.add_policy(&policy);
-
+            self.engine.edit(|engine| engine.add_policy(&policy));
+            true
+        } else {
+            false
+        };
+        if configured {
             let subjects = self
                 .store
                 .get_relation_subjects(
@@ -130,7 +165,7 @@ impl<S: ZanzibarStore + Send + Sync + 'static> NodeACP<S> {
                     self.status.store(NacStatus::DisabledTemporarily);
                 }
 
-                tracing::info!(
+                tracing::debug!(
                     target: "nac::audit",
                     event = "nac_loaded",
                     owner = %owner_did,
@@ -138,6 +173,9 @@ impl<S: ZanzibarStore + Send + Sync + 'static> NodeACP<S> {
                     "NAC state loaded from store"
                 );
             }
+        } else {
+            self.owner.store_none();
+            self.status.store(NacStatus::NotConfigured);
         }
 
         Ok(())
@@ -165,7 +203,7 @@ pub trait NodeAcpOperations: MaybeSendSync {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<S: ZanzibarStore + Send + Sync + 'static> NodeAcpOperations for NodeACP<S> {
+impl<S: ZanzibarStore + ?Sized + 'static> NodeAcpOperations for NodeACP<S> {
     async fn check_permission(&self, identity: &Did, permission: NodePermission) -> Result<bool> {
         NodeACP::check_permission(self, identity, permission).await
     }

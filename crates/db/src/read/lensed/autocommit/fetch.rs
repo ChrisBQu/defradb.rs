@@ -1,55 +1,19 @@
 //! DocFetcher trait method implementations (non-index-scan).
 
 use bytes::Bytes;
-use rapidhash::RapidHashMap;
 
-use async_lock::Mutex as TokioMutex;
 use document::Document;
-use lens::TargetedHistoryLink;
 use query::fetcher::CommitsQueryOptions;
 use query::runner::FetchByIdsResult;
 use storage::corekv::Store;
 use tracing::{debug, trace};
 
-use crate::collection::Collection;
 use crate::read::commits::{CommitsFetcher, CommitsQueryOptions as DbCommitsOptions};
 use crate::read::versioned::VersionedFetcher;
-use crate::txn::DbTxn;
 
-use super::migration::MigrationWriteBack;
 use super::LensedAutoCommitFetcher;
 
 impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
-    pub(super) async fn process_document_with_bounded_write_back(
-        &self,
-        doc: Document,
-        collection: &Collection,
-        migration_generation: u64,
-        has_migrations: bool,
-        preloaded_history: &Option<RapidHashMap<String, TargetedHistoryLink>>,
-        write_backs: &mut Vec<MigrationWriteBack>,
-    ) -> query::error::Result<Document> {
-        let outcome = self
-            .process_document(doc, collection, has_migrations, preloaded_history)
-            .await?;
-
-        if self.write_back_migrations {
-            if let Some(source_document) = outcome.source_document {
-                write_backs.push(MigrationWriteBack {
-                    source_document,
-                    migrated_document: outcome.document.clone(),
-                    migration_generation,
-                });
-                if write_backs.len() >= self.db.options().migration_write_back_batch_size() {
-                    self.persist_migrated_documents(collection, std::mem::take(write_backs))
-                        .await?;
-                }
-            }
-        }
-
-        Ok(outcome.document)
-    }
-
     pub(super) async fn get_all_impl(
         &self,
         collection_name: &str,
@@ -60,7 +24,7 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
             .map_err(|e| query::error::QueryError::execution(format!("db error: {}", e)))?
             .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
 
-        let (migration_generation, has_migrations, preloaded_history) =
+        let (_, has_migrations, preloaded_history) =
             self.load_migration_context(&collection).await?;
 
         let target_version_id = &collection.schema().version_id;
@@ -105,23 +69,13 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
         );
 
         let mut processed_docs = Vec::with_capacity(docs.len());
-        let mut write_backs =
-            Vec::with_capacity(self.db.options().migration_write_back_batch_size());
         for doc in docs {
             let processed = self
-                .process_document_with_bounded_write_back(
-                    doc,
-                    &collection,
-                    migration_generation,
-                    has_migrations,
-                    &preloaded_history,
-                    &mut write_backs,
-                )
-                .await?;
+                .process_document(doc, &collection, has_migrations, &preloaded_history)
+                .await?
+                .document;
             processed_docs.push(processed);
         }
-        self.persist_migrated_documents(&collection, write_backs)
-            .await?;
 
         if !processed_docs.is_empty() {
             debug!(
@@ -145,7 +99,7 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
             .map_err(|e| query::error::QueryError::execution(format!("db error: {}", e)))?
             .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
 
-        let (migration_generation, has_migrations, preloaded_history) =
+        let (_, has_migrations, preloaded_history) =
             self.load_migration_context(&collection).await?;
 
         let txn = self.db.new_txn(true).await.map_err(|e| {
@@ -174,23 +128,13 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
         })?;
         let docs_with_status = read_result?;
         let mut processed_docs = Vec::with_capacity(docs_with_status.len());
-        let mut write_backs =
-            Vec::with_capacity(self.db.options().migration_write_back_batch_size());
         for (doc, is_deleted) in docs_with_status {
             let processed = self
-                .process_document_with_bounded_write_back(
-                    doc,
-                    &collection,
-                    migration_generation,
-                    has_migrations,
-                    &preloaded_history,
-                    &mut write_backs,
-                )
-                .await?;
+                .process_document(doc, &collection, has_migrations, &preloaded_history)
+                .await?
+                .document;
             processed_docs.push((processed, is_deleted));
         }
-        self.persist_migrated_documents(&collection, write_backs)
-            .await?;
 
         Ok(processed_docs)
     }
@@ -206,7 +150,7 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
             .map_err(|e| query::error::QueryError::execution(format!("db error: {}", e)))?
             .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
 
-        let (migration_generation, has_migrations, preloaded_history) =
+        let (_, has_migrations, preloaded_history) =
             self.load_migration_context(&collection).await?;
 
         let txn = self.db.new_txn(true).await.map_err(|e| {
@@ -258,23 +202,13 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
         })?;
         let (docs, missing_ids) = read_result?;
         let mut processed_docs = Vec::with_capacity(docs.len());
-        let mut write_backs =
-            Vec::with_capacity(self.db.options().migration_write_back_batch_size());
         for doc in docs {
             let processed = self
-                .process_document_with_bounded_write_back(
-                    doc,
-                    &collection,
-                    migration_generation,
-                    has_migrations,
-                    &preloaded_history,
-                    &mut write_backs,
-                )
-                .await?;
+                .process_document(doc, &collection, has_migrations, &preloaded_history)
+                .await?
+                .document;
             processed_docs.push(processed);
         }
-        self.persist_migrated_documents(&collection, write_backs)
-            .await?;
 
         Ok(FetchByIdsResult::partial(processed_docs, missing_ids))
     }
@@ -291,7 +225,7 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
             .map_err(|e| query::error::QueryError::execution(format!("db error: {}", e)))?
             .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
 
-        let (migration_generation, has_migrations, preloaded_history) =
+        let (_, has_migrations, preloaded_history) =
             self.load_migration_context(&collection).await?;
 
         let txn = self.db.new_txn(true).await.map_err(|e| {
@@ -320,19 +254,11 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
         })?;
         let all_docs = read_result?;
         let mut processed_docs = Vec::new();
-        let mut write_backs =
-            Vec::with_capacity(self.db.options().migration_write_back_batch_size());
         for doc in all_docs {
             let processed = self
-                .process_document_with_bounded_write_back(
-                    doc,
-                    &collection,
-                    migration_generation,
-                    has_migrations,
-                    &preloaded_history,
-                    &mut write_backs,
-                )
-                .await?;
+                .process_document(doc, &collection, has_migrations, &preloaded_history)
+                .await?
+                .document;
             let is_match = processed
                 .get(field_name)
                 .and_then(|v| v.as_str())
@@ -341,8 +267,6 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
                 processed_docs.push(processed);
             }
         }
-        self.persist_migrated_documents(&collection, write_backs)
-            .await?;
 
         Ok(processed_docs)
     }
@@ -351,13 +275,6 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
         &self,
         options: &CommitsQueryOptions,
     ) -> query::error::Result<Vec<Document>> {
-        let txn = self.db.new_txn(true).await.map_err(|e| {
-            query::error::QueryError::execution(format!("failed to create txn: {}", e))
-        })?;
-
-        let txn_holder: std::sync::Arc<TokioMutex<Option<DbTxn<S>>>> =
-            std::sync::Arc::new(TokioMutex::new(Some(txn)));
-
         let db_options = DbCommitsOptions {
             doc_id: options.doc_id.clone(),
             cid: options.cid.clone(),
@@ -367,19 +284,15 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
             field_name: options.field_name.clone(),
         };
 
-        let commits_fetcher = CommitsFetcher::new(txn_holder.clone());
-        let result = commits_fetcher
-            .fetch_commits(&db_options)
+        self.db
+            .read_lent(
+                |txn| async move { CommitsFetcher::new(txn).fetch_commits(&db_options).await },
+            )
             .await
             .map_err(|e| {
-                query::error::QueryError::execution(format!("commits fetch error: {}", e))
-            });
-
-        if let Some(txn) = txn_holder.lock().await.take() {
-            let _ = txn.discard();
-        }
-
-        result
+                query::error::QueryError::execution(format!("failed to create txn: {}", e))
+            })?
+            .map_err(|e| query::error::QueryError::execution(format!("commits fetch error: {}", e)))
     }
 
     pub(super) async fn get_document_at_cid_impl(
@@ -388,25 +301,18 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
         expected_doc_id: Option<&str>,
         caller_identity: Option<&identity::Did>,
     ) -> query::error::Result<Document> {
-        let txn = self.db.new_txn(true).await.map_err(|e| {
-            query::error::QueryError::execution(format!("failed to create txn: {}", e))
-        })?;
-
-        let txn_holder: std::sync::Arc<TokioMutex<Option<DbTxn<S>>>> =
-            std::sync::Arc::new(TokioMutex::new(Some(txn)));
-
-        let versioned_fetcher =
-            VersionedFetcher::with_kms(txn_holder.clone(), self.db.kms(), caller_identity.cloned());
-        let result = versioned_fetcher
-            .get_document_at_cid(cid, expected_doc_id)
+        let kms = self.db.kms();
+        self.db
+            .read_lent(|txn| async move {
+                VersionedFetcher::with_kms(Some(txn), kms, caller_identity.cloned())
+                    .get_document_at_cid(cid, expected_doc_id)
+                    .await
+            })
             .await
-            .map_err(|e| query::error::QueryError::execution(e.to_string()));
-
-        if let Some(txn) = txn_holder.lock().await.take() {
-            let _ = txn.discard();
-        }
-
-        result
+            .map_err(|e| {
+                query::error::QueryError::execution(format!("failed to create txn: {}", e))
+            })?
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))
     }
 
     pub(super) async fn get_documents_at_cid_impl(
@@ -416,25 +322,18 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
         expected_doc_id: Option<&str>,
         caller_identity: Option<&identity::Did>,
     ) -> query::error::Result<Vec<Document>> {
-        let txn = self.db.new_txn(true).await.map_err(|e| {
-            query::error::QueryError::execution(format!("failed to create txn: {}", e))
-        })?;
-
-        let txn_holder: std::sync::Arc<TokioMutex<Option<DbTxn<S>>>> =
-            std::sync::Arc::new(TokioMutex::new(Some(txn)));
-
-        let versioned_fetcher =
-            VersionedFetcher::with_kms(txn_holder.clone(), self.db.kms(), caller_identity.cloned());
-        let result = versioned_fetcher
-            .get_documents_at_cid(cid, expected_doc_id, Some(collection_short_id))
+        let kms = self.db.kms();
+        self.db
+            .read_lent(|txn| async move {
+                VersionedFetcher::with_kms(Some(txn), kms, caller_identity.cloned())
+                    .get_documents_at_cid(cid, expected_doc_id, Some(collection_short_id))
+                    .await
+            })
             .await
-            .map_err(|e| query::error::QueryError::execution(e.to_string()));
-
-        if let Some(txn) = txn_holder.lock().await.take() {
-            let _ = txn.discard();
-        }
-
-        result
+            .map_err(|e| {
+                query::error::QueryError::execution(format!("failed to create txn: {}", e))
+            })?
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))
     }
 
     pub(super) async fn get_view_cache_items_impl(

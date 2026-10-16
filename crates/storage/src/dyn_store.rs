@@ -9,7 +9,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::corekv::{private, Result, Store, Txn};
+use crate::corekv::{
+    private, Result, RetryAttempt, RetryAttemptError, RetryAttemptValue, RetryOptions, Store, Txn,
+};
 
 /// A [`Store`] that erases the concrete backend behind `Arc<dyn Store>`.
 #[derive(Clone)]
@@ -28,6 +30,10 @@ impl private::Sealed for DynStore {}
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Store for DynStore {
+    async fn allocate(&self, key: &[u8], count: u64) -> Result<std::ops::Range<u64>> {
+        self.inner.allocate(key, count).await
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     fn transaction_stats_handle(&self) -> Option<crate::backends::TransactionStatsHandle> {
         self.inner.transaction_stats_handle()
@@ -35,6 +41,14 @@ impl Store for DynStore {
 
     async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>> {
         self.inner.new_txn(readonly).await
+    }
+
+    async fn transact_retry(
+        &self,
+        options: RetryOptions,
+        attempt: RetryAttempt,
+    ) -> std::result::Result<RetryAttemptValue, RetryAttemptError> {
+        self.inner.transact_retry(options, attempt).await
     }
 
     async fn close(&self) -> Result<()> {

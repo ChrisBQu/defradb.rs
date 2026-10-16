@@ -1,21 +1,20 @@
 //! Lensed auto-committing document fetcher.
 //!
 //! This fetcher combines auto-commit transaction management with lens migrations.
-//! Documents are automatically migrated during fetch when migrations are registered.
+//! Registered lenses transform returned values; reads never persist those transformations.
 
 mod fetch;
 pub mod migration;
+mod migration_cache;
 mod scan;
 pub mod stream;
 mod vector;
 
 use bytes::Bytes;
-use rapidhash::RapidHashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use document::Document;
-use lens::TargetedHistoryLink;
 use query::fetcher::CommitsQueryOptions;
 use query::planner::index_selection::IndexScanParams;
 use query::runner::{DocFetcher, FetchByIdsResult};
@@ -23,14 +22,7 @@ use storage::corekv::Store;
 
 use crate::database::DB;
 
-/// Cached migration context for a collection.
-type MigrationContext = (bool, Option<RapidHashMap<String, TargetedHistoryLink>>);
-
-#[derive(Default)]
-struct MigrationCache {
-    generation: u64,
-    contexts: RapidHashMap<String, MigrationContext>,
-}
+use migration_cache::MigrationCache;
 
 /// Document fetcher that auto-commits and applies lens migrations.
 ///
@@ -38,11 +30,9 @@ struct MigrationCache {
 /// migration support from LensedDocFetcher.
 pub struct LensedAutoCommitFetcher<S: Store> {
     db: Arc<DB<S>>,
-    write_back_migrations: bool,
-    /// Cache of migration contexts keyed by `"{collection_id}:{version_id}"`.
-    /// The full cache is invalidated whenever the committed migration graph's
-    /// generation changes.
-    migration_cache: Mutex<MigrationCache>,
+    /// Migration contexts keyed by `"{collection_id}:{version_id}"`, as one
+    /// snapshot per committed migration-graph generation.
+    migration_cache: MigrationCache,
 }
 
 impl<S: Store> LensedAutoCommitFetcher<S> {
@@ -50,22 +40,7 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
     pub fn new(db: Arc<DB<S>>) -> Self {
         Self {
             db,
-            write_back_migrations: true,
-            migration_cache: Mutex::new(MigrationCache::default()),
-        }
-    }
-
-    /// Create a lensed fetcher that returns transformed values without lazy
-    /// persistence.
-    ///
-    /// Used by mutation rebasing after the caller already holds the document's
-    /// write guard. The mutation itself persists the active-schema document,
-    /// and attempting lazy write-back here would recursively acquire that guard.
-    pub(crate) fn new_without_write_back(db: Arc<DB<S>>) -> Self {
-        Self {
-            db,
-            write_back_migrations: false,
-            migration_cache: Mutex::new(MigrationCache::default()),
+            migration_cache: MigrationCache::default(),
         }
     }
 
@@ -76,8 +51,7 @@ impl<S: Store> LensedAutoCommitFetcher<S> {
     pub(super) fn clone_for_stream(&self) -> Self {
         Self {
             db: self.db.clone(),
-            write_back_migrations: self.write_back_migrations,
-            migration_cache: Mutex::new(MigrationCache::default()),
+            migration_cache: MigrationCache::default(),
         }
     }
 }
@@ -89,12 +63,12 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
         &self,
         options: &query::fetcher::DocumentArrivalOptions,
     ) -> query::error::Result<query::fetcher::DocumentArrivalPage> {
-        let mut txn = self
+        let txn = self
             .db
             .new_txn(true)
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
-        let result = crate::event::arrivals::read(&mut txn, options)
+        let result = crate::event::arrivals::read(&txn, options)
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()));
         let _ = txn.discard();
@@ -164,6 +138,15 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
         params: &IndexScanParams,
     ) -> query::error::Result<query::fetcher::IndexScanResult> {
         self.get_by_index_scan_impl(collection_name, params).await
+    }
+
+    async fn indexes_match_documents(&self, collection_name: &str) -> query::error::Result<bool> {
+        let collection = self
+            .db
+            .get_collection(collection_name)
+            .map_err(|e| query::error::QueryError::execution(e.to_string()))?
+            .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
+        Ok(!self.load_migration_context(&collection).await?.1)
     }
 
     fn supports_index_queries(&self) -> bool {

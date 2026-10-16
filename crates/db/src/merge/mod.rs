@@ -7,9 +7,12 @@ pub mod head_provider;
 pub mod merge_handler;
 #[cfg(all(not(target_arch = "wasm32"), feature = "p2p"))]
 pub mod peer_identity;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod pooled;
 pub mod push_docs;
 pub mod push_docs_common;
 pub mod push_docs_creator;
+mod push_docs_network;
 pub mod push_docs_replay;
 pub mod redriven_sink;
 pub mod replication;
@@ -29,6 +32,8 @@ pub use merge_handler::{DbMergeHandler, MergeError, DEFAULT_MAX_MERGE_DEPTH};
 pub use peer_identity::{
     create_peer_to_did_mapper, peer_id_to_did, public_key_to_did, PeerIdentityError,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use pooled::PooledMergeHandler;
 pub use push_docs::{
     push_existing_docs, push_existing_docs_by_id, push_existing_docs_with_config,
     retry_collection_commit, retry_doc, PushExistingDocsSeOptions,

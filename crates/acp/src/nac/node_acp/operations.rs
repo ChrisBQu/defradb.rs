@@ -8,7 +8,7 @@ use crate::nac::permission::NodePermission;
 use crate::nac::policy::{ADMIN_RELATION, NODE_POLICY_ID, NODE_RESOURCE_NAME};
 use zanzibar::{Relationship, Subject, ZanzibarStore};
 
-impl<S: ZanzibarStore + Send + Sync + 'static> NodeACP<S> {
+impl<S: ZanzibarStore + ?Sized + 'static> NodeACP<S> {
     /// Check if an identity has a specific node permission.
     ///
     /// Returns `true` if:
@@ -27,7 +27,7 @@ impl<S: ZanzibarStore + Send + Sync + 'static> NodeACP<S> {
         }
 
         // Use the engine to check permission
-        let engine = self.engine.read().await;
+        let engine = self.engine.snapshot();
         let has_permission = engine
             .check(
                 NODE_POLICY_ID,
@@ -90,7 +90,7 @@ impl<S: ZanzibarStore + Send + Sync + 'static> NodeACP<S> {
         }
 
         // Check admin relation from stored relationships
-        let engine = self.engine.read().await;
+        let engine = self.engine.snapshot();
         Ok(engine
             .check(
                 NODE_POLICY_ID,

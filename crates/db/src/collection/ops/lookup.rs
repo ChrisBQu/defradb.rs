@@ -8,7 +8,7 @@ impl<S: Store> crate::database::DB<S> {
     /// if they haven't been loaded yet.
     pub async fn list_collections_with_txn(&self, txn: &mut DbTxn<S>) -> Result<Vec<String>> {
         txn.load_all_collections().await?;
-        Ok(txn.collection_cache().names())
+        Ok(txn.cached_collection_names())
     }
 
     /// List all collection names.
@@ -43,10 +43,12 @@ impl<S: Store> crate::database::DB<S> {
         result
     }
 
+    /// Offer a previously committed definition to the runtime cache.
+    /// Transactional merge paths register this publication on their ordered
+    /// commit callback; this helper is retained for explicit cache refreshes.
     pub async fn add_collection_to_cache(&self, schema: CollectionVersion) -> Result<Cached> {
         let name = schema.name.clone();
         let collection = self.collection_with_index_actions(schema.clone()).await?;
-
         let offered = schema.collection_id.clone();
         let mut cached = Cached::Taken;
         self.collections.rcu(|old| {
@@ -74,7 +76,7 @@ impl<S: Store> crate::database::DB<S> {
         txn: &mut DbTxn<S>,
         name: &str,
     ) -> Result<Option<Collection>> {
-        txn.get_collection(name).await.map(|opt| opt.cloned())
+        txn.get_collection(name).await
     }
 
     /// Get a collection by name.

@@ -36,7 +36,7 @@ impl HangStore {
 
 #[async_trait]
 impl Store for HangStore {
-    async fn get_size(&self, cid: &Cid) -> anyhow::Result<usize> {
+    async fn get_size(&self, cid: &Cid) -> bitswap::store::Result<usize> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if self.hang_all.load(Ordering::SeqCst) || self.hung == Some(*cid) {
             pending::<()>().await;
@@ -44,11 +44,11 @@ impl Store for HangStore {
         self.inner.get_size(cid).await
     }
 
-    async fn get(&self, cid: &Cid) -> anyhow::Result<Block> {
+    async fn get(&self, cid: &Cid) -> bitswap::store::Result<Block> {
         self.inner.get(cid).await
     }
 
-    async fn has(&self, cid: &Cid) -> anyhow::Result<bool> {
+    async fn has(&self, cid: &Cid) -> bitswap::store::Result<bool> {
         self.inner.has(cid).await
     }
 }

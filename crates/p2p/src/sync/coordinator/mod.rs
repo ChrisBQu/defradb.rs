@@ -49,6 +49,9 @@ pub(crate) mod dag_context;
 pub(crate) mod dag_fetcher;
 pub(crate) mod dag_retry;
 mod event_handler;
+mod merge_state;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod network_tests;
 #[cfg(feature = "libp2p-transport")]
 mod pubsub_client;
 #[cfg(feature = "libp2p-transport")]
@@ -82,7 +85,6 @@ use crate::tracked_task::{TrackedAbort, TrackedTask};
 use crate::transport::{P2PTransport, PeerId};
 
 use super::broadcaster::Broadcaster;
-use super::collection_store::P2PCollectionStorage;
 use super::head_provider::DocumentHeadProvider;
 use super::manager::{PendingDag, SyncManager};
 use super::peer_state::PeerStateTracker;
@@ -93,6 +95,10 @@ pub(crate) use super::manager::{
     DEFAULT_MAX_CONCURRENT_DAG_FETCHES, DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
     DEFAULT_MAX_DOC_SYNC_REQUEST_DOC_IDS,
 };
+
+/// Where a coordinator's push failures arrive
+/// ([`SyncCoordinator::attach_failure_channel`]).
+pub type PushFailureReceiver = tokio::sync::mpsc::Receiver<PushFailure>;
 
 /// A durable retry update emitted by outbound PushLog admission/workers.
 ///
@@ -108,89 +114,20 @@ pub struct PushFailure {
     /// False for a pre-send observation; true for a terminal failure that keeps
     /// the already-registered scope marker on its durable ladder.
     pub create_retry: bool,
+    /// This failure is an initial SE-artifact obligation without a PushJob or
+    /// previously admitted marker generation. Terminal PushJob failures must
+    /// carry their source generation instead.
+    pub initial_registration: bool,
     /// Negotiated receiver backpressure, handed to the durable retry owner.
     pub retry_after: Option<Duration>,
     /// Query the durable peer deadline immediately before a transport send.
     pub admission_only: bool,
     /// Successful acknowledgement for this exact scope/head.
     pub acknowledged: bool,
+    /// Durable generation installed before this push was admitted.
+    pub marker_generation: Option<u64>,
     /// Register-before-send handshake with the durable recorder.
-    pub durable_tx: Option<tokio::sync::oneshot::Sender<bool>>,
-}
-
-/// Volatile fence for acknowledgements of presence-only durable markers.
-///
-/// The durable marker intentionally stores no CID. This fence covers the only
-/// acknowledgements that can survive long enough to race a newer live head in
-/// the same process. Across restart there are no surviving in-flight sends, so
-/// the presence marker alone is the conservative source of truth.
-#[derive(Default)]
-pub struct HeadAckFence {
-    current: rapidhash::RapidHashMap<(String, String, String), (u64, String)>,
-}
-
-impl HeadAckFence {
-    fn scope_key(event: &PushFailure) -> (String, String, String) {
-        (
-            event.peer_id.clone(),
-            event.doc_id.clone(),
-            event.collection_id.clone(),
-        )
-    }
-
-    fn head_token(event: &PushFailure) -> (u64, String) {
-        (event.head_priority, event.cid.clone())
-    }
-
-    pub fn observe_durable(&mut self, event: &PushFailure) {
-        self.current
-            .insert(Self::scope_key(event), Self::head_token(event));
-    }
-
-    pub fn ack_is_current(&self, event: &PushFailure) -> bool {
-        self.current.get(&Self::scope_key(event)) == Some(&Self::head_token(event))
-    }
-
-    pub fn clear_current_ack(&mut self, event: &PushFailure) {
-        if self.ack_is_current(event) {
-            self.current.remove(&Self::scope_key(event));
-        }
-    }
-}
-
-#[cfg(test)]
-mod head_ack_fence_tests {
-    use super::*;
-
-    fn event(cid: &str, priority: u64) -> PushFailure {
-        PushFailure {
-            peer_id: "peer".to_string(),
-            doc_id: "doc".to_string(),
-            collection_id: "collection".to_string(),
-            cid: cid.to_string(),
-            head_priority: priority,
-            create_retry: false,
-            acknowledged: false,
-            durable_tx: None,
-            retry_after: None,
-            admission_only: false,
-        }
-    }
-
-    #[test]
-    fn stale_ack_cannot_clear_a_newer_scope_head() {
-        let mut fence = HeadAckFence::default();
-        let old = event("old", 1);
-        let new = event("new", 2);
-        fence.observe_durable(&old);
-        fence.observe_durable(&new);
-
-        assert!(!fence.ack_is_current(&old));
-        fence.clear_current_ack(&old);
-        assert!(fence.ack_is_current(&new));
-        fence.clear_current_ack(&new);
-        assert!(!fence.ack_is_current(&new));
-    }
+    pub durable_tx: Option<tokio::sync::oneshot::Sender<Option<u64>>>,
 }
 
 /// Stable diagnostic snapshot of P2P-owned sync resources (#1099).
@@ -292,6 +229,9 @@ struct SyncShutdownState {
     /// hidden pre-semaphore task queue (#1159).
     pending_dag_fetch_task_limit: usize,
     pending_dag_fetch_tasks: Atom<RapidHashMap<Cid, PendingDagFetchTask>>,
+    /// Where the coordinator's network work runs, set once by the node that
+    /// owns it (`SyncCoordinator::use_network`).
+    network: regolith::sync::OnceCell<crate::network::Network>,
 }
 
 #[derive(Clone)]
@@ -399,6 +339,7 @@ impl SyncShutdownHandle {
                 non_authoritative_broadcast_rejected: AtomicU64::new(0),
                 pending_dag_fetch_task_limit: pending_dag_fetch_task_limit.max(1),
                 pending_dag_fetch_tasks: Atom::new(RapidHashMap::new()),
+                network: regolith::sync::OnceCell::new(),
             }),
         }
     }
@@ -463,6 +404,11 @@ impl SyncShutdownHandle {
         }
     }
 
+    /// Where the coordinator's network work runs.
+    pub fn network(&self) -> crate::network::Network {
+        self.inner.network.get().cloned().unwrap_or_default()
+    }
+
     fn spawn_task<F>(&self, future: F) -> bool
     where
         F: std::future::Future<Output = ()> + MaybeSend + 'static,
@@ -470,6 +416,30 @@ impl SyncShutdownHandle {
         if self.is_shutting_down() {
             return false;
         }
+        // A pool worker (a write's broadcast, a merge's follow-up) has no
+        // reactor: the task is registered and run on the network edge.
+        let network = self.network();
+        if let Some(edge) = network.crossing() {
+            let handle = self.clone();
+            drop(edge.spawn(async move {
+                handle.spawn_here(future);
+            }));
+            return true;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if workers::on_worker() {
+            tracing::error!(
+                "network work was submitted from a pool worker of a node with no network edge; it did not run"
+            );
+            return false;
+        }
+        self.spawn_here(future)
+    }
+
+    fn spawn_here<F>(&self, future: F) -> bool
+    where
+        F: std::future::Future<Output = ()> + MaybeSend + 'static,
+    {
         // Retire completed handles on every registration so retained handles
         // track live tasks instead of total spawn count (#1099).
         self.prune_finished_tasks();
@@ -782,32 +752,14 @@ pub(super) struct SyncAccessState {
     pub(super) gossip_direction_filtered: AtomicU64,
 }
 
-/// Collection-ID set shared between the coordinator and its retry tasks.
-pub(super) type CollectionSet = HopscotchMap<String, (), rapidhash::fast::RandomState>;
-
-pub(super) fn collection_set() -> Arc<CollectionSet> {
-    Arc::new(HopscotchMap::with_hasher(
-        rapidhash::fast::RandomState::default(),
-    ))
-}
-
 /// Subscription and document head support state for the coordinator.
-pub(super) struct SyncSubscriptionState {
-    /// Serializes durable subscription mutations without blocking readers of
-    /// the live installed-topic set while transport I/O is in flight.
-    pub(super) mutation: Arc<tokio::sync::Mutex<()>>,
-
-    /// Set of subscribed collection IDs for P2P sync (in-memory cache).
-    pub(super) subscribed_collections: Arc<CollectionSet>,
-
-    /// Desired topics with one background installation retry owner.
-    pub(super) retrying_subscribes: Arc<CollectionSet>,
-
-    /// Undesired live topics with one background removal retry owner.
-    pub(super) retrying_unsubscribes: Arc<CollectionSet>,
-
-    /// Persistent storage for P2P collection subscriptions.
-    pub(super) collection_store: Arc<dyn P2PCollectionStorage>,
+pub(super) struct SyncSubscriptionState<T>
+where
+    T: P2PTransport,
+{
+    /// Collection topic subscriptions: the durable desired set and the live
+    /// topics.
+    collections: subscriptions::CollectionSubscriptions<T>,
 
     /// Document head provider for DocSync responses.
     pub(super) head_provider: Arc<dyn DocumentHeadProvider>,
@@ -828,7 +780,7 @@ pub struct SyncCoordinator<B: Blockstore, T: P2PTransport> {
     pub(super) access: SyncAccessState,
 
     /// Subscription and doc-sync support state.
-    pub(super) subscriptions: SyncSubscriptionState,
+    pub(super) subscriptions: SyncSubscriptionState<T>,
 
     /// Shared peer-authorization backend. Used by both the two-stream
     /// access helpers and the `pubsub_rpc` handlers so both paths make
@@ -842,12 +794,12 @@ pub struct SyncCoordinator<B: Blockstore, T: P2PTransport> {
     pub(super) serve_acp: Arc<crate::bitswap::LateBoundServeAcp>,
 
     /// Optional document ACP used for local ACP relationship snapshot replay.
-    pub(super) document_acp: std::sync::OnceLock<Arc<dyn DocumentACP>>,
+    pub(super) document_acp: regolith::sync::OnceCell<Arc<dyn DocumentACP>>,
 
     /// KMS pubsub transport. Set by the embedded-node layer when a transport
     /// that supports raw gossip is in use. Left empty otherwise.
     #[cfg(feature = "kms")]
-    pub(super) kms_transport: std::sync::OnceLock<Arc<crate::kms::PubsubKeyTransport<T>>>,
+    pub(super) kms_transport: regolith::sync::OnceCell<Arc<crate::kms::PubsubKeyTransport<T>>>,
 
     /// Pubsub_rpc DocSync/BranchableSync services (#828). `None` on
     /// transports whose local peer id isn't a libp2p PeerId (e.g. iroh).
@@ -878,7 +830,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         .await;
     }
 
-    /// Install the KMS pubsub transport. First-call-wins (OnceLock semantics);
+    /// Install the KMS pubsub transport. First-call-wins (OnceCell semantics);
     /// subsequent calls are silently discarded.
     #[cfg(feature = "kms")]
     pub fn install_kms_transport(&self, transport: Arc<crate::kms::PubsubKeyTransport<T>>) {
@@ -1126,6 +1078,18 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
         self.runtime.shutdown.shutdown().await;
     }
 
+    /// Runs the coordinator's network work (its background tasks, the
+    /// broadcasts writes hand it, retry sleeps) on `network`. Set once, by the
+    /// node that owns the coordinator; later calls change nothing.
+    pub fn use_network(&self, network: crate::network::Network) {
+        let _ = self.runtime.shutdown.inner.network.set(network);
+    }
+
+    /// Where the coordinator's network work runs.
+    pub fn network(&self) -> crate::network::Network {
+        self.runtime.shutdown.network()
+    }
+
     /// Spawn work owned by this coordinator so shutdown can drain or cancel it.
     pub fn spawn_background_task<F>(&self, task_name: &'static str, future: F)
     where
@@ -1203,7 +1167,13 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     limit = NON_AUTHORITATIVE_BROADCAST_TASK_LIMIT,
                     "Non-authoritative background broadcast pool full; running inline"
                 );
-                future.await;
+                // Inline means on the network: a pool worker hands it over.
+                let _ = self
+                    .runtime
+                    .shutdown
+                    .network()
+                    .hand_off(move || future)
+                    .await;
             }
         }
     }
@@ -1331,32 +1301,38 @@ mod shutdown_tests {
         }
     }
 
+    /// Its first sweep, at install, finds nothing; every later one waits.
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     impl crate::sync::pending_store::PendingDagStorage for BlockingResyncStore {
-        async fn put(
+        async fn register(
+            &self,
+            _registration: crate::sync::pending_store::Registration<'_>,
+            _view: &Arc<crate::sync::pending_store::PersistedView>,
+        ) -> crate::Result<crate::sync::pending_store::Admission> {
+            unreachable!()
+        }
+
+        async fn remove(
             &self,
             _root_cid: &Cid,
-            _record: &crate::sync::pending_store::PersistedPendingDag,
-        ) -> crate::Result<()> {
+            _view: &Arc<crate::sync::pending_store::PersistedView>,
+        ) -> crate::Result<bool> {
             unreachable!()
         }
 
-        async fn replace_scope_head(
+        async fn quarantine(
             &self,
-            _superseded_root: Option<&Cid>,
             _root_cid: &Cid,
-            _record: &crate::sync::pending_store::PersistedPendingDag,
-        ) -> crate::Result<()> {
+            _entry: &crate::sync::pending_store::PersistedQuarantinedDag,
+            _view: &Arc<crate::sync::pending_store::PersistedView>,
+        ) -> crate::Result<bool> {
             unreachable!()
         }
 
-        async fn remove(&self, _root_cid: &Cid) -> crate::Result<()> {
-            unreachable!()
-        }
-
-        async fn load_all(
+        async fn sweep(
             &self,
+            _view: &Arc<crate::sync::pending_store::PersistedView>,
         ) -> crate::Result<Vec<(Cid, crate::sync::pending_store::PersistedPendingDag)>> {
             if self.load_calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 return Ok(Vec::new());
@@ -1365,11 +1341,17 @@ mod shutdown_tests {
             std::future::pending().await
         }
 
-        async fn quarantine(
+        async fn put(
             &self,
             _root_cid: &Cid,
-            _entry: &crate::sync::pending_store::PersistedQuarantinedDag,
+            _record: &crate::sync::pending_store::PersistedPendingDag,
         ) -> crate::Result<()> {
+            unreachable!()
+        }
+
+        async fn load_all(
+            &self,
+        ) -> crate::Result<Vec<(Cid, crate::sync::pending_store::PersistedPendingDag)>> {
             unreachable!()
         }
 

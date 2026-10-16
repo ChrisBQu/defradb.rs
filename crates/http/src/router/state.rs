@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use edge::Edge;
 use query::executor::QueryExecutor;
 use query::rest::RestOperations;
 use query::QueryLimits;
@@ -31,6 +32,11 @@ impl CollectionVersionOperations for CollectionVersionsFromManagement {
 #[derive(Clone)]
 pub struct AppState {
     pub executor: Arc<dyn QueryExecutor>,
+    /// The network runtime request work runs on.
+    pub edge: Edge,
+    /// The worker pool a request's storage work runs on, when the node has
+    /// one.
+    pub pool: Option<workers::Pool>,
     pub rest: Option<Arc<dyn RestOperations>>,
     pub p2p: Option<Arc<dyn P2POperations>>,
     pub manage: Option<Arc<dyn ManageRequester>>,
@@ -53,7 +59,6 @@ pub struct AppState {
     pub node_identity_did: Option<String>,
     pub signing_enabled: bool,
     pub dev_mode: bool,
-    pub max_txn_retries: u32,
     pub query_limits: QueryLimits,
 }
 
@@ -115,7 +120,6 @@ impl std::fmt::Debug for AppState {
             )
             .field("node_identity_did", &self.node_identity_did)
             .field("dev_mode", &self.dev_mode)
-            .field("max_txn_retries", &self.max_txn_retries)
             .field("query_limits", &self.query_limits)
             .finish()
     }
@@ -274,6 +278,8 @@ impl AppState {
 /// Builder for constructing AppState with optional components.
 pub struct AppStateBuilder {
     executor: Arc<dyn QueryExecutor>,
+    edge: Edge,
+    pool: Option<workers::Pool>,
     rest: Option<Arc<dyn RestOperations>>,
     p2p: Option<Arc<dyn P2POperations>>,
     manage: Option<Arc<dyn ManageRequester>>,
@@ -296,15 +302,17 @@ pub struct AppStateBuilder {
     node_identity_did: Option<String>,
     signing_enabled: bool,
     dev_mode: bool,
-    max_txn_retries: u32,
     query_limits: QueryLimits,
 }
 
 impl AppStateBuilder {
-    /// Create a new builder with the required executor.
-    pub fn new(executor: Arc<dyn QueryExecutor>) -> Self {
+    /// Create a new builder with the required executor and the network
+    /// runtime its requests run on.
+    pub fn new(executor: Arc<dyn QueryExecutor>, edge: Edge) -> Self {
         Self {
             executor,
+            edge,
+            pool: None,
             rest: None,
             p2p: None,
             manage: None,
@@ -327,9 +335,14 @@ impl AppStateBuilder {
             node_identity_did: None,
             signing_enabled: false,
             dev_mode: false,
-            max_txn_retries: db::DEFAULT_MAX_TXN_RETRIES,
             query_limits: QueryLimits::default(),
         }
+    }
+
+    /// Run the requests' storage work on `pool`.
+    pub fn with_pool(mut self, pool: Option<workers::Pool>) -> Self {
+        self.pool = pool;
+        self
     }
 
     /// Set REST operations.
@@ -478,12 +491,6 @@ impl AppStateBuilder {
         self
     }
 
-    /// Set the maximum number of auto-commit transaction conflict retries.
-    pub fn with_max_txn_retries(mut self, retries: u32) -> Self {
-        self.max_txn_retries = retries;
-        self
-    }
-
     /// Set GraphQL parsing and filter evaluation limits.
     pub fn with_query_limits(mut self, limits: QueryLimits) -> Self {
         self.query_limits = limits;
@@ -494,6 +501,8 @@ impl AppStateBuilder {
     pub fn build(self) -> AppState {
         AppState {
             executor: self.executor,
+            edge: self.edge,
+            pool: self.pool,
             rest: self.rest,
             p2p: self.p2p,
             manage: self.manage,
@@ -516,7 +525,6 @@ impl AppStateBuilder {
             node_identity_did: self.node_identity_did,
             signing_enabled: self.signing_enabled,
             dev_mode: self.dev_mode,
-            max_txn_retries: self.max_txn_retries,
             query_limits: self.query_limits,
         }
     }

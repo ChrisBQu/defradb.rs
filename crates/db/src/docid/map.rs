@@ -20,7 +20,6 @@ use storage::stores::Systemstore;
 use crate::error::{Error, Result};
 
 const DOC_SHORT_ID_RESERVATION_SIZE: u64 = 1024;
-const MAX_RESERVATION_CONFLICT_RETRIES: u32 = 16;
 
 #[derive(Clone, Copy, Default)]
 struct ReservedRange {
@@ -57,20 +56,6 @@ impl<S: Store> DocShortIdAllocator<S> {
         loop {
             if let Some(id) = self.take_reserved()? {
                 return Ok(id);
-            }
-            self.install_reservation().await?;
-        }
-    }
-
-    /// The id the next [`next`](Self::next) returns, left unallocated.
-    pub async fn peek(&self) -> Result<u64> {
-        loop {
-            let reserved = {
-                let range = self.range.load();
-                (range.remaining > 0).then_some(range.next)
-            };
-            if let Some(next) = reserved {
-                return Ok(next);
             }
             self.install_reservation().await?;
         }
@@ -113,35 +98,11 @@ impl<S: Store> DocShortIdAllocator<S> {
     }
 
     async fn reserve_range(&self) -> Result<u64> {
-        let key = DocShortIDSequenceKey::new().bytes();
-        let mut conflicts = 0;
-        loop {
-            let mut txn = self
-                .systemstore
-                .new_txn(false)
-                .await
-                .map_err(Error::Storage)?;
-            let current = decode_sequence(txn.get(&key).await.map_err(Error::Storage)?)?;
-            let start = current
-                .checked_add(1)
-                .ok_or_else(|| Error::Other("document short-ID sequence exhausted".into()))?;
-            let end = current
-                .checked_add(self.reservation_size)
-                .ok_or_else(|| Error::Other("document short-ID sequence exhausted".into()))?;
-            txn.set(&key, &end.to_be_bytes())
-                .await
-                .map_err(Error::Storage)?;
-
-            match txn.commit().await {
-                Ok(()) => return Ok(start),
-                Err(error)
-                    if error.is_txn_conflict() && conflicts < MAX_RESERVATION_CONFLICT_RETRIES =>
-                {
-                    conflicts += 1;
-                }
-                Err(error) => return Err(Error::Storage(error)),
-            }
-        }
+        self.systemstore
+            .allocate(&DocShortIDSequenceKey::new().bytes(), self.reservation_size)
+            .await
+            .map(|range| range.start)
+            .map_err(Error::Storage)
     }
 }
 
@@ -382,7 +343,7 @@ pub async fn set_block_doc_id_mapping(
         return Ok(());
     }
     systemstore
-        .set(&BlockCIDToDocIDKey::new(block_cid, doc_id).bytes(), &[])
+        .set(&BlockCIDToDocIDKey::bytes_for(block_cid, doc_id), &[])
         .await
         .map_err(Error::Storage)
 }
@@ -464,7 +425,7 @@ pub async fn delete_block_doc_id_mapping(
         return Ok(());
     }
     systemstore
-        .delete(&BlockCIDToDocIDKey::new(block_cid, doc_id).bytes())
+        .delete(&BlockCIDToDocIDKey::bytes_for(block_cid, doc_id))
         .await
         .map_err(Error::Storage)
 }

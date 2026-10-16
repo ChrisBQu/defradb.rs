@@ -24,10 +24,10 @@ pub struct ManageHooks {
 /// Shared, write-once cell for [`ManageHooks`]. Cloned into each event loop
 /// (read side) and into node assembly (populated after the controller + NAC
 /// manager are built).
-pub type ManageHooksCell = Arc<tokio::sync::OnceCell<ManageHooks>>;
+pub type ManageHooksCell = Arc<regolith::sync::OnceCell<ManageHooks>>;
 
 /// Create an empty, unpopulated hooks cell.
 pub fn new_manage_hooks_cell() -> ManageHooksCell {
     #[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
-    Arc::new(tokio::sync::OnceCell::new())
+    Arc::new(regolith::sync::OnceCell::new())
 }

@@ -1,0 +1,15 @@
+{
+  "revision": "7b7fb91af990f368d29e79a65df4df366922222f",
+  "command": [
+    "cargo",
+    "test",
+    "-p",
+    "schema",
+    "--profile",
+    "super-dev"
+  ],
+  "passed": 183,
+  "failed": 0,
+  "log": "defra-main-cli-schema-fix-7b7fb91af.log.gz",
+  "sha256": "d62a0d843d32dda2653783fadad9203ea3ece6abcdba2e14823fda11af1c17d9"
+}

@@ -71,3 +71,19 @@ fn commit_query_error_preserves_transaction_conflict_type() {
         query::error::QueryError::TransactionConflict(_)
     ));
 }
+
+#[test]
+fn commit_query_error_preserves_retry_exhaustion_as_final_error() {
+    let conflict = storage::corekv::TransactionConflict {
+        access: regolith::Access::Read,
+        winning_write: regolith::WriteKind::Put,
+        observed_seq: 4,
+        latest_seq: 5,
+    };
+    let error = Error::Storage(storage::Error::TxnRetryExhausted(conflict));
+
+    assert!(matches!(
+        commit_query_error(error),
+        query::error::QueryError::TransactionRetryExhausted(_)
+    ));
+}

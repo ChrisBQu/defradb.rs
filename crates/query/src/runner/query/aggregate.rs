@@ -79,16 +79,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             for doc in plan_docs {
                 if let Some(doc_id_val) = doc.get(0) {
                     if let Some(doc_id) = doc_id_val.as_str() {
-                        let has_access = crate::txn::check_doc_access_with_overlay(
-                            self.acp.as_ref(),
-                            &acp_identity,
-                            DocumentPermission::Read,
-                            &policy.id,
-                            &policy.resource_name,
-                            doc_id,
-                        )
-                        .await
-                        .unwrap_or(false);
+                        let has_access = self
+                            .check_doc_access_for_read(
+                                &acp_identity,
+                                DocumentPermission::Read,
+                                &policy.id,
+                                &policy.resource_name,
+                                doc_id,
+                            )
+                            .await?;
                         if has_access {
                             filtered.push(doc);
                         }
@@ -102,7 +101,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             let doc_id = doc.get(0).and_then(|value| value.as_str()).unwrap_or("");
             if self
                 .app_may_read(app_identity.as_ref(), collection, doc_id)
-                .await
+                .await?
             {
                 readable.push(doc);
             }
@@ -353,12 +352,16 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let collections: Vec<CollectionVersion> =
             collections_map.values().map(|c| (**c).clone()).collect();
 
-        let mut planner = Planner::new(collections)
-            .with_query_limits(self.query_limits)
-            .with_fetcher(Arc::new(fetcher_arc))
-            .with_acp(self.acp.clone(), identity)
-            .with_read_validator(self.read_validator.clone())
-            .with_index_estimates(index_estimates);
+        let mut planner =
+            Planner::new(crate::runner::plan::indexes_for_documents(fetcher, collections).await?)
+                .with_query_limits(self.query_limits)
+                .with_fetcher(Arc::new(fetcher_arc))
+                .with_acp(self.acp.clone(), identity)
+                .with_dac_bypass(self.context().dac_bypass())
+                .with_acp_registration_projection(self.acp_registration_projection.clone())
+                .with_read_validator(self.read_validator.clone())
+                .with_retry_inputs(self.retry_inputs.clone())
+                .with_index_estimates(index_estimates);
         if let Some(ref lens_store) = self.lens_store {
             planner = planner.with_lens_store(lens_store.clone());
         }

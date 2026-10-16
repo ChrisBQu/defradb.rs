@@ -35,14 +35,14 @@ use super::{CloseSubscriptionResult, PollSubscriptionResult};
 pub extern "C" fn poll_subscription(subscription_handle: usize) -> PollSubscriptionResult {
     ffi_entry! {
         let result = SUBSCRIPTIONS.get(subscription_handle).map(|state| {
-            let mut subscription = state.subscription.lock();
+            let subscription = &state.subscription;
 
             // Check for dropped messages
             let dropped = subscription.check_and_reset_dropped();
 
             // Try to receive events, filtering by collection if specified
             loop {
-                match subscription.try_recv() {
+                match subscription.try_take() {
                     Ok(message) => {
                         // Check collection filter
                         if let Some(ref filter) = state.collection_filter {
@@ -129,7 +129,7 @@ pub extern "C" fn close_subscription(subscription_handle: usize) -> CloseSubscri
         };
 
         // Unsubscribe from the event bus
-        let subscription_id = state.subscription.lock().id();
+        let subscription_id = state.subscription.id();
         let unsubscribed = NODES.get(state.node_handle, |node_state| {
             node_state.event_bus.unsubscribe(subscription_id);
         });
@@ -169,7 +169,7 @@ pub extern "C" fn close_graphql_subscription(
         };
 
         // Abort the background event processing task
-        state.task_abort.abort();
+        state.service.stop();
 
         // Unsubscribe from the event bus
         NODES.get(state.node_handle, |node_state| {

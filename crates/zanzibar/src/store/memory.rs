@@ -46,6 +46,10 @@ impl ZanzibarStore for MemoryZanzibarStore {
         Ok(self.policies.get(policy_id))
     }
 
+    async fn has_policy(&self, policy_id: &str) -> Result<bool> {
+        Ok(self.policies.contains_key(policy_id))
+    }
+
     async fn next_policy_counter(&self) -> Result<u64> {
         Ok(self.policy_counter.fetch_add(1, Ordering::SeqCst) + 1)
     }

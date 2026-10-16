@@ -33,6 +33,7 @@ async-trait = { workspace = true }
 
 # Lock-free shared state
 kovan.workspace = true
+regolith.workspace = true
 
 # Serialization
 serde_json = { workspace = true }

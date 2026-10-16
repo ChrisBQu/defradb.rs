@@ -44,7 +44,11 @@ impl<S: Store + 'static> DocStream for LensedDocStream<S> {
     }
 
     async fn close(&mut self) -> query::error::Result<()> {
-        self.inner.close().await
+        let closed = self.inner.close().await;
+        // A closed stream no longer holds its transaction, so the fetcher
+        // that opened it can give the transaction back.
+        self.fetcher.release_txn();
+        closed
     }
 }
 
@@ -55,7 +59,7 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
         show_deleted: bool,
     ) -> query::error::Result<Box<dyn DocStream>> {
         let (collection, datastore, systemstore) =
-            get_collection_with_lazy_load(&self.txn, collection_name).await?;
+            get_collection_with_lazy_load(&*self.shared_txn()?, collection_name).await?;
 
         // Full-history check (matching Go), same as the eager paths.
         let (_, has_migrations) = self.load_versions_and_check_migrations(&collection).await?;
@@ -79,12 +83,6 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
 
         Ok(Box::new(LensedDocStream {
             inner: Box::new(inner),
-            // Streamed documents are processed one at a time, so per-document
-            // deferred write-back (`process_document` → `update_datastore` →
-            // `defer_document_write_back`) is the right model here - never
-            // `defer_full_scan_write_back`, which discards per-document
-            // candidates on the assumption the whole collection was already
-            // read (see fetcher.rs's eager paths, which call it up front).
             fetcher: self.stream_clone(),
             collection,
             datastore,
@@ -105,7 +103,7 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
         show_deleted: bool,
     ) -> query::error::Result<Box<dyn DocStream>> {
         let (collection, datastore, systemstore) =
-            get_collection_with_lazy_load(&self.txn, collection_name).await?;
+            get_collection_with_lazy_load(&*self.shared_txn()?, collection_name).await?;
         let (_, has_migrations) = self.load_versions_and_check_migrations(&collection).await?;
 
         Ok(Box::new(LensedDocStream {

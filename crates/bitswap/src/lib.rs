@@ -27,4 +27,4 @@ pub use message::{BitswapMessage, BlockPresence, BlockPresenceType, Entry, Prior
 pub use prefix::Prefix;
 pub use protocol::{ProtocolConfig, ProtocolId};
 pub use server::{PeerBlockRequestFilter, ServerConfig};
-pub use store::Store;
+pub use store::{Store, StoreError};

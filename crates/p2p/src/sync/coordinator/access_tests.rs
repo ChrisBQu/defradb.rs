@@ -27,7 +27,7 @@ use crate::message::{
     DocSyncRequest, PushLogBroadcast, PushLogReply, PushLogRequest,
 };
 use crate::sync::broadcaster::Broadcaster;
-use crate::sync::collection_store::NoOpCollectionStorage;
+use crate::sync::collection_store::MemoryCollectionStorage;
 use crate::sync::head_provider::{DocumentHeadProvider, NoOpHeadProvider};
 use crate::sync::manager::{SyncConfig, SyncEvent, SyncManager};
 use crate::sync::peer_state::PeerStateTracker;
@@ -355,10 +355,11 @@ fn create_test_coordinator_with_blockstore_and_head_provider<B: Blockstore + 'st
         access_mode,
     ));
 
+    let shutdown = SyncShutdownHandle::new(DEFAULT_MAX_CONCURRENT_DAG_FETCHES);
     let coordinator = SyncCoordinator {
         runtime: SyncRuntime {
             transport,
-            broadcaster,
+            broadcaster: broadcaster.clone(),
             failure_tx: Arc::new(AtomOption::none()),
             dag_fetch_limiter: DagFetchLimiter::new(DEFAULT_MAX_CONCURRENT_DAG_FETCHES),
             push_backlog: crate::sync::push_backlog::PushBacklog::new(
@@ -376,7 +377,7 @@ fn create_test_coordinator_with_blockstore_and_head_provider<B: Blockstore + 'st
             rate_limiter,
             request_rate_limiter,
             max_doc_sync_request_doc_ids: DEFAULT_MAX_DOC_SYNC_REQUEST_DOC_IDS,
-            shutdown: SyncShutdownHandle::new(DEFAULT_MAX_CONCURRENT_DAG_FETCHES),
+            shutdown: shutdown.clone(),
             dispatch_diagnostics: Arc::new(crate::sync::DispatchDiagnostics::default()),
             filter_matcher: Arc::new(crate::replicator::EqOnlyFilterMatcher),
         },
@@ -389,19 +390,19 @@ fn create_test_coordinator_with_blockstore_and_head_provider<B: Blockstore + 'st
             gossip_direction_filtered: std::sync::atomic::AtomicU64::new(0),
         },
         subscriptions: SyncSubscriptionState {
-            mutation: Arc::new(tokio::sync::Mutex::new(())),
-            subscribed_collections: super::collection_set(),
-            retrying_subscribes: super::collection_set(),
-            retrying_unsubscribes: super::collection_set(),
-            collection_store: Arc::new(NoOpCollectionStorage),
+            collections: super::subscriptions::CollectionSubscriptions::new(
+                Arc::new(MemoryCollectionStorage::default()),
+                broadcaster.clone(),
+                shutdown.clone(),
+            ),
             head_provider,
         },
         authorizer,
         classifier: Arc::new(crate::bitswap::DefaultBlockClassifier),
         serve_acp: Arc::new(crate::bitswap::LateBoundServeAcp::new()),
-        document_acp: std::sync::OnceLock::new(),
+        document_acp: regolith::sync::OnceCell::new(),
         #[cfg(feature = "kms")]
-        kms_transport: std::sync::OnceLock::new(),
+        kms_transport: regolith::sync::OnceCell::new(),
         #[cfg(feature = "libp2p-transport")]
         pubsub_services: None,
     };
@@ -1559,7 +1560,7 @@ async fn duplicate_car_ingest_defers_without_waiting_for_root_owner() {
 }
 
 #[tokio::test]
-async fn car_put_many_conflict_retries_before_publishing_one_success_completion() {
+async fn car_put_many_conflict_is_reported_once_and_not_re_run() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
     let transport = NoopTransport::new();
@@ -1584,14 +1585,14 @@ async fn car_put_many_conflict_retries_before_publishing_one_success_completion(
     let root_cid = Cid::new_v1(0x71, Code::Sha2_256.digest(block_data));
     let car_data =
         crate::sync::car::encode_car(&[root_cid], &[(&root_cid, block_data.as_slice())]).unwrap();
-    let completion = coordinator
-        .manager()
-        .rooted_car_completion_tracker()
-        .register(root_cid, peer.clone());
-
-    let ingest = {
+    let respond = || {
+        let completion = coordinator
+            .manager()
+            .rooted_car_completion_tracker()
+            .register(root_cid, peer.clone());
         let coordinator = Arc::clone(&coordinator);
-        n0_future::task::spawn(async move {
+        let (peer, car_data) = (peer.clone(), car_data.clone());
+        let ingest = n0_future::task::spawn(async move {
             coordinator
                 .handle_transport_event(TransportEvent::CarFetchResponse {
                     query_id: None,
@@ -1600,16 +1601,34 @@ async fn car_put_many_conflict_retries_before_publishing_one_success_completion(
                     car_data,
                 })
                 .await
-        })
+        });
+        (completion, ingest)
     };
 
+    // The blockstore settles its own conflicts in the engine; one it could
+    // not settle reaches the event once, and the event handler does not run
+    // the ingest again.
+    let (completion, ingest) = respond();
     assert_eq!(
         timeout(Duration::from_secs(1), completion)
             .await
-            .expect("final CAR completion should be published")
+            .expect("the CAR completion should be published")
+            .expect("completion sender remains alive"),
+        crate::sync::manager::FetchCompletion::Failure,
+    );
+    assert!(ingest.await.unwrap().is_err());
+    assert_eq!(blockstore.put_many_attempts(), 1);
+    assert!(!blockstore.has(&root_cid).await.unwrap());
+
+    // The fetch is asked again and its response lands: one success
+    // completion, and the block stored.
+    let (completion, ingest) = respond();
+    assert_eq!(
+        timeout(Duration::from_secs(1), completion)
+            .await
+            .expect("the CAR completion should be published")
             .expect("completion sender remains alive"),
         crate::sync::manager::FetchCompletion::Success,
-        "a retriable attempt must not publish an intermediate failure",
     );
     ingest.await.unwrap().unwrap();
     assert_eq!(blockstore.put_many_attempts(), 2);
@@ -1668,7 +1687,7 @@ async fn car_fetch_allows_relayed_receiver_via_authenticated_defra_identity() {
         SyncConfig::default(),
         AccessMode::Controlled,
         Arc::new(ReplicatorRegistry::new()),
-        Arc::new(NoOpCollectionStorage),
+        Arc::new(MemoryCollectionStorage::default()),
         Arc::new(crate::replicator::EqOnlyFilterMatcher),
         Arc::new(StaticDataClassifier {
             collection_id: "collection1".to_string(),
@@ -1752,7 +1771,7 @@ async fn derived_selective_car_authority_is_peer_and_root_scoped() {
         SyncConfig::default(),
         AccessMode::Controlled,
         replicators,
-        Arc::new(NoOpCollectionStorage),
+        Arc::new(MemoryCollectionStorage::default()),
         Arc::new(crate::replicator::EqOnlyFilterMatcher),
         Arc::new(StaticDataClassifier {
             collection_id: "collection1".to_string(),
@@ -1836,10 +1855,14 @@ async fn committed_head_admission_does_not_wait_for_a_batching_timer() {
     let markers = n0_future::task::spawn(async move {
         while let Some(mut observation) = failure_rx.recv().await {
             if let Some(ack) = observation.durable_tx.take() {
-                if !observation.admission_only {
+                if !observation.admission_only
+                    && !observation.create_retry
+                    && !observation.acknowledged
+                {
                     observer.fetch_add(1, Ordering::SeqCst);
                 }
-                let _ = ack.send(true);
+                let generation = Some(observation.marker_generation.unwrap_or(1));
+                let _ = ack.send(generation);
             }
         }
     });
@@ -1904,7 +1927,7 @@ async fn car_authorization_timeout_preserves_only_independent_grants() {
             SyncConfig::default(),
             AccessMode::Controlled,
             registry,
-            Arc::new(NoOpCollectionStorage),
+            Arc::new(MemoryCollectionStorage::default()),
             Arc::new(crate::replicator::EqOnlyFilterMatcher),
             Arc::new(StaticDataClassifier {
                 collection_id: "collection1".to_string(),
@@ -1961,7 +1984,7 @@ async fn filtered_car_recovers_descendant_beyond_first_response_limit() {
         SyncConfig::default(),
         AccessMode::Controlled,
         filtered_replicator_registry(&receiver, "collection1"),
-        Arc::new(NoOpCollectionStorage),
+        Arc::new(MemoryCollectionStorage::default()),
         Arc::new(crate::replicator::EqOnlyFilterMatcher),
         Arc::new(StaticDataClassifier {
             collection_id: "collection1".to_string(),
@@ -2051,7 +2074,7 @@ async fn filtered_car_authority_is_rederived_after_sender_restart() {
         SyncConfig::default(),
         AccessMode::Controlled,
         replicators,
-        Arc::new(NoOpCollectionStorage),
+        Arc::new(MemoryCollectionStorage::default()),
         Arc::new(crate::replicator::EqOnlyFilterMatcher),
         Arc::new(StaticDataClassifier {
             collection_id: "collection1".to_string(),
@@ -2065,7 +2088,8 @@ async fn filtered_car_authority_is_rederived_after_sender_restart() {
     n0_future::task::spawn(async move {
         while let Some(mut event) = failure_rx.recv().await {
             if let Some(durable_tx) = event.durable_tx.take() {
-                let _ = durable_tx.send(true);
+                let generation = Some(event.marker_generation.unwrap_or(1));
+                let _ = durable_tx.send(generation);
             }
         }
     });
@@ -2136,7 +2160,7 @@ async fn filtered_car_authority_is_rederived_after_sender_restart() {
         SyncConfig::default(),
         AccessMode::Controlled,
         restarted_replicators,
-        Arc::new(NoOpCollectionStorage),
+        Arc::new(MemoryCollectionStorage::default()),
         Arc::new(crate::replicator::EqOnlyFilterMatcher),
         Arc::new(StaticDataClassifier {
             collection_id: "collection1".to_string(),
@@ -2225,7 +2249,7 @@ async fn collection_head_car_authority_is_rederived_from_transport_after_restart
         SyncConfig::default(),
         AccessMode::Controlled,
         Arc::new(ReplicatorRegistry::new()),
-        Arc::new(NoOpCollectionStorage),
+        Arc::new(MemoryCollectionStorage::default()),
         Arc::new(crate::replicator::EqOnlyFilterMatcher),
         Arc::new(CollectionHeadClassifier {
             collection_id: "collection1".to_string(),
@@ -2313,7 +2337,7 @@ async fn gossip_car_authority_is_rederived_from_acp_without_subscription_event_a
         SyncConfig::default(),
         AccessMode::Controlled,
         Arc::new(ReplicatorRegistry::new()),
-        Arc::new(NoOpCollectionStorage),
+        Arc::new(MemoryCollectionStorage::default()),
         Arc::new(crate::replicator::EqOnlyFilterMatcher),
         Arc::new(StaticDataClassifier {
             collection_id: "collection1".to_string(),
@@ -2646,8 +2670,8 @@ async fn gossip_subscribed_collection_accepts_without_peer_connection_cache() {
 
     coordinator
         .subscriptions
-        .subscribed_collections
-        .insert("collection1".to_string(), ());
+        .collections
+        .insert_live("collection1");
 
     let result = coordinator
         .handle_transport_event(gossip_event(peer.clone(), "collection1"))
@@ -2744,8 +2768,8 @@ async fn pushlog_controlled_mode_allows_locally_subscribed_collection() {
 
     coordinator
         .subscriptions
-        .subscribed_collections
-        .insert("collection1".to_string(), ());
+        .collections
+        .insert_live("collection1");
 
     coordinator
         .handle_transport_event(pushlog_event(peer.clone(), "collection1"))
@@ -2873,8 +2897,8 @@ async fn two_stream_controlled_mode_allows_locally_subscribed_collection() {
 
     coordinator
         .subscriptions
-        .subscribed_collections
-        .insert("collection1".to_string(), ());
+        .collections
+        .insert_live("collection1");
 
     coordinator
         .handle_transport_event(two_stream_event(peer.clone(), "collection1", false))
@@ -2929,8 +2953,8 @@ async fn gossip_controlled_mode_allows_subscribed_collection() {
 
     coordinator
         .subscriptions
-        .subscribed_collections
-        .insert("collection1".to_string(), ());
+        .collections
+        .insert_live("collection1");
 
     let result = coordinator
         .handle_transport_event(gossip_event(peer, "collection1"))
@@ -2956,8 +2980,8 @@ async fn gossip_relay_cannot_confer_explicit_replicator_trust_on_origin() {
         create_test_coordinator(AccessMode::Controlled, replicators, peer_state);
     coordinator
         .subscriptions
-        .subscribed_collections
-        .insert("collection1".to_string(), ());
+        .collections
+        .insert_live("collection1");
 
     let mut event = gossip_event(relay.clone(), "collection1");
     let TransportEvent::GossipMessage { message, .. } = &mut event else {
@@ -3012,8 +3036,8 @@ async fn gossip_controlled_mode_rejects_mismatched_topic_and_payload_collection(
 
     coordinator
         .subscriptions
-        .subscribed_collections
-        .insert("collection1".to_string(), ());
+        .collections
+        .insert_live("collection1");
 
     let result = coordinator
         .handle_transport_event(gossip_event_on_topic(peer, "collection2", "collection1"))
@@ -3061,8 +3085,8 @@ async fn gossip_controlled_mode_allows_subscribed_outbound_replicator_target() {
 
     coordinator
         .subscriptions
-        .subscribed_collections
-        .insert("collection1".to_string(), ());
+        .collections
+        .insert_live("collection1");
 
     let result = coordinator
         .handle_transport_event(gossip_event(peer, "collection1"))
@@ -3103,8 +3127,8 @@ async fn gossip_allows_doc_less_collection_commit_from_outbound_replicator_targe
 
     coordinator
         .subscriptions
-        .subscribed_collections
-        .insert("collection1".to_string(), ());
+        .collections
+        .insert_live("collection1");
 
     let result = coordinator
         .handle_transport_event(collection_commit_gossip_event(peer, "collection1"))
@@ -3386,7 +3410,7 @@ async fn gossip_remains_rate_limited_when_bucket_is_empty() {
 }
 
 #[tokio::test]
-async fn pushlog_retries_transient_transaction_conflicts_without_sync_error() {
+async fn pushlog_block_conflict_is_reported_once_and_not_re_run() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
     let transport = NoopTransport::new();
@@ -3409,22 +3433,34 @@ async fn pushlog_retries_transient_transaction_conflicts_without_sync_error() {
         });
 
     let peer = random_peer_id();
+    let _ = coordinator
+        .handle_transport_event(pushlog_event(peer.clone(), "collection1"))
+        .await;
+
+    assert_eq!(blockstore.put_attempts(), 1);
+    match recv_block_received(&mut events).await {
+        SyncEvent::SyncError { error, .. } => assert!(error.contains("conflict"), "{error}"),
+        other => panic!("expected the conflict as a sync error, got {:?}", other),
+    }
+    assert!(coordinator.manager().pending_dag_cids().is_empty());
+
+    // The nacked pusher keeps its retry record and pushes again: the block
+    // lands and its DAG is ready, with no sync error.
     coordinator
         .handle_transport_event(pushlog_event(peer.clone(), "collection1"))
         .await
         .unwrap();
-
     assert_eq!(blockstore.put_attempts(), 2);
     match recv_complete_pushlog(&coordinator, &mut events).await {
         SyncEvent::DagReady { sender_peer, .. } => {
             assert_eq!(sender_peer.as_deref(), Some(peer.as_str()));
         }
-        other => panic!("expected DagReady after retry, got {:?}", other),
+        other => panic!("expected DagReady after the push again, got {:?}", other),
     }
 }
 
 #[tokio::test]
-async fn gossip_retries_transient_transaction_conflicts_without_sync_error() {
+async fn gossip_block_conflict_is_reported_once_and_not_re_run() {
     let replicators = Arc::new(ReplicatorRegistry::new());
     let peer_state = Arc::new(PeerStateTracker::new());
     let transport = NoopTransport::new();
@@ -3433,7 +3469,7 @@ async fn gossip_retries_transient_transaction_conflicts_without_sync_error() {
     let blockstore = Arc::new(ConflictOnceBlockstore::new());
 
     // A gossip origin is only a recovery provider while the transport has a
-    // route to it; this test is about conflict retries, so make it routable.
+    // route to it; this test is about a block conflict, so make it routable.
     let peer = random_peer_id();
     peer_state.peer_connected(peer.as_str());
 
@@ -3451,17 +3487,32 @@ async fn gossip_retries_transient_transaction_conflicts_without_sync_error() {
             rate_limiter: Arc::new(PeerRateLimiter::default()),
         });
 
+    let _ = coordinator
+        .handle_transport_event(gossip_event(peer.clone(), "collection1"))
+        .await;
+
+    assert_eq!(blockstore.put_attempts(), 1);
+    match recv_block_received(&mut events).await {
+        SyncEvent::SyncError { error, .. } => assert!(error.contains("conflict"), "{error}"),
+        other => panic!("expected the conflict as a sync error, got {:?}", other),
+    }
+    assert!(coordinator.manager().pending_dag_cids().is_empty());
+
+    // The head arrives again: the block lands and its DAG is ready, with no
+    // sync error.
     coordinator
         .handle_transport_event(gossip_event(peer.clone(), "collection1"))
         .await
         .unwrap();
-
     assert_eq!(blockstore.put_attempts(), 2);
     match recv_complete_pushlog(&coordinator, &mut events).await {
         SyncEvent::DagReady { sender_peer, .. } => {
             assert_eq!(sender_peer.as_deref(), Some(peer.as_str()));
         }
-        other => panic!("expected DagReady after gossip retry, got {:?}", other),
+        other => panic!(
+            "expected DagReady after the head arrived again, got {:?}",
+            other
+        ),
     }
 }
 

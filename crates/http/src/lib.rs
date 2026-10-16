@@ -84,11 +84,12 @@
 //! use defra_http::Server;
 //! use query::executor::QueryExecutor;
 //!
-//! #[tokio::main]
-//! async fn main() {
-//!     let executor = MyQueryExecutor::new();
-//!     let server = Server::new(executor);
-//!     server.run().await.unwrap();
+//! fn main() {
+//!     let runtime = edge::EdgeRuntime::start(edge::EdgeConfig::default()).unwrap();
+//!     let edge = runtime.edge().clone();
+//!     let server = Server::new(MyQueryExecutor::new(), edge.clone());
+//!     edge.block_on(server.run()).unwrap().unwrap();
+//!     runtime.shutdown().unwrap();
 //! }
 //! ```
 
@@ -107,7 +108,11 @@ pub mod identity_extractor;
 #[cfg(feature = "server")]
 pub mod nac_guard;
 #[cfg(feature = "server")]
+pub mod pool_layer;
+#[cfg(feature = "server")]
 pub mod query_context;
+#[cfg(feature = "server")]
+pub mod request_scope;
 #[cfg(feature = "server")]
 pub mod route_permissions;
 pub mod router;

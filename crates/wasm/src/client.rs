@@ -20,7 +20,7 @@ type WasmRunner =
 use crate::bindings::{from_js, to_js, ClientConfig, CollectionInfo, FieldInfo};
 use crate::document_changes::DocumentChanges;
 use crate::error::{Result, WasmError};
-use crate::identity::{ClientIdentity, SigningGuard};
+use crate::identity::ClientIdentity;
 use crate::p2p::P2PRuntime;
 
 /// DefraDB client for browser applications.
@@ -59,7 +59,6 @@ pub struct DefraClient {
     pub(crate) document_acp: Arc<dyn acp::DocumentACP>,
     pub(crate) p2p: Option<P2PRuntime>,
     pub(crate) identity: Option<ClientIdentity>,
-    mutate_lock: futures::lock::Mutex<()>,
     closed: bool,
 }
 
@@ -246,6 +245,11 @@ impl DefraClient {
             from_js(config)?
         };
 
+        // The page's thread is the pool's one worker, driven by the event
+        // loop; it polls the store's I/O queue between its tasks.
+        let pool = edge::page_pool(storage::with_worker_io(workers::Config::default()))
+            .map_err(|e| WasmError::Storage(format!("Failed to start the worker: {}", e)))?;
+
         // A regolith store on the origin-private filesystem, which is the
         // only filesystem this target has.
         let db_name = config.db_name.as_deref().unwrap_or("defradb");
@@ -255,7 +259,7 @@ impl DefraClient {
 
         // Create the database
         let event_bus = Arc::new(events::ChannelBus::new());
-        let mut db = DB::new(store)
+        let mut db = DB::with_options(store, db::DbOptions::default().with_pool(pool.clone()))
             .map_err(|e| WasmError::Storage(format!("Failed to create database: {}", e)))?;
         db.set_event_bus(event_bus.clone());
 
@@ -286,7 +290,6 @@ impl DefraClient {
             document_acp,
             p2p: None,
             identity,
-            mutate_lock: futures::lock::Mutex::new(()),
             closed: false,
         })
     }
@@ -381,15 +384,15 @@ impl DefraClient {
             return Err(WasmError::Query("Empty mutation string".to_string()));
         }
 
-        // One mutation at a time. The signing config is a thread-local, so a
-        // second mutation starting mid-flight would take it away from the
-        // first, which would go on to write unsigned blocks.
-        let _writing = self.mutate_lock.lock().await;
-        let _signing = SigningGuard::install(self.identity.as_ref());
+        // Local writes are signed with the client's key; blocks arriving
+        // from peers never are.
+        let context = defra_core::RequestContext::default()
+            .with_signing(self.identity.as_ref().map(ClientIdentity::signing_config));
         let result = self
             .runner
             .as_ref()
             .ok_or(WasmError::NotInitialized)?
+            .for_request(context)
             .execute_mutation_with_identity(graphql, self.caller())
             .await;
 
@@ -465,6 +468,8 @@ impl DefraClient {
             }
         }
 
+        // The page's pool is not this client's to stop: every client on the
+        // page shares its one worker, which lives as long as the page.
         self.closed = true;
         Ok(())
     }
@@ -642,10 +647,8 @@ mod tests {
     }
 
     /// `mutate` takes `&self`, so a page can start a second one before the
-    /// first resolves, and the signing config they share is a thread-local.
-    /// The mutation lock is what keeps one from taking it away from the other;
-    /// this pins the outcome, since each mutation runs to completion without
-    /// yielding here and the interleaving cannot be provoked from a test.
+    /// first resolves. Each carries the signing config in its own request
+    /// context, with no lock between them; this pins the outcome.
     #[wasm_bindgen_test]
     async fn concurrent_mutations_are_each_signed() {
         let (mut client, _) = client_with_identity("signing_concurrent").await;
@@ -668,6 +671,45 @@ mod tests {
             "an interleaved mutation must not lose its signature"
         );
         client.close().await.unwrap();
+    }
+
+    /// Two clients on one page sign with their own keys, even when their
+    /// mutations run at once on the page's one thread: each request carries
+    /// its client's key, where a key shared through the thread would let one
+    /// mutation sign with the other's, or with none.
+    #[wasm_bindgen_test]
+    async fn mutations_of_two_clients_at_once_each_sign_with_their_own_key() {
+        let (mut first, first_key) = client_with_identity("signing_two_first").await;
+        let (mut second, second_key) = client_with_identity("signing_two_second").await;
+        for client in [&mut first, &mut second] {
+            client
+                .add_schema("type User { name: String }")
+                .await
+                .unwrap();
+        }
+
+        let (alice, bob) = futures::join!(
+            first.mutate(r#"mutation { create_User(input: {name: "Alice"}) { _docID } }"#),
+            second.mutate(r#"mutation { create_User(input: {name: "Bob"}) { _docID } }"#),
+        );
+        alice.unwrap();
+        bob.unwrap();
+
+        for (client, private_key_hex) in [(&first, first_key), (&second, second_key)] {
+            let public_key_hex =
+                crypto::private_key_from_string(crypto::KeyType::Ed25519, &private_key_hex)
+                    .unwrap()
+                    .public_key()
+                    .to_hex_string();
+            let keys = signing_keys(client).await;
+            assert!(!keys.is_empty(), "every document must carry a signature");
+            assert!(
+                keys.iter().all(|key| *key == public_key_hex),
+                "each client signs with its own key"
+            );
+        }
+        first.close().await.unwrap();
+        second.close().await.unwrap();
     }
 
     /// A browser generating its key with WebCrypto exports a JWK whose `d` is

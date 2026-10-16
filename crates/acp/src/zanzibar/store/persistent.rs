@@ -15,7 +15,8 @@ use zanzibar::types::{ObjectRef, Policy, Relationship, Subject};
 /// Persistent Zanzibar store backed by any Store implementation.
 pub struct PersistentZanzibarStore<S: Store> {
     store: NamespacedStore<S>,
-    counter_lock: async_lock::Mutex<()>,
+    /// Filled once the policy counter is known to cover every stored policy.
+    counter_seeded: regolith::sync::OnceCell<()>,
 }
 
 impl<S: Store> PersistentZanzibarStore<S> {
@@ -23,8 +24,51 @@ impl<S: Store> PersistentZanzibarStore<S> {
     pub fn from_store(store: Arc<S>) -> Self {
         Self {
             store: NamespacedStore::new(store, Namespace::Acpstore),
-            counter_lock: async_lock::Mutex::new(()),
+            counter_seeded: regolith::sync::OnceCell::new(),
         }
+    }
+
+    /// A store written before the counter key existed holds policies but no
+    /// counter, and allocating from zero there would mint an ID already in
+    /// use. Such a counter is seeded by reserving one value per stored policy
+    /// (the NAC policy's ID is a constant and never consumed one). A
+    /// reservation only moves the counter forward, so two seeders leave a gap
+    /// and never a repeat.
+    async fn seed_policy_counter(&self) -> Result<()> {
+        let txn = self.store.new_txn(true).await.map_err(|e| {
+            Error::Serialization(format!("seed policy counter: create transaction: {}", e))
+        })?;
+        if txn
+            .has(POLICY_COUNTER_KEY.as_bytes())
+            .await
+            .map_err(|e| Error::Serialization(format!("seed policy counter: get: {}", e)))?
+        {
+            return Ok(());
+        }
+        let iter_opts = IterOptions::new()
+            .with_prefix(POLICY_PREFIX.as_bytes().to_vec())
+            .with_keys_only(true);
+        let mut iter = txn.iterator(iter_opts).await.map_err(|e| {
+            Error::Serialization(format!("seed policy counter: create iterator: {}", e))
+        })?;
+        let nac_policy_key = Self::policy_key(crate::nac::NODE_POLICY_ID);
+        let mut spent = 0u64;
+        while let Some(kv) = iter
+            .next()
+            .await
+            .map_err(|e| Error::Serialization(format!("seed policy counter: iterate: {}", e)))?
+        {
+            if !kv.key.ends_with(nac_policy_key.as_bytes()) {
+                spent += 1;
+            }
+        }
+        if spent > 0 {
+            self.store
+                .allocate(POLICY_COUNTER_KEY.as_bytes(), spent)
+                .await
+                .map_err(|error| Error::Serialization(error.to_string()))?;
+        }
+        Ok(())
     }
 }
 
@@ -42,7 +86,6 @@ impl PersistentZanzibarStore<RegolithStore> {
 const POLICY_COUNTER_KEY: &str = "/zanzibar/counter";
 
 const POLICY_PREFIX: &str = "/zanzibar/policy/";
-const MAX_COUNTER_CONFLICT_RETRIES: u32 = 16;
 
 impl<S: Store> PersistentZanzibarStore<S> {
     fn policy_key(policy_id: &str) -> String {
@@ -73,6 +116,20 @@ impl<S: Store> PersistentZanzibarStore<S> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<S: Store> ZanzibarStore for PersistentZanzibarStore<S> {
+    fn supports_transactions(&self) -> bool {
+        true
+    }
+
+    async fn begin_scope(
+        &self,
+        readonly: bool,
+    ) -> Result<Option<Box<dyn zanzibar::store::ZanzibarScope>>> {
+        let txn = datastore::BasicTxn::new(self.store.inner().as_ref(), 0, readonly)
+            .await
+            .map_err(|error| Error::Serialization(error.to_string()))?;
+        Ok(Some(Box::new(super::transaction::OwnedZanzibarScope(txn))))
+    }
+
     async fn store_policy(&self, policy: &Policy) -> Result<()> {
         let mut txn = self.store.new_txn(false).await.map_err(|e| {
             Error::Serialization(format!("store_policy: create transaction: {}", e))
@@ -80,6 +137,16 @@ impl<S: Store> ZanzibarStore for PersistentZanzibarStore<S> {
 
         let key = Self::policy_key(&policy.id);
         let value = serde_json::to_vec(policy)?;
+        if let Some(existing) = txn
+            .get(key.as_bytes())
+            .await
+            .map_err(|error| Error::Serialization(error.to_string()))?
+        {
+            if existing.as_ref() != value.as_slice() {
+                return Err(Error::PolicyAlreadyExists(policy.id.clone()));
+            }
+            return Ok(());
+        }
 
         txn.set(key.as_bytes(), &value)
             .await
@@ -113,6 +180,16 @@ impl<S: Store> ZanzibarStore for PersistentZanzibarStore<S> {
         }
     }
 
+    async fn has_policy(&self, policy_id: &str) -> Result<bool> {
+        let txn =
+            self.store.new_txn(true).await.map_err(|e| {
+                Error::Serialization(format!("has_policy: create transaction: {}", e))
+            })?;
+        txn.has(Self::policy_key(policy_id).as_bytes())
+            .await
+            .map_err(|e| Error::Serialization(format!("has_policy: {}", e)))
+    }
+
     async fn list_policies(&self) -> Result<Vec<Policy>> {
         let txn = self.store.new_txn(true).await.map_err(|e| {
             Error::Serialization(format!("list_policies: create transaction: {}", e))
@@ -139,71 +216,14 @@ impl<S: Store> ZanzibarStore for PersistentZanzibarStore<S> {
     }
 
     async fn next_policy_counter(&self) -> Result<u64> {
-        let _guard = self.counter_lock.lock().await;
-        let mut conflicts = 0;
-
-        loop {
-            let mut txn = self.store.new_txn(false).await.map_err(|e| {
-                Error::Serialization(format!("next_policy_counter: create transaction: {}", e))
-            })?;
-
-            let stored = txn
-                .get(POLICY_COUNTER_KEY.as_bytes())
-                .await
-                .map_err(|e| Error::Serialization(format!("next_policy_counter: get: {}", e)))?;
-
-            let last_issued = match stored {
-                Some(bytes) => {
-                    let value: [u8; 8] = bytes.as_ref().try_into().map_err(|_| {
-                        Error::Serialization(format!(
-                            "next_policy_counter: expected 8 bytes, found {}",
-                            bytes.len()
-                        ))
-                    })?;
-                    u64::from_be_bytes(value)
-                }
-                None => {
-                    let iter_opts =
-                        IterOptions::new().with_prefix(POLICY_PREFIX.as_bytes().to_vec());
-                    let mut iter = txn.iterator(iter_opts).await.map_err(|e| {
-                        Error::Serialization(format!("next_policy_counter: create iterator: {}", e))
-                    })?;
-
-                    let mut seeded = 0u64;
-                    while let Some(kv) = iter.next().await.map_err(|e| {
-                        Error::Serialization(format!("next_policy_counter: iterate: {}", e))
-                    })? {
-                        // NAC shares this key space but mints its id from a
-                        // constant, so it never consumed a counter value.
-                        if !kv.key.ends_with(crate::nac::NODE_POLICY_ID.as_bytes()) {
-                            seeded += 1;
-                        }
-                    }
-                    seeded
-                }
-            };
-
-            let next = last_issued + 1;
-
-            txn.set(POLICY_COUNTER_KEY.as_bytes(), &next.to_be_bytes())
-                .await
-                .map_err(|e| Error::Serialization(format!("next_policy_counter: set: {}", e)))?;
-
-            match txn.commit().await {
-                Ok(()) => return Ok(next),
-                Err(error)
-                    if error.is_txn_conflict() && conflicts < MAX_COUNTER_CONFLICT_RETRIES =>
-                {
-                    conflicts += 1;
-                }
-                Err(error) => {
-                    return Err(Error::Serialization(format!(
-                        "next_policy_counter: commit: {}",
-                        error
-                    )))
-                }
-            }
-        }
+        self.counter_seeded
+            .get_or_try_init(self.seed_policy_counter())
+            .await?;
+        self.store
+            .allocate(POLICY_COUNTER_KEY.as_bytes(), 1)
+            .await
+            .map(|range| range.start)
+            .map_err(|error| Error::Serialization(error.to_string()))
     }
 
     async fn delete_policy(&self, policy_id: &str) -> Result<bool> {

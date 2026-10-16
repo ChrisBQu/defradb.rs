@@ -16,6 +16,8 @@ use p2p::replicator::ReplicationFilter;
 use replication_filter::validate_replication_filter;
 use schema::{FieldDescription, FieldKind};
 
+mod common;
+
 const WIDTHS: [usize; 4] = [1, 4, 16, 64];
 const COLLECTION_ID: &str = "replfilter";
 

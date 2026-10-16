@@ -49,7 +49,7 @@ pub(super) fn log_field<'a>(line: &'a str, field: &str) -> Option<&'a str> {
 /// separately correlates the pending root with a sender-side success reply.
 /// An at-capacity push returns before this log. Each document is created once
 /// and never updated, so one document maps to at most one live root.
-pub(super) fn registered_doc_ids(hub_log: &std::path::Path) -> std::collections::HashSet<String> {
+pub(super) fn registered_doc_ids(hub_log: &std::path::Path) -> rapidhash::RapidHashSet<String> {
     std::fs::read_to_string(hub_log)
         .unwrap_or_default()
         .lines()

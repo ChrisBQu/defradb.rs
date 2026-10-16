@@ -18,6 +18,7 @@ use crate::error::{http_error_from_backend_message, HttpError};
 use crate::handlers::txn_header::txn_id_from_headers;
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
+use crate::request_scope::bound;
 use crate::router::{AppState, NodePermission};
 
 /// Response for setting a migration.
@@ -70,13 +71,13 @@ pub async fn set_migration(
     }
 
     let lens_id = if let Some(txn_id) = txn_id_from_headers(&headers)? {
-        let txn_ops = state.require_txn_ops()?;
+        let txn_ops = bound(state.require_txn_ops()?, &identity.context());
         txn_ops
             .set_migration_in_txn(txn_id, &body)
             .await
             .map_err(http_error_from_backend_message)?
     } else {
-        let lens = state.require_lens()?;
+        let lens = bound(state.require_lens()?, &identity.context());
         lens.set_migration(&body)
             .await
             .map_err(http_error_from_backend_message)?
@@ -99,7 +100,7 @@ pub async fn reload(
 ) -> Result<(), HttpError> {
     require_permission(&state, &identity, NodePermission::CollectionPatch).await?;
 
-    let lens = state.require_lens()?;
+    let lens = bound(state.require_lens()?, &identity.context());
 
     lens.reload().await.map_err(HttpError::Internal)?;
 
@@ -120,7 +121,7 @@ pub async fn add_lens(
 ) -> Result<Json<SetMigrationResponse>, HttpError> {
     require_permission(&state, &identity, NodePermission::LensCreate).await?;
 
-    let lens = state.require_lens()?;
+    let lens = bound(state.require_lens()?, &identity.context());
 
     if body.trim().is_empty() {
         return Err(HttpError::BadRequest(
@@ -163,7 +164,7 @@ pub async fn list_lenses(
 ) -> Result<Json<serde_json::Value>, HttpError> {
     require_permission(&state, &identity, NodePermission::LensList).await?;
 
-    let lens = state.require_lens()?;
+    let lens = bound(state.require_lens()?, &identity.context());
 
     let modules = lens.list().await.map_err(HttpError::Internal)?;
 
@@ -195,10 +196,12 @@ mod tests {
 
     #[tokio::test]
     async fn set_migration_uses_tx_header_without_global_lens_ops() {
-        let state =
-            AppStateBuilder::new(Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>)
-                .with_txn_ops(Arc::new(MockTransactionOperations::new()))
-                .build();
+        let state = AppStateBuilder::new(
+            Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>,
+            edge::testing::edge(),
+        )
+        .with_txn_ops(Arc::new(MockTransactionOperations::new()))
+        .build();
         let mut headers = HeaderMap::new();
         headers.insert(TX_HEADER_NAME, HeaderValue::from_static("txn-123"));
 

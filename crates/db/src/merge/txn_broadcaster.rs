@@ -8,11 +8,11 @@
 use std::sync::Arc;
 
 use crate::block::builder::BlockResult;
-use crate::event::emission::{TxnBroadcastEvent, TxnBroadcaster};
-use async_trait::async_trait;
+use crate::event::emission::{BroadcastDone, TxnBroadcastEvent, TxnBroadcaster};
 use blockstore::Blockstore;
 use p2p::sync::SyncCoordinator;
 use p2p::transport::P2PTransport;
+use regolith::sync::{Atom, Event};
 
 use crate::merge::broadcast_mutator::broadcast::{
     broadcast_with_retry_with_creator, log_broadcast_failure,
@@ -20,137 +20,164 @@ use crate::merge::broadcast_mutator::broadcast::{
 
 /// `TxnBroadcaster` that fans committed transactional writes out to peers via
 /// `SyncCoordinator::push_to_replicators` and gossipsub.
-pub struct SyncTxnBroadcaster<
+///
+/// Each submitted write becomes its own task on the coordinator's runtime,
+/// which starts only once the task of the write submitted before it
+/// finished, so durable delivery markers are registered in commit-receipt
+/// order without the committing transaction waiting for earlier ones.
+pub struct SyncTxnBroadcaster<B, T>
+where
     B: Blockstore + defra_core::thread_bounds::MaybeSendSync + 'static,
     T: P2PTransport + 'static,
-> {
+{
     sync: Arc<SyncCoordinator<B, T>>,
+    /// Set when the last submitted write's task finished.
+    last: Atom<Arc<Event>>,
 }
 
-impl<
-        B: Blockstore + defra_core::thread_bounds::MaybeSendSync + 'static,
-        T: P2PTransport + 'static,
-    > SyncTxnBroadcaster<B, T>
+impl<B, T> SyncTxnBroadcaster<B, T>
+where
+    B: Blockstore + defra_core::thread_bounds::MaybeSendSync + 'static,
+    T: P2PTransport + 'static,
 {
     pub fn new(sync: Arc<SyncCoordinator<B, T>>) -> Self {
-        Self { sync }
+        let finished = Event::new();
+        finished.set();
+        Self {
+            sync,
+            last: Atom::new(Arc::new(finished)),
+        }
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+/// Sets its event when dropped: a task that ends, panics or is never run
+/// lets the next one start.
+struct Finished(Arc<Event>);
+
+impl Drop for Finished {
+    fn drop(&mut self) {
+        self.0.set();
+    }
+}
+
 impl<B, T> TxnBroadcaster for SyncTxnBroadcaster<B, T>
 where
     B: Blockstore + defra_core::thread_bounds::MaybeSendSync + 'static,
     T: P2PTransport + 'static,
 {
-    async fn broadcast_update(&self, event: TxnBroadcastEvent) {
-        let TxnBroadcastEvent {
-            collection_name,
-            collection_id,
-            doc_id,
-            doc_cid,
-            doc_block,
-            document_json,
-            collection_block,
-            creator_did,
-        } = event;
-
-        let creator_ref = creator_did.as_deref();
-        if let Some(document_json) = document_json.as_ref() {
-            if let Err(error) = self
-                .sync
-                .push_document_to_replicators_with_creator(
-                    &doc_cid,
-                    &doc_block,
-                    &doc_id,
-                    &collection_id,
-                    document_json,
-                    creator_ref,
-                )
-                .await
-            {
-                tracing::error!(%error, %doc_id, %collection_id, "Committed transaction has an undurable P2P document marker");
-            }
-        } else {
-            if let Err(error) = self
-                .sync
-                .push_to_replicators_with_creator(
-                    &doc_cid,
-                    &doc_block,
-                    &doc_id,
-                    &collection_id,
-                    creator_ref,
-                )
-                .await
-            {
-                tracing::error!(%error, %doc_id, %collection_id, "Committed transaction has an undurable P2P document marker");
-            }
-        }
-        if let Some((col_cid, col_block)) = collection_block.as_ref() {
-            if let Err(error) = self
-                .sync
-                .push_to_replicators_with_creator(
-                    col_cid,
-                    col_block,
-                    "",
-                    &collection_id,
-                    creator_ref,
-                )
-                .await
-            {
-                tracing::error!(%error, %collection_id, "Committed transaction has an undurable P2P collection marker");
-            }
-        }
-
-        let sync = self.sync.clone();
-
-        // The transaction callback returns only after its scope markers are
-        // durable. Gossip still runs under the node lifecycle without holding
-        // transaction completion open.
-        self.sync.spawn_non_authoritative_broadcast_task(
-            "broadcast_transaction_update",
-            async move {
-                let creator_ref = creator_did.as_deref();
-
-                let doc_block_result = BlockResult {
-                    cid: doc_cid,
-                    block: doc_block,
-                    doc_id: doc_id.clone(),
-                    field_cids: vec![],
-                    encryption_cids: vec![],
-                };
-                log_broadcast_failure(
-                    &broadcast_with_retry_with_creator(
-                        &sync,
-                        &doc_block_result,
-                        &collection_id,
-                        &collection_name,
-                        creator_ref,
-                    )
-                    .await,
-                );
-
-                if let Some((col_cid, col_block)) = collection_block {
-                    let col_block_result = BlockResult {
-                        cid: col_cid,
-                        block: col_block,
-                        doc_id: String::new(),
-                        field_cids: vec![],
-                        encryption_cids: vec![],
-                    };
-                    log_broadcast_failure(
-                        &broadcast_with_retry_with_creator(
-                            &sync,
-                            &col_block_result,
-                            &collection_id,
-                            &collection_name,
-                            creator_ref,
-                        )
-                        .await,
-                    );
-                }
-            },
-        );
+    fn submit_update(&self, event: TxnBroadcastEvent, done: BroadcastDone) {
+        let mine = Arc::new(Event::new());
+        let previous = Arc::clone(&*self.last.swap(Arc::clone(&mine)));
+        let finished = Finished(mine);
+        let sync = Arc::clone(&self.sync);
+        // A task skipped at shutdown is dropped here with `done` and
+        // `finished`, so neither its transaction nor the next write waits.
+        self.sync
+            .spawn_background_task("ordered_transaction_broadcast", async move {
+                previous.wait().await;
+                broadcast(&sync, event).await;
+                drop(done);
+                drop(finished);
+            });
     }
+}
+
+async fn broadcast<B, T>(sync: &Arc<SyncCoordinator<B, T>>, event: TxnBroadcastEvent)
+where
+    B: Blockstore + defra_core::thread_bounds::MaybeSendSync + 'static,
+    T: P2PTransport + 'static,
+{
+    let TxnBroadcastEvent {
+        collection_name,
+        collection_id,
+        doc_id,
+        doc_cid,
+        doc_block,
+        document_json,
+        collection_block,
+        creator_did,
+    } = event;
+
+    let creator_ref = creator_did.as_deref();
+    if let Some(document_json) = document_json.as_ref() {
+        if let Err(error) = sync
+            .push_document_to_replicators_with_creator(
+                &doc_cid,
+                &doc_block,
+                &doc_id,
+                &collection_id,
+                document_json,
+                creator_ref,
+            )
+            .await
+        {
+            tracing::error!(%error, %doc_id, %collection_id, "Committed transaction has an undurable P2P document marker");
+        }
+    } else if let Err(error) = sync
+        .push_to_replicators_with_creator(
+            &doc_cid,
+            &doc_block,
+            &doc_id,
+            &collection_id,
+            creator_ref,
+        )
+        .await
+    {
+        tracing::error!(%error, %doc_id, %collection_id, "Committed transaction has an undurable P2P document marker");
+    }
+    if let Some((col_cid, col_block)) = collection_block.as_ref() {
+        if let Err(error) = sync
+            .push_to_replicators_with_creator(col_cid, col_block, "", &collection_id, creator_ref)
+            .await
+        {
+            tracing::error!(%error, %collection_id, "Committed transaction has an undurable P2P collection marker");
+        }
+    }
+
+    let gossip = Arc::clone(sync);
+
+    // The transaction's broadcast is done once its scope markers are
+    // durable. Gossip still runs under the node lifecycle without holding
+    // the transaction or the next broadcast open.
+    sync.spawn_non_authoritative_broadcast_task("broadcast_transaction_update", async move {
+        let creator_ref = creator_did.as_deref();
+
+        let doc_block_result = BlockResult {
+            cid: doc_cid,
+            block: doc_block,
+            doc_id: doc_id.clone(),
+            field_cids: vec![],
+            encryption_cids: vec![],
+        };
+        log_broadcast_failure(
+            &broadcast_with_retry_with_creator(
+                &gossip,
+                &doc_block_result,
+                &collection_id,
+                &collection_name,
+                creator_ref,
+            )
+            .await,
+        );
+
+        if let Some((col_cid, col_block)) = collection_block {
+            let col_block_result = BlockResult {
+                cid: col_cid,
+                block: col_block,
+                doc_id: String::new(),
+                field_cids: vec![],
+                encryption_cids: vec![],
+            };
+            log_broadcast_failure(
+                &broadcast_with_retry_with_creator(
+                    &gossip,
+                    &col_block_result,
+                    &collection_id,
+                    &collection_name,
+                    creator_ref,
+                )
+                .await,
+            );
+        }
+    });
 }

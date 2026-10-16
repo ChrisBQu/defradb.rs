@@ -24,6 +24,17 @@ pub struct CompositeFrame<'a> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait CompositeMergeHook: MaybeSendSync {
+    fn supports_transactions(&self) -> bool {
+        false
+    }
+
+    fn bind_transaction(
+        &self,
+        _view: datastore::NamespaceView,
+    ) -> Option<std::sync::Arc<dyn CompositeMergeHook>> {
+        None
+    }
+
     /// Whether `on_protected_update` can refuse anything, so the merge path
     /// only pays for per-frame signature verification when it matters.
     fn guards_protected_updates(&self) -> bool {

@@ -9,14 +9,14 @@
 //! Collection-scoped DEK release:
 //!   - NAC `read-document` check on the actor.
 //!
-//! `node_acp` is held in an `OnceLock` because NAC initializes after the
+//! `node_acp` is held in an `OnceCell` because NAC initializes after the
 //! KMS service in `EmbeddedNode::build_with_store` (mirrors Go's
 //! `func() NACInfo` getter pattern from PR #4778).
 
 use async_trait::async_trait;
 use identity::Did;
+use regolith::sync::OnceCell;
 use std::sync::Arc;
-use std::sync::OnceLock;
 
 use crate::error::{Error, Result};
 use crate::policy::{AccessPolicy, DocCollectionLookup, NodeAcpRead};
@@ -28,7 +28,7 @@ use crate::types::{KeyScope, PolicyDecision};
 pub struct NacDacPolicy {
     doc_acp: Arc<dyn acp::DocumentACP>,
     doc_lookup: Arc<dyn DocCollectionLookup>,
-    node_acp: OnceLock<Arc<dyn NodeAcpRead>>,
+    node_acp: OnceCell<Arc<dyn NodeAcpRead>>,
 }
 
 impl NacDacPolicy {
@@ -41,12 +41,12 @@ impl NacDacPolicy {
         Self {
             doc_acp,
             doc_lookup,
-            node_acp: OnceLock::new(),
+            node_acp: OnceCell::new(),
         }
     }
 
     /// Install the NAC reader. First call wins; subsequent calls are
-    /// silently discarded (matches `OnceLock` semantics). Callers must not
+    /// silently discarded (matches `OnceCell` semantics). Callers must not
     /// rely on swapping the NAC reader at runtime. Called by the embedded-
     /// node layer once NAC is ready.
     pub fn set_node_acp(&self, nac: Arc<dyn NodeAcpRead>) {

@@ -133,6 +133,14 @@ impl From<String> for FfiP2PError {
     }
 }
 
+/// The network runtime could not run the call: it is shutting down, or the
+/// call panicked.
+impl From<edge::EdgeError> for FfiP2PError {
+    fn from(error: edge::EdgeError) -> Self {
+        Self::internal(error.to_string())
+    }
+}
+
 impl From<&str> for FfiP2PError {
     fn from(message: &str) -> Self {
         Self::internal(message.to_string())

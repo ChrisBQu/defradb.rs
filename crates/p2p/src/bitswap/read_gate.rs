@@ -49,8 +49,13 @@ pub struct ServeAcp {
     pub gate: Arc<dyn BlockReadGate>,
 }
 
-#[derive(Default)]
-pub struct LateBoundServeAcp(std::sync::OnceLock<ServeAcp>);
+pub struct LateBoundServeAcp(regolith::sync::OnceCell<ServeAcp>);
+
+impl Default for LateBoundServeAcp {
+    fn default() -> Self {
+        Self(regolith::sync::OnceCell::new())
+    }
+}
 
 impl LateBoundServeAcp {
     pub fn new() -> Self {

@@ -57,6 +57,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // For document-level CIDs, this returns a single document.
         let mut seen_cids = RapidHashSet::new();
         let mut documents = Vec::new();
+        // Read keys are fetched as the identity acting in the request.
+        let reader = self
+            .acting_identity(caller_identity.as_ref())
+            .and_then(|value| Did::new(value).ok());
         for cid in cids {
             if !seen_cids.insert(cid.clone()) {
                 continue;
@@ -67,7 +71,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     collection.resolved_root_id(),
                     cid,
                     expected_doc_id.map(|s| s.as_str()),
-                    caller_identity.as_ref(),
+                    reader.as_ref(),
                 )
                 .await
             {
@@ -98,15 +102,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     Some(id) => id.to_string(),
                     None => continue,
                 };
-                match crate::txn::check_doc_access_with_overlay(
-                    self.acp.as_ref(),
-                    &identity,
-                    DocumentPermission::Read,
-                    &policy.id,
-                    &policy.resource_name,
-                    &doc_id,
-                )
-                .await
+                match self
+                    .check_doc_access_for_read(
+                        &identity,
+                        DocumentPermission::Read,
+                        &policy.id,
+                        &policy.resource_name,
+                        &doc_id,
+                    )
+                    .await
                 {
                     Ok(true) => permitted.push((doc, cid)),
                     Ok(false) => {
@@ -118,6 +122,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             "CID time-travel query: document excluded by ACP"
                         );
                     }
+                    Err(e @ QueryError::NeedsInput(_)) => return Err(e),
                     Err(e) => {
                         return Err(QueryError::acp_check_failed("read", doc_id, e.to_string()));
                     }
@@ -132,7 +137,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             let doc_id = doc.id().map(|id| id.to_string()).unwrap_or_default();
             if self
                 .app_may_read(app_identity.as_ref(), &collection, &doc_id)
-                .await
+                .await?
             {
                 readable.push((doc, cid));
             }

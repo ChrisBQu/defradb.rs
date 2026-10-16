@@ -17,20 +17,33 @@ use crate::access_hooks::AppReadCheck;
 use crate::document::DocumentMapping;
 use crate::error::Result;
 use crate::planner::{index_selection::CursorSeek, Doc, PlanNode};
-use crate::txn::check_doc_access_with_overlay;
+use crate::txn::AcpRegistrationProjection;
 
 // Keep enough remote checks moving to hide latency without letting one query
 // exhaust the ACP provider's connection pool.
 const MAX_IN_FLIGHT_PERMISSION_CHECKS: usize = 16;
 
-type PermissionCheck = MaybeBoxFuture<'static, (Doc, bool)>;
+type PermissionCheck = MaybeBoxFuture<'static, Result<(Doc, bool)>>;
+
+/// Who reads, through which ACP, under which policy.
+pub struct AcpRead {
+    pub acp: Arc<dyn DocumentACP>,
+    pub identity: Identity,
+    /// The request's DAC bypass (`RequestContext::dac_bypass`).
+    pub dac_bypass: bool,
+    pub policy_id: String,
+    pub resource_name: String,
+}
 
 #[derive(Clone)]
 struct AcpReadCheck {
     acp: Arc<dyn DocumentACP>,
     identity: Arc<Identity>,
+    dac_bypass: bool,
     policy_id: Arc<str>,
     resource_name: Arc<str>,
+    retry_inputs: Option<crate::prepared::PreparedInputMemo>,
+    projection: Option<Arc<AcpRegistrationProjection>>,
 }
 
 /// PermissionFilterNode filters documents based on ACP permissions.
@@ -64,7 +77,9 @@ pub struct PermissionFilterNode {
 }
 
 impl PermissionFilterNode {
-    /// Create a new permission filter node.
+    /// Create a new permission filter node, with the DAC bypass of
+    /// [`defra_core::RequestContext::ambient`] until
+    /// [`PermissionFilterNode::with_dac_bypass`] sets the request's.
     ///
     /// # Arguments
     /// * `source` - The source node to filter
@@ -85,8 +100,11 @@ impl PermissionFilterNode {
             acp: Some(AcpReadCheck {
                 acp,
                 identity: Arc::new(identity),
+                dac_bypass: defra_core::RequestContext::ambient().dac_bypass(),
                 policy_id: Arc::from(policy_id.into()),
                 resource_name: Arc::from(resource_name.into()),
+                retry_inputs: None,
+                projection: None,
             }),
             app: None,
             current_doc: Doc::default(),
@@ -105,6 +123,15 @@ impl PermissionFilterNode {
         resource_name: impl Into<String>,
     ) -> Self {
         Self::new(source, acp, Identity::from(did), policy_id, resource_name)
+    }
+
+    /// Let an authenticated reader see every document when the request's node
+    /// access grants it `bypass-dac` (`RequestContext::dac_bypass`).
+    pub fn with_dac_bypass(mut self, bypass: bool) -> Self {
+        if let Some(acp) = &mut self.acp {
+            acp.dac_bypass = bypass;
+        }
+        self
     }
 
     /// A filter that applies only an app read check.
@@ -127,16 +154,66 @@ impl PermissionFilterNode {
         self
     }
 
+    pub(crate) fn with_projection(
+        mut self,
+        projection: Option<Arc<AcpRegistrationProjection>>,
+    ) -> Self {
+        if let Some(acp) = &mut self.acp {
+            acp.projection = projection;
+        }
+        self
+    }
+
+    pub(crate) fn with_retry_inputs(
+        mut self,
+        inputs: Option<crate::prepared::PreparedInputMemo>,
+    ) -> Self {
+        if let Some(acp) = &mut self.acp {
+            acp.retry_inputs = inputs;
+        }
+        self
+    }
+
     /// Wrap `source` in whichever of the ACP and app checks apply, or return
     /// it unchanged when neither does.
     pub fn wrap(
         source: Box<dyn PlanNode>,
-        acp: Option<(Arc<dyn DocumentACP>, Identity, String, String)>,
+        acp: Option<AcpRead>,
         app: Option<AppReadCheck>,
+        retry_inputs: Option<crate::prepared::PreparedInputMemo>,
+    ) -> Box<dyn PlanNode> {
+        Self::wrap_with_projection_and_inputs(source, acp, app, None, retry_inputs)
+    }
+
+    pub fn wrap_with_projection(
+        source: Box<dyn PlanNode>,
+        acp: Option<AcpRead>,
+        app: Option<AppReadCheck>,
+        projection: Option<Arc<AcpRegistrationProjection>>,
+    ) -> Box<dyn PlanNode> {
+        Self::wrap_with_projection_and_inputs(source, acp, app, projection, None)
+    }
+
+    pub fn wrap_with_projection_and_inputs(
+        source: Box<dyn PlanNode>,
+        acp: Option<AcpRead>,
+        app: Option<AppReadCheck>,
+        projection: Option<Arc<AcpRegistrationProjection>>,
+        retry_inputs: Option<crate::prepared::PreparedInputMemo>,
     ) -> Box<dyn PlanNode> {
         match (acp, app) {
-            (Some((acp, identity, policy_id, resource_name)), app) => Box::new(
-                Self::new(source, acp, identity, policy_id, resource_name).with_app_check(app),
+            (Some(read), app) => Box::new(
+                Self::new(
+                    source,
+                    read.acp,
+                    read.identity,
+                    read.policy_id,
+                    read.resource_name,
+                )
+                .with_dac_bypass(read.dac_bypass)
+                .with_app_check(app)
+                .with_projection(projection)
+                .with_retry_inputs(retry_inputs),
             ),
             (None, Some(app)) => Box::new(Self::app_only(source, app)),
             (None, None) => source,
@@ -151,41 +228,49 @@ impl PermissionFilterNode {
             let Some(AcpReadCheck {
                 acp,
                 identity,
+                dac_bypass,
                 policy_id,
                 resource_name,
+                retry_inputs,
+                projection,
             }) = acp
             else {
-                let allowed = app_allows(app.as_ref(), &doc_id).await;
-                return (doc, allowed);
+                let allowed = app_allows(app.as_ref(), &doc_id).await?;
+                return Ok((doc, allowed));
             };
-            let allowed = if identity.is_authenticated() && defra_core::dac_bypass::get_dac_bypass()
-            {
+            let allowed = if identity.is_authenticated() && dac_bypass {
                 true
             } else {
-                check_doc_access_with_overlay(
+                match crate::txn::check_doc_access_with_prepared_inputs(
                     acp.as_ref(),
+                    projection.as_deref(),
                     identity.as_ref(),
                     DocumentPermission::Read,
                     policy_id.as_ref(),
                     resource_name.as_ref(),
                     &doc_id,
+                    retry_inputs.as_ref(),
                 )
                 .await
-                .unwrap_or_else(|error| {
-                    tracing::warn!(
-                        %doc_id,
-                        policy_id = %policy_id,
-                        resource_name = %resource_name,
-                        identity = %identity,
-                        %error,
-                        "Permission check failed, denying access to document"
-                    );
-                    false
-                })
+                {
+                    Ok(allowed) => allowed,
+                    Err(error @ crate::error::QueryError::NeedsInput(_)) => return Err(error),
+                    Err(error) => {
+                        tracing::warn!(
+                            %doc_id,
+                            policy_id = %policy_id,
+                            resource_name = %resource_name,
+                            identity = %identity,
+                            %error,
+                            "Permission check failed, denying access to document"
+                        );
+                        false
+                    }
+                }
             };
-            let allowed = allowed && app_allows(app.as_ref(), &doc_id).await;
+            let allowed = allowed && app_allows(app.as_ref(), &doc_id).await?;
 
-            (doc, allowed)
+            Ok((doc, allowed))
         })
     }
 }
@@ -234,7 +319,8 @@ impl PlanNode for PermissionFilterNode {
                 // non-blocking poll avoids racing (and potentially cancelling)
                 // `source.next()` while still letting immediately available
                 // decisions preserve single-row streaming latency.
-                if let Some(Some((doc, allowed))) = self.pending.get_mut().next().now_or_never() {
+                if let Some(Some(result)) = self.pending.get_mut().next().now_or_never() {
+                    let (doc, allowed) = result?;
                     if allowed {
                         self.current_doc = doc;
                         return Ok(true);
@@ -243,11 +329,12 @@ impl PlanNode for PermissionFilterNode {
             }
 
             match self.pending.get_mut().next().await {
-                Some((doc, true)) => {
+                Some(Ok((doc, true))) => {
                     self.current_doc = doc;
                     return Ok(true);
                 }
-                Some((_, false)) => continue,
+                Some(Ok((_, false))) => continue,
+                Some(Err(error)) => return Err(error),
                 None => return Ok(false),
             }
         }
@@ -299,7 +386,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    use async_lock::Barrier;
+    use regolith::sync::Barrier;
 
     use super::*;
 
@@ -381,6 +468,7 @@ mod tests {
         delays: RapidHashMap<String, Duration>,
         active: AtomicUsize,
         max_active: AtomicUsize,
+        calls: AtomicUsize,
     }
 
     impl MockAcp {
@@ -390,6 +478,7 @@ mod tests {
                 delays,
                 active: AtomicUsize::new(0),
                 max_active: AtomicUsize::new(0),
+                calls: AtomicUsize::new(0),
             }
         }
     }
@@ -423,6 +512,7 @@ mod tests {
             _resource_name: &str,
             doc_id: &str,
         ) -> acp::Result<bool> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             self.max_active.fetch_max(active, Ordering::SeqCst);
 
@@ -475,6 +565,38 @@ mod tests {
         ) -> acp::Result<()> {
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn prepared_permission_check_exits_for_external_input_without_calling_provider() {
+        let yielded = Arc::new(AtomicUsize::new(0));
+        let acp = Arc::new(MockAcp::new(None, RapidHashMap::new()));
+        let memo = crate::prepared::PreparedInputMemo::default();
+        let node = PermissionFilterNode::new(
+            Box::new(MockSource::new(&["doc-1".to_string()], yielded)),
+            acp.clone(),
+            Identity::Anonymous,
+            "policy",
+            "User",
+        )
+        .with_retry_inputs(Some(memo.clone()));
+        let doc = Doc::default();
+        let error = node
+            .permission_check("doc-1".to_string(), doc.deep_clone())
+            .await
+            .unwrap_err();
+        let crate::error::QueryError::NeedsInput(request) = error else {
+            panic!("expected typed ACP input request");
+        };
+        assert_eq!(acp.calls.load(Ordering::SeqCst), 0);
+
+        memo.insert(request, b"true".as_slice());
+        let (_, allowed) = node
+            .permission_check("doc-1".to_string(), doc)
+            .await
+            .expect("memoized decision succeeds");
+        assert!(allowed);
+        assert_eq!(acp.calls.load(Ordering::SeqCst), 0);
     }
 
     fn permission_filter(

@@ -6,6 +6,7 @@ use super::{map_p2p_bad_request, map_p2p_internal};
 use crate::error::HttpError;
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
+use crate::request_scope::bound;
 use crate::router::{AppState, NodePermission, P2pDocumentRequest, SyncDocumentsRequest};
 use crate::validation::validate_doc_id;
 
@@ -22,7 +23,7 @@ pub async fn list_documents(
 ) -> Result<Json<Vec<String>>, HttpError> {
     require_permission(&state, &identity, NodePermission::P2pDocumentList).await?;
 
-    let p2p = state.require_p2p()?;
+    let p2p = bound(state.require_p2p()?, &identity.context());
 
     let docs = p2p.get_documents().await.map_err(map_p2p_internal)?;
 
@@ -46,7 +47,7 @@ pub async fn add_documents(
 ) -> Result<(), HttpError> {
     require_permission(&state, &identity, NodePermission::P2pDocumentAdd).await?;
 
-    let p2p = state.require_p2p()?;
+    let p2p = bound(state.require_p2p()?, &identity.context());
 
     if doc_ids.is_empty() {
         return Err(HttpError::BadRequest(
@@ -89,7 +90,7 @@ pub async fn remove_documents(
 ) -> Result<(), HttpError> {
     require_permission(&state, &identity, NodePermission::P2pDocumentDelete).await?;
 
-    let p2p = state.require_p2p()?;
+    let p2p = bound(state.require_p2p()?, &identity.context());
 
     if doc_ids.is_empty() {
         return Err(HttpError::BadRequest(
@@ -133,7 +134,7 @@ pub async fn sync_documents(
 ) -> Result<Json<()>, HttpError> {
     require_permission(&state, &identity, NodePermission::P2pSyncDocuments).await?;
 
-    let p2p = state.require_p2p()?;
+    let p2p = bound(state.require_p2p()?, &identity.context());
 
     let timeout = crate::validation::parse_timeout(body.timeout.as_deref())?;
 

@@ -4,96 +4,54 @@
 /// - Explicit/implicit transaction handling
 /// - Transaction-scoped collection cache (lazy loading)
 /// - Reference to the database for collection operations
-use crate::collection::cache::CollectionCache;
 use crate::collection::{populate_collection_root_id, Collection};
 use crate::error::{Error, Result};
-use async_lock::{MutexGuardArc, RwLockReadGuardArc, RwLockWriteGuardArc};
-use datastore::{AsyncCallback, BasicTxn, NamespaceView, RootView, TxnCallback};
-use rapidhash::{HashSetExt, RapidHashSet};
+use catalog::Catalog;
+use datastore::{BasicTxn, NamespaceView, RootView};
 use schema::CollectionVersion;
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::index::vector::engine::diskann::CodeCaches;
-use storage::corekv::{IterOptions, Key, Store};
+use storage::corekv::{IterOptions, Key, OnAbort, OnCommit, Store};
 use storage::keys::systemstore::{CollectionKey, CollectionNameKey};
 
+mod catalog;
 pub mod context;
+pub(crate) mod held;
 pub(crate) mod lenses;
+pub(crate) mod owner;
 pub mod registry;
 
-/// A counter mutation RECORDED during an interactive/explicit transaction but
-/// not yet applied to the authoritative CRDT accumulation store. The
-/// read-modify-write (and the per-doc guard that protects it) is deferred to the
-/// commit-time finalize (#1044) so the interactive txn holds no guard/gate over
-/// its user-controlled lifetime. See `InteractiveTxnCounter.tla`.
-#[derive(Clone, Debug)]
-pub struct PendingCounterOp {
-    /// Collection name (used to reload the collection + index manager at finalize).
-    pub collection_name: String,
-    /// Schema version id of the collection at record time.
-    pub schema_version_id: String,
-    /// Document id the counter belongs to.
-    pub doc_id: String,
-    /// Counter field name.
-    pub field: String,
-    /// For updates: the recorded increment delta. For creates: the seeded value.
-    pub delta: document::NormalValue,
-    /// For UPDATE ops: the PRE-WRITE committed counter value, captured at record
-    /// time, used as the reconcile (init-if-absent) base at finalize. This must
-    /// be read BEFORE the provisional deferred blob write so the finalize does not
-    /// re-read the already-overwritten provisional blob as the "committed" value —
-    /// re-reading it would double-apply the delta for an increment-only PCounter
-    /// (whose reconcile migrates a present store UPWARD when blob > store). `None`
-    /// when the doc had no committed value for the field (seed 0). Unused for
-    /// creates.
-    pub base: Option<document::NormalValue>,
-    /// Whether this op was recorded on a CREATE (seed) vs an UPDATE (delta RMW).
-    pub is_create: bool,
-}
-
-struct PendingCollectionAcpRegistration {
+#[derive(Clone)]
+struct OwedAcpRegistration {
     acp: Arc<dyn acp::DocumentACP>,
     creator: identity::Did,
     request_bearer_token: Option<String>,
     schemas: Vec<CollectionVersion>,
 }
 
-enum CollectionGuard {
-    Read { _guard: RwLockReadGuardArc<()> },
-    Write { _guard: RwLockWriteGuardArc<()> },
-}
-
-impl PendingCollectionAcpRegistration {
+impl OwedAcpRegistration {
     async fn run(self) -> Result<()> {
-        let previous_token = self.request_bearer_token.as_ref().map(|token| {
-            let previous = defra_core::signing::get_request_bearer_token(self.creator.as_str());
-            defra_core::signing::set_request_bearer_token(self.creator.as_str(), token.clone());
-            previous
-        });
-
-        let result: acp::Result<()> = async {
-            for schema in &self.schemas {
-                crate::collection::acp::register_collection_if_needed(
-                    self.acp.as_ref(),
-                    Some(&self.creator),
-                    schema,
-                )
-                .await?;
-            }
-            Ok(())
-        }
-        .await;
-
-        if self.request_bearer_token.is_some() {
-            if let Some(Some(previous)) = previous_token {
-                defra_core::signing::set_request_bearer_token(self.creator.as_str(), previous);
-            } else {
-                defra_core::signing::clear_request_bearer_token(self.creator.as_str());
-            }
-        }
-
-        result.map_err(Error::from)
+        let creator = self.creator;
+        let schemas = self.schemas;
+        acp::with_request_bearer(
+            &self.acp,
+            Some(creator.to_string()),
+            self.request_bearer_token,
+            |acp| async move {
+                for schema in &schemas {
+                    crate::collection::acp::register_collection_if_needed(
+                        acp.as_ref(),
+                        Some(&creator),
+                        schema,
+                    )
+                    .await?;
+                }
+                Ok::<_, acp::Error>(())
+            },
+        )
+        .await
+        .map_err(Error::from)
     }
 }
 
@@ -117,81 +75,130 @@ impl PendingCollectionAcpRegistration {
 ///
 /// The collection cache is populated lazily from the SystemStore on first
 /// access, matching the Go DefraDB pattern for transaction isolation.
+///
+/// Everything a request does with the transaction takes `&self`, so the
+/// handles of one request (its fetcher, mutator and collection provider)
+/// share it with no lock. What needs it held alone (a statement savepoint, the
+/// commit, a discard) takes `&mut self` or `self`.
 pub struct DbTxn<S: Store> {
     /// The underlying BasicTxn. `None` after commit/discard.
     txn: Option<BasicTxn>,
     /// Whether this is an explicit transaction.
     explicit: bool,
-    /// Transaction-scoped collection cache (lazy loading from SystemStore).
-    collection_cache: CollectionCache,
-    /// Collection IDs created inside this transaction.
-    locally_created_collection_ids: RapidHashSet<String>,
-    /// Per-doc write guards held so a local counter read-modify-write and a P2P
-    /// merge on the same document never interleave (#1021). The merge handler
-    /// shares the same `DocWriteQueue`. For the interactive/explicit path
-    /// (#1044) these are acquired at the commit-time finalize (under the briefly
-    /// held batch gate, a finalize local) and inserted here, so they release
-    /// only when the `DbTxn` is consumed by
-    /// `commit`/`discard`/`force_commit`/`force_discard` — i.e. AFTER the durable
-    /// commit. See the finalize driver in `txn/registry/lifecycle.rs` and
-    /// `InteractiveTxnCounter.tla`.
-    doc_guards: BTreeMap<String, MutexGuardArc<()>>,
-    /// Collection locks held until this transaction commits or rolls back.
-    collection_guards: BTreeMap<String, CollectionGuard>,
-    /// Counter deltas RECORDED by the interactive mutator during the txn but not
-    /// yet applied to the authoritative CRDT accumulation store. Drained and
-    /// RMW'd at the commit-time finalize under per-doc guards (#1044).
-    pending_counter_ops: Vec<PendingCounterOp>,
-    /// Branchable collection ACP registrations that must succeed before the
+    /// The collections this transaction loaded, changed and created, and the
+    /// branchable collection ACP registrations that must succeed before the
     /// storage commit, otherwise a protected collection could be persisted
     /// without its collection-level ACP object.
-    pending_collection_acp_registrations: Vec<PendingCollectionAcpRegistration>,
+    catalog: Catalog,
     /// The database's resident DiskANN codes, for searches in this transaction.
     vector_codes: Arc<CodeCaches>,
+    /// The database's committed collections, so a collection this transaction
+    /// loads with the same definition reuses the cached handle's decoded state.
+    shared_collections: Option<Arc<crate::collection::epoch::EpochedCollections>>,
+    statement_savepoint: Option<catalog::Snapshot>,
     /// Phantom data for the store type.
     _marker: std::marker::PhantomData<S>,
+}
+
+/// A transaction lent to the handles of one request (its fetcher, mutator and
+/// collection provider). They share it through `&self`, with no lock;
+/// whoever lent it takes it back with [`reclaim`] once they are gone.
+pub type LentTxn<S> = Arc<DbTxn<S>>;
+
+/// Takes a lent transaction back, by value. A handle that still holds it (an
+/// open stream, a component kept past its request) is an error, never a wait.
+pub fn reclaim<S>(txn: LentTxn<S>) -> Result<DbTxn<S>>
+where
+    S: Store,
+{
+    Arc::try_unwrap(txn).map_err(|_| Error::TxnInUse)
+}
+
+/// A transaction is lent to the handles of one request as a shared value, so
+/// it must be shareable on every store: checked here at compile time.
+#[cfg(not(target_arch = "wasm32"))]
+fn _lendable_on_every_store<S>()
+where
+    S: Store + 'static,
+{
+    fn shareable<T>()
+    where
+        T: Send + Sync,
+    {
+    }
+    shareable::<DbTxn<S>>();
 }
 
 impl<S: Store> DbTxn<S> {
     /// Create a new implicit DbTxn.
     pub fn new(txn: BasicTxn) -> Self {
-        Self {
-            txn: Some(txn),
-            explicit: false,
-            collection_cache: CollectionCache::new(),
-            locally_created_collection_ids: RapidHashSet::new(),
-            doc_guards: BTreeMap::new(),
-            collection_guards: BTreeMap::new(),
-            pending_counter_ops: Vec::new(),
-            pending_collection_acp_registrations: Vec::new(),
-            vector_codes: Arc::default(),
-            _marker: std::marker::PhantomData,
-        }
+        Self::with_codes(txn, false, Arc::default())
     }
 
-    pub(crate) fn with_vector_codes(mut self, codes: Arc<CodeCaches>) -> Self {
-        self.vector_codes = codes;
-        self
+    /// An implicit transaction of a database, sharing its vector code caches.
+    /// Built with them rather than given them after: caches of its own would
+    /// allocate a lock-free map only to drop it, on every transaction.
+    pub(crate) fn of_database(txn: BasicTxn, codes: Arc<CodeCaches>) -> Self {
+        Self::with_codes(txn, false, codes)
+    }
+
+    fn with_codes(txn: BasicTxn, explicit: bool, vector_codes: Arc<CodeCaches>) -> Self {
+        Self {
+            txn: Some(txn),
+            explicit,
+            catalog: Catalog::new(),
+            vector_codes,
+            shared_collections: None,
+            statement_savepoint: None,
+            _marker: std::marker::PhantomData,
+        }
     }
 
     pub(crate) fn vector_codes(&self) -> &Arc<CodeCaches> {
         &self.vector_codes
     }
 
+    pub(crate) fn with_shared_collections(
+        mut self,
+        collections: Arc<crate::collection::epoch::EpochedCollections>,
+    ) -> Self {
+        self.shared_collections = Some(collections);
+        self
+    }
+
+    /// The database's committed handle for `name`, if it has one.
+    pub(crate) fn shared_collection(&self, name: &str) -> Option<Collection> {
+        self.shared_collections
+            .as_ref()?
+            .peek(|map| map.get(name).cloned())
+    }
+
     /// Create a new explicit DbTxn.
     pub fn new_explicit(txn: BasicTxn) -> Self {
-        Self {
-            txn: Some(txn),
-            explicit: true,
-            collection_cache: CollectionCache::new(),
-            locally_created_collection_ids: RapidHashSet::new(),
-            doc_guards: BTreeMap::new(),
-            collection_guards: BTreeMap::new(),
-            pending_counter_ops: Vec::new(),
-            pending_collection_acp_registrations: Vec::new(),
-            vector_codes: Arc::default(),
-            _marker: std::marker::PhantomData,
+        Self::with_codes(txn, true, Arc::default())
+    }
+
+    /// Consume this DB transaction into the engine's scoped retry attempt.
+    /// Namespace views must already be dropped; the returned callback bundle
+    /// is held by storage until the winning commit receipt is available.
+    pub fn into_retry_attempt(
+        mut self,
+    ) -> storage::corekv::Result<(
+        Box<dyn storage::corekv::RetryAttemptIO>,
+        storage::corekv::TxnCallbacks,
+    )> {
+        if self.catalog.owes() {
+            return Err(storage::corekv::Error::Other(
+                "retry attempts cannot carry pending collection ACP registrations".into(),
+            ));
         }
+        let txn = self
+            .txn
+            .take()
+            .ok_or(storage::corekv::Error::DiscardedTxn)?;
+        let (io, callbacks) = txn.into_retry_attempt()?;
+
+        Ok((io, callbacks))
     }
 
     /// Mark this transaction as explicit.
@@ -200,6 +207,50 @@ impl<S: Store> DbTxn<S> {
     /// when passed to database methods.
     pub fn make_explicit(&mut self) {
         self.explicit = true;
+    }
+
+    pub(crate) fn set_statement_savepoint(&mut self) -> Result<()> {
+        if !self.explicit || self.statement_savepoint.is_some() {
+            return Err(Error::Other(
+                "statement savepoint requires an explicit transaction with no active statement"
+                    .into(),
+            ));
+        }
+        self.txn
+            .as_mut()
+            .ok_or(Error::TxnNotActive)?
+            .set_savepoint()?;
+        self.statement_savepoint = Some(self.catalog.snapshot());
+        Ok(())
+    }
+
+    pub(crate) fn rollback_statement_savepoint(&mut self) -> Result<()> {
+        let Some(snapshot) = self.statement_savepoint.take() else {
+            return Err(Error::Other("no statement savepoint is active".into()));
+        };
+        if let Err(error) = self
+            .txn
+            .as_mut()
+            .ok_or(Error::TxnNotActive)
+            .and_then(|txn| txn.rollback_to_savepoint().map_err(Error::from))
+        {
+            self.statement_savepoint = Some(snapshot);
+            return Err(error);
+        }
+        self.catalog.restore(snapshot);
+        Ok(())
+    }
+
+    pub(crate) fn release_statement_savepoint(&mut self) -> Result<()> {
+        if self.statement_savepoint.is_none() {
+            return Err(Error::Other("no statement savepoint is active".into()));
+        }
+        self.txn
+            .as_mut()
+            .ok_or(Error::TxnNotActive)?
+            .release_savepoint()?;
+        self.statement_savepoint = None;
+        Ok(())
     }
 
     /// Check if this is an explicit transaction.
@@ -294,6 +345,19 @@ impl<S: Store> DbTxn<S> {
             .ok_or(Error::TxnNotActive)
     }
 
+    /// The registrations this transaction's creates owe an external ACP
+    /// provider, read through its own writes. A transaction no longer active
+    /// shows none.
+    #[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
+    pub fn acp_registration_projection(&self) -> Arc<query::txn::AcpRegistrationProjection> {
+        Arc::new(match self.acpstore() {
+            Ok(view) => {
+                query::txn::AcpRegistrationProjection::new(acp::PendingRegistrations::new(&view))
+            }
+            Err(_) => query::txn::AcpRegistrationProjection::detached(),
+        })
+    }
+
     /// Get the rootstore.
     ///
     /// Returns an error if the transaction has been committed or discarded.
@@ -304,52 +368,40 @@ impl<S: Store> DbTxn<S> {
             .ok_or(Error::TxnNotActive)
     }
 
-    /// Register a callback for successful commit.
+    /// Register `callback` to run once if the transaction commits. A
+    /// read-only transaction refuses ordered work.
     ///
     /// Returns an error if the transaction has been committed or discarded.
-    pub fn on_success(&mut self, callback: TxnCallback) -> Result<()> {
-        if let Some(txn) = &mut self.txn {
-            txn.on_success(callback);
-            Ok(())
-        } else {
-            Err(Error::TxnNotActive)
-        }
+    pub fn on_commit(&self, callback: OnCommit) -> Result<()> {
+        self.txn
+            .as_ref()
+            .ok_or(Error::TxnNotActive)?
+            .on_commit_shared(callback)?;
+        Ok(())
     }
 
-    /// Register a callback for commit error.
+    /// Register `callback` to run once if the transaction ends without
+    /// committing.
     ///
     /// Returns an error if the transaction has been committed or discarded.
-    pub fn on_error(&mut self, callback: TxnCallback) -> Result<()> {
-        if let Some(txn) = &mut self.txn {
-            txn.on_error(callback);
-            Ok(())
-        } else {
-            Err(Error::TxnNotActive)
-        }
+    pub fn on_abort(&self, callback: OnAbort) -> Result<()> {
+        self.txn
+            .as_ref()
+            .ok_or(Error::TxnNotActive)?
+            .on_abort_shared(callback);
+        Ok(())
     }
 
-    /// Register an async callback for successful commit.
+    /// Register `callback` to run once just before the commit is attempted.
+    /// An error from it fails the commit, and the abort callbacks run.
     ///
     /// Returns an error if the transaction has been committed or discarded.
-    pub fn on_success_async(&mut self, callback: AsyncCallback) -> Result<()> {
-        if let Some(txn) = &mut self.txn {
-            txn.on_success_async(callback);
-            Ok(())
-        } else {
-            Err(Error::TxnNotActive)
-        }
-    }
-
-    /// Register a callback for discard.
-    ///
-    /// Returns an error if the transaction has been committed or discarded.
-    pub fn on_discard(&mut self, callback: TxnCallback) -> Result<()> {
-        if let Some(txn) = &mut self.txn {
-            txn.on_discard(callback);
-            Ok(())
-        } else {
-            Err(Error::TxnNotActive)
-        }
+    pub fn before_commit(&self, callback: storage::corekv::BeforeCommit) -> Result<()> {
+        self.txn
+            .as_ref()
+            .ok_or(Error::TxnNotActive)?
+            .before_commit_shared(callback);
+        Ok(())
     }
 
     // =========================================================================
@@ -361,16 +413,15 @@ impl<S: Store> DbTxn<S> {
     /// This implements lazy loading - collections are loaded on first access.
     /// Returns `None` if the collection doesn't exist in the store.
     ///
-    /// Note: This method is structured to avoid holding `&mut self` across awaits,
-    /// which allows futures using this method to be `Send`.
+    /// The collection is returned by value: the handles a transaction is lent
+    /// to share its cache, so nothing borrows into it.
     ///
     /// Storage layout:
     /// - `/collection/name/{name}` - Maps name to version_id (string)
     /// - `/collection/id/{version_id}` - Full collection JSON
-    pub async fn get_collection(&mut self, name: &str) -> Result<Option<&Collection>> {
-        // Check cache first
-        if self.collection_cache.contains(name) {
-            return Ok(self.collection_cache.get(name));
+    pub async fn get_collection(&self, name: &str) -> Result<Option<Collection>> {
+        if let Some(collection) = self.catalog.get(name) {
+            return Ok(Some(collection));
         }
 
         // Cache miss: extract systemstore synchronously, then do async operation
@@ -407,8 +458,9 @@ impl<S: Store> DbTxn<S> {
                                 )
                             })?;
                         populate_collection_root_id(&systemstore, &mut schema).await?;
-                        self.collection_cache.add(Collection::new(schema));
-                        return Ok(self.collection_cache.get(name));
+                        let collection = Collection::new(schema);
+                        self.catalog.add(collection.clone());
+                        return Ok(Some(collection));
                     }
                 }
             }
@@ -437,8 +489,9 @@ impl<S: Store> DbTxn<S> {
                 )
             })?;
             populate_collection_root_id(&systemstore, &mut schema).await?;
-            self.collection_cache.add(Collection::new(schema));
-            return Ok(self.collection_cache.get(name));
+            let collection = Collection::new(schema);
+            self.catalog.add(collection.clone());
+            return Ok(Some(collection));
         }
 
         // version_id found but no collection data - inconsistent state
@@ -458,8 +511,8 @@ impl<S: Store> DbTxn<S> {
     /// Storage layout:
     /// - `/collection/name/{name}` - Maps name to version_id (string)
     /// - `/collection/id/{version_id}` - Full collection JSON
-    pub async fn load_all_collections(&mut self) -> Result<()> {
-        if self.collection_cache.is_fully_populated() {
+    pub async fn load_all_collections(&self) -> Result<()> {
+        if self.catalog.is_fully_populated() {
             return Ok(());
         }
 
@@ -573,116 +626,166 @@ impl<S: Store> DbTxn<S> {
             }
         }
 
-        self.collection_cache.populate(collections);
+        self.catalog.populate(collections);
         Ok(())
     }
 
     /// Add a collection to the transaction-scoped cache.
     ///
     /// The key is derived from the collection's name to prevent key-name mismatches.
-    pub fn cache_collection(&mut self, collection: Collection) {
-        self.collection_cache.add(collection);
+    pub fn cache_collection(&self, collection: Collection) {
+        self.catalog.add(collection);
     }
 
     /// Remove a collection from the transaction-scoped cache.
     ///
     /// Called by delete_collection to update the cache after writing to store.
-    pub fn uncache_collection(&mut self, name: &str) {
-        self.collection_cache.remove(name);
+    pub fn uncache_collection(&self, name: &str) {
+        self.catalog.remove(name);
     }
 
-    /// Get the collection cache.
-    ///
-    /// Use this for read-only access to iterate over cached collections.
-    pub fn collection_cache(&self) -> &CollectionCache {
-        &self.collection_cache
+    /// The collection `name` as this transaction has it cached, without
+    /// loading it.
+    pub fn cached_collection(&self, name: &str) -> Option<Collection> {
+        self.catalog.get(name)
     }
 
-    /// Get mutable access to the collection cache.
-    ///
-    /// Use this for advanced cache manipulation (e.g., populate from snapshot).
-    pub fn collection_cache_mut(&mut self) -> &mut CollectionCache {
-        &mut self.collection_cache
+    /// The names of the collections this transaction has cached.
+    pub fn cached_collection_names(&self) -> Vec<String> {
+        self.catalog.names()
     }
 
     /// Mark a collection as created inside this transaction.
-    pub fn mark_collection_created(&mut self, collection_id: impl Into<String>) {
-        self.locally_created_collection_ids
-            .insert(collection_id.into());
+    pub fn mark_collection_created(&self, collection_id: impl Into<String>) {
+        self.catalog.mark_created(collection_id.into());
     }
 
     /// Check whether a collection was created inside this transaction.
     pub fn was_collection_created(&self, collection_id: &str) -> bool {
-        self.locally_created_collection_ids.contains(collection_id)
+        self.catalog.was_created(collection_id)
     }
 
-    // =========================================================================
-    // Per-doc write guards (#1021)
-    // =========================================================================
-
-    /// Store a per-doc write guard on this txn, held until the txn is consumed
-    /// by commit/discard. Idempotent per doc: a duplicate guard is dropped.
-    pub fn insert_doc_guard(&mut self, doc_id: String, guard: MutexGuardArc<()>) {
-        self.doc_guards.entry(doc_id).or_insert(guard);
-    }
-
-    pub(crate) fn has_collection_guard(&self, collection_id: &str) -> bool {
-        self.collection_guards.contains_key(collection_id)
-    }
-
-    pub(crate) fn has_collection_write_guard(&self, collection_id: &str) -> bool {
-        matches!(
-            self.collection_guards.get(collection_id),
-            Some(CollectionGuard::Write { .. })
+    /// Load the collection and its index-action state from this transaction's
+    /// snapshot for an engine-owned write attempt. The expected schema version
+    /// keeps a retry from applying a previously prepared document to a changed
+    /// collection definition, while index-only updates (which preserve the
+    /// version ID) use the current snapshot's write/query index sets.
+    pub(crate) async fn load_collection_for_write_attempt(
+        &self,
+        name: &str,
+        expected: &Collection,
+    ) -> Result<Collection> {
+        let systemstore = self.systemstore()?;
+        let collection = crate::collection::loader::load_collection_for_write_attempt(
+            &systemstore,
+            name,
+            expected,
         )
+        .await?;
+        self.catalog.add(collection.clone());
+        Ok(collection)
     }
 
-    pub(crate) fn insert_collection_read_guard(
-        &mut self,
-        collection_id: String,
-        guard: RwLockReadGuardArc<()>,
-    ) {
-        self.collection_guards
-            .entry(collection_id)
-            .or_insert(CollectionGuard::Read { _guard: guard });
+    /// Validate the active collection name and immutable schema through this
+    /// transaction so concurrent DDL changes conflict at commit.
+    pub(crate) async fn validate_collection_for_write(
+        &self,
+        collection: &Collection,
+    ) -> Result<()> {
+        let systemstore = self.systemstore()?;
+        let version_id = systemstore
+            .get(&CollectionNameKey::new(collection.name()).bytes())
+            .await
+            .map_err(Error::Storage)?
+            .and_then(|bytes| String::from_utf8(bytes.into()).ok());
+        if version_id.as_deref() != Some(collection.version_id()) {
+            return Err(Error::CollectionNotFound(collection.name().to_string()));
+        }
+        drop(systemstore);
+        self.validate_collection_schema_for_write(collection).await
     }
 
-    pub(crate) fn insert_collection_write_guard(
-        &mut self,
-        collection_id: String,
-        guard: RwLockWriteGuardArc<()>,
-    ) {
-        self.collection_guards
-            .insert(collection_id, CollectionGuard::Write { _guard: guard });
-    }
-
-    pub(crate) fn remove_collection_guard(&mut self, collection_id: &str) {
-        self.collection_guards.remove(collection_id);
-    }
-
-    // =========================================================================
-    // Pending counter ops (#1044): recorded during the txn, RMW'd at finalize.
-    // =========================================================================
-
-    /// Record a counter op to be applied to the authoritative store at the
-    /// commit-time finalize (under a per-doc guard).
-    pub fn record_counter_op(&mut self, op: PendingCounterOp) {
-        self.pending_counter_ops.push(op);
-    }
-
-    /// Drain the recorded counter ops (consumed by the finalize driver).
-    pub fn take_counter_ops(&mut self) -> Vec<PendingCounterOp> {
-        std::mem::take(&mut self.pending_counter_ops)
-    }
-
-    /// Whether any counter ops were recorded on this txn.
-    pub fn has_pending_counter_ops(&self) -> bool {
-        !self.pending_counter_ops.is_empty()
+    /// Validate an immutable schema key for a remote merge, even if it is not
+    /// the currently active version associated with its collection name.
+    pub(crate) async fn validate_collection_schema_for_write(
+        &self,
+        collection: &Collection,
+    ) -> Result<()> {
+        let systemstore = self.systemstore()?;
+        let schema_bytes = systemstore
+            .get(&CollectionKey::new(collection.version_id()).bytes())
+            .await
+            .map_err(Error::Storage)?
+            .ok_or_else(|| Error::CollectionNotFound(collection.name().to_string()))?;
+        // The definition this handle was serialized from, byte for byte, with
+        // the root ID stored apart the same, is the handle's definition: it is
+        // not parsed again, as the loader does not parse it. Its indexes are
+        // already normalized, so the comparison below would find them equal.
+        let exact = collection.definition_wire() == Some(schema_bytes.as_ref())
+            && collection
+                .schema()
+                .indexes
+                .iter()
+                .all(|index| index.clone().normalized() == *index)
+            && crate::collection::loader::exact_schema_wire_matches(
+                collection,
+                collection.version_id(),
+                &schema_bytes,
+                crate::collection::load_persisted_collection_short_id(
+                    &systemstore,
+                    collection.collection_id(),
+                )
+                .await?,
+            );
+        let persisted = if exact {
+            let statuses = crate::collection::IndexStatuses::load_actions_for(
+                &systemstore,
+                collection.schema(),
+            )
+            .await?;
+            Collection::with_index_actions_reusing_schema(collection, &statuses)
+        } else {
+            let mut persisted_schema: CollectionVersion = serde_json::from_slice(&schema_bytes)
+                .map_err(|error| {
+                    Error::collection_schema_json(
+                        format!(
+                            "failed to deserialize schema for collection '{}'",
+                            collection.name()
+                        ),
+                        error,
+                    )
+                })?;
+            populate_collection_root_id(&systemstore, &mut persisted_schema).await?;
+            let mut cached_schema = collection.schema().clone();
+            cached_schema.indexes = cached_schema
+                .indexes
+                .into_iter()
+                .map(schema::IndexDescription::normalized)
+                .collect();
+            if persisted_schema != cached_schema {
+                return Err(Error::Other(format!(
+                    "cached schema differs from persisted version '{}'",
+                    collection.version_id()
+                )));
+            }
+            let statuses =
+                crate::collection::IndexStatuses::load_actions_for(&systemstore, &persisted_schema)
+                    .await?;
+            Collection::with_index_actions_unwired(persisted_schema, &statuses)
+        };
+        if !persisted.same_index_statuses(collection) {
+            return Err(Error::Other(format!(
+                "cached index actions differ for collection '{}'",
+                collection.name()
+            )));
+        }
+        Ok(())
     }
 
     /// Stage branchable collection ACP registration to run before commit.
     pub(crate) fn stage_collection_acp_registration(
-        &mut self,
+        &self,
+        context: &defra_core::RequestContext,
         acp: Arc<dyn acp::DocumentACP>,
         creator: identity::Did,
         schemas: Vec<CollectionVersion>,
@@ -690,18 +793,20 @@ impl<S: Store> DbTxn<S> {
         if schemas.is_empty() {
             return;
         }
-        let request_bearer_token = defra_core::signing::get_request_bearer_token(creator.as_str());
-        self.pending_collection_acp_registrations
-            .push(PendingCollectionAcpRegistration {
-                acp,
-                creator,
-                request_bearer_token,
-                schemas,
-            });
+        let request_bearer_token = context.bearer_token_for(creator.as_str());
+        self.catalog.owe(OwedAcpRegistration {
+            acp,
+            creator,
+            request_bearer_token,
+            schemas,
+        });
     }
 
     async fn run_pending_collection_acp_registrations(&mut self) -> Result<()> {
-        for registration in std::mem::take(&mut self.pending_collection_acp_registrations) {
+        for mut registration in self.catalog.take_owed() {
+            if let Some(scoped) = registration.acp.bind_transaction(self.acpstore()?) {
+                registration.acp = scoped;
+            }
             registration.run().await?;
         }
         Ok(())
@@ -719,9 +824,6 @@ impl<S: Store> DbTxn<S> {
         if self.explicit {
             return Err(Error::ExplicitTxnMustUseForce);
         }
-        if !self.pending_counter_ops.is_empty() {
-            return Err(Error::UnfinalizedCounterOps);
-        }
 
         if let Err(error) = self.run_pending_collection_acp_registrations().await {
             if let Err(discard_error) = self.discard_active_txn() {
@@ -736,10 +838,6 @@ impl<S: Store> DbTxn<S> {
         match self.txn.take() {
             Some(txn) => {
                 txn.commit().await.map_err(Error::Datastore)?;
-                // Release per-doc guards only AFTER the durable commit so a
-                // concurrent merge observes the committed counter state, never a
-                // partial RMW (#1021).
-                self.release_doc_guards();
                 Ok(())
             }
             None => Err(Error::TxnNotActive),
@@ -758,7 +856,6 @@ impl<S: Store> DbTxn<S> {
         match self.txn.take() {
             Some(txn) => {
                 txn.discard().map_err(Error::Datastore)?;
-                self.release_doc_guards();
                 Ok(())
             }
             None => Err(Error::TxnNotActive),
@@ -769,9 +866,6 @@ impl<S: Store> DbTxn<S> {
     ///
     /// This should only be called by the transaction creator.
     pub async fn force_commit(mut self) -> Result<()> {
-        if !self.pending_counter_ops.is_empty() {
-            return Err(Error::UnfinalizedCounterOps);
-        }
         if let Err(error) = self.run_pending_collection_acp_registrations().await {
             if let Err(discard_error) = self.discard_active_txn() {
                 tracing::warn!(
@@ -784,9 +878,6 @@ impl<S: Store> DbTxn<S> {
         match self.txn.take() {
             Some(txn) => {
                 txn.commit().await.map_err(Error::Datastore)?;
-                // Release per-doc guards only AFTER the durable commit so a
-                // concurrent merge observes the committed counter state (#1021).
-                self.release_doc_guards();
                 Ok(())
             }
             None => Err(Error::TxnNotActive),
@@ -800,26 +891,15 @@ impl<S: Store> DbTxn<S> {
         match self.txn.take() {
             Some(txn) => {
                 txn.discard().map_err(Error::Datastore)?;
-                self.release_doc_guards();
                 Ok(())
             }
             None => Err(Error::TxnNotActive),
         }
     }
 
-    /// Release mutation guards after the transaction is durably committed or discarded.
-    fn release_doc_guards(&mut self) {
-        self.doc_guards.clear();
-        self.collection_guards.clear();
-    }
-
     fn discard_active_txn(&mut self) -> Result<()> {
         match self.txn.take() {
-            Some(txn) => {
-                let result = txn.discard().map_err(Error::Datastore);
-                self.release_doc_guards();
-                result
-            }
+            Some(txn) => txn.discard().map_err(Error::Datastore),
             None => Err(Error::TxnNotActive),
         }
     }

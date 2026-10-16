@@ -40,7 +40,7 @@ async fn document_matches_filter<R: Reader + ?Sized>(
         return Ok(false);
     };
 
-    let doc = document::Document::from_cbor(&doc_data)
+    let doc = document::Document::from_storage_cbor(&doc_data)
         .map_err(|e| format!("failed to decode document for replication filter: {}", e))?;
     let document_json = serde_json::Value::Object(
         doc.to_map()
@@ -200,48 +200,13 @@ async fn push_existing_docs_with_config_and_allowlist<S: Store + 'static, T: P2P
     car_authority: &p2p::sync::HeadHintCarAuthority,
     allowlist: Option<&[(String, String)]>,
 ) -> Result<(), String> {
-    let conn_timeout = std::time::Duration::from_secs(15);
-    let conn_start = web_time::Instant::now();
-    let mut logged_conn_error = false;
-    loop {
-        let peers = match transport.connected_peers().await {
-            Ok(peers) => peers,
-            Err(e) => {
-                if !logged_conn_error {
-                    tracing::warn!(
-                        peer_id = %peer_id,
-                        error = %e,
-                        "connected_peers check failed during replay wait"
-                    );
-                    logged_conn_error = true;
-                }
-                Vec::new()
-            }
-        };
-        if peers.iter().any(|p| p == peer_id) {
-            break;
-        }
-        if conn_start.elapsed() > conn_timeout {
-            return Err("timeout waiting for peer connection before push".to_string());
-        }
-        n0_future::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
+    let network = db.network();
+    super::push_docs_network::wait_for_peer(&network, transport, peer_id).await?;
 
     let local_peer_id = transport.local_peer_id().to_string();
-    let peerstore = storage::stores::Peerstore::new(db.store().clone())
+    let peerstore = db
+        .peerstore()
         .with_retry_schedule(replay_config.retry_schedule.clone());
-    let Some(retry_guard) = peerstore
-        .acquire_replicator_retry_guard(peer_id.as_str())
-        .await
-        .map_err(|error| format!("failed to coordinate existing-document replay: {error}"))?
-    else {
-        tracing::debug!(peer_id = %peer_id, "Replicator removed before existing-document replay");
-        return Ok(());
-    };
-    // Serialize storage transitions, not the bounded network wait. A live
-    // update must be able to dirty the marker while initial replay is stalled.
-    drop(retry_guard);
-
     let txn = db
         .new_txn(true)
         .await
@@ -261,7 +226,7 @@ async fn push_existing_docs_with_config_and_allowlist<S: Store + 'static, T: P2P
         .map_err(|e| format!("failed to get systemstore: {}", e))?;
 
     let mut push_handles = Vec::new();
-    let replay_gate = Arc::new(ReplayPushGate::new(replay_config));
+    let replay_gate = Arc::new(ReplayPushGate::new(replay_config).on(network.clone()));
     let allowlist_by_collection = allowlist_index(allowlist);
 
     for col_name in collections {
@@ -360,18 +325,17 @@ async fn push_existing_docs_with_config_and_allowlist<S: Store + 'static, T: P2P
             // the bounded selective-CAR table is full (or signing fails), the
             // durable marker keeps this document and every later document in
             // the replay eligible for the shared retry clock.
-            let Some(marker_guard) = peerstore
-                .acquire_replicator_retry_guard(peer_id.as_str())
+            let Some(marker_generation) = peerstore
+                .observe_push_head_with_generation(
+                    peer_id.as_str(),
+                    doc_id,
+                    collection.collection_id(),
+                )
                 .await
-                .map_err(|error| format!("failed to coordinate replay marker: {error}"))?
+                .map_err(|error| format!("failed to register replay marker: {error}"))?
             else {
                 return Ok(());
             };
-            peerstore
-                .observe_push_head(peer_id.as_str(), doc_id, collection.collection_id())
-                .await
-                .map_err(|error| format!("failed to register replay marker: {error}"))?;
-            drop(marker_guard);
 
             let mut requests = Vec::new();
             for (block_cid, block_data) in doc_blocks {
@@ -403,7 +367,7 @@ async fn push_existing_docs_with_config_and_allowlist<S: Store + 'static, T: P2P
                 let pid = peer_id.clone();
                 let gate = replay_gate.clone();
                 let peer_key = pid.clone();
-                let retry_store = storage::stores::Peerstore::new(db.store().clone());
+                let retry_store = db.peerstore();
                 let replay_doc_id = doc_id.clone();
                 let replay_collection_id = collection.collection_id().to_string();
                 let total_blocks = requests.len();
@@ -416,7 +380,8 @@ async fn push_existing_docs_with_config_and_allowlist<S: Store + 'static, T: P2P
                     replay_collection_id,
                     *doc_short_id,
                     replay_head_cids,
-                    n0_future::task::spawn(async move {
+                    marker_generation,
+                    network.run(async move {
                         let _permit = permit;
                         let mut completed_blocks = 0usize;
                         for (_car_grant, req) in requests {
@@ -481,16 +446,11 @@ async fn push_existing_docs_with_config_and_allowlist<S: Store + 'static, T: P2P
 
     tracing::debug!(task_count = push_handles.len(), "awaiting push tasks");
     let mut replay_failures = Vec::new();
-    for (doc_id, collection_id, doc_short_id, attempted_heads, jh) in push_handles {
+    for (doc_id, collection_id, doc_short_id, attempted_heads, marker_generation, jh) in
+        push_handles
+    {
         match jh.await {
-            Ok(true) => {
-                let Some(_completion_guard) = peerstore
-                    .acquire_replicator_retry_guard(peer_id.as_str())
-                    .await
-                    .map_err(|error| format!("failed to coordinate replay completion: {error}"))?
-                else {
-                    continue;
-                };
+            Some(true) => {
                 let verify_txn = db
                     .new_txn(true)
                     .await
@@ -515,6 +475,7 @@ async fn push_existing_docs_with_config_and_allowlist<S: Store + 'static, T: P2P
                         &doc_id,
                         &collection_id,
                         false,
+                        marker_generation,
                         &current_heads
                             .iter()
                             .map(ToString::to_string)
@@ -523,12 +484,12 @@ async fn push_existing_docs_with_config_and_allowlist<S: Store + 'static, T: P2P
                     .await
                     .map_err(|error| format!("failed to clear replay marker: {error}"))?;
             }
-            Ok(false) => replay_failures.push(ReplayDocumentFailure {
+            Some(false) => replay_failures.push(ReplayDocumentFailure {
                 doc_id,
                 collection_id,
             }),
-            Err(error) => {
-                tracing::error!(%error, %doc_id, "Replay push task panicked or was cancelled");
+            None => {
+                tracing::error!(%doc_id, "Replay push task panicked or was cancelled");
                 replay_failures.push(ReplayDocumentFailure {
                     doc_id,
                     collection_id,
@@ -629,7 +590,7 @@ async fn push_existing_docs_with_config_and_allowlist<S: Store + 'static, T: P2P
                     _ => continue,
                 };
 
-                let doc = match document::Document::from_cbor(&doc_data) {
+                let doc = match document::Document::from_storage_cbor(&doc_data) {
                     Ok(d) => d,
                     Err(e) => {
                         tracing::warn!(doc_id = %doc_id, error = %e, "SE: failed to deserialize document");
@@ -673,7 +634,11 @@ async fn push_existing_docs_with_config_and_allowlist<S: Store + 'static, T: P2P
                     all_artifacts,
                 );
 
-                if let Err(e) = transport.send_se_artifacts(peer_id, se_request).await {
+                let sent = super::push_docs_network::send_se_artifacts(
+                    &network, transport, peer_id, se_request,
+                )
+                .await;
+                if let Err(e) = sent {
                     tracing::warn!(
                         peer_id = %peer_id,
                         collection = %col_name,
@@ -697,10 +662,12 @@ pub async fn retry_doc<S: Store + 'static, T: P2PTransport>(
     peer_id: &PeerId,
     doc_id: &str,
     collection_id: &str,
+    marker_generation: u64,
     filters: &p2p::ReplicationFilters,
     matcher: &dyn p2p::replicator::ReplicationFilterMatcher,
     car_authority: &p2p::sync::HeadHintCarAuthority,
 ) -> Result<(), String> {
+    let network = db.network();
     let local_peer_id = transport.local_peer_id().to_string();
     let resolved_collection;
     let collection_id = if collection_id.is_empty() {
@@ -735,20 +702,14 @@ pub async fn retry_doc<S: Store + 'static, T: P2PTransport>(
                     peer_id.as_str(),
                     doc_id,
                     collection_id,
+                    marker_generation,
                 )
                 .await;
             }
         }
     };
     if let Some(filter) = filters.get(collection_id) {
-        let peerstore = storage::stores::Peerstore::new(db.store().clone());
-        let Some(filter_guard) = peerstore
-            .acquire_replicator_retry_guard(peer_id.as_str())
-            .await
-            .map_err(|error| format!("retry filter guard: {error}"))?
-        else {
-            return Ok(());
-        };
+        let peerstore = db.peerstore();
         let txn = db
             .new_txn(true)
             .await
@@ -760,12 +721,18 @@ pub async fn retry_doc<S: Store + 'static, T: P2PTransport>(
             .await?
         {
             peerstore
-                .complete_retry_scope(peer_id.as_str(), doc_id, collection_id, false, &[])
+                .complete_retry_scope(
+                    peer_id.as_str(),
+                    doc_id,
+                    collection_id,
+                    false,
+                    marker_generation,
+                    &[],
+                )
                 .await
                 .map_err(|error| format!("failed to clear filtered retry marker: {error}"))?;
             return Ok(());
         }
-        drop(filter_guard);
     }
     let creator = resolve_push_creator(document_acp, &collection, doc_id, &local_peer_id).await;
 
@@ -809,23 +776,18 @@ pub async fn retry_doc<S: Store + 'static, T: P2PTransport>(
                 ));
             }
 
-            if super::push_docs_replay::remaining_retry_after(
-                &storage::stores::Peerstore::new(db.store().clone()),
-                peer_id,
-            )
-            .await?
-            .is_some()
+            if super::push_docs_replay::remaining_retry_after(&db.peerstore(), peer_id)
+                .await?
+                .is_some()
             {
                 return Err(p2p::error::RATE_LIMITED_MESSAGE.to_string());
             }
-            match transport.send_two_stream_request(peer_id, request).await {
+            let sent =
+                super::push_docs_network::send_pushlog(&network, transport, peer_id, request);
+            match sent.await {
                 Ok(reply) if reply.err_message.is_some() => {
-                    super::push_docs_replay::persist_retry_after(
-                        &storage::stores::Peerstore::new(db.store().clone()),
-                        peer_id,
-                        &reply,
-                    )
-                    .await?;
+                    super::push_docs_replay::persist_retry_after(&db.peerstore(), peer_id, &reply)
+                        .await?;
                     return Err(format!(
                         "peer rejected replay after {successful_blocks} successful block(s): {}",
                         reply
@@ -859,6 +821,7 @@ pub async fn retry_doc<S: Store + 'static, T: P2PTransport>(
         collection_id,
         doc_short_id,
         &attempted_heads,
+        marker_generation,
     )
     .await
 }
@@ -870,8 +833,10 @@ pub async fn retry_collection_commit<S: Store + 'static, T: P2PTransport>(
     db: &DB<S>,
     peer_id: &PeerId,
     collection_id: &str,
+    marker_generation: u64,
     car_authority: &p2p::sync::HeadHintCarAuthority,
 ) -> Result<(), String> {
+    let network = db.network();
     let creator = transport.local_peer_id().to_string();
     let txn = db
         .new_txn(true)
@@ -906,23 +871,17 @@ pub async fn retry_collection_commit<S: Store + 'static, T: P2PTransport>(
         if p2p::signing::sign_with_transport(transport, &mut request).is_err() {
             return Err(format!("failed to sign current collection head {cid}"));
         }
-        if super::push_docs_replay::remaining_retry_after(
-            &storage::stores::Peerstore::new(db.store().clone()),
-            peer_id,
-        )
-        .await?
-        .is_some()
+        if super::push_docs_replay::remaining_retry_after(&db.peerstore(), peer_id)
+            .await?
+            .is_some()
         {
             return Err(p2p::error::RATE_LIMITED_MESSAGE.to_string());
         }
-        match transport.send_two_stream_request(peer_id, request).await {
+        let sent = super::push_docs_network::send_pushlog(&network, transport, peer_id, request);
+        match sent.await {
             Ok(reply) if reply.err_message.is_some() => {
-                super::push_docs_replay::persist_retry_after(
-                    &storage::stores::Peerstore::new(db.store().clone()),
-                    peer_id,
-                    &reply,
-                )
-                .await?;
+                super::push_docs_replay::persist_retry_after(&db.peerstore(), peer_id, &reply)
+                    .await?;
                 return Err(format!(
                     "peer rejected current collection head {cid}: {}",
                     reply
@@ -941,6 +900,7 @@ pub async fn retry_collection_commit<S: Store + 'static, T: P2PTransport>(
         peer_id.as_str(),
         collection_id,
         &heads,
+        marker_generation,
     )
     .await
 }

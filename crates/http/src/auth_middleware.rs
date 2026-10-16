@@ -5,16 +5,19 @@
 //! before the handler runs. Existing per-handler `require_permission()` calls
 //! remain as a redundant safety net.
 //!
-//! It also binds the parsed identity to the request task (via the
-//! `current_identity` task-local) so DB-layer NAC checks on REST paths can
-//! resolve who is acting — reusing the single parse done here rather than a
-//! separate middleware that re-verified the JWT.
+//! It also builds the request's [`RequestContext`] with the parsed identity
+//! acting in it and stores it in the request's extensions, where the handlers
+//! take it (see [`crate::request_scope`]) so DB-layer NAC checks resolve who
+//! is acting, reusing the single parse done here rather than a separate
+//! middleware that re-verified the JWT.
 
 use axum::{
     extract::{MatchedPath, Request, State},
     middleware::Next,
     response::{IntoResponse, Response},
 };
+
+use defra_core::RequestContext;
 
 use crate::identity_extractor::{parse_identity_from_headers, ExtractIdentity, MiddlewareIdentity};
 use crate::nac_guard::require_permission;
@@ -48,22 +51,12 @@ pub async fn auth_middleware(
     // context, so the JWT is verified only once per request.
     let acting_did = match permission {
         RoutePermission::Exempt => None,
-        RoutePermission::IdentityOnly | RoutePermission::Dynamic => {
+        RoutePermission::IdentityOnly | RoutePermission::Dynamic | RoutePermission::Required(_) => {
             match parse_identity_from_headers(request.headers()) {
                 Ok(did) => did,
                 Err(err) => return err.into_response(),
             }
         }
-        RoutePermission::Required(perm) => match parse_identity_from_headers(request.headers()) {
-            Ok(did) => {
-                let identity = ExtractIdentity::from_did(did.clone());
-                if let Err(err) = require_permission(&state, &identity, perm).await {
-                    return err.into_response();
-                }
-                did
-            }
-            Err(err) => return err.into_response(),
-        },
     };
 
     if !is_exempt {
@@ -72,10 +65,37 @@ pub async fn auth_middleware(
             .insert(MiddlewareIdentity(acting_did.clone()));
     }
 
-    // Bind the caller's DID to the request task so DB-layer NAC checks on REST
-    // paths resolve who is acting (survives `.await`, mirroring Go's
-    // `identity.FromContext`). This replaces a separate outer middleware that
-    // re-parsed the JWT.
-    let scoped = acting_did.map(|did| did.to_string());
-    defra_core::current_identity::with_scoped_identity(scoped, next.run(request)).await
+    // The request's context carries the caller's DID to the DB-layer NAC
+    // checks the handlers reach, mirroring Go's `identity.FromContext`, and
+    // this request's verified token from its header, the one a remote ACP
+    // acts on the caller's behalf with. Never publish the token in the
+    // process-wide DID map: concurrent requests can share a DID while
+    // carrying different authorization tokens.
+    let scoped = acting_did.as_ref().map(ToString::to_string);
+    let bearer = acting_did.as_ref().and_then(|_| {
+        request
+            .headers()
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| {
+                value
+                    .strip_prefix("Bearer ")
+                    .or_else(|| value.strip_prefix("bearer "))
+            })
+            .map(|token| token.trim().to_owned())
+    });
+    let context = RequestContext::default()
+        .with_identity(scoped.clone())
+        .with_bearer(scoped, bearer);
+    request.extensions_mut().insert(context.clone());
+    let execution = async move {
+        if let RoutePermission::Required(perm) = permission {
+            let identity = ExtractIdentity::from_did(acting_did);
+            if let Err(err) = require_permission(&state, &identity, perm).await {
+                return err.into_response();
+            }
+        }
+        next.run(request).await
+    };
+    context.mirror(execution).await
 }

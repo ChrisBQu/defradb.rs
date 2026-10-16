@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use rapidhash::RapidHashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -282,7 +282,7 @@ async fn subscription_no_filter_test(cluster: TestCluster) {
         collected
     );
 
-    let seen_ids: HashSet<String> = collected
+    let seen_ids: RapidHashSet<String> = collected
         .iter()
         .filter_map(|e| extract_doc_id(e, "User"))
         .collect();

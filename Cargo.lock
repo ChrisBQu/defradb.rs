@@ -12,13 +12,14 @@ checksum = "fe438c63458706e03479442743baae6c88256498e6431708f6dfc520a26515d3"
 name = "acp"
 version = "0.5.0"
 dependencies = [
- "async-lock",
  "async-trait",
  "bytes",
+ "datastore",
  "defra-core",
  "identity 0.5.0",
  "kovan",
  "rapidhash",
+ "regolith 0.1.9",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -115,17 +116,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "aes"
+version = "0.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "35f0f96ce78e38c3dc6d8948aa8163d06385be74000f3c7a95bf1eef35d3ea32"
+dependencies = [
+ "cipher 0.5.2",
+ "cpubits",
+ "cpufeatures 0.3.0",
+]
+
+[[package]]
 name = "aes-gcm"
 version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "831010a0f742e1209b3bcea8fab6a8e149051ba6099432c8cb2cc117dec3ead1"
 dependencies = [
  "aead 0.5.2",
- "aes",
+ "aes 0.8.4",
  "cipher 0.4.4",
- "ctr",
+ "ctr 0.9.2",
  "ghash",
  "subtle",
+]
+
+[[package]]
+name = "aes-gcm-siv"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c32325128cb24de2a2d14d92da7569dae7073f9e47334521d494747fa94d902"
+dependencies = [
+ "aead 0.6.1",
+ "aes 0.9.3",
+ "cipher 0.5.2",
+ "ctr 0.10.1",
+ "ctutils",
+ "polyval 0.7.3",
+ "zeroize",
 ]
 
 [[package]]
@@ -134,7 +161,7 @@ version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "69fa2b352dcefb5f7f3a5fb840e02665d311d878955380515e4fd50095dd3d8c"
 dependencies = [
- "aes",
+ "aes 0.8.4",
 ]
 
 [[package]]
@@ -721,7 +748,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -732,7 +759,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1749,14 +1776,17 @@ dependencies = [
  "defra-http",
  "defra-perf",
  "document",
+ "edge",
  "events",
  "identity 0.5.0",
  "libp2p-identity",
  "lru",
+ "mimalloc",
  "multihash",
  "p2p",
  "query",
  "rapidhash",
+ "regolith 0.1.9",
  "replication-filter",
  "schema",
  "serde_json",
@@ -1842,7 +1872,6 @@ checksum = "843867be96c8daad0d758b57df9392b6d8d271134fce549de6ce169ff98a92af"
 name = "bitswap"
 version = "0.5.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "asynchronous-codec",
  "bytes",
@@ -1991,15 +2020,14 @@ dependencies = [
  "cid",
  "crypto",
  "defra-core",
- "lru",
  "multihash",
  "multihash-codetable",
- "parking_lot",
  "sha2 0.10.9",
  "storage",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "workers",
 ]
 
 [[package]]
@@ -2420,8 +2448,8 @@ name = "cli"
 version = "0.5.0"
 dependencies = [
  "acp 0.5.0",
- "anyhow",
  "async-trait",
+ "axum",
  "base64 0.23.1",
  "blockstore",
  "bytes",
@@ -2435,6 +2463,7 @@ dependencies = [
  "defra-version",
  "dirs",
  "document",
+ "edge",
  "events",
  "futures",
  "getrandom 0.2.17",
@@ -2447,6 +2476,7 @@ dependencies = [
  "lens",
  "libc",
  "libp2p",
+ "mimalloc",
  "orbis",
  "p2p",
  "pg-compat",
@@ -2455,6 +2485,7 @@ dependencies = [
  "rand 0.9.5",
  "rapidhash",
  "rcgen 0.13.2",
+ "regolith 0.1.9",
  "replication-filter",
  "reqwest 0.12.28",
  "rlimit",
@@ -2471,12 +2502,14 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
+ "tower",
  "tracing",
  "tracing-chrome",
  "tracing-subscriber",
  "url",
  "urlencoding",
  "vera",
+ "workers",
  "zeroize",
 ]
 
@@ -2517,7 +2550,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "117725a109d387c937a1533ce01b450cbde6b88abceea8473c4d7a85853cda3c"
 dependencies = [
  "lazy_static",
- "windows-sys 0.52.0",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -2930,11 +2963,11 @@ dependencies = [
 name = "conformance"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "defra-harness",
  "serde",
  "serde_json",
  "serial_test",
+ "thiserror 2.0.21",
  "tokio",
 ]
 
@@ -3300,6 +3333,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "defra-core",
+ "document",
  "proptest",
  "rapidhash",
  "serde",
@@ -3451,6 +3485,7 @@ dependencies = [
  "multihash-codetable",
  "p256 0.13.2",
  "rand 0.8.8",
+ "rapidhash",
  "serde",
  "serde_bytes",
  "serde_ipld_dagcbor",
@@ -3531,6 +3566,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0369ee1ad671834580515889b80f2ea915f23b8be8d0daa4bbaf2ac5c7590835"
 dependencies = [
  "cipher 0.4.4",
+]
+
+[[package]]
+name = "ctr"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "baaca1c4b237092596f64d571e9db6ce4109c4ef9742e27590f1709594461f21"
+dependencies = [
+ "cipher 0.5.2",
 ]
 
 [[package]]
@@ -3760,11 +3804,11 @@ dependencies = [
 name = "datastore"
 version = "0.5.0"
 dependencies = [
- "async-lock",
  "async-trait",
  "bytes",
  "cid",
  "futures",
+ "regolith 0.1.9",
  "storage",
  "thiserror 2.0.21",
  "tokio",
@@ -3776,8 +3820,6 @@ name = "db"
 version = "0.5.0"
 dependencies = [
  "acp 0.5.0",
- "anyhow",
- "async-lock",
  "async-trait",
  "axum",
  "base64 0.23.1",
@@ -3793,11 +3835,13 @@ dependencies = [
  "defra-core",
  "document",
  "ed25519-dalek 2.2.0",
+ "edge",
  "events",
  "futures",
  "getrandom 0.2.17",
  "hex",
  "identity 0.5.0",
+ "inputs",
  "kms",
  "kovan",
  "kovan-map",
@@ -3807,12 +3851,11 @@ dependencies = [
  "multihash",
  "n0-future",
  "p2p",
- "parking_lot",
  "proptest",
  "query",
  "rand 0.8.8",
  "rapidhash",
- "regolith 0.1.8",
+ "regolith 0.1.9",
  "reqwest 0.12.28",
  "schema",
  "serde",
@@ -3820,13 +3863,12 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "storage",
- "telemetry",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "wasm-bindgen-futures",
  "web-time",
+ "workers",
  "zeroize",
 ]
 
@@ -3847,7 +3889,7 @@ version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "708b509edf7889e53d7efb0ffadd994cc6c2345ccb62f55cfd6b0682165e4fa6"
 dependencies = [
- "aes",
+ "aes 0.8.4",
  "block-padding",
  "cbc",
  "dbus",
@@ -3874,8 +3916,10 @@ dependencies = [
  "multibase",
  "multihash",
  "multihash-codetable",
+ "proptest",
  "rand 0.8.8",
  "rapidhash",
+ "regolith 0.1.9",
  "serde",
  "serde_bytes",
  "serde_ipld_dagcbor",
@@ -3924,6 +3968,7 @@ dependencies = [
  "defra-core",
  "defra-http",
  "defra-version",
+ "edge",
  "events",
  "futures",
  "hex",
@@ -3934,8 +3979,8 @@ dependencies = [
  "kovan-queue",
  "lens",
  "query",
- "rand 0.8.8",
  "rapidhash",
+ "regolith 0.1.9",
  "rustls 0.23.46",
  "schema",
  "serde",
@@ -3949,6 +3994,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "urlencoding",
+ "workers",
 ]
 
 [[package]]
@@ -3956,7 +4002,6 @@ name = "defra-node"
 version = "0.5.0"
 dependencies = [
  "acp 0.5.0",
- "anyhow",
  "async-trait",
  "axum",
  "blockstore",
@@ -3965,6 +4010,7 @@ dependencies = [
  "defra-core",
  "defra-http",
  "defra-p2p-adapter",
+ "edge",
  "events",
  "hex",
  "identity 0.5.0",
@@ -3972,10 +4018,11 @@ dependencies = [
  "kovan",
  "kovan-queue",
  "lens",
+ "mimalloc",
  "p2p",
  "query",
- "rand 0.8.8",
  "rapidhash",
+ "regolith 0.1.9",
  "reqwest 0.12.28",
  "schema",
  "serde",
@@ -3988,6 +4035,8 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "vera",
+ "workers",
+ "zanzibar 0.5.0",
 ]
 
 [[package]]
@@ -4006,6 +4055,7 @@ dependencies = [
  "defra-core",
  "defra-http",
  "document",
+ "edge",
  "events",
  "hex",
  "identity 0.5.0",
@@ -4020,6 +4070,7 @@ dependencies = [
  "p2p",
  "query",
  "rapidhash",
+ "regolith 0.1.9",
  "replication-filter",
  "schema",
  "serde",
@@ -4030,6 +4081,7 @@ dependencies = [
  "tokio",
  "tracing",
  "web-time",
+ "workers",
  "zeroize",
 ]
 
@@ -4067,6 +4119,7 @@ dependencies = [
  "defra-p2p-adapter",
  "defra-perf",
  "document",
+ "edge",
  "events",
  "futures",
  "getrandom 0.2.17",
@@ -4089,6 +4142,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
  "web-sys",
+ "workers",
  "zeroize",
 ]
 
@@ -4459,6 +4513,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "edge"
+version = "0.5.0"
+dependencies = [
+ "defra-core",
+ "n0-future",
+ "regolith 0.1.9",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "workers",
+]
+
+[[package]]
 name = "educe"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4525,7 +4592,6 @@ name = "embedded"
 version = "0.5.0"
 dependencies = [
  "acp 0.5.0",
- "anyhow",
  "async-trait",
  "base64 0.23.1",
  "blockstore",
@@ -4537,6 +4603,7 @@ dependencies = [
  "defra-http",
  "defra-p2p-adapter",
  "document",
+ "edge",
  "events",
  "hex",
  "identity 0.5.0",
@@ -4548,6 +4615,7 @@ dependencies = [
  "p2p",
  "query",
  "rapidhash",
+ "regolith 0.1.9",
  "replication-filter",
  "schema",
  "serde",
@@ -4561,6 +4629,8 @@ dependencies = [
  "tokio",
  "tracing",
  "vera",
+ "workers",
+ "zanzibar 0.5.0",
  "zeroize",
  "zstd",
 ]
@@ -4669,7 +4739,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4704,6 +4774,7 @@ dependencies = [
  "defra-core",
  "kovan",
  "rapidhash",
+ "regolith 0.1.9",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -4809,6 +4880,7 @@ dependencies = [
  "defra-core",
  "defra-http",
  "document",
+ "edge",
  "embedded",
  "events",
  "hex",
@@ -4819,9 +4891,9 @@ dependencies = [
  "kovan-queue",
  "lens",
  "p2p",
- "parking_lot",
  "query",
  "rapidhash",
+ "regolith 0.1.9",
  "schema",
  "serde",
  "serde_bytes",
@@ -4837,6 +4909,7 @@ dependencies = [
  "tracing-chrome",
  "tracing-subscriber",
  "vera",
+ "workers",
  "zeroize",
 ]
 
@@ -5240,7 +5313,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0d8a4362ccb29cb0b265253fb0a2728f592895ee6854fd9bc13f2ffda266ff1"
 dependencies = [
  "opaque-debug",
- "polyval",
+ "polyval 0.6.2",
 ]
 
 [[package]]
@@ -6000,6 +6073,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "id-arena"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d3067d79b975e8844ca9eb072e16b31c3c1c36928edf9c6789548c524d0d954"
+
+[[package]]
 name = "ident_case"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6225,12 +6304,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "inputs"
+version = "0.5.0"
+dependencies = [
+ "defra-core",
+ "edge",
+ "n0-future",
+ "rapidhash",
+ "regolith 0.1.9",
+ "tokio",
+ "tracing",
+ "workers",
+]
+
+[[package]]
 name = "integration-test"
 version = "0.1.0"
 dependencies = [
  "acp 0.5.0",
  "alloy-sol-types",
- "anyhow",
  "base64 0.23.1",
  "chrono",
  "ciborium",
@@ -6250,6 +6342,8 @@ dependencies = [
  "mach2 0.4.3",
  "p2p",
  "paste",
+ "rapidhash",
+ "regolith 0.1.9",
  "reqwest 0.12.28",
  "serde_json",
  "serial_test",
@@ -6901,7 +6995,7 @@ dependencies = [
 name = "keyring"
 version = "0.5.0"
 dependencies = [
- "aes",
+ "aes 0.8.4",
  "aes-gcm",
  "aes-kw",
  "base64 0.23.1",
@@ -6947,14 +7041,17 @@ dependencies = [
  "cid",
  "crypto",
  "defra-core",
+ "edge",
  "futures",
  "identity 0.5.0",
+ "inputs",
  "kovan",
  "kovan-map",
  "kovan-queue",
  "orbis",
  "rand 0.8.8",
  "rapidhash",
+ "regolith 0.1.9",
  "serde",
  "serde_bytes",
  "thiserror 2.0.21",
@@ -6962,7 +7059,6 @@ dependencies = [
  "tracing",
  "uuid",
  "vera",
- "wasm-bindgen-futures",
  "x25519-dalek 2.0.1",
  "zeroize",
 ]
@@ -7065,6 +7161,7 @@ dependencies = [
  "hex",
  "kovan-map",
  "rapidhash",
+ "regolith 0.1.9",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -7072,6 +7169,7 @@ dependencies = [
  "tokio",
  "tracing",
  "wasmtime",
+ "workers",
 ]
 
 [[package]]
@@ -7103,6 +7201,15 @@ name = "libm"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
+
+[[package]]
+name = "libmimalloc-sys"
+version = "0.1.49"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a45a52f43e1c16f667ccfe4dd8c85b7f7c204fd5e3bf46c5b0db9a5c3c0b8e9"
+dependencies = [
+ "cc",
+]
 
 [[package]]
 name = "libp2p"
@@ -7756,6 +7863,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mimalloc"
+version = "0.1.52"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d4139bb28d14ad1facf21d5eb8825051b326e172d216b39f6d31df53cc97862"
+dependencies = [
+ "libmimalloc-sys",
+]
+
+[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8321,7 +8437,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -8785,9 +8901,12 @@ dependencies = [
  "blst",
  "crypto",
  "defra-core",
+ "edge",
  "hex",
  "identity 0.5.0",
  "prost 0.14.4",
+ "rapidhash",
+ "regolith 0.1.9",
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.21",
@@ -8851,7 +8970,6 @@ name = "p2p"
 version = "0.5.0"
 dependencies = [
  "acp 0.5.0",
- "anyhow",
  "async-trait",
  "base64 0.23.1",
  "bitswap",
@@ -8862,8 +8980,10 @@ dependencies = [
  "ciborium",
  "cid",
  "crypto",
+ "datastore",
  "defra-core",
  "document",
+ "edge",
  "futures",
  "getrandom 0.3.4",
  "hex",
@@ -8888,6 +9008,7 @@ dependencies = [
  "postcard",
  "rand 0.9.5",
  "rapidhash",
+ "regolith 0.1.9",
  "rlimit",
  "rustls 0.23.46",
  "serde",
@@ -8903,6 +9024,7 @@ dependencies = [
  "unsigned-varint 0.8.0",
  "uuid",
  "web-time",
+ "workers",
 ]
 
 [[package]]
@@ -9135,6 +9257,7 @@ dependencies = [
  "query",
  "rapidhash",
  "regex",
+ "regolith 0.1.9",
  "schema",
  "serde_json",
  "sqlparser",
@@ -9389,6 +9512,17 @@ dependencies = [
  "cpufeatures 0.2.17",
  "opaque-debug",
  "universal-hash 0.5.1",
+]
+
+[[package]]
+name = "polyval"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0fa31d631f2b2cb2a544d0aa321ce847a94764d701ca2becc411138b93d49cd"
+dependencies = [
+ "cpubits",
+ "cpufeatures 0.3.0",
+ "universal-hash 0.6.1",
 ]
 
 [[package]]
@@ -9863,7 +9997,6 @@ version = "0.5.0"
 dependencies = [
  "acp 0.5.0",
  "async-graphql",
- "async-lock",
  "async-trait",
  "base64 0.23.1",
  "bm25",
@@ -9877,12 +10010,14 @@ dependencies = [
  "futures",
  "graphql-parser",
  "identity 0.5.0",
+ "inputs",
  "kovan",
  "kovan-map",
  "kovan-queue",
  "lens",
  "rapidhash",
  "regex",
+ "regolith 0.1.9",
  "schema",
  "serde",
  "serde_json",
@@ -9893,6 +10028,7 @@ dependencies = [
  "tokio",
  "tracing",
  "web-time",
+ "workers",
 ]
 
 [[package]]
@@ -9987,7 +10123,7 @@ dependencies = [
  "once_cell",
  "socket2 0.5.10",
  "tracing",
- "windows-sys 0.60.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -10343,18 +10479,21 @@ dependencies = [
 
 [[package]]
 name = "regolith"
-version = "0.1.8"
-source = "git+https://github.com/sourcenetwork/regolith.git?rev=72a7b8b8ce802832d777b8156cd0dd1a136c4c0b#72a7b8b8ce802832d777b8156cd0dd1a136c4c0b"
+version = "0.1.9"
+source = "git+https://github.com/sourcenetwork/regolith.git?rev=3ed721c513a7e3a177fbcb0bf7cea54c7a17dfef#3ed721c513a7e3a177fbcb0bf7cea54c7a17dfef"
 dependencies = [
+ "aes-gcm-siv",
+ "getrandom 0.4.3",
  "js-sys",
  "kovan",
  "kovan-channel",
  "kovan-map",
- "kovan-mvcc",
  "kovan-queue",
+ "libc",
  "loom",
  "lz4_flex",
  "portable-atomic",
+ "proptest",
  "rustix",
  "snap",
  "thiserror 1.0.69",
@@ -10362,6 +10501,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "xxhash-rust",
+ "zeroize",
 ]
 
 [[package]]
@@ -10972,7 +11112,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -11097,7 +11237,7 @@ dependencies = [
  "security-framework 3.7.0",
  "security-framework-sys",
  "webpki-root-certs 0.26.11",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -11118,7 +11258,7 @@ dependencies = [
  "security-framework 3.7.0",
  "security-framework-sys",
  "webpki-root-certs 1.0.6",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -11388,7 +11528,7 @@ version = "4.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4d35ad99a181be0a60ffcbe85d680d98f87bdc4d7644ade319b87076b9dbfd4"
 dependencies = [
- "aes",
+ "aes 0.8.4",
  "cbc",
  "futures-util",
  "generic-array",
@@ -11444,7 +11584,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b55fb86dfd3a2f5f76ea78310a88f96c4ea21a3031f8d212443d56123fd0521"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -11940,7 +12080,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -12058,7 +12198,6 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
- "windows-sys 0.52.0",
  "windows-sys 0.59.0",
 ]
 
@@ -12087,7 +12226,6 @@ dependencies = [
 name = "storage"
 version = "0.5.0"
 dependencies = [
- "async-lock",
  "async-trait",
  "bm25",
  "bytes",
@@ -12099,14 +12237,14 @@ dependencies = [
  "futures",
  "getrandom 0.2.17",
  "hex",
- "kovan-map",
- "kovan-queue",
  "proptest",
  "rapidhash",
- "regolith 0.1.8",
+ "regolith 0.1.9",
  "schema",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "storage",
  "telemetry",
  "tempfile",
  "thiserror 2.0.21",
@@ -12114,6 +12252,7 @@ dependencies = [
  "tracing",
  "uuid",
  "web-time",
+ "workers",
  "zeroize",
 ]
 
@@ -12377,6 +12516,8 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry-semantic-conventions",
  "opentelemetry_sdk",
+ "rapidhash",
+ "regolith 0.1.9",
  "reqwest 0.13.3",
  "thiserror 2.0.21",
  "tracing",
@@ -12394,7 +12535,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -13159,9 +13300,9 @@ dependencies = [
 
 [[package]]
 name = "triomphe"
-version = "0.1.16"
+version = "0.1.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b40688ea6389c8171614b25491f71d4a27946e0c7ce2da1c6de27e25abf1a0ae"
+checksum = "0d15f4f5898bcfc5d8a8e45ed30b2f108d710c1a2e5489dbf80e078f707181bc"
 
 [[package]]
 name = "try-lock"
@@ -13230,7 +13371,7 @@ checksum = "51b70b87d15e91f553711b40df3048faf27a7a04e01e0ddc0cf9309f0af7c2ca"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.60.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -13439,10 +13580,12 @@ dependencies = [
  "cosmrs",
  "crypto",
  "defra-core",
+ "edge",
  "events",
  "futures",
  "hex",
  "identity 0.5.0",
+ "inputs",
  "k256",
  "keyring 0.5.0",
  "kovan",
@@ -13450,6 +13593,7 @@ dependencies = [
  "kovan-queue",
  "prost 0.14.4",
  "rapidhash",
+ "regolith 0.1.9",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -14090,6 +14234,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasm-metadata"
+version = "0.258.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47e10808eb27efde692f1b1706089fe19296728bf872291f5b4e0d50fba88f2f"
+dependencies = [
+ "anyhow",
+ "indexmap 2.14.0",
+ "wasm-encoder",
+ "wasmparser",
+]
+
+[[package]]
 name = "wasm-streams"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -14166,6 +14322,7 @@ dependencies = [
  "target-lexicon",
  "wasmparser",
  "wasmtime-environ",
+ "wasmtime-internal-component-macro",
  "wasmtime-internal-core",
  "wasmtime-internal-cranelift",
  "wasmtime-internal-fiber",
@@ -14205,6 +14362,21 @@ dependencies = [
  "wasmprinter",
  "wasmtime-internal-component-util",
  "wasmtime-internal-core",
+]
+
+[[package]]
+name = "wasmtime-internal-component-macro"
+version = "49.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d95f531a0b809fd9fd158be6133c97bd2fc628ac47f5812aff3e3b5624eb02c2"
+dependencies = [
+ "anyhow",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+ "wasmtime-internal-component-util",
+ "wasmtime-internal-wit-bindgen",
+ "wit-parser",
 ]
 
 [[package]]
@@ -14309,6 +14481,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasmtime-internal-wit-bindgen"
+version = "49.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cad5e8cef56790d4741b62f7b6c971af53b2ad4c2d1603f8ffe86872763147aa"
+dependencies = [
+ "anyhow",
+ "bitflags 2.11.0",
+ "heck 0.5.0",
+ "indexmap 2.14.0",
+ "wit-component",
+ "wit-parser",
+]
+
+[[package]]
 name = "web-sys"
 version = "0.3.91"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -14402,7 +14588,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -14917,6 +15103,44 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7249219f66ced02969388cf2bb044a09756a083d0fab1e566056b04d9fbcaa5"
 
 [[package]]
+name = "wit-component"
+version = "0.258.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0fca88950af0c1f42bc77e17315e48798b8d68340171b6d204f62bc19a878a6"
+dependencies = [
+ "anyhow",
+ "bitflags 2.11.0",
+ "indexmap 2.14.0",
+ "log",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "wasm-encoder",
+ "wasm-metadata",
+ "wasmparser",
+ "wit-parser",
+]
+
+[[package]]
+name = "wit-parser"
+version = "0.258.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72a2127663dcf3ee16614fb0e3c33d5c6c66fec9dad317a8b0fdd3869487a533"
+dependencies = [
+ "anyhow",
+ "hashbrown 0.17.1",
+ "id-arena",
+ "indexmap 2.14.0",
+ "log",
+ "semver 1.0.27",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "unicode-ident",
+ "wasmparser",
+]
+
+[[package]]
 name = "wmi"
 version = "0.18.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -14941,6 +15165,16 @@ dependencies = [
  "group 0.14.0",
  "hybrid-array",
  "primefield",
+]
+
+[[package]]
+name = "workers"
+version = "0.5.0"
+dependencies = [
+ "libc",
+ "rapidhash",
+ "regolith 0.1.9",
+ "tracing",
 ]
 
 [[package]]

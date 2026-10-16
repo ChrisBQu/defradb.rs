@@ -9,6 +9,8 @@ use defra_core::{
 };
 use std::hint::black_box;
 
+mod common;
+
 #[path = "../../crates/defra-core/tests/fixtures/go_blocks.rs"]
 mod go_blocks;
 use go_blocks::*;

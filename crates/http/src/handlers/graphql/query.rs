@@ -209,6 +209,7 @@ pub async fn graphql_get(
         operation_name: params.operation_name,
         variables,
         identity: identity.did().cloned(),
+        context: Default::default(),
     };
 
     let response = execute_with_context(&state, &identity, request).await;
@@ -269,7 +270,6 @@ pub async fn graphql_transactional(
 
     // Enforce NAC permission before executing the query
     let permission = graphql_required_permission(&request.query, state.query_limits);
-    require_permission(&state, &identity, permission).await?;
 
     // Check if this is a subscription query.
     // Fast path: skip the full GraphQL parse for mutations/queries (the common case).
@@ -282,6 +282,7 @@ pub async fn graphql_transactional(
             state.query_limits,
         )
     {
+        require_permission(&state, &identity, permission).await?;
         if !wants_sse(&headers) {
             return Err(HttpError::NotAcceptable(
                 "invalid subscription transport".to_string(),
@@ -302,6 +303,7 @@ pub async fn graphql_transactional(
         operation_name: request.operation_name,
         variables: request.variables,
         identity: identity.did().cloned(),
+        context: Default::default(),
     };
 
     // Check for transaction ID in header first (Go-compatible), then body
@@ -313,6 +315,7 @@ pub async fn graphql_transactional(
 
     let response = match txn_id {
         Some(txn_id_str) => {
+            require_permission(&state, &identity, permission).await?;
             let handle = match txn_id_str.parse() {
                 Ok(h) => h,
                 Err(_) => {
@@ -325,7 +328,21 @@ pub async fn graphql_transactional(
             };
             execute_in_txn_with_context(&state, &identity, query_request, handle).await
         }
-        None => execute_with_context(&state, &identity, query_request).await,
+        // The permission check and the query run as one task on the query's
+        // worker, its storage reads with it.
+        None => {
+            let target = query::pooled::request_target(&query_request);
+            let pool = state.pool.clone();
+            let ran = workers::run_on(pool.as_ref(), target, move || async move {
+                require_permission(&state, &identity, permission).await?;
+                Ok::<_, HttpError>(execute_with_context(&state, &identity, query_request).await)
+            })
+            .await;
+            ran.map_err(|error| {
+                tracing::warn!(%error, "a GraphQL request did not run on the worker pool");
+                HttpError::ServiceUnavailable("the node is shutting down; try again".into())
+            })??
+        }
     };
 
     record_response_metrics(&response);
@@ -359,10 +376,15 @@ async fn graphql_sse(
     let variables = request.variables;
     let did = identity.did().cloned();
     let acting_did = did.as_ref().map(|d| d.as_str().to_string());
+    // Every per-event query presents the subscriber's bearer.
+    let bearer = defra_core::RequestContext::default().with_bearer(
+        acting_did.clone(),
+        did.as_ref()
+            .and_then(|did| identity.context().bearer_token_for(did.as_str())),
+    );
 
-    // Resolve signing config and DAC bypass once at subscription setup time
+    // Signing configuration is fixed; authorization is resolved for each event.
     let signing_config = crate::query_context::resolve_signing_config(&state, &identity);
-    let dac_bypass = crate::query_context::resolve_dac_bypass(&state, &identity).await;
 
     let subscription_doc_ids_filter = subscription_doc_ids_with_limits(
         &query_str,
@@ -399,7 +421,7 @@ async fn graphql_sse(
                     }
                 };
 
-                let mut req = QueryRequest::new(query_text);
+                let mut req = QueryRequest::new(query_text).with_context(bearer.clone());
                 if did.is_some() {
                     req = req.with_identity(did.clone());
                 }
@@ -409,12 +431,9 @@ async fn graphql_sse(
                 if let Some(ref vars) = variables {
                     req = req.with_variables(vars.clone());
                 }
+                let dac_bypass = crate::query_context::resolve_dac_bypass(&state, &identity).await;
                 let response = execute_with_resolved_context(
-                    executor.clone(),
-                    req,
-                    signing_config.clone(),
-                    dac_bypass,
-                    acting_did.clone(),
+                    &state.edge, executor.clone(), req, signing_config.clone(), dac_bypass, acting_did.clone(),
                 ).await;
 
                 // Skip empty results (filter excluded the document)
@@ -456,9 +475,12 @@ mod tests {
     use crate::{router::AppStateBuilder, MockQueryExecutor};
 
     fn state_with_limits(query_limits: QueryLimits) -> AppState {
-        AppStateBuilder::new(Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>)
-            .with_query_limits(query_limits)
-            .build()
+        AppStateBuilder::new(
+            Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>,
+            edge::testing::edge(),
+        )
+        .with_query_limits(query_limits)
+        .build()
     }
 
     fn deep_encrypted_query(depth: usize) -> String {

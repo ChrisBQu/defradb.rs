@@ -505,8 +505,7 @@ async fn commits(
     options: db::read::commits::CommitsQueryOptions,
 ) -> Vec<Document> {
     let txn = handler.db().new_txn(true).await.unwrap();
-    let fetcher =
-        db::read::commits::CommitsFetcher::new(Arc::new(async_lock::Mutex::new(Some(txn))));
+    let fetcher = db::read::commits::CommitsFetcher::new(Arc::new(txn));
     fetcher.fetch_commits(&options).await.unwrap()
 }
 

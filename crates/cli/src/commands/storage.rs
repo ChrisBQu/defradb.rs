@@ -28,13 +28,15 @@ impl StorageArgs {
                 "storage stats requires an on-disk database".into(),
             ));
         }
-        if config.datastore.at_rest_encryption {
-            return Err(Error::InvalidDatastore(
-                "use the live database storage_stats API for an encrypted store".into(),
-            ));
-        }
         let StorageCommand::Stats { versions } = self.command;
-        let txn = storage::backends::RegolithTxn::open_read_only(config.data_path())?;
+        let txn = storage::backends::RegolithTxn::open_read_only(
+            config.data_path(),
+            crate::commands::start::Node::encryption_options(
+                config,
+                storage::RegolithStoreOptions::default(),
+                false,
+            )?,
+        )?;
         let stats = db::database::storage_stats::collect(&txn, versions)
             .await
             .map_err(|error| Error::Server(error.to_string()))?;

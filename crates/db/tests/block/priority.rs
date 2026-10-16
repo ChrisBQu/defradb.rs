@@ -61,11 +61,9 @@ async fn backfill_indexes_a_shared_cid_for_each_document() {
             .await
             .unwrap();
         for doc_short_id in [1, 2] {
-            headstore
-                .set(
-                    &storage::keys::HeadstoreDocKey::new(doc_short_id, "name", cid).bytes(),
-                    &[],
-                )
+            let mut heads = storage::merge::head_set::Write::default();
+            heads.add(&db::block::heads::document::name("name", &cid), 0);
+            db::block::heads::document::commit(&headstore, doc_short_id, &heads)
                 .await
                 .unwrap();
         }
@@ -187,7 +185,7 @@ async fn test_backfill_commit_priority_index_rebuilds_field_and_composite_histor
     assert_eq!(count_priority_entries(&read_txn).await, 7);
     assert!(has_priority_index_marker(&read_txn).await);
 
-    let fetcher = CommitsFetcher::new(Arc::new(async_lock::Mutex::new(Some(read_txn))));
+    let fetcher = CommitsFetcher::new(Arc::new(read_txn));
     let composite_commits = fetcher
         .fetch_commits(&db::read::commits::CommitsQueryOptions {
             doc_id: Some(doc_id.clone()),

@@ -4,7 +4,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::anyhow;
 use async_trait::async_trait;
 use bitswap::{Bitswap, Block, Config, Store};
 use bytes::Bytes;
@@ -30,16 +29,19 @@ struct MemStore(Arc<BTreeMap<Cid, Block>>);
 
 #[async_trait]
 impl Store for MemStore {
-    async fn get_size(&self, cid: &Cid) -> anyhow::Result<usize> {
+    async fn get_size(&self, cid: &Cid) -> bitswap::store::Result<usize> {
         self.0
             .get(cid)
             .map(|b| b.data.len())
-            .ok_or_else(|| anyhow!("not found"))
+            .ok_or_else(|| bitswap::StoreError("not found".into()))
     }
-    async fn get(&self, cid: &Cid) -> anyhow::Result<Block> {
-        self.0.get(cid).cloned().ok_or_else(|| anyhow!("not found"))
+    async fn get(&self, cid: &Cid) -> bitswap::store::Result<Block> {
+        self.0
+            .get(cid)
+            .cloned()
+            .ok_or_else(|| bitswap::StoreError("not found".into()))
     }
-    async fn has(&self, cid: &Cid) -> anyhow::Result<bool> {
+    async fn has(&self, cid: &Cid) -> bitswap::store::Result<bool> {
         Ok(self.0.contains_key(cid))
     }
 }

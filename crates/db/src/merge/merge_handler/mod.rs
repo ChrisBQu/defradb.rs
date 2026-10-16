@@ -5,6 +5,7 @@
 
 mod authorization;
 mod batch;
+mod block_reads;
 mod collection;
 pub mod composite;
 mod composite_fields;
@@ -16,8 +17,10 @@ mod dispatch;
 mod doc_identity;
 mod encryption;
 pub(crate) mod error;
+mod frame_source;
 pub mod hook;
 mod lww;
+mod merge_keys;
 mod protected_update;
 mod recovery;
 pub mod se_merge;
@@ -31,6 +34,7 @@ use kovan_map::HopscotchMap;
 use kovan_queue::seg_queue::SegQueue;
 use rapidhash::fast::RandomState;
 use rapidhash::{RapidHashMap, RapidHashSet};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use cid::Cid;
@@ -68,21 +72,26 @@ pub const DEFAULT_MAX_MERGE_DEPTH: usize = 8192;
 /// A lock-free set of block CIDs.
 pub type CidSet = HopscotchMap<Cid, (), RandomState>;
 
+/// Decryption keys fetched outside the engine-owned attempts of one merge,
+/// shared by those attempts without a lock.
+pub(crate) type RetryDecryptionKeys = Arc<HopscotchMap<Cid, Zeroizing<[u8; 32]>, RandomState>>;
+
+/// An empty [`RetryDecryptionKeys`].
+pub(crate) fn retry_decryption_keys() -> RetryDecryptionKeys {
+    Arc::new(HopscotchMap::with_hasher(RandomState::default()))
+}
+
+/// The error for a merge attempt that asked again for a key it was given:
+/// running it again would only ask again.
+pub(crate) fn repeated_key_request(encryption_cid: &Cid) -> MergeError {
+    MergeError::MergeFailed(format!(
+        "merge requested decryption key {encryption_cid} again after it was provided"
+    ))
+}
+
 /// An empty [`CidSet`].
 pub fn cid_set() -> CidSet {
     CidSet::with_hasher(RandomState::default())
-}
-
-/// Encode a priority value as a varint (matches Go's binary.PutUvarint).
-pub(crate) fn encode_priority_varint(priority: u64) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(10);
-    let mut n = priority;
-    while n >= 0x80 {
-        buf.push((n as u8) | 0x80);
-        n >>= 7;
-    }
-    buf.push(n as u8);
-    buf
 }
 
 /// Database merge handler that processes incoming P2P blocks.
@@ -97,52 +106,108 @@ pub struct DbMergeHandler<S: Store, B: blockstore::Blockstore> {
     /// Shared parent-chain depth policy for identity and merge traversals.
     max_merge_depth: usize,
     /// Optional merge hook for policy-specific behavior around composite merges.
-    composite_merge_hook: std::sync::OnceLock<Arc<dyn CompositeMergeHook>>,
+    composite_merge_hook: Arc<regolith::sync::OnceCell<Arc<dyn CompositeMergeHook>>>,
     /// Tracks composite CIDs that have already been merged, preventing
     /// duplicate processing from concurrent dual-broadcast paths (doc topic
     /// + collection topic). Matches Go's `loadComposites` dedup guard.
-    pub(crate) merged_composites: CidSet,
+    pub(crate) merged_composites: Arc<CidSet>,
     /// Tracks collection CIDs that have already been merged, preventing
     /// replayed collection blocks from re-adding obsolete collection heads.
-    pub(crate) merged_collections: CidSet,
+    pub(crate) merged_collections: Arc<CidSet>,
     /// Optional SE encryption key for generating search artifacts on replicated documents.
     /// When set, the merge handler generates SE artifacts after merging documents
     /// that belong to collections with encrypted indexes.
-    se_enc_key: std::sync::OnceLock<Zeroizing<Vec<u8>>>,
+    se_enc_key: Arc<regolith::sync::OnceCell<Zeroizing<Vec<u8>>>>,
     /// Optional repusher for fanning SE artifacts to this node's replicators
     /// after a merge commits. Mirrors Go, where a merging node re-enters
     /// `SendUpdate` and runs the SE push handler (`internal/db/p2p/p2p.go:709`).
     #[cfg(not(target_arch = "wasm32"))]
-    se_repusher: std::sync::OnceLock<Arc<dyn crate::merge::SeArtifactRepusher>>,
+    se_repusher: Arc<regolith::sync::OnceCell<Arc<dyn crate::merge::SeArtifactRepusher>>>,
     /// Optional KMS service. When set, `decrypt_block_data` routes DEK
     /// retrieval through the KMS (NAC/DAC-gated, cross-peer fetch) instead
     /// of reading the raw key directly from the Encryption block.
-    kms: std::sync::OnceLock<Arc<dyn kms::KmsService>>,
-    /// Per-document write serialization queue, shared with the DB so that local
-    /// writes and P2P merges that touch the same document are mutually
-    /// serialized. Ensures concurrent merges (and concurrent local writes) for
-    /// the same document are processed one at a time, preventing read-modify-write
-    /// races on the CRDT accumulation store (#1021).
-    pub(crate) merge_queue: Arc<crate::DocWriteQueue>,
+    kms: Arc<regolith::sync::OnceCell<Arc<dyn kms::KmsService>>>,
+    /// Request-scoped DEKs prepared outside an engine-owned merge attempt.
+    /// `None` means this handler is on the legacy non-retry path.
+    retry_decryption_keys: Option<RetryDecryptionKeys>,
+    retry_prefetch_requested: Option<Arc<AtomicBool>>,
+    /// Keys fetched before this merge's own transaction (see
+    /// `merge_keys`): consulted before any request to the KMS.
+    prepared_keys: Option<merge_keys::PreparedMergeKeys>,
     /// Encryption CIDs with a background DEK prefetch currently in flight, so
     /// repeated deliveries of the same deferred field block
     /// (pushlog + gossip + retries) don't fan out duplicate cross-peer
     /// fetches.
     prefetched_dek_cids: Arc<CidSet>,
     /// Composites a merge validator deferred, by the CIDs they await.
-    pub(crate) deferred: crate::merge::governance::DeferredMerges,
+    pub(crate) deferred: Arc<crate::merge::governance::DeferredMerges>,
     /// Composites a merge validator rejected. A reject rests on present bytes
     /// and never changes, and the block stays in the blockstore's unmerged
     /// set, so without this the governance sweep would re-judge every
     /// rejected composite each tick and, past its budget, never reach a
     /// deferred one. In memory: after a restart each is re-judged once.
-    pub(crate) rejected_governed: CidSet,
+    pub(crate) rejected_governed: Arc<CidSet>,
     /// Where composites merged by re-drive are reported, so they take the
     /// same post-merge path as a first-attempt merge.
-    redriven_sink: std::sync::OnceLock<Arc<dyn crate::merge::governance::RedrivenMergeSink>>,
+    redriven_sink:
+        Arc<regolith::sync::OnceCell<Arc<dyn crate::merge::governance::RedrivenMergeSink>>>,
+}
+
+impl<S: Store, B: blockstore::Blockstore> Clone for DbMergeHandler<S, B> {
+    fn clone(&self) -> Self {
+        Self {
+            db: Arc::clone(&self.db),
+            blockstore: Arc::clone(&self.blockstore),
+            max_merge_depth: self.max_merge_depth,
+            composite_merge_hook: Arc::clone(&self.composite_merge_hook),
+            merged_composites: Arc::clone(&self.merged_composites),
+            merged_collections: Arc::clone(&self.merged_collections),
+            se_enc_key: Arc::clone(&self.se_enc_key),
+            #[cfg(not(target_arch = "wasm32"))]
+            se_repusher: Arc::clone(&self.se_repusher),
+            kms: Arc::clone(&self.kms),
+            retry_decryption_keys: self.retry_decryption_keys.clone(),
+            retry_prefetch_requested: self.retry_prefetch_requested.clone(),
+            prepared_keys: self.prepared_keys.clone(),
+            prefetched_dek_cids: Arc::clone(&self.prefetched_dek_cids),
+            deferred: Arc::clone(&self.deferred),
+            rejected_governed: Arc::clone(&self.rejected_governed),
+            redriven_sink: Arc::clone(&self.redriven_sink),
+        }
+    }
 }
 
 impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
+    pub(super) fn with_retry_decryption_context(
+        &self,
+        keys: RetryDecryptionKeys,
+        prefetch_requested: Arc<AtomicBool>,
+    ) -> Self {
+        let mut handler = self.clone();
+        handler.retry_decryption_keys = Some(keys);
+        handler.retry_prefetch_requested = Some(prefetch_requested);
+        handler
+    }
+
+    pub(super) fn retry_decryption_keys(&self) -> Option<&RetryDecryptionKeys> {
+        self.retry_decryption_keys.as_ref()
+    }
+
+    pub(super) fn request_retry_dek_prefetch(&self) -> bool {
+        if let Some(requested) = &self.retry_prefetch_requested {
+            requested.store(true, std::sync::atomic::Ordering::Release);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(super) fn reset_retry_dek_prefetch_request(&self) {
+        if let Some(requested) = &self.retry_prefetch_requested {
+            requested.store(false, std::sync::atomic::Ordering::Release);
+        }
+    }
+
     /// The database handle this merge handler writes through.
     pub fn db(&self) -> &Arc<DB<S>> {
         &self.db
@@ -186,11 +251,6 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         Ok(None)
     }
 
-    /// The per-document write queue serialising merges.
-    pub fn merge_queue(&self) -> &Arc<crate::DocWriteQueue> {
-        &self.merge_queue
-    }
-
     /// Collection-definition blocks already merged in this process.
     pub fn merged_collections(&self) -> &CidSet {
         &self.merged_collections
@@ -207,28 +267,30 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     }
 
     /// Create a merge handler with an explicit parent-chain depth limit.
+    #[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
     pub fn new_with_max_merge_depth(
         db: Arc<DB<S>>,
         blockstore: Arc<B>,
         max_merge_depth: usize,
     ) -> Self {
-        let merge_queue = db.doc_write_queue();
         Self {
             db,
             blockstore,
             max_merge_depth,
-            composite_merge_hook: std::sync::OnceLock::new(),
-            merged_composites: cid_set(),
-            merged_collections: cid_set(),
-            se_enc_key: std::sync::OnceLock::new(),
+            composite_merge_hook: Arc::new(regolith::sync::OnceCell::new()),
+            merged_composites: Arc::new(cid_set()),
+            merged_collections: Arc::new(cid_set()),
+            se_enc_key: Arc::new(regolith::sync::OnceCell::new()),
             #[cfg(not(target_arch = "wasm32"))]
-            se_repusher: std::sync::OnceLock::new(),
-            kms: std::sync::OnceLock::new(),
-            merge_queue,
+            se_repusher: Arc::new(regolith::sync::OnceCell::new()),
+            kms: Arc::new(regolith::sync::OnceCell::new()),
+            retry_decryption_keys: None,
+            retry_prefetch_requested: None,
+            prepared_keys: None,
             prefetched_dek_cids: Arc::new(cid_set()),
-            deferred: Default::default(),
-            rejected_governed: cid_set(),
-            redriven_sink: std::sync::OnceLock::new(),
+            deferred: Arc::new(Default::default()),
+            rejected_governed: Arc::new(cid_set()),
+            redriven_sink: Arc::new(regolith::sync::OnceCell::new()),
         }
     }
 

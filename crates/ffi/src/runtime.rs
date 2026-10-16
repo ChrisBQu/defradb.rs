@@ -1,49 +1,39 @@
-//! Global Tokio runtime for FFI async bridging.
+//! The C library's network runtime.
 //!
-//! FFI functions are synchronous, but the Rust database API is async.
-//! This module provides a global Tokio runtime that bridges the gap.
+//! Network calls (P2P, starting and closing a node, remote ACP) run on it,
+//! blocking their C caller's thread ([`Edge::block_on`]); a node's data-path
+//! calls run on its worker pool instead ([`crate::call`]). `defra_init`
+//! starts it, and it lives as long as the process.
 
-use std::sync::OnceLock;
+use edge::{Edge, EdgeConfig, EdgeRuntime};
+use regolith::sync::OnceCell;
 
-use tokio::runtime::Runtime;
+static RUNTIME: OnceCell<EdgeRuntime> = OnceCell::new();
 
-/// Global Tokio runtime.
+/// Why the runtime could not start.
+static RUNTIME_ERROR: OnceCell<String> = OnceCell::new();
+
+/// Start the network runtime.
 ///
-/// Initialized once on first use. All async operations from FFI run here.
-pub static RUNTIME: OnceLock<Runtime> = OnceLock::new();
-
-/// Error from runtime initialization.
-static RUNTIME_ERROR: OnceLock<String> = OnceLock::new();
-
-/// Initialize the global runtime.
-///
-/// Safe to call multiple times - only the first call has an effect.
+/// Safe to call multiple times - only the first successful call starts it.
 /// Returns true on success, false on failure.
 /// On failure, call `runtime_init_error()` to get the error message.
 pub fn init_runtime() -> bool {
-    // If already initialized successfully, return true
     if RUNTIME.get().is_some() {
         return true;
     }
-
-    // If we already had an error, don't retry
     if RUNTIME_ERROR.get().is_some() {
         return false;
     }
-
-    // Try to initialize
-    match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => {
-            // Use get_or_init to handle race condition where another thread
-            // might have initialized between our check and this call
-            RUNTIME.get_or_init(|| rt);
+    match EdgeRuntime::start(EdgeConfig::default()) {
+        Ok(runtime) => {
+            // A racing call that published first wins; this runtime is
+            // dropped, which stops it.
+            let _ = RUNTIME.set(runtime);
             true
         }
-        Err(e) => {
-            RUNTIME_ERROR.get_or_init(|| format!("failed to create Tokio runtime: {}", e));
+        Err(error) => {
+            let _ = RUNTIME_ERROR.set(error.to_string());
             false
         }
     }
@@ -51,14 +41,12 @@ pub fn init_runtime() -> bool {
 
 /// Get the runtime initialization error, if any.
 pub fn runtime_init_error() -> Option<&'static str> {
-    RUNTIME_ERROR.get().map(|s| s.as_str())
+    RUNTIME_ERROR.get().map(String::as_str)
 }
 
-/// Get a handle to the global runtime.
-///
-/// Returns None if the runtime hasn't been initialized.
-pub fn runtime_handle() -> Option<&'static Runtime> {
-    RUNTIME.get()
+/// The network runtime's handle, once it started.
+pub fn edge() -> Option<&'static Edge> {
+    RUNTIME.get().map(EdgeRuntime::edge)
 }
 
 #[cfg(test)]
@@ -68,26 +56,25 @@ mod tests {
     #[test]
     fn test_runtime_init() {
         assert!(init_runtime(), "runtime initialization should succeed");
-        assert!(RUNTIME.get().is_some());
+        assert!(edge().is_some());
     }
 
     #[test]
     fn test_runtime_handle() {
         assert!(init_runtime(), "runtime initialization should succeed");
-        let handle = runtime_handle();
-        assert!(handle.is_some());
+        let edge = edge().expect("the runtime started");
 
-        // Can run async tasks
-        let result = handle.unwrap().block_on(async { 42 });
-        assert_eq!(result, 42);
+        // Can run async work, blocking this plain thread.
+        assert_eq!(edge.block_on(async { 42 }), Ok(42));
     }
 
     #[test]
     fn test_runtime_init_idempotent() {
-        // Multiple calls should all succeed
+        // Multiple calls should all succeed, on one runtime.
+        assert!(init_runtime());
+        let first = edge().expect("the runtime started").clone();
         assert!(init_runtime());
         assert!(init_runtime());
-        assert!(init_runtime());
-        assert!(RUNTIME.get().is_some());
+        assert_eq!(edge(), Some(&first));
     }
 }

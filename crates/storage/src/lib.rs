@@ -99,7 +99,6 @@ pub mod backends;
 pub mod corekv;
 pub mod dyn_store;
 pub mod encoding;
-pub mod encrypted_store;
 pub mod field_value;
 pub mod keys;
 pub mod namespace;
@@ -110,10 +109,17 @@ pub mod stores;
 // See #19 for transaction wrapper module
 
 // Re-export commonly used types for convenience.
-pub use backends::{RegolithStore, RegolithStoreOptions};
+#[cfg(not(target_arch = "wasm32"))]
+pub use backends::start_pool;
+pub use backends::{with_worker_io, RegolithStore, RegolithStoreOptions, WorkerIo};
 pub use corekv::{
     Error, IterOptions, Iterator, KvPair, Reader, ReaderWriter, Result, Store, Txn, Writer,
 };
 pub use dyn_store::DynStore;
 
 pub use backends::{TransactionStatsHandle, TransactionStatsSnapshot};
+
+/// The store's merge operator and the operands it folds, kept with the
+/// regolith adapter that installs it.
+pub use backends::regolith::merge;
+pub mod vector;

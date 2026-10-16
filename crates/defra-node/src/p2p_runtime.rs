@@ -2,6 +2,7 @@
 //!
 //! Gated behind the `p2p` feature. Not part of the public `defra_node` API.
 
+use crate::{Error, Result};
 use std::sync::Arc;
 
 use crate::P2PConfig;
@@ -35,6 +36,7 @@ pub(super) struct P2PSetupResult {
     pub(super) wire_kms: Option<WireKmsCallback>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
     store: Arc<S>,
     database: Arc<db::DB<S>>,
@@ -43,7 +45,8 @@ pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
     node_identity: Option<Arc<identity::RawIdentity>>,
     document_acp: Arc<dyn acp::DocumentACP>,
     strict_replicated_doc_access: bool,
-) -> anyhow::Result<P2PSetupResult> {
+    edge: &edge::Edge,
+) -> Result<P2PSetupResult> {
     let secret_key =
         p2p::iroh::load_or_generate_secret_key(config.secret_key_path.as_deref()).await?;
     let mut peer_config = defra_p2p_adapter::IrohPeerConfig::new(
@@ -59,6 +62,7 @@ pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
             allowlist: config.allowlist.clone(),
         },
         document_acp,
+        edge.clone(),
     );
     peer_config.strict_replicated_doc_access = strict_replicated_doc_access;
     peer_config.sync = p2p::sync::SyncConfig {
@@ -78,7 +82,7 @@ pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
 
     let peer = defra_p2p_adapter::IrohPeer::start(store, database, event_bus, peer_config)
         .await
-        .map_err(|error| anyhow::anyhow!("iroh peer failed to start: {error}"))?;
+        .map_err(Error::IrohStart)?;
     tracing::info!(target: "defra_node", peer_id = %peer.local_peer_id, "P2P started (IROH/QUIC)");
 
     let merge_handler_for_kms = Arc::clone(&peer.replication.merge_handler_inner);

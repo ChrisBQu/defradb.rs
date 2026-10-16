@@ -27,7 +27,8 @@ pub async fn build_blocks_from_document<B: Blockstore>(
     let mut field_links: Vec<DAGLink> = Vec::new();
     let mut field_cids: Vec<Cid> = Vec::new();
 
-    let immutable = compute_immutable_block(doc, schema, None, None)?;
+    let immutable = compute_immutable_block(doc, schema, None, None, None)
+        .map_err(|error| error.to_string())?;
 
     // Create a block for each field (LWW or Counter depending on CRDT type)
     for (field_name, field_value) in doc.values() {

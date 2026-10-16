@@ -1,29 +1,93 @@
 //! Block signing configuration for CRDT block signing.
 //!
-//! Provides the SigningConfig type and thread-local storage for passing
-//! signing config from the FFI/query layer to the block builder layer.
-//! Mirrors the pattern used by encryption.rs for EncryptionConfig.
+//! Provides the SigningConfig type, which a request's
+//! [`RequestContext`](crate::RequestContext) carries from the boundary to the
+//! block builder layer.
 
-use std::cell::RefCell;
 use std::fmt;
-use std::future::Future;
 use std::sync::Arc;
 
 use kovan_map::HopscotchMap;
+use regolith::sync::OnceCell;
+
+use crate::thread_bounds::MaybeBoxFuture;
 use rapidhash::fast::RandomState;
 use zeroize::Zeroize;
+
+#[cfg(any(test, feature = "ambient"))]
+pub use crate::ambient::{
+    get_broadcast_creator_did, get_request_bearer_token, get_signing_config,
+    scope_broadcast_creator_did, scope_request_bearer_token, set_broadcast_creator_did,
+    set_signing_config,
+};
 
 /// Remote signing delegate (e.g. Orbis, Secure Enclave host callbacks).
 ///
 /// Implementations call an external service to produce signatures.
-/// `sign_sync` must be callable from synchronous contexts (the block builder
-/// runs inside `spawn_blocking`).
+/// `sign_sync` must be callable from synchronous code: the block builder
+/// computes and signs a block without awaiting. [`sign_batch`](Self::sign_batch) is the
+/// completion form the write path uses: one call per wave of signatures,
+/// completing without holding a thread while the service works.
 pub trait RemoteSigner: Send + Sync {
     fn sign_sync(
         &self,
         data: &[u8],
         authorization: Option<&SigningAuthorization>,
     ) -> Result<Vec<u8>, String>;
+
+    /// Signs every payload of a wave, one result per payload in order, and
+    /// completes when all are signed. A signer that reaches a service
+    /// overrides it to run the payloads concurrently and hold no thread; the
+    /// default signs each with [`sign_sync`](Self::sign_sync) before it
+    /// returns, as a signer with only a synchronous call must.
+    fn sign_batch(
+        &self,
+        payloads: Vec<Arc<[u8]>>,
+        authorization: Option<SigningAuthorization>,
+    ) -> MaybeBoxFuture<'static, Vec<Result<Vec<u8>, SignFailure>>> {
+        let signatures = payloads
+            .iter()
+            .map(|payload| {
+                self.sign_sync(payload, authorization.as_ref())
+                    .map_err(SignFailure::refused)
+            })
+            .collect();
+        Box::pin(std::future::ready(signatures))
+    }
+}
+
+/// A signature a signer could not make.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SignFailure {
+    /// What went wrong, for the caller's error.
+    pub message: String,
+    /// The failure was on the way to the signer (a transport error, a
+    /// timeout): signing the same bytes again may succeed and is safe.
+    pub transient: bool,
+}
+
+impl SignFailure {
+    /// The signer refused or failed in a way asking again does not fix.
+    pub fn refused(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            transient: false,
+        }
+    }
+
+    /// The request did not reach the signer or its answer did not come back.
+    pub fn transient(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            transient: true,
+        }
+    }
+}
+
+impl fmt::Display for SignFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
 }
 
 /// Optional authorization context passed to remote signers.
@@ -31,7 +95,7 @@ pub trait RemoteSigner: Send + Sync {
 /// For Orbis-backed signing, this lets DefraDB attach ACP metadata to a sign
 /// request so Orbis can authorize the signature ceremony before producing a
 /// threshold signature.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum SigningAuthorization {
     Policy {
@@ -43,6 +107,85 @@ pub enum SigningAuthorization {
     Decision {
         decision_id: String,
     },
+}
+
+/// Exact delegated-signing input needed by a transaction attempt. `data` is
+/// the canonical unsigned block encoding; the remaining fields bind the
+/// response to the signer identity and authorization context.
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RemoteSignatureInput {
+    pub data: Vec<u8>,
+    pub key_type: SigningKeyType,
+    pub public_key_hex: String,
+    pub authorization: Option<SigningAuthorization>,
+}
+
+impl fmt::Debug for RemoteSignatureInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RemoteSignatureInput")
+            .field("data", &"[redacted]")
+            .field("key_type", &self.key_type)
+            .field("signer_context", &"[redacted]")
+            .finish()
+    }
+}
+
+impl RemoteSignatureInput {
+    pub fn encode(&self) -> Result<Vec<u8>, String> {
+        serde_json::to_vec(self).map_err(|error| format!("encode remote signature input: {error}"))
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
+        serde_json::from_slice(bytes)
+            .map_err(|error| format!("decode remote signature input: {error}"))
+    }
+
+    pub fn resolve(&self, signer: &SigningConfig) -> Result<Vec<u8>, String> {
+        self.remote_signer(signer)?
+            .sign_sync(&self.data, self.authorization.as_ref())
+    }
+
+    /// The remote signer of `signer` that may answer this input: the one it
+    /// was prepared for, with the same key and authorization.
+    pub fn remote_signer(&self, signer: &SigningConfig) -> Result<Arc<dyn RemoteSigner>, String> {
+        if self.key_type != signer.key_type
+            || self.public_key_hex != signer.public_key_hex
+            || self.authorization != signer.signing_authorization
+        {
+            return Err(
+                "prepared signature context no longer matches the configured signer".into(),
+            );
+        }
+        signer
+            .remote_signer
+            .clone()
+            .ok_or_else(|| "prepared remote signature requires a remote signer".to_string())
+    }
+}
+
+#[cfg(test)]
+mod remote_signature_input_tests {
+    use super::*;
+
+    #[test]
+    fn remote_signature_request_round_trips_exact_bytes_and_context() {
+        let input = RemoteSignatureInput {
+            data: vec![0x81, 0x01, 0x02],
+            key_type: SigningKeyType::BlsAugV1,
+            public_key_hex: "public-key-id".to_string(),
+            authorization: Some(SigningAuthorization::Decision {
+                decision_id: "decision-7".to_string(),
+            }),
+        };
+        let encoded = input.encode().unwrap();
+        assert_eq!(RemoteSignatureInput::decode(&encoded).unwrap(), input);
+
+        let changed_head_data = RemoteSignatureInput {
+            data: vec![0x81, 0x01, 0x03],
+            ..input.clone()
+        };
+        assert_ne!(input.encode().unwrap(), changed_head_data.encode().unwrap());
+    }
 }
 
 /// Key type for signing operations.
@@ -199,30 +342,13 @@ impl SigningConfig {
     }
 }
 
-thread_local! {
-    static CURRENT_SIGNING_CONFIG: RefCell<Option<SigningConfig>> = const { RefCell::new(None) };
-}
-
-/// Set the signing config for the current thread.
-pub fn set_signing_config(config: Option<SigningConfig>) {
-    CURRENT_SIGNING_CONFIG.with(|c| {
-        *c.borrow_mut() = config;
-    });
-}
-
-/// Get the current signing config for this thread.
-pub fn get_signing_config() -> Option<SigningConfig> {
-    CURRENT_SIGNING_CONFIG.with(|c| c.borrow().clone())
-}
-
 /// Global identity store mapping DID → SigningConfig.
 /// When create_identity() generates a keypair, we store it here so that
 /// exec_request() can look up the signing key from just a DID string.
-static IDENTITY_STORE: std::sync::OnceLock<HopscotchMap<String, SigningConfig, RandomState>> =
-    std::sync::OnceLock::new();
+static IDENTITY_STORE: OnceCell<HopscotchMap<String, SigningConfig, RandomState>> = OnceCell::new();
 
 fn identity_store() -> &'static HopscotchMap<String, SigningConfig, RandomState> {
-    IDENTITY_STORE.get_or_init(|| HopscotchMap::with_hasher(RandomState::default()))
+    IDENTITY_STORE.get_or_init_racy(|| HopscotchMap::with_hasher(RandomState::default()))
 }
 
 /// Store a signing config for a DID.
@@ -303,19 +429,16 @@ pub fn clear_identity_store() {
 // Request Bearer Token — keyed by DID for ACP registration passthrough
 // ---------------------------------------------------------------------------
 
-use std::sync::OnceLock;
-
-/// Global map of DID → JWT for in-flight requests.
-///
-/// `thread_local!` doesn't work here because tokio can migrate async tasks
-/// between OS threads at `.await` points. A global map keyed by DID ensures
-/// the token is available regardless of which thread reads it.
+/// The bearer tokens bound to DIDs for requests that carry none of their own
+/// (see [`RequestContext::bearer_token_for`](crate::RequestContext::bearer_token_for)).
+/// A request authenticated over HTTP carries its own token, so concurrent
+/// requests for the same DID never replace each other's JWT.
 fn request_token_store() -> &'static HopscotchMap<String, String, RandomState> {
-    static STORE: OnceLock<HopscotchMap<String, String, RandomState>> = OnceLock::new();
-    STORE.get_or_init(|| HopscotchMap::with_hasher(RandomState::default()))
+    static STORE: OnceCell<HopscotchMap<String, String, RandomState>> = OnceCell::new();
+    STORE.get_or_init_racy(|| HopscotchMap::with_hasher(RandomState::default()))
 }
 
-/// Store the raw JWT from the HTTP Authorization header, keyed by the caller's DID.
+/// Bind `token` to `did` for requests that carry no bearer of their own.
 ///
 /// When a user authenticates via JWT, the node doesn't have their private key
 /// and can't create new bearer tokens for them. Instead, we pass through the
@@ -325,8 +448,8 @@ pub fn set_request_bearer_token(did: &str, token: impl Into<String>) {
     request_token_store().insert(did.to_string(), token.into());
 }
 
-/// Get the stored request bearer token for a specific DID.
-pub fn get_request_bearer_token(did: &str) -> Option<String> {
+/// The bearer token bound to `did` for requests that carry none of their own.
+pub fn stored_bearer_token(did: &str) -> Option<String> {
     request_token_store().get(did)
 }
 
@@ -338,7 +461,60 @@ pub fn clear_request_bearer_token(did: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use regolith::sync::{Mutex, MutexGuard};
+
+    #[tokio::test]
+    async fn request_bearer_scope_isolated_across_same_did_and_restores_global_fallback() {
+        let did = "did:key:bearer-scope-test";
+        let other_did = "did:key:bearer-scope-other";
+        set_request_bearer_token(did, "legacy-global");
+        set_request_bearer_token(other_did, "other-global");
+
+        let first = scope_request_bearer_token(
+            Some(did.to_string()),
+            Some("request-one".to_string()),
+            async {
+                assert_eq!(
+                    get_request_bearer_token(did).as_deref(),
+                    Some("request-one")
+                );
+                tokio::task::yield_now().await;
+                assert_eq!(
+                    get_request_bearer_token(did).as_deref(),
+                    Some("request-one")
+                );
+            },
+        );
+        let second = scope_request_bearer_token(
+            Some(did.to_string()),
+            Some("request-two".to_string()),
+            async {
+                assert_eq!(
+                    get_request_bearer_token(did).as_deref(),
+                    Some("request-two")
+                );
+                tokio::task::yield_now().await;
+                assert_eq!(
+                    get_request_bearer_token(did).as_deref(),
+                    Some("request-two")
+                );
+            },
+        );
+        tokio::join!(first, second);
+
+        scope_request_bearer_token(Some(did.to_string()), None, async {
+            assert_eq!(get_request_bearer_token(did), None);
+            assert_eq!(get_request_bearer_token(other_did), None);
+        })
+        .await;
+
+        assert_eq!(
+            get_request_bearer_token(did).as_deref(),
+            Some("legacy-global")
+        );
+        clear_request_bearer_token(did);
+        clear_request_bearer_token(other_did);
+    }
 
     fn make_config(label: &str) -> SigningConfig {
         SigningConfig {
@@ -353,20 +529,16 @@ mod tests {
 
     /// `IDENTITY_STORE` is process-global, so the tests that clear and refill it
     /// cannot run concurrently: one test's `store_identity` lands between
-    /// another's `clear_identity_store` and its assertion. Poisoning is
-    /// recovered from rather than propagated, so one failure does not cascade
-    /// into the others.
+    /// another's `clear_identity_store` and its assertion.
     static IDENTITY_STORE_GUARD: Mutex<()> = Mutex::new(());
 
-    fn lock_identity_store() -> std::sync::MutexGuard<'static, ()> {
-        IDENTITY_STORE_GUARD
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    async fn lock_identity_store() -> MutexGuard<'static, ()> {
+        IDENTITY_STORE_GUARD.lock().await
     }
 
-    #[test]
-    fn resolve_signing_config_uses_request_identity_when_registered() {
-        let _guard = lock_identity_store();
+    #[tokio::test]
+    async fn resolve_signing_config_uses_request_identity_when_registered() {
+        let _guard = lock_identity_store().await;
         clear_identity_store();
         store_identity("did:key:request", make_config("request"));
         store_identity("did:key:node", make_config("node"));
@@ -382,9 +554,9 @@ mod tests {
         clear_identity_store();
     }
 
-    #[test]
-    fn resolve_signing_config_falls_back_to_node_identity_when_request_identity_missing() {
-        let _guard = lock_identity_store();
+    #[tokio::test]
+    async fn resolve_signing_config_falls_back_to_node_identity_when_request_identity_missing() {
+        let _guard = lock_identity_store().await;
         clear_identity_store();
         store_identity("did:key:node", make_config("node"));
 
@@ -395,9 +567,9 @@ mod tests {
         clear_identity_store();
     }
 
-    #[test]
-    fn find_remote_signer_did_returns_registered_remote_signer() {
-        let _guard = lock_identity_store();
+    #[tokio::test]
+    async fn find_remote_signer_did_returns_registered_remote_signer() {
+        let _guard = lock_identity_store().await;
         struct NoopRemoteSigner;
 
         impl RemoteSigner for NoopRemoteSigner {
@@ -466,71 +638,6 @@ mod tests {
         let error = "invalid".parse::<SigningKeyType>().unwrap_err();
         assert_eq!(error, "unsupported signing key type: invalid");
     }
-}
-
-// ---------------------------------------------------------------------------
-// Broadcast Creator DID — thread-local for P2P ACP propagation
-// ---------------------------------------------------------------------------
-
-thread_local! {
-    static BROADCAST_CREATOR_DID: RefCell<Option<String>> = const { RefCell::new(None) };
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-tokio::task_local! {
-    static TASK_BROADCAST_CREATOR_DID: Option<String>;
-}
-
-/// Scope the broadcast creator DID to one async mutation task.
-///
-/// A thread-local alone is not safe across `.await`: Tokio may resume the
-/// mutation on a different worker, leaving the old worker contaminated and
-/// clearing an unrelated worker on drop. Async query entry points must use
-/// this scope; the thread-local remains only for synchronous lower-level
-/// callers and tests.
-#[cfg(not(target_arch = "wasm32"))]
-pub async fn scope_broadcast_creator_did<F>(did: Option<String>, future: F) -> F::Output
-where
-    F: Future,
-{
-    TASK_BROADCAST_CREATOR_DID.scope(did, future).await
-}
-
-/// Run an async mutation without server-side task-local P2P state on WASM.
-#[cfg(target_arch = "wasm32")]
-pub async fn scope_broadcast_creator_did<F>(_did: Option<String>, future: F) -> F::Output
-where
-    F: Future,
-{
-    future.await
-}
-
-/// Set the broadcast creator DID for the current thread.
-///
-/// When set, P2P broadcasts use this DID as the Creator field instead of
-/// the node's PeerId. This enables ACP registration on the receiving node:
-/// the merge handler registers the document with this DID as owner.
-#[cfg(test)]
-pub fn set_broadcast_creator_did(did: Option<String>) {
-    BROADCAST_CREATOR_DID.with(|c| {
-        *c.borrow_mut() = did;
-    });
-}
-
-/// Get the broadcast creator DID for this thread.
-///
-/// Returns the DID set by `set_broadcast_creator_did`, or None if no
-/// identity override is active (broadcasts will use the node PeerId).
-#[cfg(not(target_arch = "wasm32"))]
-pub fn get_broadcast_creator_did() -> Option<String> {
-    TASK_BROADCAST_CREATOR_DID
-        .try_with(Clone::clone)
-        .unwrap_or_else(|_| BROADCAST_CREATOR_DID.with(|c| c.borrow().clone()))
-}
-
-#[cfg(target_arch = "wasm32")]
-pub fn get_broadcast_creator_did() -> Option<String> {
-    BROADCAST_CREATOR_DID.with(|c| c.borrow().clone())
 }
 
 #[cfg(test)]

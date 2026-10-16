@@ -1,6 +1,6 @@
 use super::*;
 use lens::TransformStore;
-use storage::keys::systemstore::LensConfigKey;
+use storage::corekv::OnCommit;
 
 impl<S: Store> crate::database::DB<S> {
     /// Create and store a new schema version from a validated patched schema.
@@ -20,6 +20,10 @@ impl<S: Store> crate::database::DB<S> {
         is_active_explicitly_set: bool,
         migration: Option<lens::LensConfig>,
     ) -> Result<CollectionVersion> {
+        // Start the write transaction before loading schema metadata so all
+        // version/head decisions use the snapshot that will be committed.
+        let mut txn = self.new_txn(false).await?;
+
         // Go compatibility: default new fields with CType::None to CType::LwwRegister.
         // Go's patchCollection does this in collection_define.go for new fields that
         // don't have an explicit CRDT type. This must happen before CID generation.
@@ -39,7 +43,26 @@ impl<S: Store> crate::database::DB<S> {
         // Run Go-compatible cross-collection validators (before schema validate() which
         // uses different error messages). These validators cover duplicate fields,
         // CRDT/kind compatibility, and all Go-specific patch constraints.
-        let all_existing = self.get_all_collection_versions().await?;
+        let all_existing = self.get_all_collection_versions_with_txn(&mut txn).await?;
+        let Some(persisted_old_schema) = all_existing.iter().find(|version| {
+            version.collection_id == collection_id && version.version_id == old_version_id
+        }) else {
+            return Err(Error::CollectionVersionNotFound(old_version_id.to_string()));
+        };
+        if !crate::collection::loader::same_schema(persisted_old_schema, old_schema) {
+            return Err(Error::Storage(storage::Error::TxnConflict));
+        }
+        let old_name_key = CollectionNameKey::new(actual_name);
+        let persisted_name_version = txn
+            .systemstore()?
+            .get(&old_name_key.bytes())
+            .await
+            .map_err(Error::Storage)?;
+        if old_schema.is_active
+            && persisted_name_version.as_deref() != Some(old_version_id.as_bytes())
+        {
+            return Err(Error::Storage(storage::Error::TxnConflict));
+        }
         let new_collections: Vec<CollectionVersion> = all_existing
             .iter()
             .filter(|c| c.version_id != old_version_id)
@@ -131,8 +154,24 @@ impl<S: Store> crate::database::DB<S> {
         // Read current heads from schema_heads (emulates Go's persistent headstore).
         // For branching patches (v1→v2 then v1→v3), the headstore tracks the latest
         // CID after v2, so v3 gets heads=[v2_cid] and priority=3, matching Go.
+        let persisted_version_count = all_existing
+            .iter()
+            .filter(|version| version.collection_id == collection_id && !version.is_placeholder)
+            .count() as u64;
         let (collection_heads, collection_priority) = {
-            match self.schema_heads.get(actual_name) {
+            match self
+                .schema_heads
+                .get(actual_name)
+                .filter(|(heads, height)| {
+                    *height == persisted_version_count
+                        && !heads.is_empty()
+                        && heads.iter().all(|head| {
+                            all_existing.iter().any(|version| {
+                                version.collection_id == collection_id
+                                    && version.version_id == head.to_string()
+                            })
+                        })
+                }) {
                 Some((heads, h)) => (heads, h + 1),
                 None => {
                     // Fallback: compute from version chain (for databases loaded from storage)
@@ -184,8 +223,7 @@ impl<S: Store> crate::database::DB<S> {
         // with previous_version.transform set. We need to copy that transform to preserve
         // the migration link.
         let placeholder_transform = {
-            let read_txn = self.new_txn(true).await?;
-            let systemstore = read_txn.systemstore()?;
+            let systemstore = txn.systemstore()?;
             let placeholder_key = CollectionKey::new(&new_version_id);
             match systemstore
                 .get(&placeholder_key.bytes())
@@ -260,7 +298,7 @@ impl<S: Store> crate::database::DB<S> {
             config.source_schema_version_id = old_version_id.to_string();
             config.destination_schema_version_id = new_version_id.clone();
 
-            let txn_lens_store = crate::txn::lenses::TxnLensStore::new(self.lens_store.clone())?;
+            let txn_lens_store = crate::txn::lenses::TxnLensStore::new(self.lens_store.clone());
             let transform_id = txn_lens_store.add(config.clone()).await?;
             new_schema.previous_version = Some(CollectionSource {
                 source_collection_id: old_version_id.to_string(),
@@ -285,9 +323,6 @@ impl<S: Store> crate::database::DB<S> {
             field_count = new_schema.fields.len(),
             "Creating new schema version"
         );
-
-        // Begin transaction to store all version data
-        let txn = self.new_txn(false).await?;
 
         // Prepare serialized data before getting systemstore reference
         let old_version_key = CollectionKey::new(old_version_id);
@@ -318,6 +353,9 @@ impl<S: Store> crate::database::DB<S> {
         {
             let systemstore = txn.systemstore()?;
 
+            crate::collection::parts::prepare(self.store().as_ref(), &systemstore, &new_schema)
+                .await?;
+
             // 1. Store old version at /collection/id/{old_version_id} with is_active = false
             systemstore
                 .set(&old_version_key.bytes(), &old_version_data)
@@ -337,6 +375,13 @@ impl<S: Store> crate::database::DB<S> {
                     .set(&name_key.bytes(), new_version_id.as_bytes())
                     .await
                     .map_err(Error::Storage)?;
+                crate::definition::migration::owe_reindex(
+                    &systemstore,
+                    &self.collections,
+                    collection_id,
+                    None,
+                )
+                .await?;
             }
 
             // 4. Add version index at /collection/version/{collection_id}/{new_version_id}
@@ -352,13 +397,12 @@ impl<S: Store> crate::database::DB<S> {
                 .map_err(Error::Storage)?;
 
             if let Some((transform_id, config)) = &committed_migration {
-                let lens_key = LensConfigKey::new(transform_id.to_string());
-                let lens_data = serde_json::to_vec(config)
-                    .map_err(|e| Error::lens_config_json("failed to serialize lens config", e))?;
-                systemstore
-                    .set(&lens_key.bytes(), &lens_data)
-                    .await
-                    .map_err(Error::Storage)?;
+                crate::definition::migration::committed_lenses::write_lens_config(
+                    &systemstore,
+                    transform_id,
+                    config,
+                )
+                .await?;
             }
         } // systemstore reference dropped here
 
@@ -459,50 +503,42 @@ impl<S: Store> crate::database::DB<S> {
             }
         }
 
+        if let Ok(new_cid) = cid::Cid::try_from(new_version_id.as_str()) {
+            let schema_heads = std::sync::Arc::clone(&self.schema_heads);
+            let head_name = actual_name.to_string();
+            txn.on_commit(OnCommit::Ordered(Box::new(move || {
+                schema_heads.insert(head_name.clone(), (vec![new_cid], collection_priority));
+            })))?;
+        }
+
+        let collections = std::sync::Arc::clone(&self.collections);
+        let registered_name = actual_name.to_string();
+        let active = new_schema.is_active;
+        let cached_collection = if active {
+            Some(Collection::load_index_actions(new_schema.clone(), &txn.systemstore()?).await?)
+        } else {
+            None
+        };
+        txn.on_commit(OnCommit::Ordered(Box::new(move || {
+            collections.rcu(|old| {
+                let mut cache = old.clone();
+                if let Some(collection) = &cached_collection {
+                    cache.put_named(&registered_name, collection.clone());
+                } else {
+                    cache.remove(&registered_name);
+                }
+                cache
+            });
+        })))?;
         txn.commit().await?;
 
         if let Some((transform_id, config)) = committed_migration {
             self.bump_migration_generation();
-            if let Err(error) = self
-                .lens_store()
-                .add_with_id(transform_id.clone(), config)
-                .await
-            {
-                tracing::warn!(
-                    transform_id = %transform_id,
-                    error = %error,
-                    "failed to promote collection patch migration lens"
-                );
-            }
-        }
-
-        // Publish the new head only after all durable patch writes succeed.
-        if let Ok(new_cid) = cid::Cid::try_from(new_version_id.as_str()) {
-            self.schema_heads.insert(
-                actual_name.to_string(),
-                (vec![new_cid], collection_priority),
-            );
+            self.register_committed_lens(transform_id, config).await;
         }
 
         // Clean up any pending migration that was linked to this version
         self.pending_migrations.remove(&new_version_id);
-
-        // Update cache based on which version is active.
-        // An inactive new version leaves the old version cached, as it already is.
-        if new_schema.is_active {
-            // Cached under the actual collection name — the same name the
-            // name index, schema_heads and the reindex switch were written
-            // under — not new_schema.name, which for a placeholder rename
-            // has not become the registered name yet.
-            let cached_collection = self
-                .collection_with_index_actions(new_schema.clone())
-                .await?;
-            self.collections.rcu(|old| {
-                let mut cache = old.clone();
-                cache.put_named(actual_name, cached_collection.clone());
-                cache
-            });
-        }
 
         // Cross-collection one-to-one index creation.
         // When collections are patched sequentially (e.g., Author then Book), the
@@ -516,15 +552,9 @@ impl<S: Store> crate::database::DB<S> {
                 .await?;
         }
 
-        // After switching active versions, reindex if the new version's history has migrations
+        // After switching active versions, rebuild the indexes the switch owes.
         if new_schema.is_active {
-            if let Err(e) = self.maybe_reindex_on_version_switch(actual_name).await {
-                tracing::warn!(
-                    error = %e,
-                    collection = %actual_name,
-                    "Failed to reindex after version switch"
-                );
-            }
+            self.settle_owed_reindexes_after_commit().await;
         }
 
         Ok(new_schema)
@@ -616,15 +646,19 @@ impl<S: Store> crate::database::DB<S> {
                         .await
                         .map_err(Error::Storage)?;
                 }
+                let cached_collection =
+                    Collection::load_index_actions(updated_schema.clone(), &txn.systemstore()?)
+                        .await?;
+                let collections = std::sync::Arc::clone(&self.collections);
+                let registered_name = coll_name.to_string();
+                txn.on_commit(OnCommit::Ordered(Box::new(move || {
+                    collections.rcu(|old| {
+                        let mut cache = old.clone();
+                        cache.put_named(&registered_name, cached_collection.clone());
+                        cache
+                    });
+                })))?;
                 txn.commit().await?;
-
-                // Update cache
-                let cached_collection = self.collection_with_index_actions(updated_schema).await?;
-                self.collections.rcu(|old| {
-                    let mut cache = old.clone();
-                    cache.put_named(coll_name, cached_collection.clone());
-                    cache
-                });
             }
         }
 

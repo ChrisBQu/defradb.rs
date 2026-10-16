@@ -19,6 +19,14 @@ async fn systemstore() -> NamespaceView {
 }
 
 async fn persisted_sequence(store: Arc<RegolithStore>) -> u64 {
+    // Allocations enter the pipeline before their first use. A committed use
+    // publishes the reservation before a snapshot can inspect the stored key.
+    let mut committed_use = store.new_txn(false).await.unwrap();
+    committed_use
+        .set(b"allocation-test-use", b"used")
+        .await
+        .unwrap();
+    committed_use.commit().await.unwrap();
     let systemstore = Systemstore::new(store);
     let txn = systemstore.new_txn(true).await.unwrap();
     decode_sequence(
@@ -50,11 +58,7 @@ async fn malformed_sequence_is_rejected() {
         .next()
         .await
         .unwrap_err();
-    assert!(matches!(
-        error,
-        Error::Other(message)
-            if message == "invalid persisted document short-ID sequence"
-    ));
+    assert!(matches!(error, Error::Storage(storage::Error::Backend(_))));
 }
 
 #[tokio::test]

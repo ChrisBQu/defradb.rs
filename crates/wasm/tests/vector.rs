@@ -104,20 +104,24 @@ fn kernels_agree_with_a_scalar_reference() {
     }
 }
 
-/// A slice taken at an odd element offset from a 16-byte-aligned buffer is
-/// 8- but not 16-byte aligned: the alignment `load_direct` may not assume.
-#[repr(align(16))]
-struct Aligned(Vec<f64>);
+/// The `len` elements of `buffer` that start 8 bytes past a 16-byte
+/// boundary: aligned for `f64` but not to 16, the alignment `load_direct`
+/// may not assume. Where the allocator places `buffer` is its own business,
+/// so the start is chosen from the address rather than assumed.
+fn unaligned(buffer: &[f64], len: usize) -> &[f64] {
+    let start = usize::from((buffer.as_ptr() as usize).is_multiple_of(16));
+    &buffer[start..start + len]
+}
 
 #[wasm_bindgen_test]
 fn kernels_agree_on_an_oddly_offset_slice() {
     let mut corpus = Corpus(0x0DD_1655);
 
     for dimensions in [2usize, 4, 6, 16, 30, 64] {
-        let a_padded = Aligned(corpus.vector(dimensions + 1));
-        let b_padded = Aligned(corpus.vector(dimensions + 1));
-        let a = &a_padded.0[1..];
-        let b = &b_padded.0[1..];
+        let a_padded = corpus.vector(dimensions + 1);
+        let b_padded = corpus.vector(dimensions + 1);
+        let a = unaligned(&a_padded, dimensions);
+        let b = unaligned(&b_padded, dimensions);
         assert_eq!(a.as_ptr() as usize % 16, 8, "fixture must stay unaligned");
 
         let products: Vec<f64> = a.iter().zip(b).map(|(x, y)| x * y).collect();

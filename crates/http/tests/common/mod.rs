@@ -60,7 +60,7 @@ impl ViewOperations for RecordingViewOps {
 }
 
 pub fn router_with(view: Arc<RecordingViewOps>) -> Router {
-    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()))
+    let state = AppStateBuilder::new(Arc::new(MockQueryExecutor::new()), edge::testing::edge())
         .with_acp(Arc::new(MockAcpOperations::new()))
         .with_view(view)
         .build();

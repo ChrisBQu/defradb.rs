@@ -13,33 +13,23 @@ use events::Bus;
 use identity::{Identity, RawIdentity};
 use kovan_map::HopscotchMap;
 use lens::TransformStore;
-#[cfg(not(feature = "wasmtime-runtime"))]
-use lens::UnsupportedTransformStore;
-#[cfg(feature = "wasmtime-runtime")]
-use lens::WasmTransformStore;
 use rapidhash::fast::RandomState;
-use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use storage::corekv::Store;
+use storage::corekv::{Key, Store};
 
 pub mod action;
 pub(crate) mod dump;
 pub(crate) mod spawn;
 pub mod storage_stats;
 
-/// Default maximum number of lazy migrations written in one transaction.
-pub const DEFAULT_MIGRATION_WRITE_BACK_BATCH_SIZE: usize = 128;
-/// Default maximum number of retries after an auto-commit transaction conflict.
-pub const DEFAULT_MAX_TXN_RETRIES: u32 = 5;
+pub use storage::corekv::DEFAULT_MAX_TXN_RETRIES;
 
 /// Database options.
 #[derive(Clone, Default)]
 pub struct DbOptions {
     /// Maximum number of transaction retries.
     pub max_txn_retries: Option<u32>,
-    /// Maximum number of lazy migrations written in one transaction.
-    pub migration_write_back_batch_size: Option<NonZeroUsize>,
     /// Chunk size for large values in the blockstore.
     pub chunk_size: Option<usize>,
     /// Node identity for this database instance.
@@ -55,16 +45,17 @@ pub struct DbOptions {
     pub embedding_model: String,
     /// Resolved embedding API key value.
     pub embedding_api_key: String,
+    /// The worker pool this database's work runs on: its periodic and
+    /// detached jobs, and the pool [`DB::close`] stops before the store
+    /// closes. `None` (a test, a one-shot tool) runs them on the process's
+    /// default pool.
+    pub pool: Option<workers::Pool>,
 }
 
 impl std::fmt::Debug for DbOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DbOptions")
             .field("max_txn_retries", &self.max_txn_retries)
-            .field(
-                "migration_write_back_batch_size",
-                &self.migration_write_back_batch_size,
-            )
             .field("chunk_size", &self.chunk_size)
             .field(
                 "node_identity",
@@ -80,6 +71,7 @@ impl std::fmt::Debug for DbOptions {
                 "embedding_api_key_configured",
                 &!self.embedding_api_key.is_empty(),
             )
+            .field("pool", &self.pool)
             .finish()
     }
 }
@@ -113,17 +105,9 @@ impl DbOptions {
         self.max_txn_retries.unwrap_or(DEFAULT_MAX_TXN_RETRIES)
     }
 
-    /// Sets the maximum number of lazy migrations written in one transaction.
-    pub fn with_migration_write_back_batch_size(mut self, batch_size: NonZeroUsize) -> Self {
-        self.migration_write_back_batch_size = Some(batch_size);
-        self
-    }
-
-    /// Returns the maximum number of lazy migrations written in one transaction.
-    pub fn migration_write_back_batch_size(&self) -> usize {
-        self.migration_write_back_batch_size
-            .map(NonZeroUsize::get)
-            .unwrap_or(DEFAULT_MIGRATION_WRITE_BACK_BATCH_SIZE)
+    /// The engine retry policy every write of this database runs under.
+    pub fn retry_options(&self) -> storage::corekv::RetryOptions {
+        storage::corekv::engine_retry_options(self.max_txn_retries())
     }
 
     /// Sets the chunk size for large values.
@@ -150,6 +134,12 @@ impl DbOptions {
         self
     }
 
+    /// Runs the database's work on `pool`, the pool its store was placed on.
+    pub fn with_pool(mut self, pool: workers::Pool) -> Self {
+        self.pool = Some(pool);
+        self
+    }
+
     /// Returns the embedding client configuration for this database.
     pub fn embedding_config(&self) -> EmbeddingClientConfig {
         EmbeddingClientConfig::new()
@@ -162,15 +152,6 @@ impl DbOptions {
 /// The main DefraDB database struct.
 ///
 /// This matches Go's DB struct in internal/db/db.go.
-/// Branchable appends between head-key reclamation passes. Sixteen holds the
-/// backlog to a handful of keys per collection while keeping the extra
-/// transaction off fifteen appends out of sixteen.
-const HEAD_PRUNE_INTERVAL: u64 = 16;
-
-/// Keys one reclamation pass may delete. Bounds the pass by what it holds,
-/// and a pass that stops here leaves the rest for the next one.
-const HEAD_PRUNE_MAX_KEYS: usize = 512;
-
 pub struct DB<S: Store> {
     /// The underlying store.
     store: Arc<S>,
@@ -178,14 +159,6 @@ pub struct DB<S: Store> {
     options: DbOptions,
     /// Counter for generating unique transaction IDs.
     txn_id_counter: AtomicU64,
-    /// Branchable appends since a collection's head keys were last reclaimed.
-    ///
-    /// A superseded head key is reclaimed by a transaction of its own (see
-    /// [`crate::block::heads`]), so doing it on every append would double the
-    /// transaction count on that path. Amortizing it over
-    /// [`HEAD_PRUNE_INTERVAL`] appends holds the backlog at a small constant
-    /// per collection for one atomic per mutation.
-    head_prune_tick: AtomicU64,
     /// Generation of the committed migration graph.
     ///
     /// Lensed fetchers include this in their history-cache validity checks so
@@ -196,7 +169,7 @@ pub struct DB<S: Store> {
     /// Whether the database has been closed.
     closed: AtomicBool,
     /// In-memory collection cache (name -> Collection).
-    pub(crate) collections: crate::collection::epoch::EpochedCollections,
+    pub(crate) collections: Arc<crate::collection::epoch::EpochedCollections>,
     /// PQ codes of resident-codes DiskANN indexes, shared by every search.
     vector_codes: Arc<crate::index::vector::engine::diskann::CodeCaches>,
     /// Event bus for subscription notifications.
@@ -209,7 +182,7 @@ pub struct DB<S: Store> {
     /// Schema definition headstore: tracks latest CID and height per collection.
     /// Emulates Go's persistent headstore for CID computation during patching.
     /// Key: collection name, Value: (sorted heads as CIDs, max height)
-    pub(crate) schema_heads: HopscotchMap<String, (Vec<Cid>, u64), RandomState>,
+    pub(crate) schema_heads: Arc<HopscotchMap<String, (Vec<Cid>, u64), RandomState>>,
     /// Collection IDs whose last local version has been deleted.
     ///
     /// Go's collection repository forbids these immediately, including for
@@ -219,34 +192,36 @@ pub struct DB<S: Store> {
     /// encrypted-field DEKs through the KMS (which persists them in its
     /// KeyStore for cross-peer serving) instead of inline-and-blockstore.
     /// Set once at node startup via [`DB::set_kms`].
-    kms: std::sync::OnceLock<std::sync::Arc<dyn kms::KmsService>>,
+    document_acp: regolith::sync::OnceCell<Arc<dyn acp::DocumentACP>>,
+    kms: regolith::sync::OnceCell<std::sync::Arc<dyn kms::KmsService>>,
+    /// Remote signatures and embeddings, each behind its own service.
+    remote_inputs: crate::remote_inputs::RemoteInputs,
+    /// Where the database's P2P work (pushes, replays, retries) runs its
+    /// network waits: the node's network runtime. Set once at startup.
+    network: regolith::sync::OnceCell<p2p::network::Network>,
     /// Owning handle to the KMS durable blockstore. The KMS adapter
     /// (`DbEncBlockStore`) references this weakly to avoid the
     /// DB→KMS→`KeyStore`→adapter→blockstore→store Arc cycle that would pin the
     /// storage lock past node close (#976). Parking the owning `Arc` here means
     /// it shares the DB's lifetime — and its in-process block cache — and drops
     /// with the DB, releasing the lock. Set once at startup.
-    kms_blockstore: std::sync::OnceLock<Arc<blockstore::DefraBlockstore<S>>>,
+    kms_blockstore: regolith::sync::OnceCell<Arc<blockstore::DefraBlockstore<S>>>,
     /// Optional NAC manager. When set and enabled, node-level operations are
     /// gated through [`DB::check_node_access`]. Set once at node startup via
     /// [`DB::set_nac_manager`]. When unset, all `check_node_access` calls are
     /// no-ops (NAC not configured).
-    nac_manager: std::sync::OnceLock<std::sync::Arc<dyn NacManagerApi>>,
+    nac_manager: regolith::sync::OnceCell<std::sync::Arc<dyn NacManagerApi>>,
     /// Collections an app has claimed and the validator governing their
     /// replicated composites. Set once, before replication starts.
     ///
     /// Held by value: every reader borrows it, and on wasm the validator is
     /// `?Send`, so wrapping it in an `Arc` would be an `Arc` over a value that
     /// is neither `Send` nor `Sync`.
-    merge_governance: std::sync::OnceLock<crate::merge::governance::MergeGovernance>,
+    merge_governance: regolith::sync::OnceCell<crate::merge::governance::MergeGovernance>,
     /// Told about each composite a local write commits, so composites deferred
     /// awaiting what the write created are released.
     local_commit_release:
-        std::sync::OnceLock<Arc<dyn crate::merge::governance::LocalCommitRelease>>,
-    /// Per-document write serialization queue. Shared with the merge handler so
-    /// local writes and P2P merges that touch the same document never interleave
-    /// their CRDT read-modify-write (#1021 counter convergence).
-    doc_write_queue: Arc<crate::write::queue::DocWriteQueue>,
+        regolith::sync::OnceCell<Arc<dyn crate::merge::governance::LocalCommitRelease>>,
     /// Process-local document short-ID range allocator.
     doc_short_id_allocator: crate::docid::map::DocShortIdAllocator<S>,
     /// Process-local claims for collection-wide actions.
@@ -256,8 +231,6 @@ pub struct DB<S: Store> {
     /// behind. The registry provides cancellation-safe mutual exclusion for
     /// operations running in this database instance.
     pub active_actions: Arc<crate::database::action::ActionRegistry>,
-    /// Per-collection locks coordinating document writes with schema changes.
-    pub(crate) collection_locks: HopscotchMap<String, Arc<async_lock::RwLock<()>>, RandomState>,
 }
 
 impl<S: Store> DB<S> {
@@ -274,33 +247,33 @@ impl<S: Store> DB<S> {
     /// This creates a DB with an empty collection cache. Use `open_with_options()`
     /// to load existing collections from the store.
     pub fn with_options(store: S, options: DbOptions) -> Result<Self> {
-        let lens_store: Arc<dyn TransformStore> = Self::create_lens_store()?;
+        let lens_store: Arc<dyn TransformStore> = Self::create_lens_store(options.pool.as_ref())?;
         let store = Arc::new(store);
         Ok(Self {
             doc_short_id_allocator: crate::docid::map::DocShortIdAllocator::new(store.clone()),
             store,
             options,
             txn_id_counter: AtomicU64::new(0),
-            head_prune_tick: AtomicU64::new(0),
             migration_generation: AtomicU64::new(0),
             closed: AtomicBool::new(false),
-            collections: crate::collection::epoch::EpochedCollections::new(
+            collections: Arc::new(crate::collection::epoch::EpochedCollections::new(
                 crate::collection::CollectionMap::default(),
-            ),
+            )),
             vector_codes: Arc::default(),
             event_bus: None,
             lens_store,
             pending_migrations: HopscotchMap::with_hasher(RandomState::default()),
-            schema_heads: HopscotchMap::with_hasher(RandomState::default()),
+            schema_heads: Arc::new(HopscotchMap::with_hasher(RandomState::default())),
             forbidden_collection_ids: HopscotchMap::with_hasher(RandomState::default()),
-            kms: std::sync::OnceLock::new(),
-            kms_blockstore: std::sync::OnceLock::new(),
-            nac_manager: std::sync::OnceLock::new(),
-            merge_governance: std::sync::OnceLock::new(),
-            local_commit_release: std::sync::OnceLock::new(),
-            doc_write_queue: Arc::new(crate::write::queue::DocWriteQueue::new()),
+            document_acp: regolith::sync::OnceCell::new(),
+            kms: regolith::sync::OnceCell::new(),
+            remote_inputs: Default::default(),
+            network: regolith::sync::OnceCell::new(),
+            kms_blockstore: regolith::sync::OnceCell::new(),
+            nac_manager: regolith::sync::OnceCell::new(),
+            merge_governance: regolith::sync::OnceCell::new(),
+            local_commit_release: regolith::sync::OnceCell::new(),
             active_actions: Arc::new(crate::database::action::ActionRegistry::default()),
-            collection_locks: HopscotchMap::with_hasher(RandomState::default()),
         })
     }
 
@@ -343,32 +316,32 @@ impl<S: Store> DB<S> {
     /// **Warning:** When multiple DB instances share a store via `from_arc()`,
     /// transaction IDs may collide if both instances create transactions concurrently.
     pub fn from_arc_with_options(store: Arc<S>, options: DbOptions) -> Result<Self> {
-        let lens_store: Arc<dyn TransformStore> = Self::create_lens_store()?;
+        let lens_store: Arc<dyn TransformStore> = Self::create_lens_store(options.pool.as_ref())?;
         Ok(Self {
             doc_short_id_allocator: crate::docid::map::DocShortIdAllocator::new(store.clone()),
             store,
             options,
             txn_id_counter: AtomicU64::new(0),
-            head_prune_tick: AtomicU64::new(0),
             migration_generation: AtomicU64::new(0),
             closed: AtomicBool::new(false),
-            collections: crate::collection::epoch::EpochedCollections::new(
+            collections: Arc::new(crate::collection::epoch::EpochedCollections::new(
                 crate::collection::CollectionMap::default(),
-            ),
+            )),
             vector_codes: Arc::default(),
             event_bus: None,
             lens_store,
             pending_migrations: HopscotchMap::with_hasher(RandomState::default()),
-            schema_heads: HopscotchMap::with_hasher(RandomState::default()),
+            schema_heads: Arc::new(HopscotchMap::with_hasher(RandomState::default())),
             forbidden_collection_ids: HopscotchMap::with_hasher(RandomState::default()),
-            kms: std::sync::OnceLock::new(),
-            kms_blockstore: std::sync::OnceLock::new(),
-            nac_manager: std::sync::OnceLock::new(),
-            merge_governance: std::sync::OnceLock::new(),
-            local_commit_release: std::sync::OnceLock::new(),
-            doc_write_queue: Arc::new(crate::write::queue::DocWriteQueue::new()),
+            document_acp: regolith::sync::OnceCell::new(),
+            kms: regolith::sync::OnceCell::new(),
+            remote_inputs: Default::default(),
+            network: regolith::sync::OnceCell::new(),
+            kms_blockstore: regolith::sync::OnceCell::new(),
+            nac_manager: regolith::sync::OnceCell::new(),
+            merge_governance: regolith::sync::OnceCell::new(),
+            local_commit_release: regolith::sync::OnceCell::new(),
             active_actions: Arc::new(crate::database::action::ActionRegistry::default()),
-            collection_locks: HopscotchMap::with_hasher(RandomState::default()),
         })
     }
 
@@ -405,8 +378,15 @@ impl<S: Store> DB<S> {
     {
         self.load_collections().await?;
         self.initialize_migrations().await?;
+        self.migrate_document_parts().await?;
+        // Counters move into their document part, so they need the part IDs the step above gives
+        // collections written before part IDs existed.
+        self.maybe_migrate_counter_accumulators().await?;
         self.migrate_index_format().await?;
-        self.resume_index_backfills().await
+        self.resume_index_backfills().await?;
+        // Reindexes owed by schema changes a crash or a failure left unsettled.
+        self.settle_owed_reindexes_after_commit().await;
+        Ok(())
     }
 
     /// Set the event bus for subscription notifications.
@@ -422,21 +402,26 @@ impl<S: Store> DB<S> {
         self.event_bus.as_ref()
     }
 
-    /// Get the shared per-document write serialization queue. The merge handler
-    /// acquires this same queue so local writes and merges that touch the same
-    /// document are mutually serialized (#1021).
-    pub fn doc_write_queue(&self) -> Arc<crate::write::queue::DocWriteQueue> {
-        self.doc_write_queue.clone()
-    }
-
     /// Allocate a globally unique document short ID.
     pub async fn next_doc_short_id(&self) -> Result<u64> {
         self.doc_short_id_allocator.next().await
     }
 
-    /// The short ID the next allocation returns, left unallocated.
-    pub(crate) async fn peek_doc_short_id(&self) -> Result<u64> {
-        self.doc_short_id_allocator.peek().await
+    /// Reserve a process-independent upper fence for index backfill.
+    ///
+    /// A DB handle's cached short-ID range is not a global high-water mark:
+    /// another handle may already have reserved and used a later range. A
+    /// single global allocation gives backfill a fence above every ID handed
+    /// out before this call. The reserved ID is intentionally left unused.
+    pub(crate) async fn reserve_doc_short_id_fence(&self) -> Result<u64> {
+        storage::stores::Systemstore::new(self.store.clone())
+            .allocate(
+                &storage::keys::doc_id_index::DocShortIDSequenceKey::new().bytes(),
+                1,
+            )
+            .await
+            .map(|range| range.start)
+            .map_err(Error::Storage)
     }
 
     /// Resolve a document short ID or allocate and stage a new mapping.
@@ -476,7 +461,30 @@ impl<S: Store> DB<S> {
         self.migration_generation.fetch_add(1, Ordering::AcqRel);
     }
 
-    /// Install the KMS service. First call wins (OnceLock); subsequent calls
+    /// Install the node's document authorization provider before serving
+    /// mutations. A non-transactional provider is gated by the registrations
+    /// creates owe it (see [`acp::ExternalDocumentAcp`]) unless it already is.
+    pub fn set_document_acp(&self, provider: Arc<dyn acp::DocumentACP>)
+    where
+        S: 'static,
+    {
+        let provider: Arc<dyn acp::DocumentACP> =
+            if provider.supports_transactions() || provider.settles_owed_registrations() {
+                provider
+            } else {
+                Arc::new(acp::ExternalDocumentAcp::new(
+                    provider,
+                    Arc::clone(&self.store),
+                ))
+            };
+        let _ = self.document_acp.set(provider);
+    }
+
+    pub fn document_acp(&self) -> Option<&Arc<dyn acp::DocumentACP>> {
+        self.document_acp.get()
+    }
+
+    /// Install the KMS service. First call wins (OnceCell); subsequent calls
     /// are silently discarded. Called once at node startup.
     /// True when no process-local action claim is held.
     pub fn has_no_active_actions(&self) -> bool {
@@ -485,7 +493,8 @@ impl<S: Store> DB<S> {
 
     /// Replace the transform store backing lens migrations.
     pub fn set_lens_store(&mut self, store: Arc<dyn TransformStore>) {
-        self.lens_store = store;
+        self.lens_store =
+            crate::definition::migration::committed_lenses::CommittedLensStore::wrap(store);
     }
 
     pub fn set_kms(&self, kms: std::sync::Arc<dyn kms::KmsService>) {
@@ -497,7 +506,33 @@ impl<S: Store> DB<S> {
         self.kms.get().cloned()
     }
 
-    /// Install the NAC manager. First call wins (OnceLock); subsequent calls
+    /// Runs the database's remote inputs (signatures, embeddings) and the
+    /// network waits of its P2P work on the node's network runtime. Set once
+    /// at startup, before the first write that needs one; without it
+    /// signatures run in the caller's task and embeddings on the process's
+    /// on-demand network runtime.
+    pub fn set_network(&self, edge: edge::Edge) {
+        let p2p = self
+            .network
+            .set(p2p::network::Network::on(edge.clone()))
+            .is_ok();
+        if !self.remote_inputs.set_runtime(inputs::Runtime::edge(edge)) || !p2p {
+            tracing::warn!("the database's network runtime was already set; keeping the first");
+        }
+    }
+
+    /// Where the database's P2P work runs its network waits: the runtime
+    /// [`set_network`](Self::set_network) set, or without one the runtime of
+    /// the task that waits.
+    pub fn network(&self) -> p2p::network::Network {
+        self.network.get().cloned().unwrap_or_default()
+    }
+
+    pub(crate) fn remote_inputs(&self) -> &crate::remote_inputs::RemoteInputs {
+        &self.remote_inputs
+    }
+
+    /// Install the NAC manager. First call wins (OnceCell); subsequent calls
     /// are silently discarded. Called once at node startup. When unset, all
     /// `check_node_access` calls are no-ops (NAC not configured).
     pub fn set_nac_manager(&self, nac: std::sync::Arc<dyn NacManagerApi>) {
@@ -568,75 +603,37 @@ impl<S: Store> DB<S> {
         let basic_txn = BasicTxn::new(&*self.store, id, readonly)
             .await
             .map_err(Error::Storage)?;
-        Ok(DbTxn::new(basic_txn).with_vector_codes(self.vector_codes.clone()))
+        Ok(self.new_db_txn(basic_txn))
+    }
+
+    /// Runs `read` against a read-only transaction lent to it, then discards
+    /// the transaction. `read` gets the transaction by value and must drop
+    /// every handle it made of it before it returns.
+    pub(crate) async fn read_lent<T, F, Fut>(&self, read: F) -> Result<T>
+    where
+        F: FnOnce(crate::txn::LentTxn<S>) -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        let txn = Arc::new(self.new_txn(true).await?);
+        let output = read(Arc::clone(&txn)).await;
+        match crate::txn::reclaim(txn).map(crate::txn::DbTxn::discard) {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) | Err(error) => {
+                tracing::warn!(%error, "failed to discard a read-only transaction");
+            }
+        }
+        Ok(output)
+    }
+
+    /// Wraps a BasicTxn created by a storage-owned retry attempt while keeping
+    /// database-scoped caches shared with ordinary transactions.
+    pub(crate) fn new_db_txn(&self, basic_txn: BasicTxn) -> DbTxn<S> {
+        DbTxn::of_database(basic_txn, self.vector_codes.clone())
+            .with_shared_collections(Arc::clone(&self.collections))
     }
 
     pub(crate) fn vector_codes(&self) -> &crate::index::vector::engine::diskann::CodeCaches {
         &self.vector_codes
-    }
-
-    /// Reclaim superseded collection head keys, if enough have built up.
-    ///
-    /// Called after a branchable append commits. One in
-    /// [`HEAD_PRUNE_INTERVAL`] calls does the work; the rest are an atomic
-    /// increment.
-    pub(crate) async fn maybe_prune_collection_heads(&self, collection_short_id: u32) {
-        if !self
-            .head_prune_tick
-            .fetch_add(1, Ordering::Relaxed)
-            .is_multiple_of(HEAD_PRUNE_INTERVAL)
-        {
-            return;
-        }
-        match self.prune_collection_heads(collection_short_id).await {
-            Ok(_) => {}
-            // Reclamation is the one path here that can lose a write race, and
-            // losing costs nothing: the head set is a function of the markers,
-            // so the next pass repeats the work.
-            Err(error) if error.is_txn_conflict() => tracing::debug!(
-                collection_short_id,
-                %error,
-                "collection head reclamation lost a write race"
-            ),
-            // Any other failure repeats on every pass, and every branchable
-            // append then scans a head set that only grows.
-            Err(error) => tracing::warn!(
-                collection_short_id,
-                %error,
-                "collection head reclamation failed"
-            ),
-        }
-    }
-
-    /// Delete collection head keys that a marker supersedes, with their
-    /// markers, in a transaction of its own.
-    ///
-    /// Separate on purpose: two of these write the same keys, whereas two
-    /// appends never do. Folding it into an append would put the write-write
-    /// conflict back on the path that must not have one.
-    pub async fn prune_collection_heads(
-        &self,
-        collection_short_id: u32,
-    ) -> Result<crate::block::heads::PruneOutcome> {
-        let txn = self.new_txn(false).await?;
-        let outcome = {
-            // A live view keeps the transaction referenced, and commit refuses
-            // a referenced transaction.
-            let headstore = txn.headstore()?;
-            crate::block::heads::prune_superseded_heads(
-                &headstore,
-                collection_short_id,
-                HEAD_PRUNE_MAX_KEYS,
-            )
-            .await
-            .map_err(Error::Storage)?
-        };
-        if outcome == crate::block::heads::PruneOutcome::default() {
-            txn.discard()?;
-            return Ok(outcome);
-        }
-        txn.commit().await?;
-        Ok(outcome)
     }
 
     /// Execute a function within a transaction.
@@ -702,9 +699,35 @@ impl<S: Store> DB<S> {
     ///
     /// After closing, any attempt to create new transactions will return
     /// `Error::DatabaseClosed`. Matches Go's close-guard behavior (PR #4435).
+    /// Closes the database, in the one shutdown order: new transactions are
+    /// refused, the pool finishes the work it admitted and stops (within its
+    /// shutdown deadline), then the store closes. Called on a worker, the
+    /// pool is left to its owner: a worker cannot wait for itself to stop.
     pub async fn close(&self) -> Result<()> {
         self.closed.store(true, Ordering::SeqCst);
+        if let Some(pool) = &self.options.pool {
+            match pool.stop().await {
+                Ok(()) | Err(workers::Error::OnWorker) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "the worker pool did not stop cleanly before the store closed");
+                }
+            }
+        }
         self.store.close().await.map_err(Error::Storage)
+    }
+
+    /// The pool this database's work runs on, when it was given one.
+    pub fn pool(&self) -> Option<&workers::Pool> {
+        self.options.pool.as_ref()
+    }
+
+    /// The pool this database's pool work runs on: its own, else the
+    /// process's default pool ([`workers::default_pool`]).
+    pub fn pool_or_default(&self) -> std::result::Result<workers::Pool, workers::Error> {
+        self.options
+            .pool
+            .clone()
+            .map_or_else(workers::default_pool, Ok)
     }
 
     /// Returns true if the database has been closed.
@@ -720,6 +743,14 @@ impl<S: Store> DB<S> {
     /// Get the database options.
     pub fn options(&self) -> &DbOptions {
         &self.options
+    }
+
+    /// The peerstore over this database's store, running its conflicts under
+    /// the database's retry policy.
+    pub fn peerstore(&self) -> storage::stores::Peerstore<S> {
+        storage::stores::Peerstore::new(self.store.clone())
+            .with_max_txn_retries(self.options.max_txn_retries())
+            .placed_on(self.pool())
     }
 
     /// Returns the node identity, if one was configured.
@@ -749,22 +780,65 @@ impl<S: Store> DB<S> {
             .and_then(|id| id.did().ok())
     }
 
-    /// Create the appropriate lens transform store for the current platform.
-    #[cfg(feature = "wasmtime-runtime")]
-    fn create_lens_store() -> Result<Arc<dyn TransformStore>> {
-        let store = WasmTransformStore::with_sandbox(Some(lens::WasmSandboxConfig::restrictive()))
-            .map_err(|e| Error::Lens(format!("failed to create lens transform store: {}", e)))?;
-        Ok(Arc::new(store))
-    }
-
-    /// Create the appropriate lens transform store for the current platform.
-    #[cfg(not(feature = "wasmtime-runtime"))]
-    fn create_lens_store() -> Result<Arc<dyn TransformStore>> {
-        Ok(Arc::new(UnsupportedTransformStore))
+    /// The lens transform store this database runs its migrations on.
+    /// The database's lens store: its epoch ticks run on `pool`'s deadline
+    /// queue, or on a thread of their own without one.
+    fn create_lens_store(pool: Option<&workers::Pool>) -> Result<Arc<dyn TransformStore>> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let store = match pool {
+            Some(pool) => lens::default_store_on(pool),
+            None => lens::default_store(),
+        };
+        // A browser build compiles no lens runtime: nothing ticks.
+        #[cfg(target_arch = "wasm32")]
+        let store = {
+            let _ = pool;
+            lens::default_store()
+        };
+        store
+            .map(crate::definition::migration::committed_lenses::CommittedLensStore::wrap)
+            .map_err(|e| Error::Lens(format!("failed to create lens transform store: {}", e)))
     }
 
     /// Get the current transaction ID counter value.
     pub fn current_txn_id(&self) -> u64 {
         self.txn_id_counter.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod close_tests;
+
+#[cfg(test)]
+mod vector_cache_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn retry_transactions_share_database_vector_code_caches() {
+        let db = DB::new(storage::RegolithStore::in_memory().unwrap()).unwrap();
+        let ordinary = db.new_txn(true).await.unwrap();
+        let basic = BasicTxn::new(&*db.store, db.next_txn_id(), true)
+            .await
+            .unwrap();
+        let retry = db.new_db_txn(basic);
+
+        let ordinary_cache = ordinary.vector_codes().get(17, 29);
+        let retry_cache = retry.vector_codes().get(17, 29);
+        assert!(Arc::ptr_eq(&ordinary_cache, &retry_cache));
+    }
+
+    /// A transaction of a database is built with the database's caches, so
+    /// it builds none of its own: each would allocate a lock-free map only to
+    /// drop it, on every transaction.
+    #[tokio::test]
+    async fn a_database_transaction_builds_no_code_caches() {
+        use crate::index::vector::engine::diskann::CODE_CACHES_BUILT;
+
+        let db = DB::new(storage::RegolithStore::in_memory().unwrap()).unwrap();
+        let built = CODE_CACHES_BUILT.with(std::cell::Cell::get);
+        for readonly in [true, false] {
+            db.new_txn(readonly).await.unwrap().discard().unwrap();
+        }
+        assert_eq!(CODE_CACHES_BUILT.with(std::cell::Cell::get), built);
     }
 }

@@ -4,9 +4,12 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+#[path = "support/outcome.rs"]
+mod outcome;
+
 use db::index::vector::index::VectorIndex;
 use embedded::{EmbeddedNode, NodeBuilder};
+use outcome::Result;
 
 const TRAIN_THRESHOLD: usize = db::index::vector::engine::diskann::TRAIN_THRESHOLD as usize;
 

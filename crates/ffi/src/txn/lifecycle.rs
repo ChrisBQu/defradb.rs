@@ -1,7 +1,7 @@
 use std::ffi::c_char;
 
 use crate::ffi_entry;
-use crate::helpers::{get_node_runner, get_rt, require_c_str};
+use crate::helpers::{get_node_runner, require_c_str};
 use crate::state::NODES;
 use crate::types::{FfiResult, NewTxnResult};
 use crate::{ffi_async_ok, try_ffi, ERR_INVALID_NODE_HANDLE};
@@ -22,18 +22,13 @@ use crate::{ffi_async_ok, try_ffi, ERR_INVALID_NODE_HANDLE};
 #[no_mangle]
 pub extern "C" fn begin_txn(node_ptr: usize, readonly: i32) -> NewTxnResult {
     ffi_entry! {
-        let rt = match crate::runtime::RUNTIME.get() {
-            Some(rt) => rt,
-            None => return NewTxnResult::error("runtime not initialized - call defra_init() first"),
-        };
-
         // Validate node handle before entering async block
         let runner = match NODES.get(node_ptr, |state| state.query_runner.clone()) {
             Some(r) => r,
             None => return NewTxnResult::error(ERR_INVALID_NODE_HANDLE),
         };
 
-        let result = rt.block_on(async {
+        let result = crate::call::wait(async move {
             let handle = runner
                 .begin_txn(readonly != 0)
                 .await
@@ -65,11 +60,10 @@ pub extern "C" fn begin_txn(node_ptr: usize, readonly: i32) -> NewTxnResult {
 #[no_mangle]
 pub unsafe extern "C" fn commit_txn(node_ptr: usize, txn_id: *const c_char) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         let txn_str = try_ffi!(require_c_str(txn_id, "txn_id"));
         let runner = try_ffi!(get_node_runner(node_ptr));
 
-        ffi_async_ok!(rt, {
+        ffi_async_ok!(caller, {
             let handle: query::txn::TransactionHandle = txn_str
                 .parse()
                 .map_err(|e| format!("invalid transaction ID: {}", e))?;
@@ -100,11 +94,10 @@ pub unsafe extern "C" fn commit_txn(node_ptr: usize, txn_id: *const c_char) -> F
 #[no_mangle]
 pub unsafe extern "C" fn rollback_txn(node_ptr: usize, txn_id: *const c_char) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         let txn_str = try_ffi!(require_c_str(txn_id, "txn_id"));
         let runner = try_ffi!(get_node_runner(node_ptr));
 
-        ffi_async_ok!(rt, {
+        ffi_async_ok!(caller, {
             let handle: query::txn::TransactionHandle = txn_str
                 .parse()
                 .map_err(|e| format!("invalid transaction ID: {}", e))?;

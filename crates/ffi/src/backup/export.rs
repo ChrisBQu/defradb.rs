@@ -2,7 +2,7 @@ use std::ffi::c_char;
 use std::fs;
 
 use crate::ffi_entry;
-use crate::helpers::{get_rt, require_c_str};
+use crate::helpers::require_c_str;
 use crate::state::NODES;
 use crate::types::FfiResult;
 use crate::{ffi_async_ok, try_ffi, ERR_INVALID_NODE_HANDLE};
@@ -28,7 +28,6 @@ use super::BackupConfig;
 #[no_mangle]
 pub unsafe extern "C" fn basic_export(node_ptr: usize, config_json: *const c_char) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         let config_str = try_ffi!(require_c_str(config_json, "config_json"));
 
         let config: BackupConfig = match serde_json::from_str(&config_str) {
@@ -43,7 +42,7 @@ pub unsafe extern "C" fn basic_export(node_ptr: usize, config_json: *const c_cha
             None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
         };
 
-        ffi_async_ok!(rt, {
+        ffi_async_ok!(node_ptr, {
             let json_output =
                 db::backup::export_database(&database, &runner, &config.collections, config.pretty)
                     .await?;

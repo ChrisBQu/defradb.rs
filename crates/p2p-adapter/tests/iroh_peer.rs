@@ -35,7 +35,7 @@ async fn start_peer_with_bus(
         bind_addr: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
         ..IrohEndpointConfig::default()
     };
-    let mut config = IrohPeerConfig::new(endpoint, document_acp);
+    let mut config = IrohPeerConfig::new(endpoint, document_acp, edge::testing::edge());
     config.strict_replicated_doc_access = strict;
     IrohPeer::start(store, database, event_bus, config)
         .await

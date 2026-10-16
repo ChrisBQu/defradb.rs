@@ -8,6 +8,7 @@ use axum::error_handling::HandleErrorLayer;
 use axum::extract::DefaultBodyLimit;
 use axum::http::{header, HeaderValue, Method, StatusCode};
 use axum::Router;
+use edge::Edge;
 use tokio::net::TcpListener;
 use tower::limit::ConcurrencyLimitLayer;
 use tower::timeout::TimeoutLayer;
@@ -64,7 +65,6 @@ pub struct ServerConfig {
     /// Max concurrent requests (0 = unlimited).
     pub max_concurrent_requests: usize,
     /// Maximum retries after an auto-commit transaction conflict.
-    pub max_txn_retries: u32,
     /// GraphQL parsing and filter evaluation limits.
     pub query_limits: QueryLimits,
 }
@@ -80,7 +80,6 @@ impl Default for ServerConfig {
             no_signing: false,
             request_timeout: 300,
             max_concurrent_requests: 1000,
-            max_txn_retries: db::DEFAULT_MAX_TXN_RETRIES,
             query_limits: QueryLimits::default(),
         }
     }
@@ -91,6 +90,12 @@ pub struct Server {
     config: ServerConfig,
     tls: Option<crate::TlsConfig>,
     executor: Arc<dyn QueryExecutor>,
+    /// The network runtime the server's requests run on.
+    edge: Edge,
+    /// The worker pool its data-path routes run on.
+    pool: Option<workers::Pool>,
+    /// The document ACP is the node's own store: its routes run on the pool.
+    local_acp: bool,
     rest: Option<Arc<dyn RestOperations>>,
     p2p: Option<Arc<dyn P2POperations>>,
     manage: Option<Arc<dyn ManageRequester>>,
@@ -115,102 +120,40 @@ pub struct Server {
 }
 
 impl Server {
-    /// Create a new server with the given executor.
-    pub fn new<E: QueryExecutor + 'static>(executor: E) -> Self {
-        Self {
-            config: ServerConfig::default(),
-            tls: None,
-            executor: Arc::new(executor),
-            rest: None,
-            p2p: None,
-            manage: None,
-            acp: None,
-            index: None,
-            encrypted_index: None,
-            backup: None,
-            block: None,
-            schema: None,
-            lens: None,
-            nac: None,
-            collection_versions: None,
-            collection_mgmt: None,
-            doc_acp: None,
-            view: None,
-            dump: None,
-            txn_ops: None,
-            event_bus: None,
-            node_options: None,
-            node_identity_did: None,
-            dev_mode: false,
-        }
+    /// Create a new server with the given executor, running on `edge`.
+    pub fn new<E>(executor: E, edge: Edge) -> Self
+    where
+        E: QueryExecutor + 'static,
+    {
+        Self::from_arc_with_config(Arc::new(executor), ServerConfig::default(), edge)
     }
 
     /// Create a server with custom configuration.
-    pub fn with_config<E: QueryExecutor + 'static>(executor: E, config: ServerConfig) -> Self {
-        Self {
-            config,
-            tls: None,
-            executor: Arc::new(executor),
-            rest: None,
-            p2p: None,
-            manage: None,
-            acp: None,
-            index: None,
-            encrypted_index: None,
-            backup: None,
-            block: None,
-            schema: None,
-            lens: None,
-            nac: None,
-            collection_versions: None,
-            collection_mgmt: None,
-            doc_acp: None,
-            view: None,
-            dump: None,
-            txn_ops: None,
-            event_bus: None,
-            node_options: None,
-            node_identity_did: None,
-            dev_mode: false,
-        }
+    pub fn with_config<E>(executor: E, config: ServerConfig, edge: Edge) -> Self
+    where
+        E: QueryExecutor + 'static,
+    {
+        Self::from_arc_with_config(Arc::new(executor), config, edge)
     }
 
     /// Create a server from an Arc'd executor.
-    pub fn from_arc(executor: Arc<dyn QueryExecutor>) -> Self {
-        Self {
-            config: ServerConfig::default(),
-            tls: None,
-            executor,
-            rest: None,
-            p2p: None,
-            manage: None,
-            acp: None,
-            index: None,
-            encrypted_index: None,
-            backup: None,
-            block: None,
-            schema: None,
-            lens: None,
-            nac: None,
-            collection_versions: None,
-            collection_mgmt: None,
-            doc_acp: None,
-            view: None,
-            dump: None,
-            txn_ops: None,
-            event_bus: None,
-            node_options: None,
-            node_identity_did: None,
-            dev_mode: false,
-        }
+    pub fn from_arc(executor: Arc<dyn QueryExecutor>, edge: Edge) -> Self {
+        Self::from_arc_with_config(executor, ServerConfig::default(), edge)
     }
 
     /// Create a server from an Arc'd executor with custom configuration.
-    pub fn from_arc_with_config(executor: Arc<dyn QueryExecutor>, config: ServerConfig) -> Self {
+    pub fn from_arc_with_config(
+        executor: Arc<dyn QueryExecutor>,
+        config: ServerConfig,
+        edge: Edge,
+    ) -> Self {
         Self {
             config,
             tls: None,
             executor,
+            edge,
+            pool: None,
+            local_acp: false,
             rest: None,
             p2p: None,
             manage: None,
@@ -413,6 +356,21 @@ impl Server {
         self
     }
 
+    /// Run the data-path routes (collections, indexes, schema, views, lens,
+    /// backups, blocks, node ACP) on `pool`, the database's worker pool, when
+    /// it has one.
+    pub fn with_pool(mut self, pool: Option<workers::Pool>) -> Self {
+        self.pool = pool;
+        self
+    }
+
+    /// The document ACP is the node's own store: its routes run on the pool
+    /// too.
+    pub fn with_local_acp(mut self) -> Self {
+        self.local_acp = true;
+        self
+    }
+
     /// Set the effective node configuration exposed by `/node/options`.
     pub fn with_node_options(mut self, options: Map<String, serde_json::Value>) -> Self {
         self.node_options = Some(Arc::new(options));
@@ -444,7 +402,8 @@ impl Server {
     /// defect class is a value computed correctly and never consumed.
     pub(crate) fn app_state(&self) -> AppState {
         // Build state with all configured components
-        let mut builder = AppStateBuilder::new(Arc::clone(&self.executor));
+        let mut builder = AppStateBuilder::new(Arc::clone(&self.executor), self.edge.clone())
+            .with_pool(self.pool.clone());
         if let Some(ref rest) = self.rest {
             builder = builder.with_rest(Arc::clone(rest));
         }
@@ -507,7 +466,6 @@ impl Server {
             builder = builder.with_signing_enabled(self.signing_enabled());
         }
         builder = builder.with_dev_mode(self.dev_mode);
-        builder = builder.with_max_txn_retries(self.config.max_txn_retries);
         builder = builder.with_query_limits(self.config.query_limits);
         builder.build()
     }
@@ -537,6 +495,18 @@ impl Server {
             state_for_middleware,
             crate::auth_middleware::auth_middleware,
         ));
+
+        // Outermost route layer: a data-path route runs whole on the worker
+        // pool, its auth middleware included, so what the middleware binds to
+        // the request is there when the handler reads it.
+        if let Some(ref pool) = self.pool {
+            let on_pool = crate::pool_layer::OnPool::new(pool.clone());
+            router = router.route_layer(if self.local_acp {
+                on_pool.with_local_acp()
+            } else {
+                on_pool
+            });
+        }
 
         // Apply global body limit (0 = unlimited)
         if self.config.max_body_size > 0 {

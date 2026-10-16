@@ -16,7 +16,7 @@ use super::CommitsFetcher;
 
 impl<S: Store> CommitsFetcher<S> {
     /// Load a block from blockstore by CID
-    pub(super) async fn load_block(&self, txn: &mut DbTxn<S>, cid: &Cid) -> Result<Block> {
+    pub(super) async fn load_block(&self, txn: &DbTxn<S>, cid: &Cid) -> Result<Block> {
         let blockstore = txn.blockstore()?;
 
         let key = cid.to_bytes();
@@ -42,7 +42,7 @@ impl<S: Store> CommitsFetcher<S> {
     /// Load a signature block from blockstore by CID
     pub(super) async fn load_signature_block(
         &self,
-        txn: &mut DbTxn<S>,
+        txn: &DbTxn<S>,
         cid: &Cid,
     ) -> Result<Signature> {
         let blockstore = txn.blockstore()?;
@@ -66,7 +66,7 @@ impl<S: Store> CommitsFetcher<S> {
     /// replaces.
     pub(super) async fn block_to_commit_docs(
         &self,
-        txn: &mut DbTxn<S>,
+        txn: &DbTxn<S>,
         cid: &Cid,
         block: &Block,
         doc_id: Option<&str>,
@@ -99,7 +99,7 @@ impl<S: Store> CommitsFetcher<S> {
     /// in nested link/head objects, matching Go DefraDB behavior.
     async fn block_to_commit_doc(
         &self,
-        txn: &mut DbTxn<S>,
+        txn: &DbTxn<S>,
         cid: &Cid,
         block: &Block,
         doc_id: Option<&str>,
@@ -247,11 +247,7 @@ impl<S: Store> CommitsFetcher<S> {
 
     /// Build simple links array (without recursive nesting) for nested queries.
     /// Returns array of {cid, fieldName, height} for each link.
-    pub(super) async fn build_simple_links(
-        &self,
-        txn: &mut DbTxn<S>,
-        block: &Block,
-    ) -> Vec<JsonValue> {
+    pub(super) async fn build_simple_links(&self, txn: &DbTxn<S>, block: &Block) -> Vec<JsonValue> {
         let mut links = Vec::new();
         if let Some(block_links) = &block.links {
             for link in block_links {
@@ -280,11 +276,7 @@ impl<S: Store> CommitsFetcher<S> {
 
     /// Build simple heads array (without recursive nesting) for nested queries.
     /// Returns array of {cid, fieldName, height} for each head.
-    pub(super) async fn build_simple_heads(
-        &self,
-        txn: &mut DbTxn<S>,
-        block: &Block,
-    ) -> Vec<JsonValue> {
+    pub(super) async fn build_simple_heads(&self, txn: &DbTxn<S>, block: &Block) -> Vec<JsonValue> {
         let mut heads = Vec::new();
         if let Some(block_heads) = &block.heads {
             for head_cid in block_heads {

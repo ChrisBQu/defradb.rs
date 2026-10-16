@@ -3,6 +3,7 @@
 //! This trait defines the interface for document-level access control.
 
 use async_trait::async_trait;
+use defra_core::RequestContext;
 use identity::Did;
 use storage::corekv::MaybeSendSync;
 use zanzibar::types::Subject;
@@ -21,6 +22,35 @@ use crate::permission::DocumentPermission;
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait DocumentACP: MaybeSendSync {
+    /// Whether local reads and writes must share the authorized transaction.
+    fn supports_transactions(&self) -> bool {
+        false
+    }
+
+    /// Bind local authorization and registration to the same transaction as its rows.
+    /// Remote backends return None and remain at the network boundary.
+    fn bind_transaction(
+        &self,
+        _view: datastore::NamespaceView,
+    ) -> Option<std::sync::Arc<dyn DocumentACP>> {
+        None
+    }
+
+    /// This provider serving the request `context` serves: one that acts on
+    /// its callers' behalf with the credentials the request carries (see
+    /// [`RequestContext::bearer_token_for`]). Providers that present no
+    /// request credentials return None and serve every request as they are.
+    fn bind_request(&self, _context: &RequestContext) -> Option<std::sync::Arc<dyn DocumentACP>> {
+        None
+    }
+
+    /// The bearer token `did` presents to this provider: the one of the
+    /// request it is bound to, or of [`RequestContext::ambient`] when it is
+    /// bound to none.
+    fn bearer_token_for(&self, did: &str) -> Option<String> {
+        RequestContext::ambient().bearer_token_for(did)
+    }
+
     /// Whether missing registrations allow public access or require a collection grant.
     /// Remote backends may deny absence, including retired policies and archived objects.
     fn unregistered_documents_are_public(&self) -> bool {
@@ -44,6 +74,28 @@ pub trait DocumentACP: MaybeSendSync {
         resource_name: &str,
         doc_id: &str,
     ) -> Result<()>;
+
+    /// Whether this provider reads and settles the registrations creates owe
+    /// it (see [`crate::pending`]), as [`crate::ExternalDocumentAcp`] does. A
+    /// non-transactional provider that does not is wrapped in one by the
+    /// database it is installed in.
+    fn settles_owed_registrations(&self) -> bool {
+        false
+    }
+
+    /// Complete the registration a create owes this provider for `doc_id`
+    /// (see [`crate::pending`]): register the recorded creator and clear the
+    /// record. Nothing is owed when no record exists, which is always the case
+    /// for a provider that registers inside the create's transaction.
+    async fn redrive_registration(
+        &self,
+        policy_id: &str,
+        resource_name: &str,
+        doc_id: &str,
+    ) -> Result<()> {
+        let _ = (policy_id, resource_name, doc_id);
+        Ok(())
+    }
 
     /// Register an ACP object with creator as owner.
     ///
@@ -261,10 +313,13 @@ pub trait DocumentACP: MaybeSendSync {
         .await
     }
 
-    /// Unregister a document, removing all ACP tuples.
+    /// Remove provider-local registration state when a document is deleted.
     ///
-    /// This should be called when a document is deleted to clean up
-    /// all associated relation tuples (owner, reader, updater, etc.).
+    /// Providers backed by shared authorization state may keep the object
+    /// registered after a local document tombstone: a replica's delete can be
+    /// rejected elsewhere, and removing shared grants early would affect
+    /// documents that remain live there. Global object archival is a separate
+    /// lifecycle operation for those providers.
     ///
     /// # Arguments
     /// * `policy_id` - The policy ID from the collection
@@ -276,4 +331,32 @@ pub trait DocumentACP: MaybeSendSync {
         resource_name: &str,
         doc_id: &str,
     ) -> Result<()>;
+}
+
+/// `acp` serving the request `context` serves (see
+/// [`DocumentACP::bind_request`]).
+pub fn bound_to_request(
+    acp: &std::sync::Arc<dyn DocumentACP>,
+    context: &RequestContext,
+) -> std::sync::Arc<dyn DocumentACP> {
+    acp.bind_request(context)
+        .unwrap_or_else(|| std::sync::Arc::clone(acp))
+}
+
+/// Runs `call` against `acp` for `did` presenting `token`, outside the
+/// request that captured them (a hook a commit runs later): `acp` bound to a
+/// context carrying that bearer, which [`RequestContext::mirror`] also
+/// installs for test doubles that read it the old way.
+pub async fn with_request_bearer<T, F, Fut>(
+    acp: &std::sync::Arc<dyn DocumentACP>,
+    did: Option<String>,
+    token: Option<String>,
+    call: F,
+) -> T
+where
+    F: FnOnce(std::sync::Arc<dyn DocumentACP>) -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    let context = RequestContext::ambient().with_bearer(did, token);
+    context.mirror(call(bound_to_request(acp, &context))).await
 }

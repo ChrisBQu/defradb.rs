@@ -1,6 +1,9 @@
 use cid::Cid;
 use defra_core::block::{Block, CrdtDelta};
 use defra_core::merge::MergeBlock;
+#[cfg(not(target_arch = "wasm32"))]
+use defra_core::thread_bounds::MaybeSendSync;
+use std::future::Future;
 use storage::corekv::Store;
 
 use crate::merge::merge_handler::{DbMergeHandler, MergeError};
@@ -138,7 +141,9 @@ pub const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(6
 
 /// Run [`DbMergeHandler::sweep_unmerged_governed`] at `interval` until
 /// shutdown, starting with one pass now so a restart does not wait a whole
-/// interval to re-judge what it deferred before it stopped.
+/// interval to re-judge what it deferred before it stopped. The interval is a
+/// timer of the worker pool's deadline queue; [`start_governance_sweep`] runs
+/// the whole sweep there.
 pub async fn run_governance_sweep<S, B>(
     handler: std::sync::Arc<DbMergeHandler<S, B>>,
     interval: std::time::Duration,
@@ -155,9 +160,42 @@ pub async fn run_governance_sweep<S, B>(
         if swept > 0 {
             tracing::debug!(swept, "Governance sweep re-drove unmerged composites");
         }
-        tokio::select! {
-            _ = n0_future::time::sleep(interval) => {}
-            _ = shutdown.cancelled() => return,
+        let pause = match workers::delay(interval) {
+            Ok(pause) => pause,
+            Err(error) => {
+                tracing::error!(%error, "the governance sweep stopped: no timer could be set");
+                return;
+            }
+        };
+        let mut pause = std::pin::pin!(pause);
+        let mut cancelled = std::pin::pin!(shutdown.cancelled());
+        let stopping = std::future::poll_fn(|cx| {
+            if cancelled.as_mut().poll(cx).is_ready() {
+                return std::task::Poll::Ready(true);
+            }
+            pause.as_mut().poll(cx).map(|_| false)
+        })
+        .await;
+        if stopping {
+            return;
         }
     }
+}
+
+/// Starts [`run_governance_sweep`] in the background on the database's worker
+/// pool. It ends at `shutdown`, when aborted, or when its worker stops.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn start_governance_sweep<S, B>(
+    handler: std::sync::Arc<DbMergeHandler<S, B>>,
+    interval: std::time::Duration,
+    shutdown: p2p::sync::SyncShutdownHandle,
+) -> workers::Background
+where
+    S: Store + 'static,
+    B: blockstore::Blockstore + MaybeSendSync + 'static,
+{
+    let pool = handler.db.pool().cloned();
+    workers::spawn_background(pool.as_ref(), "db::governance_sweep", move || {
+        run_governance_sweep(handler, interval, shutdown)
+    })
 }

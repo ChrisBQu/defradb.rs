@@ -27,6 +27,7 @@ pub(super) struct HttpServerArgs<'a> {
     pub(super) zanzibar_store: Arc<dyn acp::ZanzibarStore>,
     pub(super) user_did: Option<&'a Did>,
     pub(super) node_identity_did: Option<String>,
+    pub(super) edge: edge::Edge,
 }
 
 impl Node {
@@ -43,6 +44,7 @@ impl Node {
             zanzibar_store,
             user_did,
             node_identity_did,
+            edge,
         } = args;
 
         let api_address: SocketAddr =
@@ -68,15 +70,17 @@ impl Node {
             max_backup_size: config.api.max_backup_size,
             request_timeout: config.api.request_timeout,
             max_concurrent_requests: config.api.max_concurrent_requests,
-            max_txn_retries: config.datastore.max_txn_retries,
             no_signing: config.datastore.no_signing,
             query_limits,
         };
 
-        let mut server =
-            defra_http::Server::from_arc_with_config(query_setup.runner.clone(), server_config)
-                .with_rest_arc(query_setup.rest_ops.clone())
-                .with_dev_mode(config.development);
+        let mut server = defra_http::Server::from_arc_with_config(
+            query_setup.runner.clone(),
+            server_config,
+            edge,
+        )
+        .with_rest_arc(query_setup.rest_ops.clone())
+        .with_dev_mode(config.development);
 
         let remote_signer_did = defra_core::signing::find_remote_signer_did();
         let user_identity_present = user_did.is_some();
@@ -224,6 +228,14 @@ impl Node {
 
         server = server.with_event_bus_arc(event_bus);
         info!("Subscription event bus enabled");
+
+        // The data-path routes run on the database's worker pool.
+        server = server.with_pool(database.pool().cloned());
+        // A local document ACP is the node's own store: its routes run on the
+        // pool; a remote one is reached through the network.
+        if config.acp.document_type == AcpDocumentType::Local {
+            server = server.with_local_acp();
+        }
 
         info!(
             "HTTP server configured on {} with REST endpoints enabled",

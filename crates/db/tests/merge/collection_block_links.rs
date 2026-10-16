@@ -20,7 +20,6 @@ use defra_core::block::{
 use defra_core::merge::{BlockMetadata, MergeBlock, MergeHandler, MergeOutcome};
 use document::NormalValue;
 use schema::{CollectionVersion, FieldDescription, FieldKind};
-use storage::corekv::IterOptions;
 use storage::RegolithStore;
 
 const COLLECTION_ID: &str = "col-ledger";
@@ -119,28 +118,19 @@ async fn merge(handler: &Handler, cid: &Cid, bytes: &[u8]) -> MergeOutcome {
         .unwrap()
 }
 
-/// The collection's head keys, read through the headstore's own prefix rather
-/// than by matching text across every namespace in the store.
+/// The collection's live heads, as CID text.
 async fn collection_heads(db: &Arc<DB<RegolithStore>>) -> Vec<String> {
     let collection = db.get_collection("Ledger").unwrap().unwrap();
-    let prefix =
-        storage::keys::headstore::HeadstoreColKey::collection_prefix(collection.resolved_root_id());
     let txn = db.new_txn(true).await.unwrap();
-    let keys = {
-        let headstore = txn.headstore().unwrap();
-        let mut iter = headstore
-            .iterator(IterOptions::new().with_prefix(prefix).with_keys_only(true))
-            .await
-            .unwrap();
-        let mut keys = Vec::new();
-        while let Some(pair) = iter.next().await.unwrap() {
-            keys.push(String::from_utf8_lossy(&pair.key).into_owned());
-        }
-        iter.close().await.unwrap();
-        keys
-    };
+    let heads = db::block::heads::live_collection_heads(
+        &txn.headstore().unwrap(),
+        collection.resolved_root_id(),
+    )
+    .await
+    .unwrap()
+    .live;
     let _ = txn.discard();
-    keys
+    heads.iter().map(ToString::to_string).collect()
 }
 
 #[tokio::test]
@@ -270,14 +260,35 @@ async fn an_incomplete_ancestor_merges_once_its_missing_link_arrives() {
         blockstore.put(cid, bytes).await.unwrap();
     }
 
-    merge(&handler, &ancestor_cid, &ancestor_bytes).await;
+    assert_eq!(
+        merge(&handler, &ancestor_cid, &ancestor_bytes).await,
+        MergeOutcome::Merged,
+        "the ancestor was not discharged, so it merges when it arrives again"
+    );
+    assert_ancestor_superseded_by_root(&db, &root_cid, &ancestor_cid).await;
+}
 
-    let heads = collection_heads(&db).await;
+/// Once merged, the ancestor is a superseded head: the root names it, so the
+/// live head is the root alone, and the merge reclaimed the ancestor's keys.
+async fn assert_ancestor_superseded_by_root(
+    db: &Arc<DB<RegolithStore>>,
+    root: &Cid,
+    ancestor: &Cid,
+) {
+    let collection = db.get_collection("Ledger").unwrap().unwrap();
+    let txn = db.new_txn(true).await.unwrap();
+    let live = db::block::heads::live_collection_heads(
+        &txn.headstore().unwrap(),
+        collection.resolved_root_id(),
+    )
+    .await
+    .unwrap();
+    let _ = txn.discard();
+    assert_eq!(live.live, vec![*root]);
+    let heads = collection_heads(db).await;
     assert!(
-        heads
-            .iter()
-            .any(|key| key.contains(&ancestor_cid.to_string())),
-        "the ancestor was not discharged, so it merges when it arrives again: {heads:?}"
+        !heads.iter().any(|key| key.contains(&ancestor.to_string())),
+        "{heads:?}"
     );
 }
 
@@ -336,13 +347,40 @@ async fn the_batch_walk_leaves_an_incomplete_ancestor_mergeable() {
         blockstore.put(cid, bytes).await.unwrap();
     }
 
-    merge_batch(&handler, &ancestor_cid, &ancestor_bytes).await;
-
-    let heads = collection_heads(&db).await;
-    assert!(
-        heads
-            .iter()
-            .any(|key| key.contains(&ancestor_cid.to_string())),
-        "the batch walk left the ancestor mergeable: {heads:?}"
+    assert_eq!(
+        merge_batch(&handler, &ancestor_cid, &ancestor_bytes).await,
+        MergeOutcome::Merged,
+        "the batch walk left the ancestor mergeable"
     );
+    assert_ancestor_superseded_by_root(&db, &root_cid, &ancestor_cid).await;
+}
+
+/// The walk loads a parent named in `heads` when it reaches it. A parent this
+/// node does not hold, or one that is not a collection block, ends that branch
+/// of the walk and never the root's merge, in either walk.
+#[tokio::test]
+async fn a_parent_that_is_not_held_or_not_a_collection_block_is_skipped() {
+    for batch in [false, true] {
+        let (db, handler, blockstore) = node().await;
+        let (absent_parent, _) = collection_block(&[]);
+        let (present, blocks) = document("current");
+        for (cid, bytes) in &blocks {
+            blockstore.put(cid, bytes).await.unwrap();
+        }
+        let (root_cid, root_bytes) = collection_block_over(&[present], &[absent_parent, present]);
+        blockstore.put(&root_cid, &root_bytes).await.unwrap();
+
+        let outcome = if batch {
+            merge_batch(&handler, &root_cid, &root_bytes).await
+        } else {
+            merge(&handler, &root_cid, &root_bytes).await
+        };
+
+        assert_eq!(outcome, MergeOutcome::Merged, "batch walk: {batch}");
+        let heads = collection_heads(&db).await;
+        assert!(
+            heads.iter().any(|key| key.contains(&root_cid.to_string())),
+            "batch walk: {batch}: the root's head must install: {heads:?}"
+        );
+    }
 }

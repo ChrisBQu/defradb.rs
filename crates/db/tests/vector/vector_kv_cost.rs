@@ -96,6 +96,29 @@ impl<S: VectorNodeStore> VectorNodeStore for Counting<S> {
         self.inner.get_node(id).await
     }
 
+    async fn get_node_advisory(&self, id: NodeId) -> Result<Option<Node>> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        self.distinct.insert(id.0, ());
+        self.inner.get_node_advisory(id).await
+    }
+    async fn get_node_for_links(&self, id: NodeId) -> Result<Option<Node>> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        self.distinct.insert(id.0, ());
+        self.inner.get_node_for_links(id).await
+    }
+    async fn add_link(&mut self, id: NodeId, layer: usize, neighbor: NodeId) -> Result<()> {
+        self.writes.fetch_add(1, Ordering::Relaxed);
+        self.inner.add_link(id, layer, neighbor).await
+    }
+    async fn get_meta_advisory(&self) -> Result<Option<Meta>> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        self.inner.get_meta_advisory().await
+    }
+    async fn add_counts(&mut self, live: i64, waste: u64) -> Result<()> {
+        self.writes.fetch_add(1, Ordering::Relaxed);
+        self.inner.add_counts(live, waste).await
+    }
+
     async fn put_node(&mut self, node: Node) -> Result<()> {
         self.writes.fetch_add(1, Ordering::Relaxed);
         self.inner.put_node(node).await

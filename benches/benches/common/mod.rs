@@ -1,4 +1,5 @@
-//! Helpers shared by more than one benchmark target.
+//! Helpers shared by more than one benchmark target, and the process
+//! allocator every target runs on ([`allocator`]).
 //!
 //! Only helpers that are byte-identical at every call site live here. A helper
 //! that differs between targets stays with its target: for tokio runtimes in
@@ -8,18 +9,30 @@
 
 #![allow(dead_code)]
 
+mod allocator;
 pub mod sift;
 pub mod vector;
 
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
+use regolith::sync::OnceCell;
 use tokio::runtime::Runtime;
 
 /// Built once per process and reused. `Runtime::new()` is multi-threaded across
 /// all available cores.
 pub fn shared_runtime() -> &'static Runtime {
-    static RUNTIME: OnceLock<Runtime> = OnceLock::new();
-    RUNTIME.get_or_init(|| Runtime::new().unwrap())
+    static RUNTIME: OnceCell<Runtime> = OnceCell::new();
+    static CLAIMED: AtomicBool = AtomicBool::new(false);
+    // The runtime spawns threads, so exactly one caller builds it; the rest wait for it.
+    if !CLAIMED.swap(true, Ordering::AcqRel) {
+        let _ = RUNTIME.set(Runtime::new().unwrap());
+    }
+    loop {
+        if let Some(runtime) = RUNTIME.get() {
+            return runtime;
+        }
+        std::thread::yield_now();
+    }
 }
 
 /// A fresh multi-threaded runtime per call, for targets that build one outside

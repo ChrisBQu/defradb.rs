@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
-use async_lock::{Mutex, MutexGuard};
 use async_trait::async_trait;
 use cid::Cid;
 use defra_core::block::{Block, CrdtDelta};
 use defra_core::thread_bounds::MaybeSendSync;
 use document::{DocID, Document, NormalValue};
-use rapidhash::RapidHashMap;
+use kovan_map::HopscotchMap;
+use rapidhash::fast::RandomState;
+use regolith::sync::OnceCell;
 use storage::corekv::{IterOptions, Store};
 use storage::index::SimpleIndex;
 use storage::keys::doc_id_index::decode_doc_short_id;
@@ -88,26 +89,32 @@ pub trait MergeView: MaybeSendSync {
 }
 
 /// By (collection, field); `None` when the field has no index a lookup can use.
-type ChosenIndexes = RapidHashMap<(String, String), Option<Arc<SimpleIndex>>>;
+type ChosenIndexes = HopscotchMap<(String, String), Option<Arc<SimpleIndex>>, RandomState>;
 
+/// One verdict's reads. Every read of the verdict sees one snapshot, opened on
+/// first use; what the verdict derives from that snapshot (the index chosen
+/// per field, the deleted documents per collection) is kept for its other
+/// reads. A validator may issue reads concurrently, so the snapshot is a
+/// `OnceCell` and the memos are lock-free maps: two reads that race to fill
+/// the same entry compute the same value from the same snapshot.
 pub(crate) struct DbMergeView<'a, S: Store, B: blockstore::Blockstore> {
     handler: &'a DbMergeHandler<S, B>,
-    snapshot: Mutex<Option<DbTxn<S>>>,
+    snapshot: OnceCell<DbTxn<S>>,
     /// The index chosen for each (collection, field) looked up this verdict.
-    pub(super) indexes: Mutex<ChosenIndexes>,
+    pub(super) indexes: ChosenIndexes,
     /// The deleted documents of each collection scanned this verdict, by
     /// collection name: the snapshot is fixed, so one scan serves every
     /// lookup the verdict makes.
-    deleted: Mutex<RapidHashMap<String, Arc<Vec<Document>>>>,
+    deleted: HopscotchMap<String, Arc<Vec<Document>>, RandomState>,
 }
 
 impl<'a, S: Store, B: blockstore::Blockstore> DbMergeView<'a, S, B> {
     pub(crate) fn new(handler: &'a DbMergeHandler<S, B>) -> Self {
         Self {
             handler,
-            snapshot: Mutex::new(None),
-            indexes: Mutex::new(RapidHashMap::default()),
-            deleted: Mutex::new(RapidHashMap::default()),
+            snapshot: OnceCell::new(),
+            indexes: HopscotchMap::with_hasher(RandomState::default()),
+            deleted: HopscotchMap::with_hasher(RandomState::default()),
         }
     }
 
@@ -247,14 +254,18 @@ where
 }
 
 impl<S: Store, B: blockstore::Blockstore> DbMergeView<'_, S, B> {
-    /// The verdict's snapshot, opened on first use.
-    pub(super) async fn snapshot(&self) -> Result<MutexGuard<'_, Option<DbTxn<S>>>, String> {
-        let mut snapshot = self.snapshot.lock().await;
-        if snapshot.is_none() {
-            let txn = self.handler.db.new_txn(true).await;
-            *snapshot = Some(txn.map_err(|error| error.to_string())?);
-        }
-        Ok(snapshot)
+    /// The verdict's snapshot, opened on first use. A read that arrives while
+    /// another opens it waits for that one rather than opening a second.
+    pub(super) async fn snapshot(&self) -> Result<&DbTxn<S>, String> {
+        self.snapshot
+            .get_or_try_init(async {
+                self.handler
+                    .db
+                    .new_txn(true)
+                    .await
+                    .map_err(|error| error.to_string())
+            })
+            .await
     }
 
     fn collection(&self, name: &str) -> Result<Option<Collection>, String> {
@@ -277,8 +288,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeView<'_, S, B> {
         let Ok(parsed) = doc_id.parse::<DocID>() else {
             return Ok(None);
         };
-        let snapshot = self.snapshot().await?;
-        let txn = snapshot.as_ref().expect("snapshot opened above");
+        let txn = self.snapshot().await?;
         let datastore = txn.datastore().map_err(|error| error.to_string())?;
         let systemstore = txn.systemstore().map_err(|error| error.to_string())?;
         let Some((short_id, canonical)) = collection
@@ -303,8 +313,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeView<'_, S, B> {
     /// Every merged document of `collection` on this verdict's snapshot,
     /// deleted or not.
     async fn documents(&self, collection: &Collection) -> Result<Vec<Document>, String> {
-        let snapshot = self.snapshot().await?;
-        let txn = snapshot.as_ref().expect("snapshot opened above");
+        let txn = self.snapshot().await?;
         let datastore = txn.datastore().map_err(|error| error.to_string())?;
         let systemstore = txn.systemstore().map_err(|error| error.to_string())?;
         Ok(collection
@@ -326,23 +335,20 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeView<'_, S, B> {
         &self,
         collection: &Collection,
     ) -> Result<Arc<Vec<Document>>, String> {
-        if let Some(cached) = self.deleted.lock().await.get(collection.name()).cloned() {
+        if let Some(cached) = self.deleted.get(collection.name()) {
             return Ok(cached);
         }
         let documents = Arc::new(self.scan_deleted_documents(collection).await?);
-        self.deleted
-            .lock()
-            .await
-            .insert(collection.name().to_string(), documents.clone());
-        Ok(documents)
+        Ok(self
+            .deleted
+            .get_or_insert(collection.name().to_string(), documents))
     }
 
     async fn scan_deleted_documents(
         &self,
         collection: &Collection,
     ) -> Result<Vec<Document>, String> {
-        let snapshot = self.snapshot().await?;
-        let txn = snapshot.as_ref().expect("snapshot opened above");
+        let txn = self.snapshot().await?;
         let datastore = txn.datastore().map_err(|error| error.to_string())?;
         let systemstore = txn.systemstore().map_err(|error| error.to_string())?;
 

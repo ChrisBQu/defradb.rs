@@ -9,6 +9,15 @@
 use crate::corekv::Key;
 use defra_core::Action;
 
+/// Systemstore key holding the format the indexes on disk were written with, a
+/// four-byte big-endian version. Every store a database has opened holds it.
+pub const INDEX_FORMAT_KEY: &[u8] = b"/system/index_format";
+
+/// Systemstore key the one-time at-rest rewrite writes into the store it
+/// produced, once that store has been checked against the one it replaces.
+/// Its value is the number of entries copied, eight bytes big-endian.
+pub const AT_REST_REWRITE_KEY: &[u8] = b"/system/at_rest_rewrite";
+
 const ACTION_STATUS_PREFIX: &str = "/a/s";
 const ACTION_REASON_PREFIX: &str = "/a/r";
 const ACTION_PROGRESS_PREFIX: &str = "/a/p";

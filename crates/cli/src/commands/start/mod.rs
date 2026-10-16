@@ -4,6 +4,7 @@ mod fd_limit;
 mod node;
 mod node_identity;
 mod p2p;
+mod pool_args;
 mod run;
 mod server;
 mod server_acp;
@@ -19,6 +20,7 @@ use identity::Identity;
 use storage::backends::DurabilityMode;
 
 pub use node::Node;
+pub use pool_args::{StartCommand, WorkerArgs};
 
 const DEV_MODE_BANNER: &str = r#"
 ******************************************
@@ -89,7 +91,7 @@ pub struct StartArgs {
     #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = crate::cli::bool_value_parser())]
     pub no_searchable_encryption: Option<bool>,
 
-    /// Enable transparent at-rest value encryption for the storage backend,
+    /// Enable engine file encryption at rest for the storage backend,
     /// keyed by the keyring `encryption-key`. Default: false.
     #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
     pub at_rest_encryption: Option<bool>,
@@ -316,8 +318,8 @@ pub struct StartArgs {
 }
 
 impl StartArgs {
-    /// Execute the start command
-    pub async fn execute(self, mut config: Config) -> Result<()> {
+    /// Execute the start command, serving on the network runtime `edge`.
+    pub async fn execute(self, mut config: Config, edge: edge::Edge) -> Result<()> {
         // Apply start-specific flags to config
         self.apply_to_config(&mut config)?;
 
@@ -335,7 +337,7 @@ impl StartArgs {
         // Set up Orbis remote signer if configured
         #[cfg(feature = "orbis")]
         if self.signer_type.as_deref() == Some("orbis") {
-            self.setup_orbis_signer(&user_identity).await?;
+            self.setup_orbis_signer(&user_identity, &edge).await?;
         }
 
         // regolith keeps a descriptor per live SSTable; a service manager's
@@ -343,7 +345,7 @@ impl StartArgs {
         fd_limit::raise_nofile_limit();
 
         // Start the node
-        let node = Node::new(config, user_identity).await?;
+        let node = Node::new(config, user_identity, edge).await?;
         node.run().await
     }
 
@@ -355,6 +357,7 @@ impl StartArgs {
     async fn setup_orbis_signer(
         &self,
         user_identity: &Option<std::sync::Arc<identity::RawIdentity>>,
+        edge: &edge::Edge,
     ) -> Result<()> {
         let service_identity = match self.parse_orbis_service_identity()? {
             Some(identity) => identity,
@@ -389,6 +392,7 @@ impl StartArgs {
             derivation_id.clone(),
             public_key,
             service_identity.clone(),
+            edge.clone(),
         )
         .await
         .map_err(|e| Error::InvalidConfig(format!("Orbis signer setup failed: {}", e)))?;

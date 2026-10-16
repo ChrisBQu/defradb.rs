@@ -2,28 +2,34 @@
 //!
 //! regolith validates its own transactions, so there is no conflict
 //! tracker or read-set bookkeeping here: the engine decides whether a
-//! transaction may land. Snapshot capture and native commit share a short
-//! publication boundary with the collection-head cache (HeadSet.Cache).
+//! transaction may land. Snapshot capture and native commit use the engine
+//! directly, so independent commits can join its commit groups.
+
+#![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use regolith::{OptimisticTransactionDb, StreamOptions};
+use regolith::OptimisticTransactionDb;
 
-use super::background_errors::BackgroundErrorListener;
 use super::config::RegolithStoreOptions;
-use super::head_cache::{self, SharedHeadCache};
+use super::event_order::EventOrder;
+use super::hooks::StoreHooks;
+use super::listener::StoreListener;
+use super::slots::TxnSlots;
 use super::transaction::RegolithTxn;
 use crate::backends::shared::TransactionStatsHandle;
-use crate::corekv::{Dropable, Error, Result, Store, Txn};
+use crate::corekv::{
+    Dropable, Error, Result, RetryAttempt, RetryAttemptError, RetryAttemptValue, RetryOptions,
+    Store, Txn,
+};
 
 /// Key-value store backed by regolith.
 ///
 /// Cloning hands back another handle on the same database, not another
-/// database: the close flag and the in-flight count are shared, so
-/// closing through one handle closes it for all of them.
+/// database: the in-flight slots are shared, so closing through one handle
+/// closes it for all of them.
 #[derive(Clone)]
 pub struct RegolithStore {
     inner: Arc<StoreInner>,
@@ -32,10 +38,12 @@ pub struct RegolithStore {
 struct StoreInner {
     db: Arc<OptimisticTransactionDb>,
     options: RegolithStoreOptions,
-    closed: AtomicBool,
-    active_txns: Arc<AtomicUsize>,
+    slots: Arc<TxnSlots>,
     stats: TransactionStatsHandle,
-    head_cache: SharedHeadCache,
+    /// Where calls do their I/O: the calling worker's queue, a borrowed one
+    /// off the pool, or blocking without a pool.
+    io: super::worker_io::StoreIo,
+    event_order: Arc<EventOrder>,
     path: PathBuf,
     /// The mounted OPFS environment, kept so `persist` can reach it.
     ///
@@ -68,21 +76,36 @@ impl RegolithStore {
                 })?;
             }
         }
-        let mut engine = options.engine.clone();
-        engine
-            .listeners
-            .push(Arc::new(BackgroundErrorListener) as Arc<dyn regolith::EventListener>);
+        // The store reads tickers only, so statistics of its own keep no
+        // histogram: a timer reads the clock twice per iterator step, read
+        // and log write, and a sample costs atomics on every read and commit.
+        let engine_stats = options.engine.get_statistics().cloned().unwrap_or_else(|| {
+            Arc::new(regolith::Statistics::with_level(
+                regolith::StatsLevel::ExceptHistogramOrTimers,
+            ))
+        });
+        let stats = TransactionStatsHandle::from_engine(engine_stats.clone());
+        let engine = options
+            .engine_for_open()
+            .statistics(Some(engine_stats))
+            .add_listener(Arc::new(StoreListener(stats.clone())))
+            .transaction_hooks(Arc::new(StoreHooks));
+        #[cfg(not(target_arch = "wasm32"))]
+        let db = super::rewrite::open(&path, engine, &options)?;
+        #[cfg(target_arch = "wasm32")]
         let db = OptimisticTransactionDb::open(&path, engine)
-            .map_err(|error| Error::Backend(format!("failed to open regolith: {error}")))?
-            .with_isolation(options.isolation);
+            .map_err(|error| Error::Backend(format!("failed to open regolith: {error}")))?;
+        let db = db
+            .with_isolation(options.isolation)
+            .with_policy(Arc::new(super::classifier::DefraKeyClassifier));
         Ok(Self {
             inner: Arc::new(StoreInner {
                 db: Arc::new(db),
+                io: super::worker_io::StoreIo::new(options.pool.clone(), stats.clone()),
                 options,
-                closed: AtomicBool::new(false),
-                active_txns: Arc::new(AtomicUsize::new(0)),
-                stats: TransactionStatsHandle::for_backend("regolith"),
-                head_cache: Arc::default(),
+                slots: TxnSlots::new(),
+                stats,
+                event_order: Arc::default(),
                 path,
                 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
                 opfs: None,
@@ -141,9 +164,11 @@ impl RegolithStore {
         // this target durability comes from `persist`, which writes the
         // database back to OPFS, not from an fsync that does nothing.
         if !env.as_env().capabilities().durable_sync {
-            options.engine.durability = regolith::DurabilityMode::Eventual;
+            options.engine = options
+                .engine
+                .durability(regolith::DurabilityMode::Eventual);
         }
-        options.engine.env = env.as_env();
+        options.engine = options.engine.env(env.as_env());
         let store = Self::open_with_options(db_name, options)?;
         // Safe to reach in: nothing else holds this store yet.
         let mut inner = Arc::try_unwrap(store.inner)
@@ -179,62 +204,20 @@ impl RegolithStore {
         &self.inner.path
     }
 
-    /// A writer that bounds its own memory rather than the caller's
-    /// input, for a bulk load whose size the caller does not control.
-    ///
-    /// Each flush is atomic; the stream as a whole is not. Work that must
-    /// land all-or-nothing belongs in a transaction.
-    pub fn streaming_writer(&self, opts: StreamOptions) -> regolith::StreamingWriter<'_> {
-        super::blocking(|| {
-            // A borrowed native writer can flush after this call returns, outside
-            // transaction publication. Disable caching for this store's lifetime.
-            self.inner
-                .head_cache
-                .lock()
-                .expect("head cache publication poisoned")
-                .disable();
-            self.inner.db.db().streaming_writer(opts)
-        })
+    /// The engine, for tests that reach under the adapter.
+    #[cfg(test)]
+    pub(super) fn engine(&self) -> &OptimisticTransactionDb {
+        &self.inner.db
     }
 
-    /// Wait for in-flight transactions to finish, up to the configured
-    /// timeout.
-    ///
-    /// On wasm there is nothing to wait for: the runtime is
-    /// single-threaded, so any transaction still counted here belongs to
-    /// this task's own call stack and spinning would deadlock rather than
-    /// let it finish. Report it instead.
-    #[cfg(not(target_arch = "wasm32"))]
-    async fn await_quiescence(&self) -> Result<()> {
-        let deadline = web_time::Instant::now() + self.inner.options.close_timeout;
-        let mut backoff = std::time::Duration::from_millis(1);
-        while self.inner.active_txns.load(Ordering::Acquire) > 0 {
-            if web_time::Instant::now() >= deadline {
-                return Err(self.in_flight_error());
-            }
-            tokio::time::sleep(backoff).await;
-            backoff = (backoff * 2).min(std::time::Duration::from_millis(50));
-        }
-        Ok(())
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    async fn await_quiescence(&self) -> Result<()> {
-        if self.inner.active_txns.load(Ordering::Acquire) > 0 {
-            return Err(self.in_flight_error());
-        }
-        Ok(())
-    }
-
-    fn in_flight_error(&self) -> Error {
-        Error::Backend(format!(
-            "closed with {} transaction(s) still in flight",
-            self.inner.active_txns.load(Ordering::Acquire)
-        ))
+    /// The engine as the store holds it, for tests of what is keyed by it.
+    #[cfg(test)]
+    pub(super) fn engine_arc(&self) -> &Arc<OptimisticTransactionDb> {
+        &self.inner.db
     }
 
     fn ensure_open(&self) -> Result<()> {
-        if self.inner.closed.load(Ordering::Acquire) {
+        if self.inner.slots.is_closing() {
             return Err(Error::DBClosed);
         }
         Ok(())
@@ -246,42 +229,64 @@ impl crate::corekv::private::Sealed for RegolithStore {}
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Store for RegolithStore {
+    async fn allocate(&self, key: &[u8], count: u64) -> Result<std::ops::Range<u64>> {
+        self.ensure_open()?;
+        let db = self.inner.db.db();
+        // On a pool the reservation never reads the device on the thread:
+        // what it waits for is recorded on a worker's queue.
+        match self.inner.io.queue(&self.inner.db, "allocate").await {
+            Some(queue) => super::worker_io::settle(|| db.allocate_nowait(queue, key, count)).await,
+            None => db.allocate(key, count),
+        }
+        .map_err(|error| Error::Backend(error.to_string()))
+    }
+
     fn transaction_stats_handle(&self) -> Option<TransactionStatsHandle> {
         Some(self.inner.stats.clone())
     }
 
     async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>> {
-        self.ensure_open()?;
-        self.inner.active_txns.fetch_add(1, Ordering::AcqRel);
-        // Closing between the check and the count would leak the count,
-        // so re-check and hand it back rather than leaving `close`
-        // waiting on a transaction that was never handed out.
-        if self.inner.closed.load(Ordering::Acquire) {
-            self.inner.active_txns.fetch_sub(1, Ordering::AcqRel);
-            return Err(Error::DBClosed);
-        }
+        let slot = self.inner.slots.enter()?;
+        let mode = self.inner.io.read_mode(&self.inner.db, "transaction").await;
         let txn = RegolithTxn::new(
             &self.inner.db,
             readonly,
             self.inner.options.isolation,
-            Arc::clone(&self.inner.active_txns),
-            self.inner.stats.clone(),
-            Arc::clone(&self.inner.head_cache),
-        );
-        match txn {
-            Ok(txn) => Ok(Box::new(txn)),
-            Err(error) => {
-                self.inner.active_txns.fetch_sub(1, Ordering::AcqRel);
-                Err(error)
-            }
-        }
+            slot,
+            Arc::clone(&self.inner.event_order),
+            mode,
+        )?;
+        Ok(Box::new(txn))
+    }
+
+    async fn transact_retry(
+        &self,
+        options: RetryOptions,
+        attempt: RetryAttempt,
+    ) -> std::result::Result<RetryAttemptValue, RetryAttemptError> {
+        let _slot = self.inner.slots.enter()?;
+        let queue = self.inner.io.queue(&self.inner.db, "transact").await;
+        super::retry::transact(
+            &self.inner.db,
+            &self.inner.io,
+            queue,
+            &self.inner.event_order,
+            options,
+            attempt,
+        )
+        .await
     }
 
     async fn close(&self) -> Result<()> {
-        if self.inner.closed.swap(true, Ordering::AcqRel) {
+        if !self.inner.slots.begin_close() {
             return Ok(());
         }
-        self.await_quiescence().await?;
+        // A transaction still open, a commit still running and its
+        // post-commit work each hold a slot; the last to end opens the latch.
+        self.inner
+            .slots
+            .quiesce(self.inner.options.close_timeout)
+            .await?;
         // On OPFS the database is resident in linear memory and only `persist`
         // writes it back, so closing without it discards everything since the
         // last explicit call. A no-op on every other environment.
@@ -299,15 +304,53 @@ impl Store for RegolithStore {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Dropable for RegolithStore {
     async fn drop_all(&self) -> Result<()> {
-        super::blocking(|| {
-            self.ensure_open()?;
-            let mut cache = head_cache::lock(&self.inner.head_cache)?;
-            cache.reset();
-            self.inner
-                .db
-                .db()
-                .drop_all()
-                .map_err(|error| Error::Backend(format!("drop_all failed: {error}")))
-        })
+        self.ensure_open()?;
+        self.inner
+            .db
+            .db()
+            .drop_all()
+            .map_err(|error| Error::Backend(format!("drop_all failed: {error}")))
+    }
+}
+
+#[cfg(test)]
+mod statistics_tests {
+    use super::*;
+    use crate::corekv::{IterOptions, Iterator, Reader, Writer};
+    use regolith::{Histogram, StatsLevel, Ticker};
+
+    /// Statistics the store opens on its own count tickers and keep no
+    /// histogram: the store reports only tickers, a timer reads the clock
+    /// twice per iterator step, read and log write, and a sample costs
+    /// atomics on every read and commit.
+    #[tokio::test]
+    async fn the_stores_own_statistics_count_tickers_only() {
+        let store = RegolithStore::in_memory().unwrap();
+        let mut txn = store.new_txn(false).await.unwrap();
+        txn.set(b"key", b"value").await.unwrap();
+        txn.commit().await.unwrap();
+        let reader = store.new_txn(true).await.unwrap();
+        assert!(reader.get(b"key").await.unwrap().is_some());
+        let mut iter = reader.iterator(IterOptions::new()).await.unwrap();
+        while iter.next().await.unwrap().is_some() {}
+        iter.close().await.unwrap();
+        reader.discard();
+
+        let stats = store.engine().db().statistics().unwrap();
+        assert_eq!(stats.level(), StatsLevel::ExceptHistogramOrTimers);
+        assert!(stats.get_ticker(Ticker::CommitCount) > 0);
+        assert!(stats.get_ticker(Ticker::IterSeekCount) > 0);
+        for histogram in [
+            Histogram::DbIterSeek,
+            Histogram::DbIterNext,
+            Histogram::WalWriteTime,
+            Histogram::BytesPerWrite,
+        ] {
+            assert_eq!(
+                stats.get_histogram_snapshot(histogram).count,
+                0,
+                "{histogram:?}"
+            );
+        }
     }
 }

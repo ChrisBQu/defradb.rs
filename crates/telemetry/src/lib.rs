@@ -16,6 +16,7 @@
 mod config;
 #[cfg(feature = "otlp")]
 mod dedup;
+mod engine_tickers;
 mod handle;
 mod metrics;
 #[cfg(feature = "otlp")]
@@ -24,11 +25,16 @@ mod util;
 pub use config::TelemetryConfig;
 #[cfg(feature = "otlp")]
 pub use dedup::OtelDedupFilter;
+pub use engine_tickers::{
+    engine_ticker_totals, export_engine_tickers, exported_engine_tickers, EngineTickerExport,
+};
 pub use handle::TelemetryHandle;
 pub use metrics::{
     conflict_metrics_snapshot, record_escaped_conflict, record_retry_attempt,
     record_retry_exhaustion, record_retry_success, record_storage_background_error,
-    storage_background_error_count, ConflictMetricsSnapshot, RetryLayer, RetryLayerSnapshot,
+    record_storage_conflict, record_storage_event, storage_background_error_count,
+    storage_event_count, ConflictMetricsSnapshot, EngineRetrySnapshot, RetryLayer,
+    RetryLayerSnapshot, StorageEvent,
 };
 
 #[cfg(feature = "otlp")]

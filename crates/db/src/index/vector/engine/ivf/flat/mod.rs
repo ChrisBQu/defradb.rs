@@ -31,10 +31,10 @@ use crate::index::error::{Error, Result};
 use crate::index::vector::engine::ann::{Admit, EngineKind, Neighbor, VectorIndexEngine};
 use crate::index::vector::engine::flat::Flat;
 use crate::index::vector::engine::ivf::{self, TrainedState};
+use crate::index::vector::engine::trained_cache::TrainedCache;
 use crate::index::vector::quantize::Centroids;
 use crate::index::vector::store::{NodeId, VectorNodeStore};
 use defra_core::vector::{Element, Metric};
-use std::sync::OnceLock;
 
 /// A coarse-partitioned index whose lists hold full-precision vectors.
 #[derive(Debug, Clone)]
@@ -45,7 +45,7 @@ pub struct IvfFlat<S> {
     seed: u64,
     /// Centroids are fixed once trained, and decoding them costs more than
     /// scanning the lists they route to. Loaded once per engine.
-    trained_cache: OnceLock<Centroids>,
+    trained_cache: TrainedCache<Centroids>,
 }
 
 impl<S: VectorNodeStore> IvfFlat<S> {
@@ -75,7 +75,7 @@ impl<S: VectorNodeStore> IvfFlat<S> {
             metric,
             params,
             seed,
-            trained_cache: OnceLock::new(),
+            trained_cache: TrainedCache::new(),
         })
     }
 
@@ -117,7 +117,7 @@ impl<S: VectorNodeStore> IvfFlat<S> {
             return Ok(centroids);
         }
         let centroids = ivf::load_centroids(self.store(), state.nlist, state.dimensions).await?;
-        Ok(self.trained_cache.get_or_init(|| centroids))
+        Ok(self.trained_cache.get_or_init_racy(|| centroids))
     }
 }
 

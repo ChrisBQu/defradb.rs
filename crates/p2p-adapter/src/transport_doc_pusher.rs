@@ -49,15 +49,24 @@ pub trait TransportDocPusher: defra_core::thread_bounds::MaybeSendSync {
         ))
     }
 
-    async fn retry_doc(&self, peer_id: &PeerId, doc_id: &str, collection_id: &str)
-        -> P2PResult<()>;
+    async fn retry_doc(
+        &self,
+        peer_id: &PeerId,
+        doc_id: &str,
+        collection_id: &str,
+        generation: u64,
+    ) -> P2PResult<()>;
 
     /// Replay a failed collection scope by rederiving current collection heads.
     ///
     /// Collection commits are doc-less, so they cannot be replayed through
     /// `retry_doc`, which resolves work from a document's composite heads.
-    async fn retry_collection_commit(&self, peer_id: &PeerId, collection_id: &str)
-        -> P2PResult<()>;
+    async fn retry_collection_commit(
+        &self,
+        peer_id: &PeerId,
+        collection_id: &str,
+        generation: u64,
+    ) -> P2PResult<()>;
 
     async fn load_document_head_blocks(&self, doc_id: &str) -> P2PResult<Vec<(Cid, Bytes)>>;
 
@@ -109,7 +118,7 @@ pub struct DbTransportDocPusher<S: storage::corekv::Store, T: P2PTransport> {
     transport: T,
     car_authority: p2p::sync::HeadHintCarAuthority,
     retry_schedule: storage::stores::RetrySchedule,
-    document_acp: std::sync::OnceLock<Arc<dyn acp::DocumentACP>>,
+    document_acp: regolith::sync::OnceCell<Arc<dyn acp::DocumentACP>>,
 }
 
 impl<S: storage::corekv::Store + 'static, T: P2PTransport> DbTransportDocPusher<S, T> {
@@ -123,7 +132,7 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> DbTransportDocPusher<
             transport,
             car_authority,
             retry_schedule: storage::stores::RetrySchedule::default(),
-            document_acp: std::sync::OnceLock::new(),
+            document_acp: regolith::sync::OnceCell::new(),
         }
     }
 
@@ -151,7 +160,8 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
     for DbTransportDocPusher<S, T>
 {
     async fn push_retry_marker_stats(&self) -> P2PResult<storage::stores::PushRetryMarkerStats> {
-        storage::stores::Peerstore::new(self.db.store().clone())
+        self.db
+            .peerstore()
             .push_retry_marker_stats()
             .await
             .map_err(|error| P2PError::internal(error.to_string()))
@@ -204,7 +214,7 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
         docs: &[(String, String)],
     ) -> P2PResult<()> {
         let peer_id_str = peer_id.to_string();
-        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
+        let peerstore = self.db.peerstore();
         let filters = match peerstore.get_replicator(&peer_id_str).await {
             Ok(Some(bytes)) => p2p::ReplicatorInfo::from_bytes(&bytes)
                 .map(|info| info.filters)
@@ -235,9 +245,10 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
         peer_id: &PeerId,
         doc_id: &str,
         collection_id: &str,
+        generation: u64,
     ) -> P2PResult<()> {
         let peer_id_str = peer_id.to_string();
-        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
+        let peerstore = self.db.peerstore();
         let filters = match peerstore.get_replicator(&peer_id_str).await {
             Ok(Some(bytes)) => p2p::ReplicatorInfo::from_bytes(&bytes)
                 .map(|info| info.filters)
@@ -251,6 +262,7 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
             peer_id,
             doc_id,
             collection_id,
+            generation,
             &filters,
             &replication_filter::QueryReplicationFilterMatcher::new(),
             &self.car_authority,
@@ -263,12 +275,14 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
         &self,
         peer_id: &PeerId,
         collection_id: &str,
+        generation: u64,
     ) -> P2PResult<()> {
         db::merge::retry_collection_commit(
             &self.transport,
             &self.db,
             peer_id,
             collection_id,
+            generation,
             &self.car_authority,
         )
         .await
@@ -371,7 +385,7 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
     }
 
     async fn persist_replicator(&self, peer_id: &str, collections: &[String]) -> P2PResult<()> {
-        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
+        let peerstore = self.db.peerstore();
         let mut info = match peerstore.get_replicator(peer_id).await.map_err(|error| {
             P2PError::persistence(format!("failed to load persisted replicator: {error}"))
         })? {
@@ -397,7 +411,7 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
 
     async fn persist_replicator_info(&self, info: &p2p::ReplicatorInfo) -> P2PResult<()> {
         let peer_id = info.peer_id_str();
-        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
+        let peerstore = self.db.peerstore();
         let mut info = info.clone();
         info.id = peer_id.to_string();
         let bytes = info.to_bytes().map_err(|error| {
@@ -412,35 +426,35 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> TransportDocPusher
     }
 
     async fn delete_persisted_replicator(&self, peer_id: &str) -> P2PResult<()> {
-        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
+        let peerstore = self.db.peerstore();
         peerstore.delete_replicator(peer_id).await.map_err(|error| {
             P2PError::persistence(format!("failed to delete persisted replicator: {error}"))
         })
     }
 
     async fn load_persisted_replicators(&self) -> P2PResult<Option<Vec<p2p::ReplicatorInfo>>> {
-        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
+        let peerstore = self.db.peerstore();
         crate::load_persisted_replicators(&peerstore)
             .await
             .map(Some)
     }
 
     async fn persist_p2p_documents(&self, doc_ids: &[String]) -> P2PResult<()> {
-        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
+        let peerstore = self.db.peerstore();
         peerstore.persist_documents(doc_ids).await.map_err(|error| {
             P2PError::persistence(format!("failed to persist P2P documents: {error}"))
         })
     }
 
     async fn load_p2p_documents(&self) -> P2PResult<Vec<String>> {
-        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
+        let peerstore = self.db.peerstore();
         peerstore.load_documents().await.map_err(|error| {
             P2PError::persistence(format!("failed to load P2P documents: {error}"))
         })
     }
 
     async fn persist_p2p_collections(&self, collections: &[String]) -> P2PResult<()> {
-        let peerstore = storage::stores::Peerstore::new(self.db.store().clone());
+        let peerstore = self.db.peerstore();
         peerstore
             .persist_collections(collections)
             .await

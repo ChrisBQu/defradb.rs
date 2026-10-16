@@ -17,6 +17,7 @@ bench = false
 [dependencies]
 # Internal dependencies
 storage = { path = "../storage" }
+workers = { path = "../workers" }
 crypto = { path = "../crypto" }
 defra-core = { path = "../defra-core" }
 
@@ -37,10 +38,7 @@ thiserror = { workspace = true }
 # Logging
 tracing = { workspace = true }
 
-# Caching
 bytes = { workspace = true }
-lru = { workspace = true }
-parking_lot = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

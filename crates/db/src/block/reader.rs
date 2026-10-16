@@ -1,6 +1,6 @@
 //! Reading committed blocks and their deltas through `DB` / `DbTxn`.
 
-use crate::block::builder::{get_all_field_heads, BlockResult};
+use crate::block::builder::{BlockResult, DocHeadsSnapshot};
 use document::{DocID, Document};
 
 /// Read a committed document by ID from a collection, in a `Send`-safe way.
@@ -66,8 +66,8 @@ pub async fn read_document_for_se<S: storage::corekv::Store>(
     let Some(doc_bytes) = doc_bytes else {
         return Ok(None);
     };
-    let mut document =
-        Document::from_cbor(&doc_bytes).map_err(|e| format!("failed to decode document: {e}"))?;
+    let mut document = Document::from_storage_cbor(&doc_bytes)
+        .map_err(|e| format!("failed to decode document: {e}"))?;
     document.set_id(canonical_doc_id);
     if let Some(version_bytes) = version_bytes {
         if let Ok(version) = String::from_utf8(version_bytes.into()) {
@@ -109,11 +109,11 @@ pub async fn read_latest_composite_block<S: storage::corekv::Store>(
         .map(|doc_ref| doc_ref.doc_short_id)
         .ok_or_else(|| format!("No doc-ID mapping found for doc {}", doc_id))?;
 
-    let composite_heads = get_all_field_heads(&headstore, doc_short_id, "C").await?;
-
-    let composite_cid = composite_heads
+    let composite_cid = DocHeadsSnapshot::load(&headstore, doc_short_id)
+        .await?
+        .field_heads("C")
         .first()
-        .map(|entry| entry.cid)
+        .copied()
         .ok_or_else(|| format!("No composite head found for doc {}", doc_id))?;
 
     let blockstore = txn

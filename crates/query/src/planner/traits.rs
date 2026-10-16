@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
-use storage::corekv::MaybeSendSync;
+use storage::corekv::MaybeSend;
 
 use crate::document::DocumentMapping;
 use crate::error::Result;
@@ -19,9 +19,13 @@ use crate::doc::Doc;
 /// `init() -> start() -> next()* -> close()`
 ///
 /// The iterator pattern allows lazy evaluation and pipelining of results.
+///
+/// A plan tree is owned by the one task that executes it and is driven
+/// through `&mut self`, so a node need not be `Sync`: it owns its source
+/// stream as a plain field.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-pub trait PlanNode: MaybeSendSync {
+pub trait PlanNode: MaybeSend {
     /// Initialize or reinitialize the node.
     ///
     /// Called before start() to set up internal state.

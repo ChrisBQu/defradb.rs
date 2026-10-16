@@ -77,6 +77,32 @@ impl Key for ReplicatorKey {
     }
 }
 
+/// ReplicatorIncarnationKey: Durable generation for one peer configuration
+/// incarnation. The watermark survives forget so an in-flight registration
+/// from an earlier incarnation cannot attach its marker to a later one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplicatorIncarnationKey {
+    peer_id: String,
+}
+
+impl ReplicatorIncarnationKey {
+    pub fn new(peer_id: impl Into<String>) -> Self {
+        Self {
+            peer_id: peer_id.into(),
+        }
+    }
+}
+
+impl Key for ReplicatorIncarnationKey {
+    fn bytes(&self) -> Vec<u8> {
+        format!("/rep/incarnation/id/{}", self.peer_id).into_bytes()
+    }
+
+    fn to_string(&self) -> String {
+        format!("/rep/incarnation/id/{}", self.peer_id)
+    }
+}
+
 /// ReplicatorRetryIDKey: Tracks failed replication attempts by peer
 ///
 /// Structure: /rep/retry/id/[PeerID]

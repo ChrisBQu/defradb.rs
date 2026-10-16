@@ -1,19 +1,14 @@
 //! Lens migration pipeline.
 //!
-//! Matches Go's internal/lens/lens.go Lens type and behavior.
-//!
-//! Two modes:
-//! - With `wasmtime-runtime`: spawns a background task via tokio for processing
-//! - Without: processes documents inline (suitable for wasm32/browser)
+//! Matches Go's internal/lens/lens.go Lens type and behavior. Documents are
+//! migrated on the caller's task, one at a time, as `next` asks for them.
 
-#[cfg(not(feature = "wasmtime-runtime"))]
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use futures::StreamExt;
 use rapidhash::{HashSetExt, RapidHashMap, RapidHashSet};
 
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::store::TransformStore;
 use crate::{Error, LensDoc, Result, TargetedHistoryLink, TransformId};
@@ -44,16 +39,9 @@ impl LensInput {
 ///
 /// Matches Go's Lens interface.
 pub struct Lens {
-    #[cfg_attr(feature = "wasmtime-runtime", allow(dead_code))]
     store: Arc<dyn TransformStore>,
     target_version_id: String,
-    #[cfg_attr(feature = "wasmtime-runtime", allow(dead_code))]
     collection_history: RapidHashMap<String, TargetedHistoryLink>,
-    #[cfg(feature = "wasmtime-runtime")]
-    input_tx: futures::channel::mpsc::UnboundedSender<LensInput>,
-    #[cfg(feature = "wasmtime-runtime")]
-    output_rx: futures::channel::mpsc::UnboundedReceiver<Result<LensDoc>>,
-    #[cfg(not(feature = "wasmtime-runtime"))]
     pending: VecDeque<LensInput>,
 }
 
@@ -69,84 +57,33 @@ impl Lens {
         target_version_id: impl Into<String>,
         collection_history: RapidHashMap<String, TargetedHistoryLink>,
     ) -> Self {
-        let target_version_id = target_version_id.into();
-
-        #[cfg(feature = "wasmtime-runtime")]
-        {
-            use futures::channel::mpsc;
-
-            let (input_tx, input_rx) = mpsc::unbounded();
-            let (output_tx, output_rx) = mpsc::unbounded();
-
-            let pipeline = PipelineProcessor {
-                store: store.clone(),
-                target_version_id: target_version_id.clone(),
-                collection_history: collection_history.clone(),
-                input_rx,
-                output_tx,
-            };
-
-            tokio::spawn(pipeline.run());
-
-            Self {
-                store,
-                target_version_id,
-                collection_history,
-                input_tx,
-                output_rx,
-            }
-        }
-
-        #[cfg(not(feature = "wasmtime-runtime"))]
-        {
-            Self {
-                store,
-                target_version_id,
-                collection_history,
-                pending: VecDeque::new(),
-            }
+        Self {
+            store,
+            target_version_id: target_version_id.into(),
+            collection_history,
+            pending: VecDeque::new(),
         }
     }
 
     /// Put a document into the pipeline for transformation.
     pub async fn put(&mut self, schema_version_id: &str, doc: LensDoc) -> Result<()> {
-        #[cfg(feature = "wasmtime-runtime")]
-        {
-            use futures::SinkExt;
-            self.input_tx
-                .send(LensInput::new(schema_version_id, doc))
-                .await
-                .map_err(|e| Error::Pipeline(format!("failed to send input: {}", e)))
-        }
-
-        #[cfg(not(feature = "wasmtime-runtime"))]
-        {
-            self.pending
-                .push_back(LensInput::new(schema_version_id, doc));
-            Ok(())
-        }
+        self.pending
+            .push_back(LensInput::new(schema_version_id, doc));
+        Ok(())
     }
 
     /// Get the next transformed document from the pipeline.
     pub async fn next(&mut self) -> Option<Result<LensDoc>> {
-        #[cfg(feature = "wasmtime-runtime")]
-        {
-            self.output_rx.next().await
-        }
-
-        #[cfg(not(feature = "wasmtime-runtime"))]
-        {
-            let input = self.pending.pop_front()?;
-            Some(
-                transform_to_target(
-                    &self.store,
-                    &self.target_version_id,
-                    &self.collection_history,
-                    input,
-                )
-                .await,
+        let input = self.pending.pop_front()?;
+        Some(
+            transform_to_target(
+                &self.store,
+                &self.target_version_id,
+                &self.collection_history,
+                input,
             )
-        }
+            .await,
+        )
     }
 
     /// Check if a migration is needed for the given schema version.
@@ -161,44 +98,18 @@ impl Lens {
     }
 }
 
-/// Internal pipeline processor that handles document transformation (spawned mode).
-#[cfg(feature = "wasmtime-runtime")]
-struct PipelineProcessor {
-    store: Arc<dyn TransformStore>,
-    target_version_id: String,
-    collection_history: RapidHashMap<String, TargetedHistoryLink>,
-    input_rx: futures::channel::mpsc::UnboundedReceiver<LensInput>,
-    output_tx: futures::channel::mpsc::UnboundedSender<Result<LensDoc>>,
-}
-
-#[cfg(feature = "wasmtime-runtime")]
-impl PipelineProcessor {
-    async fn run(mut self) {
-        while let Some(input) = self.input_rx.next().await {
-            let result = transform_to_target(
-                &self.store,
-                &self.target_version_id,
-                &self.collection_history,
-                input,
-            )
-            .await;
-            if self.output_tx.unbounded_send(result).is_err() {
-                break;
-            }
-        }
-    }
-}
-
 /// Transform a document to the target schema version.
 ///
-/// Shared between spawned and inline modes.
-async fn transform_to_target(
+/// Runs on the caller task without spawning work on another executor.
+/// Transaction attempts use this entry point so a local transform cannot
+/// depend on the runtime thread currently driving their storage I/O queue.
+pub async fn transform_to_target(
     store: &Arc<dyn TransformStore>,
     target_version_id: &str,
     collection_history: &RapidHashMap<String, TargetedHistoryLink>,
     input: LensInput,
 ) -> Result<LensDoc> {
-    info!(
+    debug!(
         from_version = %input.schema_version_id,
         to_version = %target_version_id,
         history_size = collection_history.len(),
@@ -237,7 +148,7 @@ async fn transform_to_target(
         );
 
         if current_version == target_version_id {
-            info!(
+            debug!(
                 iterations = iteration,
                 "Migration complete, reached target version"
             );
@@ -281,7 +192,7 @@ async fn transform_to_target(
                 .get(next_version)
                 .ok_or_else(|| Error::SchemaVersionNotFound(next_version.clone()))?;
 
-            info!(
+            debug!(
                 direction = "forward",
                 from = %current_version,
                 to = %next_version,
@@ -290,14 +201,14 @@ async fn transform_to_target(
             );
 
             if let Some(ref transform_id) = next_link.transform {
-                info!(
+                debug!(
                     transform_id = %transform_id,
                     "Applying forward transform"
                 );
                 current_doc =
                     apply_transform(store, &TransformId::new(transform_id), current_doc, false)
                         .await?;
-                info!("Forward transform applied successfully");
+                debug!("Forward transform applied successfully");
             } else {
                 debug!("No transform defined for this version transition");
             }
@@ -307,7 +218,7 @@ async fn transform_to_target(
         } else if can_go_prev {
             let prev_version = current_link.previous.as_ref().unwrap();
 
-            info!(
+            debug!(
                 direction = "backward",
                 from = %current_version,
                 to = %prev_version,
@@ -316,14 +227,14 @@ async fn transform_to_target(
             );
 
             if let Some(ref transform_id) = current_link.transform {
-                info!(
+                debug!(
                     transform_id = %transform_id,
                     "Applying inverse transform"
                 );
                 current_doc =
                     apply_transform(store, &TransformId::new(transform_id), current_doc, true)
                         .await?;
-                info!("Inverse transform applied successfully");
+                debug!("Inverse transform applied successfully");
             } else {
                 debug!("No transform defined for this version transition");
             }
@@ -351,64 +262,11 @@ async fn apply_transform(
     doc: LensDoc,
     inverse: bool,
 ) -> Result<LensDoc> {
-    let direction = if inverse { "inverse" } else { "forward" };
-    info!(
-        transform_id = %transform_id,
-        direction = direction,
-        doc_keys = ?doc.keys().collect::<Vec<_>>(),
-        "Applying transform"
-    );
-
-    // Check if transform exists in store
-    let has_transform = store.has_transform(transform_id);
-    info!(
-        transform_id = %transform_id,
-        has_transform = has_transform,
-        "Transform lookup result"
-    );
-
-    if !has_transform {
-        warn!(
-            transform_id = %transform_id,
-            "Transform not found in store"
-        );
-        return Err(Error::TransformNotFound(transform_id.to_string()));
-    }
-
-    let input_stream = Box::pin(futures::stream::once(async move { doc }));
-
-    let mut output_stream = if inverse {
-        store.inverse(transform_id, input_stream)?
-    } else {
-        store.transform(transform_id, input_stream)?
-    };
-
-    let result = output_stream.next().await.ok_or_else(|| {
-        warn!(
-            transform_id = %transform_id,
-            "Transform produced no output"
-        );
-        Error::Pipeline("transform produced no output".to_string())
-    })?;
-
-    match &result {
-        Ok(output_doc) => {
-            info!(
-                transform_id = %transform_id,
-                output_keys = ?output_doc.keys().collect::<Vec<_>>(),
-                "Transform completed successfully"
-            );
-        }
-        Err(e) => {
-            warn!(
-                transform_id = %transform_id,
-                error = %e,
-                "Transform failed"
-            );
-        }
-    }
-
-    result
+    debug!(transform_id = %transform_id, inverse, "Applying transform");
+    store
+        .transform_doc(transform_id, doc, inverse)
+        .await
+        .inspect_err(|error| debug!(transform_id = %transform_id, %error, "Transform failed"))
 }
 
 #[cfg(test)]

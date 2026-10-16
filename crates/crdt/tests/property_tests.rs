@@ -477,14 +477,14 @@ mod counter_properties {
                 ).unwrap();
 
                 let store1 = RegolithStore::in_memory().unwrap();
-                let counter1 = Counter::new("v1".to_string(), b"doc1", "count".to_string(), true, NumericKind::Int64).unwrap();
+                let counter1 = Counter::new("v1".to_string(), b"doc1".to_vec(), 0, "count".to_string(), true, NumericKind::Int64).unwrap();
                 let mut txn1 = store1.new_txn(false).await.unwrap();
                 counter1.merge(&mut *txn1, &ctx, &delta1).await.unwrap();
                 counter1.merge(&mut *txn1, &ctx, &delta2).await.unwrap();
                 let val1 = counter1.value(&*txn1).await.ok();
 
                 let store2 = RegolithStore::in_memory().unwrap();
-                let counter2 = Counter::new("v1".to_string(), b"doc1", "count".to_string(), true, NumericKind::Int64).unwrap();
+                let counter2 = Counter::new("v1".to_string(), b"doc1".to_vec(), 0, "count".to_string(), true, NumericKind::Int64).unwrap();
                 let mut txn2 = store2.new_txn(false).await.unwrap();
                 counter2.merge(&mut *txn2, &ctx, &delta2).await.unwrap();
                 counter2.merge(&mut *txn2, &ctx, &delta1).await.unwrap();
@@ -521,7 +521,7 @@ mod counter_properties {
                 ).unwrap();
 
                 let store = RegolithStore::in_memory().unwrap();
-                let counter = Counter::new("v1".to_string(), b"doc1", "count".to_string(), true, NumericKind::Int64).unwrap();
+                let counter = Counter::new("v1".to_string(), b"doc1".to_vec(), 0, "count".to_string(), true, NumericKind::Int64).unwrap();
                 let mut txn = store.new_txn(false).await.unwrap();
 
                 counter.merge(&mut *txn, &ctx, &delta).await.unwrap();
@@ -546,7 +546,7 @@ mod counter_properties {
                 };
 
                 let store = RegolithStore::in_memory().unwrap();
-                let counter = Counter::new("v1".to_string(), b"doc1", "count".to_string(), true, NumericKind::Int64).unwrap();
+                let counter = Counter::new("v1".to_string(), b"doc1".to_vec(), 0, "count".to_string(), true, NumericKind::Int64).unwrap();
                 let mut txn = store.new_txn(false).await.unwrap();
 
                 let delta1 = CounterDelta::new_int64(
@@ -587,7 +587,7 @@ mod counter_properties {
                 };
 
                 let store = RegolithStore::in_memory().unwrap();
-                let counter = Counter::new("v1".to_string(), b"doc1", "count".to_string(), true, NumericKind::Int64).unwrap();
+                let counter = Counter::new("v1".to_string(), b"doc1".to_vec(), 0, "count".to_string(), true, NumericKind::Int64).unwrap();
                 let mut txn = store.new_txn(false).await.unwrap();
 
                 let delta1 = CounterDelta::new_int64(
@@ -673,7 +673,7 @@ mod counter_properties {
                 let mut results = Vec::new();
                 for perm in permutations {
                     let store = RegolithStore::in_memory().unwrap();
-                    let counter = Counter::new("v1".to_string(), b"doc1", "count".to_string(), true, NumericKind::Int64).unwrap();
+                    let counter = Counter::new("v1".to_string(), b"doc1".to_vec(), 0, "count".to_string(), true, NumericKind::Int64).unwrap();
                     let mut txn = store.new_txn(false).await.unwrap();
                     for delta in perm {
                         counter.merge(&mut *txn, &ctx, delta).await.unwrap();
@@ -721,14 +721,14 @@ mod counter_properties {
                 ).unwrap();
 
                 let store1 = RegolithStore::in_memory().unwrap();
-                let counter1 = Counter::new("v1".to_string(), b"doc1", "count".to_string(), false, NumericKind::Int64).unwrap();
+                let counter1 = Counter::new("v1".to_string(), b"doc1".to_vec(), 0, "count".to_string(), false, NumericKind::Int64).unwrap();
                 let mut txn1 = store1.new_txn(false).await.unwrap();
                 counter1.merge(&mut *txn1, &ctx, &delta1).await.unwrap();
                 counter1.merge(&mut *txn1, &ctx, &delta2).await.unwrap();
                 let val1 = counter1.value(&*txn1).await.ok();
 
                 let store2 = RegolithStore::in_memory().unwrap();
-                let counter2 = Counter::new("v1".to_string(), b"doc1", "count".to_string(), false, NumericKind::Int64).unwrap();
+                let counter2 = Counter::new("v1".to_string(), b"doc1".to_vec(), 0, "count".to_string(), false, NumericKind::Int64).unwrap();
                 let mut txn2 = store2.new_txn(false).await.unwrap();
                 counter2.merge(&mut *txn2, &ctx, &delta2).await.unwrap();
                 counter2.merge(&mut *txn2, &ctx, &delta1).await.unwrap();
@@ -794,7 +794,7 @@ mod counter_properties {
                 let mut results = Vec::new();
                 for perm in permutations {
                     let store = RegolithStore::in_memory().unwrap();
-                    let counter = Counter::new("v1".to_string(), b"doc1", "count".to_string(), false, NumericKind::Int64).unwrap();
+                    let counter = Counter::new("v1".to_string(), b"doc1".to_vec(), 0, "count".to_string(), false, NumericKind::Int64).unwrap();
                     let mut txn = store.new_txn(false).await.unwrap();
                     for delta in perm {
                         counter.merge(&mut *txn, &ctx, delta).await.unwrap();
@@ -820,7 +820,8 @@ mod counter_properties {
         let store = RegolithStore::in_memory().unwrap();
         let counter = Counter::new(
             "v1".to_string(),
-            b"doc1",
+            b"doc1".to_vec(),
+            0,
             "count".to_string(),
             true,
             NumericKind::Int64,
@@ -893,14 +894,14 @@ mod float64_counter_properties {
                 ).unwrap();
 
                 let store1 = RegolithStore::in_memory().unwrap();
-                let counter1 = Counter::new("v1".to_string(), b"doc1", "amount".to_string(), true, NumericKind::Float64).unwrap();
+                let counter1 = Counter::new("v1".to_string(), b"doc1".to_vec(), 0, "amount".to_string(), true, NumericKind::Float64).unwrap();
                 let mut txn1 = store1.new_txn(false).await.unwrap();
                 counter1.merge(&mut *txn1, &ctx, &delta1).await.unwrap();
                 counter1.merge(&mut *txn1, &ctx, &delta2).await.unwrap();
                 let val1 = counter1.value(&*txn1).await.ok();
 
                 let store2 = RegolithStore::in_memory().unwrap();
-                let counter2 = Counter::new("v1".to_string(), b"doc1", "amount".to_string(), true, NumericKind::Float64).unwrap();
+                let counter2 = Counter::new("v1".to_string(), b"doc1".to_vec(), 0, "amount".to_string(), true, NumericKind::Float64).unwrap();
                 let mut txn2 = store2.new_txn(false).await.unwrap();
                 counter2.merge(&mut *txn2, &ctx, &delta2).await.unwrap();
                 counter2.merge(&mut *txn2, &ctx, &delta1).await.unwrap();
@@ -937,7 +938,7 @@ mod float64_counter_properties {
                 ).unwrap();
 
                 let store = RegolithStore::in_memory().unwrap();
-                let counter = Counter::new("v1".to_string(), b"doc1", "amount".to_string(), true, NumericKind::Float64).unwrap();
+                let counter = Counter::new("v1".to_string(), b"doc1".to_vec(), 0, "amount".to_string(), true, NumericKind::Float64).unwrap();
                 let mut txn = store.new_txn(false).await.unwrap();
 
                 counter.merge(&mut *txn, &ctx, &delta).await.unwrap();

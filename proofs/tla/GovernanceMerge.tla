@@ -24,7 +24,7 @@
 \*                               and die with the process unless persisted
 \*   PendingDagQuarantine.tla -- a registered root is re-driven by a sweep;
 \*                               a content-determined rejection quarantines it
-\*   MergeQueue.tla           -- the merge path itself, fail-closed
+\*   (The historical MergeQueue model was retired when DocWriteQueue was removed.)
 \*
 \* WHAT IS STRUCTURALLY DIFFERENT FROM GovernanceContract.tla, and therefore
 \* worth checking rather than assuming:

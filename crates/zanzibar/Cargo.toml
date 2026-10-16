@@ -17,7 +17,6 @@ bench = false
 [dependencies]
 identity = { path = "../identity" }
 async-trait.workspace = true
-futures.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -28,6 +27,7 @@ tracing.workspace = true
 kovan-map.workspace = true
 
 [dev-dependencies]
+futures.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
 proptest.workspace = true
 

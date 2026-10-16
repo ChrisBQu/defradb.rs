@@ -701,7 +701,8 @@ mod pending_persistence {
     use super::*;
     use async_trait::async_trait;
     use p2p::sync::{
-        PendingDagStorage, PendingDagStore, PersistedPendingDag, PersistedQuarantinedDag,
+        Admission, PendingDagStorage, PendingDagStore, PersistedPendingDag,
+        PersistedQuarantinedDag, PersistedView, Registration,
     };
 
     async fn manager_with_store(
@@ -1504,7 +1505,10 @@ mod pending_persistence {
         assert_eq!(manager.persisted_pending_count(), 1);
 
         // Simulate the race outcome: record gone, set entry left behind.
-        pending_store.remove(&comp_cid).await.expect("drop record");
+        pending_store
+            .remove(&comp_cid, &Arc::new(PersistedView::default()))
+            .await
+            .expect("drop record");
         manager.clear_pending_dag(&comp_cid);
 
         for _ in 0..10 {
@@ -1540,7 +1544,10 @@ mod pending_persistence {
         // Model the observed fleet state after the durable terminal delete
         // committed but a stale resync snapshot re-added the accounting bit.
         // The old pending entry deliberately remains live.
-        pending_store.remove(&comp_cid).await.expect("drop record");
+        pending_store
+            .remove(&comp_cid, &Arc::new(PersistedView::default()))
+            .await
+            .expect("drop record");
         assert!(pending_store.load_all().await.expect("load").is_empty());
 
         manager.resync_persisted_pending_dags().await;
@@ -1581,6 +1588,34 @@ mod pending_persistence {
 
     #[async_trait]
     impl PendingDagStorage for FailingStore {
+        async fn register(
+            &self,
+            _registration: Registration<'_>,
+            _view: &Arc<PersistedView>,
+        ) -> p2p::error::Result<Admission> {
+            Err(Error::Storage("disk full".to_string()))
+        }
+        async fn remove(
+            &self,
+            _root_cid: &Cid,
+            _view: &Arc<PersistedView>,
+        ) -> p2p::error::Result<bool> {
+            Ok(false)
+        }
+        async fn quarantine(
+            &self,
+            _root_cid: &Cid,
+            _entry: &PersistedQuarantinedDag,
+            _view: &Arc<PersistedView>,
+        ) -> p2p::error::Result<bool> {
+            Err(Error::Storage("disk full".to_string()))
+        }
+        async fn sweep(
+            &self,
+            _view: &Arc<PersistedView>,
+        ) -> p2p::error::Result<Vec<(Cid, PersistedPendingDag)>> {
+            Ok(Vec::new())
+        }
         async fn put(
             &self,
             _root_cid: &Cid,
@@ -1588,26 +1623,8 @@ mod pending_persistence {
         ) -> p2p::error::Result<()> {
             Err(Error::Storage("disk full".to_string()))
         }
-        async fn replace_scope_head(
-            &self,
-            _superseded_root: Option<&Cid>,
-            _root_cid: &Cid,
-            _record: &PersistedPendingDag,
-        ) -> p2p::error::Result<()> {
-            Err(Error::Storage("disk full".to_string()))
-        }
-        async fn remove(&self, _root_cid: &Cid) -> p2p::error::Result<()> {
-            Ok(())
-        }
         async fn load_all(&self) -> p2p::error::Result<Vec<(Cid, PersistedPendingDag)>> {
             Ok(Vec::new())
-        }
-        async fn quarantine(
-            &self,
-            _root_cid: &Cid,
-            _entry: &PersistedQuarantinedDag,
-        ) -> p2p::error::Result<()> {
-            Err(Error::Storage("disk full".to_string()))
         }
         async fn is_quarantined(&self, _root_cid: &Cid) -> p2p::error::Result<bool> {
             Ok(false)

@@ -14,10 +14,17 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         payload: &defra_core::block::CompositeDeltaPayload,
         doc_id: &str,
         collection: &CollectionVersion,
+        view: Option<datastore::NamespaceView>,
     ) -> std::result::Result<Option<MergeOutcome>, MergeError> {
         let Some(hook) = self.composite_merge_hook() else {
             return Ok(None);
         };
+        if view.is_none() && hook.supports_transactions() {
+            // Local authorization is evaluated below in the mutation snapshot.
+            return Ok(None);
+        }
+        let scoped = view.and_then(|view| hook.bind_transaction(view));
+        let hook = scoped.as_ref().unwrap_or(hook);
         let is_genesis = block.heads.as_deref().is_none_or(<[Cid]>::is_empty);
         if collection.policy.is_none() || is_genesis || !hook.guards_protected_updates() {
             return Ok(None);

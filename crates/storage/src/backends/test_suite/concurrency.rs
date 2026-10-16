@@ -1,4 +1,4 @@
-use crate::corekv::{Error, Store};
+use crate::corekv::Store;
 use bytes::Bytes;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -57,7 +57,7 @@ pub async fn test_concurrent_writes_same_key<S: Store + 'static>(store: Arc<S>) 
                 Ok(()) => {
                     success_count.fetch_add(1, Ordering::SeqCst);
                 }
-                Err(Error::TxnConflict) => {
+                Err(error) if error.is_txn_conflict() => {
                     conflict_count.fetch_add(1, Ordering::SeqCst);
                 }
                 Err(e) => panic!("unexpected error: {}", e),
@@ -97,7 +97,7 @@ pub async fn test_last_writer_wins<S: Store + 'static>(store: Arc<S>) {
     let result = txn2.commit().await;
     assert!(result.is_err(), "Second commit should fail with conflict");
     assert!(
-        matches!(result.unwrap_err(), Error::TxnConflict),
+        result.unwrap_err().is_txn_conflict(),
         "Error should be TxnConflict"
     );
 
@@ -122,7 +122,7 @@ pub async fn test_last_writer_wins_reverse<S: Store + 'static>(store: Arc<S>) {
     let result = txn1.commit().await;
     assert!(result.is_err(), "Second commit should fail with conflict");
     assert!(
-        matches!(result.unwrap_err(), Error::TxnConflict),
+        result.unwrap_err().is_txn_conflict(),
         "Error should be TxnConflict"
     );
 
@@ -191,7 +191,7 @@ pub async fn test_snapshot_isolation_concurrent<S: Store + 'static>(store: Arc<S
     let total_checks = Arc::new(AtomicUsize::new(0));
 
     // Barrier to synchronize start
-    let barrier = Arc::new(tokio::sync::Barrier::new(21)); // 10 readers + 10 writers + 1 main
+    let barrier = Arc::new(regolith::sync::Barrier::new(21)); // 10 readers + 10 writers + 1 main
 
     let mut handles = vec![];
 
@@ -245,7 +245,7 @@ pub async fn test_snapshot_isolation_concurrent<S: Store + 'static>(store: Arc<S
                     .unwrap();
                 match writer.commit().await {
                     Ok(()) => break,
-                    Err(crate::corekv::Error::TxnConflict) => continue,
+                    Err(error) if error.is_txn_conflict() => continue,
                     Err(e) => panic!("Unexpected commit error: {:?}", e),
                 }
             }
@@ -373,7 +373,7 @@ pub async fn test_write_write_isolation<S: Store + 'static>(store: Arc<S>) {
         "Writer2 commit should fail due to conflict on shared_key"
     );
     assert!(
-        matches!(result.unwrap_err(), Error::TxnConflict),
+        result.unwrap_err().is_txn_conflict(),
         "Error should be TxnConflict"
     );
 

@@ -11,6 +11,7 @@ use crate::error::{http_error_from_backend_message, HttpError};
 use crate::handlers::txn_header::txn_id_from_headers;
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
+use crate::request_scope::bound;
 use crate::router::{AppState, NodePermission};
 use schema::CollectionVersion;
 
@@ -31,7 +32,7 @@ pub async fn add_schema(
     require_permission(&state, &identity, NodePermission::CollectionPatch).await?;
 
     if let Some(txn_id) = txn_id_from_headers(&headers)? {
-        let txn_ops = state.require_txn_ops()?;
+        let txn_ops = bound(state.require_txn_ops()?, &identity.context());
         let collections = txn_ops
             .add_schema_in_txn(txn_id, &body)
             .await
@@ -40,7 +41,7 @@ pub async fn add_schema(
         return Ok(Json(collections));
     }
 
-    let schema_ops = state.require_schema()?;
+    let schema_ops = bound(state.require_schema()?, &identity.context());
 
     let collections = schema_ops
         .add_schema(&body)

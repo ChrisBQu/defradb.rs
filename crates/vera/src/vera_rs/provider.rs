@@ -19,9 +19,11 @@ use vera_modules::acp::types::PolicyRecord;
 use super::abi::{IAcp, ACP_ADDRESS};
 use super::bearer;
 use super::client::VeraRsClient;
+#[cfg(test)]
+use super::provider_commands::resolve_registered_or_passthrough_bearer_token;
 use super::provider_commands::{
     encode_archive_object_cmd, encode_delete_relationship_cmd, encode_register_object_cmd,
-    encode_set_relationship_cmd, resolve_registered_or_passthrough_bearer_token,
+    encode_set_relationship_cmd, resolve_registered_or_passthrough_bearer_token_as,
 };
 use super::worker::NativeWorker;
 
@@ -30,7 +32,7 @@ mod submission;
 pub struct VeraRsProvider {
     light_client: Arc<AcpLightClient>,
     client: VeraRsClient,
-    worker: Arc<tokio::sync::Mutex<NativeWorker>>,
+    worker: Arc<regolith::sync::Mutex<NativeWorker>>,
     worker_did: String,
     actor_did: String,
     deployment: u64,
@@ -93,7 +95,7 @@ impl VeraRsProvider {
         let provider = Self {
             light_client,
             client,
-            worker: Arc::new(tokio::sync::Mutex::new(worker)),
+            worker: Arc::new(regolith::sync::Mutex::new(worker)),
             worker_did,
             actor_did,
             deployment,
@@ -205,7 +207,23 @@ impl VeraProvider for VeraRsProvider {
         self.worker_did.clone()
     }
 
+    fn archive_object_on_document_delete(&self) -> bool {
+        // A local document tombstone may still be rejected by another
+        // replica. Archiving the shared ACP object here would revoke grants
+        // before the replicated delete has been authorized.
+        false
+    }
+
     async fn create_bearer_token(&self, did: &str) -> Result<String, ProviderError> {
+        self.create_bearer_token_as(&defra_core::RequestContext::ambient(), did)
+            .await
+    }
+
+    async fn create_bearer_token_as(
+        &self,
+        context: &defra_core::RequestContext,
+        did: &str,
+    ) -> Result<String, ProviderError> {
         if Some(did.to_string()) == self.self_did() {
             return bearer::create_bearer_token(
                 &self.signing_key,
@@ -219,9 +237,12 @@ impl VeraProvider for VeraRsProvider {
             });
         }
 
-        if let Some(token) =
-            resolve_registered_or_passthrough_bearer_token(did, &self.worker_did, self.deployment)?
-        {
+        if let Some(token) = resolve_registered_or_passthrough_bearer_token_as(
+            context,
+            did,
+            &self.worker_did,
+            self.deployment,
+        )? {
             return Ok(token);
         }
 
@@ -544,6 +565,13 @@ impl VeraProvider for VeraRsProvider {
         Ok(Some(decision.id))
     }
 
+    fn decision_state(&self) -> Option<String> {
+        self.light_client
+            .header_chain()
+            .state()
+            .map(|state| format_root(state.module_state_root))
+    }
+
     fn acp_light_client_status(&self) -> Result<AcpLightClientStatus, ProviderError> {
         let sync = self.light_client.header_chain().state();
         let last_invalidation_height = self.light_client_observability.load(Ordering::Relaxed);
@@ -610,10 +638,8 @@ mod tests {
 
     #[test]
     fn resolve_registered_or_passthrough_bearer_token_uses_request_token_for_remote_identity() {
-        let _guard = crate::signing_state_test_guard();
         let did = "did:key:zRemoteVeraRsToken";
         let token = "device.jwt.token".to_string();
-        defra_core::signing::clear_identity_store();
         defra_core::signing::clear_request_bearer_token(did);
 
         store_remote_secp256r1_identity(did);
@@ -626,18 +652,15 @@ mod tests {
         assert_eq!(resolved, token);
 
         defra_core::signing::clear_request_bearer_token(did);
-        defra_core::signing::clear_identity_store();
     }
 
     #[test]
     fn resolve_registered_or_passthrough_bearer_token_builds_local_secp256k1_token() {
-        let _guard = crate::signing_state_test_guard();
         let private_key = crypto::generate_secp256k1().expect("should generate secp256k1 key");
         let raw_identity =
             identity::RawIdentity::from_secp256k1(private_key).expect("identity should build");
         let did = raw_identity.did().expect("did should derive").to_string();
 
-        defra_core::signing::clear_identity_store();
         defra_core::signing::store_identity(
             &did,
             defra_core::signing::SigningConfig {
@@ -668,6 +691,5 @@ mod tests {
         assert_eq!(claims["scope"], "acp:policy");
 
         defra_core::signing::clear_request_bearer_token(&did);
-        defra_core::signing::clear_identity_store();
     }
 }

@@ -1,13 +1,4 @@
-//! Streaming variant of the lensed auto-commit read path.
-//!
-//! Like `lensed::fetcher::stream`, this applies migration per document as it
-//! is pulled from storage (Go's read-through model) instead of after a full
-//! collection read. Write-back stays batched as the eager path batches it
-//! (`process_document_with_bounded_write_back` flushes every
-//! `migration_write_back_batch_size` documents via its own guarded write
-//! transaction), with the partial batch flushed when the stream ends - either
-//! by exhaustion or by [`DocStream::close`], which a consumer that stops early
-//! must call.
+//! Streams transformed documents without writing to storage.
 
 use rapidhash::RapidHashMap;
 
@@ -16,80 +7,49 @@ use document::Document;
 use lens::TargetedHistoryLink;
 use query::doc_stream::DocStream;
 use storage::corekv::{IterOptions, Store};
-use tracing::warn;
 
 use crate::collection::stream::CollectionDocStream;
 use crate::collection::Collection;
+use crate::read::autocommit::AutoCommitDocStream;
 use crate::txn::DbTxn;
 
-use super::migration::MigrationWriteBack;
 use super::LensedAutoCommitFetcher;
 
 /// Pulls documents from storage and applies the auto-commit fetcher's
-/// per-document, batched-write-back migration to each one as it is yielded.
+/// per-document migration to each one as it is yielded.
 ///
-/// Owns its own read-only transaction (auto-commit fetchers open one per
-/// operation): `release_read_txn` drops the inner stream first so its
-/// `NamespaceView`s give up their `Arc<SharedTxn>` clones, then discards the
-/// transaction - `BasicTxn::discard` requires sole ownership of that Arc.
-///
-/// `txn` is wrapped in a `std::sync::Mutex` purely so `DbTxn`'s non-`Sync`
-/// callback storage doesn't stop this struct satisfying `DocStream`'s
-/// `MaybeSendSync` bound; every access goes through `&mut self` via
-/// `get_mut`, so it never actually locks.
+/// The source is an [`AutoCommitDocStream`], which owns the read-only
+/// transaction auto-commit fetchers open per operation and releases it when
+/// the source is exhausted, closed or dropped.
 pub struct LensedAutoCommitDocStream<S: Store + 'static> {
-    inner: Option<Box<dyn DocStream>>,
-    txn: std::sync::Mutex<Option<DbTxn<S>>>,
+    source: AutoCommitDocStream<S>,
     fetcher: LensedAutoCommitFetcher<S>,
     collection: Collection,
-    migration_generation: u64,
     has_migrations: bool,
     preloaded_history: Option<RapidHashMap<String, TargetedHistoryLink>>,
-    write_backs: Vec<MigrationWriteBack>,
 }
 
 impl<S: Store + 'static> LensedAutoCommitDocStream<S> {
     /// Wrap an inner stream, optionally holding the read transaction it owns.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         inner: Box<dyn DocStream>,
         txn: Option<DbTxn<S>>,
         fetcher: LensedAutoCommitFetcher<S>,
         collection: Collection,
-        migration_generation: u64,
         has_migrations: bool,
         preloaded_history: Option<RapidHashMap<String, TargetedHistoryLink>>,
-        write_backs: Vec<MigrationWriteBack>,
     ) -> Self {
+        let source = match txn {
+            Some(txn) => AutoCommitDocStream::new(inner, txn),
+            None => AutoCommitDocStream::without_txn(inner),
+        };
         Self {
-            inner: Some(inner),
-            txn: std::sync::Mutex::new(txn),
+            source,
             fetcher,
             collection,
-            migration_generation,
             has_migrations,
             preloaded_history,
-            write_backs,
         }
-    }
-
-    fn release_read_txn(&mut self) {
-        self.inner = None;
-        let slot = self
-            .txn
-            .get_mut()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(txn) = slot.take() {
-            if let Err(e) = txn.discard() {
-                warn!(error = %e, "failed to discard lensed auto-commit stream transaction");
-            }
-        }
-    }
-}
-
-impl<S: Store + 'static> Drop for LensedAutoCommitDocStream<S> {
-    fn drop(&mut self) {
-        self.release_read_txn();
     }
 }
 
@@ -97,64 +57,25 @@ impl<S: Store + 'static> Drop for LensedAutoCommitDocStream<S> {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S: Store + 'static> DocStream for LensedAutoCommitDocStream<S> {
     async fn next(&mut self) -> query::error::Result<Option<(Document, bool)>> {
-        let pulled = match self.inner.as_mut() {
-            Some(inner) => inner.next().await?,
-            None => None,
-        };
-
-        let Some((doc, is_deleted)) = pulled else {
-            self.close().await?;
+        let Some((doc, is_deleted)) = self.source.next().await? else {
             return Ok(None);
         };
 
         let processed = self
             .fetcher
-            .process_document_with_bounded_write_back(
+            .process_document(
                 doc,
                 &self.collection,
-                self.migration_generation,
                 self.has_migrations,
                 &self.preloaded_history,
-                &mut self.write_backs,
             )
             .await?;
-        Ok(Some((processed, is_deleted)))
+        Ok(Some((processed.document, is_deleted)))
     }
 
-    /// Close the inner stream, release the read transaction, then flush
-    /// whatever partial write-back batch remains, matching the eager path's
-    /// final `persist_migrated_documents` call after its loop. Called both on
-    /// exhaustion and by consumers that stop pulling early; taking the buffer
-    /// first makes a second call a no-op.
-    ///
-    /// The write-back flush runs even if closing the inner stream errored,
-    /// since it persists migrations already computed from documents already
-    /// read - discarding that work on a cleanup failure would be worse than
-    /// surfacing the close error afterward. If both the close and the flush
-    /// fail, neither error is dropped: they are joined into one, matching
-    /// Go's `errors.Join` in this same situation (`versioned.go`, `indexer.go`).
+    /// Close the inner stream and release its read snapshot.
     async fn close(&mut self) -> query::error::Result<()> {
-        let write_backs = std::mem::take(&mut self.write_backs);
-        let closed = match self.inner.take() {
-            Some(mut inner) => inner.close().await,
-            None => Ok(()),
-        };
-        self.release_read_txn();
-        let persisted = self
-            .fetcher
-            .persist_migrated_documents(&self.collection, write_backs)
-            .await;
-        match (closed, persisted) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Err(e), Ok(())) => Err(e),
-            (Ok(()), Err(e)) => Err(e),
-            (Err(close_err), Err(persist_err)) => {
-                Err(query::error::QueryError::execution(format!(
-                    "failed to close inner stream: {}; failed to persist migrated documents: {}",
-                    close_err, persist_err
-                )))
-            }
-        }
+        self.source.close().await
     }
 }
 
@@ -170,7 +91,7 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
             .map_err(|e| query::error::QueryError::execution(format!("db error: {}", e)))?
             .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
 
-        let (migration_generation, has_migrations, preloaded_history) =
+        let (_, has_migrations, preloaded_history) =
             self.load_migration_context(&collection).await?;
 
         let txn = self.db.new_txn(true).await.map_err(|e| {
@@ -204,16 +125,14 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
             show_deleted,
         );
 
-        Ok(Box::new(LensedAutoCommitDocStream {
-            inner: Some(Box::new(inner)),
-            txn: std::sync::Mutex::new(Some(txn)),
-            fetcher: self.clone_for_stream(),
+        Ok(Box::new(LensedAutoCommitDocStream::new(
+            Box::new(inner),
+            Some(txn),
+            self.clone_for_stream(),
             collection,
-            migration_generation,
             has_migrations,
             preloaded_history,
-            write_backs: Vec::with_capacity(self.db.options().migration_write_back_batch_size()),
-        }))
+        )))
     }
 }
 
@@ -233,7 +152,7 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
             .map_err(|e| query::error::QueryError::execution(format!("db error: {}", e)))?
             .ok_or_else(|| query::error::QueryError::collection_not_found(collection_name))?;
 
-        let (migration_generation, has_migrations, preloaded_history) =
+        let (_, has_migrations, preloaded_history) =
             self.load_migration_context(&collection).await?;
 
         let txn = self.db.new_txn(true).await.map_err(|e| {
@@ -249,21 +168,19 @@ impl<S: Store + 'static> LensedAutoCommitFetcher<S> {
             query::error::QueryError::execution(format!("failed to get systemstore: {}", e))
         })?;
 
-        Ok(Box::new(LensedAutoCommitDocStream {
-            inner: Some(Box::new(crate::collection::stream::ShortIdDocStream::new(
+        Ok(Box::new(LensedAutoCommitDocStream::new(
+            Box::new(crate::collection::stream::ShortIdDocStream::new(
                 collection.clone(),
                 datastore,
                 systemstore,
                 doc_short_ids.to_vec(),
                 show_deleted,
-            ))),
-            txn: std::sync::Mutex::new(Some(txn)),
-            fetcher: self.clone_for_stream(),
+            )),
+            Some(txn),
+            self.clone_for_stream(),
             collection,
-            migration_generation,
             has_migrations,
             preloaded_history,
-            write_backs: Vec::with_capacity(self.db.options().migration_write_back_batch_size()),
-        }))
+        )))
     }
 }

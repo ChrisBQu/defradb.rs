@@ -122,8 +122,37 @@ impl IndexScanResult {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait DocFetcher: MaybeSendSync {
+    async fn check_node_permission(
+        &self,
+        _identity: &identity::Did,
+        _permission: acp::nac::NodePermission,
+    ) -> Result<Option<bool>> {
+        Ok(None)
+    }
+
+    /// Use the row snapshot for local authorization; remote providers remain external.
+    async fn scoped_acp(
+        &self,
+        provider: std::sync::Arc<dyn acp::DocumentACP>,
+    ) -> crate::error::Result<std::sync::Arc<dyn acp::DocumentACP>> {
+        Ok(provider)
+    }
+
     /// Get all documents from a collection (excludes deleted documents).
     async fn get_all(&self, collection_name: &str) -> Result<Vec<Document>>;
+
+    /// Get all documents from a collection for an update whose decision rests
+    /// only on `fields` (see [`crate::update_parts`]): a document the
+    /// transaction later writes is validated over those parts alone, so a
+    /// concurrent write of another field does not conflict with it. A fetcher
+    /// that cannot narrow the check reads as [`Self::get_all`].
+    async fn get_all_projected(
+        &self,
+        collection_name: &str,
+        _fields: &rapidhash::RapidHashSet<String>,
+    ) -> Result<Vec<Document>> {
+        self.get_all(collection_name).await
+    }
 
     /// Get all documents from a collection with their deletion status.
     ///
@@ -189,6 +218,21 @@ pub trait DocFetcher: MaybeSendSync {
         doc_ids: &[String],
     ) -> Result<FetchByIdsResult>;
 
+    /// Get complete documents by ID while validating only the named fields.
+    ///
+    /// Implementations that cannot provide an exact projected read return
+    /// `None`; callers must then use [`Self::get_by_ids`] and retain full-read
+    /// validation. Projection narrows validation, not materialization: callers
+    /// still need the complete snapshot value for schema checks and events.
+    async fn get_by_ids_projected(
+        &self,
+        _collection_name: &str,
+        _doc_ids: &[String],
+        _fields: &rapidhash::RapidHashSet<String>,
+    ) -> Result<Option<FetchByIdsResult>> {
+        Ok(None)
+    }
+
     /// Get documents by a field value (for FK lookups).
     ///
     /// This method is optimized for type joins - it looks up documents where
@@ -211,6 +255,8 @@ pub trait DocFetcher: MaybeSendSync {
         value: &str,
     ) -> Result<Vec<Document>>;
 
+    /// Read committed arrivals in local commit order. A transaction's own
+    /// creates acquire cursors only at commit and are absent from this result.
     async fn get_document_arrivals(
         &self,
         options: &DocumentArrivalOptions,
@@ -285,6 +331,12 @@ pub trait DocFetcher: MaybeSendSync {
     /// Returns true if `get_by_index_scan` is implemented and functional.
     fn supports_index_queries(&self) -> bool {
         false
+    }
+
+    /// Whether stored index entries describe the documents this fetcher returns.
+    /// Read-time lens transforms may change indexed values without persisting them.
+    async fn indexes_match_documents(&self, _collection_name: &str) -> Result<bool> {
+        Ok(true)
     }
 
     /// Estimate the index entries `params` would visit, bounded by `cap`.

@@ -46,10 +46,10 @@ impl<S: VectorNodeStore> Hnsw<S> {
         }
         let ef = ef_search.max(k);
 
-        let Some(meta) = self.store.get_meta().await? else {
+        let Some(meta) = self.store.get_meta_advisory().await? else {
             return Ok(Vec::new());
         };
-        let Some(entry) = self.store.get_node(meta.entry_point).await? else {
+        let Some(entry) = self.store.get_node_advisory(meta.entry_point).await? else {
             return Ok(Vec::new());
         };
 
@@ -131,7 +131,7 @@ impl<S: VectorNodeStore> Hnsw<S> {
             if !visited.insert(entry.id) {
                 continue;
             }
-            let Some(node) = self.store.get_node(entry.id).await? else {
+            let Some(node) = self.store.get_node_advisory(entry.id).await? else {
                 continue;
             };
             let admitted = !node.deleted && admit.admits(node.id);
@@ -159,7 +159,7 @@ impl<S: VectorNodeStore> Hnsw<S> {
                 break;
             };
 
-            let Some(node) = self.store.get_node(nearest.id).await? else {
+            let Some(node) = self.store.get_node_advisory(nearest.id).await? else {
                 continue;
             };
 
@@ -167,7 +167,7 @@ impl<S: VectorNodeStore> Hnsw<S> {
                 if !visited.insert(neighbor_id) {
                     continue;
                 }
-                let Some(neighbor) = self.store.get_node(neighbor_id).await? else {
+                let Some(neighbor) = self.store.get_node_advisory(neighbor_id).await? else {
                     continue;
                 };
                 // Rejected nodes are still routes, exactly as tombstones are.

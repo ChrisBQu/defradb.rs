@@ -11,6 +11,8 @@ use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criteri
 use storage::stores::Peerstore;
 use storage::RegolithStore;
 
+mod common;
+
 const DOCUMENT_COUNTS: [usize; 3] = [1, 10, 100];
 const REPLICATOR_COUNTS: [usize; 2] = [1, 4];
 

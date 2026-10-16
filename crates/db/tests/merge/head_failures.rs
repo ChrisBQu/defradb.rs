@@ -6,38 +6,57 @@ use defra_core::block::{
     generate_cid_from_bytes, Block, CompositeDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload,
 };
 use defra_core::merge::{BlockMetadata, MergeBlock, MergeHandler};
-use std::sync::{Arc, Mutex};
+use kovan::Atom;
+use std::sync::Arc;
 use storage::corekv::{
-    private::Sealed, AsyncTxnCallback, IterOptions, Iterator, Reader, Result, Store, Txn,
-    TxnCallback, Writer,
+    intercept_retry_writes, private::Sealed, IterOptions, Iterator, Reader, Result, RetryAttempt,
+    RetryAttemptError, RetryAttemptValue, RetryOptions, RetryWriteInterceptor, Store, Txn, Writer,
 };
 use storage::RegolithStore;
 
-/// One headstore write, identified by the CID it records, that the store refuses.
+mod collection;
+
+/// One headstore write, identified by the CID it records, that the store
+/// refuses. A head set is written by one merge per set, so the points that
+/// name a document's head, its parent or a collection's head or parent refuse
+/// the merge that carries that CID.
 #[derive(Clone, Copy, Debug)]
 enum FailPoint {
     SetHead(Cid),
-    DeleteHead(Cid),
+    SupersedeHead(Cid),
     SetPriority(Cid),
+    /// The head set merge that adds a collection block.
+    CollectionHead(Cid),
+    /// The head set merge that supersedes a parent for this collection block.
+    CollectionSupersede(Cid),
 }
 
 impl FailPoint {
-    fn refuses(self, delete: bool, key: &[u8]) -> bool {
+    fn refuses(self, key: &[u8], value: Option<&[u8]>) -> bool {
         let Some(key) = key.strip_prefix(b"h") else {
             return false;
         };
-        let head = storage::keys::headstore::HeadstoreDocKey::parse(key);
+        let names = |cid: Cid| {
+            let text = cid.to_string();
+            value.is_some_and(|value| {
+                value
+                    .windows(text.len())
+                    .any(|window| window == text.as_bytes())
+            })
+        };
         match self {
-            Self::SetHead(cid) => !delete && head.is_some_and(|head| head.cid == cid),
-            Self::DeleteHead(cid) => delete && head.is_some_and(|head| head.cid == cid),
+            Self::SetHead(cid) | Self::SupersedeHead(cid) => key.starts_with(b"/hd/") && names(cid),
             Self::SetPriority(cid) => {
-                !delete && key.starts_with(b"/p/") && key.ends_with(&cid.to_bytes())
+                value.is_some() && key.starts_with(b"/p/") && key.ends_with(&cid.to_bytes())
+            }
+            Self::CollectionHead(cid) | Self::CollectionSupersede(cid) => {
+                key.starts_with(b"/hc/") && names(cid)
             }
         }
     }
 }
 
-type FailSwitch = Arc<Mutex<Vec<FailPoint>>>;
+type FailSwitch = Arc<Atom<Vec<FailPoint>>>;
 
 struct FailingHeadStore {
     inner: Arc<RegolithStore>,
@@ -48,11 +67,33 @@ impl Sealed for FailingHeadStore {}
 
 #[async_trait]
 impl Store for FailingHeadStore {
+    async fn allocate(&self, key: &[u8], count: u64) -> storage::Result<std::ops::Range<u64>> {
+        self.inner.allocate(key, count).await
+    }
+
     async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>> {
         Ok(Box::new(FailingHeadTxn {
             inner: self.inner.new_txn(readonly).await?,
             fail: self.fail.clone(),
         }))
+    }
+    async fn transact_retry(
+        &self,
+        options: RetryOptions,
+        attempt: RetryAttempt,
+    ) -> std::result::Result<RetryAttemptValue, RetryAttemptError> {
+        let fail = self.fail.clone();
+        let interceptor: RetryWriteInterceptor = Arc::new(move |key, value| {
+            match fail.load().iter().find(|point| point.refuses(key, value)) {
+                Some(point) => Err(storage::Error::Other(format!(
+                    "injected head write failure at {point:?}"
+                ))),
+                None => Ok(()),
+            }
+        });
+        self.inner
+            .transact_retry(options, intercept_retry_writes(attempt, interceptor))
+            .await
     }
     async fn close(&self) -> Result<()> {
         self.inner.close().await
@@ -66,13 +107,12 @@ struct FailingHeadTxn {
 impl Sealed for FailingHeadTxn {}
 
 impl FailingHeadTxn {
-    fn check(&self, delete: bool, key: &[u8]) -> Result<()> {
+    fn check(&self, key: &[u8], value: Option<&[u8]>) -> Result<()> {
         match self
             .fail
-            .lock()
-            .unwrap()
+            .load()
             .iter()
-            .find(|point| point.refuses(delete, key))
+            .find(|point| point.refuses(key, value))
         {
             Some(point) => Err(storage::Error::Other(format!(
                 "injected head write failure at {point:?}"
@@ -90,9 +130,7 @@ impl Reader for FailingHeadTxn {
     async fn has(&self, key: &[u8]) -> Result<bool> {
         self.inner.has(key).await
     }
-    async fn has_for_update(&self, key: &[u8]) -> Result<bool> {
-        self.inner.has_for_update(key).await
-    }
+
     async fn get_size(&self, key: &[u8]) -> Result<Option<usize>> {
         self.inner.get_size(key).await
     }
@@ -103,13 +141,27 @@ impl Reader for FailingHeadTxn {
 
 #[async_trait]
 impl Writer for FailingHeadTxn {
-    async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
-        self.check(false, key)?;
-        self.inner.set(key, value).await
+    async fn merge_shared(&self, key: &[u8], operand: &[u8]) -> Result<()> {
+        self.check(key, Some(operand))?;
+        self.inner.merge_shared(key, operand).await
     }
-    async fn delete(&mut self, key: &[u8]) -> Result<()> {
-        self.check(true, key)?;
-        self.inner.delete(key).await
+
+    async fn append_shared(
+        &self,
+        log: &storage::corekv::AppendLog,
+        entry: &[u8],
+        once_key: Option<&[u8]>,
+    ) -> storage::Result<()> {
+        self.inner.append_shared(log, entry, once_key).await
+    }
+
+    async fn set_shared(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        self.check(key, Some(value))?;
+        self.inner.set_shared(key, value).await
+    }
+    async fn delete_shared(&self, key: &[u8]) -> Result<()> {
+        self.check(key, None)?;
+        self.inner.delete_shared(key).await
     }
 }
 
@@ -121,23 +173,16 @@ impl Txn for FailingHeadTxn {
     fn discard(self: Box<Self>) {
         self.inner.discard()
     }
-    fn on_success(&mut self, callback: TxnCallback) {
-        self.inner.on_success(callback)
+    fn on_commit(&mut self, callback: storage::corekv::OnCommit) -> Result<()> {
+        self.inner.on_commit(callback)
     }
-    fn on_success_async(&mut self, callback: AsyncTxnCallback) {
-        self.inner.on_success_async(callback)
+
+    fn on_abort(&mut self, callback: storage::corekv::OnAbort) {
+        self.inner.on_abort(callback)
     }
-    fn on_error(&mut self, callback: TxnCallback) {
-        self.inner.on_error(callback)
-    }
-    fn on_error_async(&mut self, callback: AsyncTxnCallback) {
-        self.inner.on_error_async(callback)
-    }
-    fn on_discard(&mut self, callback: TxnCallback) {
-        self.inner.on_discard(callback)
-    }
-    fn on_discard_async(&mut self, callback: AsyncTxnCallback) {
-        self.inner.on_discard_async(callback)
+
+    fn before_commit(&mut self, callback: storage::corekv::BeforeCommit) {
+        self.inner.before_commit(callback)
     }
     fn as_any(&self) -> &dyn std::any::Any {
         self
@@ -188,7 +233,7 @@ async fn fixture() -> Fixture {
 
 impl Fixture {
     fn fail_at(&self, points: &[FailPoint]) {
-        *self.fail.lock().unwrap() = points.to_vec();
+        self.fail.store(points.to_vec());
     }
 
     async fn merge(&self, block: &MergeBlock) -> std::result::Result<(), String> {
@@ -349,8 +394,8 @@ async fn assert_update_rolls_back(point: impl FnOnce(&Update) -> FailPoint) {
 }
 
 #[tokio::test]
-async fn composite_parent_delete_failure_aborts_update_merge() {
-    assert_update_rolls_back(|update| FailPoint::DeleteHead(update.genesis)).await;
+async fn composite_parent_marker_failure_aborts_update_merge() {
+    assert_update_rolls_back(|update| FailPoint::SupersedeHead(update.genesis)).await;
 }
 
 #[tokio::test]
@@ -364,8 +409,8 @@ async fn composite_priority_write_failure_aborts_update_merge() {
 }
 
 #[tokio::test]
-async fn field_parent_delete_failure_aborts_update_merge() {
-    assert_update_rolls_back(|update| FailPoint::DeleteHead(update.genesis_name)).await;
+async fn field_parent_marker_failure_aborts_update_merge() {
+    assert_update_rolls_back(|update| FailPoint::SupersedeHead(update.genesis_name)).await;
 }
 
 #[tokio::test]

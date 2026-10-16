@@ -1,60 +1,4 @@
-//! Identity validation and storage helpers for FFI operations.
-
-use std::ffi::CString;
-use std::sync::Arc;
-
-use crate::types::DefraRemoteSignCallback;
-
-pub(crate) const MAX_REMOTE_SIGNATURE_LEN: usize = 512;
-
-pub(crate) struct FfiRemoteSigner {
-    pub did: CString,
-    pub key_type: CString,
-    pub signer_handle: usize,
-    pub callback: DefraRemoteSignCallback,
-}
-
-impl defra_core::signing::RemoteSigner for FfiRemoteSigner {
-    fn sign_sync(
-        &self,
-        data: &[u8],
-        _authorization: Option<&defra_core::signing::SigningAuthorization>,
-    ) -> Result<Vec<u8>, String> {
-        let mut signature = vec![0u8; MAX_REMOTE_SIGNATURE_LEN];
-        let mut signature_len = 0usize;
-        let status = unsafe {
-            (self.callback)(
-                self.signer_handle,
-                self.did.as_ptr(),
-                self.key_type.as_ptr(),
-                data.as_ptr(),
-                data.len(),
-                signature.as_mut_ptr(),
-                signature.len(),
-                &mut signature_len,
-            )
-        };
-
-        if status != 0 {
-            return Err(format!(
-                "remote signer callback failed with status {}",
-                status
-            ));
-        }
-        if signature_len == 0 {
-            return Err("remote signer callback returned an empty signature".to_string());
-        }
-        if signature_len > signature.len() {
-            return Err(format!(
-                "remote signer callback reported {} bytes, exceeding the {} byte limit",
-                signature_len, MAX_REMOTE_SIGNATURE_LEN
-            ));
-        }
-
-        signature.truncate(signature_len);
-        Ok(signature)
-    }
-}
+//! Key type parsing and public key validation for FFI identity operations.
 
 pub(crate) fn parse_signing_key_type(
     key_type: &str,
@@ -107,36 +51,4 @@ pub(crate) fn validate_public_key_bytes(
     }
 
     Ok(())
-}
-
-pub(crate) fn store_remote_identity(
-    did: String,
-    public_key_bytes: Vec<u8>,
-    public_key_hex: String,
-    key_type: defra_core::signing::SigningKeyType,
-    signer_handle: usize,
-    callback: DefraRemoteSignCallback,
-) -> Result<String, String> {
-    let signer = Arc::new(FfiRemoteSigner {
-        did: CString::new(did.clone())
-            .map_err(|_| "did contains an embedded null byte".to_string())?,
-        key_type: CString::new(key_type.to_string())
-            .map_err(|_| "key_type contains an embedded null byte".to_string())?,
-        signer_handle,
-        callback,
-    });
-
-    defra_core::signing::store_identity(
-        &did,
-        defra_core::signing::SigningConfig {
-            key_type,
-            private_key_bytes: Vec::new(),
-            public_key_bytes,
-            public_key_hex,
-            remote_signer: Some(signer),
-            signing_authorization: None,
-        },
-    );
-
-    Ok("{}".to_string())
 }

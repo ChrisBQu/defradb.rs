@@ -6,14 +6,16 @@
 //! it, as Go does (`cbindings/node_new.go` sets it independently of signing).
 #![cfg(feature = "libp2p")]
 
+#[path = "support/outcome.rs"]
+mod outcome;
 mod support;
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context, Result};
 use embedded::{EmbeddedNodeConfig, Libp2pConfig, SigningConfig, TransportConfig};
 use identity::Did;
+use outcome::Result;
 use tokio::time::{sleep, Instant};
 
 use support::{add_policy, add_schema, grant_collection_reader, new_identity, wait_for_fred, Node};
@@ -68,27 +70,18 @@ async fn scenario(
     let collection_id = node0
         .database
         .get_collection("Users")?
-        .context("Users collection missing on node 0")?
+        .expect("Users collection missing on node 0")
         .collection_id()
         .to_string();
     grant_collection_reader(node0, jack, node1_id, &policy_id, &collection_id).await?;
     grant_collection_reader(node1, jack, node1_id, &policy_id, &collection_id).await?;
 
-    let p2p0 = node0.p2p().context("node 0 has no p2p")?;
-    let p2p1 = node1.p2p().context("node 1 has no p2p")?;
+    let p2p0 = node0.p2p().expect("node 0 has no p2p");
+    let p2p1 = node1.p2p().expect("node 1 has no p2p");
     let addr0 = wait_for_listen_addr(p2p0).await?;
-    p2p1.ops()
-        .connect_peer(&addr0)
-        .await
-        .map_err(|e| anyhow!(e))?;
-    p2p0.ops()
-        .add_collections(vec!["Users".into()])
-        .await
-        .map_err(|e| anyhow!(e))?;
-    p2p1.ops()
-        .add_collections(vec!["Users".into()])
-        .await
-        .map_err(|e| anyhow!(e))?;
+    p2p1.ops().connect_peer(&addr0).await?;
+    p2p0.ops().add_collections(vec!["Users".into()]).await?;
+    p2p1.ops().add_collections(vec!["Users".into()]).await?;
 
     let encrypt_arg = if encrypt { ", encrypt: true" } else { "" };
     let mutation = format!(
@@ -96,7 +89,7 @@ async fn scenario(
     );
     let response = node0.execute(&mutation).await;
     if response.has_errors() {
-        bail!("create on node 0 failed: {:?}", response.errors);
+        panic!("create on node 0 failed: {:?}", response.errors);
     }
 
     wait_for_fred(node1, jack).await
@@ -104,24 +97,23 @@ async fn scenario(
 
 async fn build_node(signing: SigningConfig) -> Result<Node> {
     let config = EmbeddedNodeConfig {
+        edge: Some(edge::testing::edge()),
         transport: TransportConfig::Libp2p(Libp2pConfig {
             listen_addr: "/ip4/127.0.0.1/tcp/0".to_string(),
         }),
         signing,
         ..Default::default()
     };
-    embedded::build_with_store(Arc::new(storage::RegolithStore::in_memory()?), config).await
+    embedded::build_with_store(Arc::new(storage::RegolithStore::in_memory()?), config)
+        .await
+        .map_err(Into::into)
 }
 
 async fn wait_for_listen_addr(system: &embedded::ManagedP2PSystem) -> Result<String> {
-    let peer_id = system.ops().local_peer_id().await.map_err(|e| anyhow!(e))?;
+    let peer_id = system.ops().local_peer_id().await?;
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let addrs = system
-            .ops()
-            .listen_addresses()
-            .await
-            .map_err(|e| anyhow!(e))?;
+        let addrs = system.ops().listen_addresses().await?;
         if let Some(addr) = addrs
             .into_iter()
             .find(|addr| addr.starts_with("/ip4/127.0.0.1/tcp/"))
@@ -129,7 +121,7 @@ async fn wait_for_listen_addr(system: &embedded::ManagedP2PSystem) -> Result<Str
             return Ok(format!("{addr}/p2p/{peer_id}"));
         }
         if Instant::now() >= deadline {
-            bail!("timed out waiting for a libp2p listen address");
+            panic!("timed out waiting for a libp2p listen address");
         }
         sleep(Duration::from_millis(100)).await;
     }

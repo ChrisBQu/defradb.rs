@@ -1,4 +1,5 @@
 use super::*;
+use crate::block::heads::document as doc_heads;
 
 /// The `Encryption` link a new block should carry forward, read off the
 /// previous block, when the write brings no config of its own.
@@ -22,7 +23,7 @@ async fn inherited_encryption_cid(
 ) -> Result<Option<Cid>, String> {
     for head in heads {
         let block_bytes = blockstore
-            .get(&head.to_bytes())
+            .get(&cid_bytes(head))
             .await
             .map_err(|e| format!("Failed to read previous block {}: {}", head, e))?
             .ok_or_else(|| format!("Previous block {} not found", head))?;
@@ -45,8 +46,38 @@ async fn inherited_encryption_cid(
 async fn kms_resolved_key(
     kms: Option<&std::sync::Arc<dyn kms::KmsService>>,
     enc_cid: Cid,
-) -> Result<Option<([u8; 32], Cid)>, String> {
+    prepared_inputs: Option<&query::prepared::PreparedInputMemo>,
+) -> Result<Option<([u8; 32], Cid)>, BuildError> {
     let kms_svc = kms.ok_or_else(|| format!("Encryption block {} not found", enc_cid))?;
+    if let Some(inputs) = prepared_inputs {
+        let request = crate::write::prepare::kms_input_request(
+            crate::write::prepare::PreparedKmsOperation::Get {
+                cid: enc_cid.to_string(),
+            },
+        );
+        let Some(response) = inputs.get(&request) else {
+            return Err(BuildError::NeedsInput(request));
+        };
+        let response: crate::write::prepare::PreparedKmsResponse =
+            serde_json::from_slice(&response).map_err(|error| {
+                BuildError::Message(format!("invalid cached KMS key response: {error}"))
+            })?;
+        let returned_cid = Cid::try_from(response.cid.as_str()).map_err(|error| {
+            BuildError::Message(format!("invalid CID in cached KMS key response: {error}"))
+        })?;
+        let key: [u8; 32] = response.key.try_into().map_err(|key: Vec<u8>| {
+            BuildError::Message(format!(
+                "KMS returned a {}-byte key for {returned_cid}, expected 32",
+                key.len()
+            ))
+        })?;
+        if returned_cid != enc_cid {
+            return Err(BuildError::Message(format!(
+                "KMS returned key for {returned_cid}, expected {enc_cid}"
+            )));
+        }
+        return Ok(Some((key, enc_cid)));
+    }
     let key = kms_svc
         .get_keys(&kms::RequestContext::anonymous(), &[enc_cid])
         .await
@@ -70,7 +101,8 @@ async fn inherited_encryption(
     blockstore: &NamespaceView,
     heads: &[Cid],
     kms: Option<&std::sync::Arc<dyn kms::KmsService>>,
-) -> Result<Option<([u8; 32], Cid)>, String> {
+    prepared_inputs: Option<&query::prepared::PreparedInputMemo>,
+) -> Result<Option<([u8; 32], Cid)>, BuildError> {
     let Some(enc_cid) = inherited_encryption_cid(blockstore, heads).await? else {
         return Ok(None);
     };
@@ -79,7 +111,7 @@ async fn inherited_encryption(
     // encstore while locally-written ones go to the blockstore. Mirrors the
     // merge decrypt path (`db-merge/src/merge_handler/encryption.rs`) and
     // `versioned_fetcher`.
-    let enc_key = enc_cid.to_bytes();
+    let enc_key = cid_bytes(&enc_cid);
     let enc_bytes = match blockstore
         .sibling(storage::namespace::Namespace::Encstore)
         .get(&enc_key)
@@ -97,7 +129,7 @@ async fn inherited_encryption(
             // block in its own `KeyStore`; nothing requires that store to be
             // either of these namespaces. Ask it for the key rather than
             // assuming the aliasing today's wiring happens to give us.
-            None => return kms_resolved_key(kms, enc_cid).await,
+            None => return kms_resolved_key(kms, enc_cid, prepared_inputs).await,
         },
     };
     let enc_block = Encryption::from_dag_cbor(&enc_bytes)
@@ -113,11 +145,36 @@ async fn inherited_encryption(
     Ok(Some((key, enc_cid)))
 }
 
+pub(crate) async fn inherited_encryption_policy(
+    blockstore: &NamespaceView,
+    headstore: &NamespaceView,
+    identity: DocStorageIdentity,
+    fields: &[String],
+) -> Result<(bool, rapidhash::RapidHashSet<String>), String> {
+    let snapshot = DocHeadsSnapshot::load(headstore, identity.doc_short_id).await?;
+    let heads = snapshot.field_heads("C");
+    let encrypt_doc = inherited_encryption_cid(blockstore, &heads)
+        .await?
+        .is_some();
+    let mut encrypted_fields = rapidhash::RapidHashSet::default();
+    for field in fields {
+        let heads = snapshot.field_heads(field);
+        if inherited_encryption_cid(blockstore, &heads)
+            .await?
+            .is_some()
+        {
+            encrypted_fields.insert(field.clone());
+        }
+    }
+    Ok((encrypt_doc, encrypted_fields))
+}
+
 /// Mint a fresh key for a field, seal its delta with it, and persist the
 /// `Encryption` block the new block will link to.
 ///
 /// Shared by the explicit-config path and the document-policy path so both
 /// route through the KMS whenever one is configured.
+#[allow(clippy::too_many_arguments)]
 async fn encrypt_with_new_key(
     blockstore: &NamespaceView,
     kms: Option<&std::sync::Arc<dyn kms::KmsService>>,
@@ -125,22 +182,59 @@ async fn encrypt_with_new_key(
     field_name: &str,
     key_field_name: Option<&str>,
     value_bytes: &[u8],
-) -> Result<(Vec<u8>, Cid), String> {
+    prepared: Option<&document::WritePreparation>,
+    prepared_inputs: Option<&query::prepared::PreparedInputMemo>,
+) -> Result<(Vec<u8>, Cid), BuildError> {
+    if let Some(prepared) = prepared {
+        if let Some((cid, key)) = prepared.key(field_name) {
+            if prepared.key_scope_matches(field_name, key_field_name) {
+                return Ok((encrypt_retry_delta(value_bytes, key, prepared_inputs)?, cid));
+            }
+        }
+        if (prepared.requires_kms_keys() || kms.is_some()) && prepared_inputs.is_none() {
+            return Err(format!(
+                "encryption key for field {field_name} was not prepared for the current encryption context"
+            )
+            .into());
+        }
+    }
     if let Some(kms_svc) = kms {
         // KMS path: the KMS generates + persists the Encryption block (in its
         // KeyStore) and returns the CID + plain key for us to encrypt the field
         // delta with. The scope is keyed by the node-local DocRef: the public
         // DocID is not yet known on the create path.
-        let scope = kms::KeyScope::Document {
-            doc_id: hex::encode(doc_ref_bytes),
-            field: key_field_name.map(str::to_owned),
+        let doc_id = hex::encode(doc_ref_bytes);
+        let field = key_field_name.map(str::to_owned);
+        let (enc_cid, key) = if let Some(inputs) = prepared_inputs {
+            let request = crate::write::prepare::kms_input_request(
+                crate::write::prepare::PreparedKmsOperation::Generate { doc_id, field },
+            );
+            let Some(response) = inputs.get(&request) else {
+                return Err(BuildError::NeedsInput(request));
+            };
+            let response: crate::write::prepare::PreparedKmsResponse =
+                serde_json::from_slice(&response).map_err(|error| {
+                    BuildError::Message(format!("invalid cached KMS key response: {error}"))
+                })?;
+            let enc_cid = Cid::try_from(response.cid.as_str()).map_err(|error| {
+                BuildError::Message(format!("invalid CID in cached KMS key response: {error}"))
+            })?;
+            let key: [u8; 32] = response.key.try_into().map_err(|key: Vec<u8>| {
+                BuildError::Message(format!(
+                    "KMS returned a {}-byte key for {enc_cid}, expected 32",
+                    key.len()
+                ))
+            })?;
+            (enc_cid, key)
+        } else {
+            let scope = kms::KeyScope::Document { doc_id, field };
+            let ctx = kms::RequestContext::anonymous();
+            kms_svc
+                .generate_key(&ctx, scope)
+                .await
+                .map_err(|e| BuildError::Message(format!("kms generate_key: {e}")))?
         };
-        let ctx = kms::RequestContext::anonymous();
-        let (enc_cid, key) = kms_svc
-            .generate_key(&ctx, scope)
-            .await
-            .map_err(|e| format!("kms generate_key: {e}"))?;
-        let encrypted = encrypt_delta(value_bytes, &key)?;
+        let encrypted = encrypt_retry_delta(value_bytes, &key, prepared_inputs)?;
         tracing::debug!(
             field = %field_name,
             ciphertext_len = encrypted.len(),
@@ -150,8 +244,8 @@ async fn encrypt_with_new_key(
     }
 
     // Legacy path: inline key generation + direct block store.
-    let key = defra_core::encryption::generate_encryption_key_for(doc_ref_bytes, key_field_name);
-    let encrypted = encrypt_delta(value_bytes, &key)?;
+    let key = encryption_key_prepared(doc_ref_bytes, key_field_name, prepared_inputs)?;
+    let encrypted = encrypt_retry_delta(value_bytes, &key, prepared_inputs)?;
 
     tracing::debug!(
         field = %field_name,
@@ -166,7 +260,7 @@ async fn encrypt_with_new_key(
     let enc_cid = generate_cid_from_bytes(&enc_bytes)
         .map_err(|e| format!("Failed to generate encryption CID: {}", e))?;
     blockstore
-        .set(&enc_cid.to_bytes(), &enc_bytes)
+        .set(&cid_bytes(&enc_cid), &enc_bytes)
         .await
         .map_err(|e| format!("Failed to store encryption block: {}", e))?;
 
@@ -207,6 +301,42 @@ pub async fn write_document_blocks(
     signing_config: Option<&SigningConfig>,
     kms: Option<&std::sync::Arc<dyn kms::KmsService>>,
 ) -> Result<BlockResult, String> {
+    write_document_blocks_with_inputs(
+        blockstore,
+        headstore,
+        doc,
+        schema,
+        identity,
+        modified_fields,
+        encryption_config,
+        signing_config,
+        None,
+        kms,
+        None,
+        None,
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
+/// [`write_document_blocks`] with prepared remote inputs. An update that has
+/// already read the document's heads passes them in `heads`, so they are not
+/// read a second time; without them an update reads them here.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn write_document_blocks_with_inputs(
+    blockstore: &NamespaceView,
+    headstore: &NamespaceView,
+    doc: &Document,
+    schema: &CollectionVersion,
+    identity: DocStorageIdentity,
+    modified_fields: Option<&rapidhash::RapidHashSet<String>>,
+    encryption_config: Option<&EncryptionConfig>,
+    signing_config: Option<&SigningConfig>,
+    batch_session: Option<&str>,
+    kms: Option<&std::sync::Arc<dyn kms::KmsService>>,
+    prepared_inputs: Option<&query::prepared::PreparedInputMemo>,
+    heads: Option<DocHeadsSnapshot>,
+) -> Result<BlockResult, BuildError> {
     let schema_version_id = schema.version_id.as_str();
     let immutable_fields = immutable_field_names(schema);
     let doc_ref_bytes = identity.doc_ref_bytes();
@@ -217,11 +347,12 @@ pub async fn write_document_blocks(
     let mut encryption_cids: Vec<Cid> = Vec::new();
 
     let is_create = modified_fields.is_none();
-    let snapshot = if is_create {
-        None
-    } else {
-        Some(DocHeadsSnapshot::load(headstore, identity.doc_short_id).await?)
+    let snapshot = match heads {
+        _ if is_create => None,
+        Some(heads) => Some(heads),
+        None => Some(DocHeadsSnapshot::load(headstore, identity.doc_short_id).await?),
     };
+    let mut head_write = storage::merge::head_set::Write::default();
     let composite_priority: u64 = if is_create {
         1
     } else {
@@ -232,15 +363,13 @@ pub async fn write_document_blocks(
             + 1
     };
 
-    let (composite_head_entries, composite_heads) = if is_create {
-        (Vec::new(), Vec::new())
+    let composite_heads: Vec<Cid> = if is_create {
+        Vec::new()
     } else {
-        let entries = snapshot
+        snapshot
             .as_ref()
             .ok_or_else(|| "snapshot required for updates".to_string())?
-            .field_heads("C");
-        let heads: Vec<Cid> = entries.iter().map(|h| h.cid).collect();
-        (entries, heads)
+            .field_heads("C")
     };
 
     // The composite block's encryption link is set only for whole-document
@@ -255,12 +384,20 @@ pub async fn write_document_blocks(
         inherited_encryption_cid(blockstore, &composite_heads).await?
     };
 
-    let immutable = if is_create {
-        compute_immutable_block(doc, schema, encryption_config, signing_config)?
+    // The first signature this pass is missing; the pass goes on past it.
+    let mut first_miss = None;
+    let (immutable_names, immutable) = if is_create {
+        immutable_for_pass(
+            doc,
+            schema,
+            encryption_config,
+            signing_config,
+            prepared_inputs,
+            &mut first_miss,
+        )?
     } else {
-        None
+        Default::default()
     };
-
     for (field_name, field_value) in doc.values() {
         if field_name == "_docID" {
             continue;
@@ -270,9 +407,7 @@ pub async fn write_document_blocks(
         // are written), so it needs no block; on create it is in the
         // Immutable block.
         let should_create_block = match modified_fields {
-            None => !immutable
-                .as_ref()
-                .is_some_and(|block| block.fields.contains(field_name)),
+            None => !immutable_names.contains(field_name),
             Some(fields) => {
                 fields.contains(field_name) && !immutable_fields.contains(field_name.as_str())
             }
@@ -288,7 +423,7 @@ pub async fn write_document_blocks(
         };
 
         if should_create_block {
-            let heads: Vec<Cid> = field_head_entries.iter().map(|h| h.cid).collect();
+            let heads = field_head_entries.clone();
             let field_priority = if is_create {
                 1
             } else {
@@ -322,14 +457,16 @@ pub async fn write_document_blocks(
                     field_name,
                     key_field_name,
                     &value_bytes,
+                    doc.write_preparation().map(AsRef::as_ref),
+                    prepared_inputs,
                 )
                 .await?;
                 encryption_cids.push(enc_cid);
                 (encrypted, Some(enc_cid))
             } else if let Some((key, enc_cid)) =
-                inherited_encryption(blockstore, &heads, kms).await?
+                inherited_encryption(blockstore, &heads, kms, prepared_inputs).await?
             {
-                let encrypted = encrypt_delta(&value_bytes, &key)?;
+                let encrypted = encrypt_retry_delta(&value_bytes, &key, prepared_inputs)?;
 
                 tracing::debug!(
                     field = %field_name,
@@ -349,6 +486,8 @@ pub async fn write_document_blocks(
                     field_name,
                     None,
                     &value_bytes,
+                    doc.write_preparation().map(AsRef::as_ref),
+                    prepared_inputs,
                 )
                 .await?;
                 encryption_cids.push(enc_cid);
@@ -365,7 +504,34 @@ pub async fn write_document_blocks(
                 || doc.get_counter_delta(field_name).is_some();
 
             let nonce: i64 = if is_counter && !is_create {
-                rand::random()
+                if let Some(inputs) = prepared_inputs {
+                    let exact = serde_json::to_vec(&(
+                        "counter-nonce-v1",
+                        &doc_ref_bytes,
+                        field_name,
+                        field_priority,
+                        &heads,
+                        &value_bytes,
+                    ))
+                    .map_err(|error| BuildError::Message(error.to_string()))?;
+                    let request = query::prepared::PreparedInputRequest::new(
+                        query::prepared::PreparedInputKind::Encryption,
+                        exact,
+                    );
+                    let nonce = match inputs.get(&request) {
+                        Some(nonce) => nonce,
+                        None => {
+                            let nonce: i64 = rand::random();
+                            inputs
+                                .insert(request, std::sync::Arc::<[u8]>::from(nonce.to_be_bytes()))
+                        }
+                    };
+                    i64::from_be_bytes(nonce.as_ref().try_into().map_err(|_| {
+                        BuildError::Message("invalid prepared counter nonce".into())
+                    })?)
+                } else {
+                    rand::random()
+                }
             } else {
                 0
             };
@@ -392,13 +558,19 @@ pub async fn write_document_blocks(
 
             if let Some(signer) = signing_config {
                 tracing::debug!(field = %field_name, priority = field_priority, "Signing field block");
-                match sign_block(&field_block, signer, blockstore).await {
+                match sign_block(&field_block, signer, blockstore, prepared_inputs).await {
                     Ok(Some(sig_cid)) => {
                         tracing::debug!(field = %field_name, sig_cid = %sig_cid, "Field block signed");
                         field_block.signature = Some(sig_cid);
                     }
                     Ok(None) => {
                         tracing::debug!(field = %field_name, priority = field_priority, "Skipped signing (priority > 1)");
+                    }
+                    // The field waits for its signature; the other fields'
+                    // go out in the same wave.
+                    Err(BuildError::NeedsInput(request)) => {
+                        first_miss.get_or_insert(request);
+                        continue;
                     }
                     Err(e) => {
                         tracing::debug!(field = %field_name, error = %e, "Failed to sign field block");
@@ -430,23 +602,15 @@ pub async fn write_document_blocks(
             }
 
             blockstore
-                .set(&field_cid.to_bytes(), &field_block_bytes)
+                .set(&cid_bytes(&field_cid), &field_block_bytes)
                 .await
                 .map_err(|e| format!("Failed to store field block: {}", e))?;
 
             for old_head in &field_head_entries {
-                headstore
-                    .delete(&old_head.key)
-                    .await
-                    .map_err(|e| format!("Failed to delete old field head: {}", e))?;
+                head_write.supersede(&doc_heads::name(field_name, old_head));
             }
+            head_write.add(&doc_heads::name(field_name, &field_cid), field_priority);
 
-            let head_key = HeadstoreDocKey::new(identity.doc_short_id, field_name, field_cid);
-            let priority_bytes = encode_priority_varint(field_priority);
-            headstore
-                .set(&head_key.bytes(), &priority_bytes)
-                .await
-                .map_err(|e| format!("Failed to write field head: {}", e))?;
             headstore
                 .set(
                     &priority_index_key(identity.doc_short_id, field_priority, field_cid),
@@ -470,24 +634,30 @@ pub async fn write_document_blocks(
             }
         }
     }
+    // The composite links every field block, so it waits for all of them.
+    if let Some(request) = first_miss {
+        return Err(BuildError::NeedsInput(request));
+    }
 
     if let Some(block) = immutable {
         if let Some((sig_cid, sig_cbor)) = &block.signature {
             blockstore
-                .set(&sig_cid.to_bytes(), sig_cbor)
+                .set(&cid_bytes(sig_cid), sig_cbor)
                 .await
                 .map_err(|e| format!("Failed to store signature block: {}", e))?;
         }
         blockstore
-            .set(&block.cid.to_bytes(), &block.bytes)
+            .set(&cid_bytes(&block.cid), &block.bytes)
             .await
             .map_err(|e| format!("Failed to store immutable block: {}", e))?;
-        for (key, value) in block.head_entries(identity.doc_short_id) {
-            headstore
-                .set(&key, &value)
-                .await
-                .map_err(|e| format!("Failed to write immutable head: {}", e))?;
-        }
+        block.add_heads(&mut head_write);
+        headstore
+            .set(
+                &priority_index_key(identity.doc_short_id, 1, block.cid),
+                &[],
+            )
+            .await
+            .map_err(|e| format!("Failed to write immutable priority index: {}", e))?;
         field_links.push(block.link());
         field_cids.push(block.cid);
         initial_field_cids.push(block.cid);
@@ -500,7 +670,7 @@ pub async fn write_document_blocks(
     };
 
     let composite_encryption_cid = if explicit_doc_encryption {
-        let key = defra_core::encryption::generate_encryption_key_for(&doc_ref_bytes, None);
+        let key = encryption_key_prepared(&doc_ref_bytes, None, prepared_inputs)?;
         let enc_block = Encryption { key: key.to_vec() };
         let enc_bytes = enc_block
             .to_dag_cbor()
@@ -508,7 +678,7 @@ pub async fn write_document_blocks(
         let enc_cid = generate_cid_from_bytes(&enc_bytes)
             .map_err(|e| format!("Failed to generate composite encryption CID: {}", e))?;
         blockstore
-            .set(&enc_cid.to_bytes(), &enc_bytes)
+            .set(&cid_bytes(&enc_cid), &enc_bytes)
             .await
             .map_err(|e| format!("Failed to store composite encryption block: {}", e))?;
         encryption_cids.push(enc_cid);
@@ -521,14 +691,16 @@ pub async fn write_document_blocks(
 
     let mut composite_block = Block::new_with_options(
         CrdtDelta::Composite(composite_payload),
-        composite_heads,
+        composite_heads.clone(),
         field_links,
         composite_encryption_cid,
         None,
     );
 
     if let Some(signer) = signing_config {
-        if let Some(sig_cid) = sign_block(&composite_block, signer, blockstore).await? {
+        if let Some(sig_cid) =
+            sign_block(&composite_block, signer, blockstore, prepared_inputs).await?
+        {
             composite_block.signature = Some(sig_cid);
         }
     }
@@ -540,23 +712,15 @@ pub async fn write_document_blocks(
         .map_err(|e| format!("Failed to generate composite CID: {}", e))?;
 
     blockstore
-        .set(&composite_cid.to_bytes(), &composite_bytes)
+        .set(&cid_bytes(&composite_cid), &composite_bytes)
         .await
         .map_err(|e| format!("Failed to store composite block: {}", e))?;
 
-    for old_head in &composite_head_entries {
-        headstore
-            .delete(&old_head.key)
-            .await
-            .map_err(|e| format!("Failed to delete old composite head: {}", e))?;
+    for old_head in &composite_heads {
+        head_write.supersede(&doc_heads::name("C", old_head));
     }
+    head_write.add(&doc_heads::name("C", &composite_cid), composite_priority);
 
-    let composite_head_key = HeadstoreDocKey::new(identity.doc_short_id, "C", composite_cid);
-    let priority_bytes = encode_priority_varint(composite_priority);
-    headstore
-        .set(&composite_head_key.bytes(), &priority_bytes)
-        .await
-        .map_err(|e| format!("Failed to write composite head: {}", e))?;
     headstore
         .set(
             &priority_index_key(identity.doc_short_id, composite_priority, composite_cid),
@@ -564,6 +728,9 @@ pub async fn write_document_blocks(
         )
         .await
         .map_err(|e| format!("Failed to write composite priority index: {}", e))?;
+    doc_heads::commit(headstore, identity.doc_short_id, &head_write)
+        .await
+        .map_err(|e| format!("Failed to write document heads: {}", e))?;
 
     let doc_id_str = if is_create {
         derive_doc_id(&composite_cid)
@@ -577,15 +744,16 @@ pub async fn write_document_blocks(
         doc_id = %doc_id_str,
         cid = %composite_cid,
         field_count = field_cids.len(),
-        prev_heads = composite_head_entries.len(),
+        prev_heads = composite_heads.len(),
         "Built composite block with field links and wrote heads"
     );
 
     collect_on_commit(
         blockstore,
+        batch_session,
         initial_field_cids.into_iter().chain([composite_cid]),
     )
-    .await;
+    .await?;
 
     Ok(BlockResult {
         cid: composite_cid,
@@ -605,11 +773,41 @@ pub async fn write_delete_block(
     schema_version_id: &str,
     signing_config: Option<&SigningConfig>,
 ) -> Result<BlockResult, String> {
-    let snapshot = DocHeadsSnapshot::load(headstore, doc_short_id).await?;
+    write_delete_block_with_inputs(
+        blockstore,
+        headstore,
+        doc_id,
+        doc_short_id,
+        schema_version_id,
+        signing_config,
+        None,
+        None,
+        None,
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn write_delete_block_with_inputs(
+    blockstore: &NamespaceView,
+    headstore: &NamespaceView,
+    doc_id: &str,
+    doc_short_id: u64,
+    schema_version_id: &str,
+    signing_config: Option<&SigningConfig>,
+    batch_session: Option<&str>,
+    prepared_inputs: Option<&query::prepared::PreparedInputMemo>,
+    heads: Option<DocHeadsSnapshot>,
+) -> Result<BlockResult, BuildError> {
+    let snapshot = match heads {
+        Some(heads) => heads,
+        None => DocHeadsSnapshot::load(headstore, doc_short_id).await?,
+    };
+    let mut head_write = storage::merge::head_set::Write::default();
     let priority: u64 = snapshot.max_priority() + 1;
 
-    let composite_head_entries = snapshot.field_heads("C");
-    let composite_heads: Vec<Cid> = composite_head_entries.iter().map(|h| h.cid).collect();
+    let composite_heads = snapshot.field_heads("C");
 
     let composite_payload = CompositeDeltaPayload {
         schema_version_id: schema_version_id.to_string(),
@@ -621,14 +819,16 @@ pub async fn write_delete_block(
 
     let mut composite_block = Block::new_with_options(
         CrdtDelta::Composite(composite_payload),
-        composite_heads,
+        composite_heads.clone(),
         vec![],
         composite_encryption_cid,
         None,
     );
 
     if let Some(signer) = signing_config {
-        if let Some(sig_cid) = sign_block(&composite_block, signer, blockstore).await? {
+        if let Some(sig_cid) =
+            sign_block(&composite_block, signer, blockstore, prepared_inputs).await?
+        {
             composite_block.signature = Some(sig_cid);
         }
     }
@@ -640,23 +840,15 @@ pub async fn write_delete_block(
         .map_err(|e| format!("Failed to generate delete composite CID: {}", e))?;
 
     blockstore
-        .set(&composite_cid.to_bytes(), &composite_bytes)
+        .set(&cid_bytes(&composite_cid), &composite_bytes)
         .await
         .map_err(|e| format!("Failed to store delete composite block: {}", e))?;
 
-    for old_head in &composite_head_entries {
-        headstore
-            .delete(&old_head.key)
-            .await
-            .map_err(|e| format!("Failed to delete old composite head: {}", e))?;
+    for old_head in &composite_heads {
+        head_write.supersede(&doc_heads::name("C", old_head));
     }
+    head_write.add(&doc_heads::name("C", &composite_cid), priority);
 
-    let composite_head_key = HeadstoreDocKey::new(doc_short_id, "C", composite_cid);
-    let priority_bytes = encode_priority_varint(priority);
-    headstore
-        .set(&composite_head_key.bytes(), &priority_bytes)
-        .await
-        .map_err(|e| format!("Failed to write delete composite head: {}", e))?;
     headstore
         .set(
             &priority_index_key(doc_short_id, priority, composite_cid),
@@ -664,6 +856,9 @@ pub async fn write_delete_block(
         )
         .await
         .map_err(|e| format!("Failed to write delete priority index: {}", e))?;
+    doc_heads::commit(headstore, doc_short_id, &head_write)
+        .await
+        .map_err(|e| format!("Failed to write delete heads: {}", e))?;
 
     tracing::debug!(
         doc_id = %doc_id,
@@ -672,7 +867,7 @@ pub async fn write_delete_block(
         "Built delete composite block (status=2)"
     );
 
-    collect_on_commit(blockstore, [composite_cid]).await;
+    collect_on_commit(blockstore, batch_session, [composite_cid]).await?;
 
     Ok(BlockResult {
         cid: composite_cid,
@@ -681,4 +876,15 @@ pub async fn write_delete_block(
         field_cids: vec![],
         encryption_cids: vec![],
     })
+}
+
+fn encrypt_retry_delta(
+    plaintext: &[u8],
+    key: &[u8; 32],
+    inputs: Option<&query::prepared::PreparedInputMemo>,
+) -> Result<Vec<u8>, String> {
+    match inputs {
+        Some(inputs) => encrypt_delta_prepared(plaintext, key, inputs),
+        None => encrypt_delta(plaintext, key),
+    }
 }

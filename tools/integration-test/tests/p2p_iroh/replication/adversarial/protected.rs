@@ -1,7 +1,7 @@
 //! A local-ACP iroh node with a policy-bound `User` collection, dialled by a
 //! hostile peer.
 
-use std::collections::HashMap;
+use rapidhash::RapidHashMap;
 use std::time::Duration;
 
 use cid::Cid;
@@ -179,7 +179,7 @@ impl ProtectedNode {
             )
             .expect("commits query");
         let mut composite = None;
-        let mut fields = HashMap::new();
+        let mut fields = RapidHashMap::default();
         for commit in commits["_commits"].as_array().expect("commits") {
             let cid: Cid = commit["cid"].as_str().expect("cid").parse().expect("CID");
             match commit["fieldName"].as_str() {

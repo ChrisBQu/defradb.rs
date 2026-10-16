@@ -2,7 +2,7 @@ use std::ffi::c_char;
 
 use acp::nac::NodePermission;
 
-use crate::helpers::{get_node_database, get_rt, require_c_str};
+use crate::helpers::{get_node_database, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::schema::parse_optional_identity_did;
 use crate::state::NODES;
@@ -54,9 +54,7 @@ pub unsafe extern "C" fn add_view(
     transform: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::ViewAdd
@@ -76,13 +74,11 @@ pub unsafe extern "C" fn add_view(
         };
         let (identity_str, creator) = try_ffi!(parse_optional_identity_did(identity_did));
 
-        // Bind the caller's identity into the ambient context so the DB-layer NAC
-        // gate on create_collections_atomic resolves the actual caller instead of
-        // the wildcard. The body runs on this thread via `block_on`, so the
-        // thread-local is visible throughout it; the guard restores on drop.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(identity_str);
+        // The caller acts in the call's context, so the NAC checks the body
+        // reaches resolve the actual caller instead of the wildcard.
+        let context = defra_core::RequestContext::default().with_identity(identity_str);
 
-        ffi_async!(rt, {
+        ffi_async!(node_ptr, {
             // Get existing collection names so the SDL parser can resolve external type references
             let known_types: rapidhash::RapidHashSet<String> = database
                 .list_collections()
@@ -148,11 +144,7 @@ pub unsafe extern "C" fn add_view(
 
             // Create all view collections atomically (all-or-nothing)
             let created_versions = database
-                .create_collections_atomic_with_acp_registration(
-                    view_collections,
-                    document_acp.clone(),
-                    creator,
-                )
+                .create_collections_atomic_with_acp_registration_as(&context, view_collections, document_acp.clone(), creator)
                 .await
                 .map_err(|e| format!("failed to create view collection: {}", e))?;
 
@@ -180,7 +172,7 @@ pub unsafe extern "C" fn add_view(
 
             if !downsample_names.is_empty() {
                 database
-                    .bootstrap_downsamples(Some(&downsample_names))
+                    .bootstrap_downsamples_as(&context, Some(&downsample_names))
                     .await
                     .map_err(|e| format!("failed to bootstrap downsample collections: {}", e))?;
             }
@@ -217,27 +209,19 @@ pub unsafe extern "C" fn refresh_views(
     options: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::ViewRefresh
         ));
         let database = try_ffi!(get_node_database(node_ptr));
 
-        // Bind the caller's identity so any DB-layer NAC gate reached by the body
-        // resolves the actual caller instead of the wildcard.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
-        );
-
         let refresh_options =
             parse_view_names_options(c_str_to_string(options))
                 .map(db::CollectionSelector::with_names)
                 .unwrap_or_default();
 
-        ffi_async!(rt, {
+        ffi_async!(node_ptr, {
             database
                 .refresh_views(refresh_options)
                 .await
@@ -271,12 +255,11 @@ pub unsafe extern "C" fn gc_downsample_histories(
     options: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         let database = try_ffi!(get_node_database(node_ptr));
         let gc_options = parse_view_names_options(c_str_to_string(options))
             .map(db::downsample::GcDownsampleHistoriesOptions::with_names);
 
-        ffi_async!(rt, {
+        ffi_async!(node_ptr, {
             database
                 .gc_downsample_histories(gc_options)
                 .await

@@ -320,12 +320,20 @@ fn test_dag_link_ordering() {
 fn test_block_new_sorts_links_by_cid_string() {
     let link_a = DAGLink::new("z-name", test_cid());
     let link_b = DAGLink::new("a-name", test_cid2());
+    let tied_b = DAGLink::new("b-name", test_cid());
+    let tied_a = DAGLink::new("a-name", test_cid());
 
-    let block = Block::new(test_lww_delta(), vec![], vec![link_a, link_b]);
+    let block = Block::new(
+        test_lww_delta(),
+        vec![],
+        vec![link_a, link_b, tied_b, tied_a],
+    );
     let links = block.links.unwrap();
 
     assert_eq!(links[0].link, test_cid2());
-    assert_eq!(links[1].link, test_cid());
+    assert_eq!(links[1].name, "a-name");
+    assert_eq!(links[2].name, "b-name");
+    assert_eq!(links[3].name, "z-name");
 }
 
 #[test]

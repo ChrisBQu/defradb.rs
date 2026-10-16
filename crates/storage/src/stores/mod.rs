@@ -20,7 +20,7 @@ pub mod rootstore;
 pub mod systemstore;
 
 // Re-export commonly used types
-pub use blockstore::Blockstore;
+pub use blockstore::{BlockWrite, Blockstore};
 pub use datastore::{Datastore, CHUNK_SIZE};
 pub use headstore::Headstore;
 pub use multistore::Multistore;

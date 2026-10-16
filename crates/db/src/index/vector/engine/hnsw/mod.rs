@@ -120,10 +120,8 @@ impl<S: VectorNodeStore> Hnsw<S> {
         // sees it the moment it lands. Counters stay approximate otherwise:
         // a meta from an older layout reads zeroed and is trued up by the
         // rebuild itself.
-        if let Some(mut meta) = self.store.get_meta().await? {
-            meta.live = meta.live.saturating_sub(1);
-            meta.waste += 1;
-            self.store.put_meta(meta).await?;
+        if self.store.get_meta_advisory().await?.is_some() {
+            self.store.add_counts(-1, 1).await?;
         }
         Ok(true)
     }
@@ -144,7 +142,7 @@ impl<S: VectorNodeStore> Hnsw<S> {
     async fn candidates_from_ids(&self, query: &[f32], ids: &[NodeId]) -> Result<Vec<Candidate>> {
         let mut out = Vec::with_capacity(ids.len());
         for &id in ids {
-            if let Some(node) = self.store.get_node(id).await? {
+            if let Some(node) = self.store.get_node_advisory(id).await? {
                 out.push(self.candidate(query, node));
             }
         }

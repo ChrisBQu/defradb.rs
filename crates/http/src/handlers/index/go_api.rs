@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{http_error_from_backend_message, HttpError};
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
+use crate::request_scope::bound;
 use crate::router::{AppState, NodePermission};
 use crate::validation::validate_identifier;
 
@@ -121,7 +122,7 @@ pub async fn go_create_index(
 ) -> Result<Json<GoIndexDescription>, HttpError> {
     require_permission(&state, &identity, NodePermission::IndexCreate).await?;
 
-    let index_ops = state.require_index()?;
+    let index_ops = bound(state.require_index()?, &identity.context());
 
     // Validate collection name
     validate_identifier(&collection).map_err(|_| {
@@ -193,7 +194,7 @@ pub async fn go_list_indexes(
 ) -> Result<Json<Vec<GoListIndexesResult>>, HttpError> {
     require_permission(&state, &identity, NodePermission::IndexList).await?;
 
-    let index_ops = state.require_index()?;
+    let index_ops = bound(state.require_index()?, &identity.context());
 
     // Validate collection name
     validate_identifier(&collection).map_err(|_| {
@@ -227,7 +228,7 @@ pub async fn go_delete_index(
 ) -> Result<StatusCode, HttpError> {
     require_permission(&state, &identity, NodePermission::IndexDelete).await?;
 
-    let index_ops = state.require_index()?;
+    let index_ops = bound(state.require_index()?, &identity.context());
 
     // Validate collection name
     validate_identifier(&collection).map_err(|_| {
@@ -265,7 +266,7 @@ pub async fn go_list_all_indexes(
 ) -> Result<Json<RapidHashMap<String, Vec<GoListIndexesResult>>>, HttpError> {
     require_permission(&state, &identity, NodePermission::IndexList).await?;
 
-    let index_ops = state.require_index()?;
+    let index_ops = bound(state.require_index()?, &identity.context());
 
     let indexes = index_ops
         .list_indexes(None)

@@ -1,11 +1,11 @@
 //! Integration tests for BasicTxn.
 
 use bytes::Bytes;
-use datastore::BasicTxn;
+use datastore::{BasicTxn, OnAbort, OnCommit};
 use futures::FutureExt;
+use regolith::sync::SegQueue;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
-use std::sync::Mutex;
 use storage::RegolithStore;
 
 #[tokio::test]
@@ -69,9 +69,10 @@ async fn test_basic_txn_on_success_callback() {
 
     let called = Arc::new(AtomicBool::new(false));
     let called_clone = called.clone();
-    txn.on_success(Box::new(move || {
+    txn.on_commit(OnCommit::Sync(Box::new(move || {
         called_clone.store(true, Ordering::SeqCst);
-    }));
+    })))
+    .unwrap();
 
     txn.commit().await.unwrap();
 
@@ -86,9 +87,10 @@ async fn test_basic_txn_multiple_callbacks() {
     let counter = Arc::new(AtomicU32::new(0));
     for _ in 0..3 {
         let counter_clone = counter.clone();
-        txn.on_success(Box::new(move || {
+        txn.on_commit(OnCommit::Sync(Box::new(move || {
             counter_clone.fetch_add(1, Ordering::SeqCst);
-        }));
+        })))
+        .unwrap();
     }
 
     txn.commit().await.unwrap();
@@ -97,15 +99,15 @@ async fn test_basic_txn_multiple_callbacks() {
 }
 
 #[tokio::test]
-async fn test_basic_txn_discard_callback() {
+async fn test_basic_txn_abort_callback_on_discard() {
     let store = RegolithStore::in_memory().unwrap();
     let mut txn = BasicTxn::new(&store, 1, false).await.unwrap();
 
     let called = Arc::new(AtomicBool::new(false));
     let called_clone = called.clone();
-    txn.on_discard(Box::new(move || {
+    txn.on_abort(OnAbort::Sync(Box::new(move || {
         called_clone.store(true, Ordering::SeqCst);
-    }));
+    })));
 
     // Write some data
     txn.datastore().set(b"key", b"value").await.unwrap();
@@ -136,21 +138,22 @@ async fn test_basic_txn_rootstore_access() {
 }
 
 #[tokio::test]
-async fn test_basic_txn_error_callback_not_called_on_success() {
+async fn test_basic_txn_abort_callback_not_called_on_success() {
     let store = RegolithStore::in_memory().unwrap();
     let mut txn = BasicTxn::new(&store, 1, false).await.unwrap();
 
     let error_called = Arc::new(AtomicBool::new(false));
     let error_called_clone = error_called.clone();
-    txn.on_error(Box::new(move || {
+    txn.on_abort(OnAbort::Sync(Box::new(move || {
         error_called_clone.store(true, Ordering::SeqCst);
-    }));
+    })));
 
     let success_called = Arc::new(AtomicBool::new(false));
     let success_called_clone = success_called.clone();
-    txn.on_success(Box::new(move || {
+    txn.on_commit(OnCommit::Sync(Box::new(move || {
         success_called_clone.store(true, Ordering::SeqCst);
-    }));
+    })))
+    .unwrap();
 
     txn.commit().await.unwrap();
 
@@ -160,15 +163,15 @@ async fn test_basic_txn_error_callback_not_called_on_success() {
 }
 
 #[tokio::test]
-async fn test_basic_txn_discard_callback_not_called_on_commit() {
+async fn test_basic_txn_abort_callback_not_called_on_commit() {
     let store = RegolithStore::in_memory().unwrap();
     let mut txn = BasicTxn::new(&store, 1, false).await.unwrap();
 
     let discard_called = Arc::new(AtomicBool::new(false));
     let discard_called_clone = discard_called.clone();
-    txn.on_discard(Box::new(move || {
+    txn.on_abort(OnAbort::Sync(Box::new(move || {
         discard_called_clone.store(true, Ordering::SeqCst);
-    }));
+    })));
 
     txn.commit().await.unwrap();
 
@@ -183,9 +186,10 @@ async fn test_basic_txn_success_callback_not_called_on_discard() {
 
     let success_called = Arc::new(AtomicBool::new(false));
     let success_called_clone = success_called.clone();
-    txn.on_success(Box::new(move || {
+    txn.on_commit(OnCommit::Sync(Box::new(move || {
         success_called_clone.store(true, Ordering::SeqCst);
-    }));
+    })))
+    .unwrap();
 
     txn.discard().unwrap();
 
@@ -298,11 +302,12 @@ async fn test_basic_txn_async_success_callback() {
     let mut txn = BasicTxn::new(&store, 1, false).await.unwrap();
 
     let (tx, rx) = tokio::sync::oneshot::channel();
-    txn.on_success_async(Box::new(move || {
+    txn.on_commit(OnCommit::Async(Box::new(move || {
         Box::pin(async move {
             tx.send(()).unwrap();
         })
-    }));
+    })))
+    .unwrap();
 
     txn.commit().await.unwrap();
 
@@ -318,53 +323,57 @@ async fn test_basic_txn_mixed_success_callbacks_preserve_execution_order() {
     let store = RegolithStore::in_memory().unwrap();
     let mut txn = BasicTxn::new(&store, 1, false).await.unwrap();
 
-    let execution_order = Arc::new(Mutex::new(Vec::new()));
+    let execution_order = Arc::new(SegQueue::new());
 
     let order = execution_order.clone();
-    txn.on_success(Box::new(move || {
-        order.lock().unwrap().push("sync-1");
-    }));
+    txn.on_commit(OnCommit::Sync(Box::new(move || {
+        order.push("sync-1");
+    })))
+    .unwrap();
 
     let order = execution_order.clone();
-    txn.on_success_async(Box::new(move || {
+    txn.on_commit(OnCommit::Async(Box::new(move || {
         Box::pin(async move {
-            order.lock().unwrap().push("async-1");
+            order.push("async-1");
         })
-    }));
+    })))
+    .unwrap();
 
     let order = execution_order.clone();
-    txn.on_success(Box::new(move || {
-        order.lock().unwrap().push("sync-2");
-    }));
+    txn.on_commit(OnCommit::Sync(Box::new(move || {
+        order.push("sync-2");
+    })))
+    .unwrap();
 
     let order = execution_order.clone();
-    txn.on_success_async(Box::new(move || {
+    txn.on_commit(OnCommit::Async(Box::new(move || {
         Box::pin(async move {
-            order.lock().unwrap().push("async-2");
+            order.push("async-2");
         })
-    }));
+    })))
+    .unwrap();
 
     txn.commit().await.unwrap();
 
     assert_eq!(
-        *execution_order.lock().unwrap(),
+        std::iter::from_fn(|| execution_order.pop()).collect::<Vec<_>>(),
         vec!["async-1", "async-2", "sync-1", "sync-2"]
     );
 }
 
 #[tokio::test]
-async fn test_basic_txn_async_discard_callback() {
+async fn test_basic_txn_async_abort_callback_on_discard() {
     use std::time::Duration;
 
     let store = RegolithStore::in_memory().unwrap();
     let mut txn = BasicTxn::new(&store, 1, false).await.unwrap();
 
     let (tx, rx) = tokio::sync::oneshot::channel();
-    txn.on_discard_async(Box::new(move || {
+    txn.on_abort(OnAbort::Async(Box::new(move || {
         Box::pin(async move {
             tx.send(()).unwrap();
         })
-    }));
+    })));
 
     txn.discard().unwrap();
 
@@ -383,17 +392,17 @@ async fn test_basic_txn_discard_spawns_async_callbacks_before_sync_callbacks() {
     let mut txn = BasicTxn::new(&store, 1, false).await.unwrap();
 
     let (started_tx, started_rx) = std::sync::mpsc::channel();
-    txn.on_discard_async(Box::new(move || {
+    txn.on_abort(OnAbort::Async(Box::new(move || {
         Box::pin(async move {
             started_tx.send(()).unwrap();
         })
-    }));
+    })));
 
-    txn.on_discard(Box::new(move || {
+    txn.on_abort(OnAbort::Sync(Box::new(move || {
         started_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("async discard callback should be spawned before sync discard callback runs");
-    }));
+    })));
 
     txn.discard().unwrap();
 }
@@ -405,16 +414,19 @@ async fn test_basic_txn_success_callback_panic_propagates() {
 
     let counter = Arc::new(AtomicU32::new(0));
     let counter_clone = counter.clone();
-    txn.on_success(Box::new(move || {
+    txn.on_commit(OnCommit::Sync(Box::new(move || {
         counter_clone.fetch_add(1, Ordering::SeqCst);
-    }));
-    txn.on_success(Box::new(|| {
+    })))
+    .unwrap();
+    txn.on_commit(OnCommit::Sync(Box::new(|| {
         panic!("success callback panic");
-    }));
+    })))
+    .unwrap();
     let counter_clone = counter.clone();
-    txn.on_success(Box::new(move || {
+    txn.on_commit(OnCommit::Sync(Box::new(move || {
         counter_clone.fetch_add(1, Ordering::SeqCst);
-    }));
+    })))
+    .unwrap();
 
     let panic = std::panic::AssertUnwindSafe(async move {
         txn.commit().await.unwrap();
@@ -433,22 +445,25 @@ async fn test_basic_txn_async_success_callback_panic_propagates() {
 
     let counter = Arc::new(AtomicU32::new(0));
     let counter_clone = counter.clone();
-    txn.on_success_async(Box::new(move || {
+    txn.on_commit(OnCommit::Async(Box::new(move || {
         Box::pin(async move {
             counter_clone.fetch_add(1, Ordering::SeqCst);
         })
-    }));
-    txn.on_success_async(Box::new(|| {
+    })))
+    .unwrap();
+    txn.on_commit(OnCommit::Async(Box::new(|| {
         Box::pin(async {
             panic!("async success callback panic");
         })
-    }));
+    })))
+    .unwrap();
     let counter_clone = counter.clone();
-    txn.on_success_async(Box::new(move || {
+    txn.on_commit(OnCommit::Async(Box::new(move || {
         Box::pin(async move {
             counter_clone.fetch_add(1, Ordering::SeqCst);
         })
-    }));
+    })))
+    .unwrap();
 
     let panic = std::panic::AssertUnwindSafe(async move {
         txn.commit().await.unwrap();
@@ -461,22 +476,22 @@ async fn test_basic_txn_async_success_callback_panic_propagates() {
 }
 
 #[tokio::test]
-async fn test_basic_txn_discard_callback_panic_propagates() {
+async fn test_basic_txn_abort_callback_panic_propagates_from_discard() {
     let store = RegolithStore::in_memory().unwrap();
     let mut txn = BasicTxn::new(&store, 1, false).await.unwrap();
 
     let counter = Arc::new(AtomicU32::new(0));
     let counter_clone = counter.clone();
-    txn.on_discard(Box::new(move || {
+    txn.on_abort(OnAbort::Sync(Box::new(move || {
         counter_clone.fetch_add(1, Ordering::SeqCst);
-    }));
-    txn.on_discard(Box::new(|| {
+    })));
+    txn.on_abort(OnAbort::Sync(Box::new(|| {
         panic!("discard callback panic");
-    }));
+    })));
     let counter_clone = counter.clone();
-    txn.on_discard(Box::new(move || {
+    txn.on_abort(OnAbort::Sync(Box::new(move || {
         counter_clone.fetch_add(1, Ordering::SeqCst);
-    }));
+    })));
 
     let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         txn.discard().unwrap();
@@ -484,4 +499,45 @@ async fn test_basic_txn_discard_callback_panic_propagates() {
 
     assert!(panic.is_err());
     assert_eq!(counter.load(Ordering::SeqCst), 1);
+}
+
+/// A commit that loses a conflict runs the abort callbacks, awaited, and
+/// none of the commit callbacks.
+#[tokio::test]
+async fn test_basic_txn_abort_callbacks_run_once_on_a_failed_commit() {
+    let store = RegolithStore::in_memory().unwrap();
+    let seed = BasicTxn::new(&store, 1, false).await.unwrap();
+    seed.datastore().set(b"key", b"one").await.unwrap();
+    seed.commit().await.unwrap();
+
+    let order = Arc::new(SegQueue::new());
+    let mut loser = BasicTxn::new(&store, 2, false).await.unwrap();
+    assert!(loser.datastore().get(b"key").await.unwrap().is_some());
+    loser.datastore().set(b"key", b"loser").await.unwrap();
+    let seen = order.clone();
+    loser
+        .on_commit(OnCommit::Sync(Box::new(move || {
+            seen.push("commit");
+        })))
+        .unwrap();
+    let seen = order.clone();
+    loser.on_abort(OnAbort::Sync(Box::new(move || {
+        seen.push("abort");
+    })));
+    let seen = order.clone();
+    loser.on_abort(OnAbort::Async(Box::new(move || {
+        Box::pin(async move {
+            seen.push("abort-async");
+        })
+    })));
+
+    let winner = BasicTxn::new(&store, 3, false).await.unwrap();
+    winner.datastore().set(b"key", b"winner").await.unwrap();
+    winner.commit().await.unwrap();
+
+    assert!(loser.commit().await.is_err());
+    assert_eq!(
+        std::iter::from_fn(|| order.pop()).collect::<Vec<_>>(),
+        vec!["abort-async", "abort"]
+    );
 }

@@ -243,7 +243,7 @@ pub struct DatastoreConfig {
     /// Maximum DAG traversal depth for merge operations.
     #[serde(default = "default_max_merge_depth")]
     pub max_merge_depth: usize,
-    /// Enable transparent at-rest value encryption for the storage backend.
+    /// Enable engine file encryption at rest for the storage backend.
     ///
     /// When enabled, all stored values are encrypted with AES-256-GCM keyed by
     /// the keyring `encryption-key` (generated on first use if absent). Keys

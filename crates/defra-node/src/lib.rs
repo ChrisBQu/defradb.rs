@@ -30,11 +30,15 @@ mod db_impls;
 pub mod dense_search;
 #[cfg(test)]
 mod embedded_query_identity_tests;
+mod error;
+mod network;
 mod node_acp;
+#[cfg(test)]
+mod on_pool_tests;
 #[cfg(feature = "p2p")]
 mod p2p_runtime;
 pub mod search_chunks;
-mod signed_query_runtime;
+mod signed_query;
 mod transaction;
 pub mod version;
 
@@ -43,8 +47,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use defra_core::signing::SigningConfig;
+use defra_core::RequestContext;
 use identity::{Identity as _, IdentityKeyType, RawIdentity};
-use rand::Rng;
 
 /// Re-exported so callers can name `Arc<dyn DocumentACP>` (the type
 /// [`EmbeddedNode::document_acp`] returns) without depending on `acp` directly.
@@ -61,6 +65,7 @@ pub use config::P2PConfig;
 #[cfg(feature = "vera")]
 pub use config::VeraConfig;
 pub use dense_search::{DenseHybridSearchHit, DenseHybridSearchRequest, DenseHybridSearchResponse};
+pub use error::{Error, Result};
 pub use events::EventName;
 pub use lens::{LensConfig, LensModule, TransformId};
 pub use query::QueryLimits;
@@ -71,83 +76,87 @@ pub use telemetry::{ConflictMetricsSnapshot, RetryLayerSnapshot};
 pub use telemetry::{TelemetryConfig, TelemetryHandle};
 pub use transaction::EmbeddedTransaction;
 
+use network::NodeEdge;
 #[cfg(not(target_arch = "wasm32"))]
-use signed_query_runtime::{
-    execute_with_signing_context, unavailable_node_signer_response, SignedQueryRuntime,
-    SIGNED_QUERY_DRAIN_TIMEOUT,
-};
-
-/// Retry policy for [`EmbeddedNode::execute_with_retry`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ExecuteRetryPolicy {
-    /// Number of retries after the initial attempt.
-    pub max_retries: u32,
-    /// Backoff before the first retry.
-    pub initial_backoff: Duration,
-    /// Maximum backoff between retries.
-    pub max_backoff: Duration,
-}
-
-impl ExecuteRetryPolicy {
-    /// Create a retry policy with bounded exponential backoff.
-    pub const fn new(max_retries: u32, initial_backoff: Duration, max_backoff: Duration) -> Self {
-        Self {
-            max_retries,
-            initial_backoff,
-            max_backoff,
-        }
-    }
-}
-
-impl Default for ExecuteRetryPolicy {
-    fn default() -> Self {
-        Self {
-            max_retries: 3,
-            initial_backoff: Duration::from_millis(10),
-            max_backoff: Duration::from_millis(250),
-        }
-    }
-}
+use signed_query::{execute_with_signing_context, unavailable_node_signer_response};
 
 /// Type-erased schema operations so we can store DB<S> without leaking the Store generic.
 #[async_trait::async_trait]
 trait SchemaOps: Send + Sync {
-    async fn add_schema(&self, sdl: &str) -> anyhow::Result<Vec<CollectionVersion>>;
+    async fn add_schema(
+        &self,
+        context: &RequestContext,
+        sdl: &str,
+    ) -> Result<Vec<CollectionVersion>>;
     async fn ensure_ordinary_index(
         &self,
+        context: &RequestContext,
         collection: &str,
         name: &str,
         fields: Vec<schema::IndexedFieldDescription>,
-    ) -> anyhow::Result<schema::IndexDescription>;
-    async fn add_view(&self, source_query: &str, target_sdl: &str) -> anyhow::Result<()>;
+    ) -> Result<schema::IndexDescription>;
+    async fn add_view(
+        &self,
+        context: &RequestContext,
+        source_query: &str,
+        target_sdl: &str,
+    ) -> Result<()>;
     async fn patch_collection(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         patch: &str,
-    ) -> anyhow::Result<CollectionVersion>;
-    async fn set_active_collection_version(&self, version_id: &str) -> anyhow::Result<()>;
-    async fn set_migration(&self, config: LensConfig) -> anyhow::Result<TransformId>;
-    async fn materialize_collection(&self, collection_name: &str) -> anyhow::Result<usize>;
-    fn list_collections(&self) -> anyhow::Result<Vec<String>>;
-    fn get_collection(&self, name: &str) -> anyhow::Result<Option<CollectionVersion>>;
+    ) -> Result<CollectionVersion>;
+    async fn set_active_collection_version(
+        &self,
+        context: &RequestContext,
+        version_id: &str,
+    ) -> Result<()>;
+    async fn set_migration(
+        &self,
+        context: &RequestContext,
+        config: LensConfig,
+    ) -> Result<TransformId>;
+    async fn materialize_collection(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+    ) -> Result<usize>;
+    fn list_collections(&self) -> Result<Vec<String>>;
+    fn get_collection(&self, name: &str) -> Result<Option<CollectionVersion>>;
     async fn get_collection_by_version_id(
         &self,
         version_id: &str,
-    ) -> anyhow::Result<Option<CollectionVersion>>;
-    async fn get_all_collection_versions(&self) -> anyhow::Result<Vec<CollectionVersion>>;
+    ) -> Result<Option<CollectionVersion>>;
+    async fn get_all_collection_versions(&self) -> Result<Vec<CollectionVersion>>;
 }
 
 #[cfg(feature = "http")]
 struct HttpSchemaOps {
     schema_ops: Arc<dyn SchemaOps>,
+    /// The request these operations serve, for ones bound to it.
+    context: Option<RequestContext>,
 }
 
 #[cfg(feature = "http")]
 #[async_trait::async_trait]
 impl defra_http::router::SchemaOperations for HttpSchemaOps {
+    fn bind_request(
+        &self,
+        context: &RequestContext,
+    ) -> Option<Arc<dyn defra_http::router::SchemaOperations>> {
+        Some(Arc::new(Self {
+            schema_ops: Arc::clone(&self.schema_ops),
+            context: Some(context.clone()),
+        }))
+    }
+
     async fn add_schema(&self, sdl: &str) -> Result<Vec<CollectionVersion>, String> {
         self.schema_ops
-            .add_schema(sdl)
+            .add_schema(
+                &RequestContext::bound_or_ambient(self.context.as_ref()),
+                sdl,
+            )
             .await
             .map_err(|error| error.to_string())
     }
@@ -159,13 +168,14 @@ trait BlockOps: Send + Sync {
         &self,
         cid: &str,
         caller_did: Option<&str>,
-    ) -> anyhow::Result<(Vec<u8>, Vec<u8>)>;
-    async fn verified_signer_did(&self, cid: &str) -> anyhow::Result<String>;
+    ) -> Result<(Vec<u8>, Vec<u8>)>;
+    async fn verified_signer_did(&self, cid: &str) -> Result<String>;
     async fn verified_signer_did_in_txn(
         &self,
+        context: &RequestContext,
         cid: &str,
         transaction: &TransactionHandle,
-    ) -> anyhow::Result<String>;
+    ) -> Result<String>;
 }
 
 /// An embedded DefraDB node with query execution and event subscription.
@@ -181,12 +191,21 @@ pub struct EmbeddedNode {
     embedding_config: db::EmbeddingClientConfig,
     node_identity_did: Option<String>,
     node_query_identity: Option<identity::Did>,
-    #[cfg(not(target_arch = "wasm32"))]
-    signed_query_runtime: Option<SignedQueryRuntime>,
+    /// The node's share of the network runtime; `None` when the node has
+    /// no network work and was given no runtime.
+    network: Option<NodeEdge>,
+    /// Closes the database: its worker pool finishes and stops, then its
+    /// store closes. Run once, at shutdown.
+    close_database: CloseDatabase,
+    /// The database's worker pool: the node's data-path calls run there.
+    pool: Option<workers::Pool>,
+    /// Document ACP is a remote provider: its calls reach the network, so
+    /// they stay where they are made.
+    remote_acp: bool,
     #[cfg(not(target_arch = "wasm32"))]
     transaction_stats: Option<storage::TransactionStatsHandle>,
     #[cfg(feature = "http")]
-    txn_cleanup_task: kovan_queue::seg_queue::SegQueue<tokio::task::JoinHandle<()>>,
+    txn_cleanup_task: kovan_queue::seg_queue::SegQueue<workers::Background>,
     /// Vector index rebuild and downsample view refresh, as the CLI and the
     /// `embedded` node run them. Each holds the database open until aborted.
     #[cfg(not(target_arch = "wasm32"))]
@@ -199,18 +218,40 @@ pub struct EmbeddedNode {
     telemetry: kovan_queue::seg_queue::SegQueue<TelemetryHandle>,
 }
 
+/// Closes a node's database, whatever store it runs on.
+type CloseDatabase = Box<
+    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = db::Result<()>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// The closer of `database`, for a node that does not know its store type.
+fn close_database<S>(database: &Arc<db::DB<S>>) -> CloseDatabase
+where
+    S: storage::corekv::Store + 'static,
+{
+    let database = Arc::clone(database);
+    Box::new(move || {
+        let database = Arc::clone(&database);
+        Box::pin(async move { database.close().await })
+    })
+}
+
 #[cfg(not(target_arch = "wasm32"))]
-struct BackgroundTasks(std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>);
+struct BackgroundTasks(kovan_queue::seg_queue::SegQueue<workers::Background>);
 
 #[cfg(not(target_arch = "wasm32"))]
 impl BackgroundTasks {
-    fn take(&self) -> Vec<tokio::task::JoinHandle<()>> {
-        std::mem::take(
-            &mut *self
-                .0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        )
+    fn new(tasks: impl IntoIterator<Item = workers::Background>) -> Self {
+        let queue = kovan_queue::seg_queue::SegQueue::new();
+        for task in tasks {
+            queue.push(task);
+        }
+        Self(queue)
+    }
+
+    fn take(&self) -> impl Iterator<Item = workers::Background> + '_ {
+        std::iter::from_fn(|| self.0.pop())
     }
 }
 
@@ -254,32 +295,25 @@ impl EmbeddedNode {
             .await
     }
 
-    /// Execute a GraphQL query or mutation, retrying transient transaction conflicts.
+    /// Execute a prepared query request once, resolving external inputs between attempts.
     ///
-    /// A configured node identity is used as the document ACP actor on every
-    /// attempt.
-    pub async fn execute_with_retry(
-        &self,
-        query_str: &str,
-        policy: ExecuteRetryPolicy,
-    ) -> QueryResponse {
-        self.execute_request_with_retry(QueryRequest::new(query_str), policy)
-            .await
+    /// Storage conflicts are returned to the caller. Eligible implicit mutations
+    /// retry inside the engine-owned transaction boundary.
+    pub async fn execute_request(&self, request: QueryRequest) -> QueryResponse {
+        self.execute_prepared_request(request, None).await
     }
 
-    /// Execute a prepared query request, retrying transient transaction conflicts.
+    /// Execute a prepared query request within an existing transaction.
     ///
-    /// Requests without an identity use the configured node identity for
-    /// document ACP. An explicit request identity takes precedence.
-    pub async fn execute_request_with_retry(
+    /// The node identity context and explicit request identity are applied
+    /// the same way as [`Self::execute_request`].
+    pub async fn execute_request_in_txn(
         &self,
         request: QueryRequest,
-        policy: ExecuteRetryPolicy,
+        handle: &TransactionHandle,
     ) -> QueryResponse {
-        execute_request_with_retry_loop(request, policy, |request| {
-            self.execute_request_once(request)
-        })
-        .await
+        self.execute_prepared_request(request, Some(handle.clone()))
+            .await
     }
 
     async fn execute_request_once(&self, request: QueryRequest) -> QueryResponse {
@@ -295,7 +329,7 @@ impl EmbeddedNode {
         let Some(node_identity_did) = self.node_identity_did.as_deref() else {
             return match txn_handle {
                 Some(handle) => self.runner.execute_in_txn(request, &handle).await,
-                None => self.runner.execute(request).await,
+                None => execute_autocommit_request(self.runner.as_ref(), request).await,
             };
         };
 
@@ -316,39 +350,20 @@ impl EmbeddedNode {
             return unavailable_node_signer_response(node_identity_did);
         };
         #[cfg(not(target_arch = "wasm32"))]
-        let Some(signed_query_runtime) = self.signed_query_runtime.as_ref() else {
+        let Some(network) = self.network.as_ref() else {
             return unavailable_node_signer_response(node_identity_did);
-        };
-        #[cfg(not(target_arch = "wasm32"))]
-        let Some(signed_query_permit) = signed_query_runtime.admit() else {
-            return QueryResponse::error("signed query runtime is shutting down");
         };
 
         #[cfg(not(target_arch = "wasm32"))]
         execute_with_signing_context(
+            network.edge(),
             self.runner.clone(),
             request,
             txn_handle,
             signing_config,
             node_identity_did.to_string(),
-            signed_query_runtime.handle(),
-            signed_query_permit,
         )
         .await
-    }
-
-    /// Execute a prepared query request within an existing transaction.
-    ///
-    /// When the node has a configured identity, the same signing and ambient
-    /// identity context used by [`Self::execute`] is applied to this request.
-    /// It is also the document ACP actor unless the request supplies one.
-    pub async fn execute_request_in_txn(
-        &self,
-        request: QueryRequest,
-        handle: &TransactionHandle,
-    ) -> QueryResponse {
-        self.execute_prepared_request(request, Some(handle.clone()))
-            .await
     }
 
     fn with_default_query_identity(&self, mut request: QueryRequest) -> QueryRequest {
@@ -358,20 +373,43 @@ impl EmbeddedNode {
         request
     }
 
-    /// Run `op` with the node's own identity installed as the ambient acting
-    /// identity for the duration of the future, so DB-layer NAC checks resolve
-    /// to the node itself (which holds full access). No-op when no node identity
-    /// is configured. Uses the task_local so it survives `.await` on the
-    /// direct-async schema paths.
-    async fn as_node_identity<F, T>(&self, op: F) -> T
+    /// Runs the data-path call `make` builds on the database's worker pool
+    /// (in place on a worker, or without a pool). The request context the
+    /// call acts in travels inside it.
+    async fn on_pool<F, Fut, T>(&self, make: F) -> Result<T>
     where
-        F: std::future::Future<Output = T>,
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<T>> + 'static,
+        T: Send + 'static,
     {
-        if self.node_identity_did.is_some() {
-            defra_core::current_identity::with_scoped_identity(self.node_identity_did.clone(), op)
-                .await
+        workers::run_on(self.pool.as_ref(), workers::Target::LeastLoaded, make)
+            .await
+            .map_err(Error::WorkerPoolCall)?
+    }
+
+    /// Runs a document ACP call: on the pool when the ACP is the node's own
+    /// store, where it is made when the ACP is a remote provider.
+    async fn on_acp<F, Fut, T>(&self, make: F) -> Result<T>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<T>> + 'static,
+        T: Send + 'static,
+    {
+        if self.remote_acp {
+            make().await
         } else {
-            op.await
+            self.on_pool(make).await
+        }
+    }
+
+    /// The context the node's own operations run in: the node's identity acts
+    /// in it, so DB-layer NAC checks resolve to the node itself (which holds
+    /// full access). Without a node identity it is [`RequestContext::ambient`].
+    fn node_context(&self) -> RequestContext {
+        let context = RequestContext::ambient();
+        match &self.node_identity_did {
+            Some(did) => context.with_identity(Some(did.clone())),
+            None => context,
         }
     }
 
@@ -385,8 +423,10 @@ impl EmbeddedNode {
     /// This reads the signature linked by `cid`, verifies it over the
     /// canonical DAG-CBOR block bytes, and derives the DID from the verified
     /// public key. Unsigned, malformed, missing, or invalid blocks fail closed.
-    pub async fn verified_block_signer_did(&self, cid: &str) -> anyhow::Result<String> {
-        self.block_ops.verified_signer_did(cid).await
+    pub async fn verified_block_signer_did(&self, cid: &str) -> Result<String> {
+        let (ops, cid) = (Arc::clone(&self.block_ops), cid.to_owned());
+        self.on_pool(move || async move { ops.verified_signer_did(&cid).await })
+            .await
     }
 
     /// Load canonical signed-block material after applying document ACP for
@@ -396,8 +436,11 @@ impl EmbeddedNode {
         &self,
         cid: &str,
         caller_did: Option<&str>,
-    ) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
-        self.block_ops.signed_block_bytes(cid, caller_did).await
+    ) -> Result<(Vec<u8>, Vec<u8>)> {
+        let (ops, cid) = (Arc::clone(&self.block_ops), cid.to_owned());
+        let caller = caller_did.map(str::to_owned);
+        self.on_pool(move || async move { ops.signed_block_bytes(&cid, caller.as_deref()).await })
+            .await
     }
 
     /// Cryptographically verify a block visible inside an active transaction.
@@ -408,14 +451,20 @@ impl EmbeddedNode {
         &self,
         cid: &str,
         transaction: &TransactionHandle,
-    ) -> anyhow::Result<String> {
-        self.as_node_identity(self.block_ops.verified_signer_did_in_txn(cid, transaction))
+    ) -> Result<String> {
+        self.block_ops
+            .verified_signer_did_in_txn(&self.node_context(), cid, transaction)
             .await
     }
 
     /// Add a schema from a GraphQL SDL type definition.
-    pub async fn add_schema(&self, sdl: &str) -> anyhow::Result<()> {
-        self.as_node_identity(async { self.schema_ops.add_schema(sdl).await.map(|_| ()) })
+    pub async fn add_schema(&self, sdl: &str) -> Result<()> {
+        let (ops, sdl, context) = (
+            Arc::clone(&self.schema_ops),
+            sdl.to_owned(),
+            self.node_context(),
+        );
+        self.on_pool(move || async move { ops.add_schema(&context, &sdl).await.map(|_| ()) })
             .await
     }
 
@@ -427,11 +476,13 @@ impl EmbeddedNode {
         collection: &str,
         name: &str,
         fields: Vec<schema::IndexedFieldDescription>,
-    ) -> anyhow::Result<schema::IndexDescription> {
-        self.as_node_identity(
-            self.schema_ops
-                .ensure_ordinary_index(collection, name, fields),
-        )
+    ) -> Result<schema::IndexDescription> {
+        let (ops, context) = (Arc::clone(&self.schema_ops), self.node_context());
+        let (collection, name) = (collection.to_owned(), name.to_owned());
+        self.on_pool(move || async move {
+            ops.ensure_ordinary_index(&context, &collection, &name, fields)
+                .await
+        })
         .await
     }
 
@@ -440,8 +491,10 @@ impl EmbeddedNode {
     /// `source_query` format: `"SourceType { field1 field2 ... }"`
     /// `target_sdl` is the SDL for the view collection (may include directives
     /// like `@downsample` that are forward-declared for future defradb.rs support).
-    pub async fn add_view(&self, source_query: &str, target_sdl: &str) -> anyhow::Result<()> {
-        self.as_node_identity(self.schema_ops.add_view(source_query, target_sdl))
+    pub async fn add_view(&self, source_query: &str, target_sdl: &str) -> Result<()> {
+        let (ops, context) = (Arc::clone(&self.schema_ops), self.node_context());
+        let (query, sdl) = (source_query.to_owned(), target_sdl.to_owned());
+        self.on_pool(move || async move { ops.add_view(&context, &query, &sdl).await })
             .await
     }
 
@@ -457,8 +510,10 @@ impl EmbeddedNode {
         &self,
         collection_name: &str,
         patch: &str,
-    ) -> anyhow::Result<CollectionVersion> {
-        self.as_node_identity(self.schema_ops.patch_collection(collection_name, patch))
+    ) -> Result<CollectionVersion> {
+        let (ops, context) = (Arc::clone(&self.schema_ops), self.node_context());
+        let (name, patch) = (collection_name.to_owned(), patch.to_owned());
+        self.on_pool(move || async move { ops.patch_collection(&context, &name, &patch).await })
             .await
     }
 
@@ -467,9 +522,13 @@ impl EmbeddedNode {
     /// Deactivates sibling versions of the same collection and updates the
     /// collection-name pointer to resolve to this version. If migrations are
     /// registered, documents are reindexed through them.
-    pub async fn set_active_collection_version(&self, version_id: &str) -> anyhow::Result<()> {
-        self.as_node_identity(self.schema_ops.set_active_collection_version(version_id))
-            .await
+    pub async fn set_active_collection_version(&self, version_id: &str) -> Result<()> {
+        let (ops, context) = (Arc::clone(&self.schema_ops), self.node_context());
+        let version = version_id.to_owned();
+        self.on_pool(
+            move || async move { ops.set_active_collection_version(&context, &version).await },
+        )
+        .await
     }
 
     /// Register a Lens migration between two collection versions.
@@ -480,8 +539,9 @@ impl EmbeddedNode {
     ///
     /// Requires the `wasmtime-runtime` feature (on by default). Without it this
     /// returns an explicit error instead of registering a no-op transform.
-    pub async fn set_migration(&self, config: LensConfig) -> anyhow::Result<TransformId> {
-        self.as_node_identity(self.schema_ops.set_migration(config))
+    pub async fn set_migration(&self, config: LensConfig) -> Result<TransformId> {
+        let (ops, context) = (Arc::clone(&self.schema_ops), self.node_context());
+        self.on_pool(move || async move { ops.set_migration(&context, config).await })
             .await
     }
 
@@ -489,8 +549,10 @@ impl EmbeddedNode {
     ///
     /// Returns the number of documents advanced to the active version. This is a
     /// datastore-only operation and does not create or broadcast document commits.
-    pub async fn materialize_collection(&self, collection_name: &str) -> anyhow::Result<usize> {
-        self.as_node_identity(self.schema_ops.materialize_collection(collection_name))
+    pub async fn materialize_collection(&self, collection_name: &str) -> Result<usize> {
+        let (ops, context) = (Arc::clone(&self.schema_ops), self.node_context());
+        let name = collection_name.to_owned();
+        self.on_pool(move || async move { ops.materialize_collection(&context, &name).await })
             .await
     }
 
@@ -498,14 +560,14 @@ impl EmbeddedNode {
     ///
     /// Useful for idempotent schema-bootstrap flows that need to decide whether
     /// to call [`Self::add_schema`] (create) or [`Self::patch_collection`] (evolve).
-    pub fn list_collections(&self) -> anyhow::Result<Vec<String>> {
+    pub fn list_collections(&self) -> Result<Vec<String>> {
         self.schema_ops.list_collections()
     }
 
     /// Fetch the active schema definition for a collection by name.
     ///
     /// Returns `Ok(None)` if no active collection with that name exists.
-    pub fn get_collection(&self, name: &str) -> anyhow::Result<Option<CollectionVersion>> {
+    pub fn get_collection(&self, name: &str) -> Result<Option<CollectionVersion>> {
         self.schema_ops.get_collection(name)
     }
 
@@ -517,15 +579,17 @@ impl EmbeddedNode {
     pub async fn get_collection_by_version_id(
         &self,
         version_id: &str,
-    ) -> anyhow::Result<Option<CollectionVersion>> {
-        self.schema_ops
-            .get_collection_by_version_id(version_id)
+    ) -> Result<Option<CollectionVersion>> {
+        let (ops, version) = (Arc::clone(&self.schema_ops), version_id.to_owned());
+        self.on_pool(move || async move { ops.get_collection_by_version_id(&version).await })
             .await
     }
 
     /// Return every collection version known to the node, active and inactive.
-    pub async fn get_all_collection_versions(&self) -> anyhow::Result<Vec<CollectionVersion>> {
-        self.schema_ops.get_all_collection_versions().await
+    pub async fn get_all_collection_versions(&self) -> Result<Vec<CollectionVersion>> {
+        let ops = Arc::clone(&self.schema_ops);
+        self.on_pool(move || async move { ops.get_all_collection_versions().await })
+            .await
     }
 
     /// Subscribe to DefraDB events.
@@ -557,7 +621,9 @@ impl EmbeddedNode {
         &self,
         readonly: bool,
     ) -> Result<TransactionHandle, query::TransactionError> {
-        self.as_node_identity(self.runner.begin_txn(readonly)).await
+        self.runner
+            .begin_txn_as(&self.node_context(), readonly)
+            .await
     }
 
     /// Commit a transaction owned by this embedded node.
@@ -565,7 +631,8 @@ impl EmbeddedNode {
         &self,
         transaction: &TransactionHandle,
     ) -> Result<(), query::TransactionError> {
-        self.as_node_identity(self.runner.commit_txn(transaction))
+        self.runner
+            .commit_txn_as(&self.node_context(), transaction)
             .await
     }
 
@@ -574,7 +641,8 @@ impl EmbeddedNode {
         &self,
         transaction: &TransactionHandle,
     ) -> Result<(), query::TransactionError> {
-        self.as_node_identity(self.runner.rollback_txn(transaction))
+        self.runner
+            .rollback_txn_as(&self.node_context(), transaction)
             .await
     }
 
@@ -593,8 +661,11 @@ impl EmbeddedNode {
     }
 
     /// Register a DAC policy (Go: client.Store::AddDACPolicy). Returns the policy ID.
-    pub async fn add_dac_policy(&self, identity: &str, policy: &str) -> anyhow::Result<String> {
-        self.acp_ops.add_dac_policy(identity, policy).await
+    pub async fn add_dac_policy(&self, identity: &str, policy: &str) -> Result<String> {
+        let ops = Arc::clone(&self.acp_ops);
+        let (identity, policy) = (identity.to_owned(), policy.to_owned());
+        self.on_acp(move || async move { ops.add_dac_policy(&identity, &policy).await })
+            .await
     }
 
     /// Register a DAC policy under an explicit id-salt counter (local ACP only).
@@ -612,10 +683,14 @@ impl EmbeddedNode {
         identity: &str,
         policy: &str,
         counter: u64,
-    ) -> anyhow::Result<String> {
-        self.acp_ops
-            .add_dac_policy_with_counter(identity, policy, counter)
-            .await
+    ) -> Result<String> {
+        let ops = Arc::clone(&self.acp_ops);
+        let (identity, policy) = (identity.to_owned(), policy.to_owned());
+        self.on_acp(move || async move {
+            ops.add_dac_policy_with_counter(&identity, &policy, counter)
+                .await
+        })
+        .await
     }
 
     /// Grant `target` the `relation` on a document (Go: client.Store::AddDACActorRelationship).
@@ -634,10 +709,16 @@ impl EmbeddedNode {
         doc_id: &str,
         relation: &str,
         target: &str,
-    ) -> anyhow::Result<bool> {
-        self.acp_ops
-            .add_dac_actor_relationship(identity, collection, doc_id, relation, target)
-            .await
+    ) -> Result<bool> {
+        let ops = Arc::clone(&self.acp_ops);
+        let owned = |value: &str| value.to_owned();
+        let (identity, collection, doc_id) = (owned(identity), owned(collection), owned(doc_id));
+        let (relation, target) = (owned(relation), owned(target));
+        self.on_acp(move || async move {
+            ops.add_dac_actor_relationship(&identity, &collection, &doc_id, &relation, &target)
+                .await
+        })
+        .await
     }
 
     /// Revoke `target`'s `relation` on a document (Go: client.Store::DeleteDACActorRelationship).
@@ -654,10 +735,16 @@ impl EmbeddedNode {
         doc_id: &str,
         relation: &str,
         target: &str,
-    ) -> anyhow::Result<bool> {
-        self.acp_ops
-            .delete_dac_actor_relationship(identity, collection, doc_id, relation, target)
-            .await
+    ) -> Result<bool> {
+        let ops = Arc::clone(&self.acp_ops);
+        let owned = |value: &str| value.to_owned();
+        let (identity, collection, doc_id) = (owned(identity), owned(collection), owned(doc_id));
+        let (relation, target) = (owned(relation), owned(target));
+        self.on_acp(move || async move {
+            ops.delete_dac_actor_relationship(&identity, &collection, &doc_id, &relation, &target)
+                .await
+        })
+        .await
     }
 
     /// Access the raw document ACP handle (Go: `node.DB.DocumentACP()`).
@@ -710,16 +797,10 @@ impl EmbeddedNode {
     /// enabled, or if the active transport has no concept of an inbound
     /// allowlist.
     #[cfg(feature = "p2p")]
-    pub async fn allow_p2p_peer(&self, peer_id: &str) -> anyhow::Result<()> {
-        let ops = self
-            .p2p_ops
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("P2P is not enabled for this node"))?;
-        let peer_id = defra_http::TransportPeerId::new(peer_id)
-            .map_err(|error| anyhow::anyhow!("invalid peer ID: {error}"))?;
-        ops.allow_peer(&peer_id)
-            .await
-            .map_err(|error| anyhow::anyhow!("failed to authorize peer: {error}"))
+    pub async fn allow_p2p_peer(&self, peer_id: &str) -> Result<()> {
+        let ops = self.p2p_ops.as_ref().ok_or(Error::P2pDisabled)?;
+        let peer_id = defra_http::TransportPeerId::new(peer_id).map_err(Error::InvalidPeerId)?;
+        ops.allow_peer(&peer_id).await.map_err(Error::PeerAuthorize)
     }
 
     /// Bar a peer from this node in both directions, while it is running and
@@ -745,16 +826,10 @@ impl EmbeddedNode {
     /// Returns an error if P2P is not enabled, or if the active transport has
     /// no concept of peer admission.
     #[cfg(feature = "p2p")]
-    pub async fn deny_p2p_peer(&self, peer_id: &str) -> anyhow::Result<()> {
-        let ops = self
-            .p2p_ops
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("P2P is not enabled for this node"))?;
-        let peer_id = defra_http::TransportPeerId::new(peer_id)
-            .map_err(|error| anyhow::anyhow!("invalid peer ID: {error}"))?;
-        ops.deny_peer(&peer_id)
-            .await
-            .map_err(|error| anyhow::anyhow!("failed to revoke peer: {error}"))
+    pub async fn deny_p2p_peer(&self, peer_id: &str) -> Result<()> {
+        let ops = self.p2p_ops.as_ref().ok_or(Error::P2pDisabled)?;
+        let peer_id = defra_http::TransportPeerId::new(peer_id).map_err(Error::InvalidPeerId)?;
+        ops.deny_peer(&peer_id).await.map_err(Error::PeerRevoke)
     }
 
     /// Gracefully stop background services owned by this embedded node.
@@ -779,18 +854,10 @@ impl EmbeddedNode {
             let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
         }
 
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(runtime) = &self.signed_query_runtime {
-            if !runtime
-                .close_admission_and_wait_for(SIGNED_QUERY_DRAIN_TIMEOUT)
-                .await
-            {
-                tracing::warn!(
-                    active_queries = runtime.active_queries(),
-                    timeout_secs = SIGNED_QUERY_DRAIN_TIMEOUT.as_secs(),
-                    "timed out draining signed queries during node shutdown"
-                );
-            }
+        // Stop accepting the node's network work (signed queries, the HTTP
+        // server's accept loop) and drain what is in flight.
+        if let Some(network) = &self.network {
+            network.drain().await;
         }
 
         #[cfg(feature = "p2p")]
@@ -798,9 +865,10 @@ impl EmbeddedNode {
             lifecycle.shutdown().await;
         }
 
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(runtime) = &self.signed_query_runtime {
-            runtime.shutdown().await;
+        // Nothing reaches the data path any more: the worker pool finishes
+        // what it admitted and stops, then the store closes.
+        if let Err(error) = (self.close_database)().await {
+            tracing::warn!(%error, "the node's database did not close cleanly");
         }
 
         // Flush buffered spans / metrics. Done after P2P shutdown so trailing
@@ -814,79 +882,75 @@ impl EmbeddedNode {
         if let Some(handle) = self.telemetry.pop() {
             let _ = tokio::task::spawn_blocking(move || handle.shutdown()).await;
         }
+
+        // Last: a runtime the node started itself goes once nothing of the
+        // node runs on it.
+        if let Some(network) = &self.network {
+            network.stop_owned().await;
+        }
     }
 }
 
-async fn execute_request_with_retry_loop<F, Fut>(
+async fn execute_autocommit_request(
+    executor: &dyn QueryExecutor,
     request: QueryRequest,
-    policy: ExecuteRetryPolicy,
-    mut execute_once: F,
-) -> QueryResponse
-where
-    F: FnMut(QueryRequest) -> Fut,
-    Fut: std::future::Future<Output = QueryResponse>,
-{
-    let mut retry_count = 0;
-    let mut backoff = policy.initial_backoff.min(policy.max_backoff);
-
-    loop {
-        let response = execute_once(request.clone()).await;
-        if !is_transaction_conflict_response(&response) {
-            if retry_count > 0 {
-                telemetry::record_retry_success(telemetry::RetryLayer::EmbeddedExecute);
+) -> QueryResponse {
+    // Remote preparation is resolved outside mutation attempts. Storage and
+    // business conflicts are returned after one attempt.
+    let prepared = match executor.prepare_request(&request).await {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return QueryResponse {
+                data: None,
+                errors: vec![query::QueryResponseError::from_query_error(error)],
+                extensions: None,
             }
-            return response;
         }
-        if retry_count >= policy.max_retries {
-            telemetry::record_retry_exhaustion(telemetry::RetryLayer::EmbeddedExecute);
-            return response;
-        }
+    };
+    execute_prepared_request_resolving_inputs(executor, request, prepared).await
+}
 
-        telemetry::record_retry_attempt(telemetry::RetryLayer::EmbeddedExecute);
-        retry_count += 1;
-        let delay = jittered_backoff(backoff);
-        tracing::warn!(
-            retry = retry_count,
-            max_retries = policy.max_retries,
-            backoff_ms = delay.as_millis(),
-            "retrying embedded execute after transaction conflict"
-        );
-
-        if !delay.is_zero() {
-            tokio::time::sleep(delay).await;
+async fn execute_prepared_request_resolving_inputs(
+    executor: &dyn QueryExecutor,
+    request: QueryRequest,
+    mut prepared: Option<std::sync::Arc<query::prepared::PreparedMutations>>,
+) -> QueryResponse {
+    loop {
+        let response = executor
+            .execute_prepared(request.clone(), prepared.clone())
+            .await;
+        if let Some(input) = response.retry_input() {
+            match executor
+                .resolve_retry_input(&request, prepared.clone(), input)
+                .await
+            {
+                Ok(Some(updated)) => {
+                    prepared = Some(updated);
+                    continue;
+                }
+                Ok(None) => {
+                    return QueryResponse::error(
+                        "retry input resolution returned no preparation capsule",
+                    )
+                }
+                Err(error) => {
+                    return QueryResponse::error(query::QueryResponseError::from_query_error(error))
+                }
+            }
         }
-        backoff = next_retry_backoff(backoff, policy.max_backoff);
+        return response;
     }
 }
 
-fn is_transaction_conflict_response(response: &QueryResponse) -> bool {
-    response.is_transaction_conflict()
-}
+#[cfg(test)]
+#[path = "request_preparation_tests.rs"]
+mod request_preparation_tests;
 
-fn jittered_backoff(max_backoff: Duration) -> Duration {
-    if max_backoff.is_zero() {
-        return Duration::ZERO;
-    }
-
-    let max_nanos = max_backoff.as_nanos().min(u64::MAX as u128) as u64;
-    Duration::from_nanos(rand::thread_rng().gen_range(0..=max_nanos))
-}
-
-fn next_retry_backoff(current: Duration, max_backoff: Duration) -> Duration {
-    if current.is_zero() {
-        return Duration::ZERO;
-    }
-    current.saturating_mul(2).min(max_backoff)
-}
-
-fn resolve_registered_node_identity(did: &str) -> anyhow::Result<SigningConfig> {
-    let config = defra_core::signing::get_identity(did).ok_or_else(|| {
-        anyhow::anyhow!("node identity DID {did} is not registered in the DefraDB signing registry")
-    })?;
+fn resolve_registered_node_identity(did: &str) -> Result<SigningConfig> {
+    let config = defra_core::signing::get_identity(did)
+        .ok_or_else(|| Error::NodeIdentityUnregistered(did.to_owned()))?;
     if !config.has_local_private_key() && !config.has_remote_signer() {
-        anyhow::bail!(
-            "node identity DID {did} is registered without local key bytes or a remote signer"
-        );
+        return Err(Error::NodeIdentityUnusable(did.to_owned()));
     }
     Ok(config)
 }
@@ -894,36 +958,38 @@ fn resolve_registered_node_identity(did: &str) -> anyhow::Result<SigningConfig> 
 fn local_raw_identity_from_registered_config(
     did: &str,
     config: &SigningConfig,
-) -> anyhow::Result<Option<RawIdentity>> {
+) -> Result<Option<RawIdentity>> {
     if !config.has_local_private_key() {
         return Ok(None);
     }
 
     let key_type = identity_key_type_from_signing_key_type(config.key_type)?;
     let identity = RawIdentity::from_identity_key_type(key_type, &config.private_key_bytes)
-        .map_err(|error| {
-            anyhow::anyhow!("failed to load registered node identity {did}: {error}")
+        .map_err(|error| Error::NodeIdentityLoad {
+            did: did.to_owned(),
+            source: error,
         })?;
     let derived_did = identity
         .did()
-        .map_err(|error| anyhow::anyhow!("failed to derive registered node identity DID: {error}"))?
+        .map_err(Error::NodeIdentityDerive)?
         .to_string();
     if derived_did != did {
-        anyhow::bail!(
-            "registered node identity DID mismatch: expected {did}, derived {derived_did}"
-        );
+        return Err(Error::NodeIdentityMismatch {
+            expected: did.to_owned(),
+            derived: derived_did,
+        });
     }
     Ok(Some(identity))
 }
 
 fn identity_key_type_from_signing_key_type(
     key_type: defra_core::signing::SigningKeyType,
-) -> anyhow::Result<IdentityKeyType> {
+) -> Result<IdentityKeyType> {
     match key_type {
         defra_core::signing::SigningKeyType::Ed25519 => Ok(IdentityKeyType::Ed25519),
         defra_core::signing::SigningKeyType::Secp256k1 => Ok(IdentityKeyType::Secp256k1),
         defra_core::signing::SigningKeyType::Secp256r1 => Ok(IdentityKeyType::Secp256r1),
-        unsupported => anyhow::bail!("unsupported registered node identity key type {unsupported}"),
+        unsupported => Err(Error::UnsupportedKeyType(unsupported.to_string())),
     }
 }
 
@@ -950,6 +1016,8 @@ pub enum StorageBackend {
 /// Builder for constructing an `EmbeddedNode`.
 #[derive(Default)]
 pub struct NodeBuilder {
+    edge: Option<edge::Edge>,
+    workers: Option<workers::Config>,
     data_path: Option<PathBuf>,
     storage_backend: StorageBackend,
     storage_durability: storage::backends::DurabilityMode,
@@ -961,6 +1029,7 @@ pub struct NodeBuilder {
     node_identity_did: Option<String>,
     node_acp_enabled: bool,
     at_rest_encryption_key: Option<[u8; 32]>,
+    previous_at_rest_encryption_keys: Vec<[u8; 32]>,
     max_txn_retries: Option<u32>,
     query_timeout: Option<Duration>,
     query_limits: QueryLimits,
@@ -982,7 +1051,22 @@ fn resolve_regolith_options(
     explicit.unwrap_or_default().with_durability(durability)
 }
 
+/// The builder's at-rest keys, current and previous, installed on `options`.
+fn with_at_rest_keys(
+    options: storage::RegolithStoreOptions,
+    current: Option<[u8; 32]>,
+    previous: &[[u8; 32]],
+) -> Result<storage::RegolithStoreOptions> {
+    match current {
+        Some(key) => options
+            .with_encryption_keys(key, previous.iter().copied())
+            .map_err(Error::InvalidAtRestKeys),
+        None => Ok(options),
+    }
+}
+
 struct StoreBuildArgs {
+    network: Option<NodeEdge>,
     persistence: node_acp::Persistence,
     document_acp_config: DocumentAcpConfig,
     db_options: db::DbOptions,
@@ -1003,6 +1087,7 @@ struct StoreBuildArgs {
 }
 
 struct PersistentStoreBuildArgs {
+    network: Option<NodeEdge>,
     document_acp_config: DocumentAcpConfig,
     db_options: db::DbOptions,
     event_bus: Arc<dyn events::Bus>,
@@ -1022,6 +1107,21 @@ struct PersistentStoreBuildArgs {
 }
 
 impl NodeBuilder {
+    /// The worker pool the node's data path runs on. Unset, the pool's own
+    /// defaults (`workers::Config::default()`).
+    pub fn with_workers(mut self, config: workers::Config) -> Self {
+        self.workers = Some(config);
+        self
+    }
+
+    /// Run the node's network work (signed queries, the HTTP server, P2P)
+    /// on the application's network runtime. Without one, the node starts
+    /// its own when it has network work to run, and stops it at shutdown.
+    pub fn with_edge(mut self, edge: edge::Edge) -> Self {
+        self.edge = Some(edge);
+        self
+    }
+
     /// Set the data directory for persistent storage.
     /// If not set, uses in-memory storage.
     pub fn data_path(mut self, path: impl Into<PathBuf>) -> Self {
@@ -1063,9 +1163,20 @@ impl NodeBuilder {
         self
     }
 
-    /// Enable transparent at-rest value encryption for the persistent storage backend.
+    /// Enable engine file encryption at rest for the persistent storage backend.
     pub fn with_at_rest_encryption_key(mut self, key: [u8; 32]) -> Self {
         self.at_rest_encryption_key = Some(key);
+        self
+    }
+
+    /// Keys the store's files may still be sealed under after a rotation to
+    /// the key given to [`NodeBuilder::with_at_rest_encryption_key`]. They
+    /// only open what they sealed; new files use the current key.
+    pub fn with_previous_at_rest_encryption_keys<I>(mut self, keys: I) -> Self
+    where
+        I: IntoIterator<Item = [u8; 32]>,
+    {
+        self.previous_at_rest_encryption_keys = keys.into_iter().collect();
         self
     }
 
@@ -1189,7 +1300,7 @@ impl NodeBuilder {
     }
 
     /// Build and start the embedded DefraDB node.
-    pub async fn build(self) -> anyhow::Result<EmbeddedNode> {
+    pub async fn build(self) -> Result<EmbeddedNode> {
         let node_identity_did = self.node_identity_did.clone();
         let node_identity_config = node_identity_did
             .as_deref()
@@ -1225,8 +1336,6 @@ impl NodeBuilder {
             }
             options
         };
-        #[cfg(feature = "http")]
-        let max_txn_retries = db_options.max_txn_retries();
 
         // 2. Extract configs before moving self
         #[cfg(feature = "http")]
@@ -1236,9 +1345,7 @@ impl NodeBuilder {
             Some(config) if config.transaction_idle_timeout.is_zero() => None,
             Some(config) => {
                 if config.transaction_cleanup_interval.is_zero() {
-                    anyhow::bail!(
-                        "transaction cleanup interval must be non-zero when idle cleanup is enabled"
-                    );
+                    return Err(Error::ZeroCleanupInterval);
                 }
 
                 Some(TransactionCleanupConfig {
@@ -1262,11 +1369,39 @@ impl NodeBuilder {
         #[cfg(feature = "otel")]
         let telemetry_handle: Option<TelemetryHandle> = self.telemetry_handle;
 
+        // The node's network runtime comes first, so a failure to start it
+        // leaves no network work behind.
+        #[cfg(feature = "http")]
+        let serves_http = http_config.is_some();
+        #[cfg(not(feature = "http"))]
+        let serves_http = false;
+        #[cfg(feature = "p2p")]
+        let runs_p2p = p2p_config.is_some();
+        #[cfg(not(feature = "p2p"))]
+        let runs_p2p = false;
+        let network = NodeEdge::start(
+            self.edge,
+            node_identity_did.is_some() || serves_http || runs_p2p,
+        )?;
+
+        // The data path's worker pool comes before the store, which places
+        // its compaction threads by the pool's plan; the network runtime's
+        // timer, when the node has one, runs the pool's stuck-poll monitor.
+        let pool = storage::start_pool(
+            self.workers.clone().unwrap_or_default(),
+            network
+                .as_ref()
+                .map(|network| network.edge().pool_monitor()),
+        )
+        .map_err(Error::WorkerPoolStart)?;
+        let db_options = db_options.with_pool(pool.clone());
+
         // 3. Storage backend + database
         let node = if let Some(path) = self.data_path {
             tokio::fs::create_dir_all(&path).await?;
 
             let persistent_args = PersistentStoreBuildArgs {
+                network,
                 document_acp_config: self.document_acp.clone(),
                 db_options: db_options.clone(),
                 event_bus,
@@ -1290,26 +1425,37 @@ impl NodeBuilder {
                 data_path = %path.display(),
                 "embedded node starting"
             );
-            let opts =
-                resolve_regolith_options(self.regolith_options.clone(), self.storage_durability);
-            let store = storage::RegolithStore::open_with_options(&path, opts)
-                .map_err(|e| anyhow::anyhow!("failed to open regolith store: {}", e))?;
+            let opts = with_at_rest_keys(
+                resolve_regolith_options(self.regolith_options.clone(), self.storage_durability)
+                    .placed_on(&pool),
+                self.at_rest_encryption_key,
+                &self.previous_at_rest_encryption_keys,
+            )?;
+            let store =
+                storage::RegolithStore::open_with_options(&path, opts).map_err(Error::StoreOpen)?;
 
-            Self::build_with_persistent_store(store, self.at_rest_encryption_key, persistent_args)
-                .await?
+            Self::build_with_persistent_store_arc(Arc::new(store), persistent_args).await?
         } else {
             tracing::info!(
                 storage_backend = "memory",
                 "embedded node starting (ephemeral, no data_path)"
             );
             let store = Arc::new(
-                storage::RegolithStore::in_memory()
-                    .map_err(|e| anyhow::anyhow!("failed to open in-memory regolith: {}", e))?,
+                storage::RegolithStore::open_with_options(
+                    "memory",
+                    with_at_rest_keys(
+                        storage::RegolithStoreOptions::memory().placed_on(&pool),
+                        self.at_rest_encryption_key,
+                        &self.previous_at_rest_encryption_keys,
+                    )?,
+                )
+                .map_err(Error::MemoryStoreOpen)?,
             );
 
             Self::build_with_store(
                 store,
                 StoreBuildArgs {
+                    network,
                     persistence: node_acp::Persistence::Memory,
                     document_acp_config: self.document_acp,
                     db_options,
@@ -1335,20 +1481,25 @@ impl NodeBuilder {
         // 4. Spawn HTTP server if configured
         #[cfg(feature = "http")]
         if let Some(http_cfg) = http_config {
+            let network = node.network.as_ref().ok_or(Error::HttpNeedsNetwork)?;
             let server_config = defra_http::ServerConfig {
                 address: http_cfg.address,
                 request_timeout: timeout_secs(http_cfg.request_timeout),
-                max_txn_retries,
                 query_limits,
                 ..Default::default()
             };
-            let server =
-                defra_http::Server::from_arc_with_config(node.runner.clone(), server_config)
-                    .with_event_bus_arc(node.event_bus.clone())
-                    .with_schema_arc(Arc::new(HttpSchemaOps {
-                        schema_ops: Arc::clone(&node.schema_ops),
-                    }))
-                    .with_collection_versions_arc(Arc::clone(&node.collection_version_ops));
+            let server = defra_http::Server::from_arc_with_config(
+                node.runner.clone(),
+                server_config,
+                network.edge().clone(),
+            )
+            .with_event_bus_arc(node.event_bus.clone())
+            .with_pool(node.pool.clone())
+            .with_schema_arc(Arc::new(HttpSchemaOps {
+                schema_ops: Arc::clone(&node.schema_ops),
+                context: None,
+            }))
+            .with_collection_versions_arc(Arc::clone(&node.collection_version_ops));
 
             let server = if let Some(did) = node_identity_did.as_ref() {
                 server.with_node_identity_did(did.clone())
@@ -1366,7 +1517,9 @@ impl NodeBuilder {
             let addr = http_cfg.address;
             let extra_routes = http_cfg.extra_routes;
             let bound = http_cfg.listener;
-            tokio::spawn(async move {
+            // The accept loop is a service of the node's scope: shutting the
+            // node down stops it accepting.
+            let service = network.edge().spawn_service(async move {
                 let router_result = server.router();
                 let run_result = async {
                     let mut router = router_result?;
@@ -1376,32 +1529,19 @@ impl NodeBuilder {
 
                     let listener = match bound {
                         Some(listener) => {
-                            listener.set_nonblocking(true).map_err(|e| {
-                                anyhow::anyhow!("failed to prepare listener on {}: {}", addr, e)
-                            })?;
-                            tokio::net::TcpListener::from_std(listener).map_err(|e| {
-                                anyhow::anyhow!("failed to adopt listener on {}: {}", addr, e)
-                            })?
+                            listener
+                                .set_nonblocking(true)
+                                .map_err(|source| Error::ListenerPrepare { addr, source })?;
+                            tokio::net::TcpListener::from_std(listener)
+                                .map_err(|source| Error::ListenerAdopt { addr, source })?
                         }
-                        None => tokio::net::TcpListener::bind(addr).await.map_err(|e| {
-                            let hint = match e.kind() {
-                                std::io::ErrorKind::AddrInUse => "port is already in use",
-                                std::io::ErrorKind::PermissionDenied => {
-                                    "permission denied (try port > 1024)"
-                                }
-                                std::io::ErrorKind::AddrNotAvailable => {
-                                    "address not available on this host"
-                                }
-                                _ => "check network configuration",
-                            };
-                            anyhow::anyhow!("failed to bind to {}: {} ({})", addr, e, hint)
-                        })?,
+                        None => tokio::net::TcpListener::bind(addr)
+                            .await
+                            .map_err(|source| Error::ListenerBind { addr, source })?,
                     };
 
-                    axum::serve(listener, router)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("server error: {}", e))?;
-                    Ok::<(), anyhow::Error>(())
+                    axum::serve(listener, router).await.map_err(Error::Serve)?;
+                    Ok::<(), Error>(())
                 }
                 .await;
 
@@ -1409,31 +1549,19 @@ impl NodeBuilder {
                     tracing::error!(error = %e, address = %addr, "HTTP server exited with error");
                 }
             });
+            service.detach();
             tracing::info!(address = %addr, "HTTP server started");
         }
 
         Ok(node)
     }
 
-    async fn build_with_persistent_store<S: storage::corekv::Store + 'static>(
-        store: S,
-        at_rest_encryption_key: Option<[u8; 32]>,
-        args: PersistentStoreBuildArgs,
-    ) -> anyhow::Result<EmbeddedNode> {
-        if let Some(key) = at_rest_encryption_key {
-            tracing::info!("at-rest encryption enabled (value-only, AES-256-GCM)");
-            let store = Arc::new(storage::encrypted_store::EncryptedStore::new(store, key));
-            Self::build_with_persistent_store_arc(store, args).await
-        } else {
-            Self::build_with_persistent_store_arc(Arc::new(store), args).await
-        }
-    }
-
     async fn build_with_persistent_store_arc<S: storage::corekv::Store + 'static>(
         store: Arc<S>,
         args: PersistentStoreBuildArgs,
-    ) -> anyhow::Result<EmbeddedNode> {
+    ) -> Result<EmbeddedNode> {
         let PersistentStoreBuildArgs {
+            network,
             document_acp_config,
             db_options,
             event_bus,
@@ -1455,6 +1583,7 @@ impl NodeBuilder {
         Self::build_with_store(
             store,
             StoreBuildArgs {
+                network,
                 persistence: node_acp::Persistence::Persistent,
                 document_acp_config,
                 db_options,
@@ -1480,8 +1609,9 @@ impl NodeBuilder {
     async fn build_with_store<S: storage::corekv::Store + 'static>(
         store: Arc<S>,
         args: StoreBuildArgs,
-    ) -> anyhow::Result<EmbeddedNode> {
+    ) -> Result<EmbeddedNode> {
         let StoreBuildArgs {
+            network,
             persistence,
             document_acp_config,
             db_options,
@@ -1505,7 +1635,7 @@ impl NodeBuilder {
             .as_ref()
             .map(|did| identity::Did::new(did.clone()))
             .transpose()
-            .map_err(|error| anyhow::anyhow!("invalid node identity DID: {error}"))?;
+            .map_err(Error::InvalidNodeIdentityDid)?;
 
         let embedding_config = db_options.embedding_config();
         #[cfg(not(target_arch = "wasm32"))]
@@ -1514,11 +1644,15 @@ impl NodeBuilder {
         // Open database
         let mut database = db::DB::open_from_arc_with_options(store.clone(), db_options)
             .await
-            .map_err(|e| anyhow::anyhow!("failed to open database: {}", e))?;
+            .map_err(Error::DatabaseOpen)?;
 
         // Wire event bus so mutations publish events
         database.set_event_bus(event_bus.clone());
+        if let Some(network) = network.as_ref() {
+            database.set_network(network.edge().clone());
+        }
         let database = Arc::new(database);
+        let closer = close_database(&database);
 
         // Node Access Control: only installed when explicitly enabled. The node
         // identity owns the policy, so DB-layer node operations run by the node
@@ -1526,20 +1660,10 @@ impl NodeBuilder {
         if node_acp_enabled {
             let owner = node_identity_did
                 .as_deref()
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "node ACP requires a node identity; set one with with_node_identity_did()"
-                    )
-                })
-                .and_then(|did| {
-                    identity::Did::new(did)
-                        .map_err(|e| anyhow::anyhow!("invalid node identity DID for node ACP: {e}"))
-                })?;
+                .ok_or(Error::NodeAcpNeedsIdentity)
+                .and_then(|did| identity::Did::new(did).map_err(Error::InvalidNodeAcpIdentity))?;
             if database.node_did().as_ref() != Some(&owner) {
-                anyhow::bail!(
-                    "node ACP requires the node identity to be backed by local key bytes so the \
-                     node DID can own the policy"
-                );
+                return Err(Error::NodeAcpNeedsLocalKey);
             }
             let nac_store = Arc::new(acp::PersistentZanzibarStore::from_store(store.clone()));
             let nac_config = db::NacConfig::new().with_enabled().with_dev_mode();
@@ -1547,31 +1671,28 @@ impl NodeBuilder {
             nac_manager
                 .initialize(Some(&owner))
                 .await
-                .map_err(|e| anyhow::anyhow!("failed to enable node ACP: {e}"))?;
+                .map_err(Error::NodeAcpEnable)?;
             database.set_nac_manager(nac_manager);
         }
 
-        // Build the node-owned signed-query runtime before starting P2P. If
-        // runtime construction fails, the builder can return without leaving
-        // already-started network tasks behind.
-        #[cfg(not(target_arch = "wasm32"))]
-        let signed_query_runtime = node_identity_did
-            .as_ref()
-            .map(|_| SignedQueryRuntime::new())
-            .transpose()
-            .map_err(anyhow::Error::msg)?;
-
-        let acp_setup =
-            node_acp::create_document_acp(store.clone(), persistence, &document_acp_config).await?;
+        let acp_setup = node_acp::create_document_acp(
+            store.clone(),
+            persistence,
+            &document_acp_config,
+            network.as_ref().map(NodeEdge::edge),
+        )
+        .await?;
         let document_acp = acp_setup.document_acp.clone();
         #[cfg(feature = "vera")]
-        let _strict_replicated_doc_access = acp_setup.vera_acp.is_some();
+        let remote_acp = acp_setup.vera_acp.is_some();
         #[cfg(not(feature = "vera"))]
-        let _strict_replicated_doc_access = false;
+        let remote_acp = false;
+        let _strict_replicated_doc_access = remote_acp;
 
         // P2P setup (affects mutator choice)
         #[cfg(feature = "p2p")]
         let mut p2p_result = if let Some(p2p_cfg) = p2p_config {
+            let network = network.as_ref().ok_or(Error::P2pNeedsNetwork)?;
             Some(
                 p2p_runtime::setup_p2p(
                     store.clone(),
@@ -1581,6 +1702,7 @@ impl NodeBuilder {
                     node_p2p_identity,
                     document_acp.clone(),
                     _strict_replicated_doc_access,
+                    network.edge(),
                 )
                 .await?,
             )
@@ -1639,7 +1761,9 @@ impl NodeBuilder {
             // blockstore Arc (set_kms_blockstore) so the adapter can hold a
             // Weak and avoid the lock-pinning cycle (#976).
             let kms_blockstore = database.set_kms_blockstore(Arc::new(
-                blockstore::DefraBlockstore::new(store.clone(), true),
+                blockstore::DefraBlockstore::new(store.clone(), true)
+                    .with_max_txn_retries(database.options().max_txn_retries())
+                    .placed_on(database.pool()),
             ));
             let enc_block_store: Arc<dyn kms::EncBlockStore> =
                 Arc::new(db::DbEncBlockStore::new(database.clone(), kms_blockstore));
@@ -1659,12 +1783,16 @@ impl NodeBuilder {
                     .expect("static anonymous DID parses")
             });
 
-            let kms_service: Arc<dyn kms::KmsService> = Arc::new(kms::DefraKms::new(
+            let kms_service: Arc<dyn kms::KmsService> = Arc::new(kms::DefraKms::with_inputs(
                 key_store,
                 vec![p2p.kms_transport.clone()],
                 policy as Arc<dyn kms::AccessPolicy>,
                 Arc::new(db::DbBlockDocIDResolver::new(database.clone())),
                 kms_node_did,
+                network
+                    .as_ref()
+                    .map(|network| kms::KmsInputs::on(network.edge()))
+                    .unwrap_or_default(),
             ));
 
             // Bind this node's transport peer id into the KMS so served
@@ -1717,7 +1845,10 @@ impl NodeBuilder {
             query_runner
         };
 
-        let runner: Arc<dyn QueryExecutor> = Arc::new(query_runner);
+        // GraphQL requests run on the database's worker pool, routed there
+        // once at the boundary.
+        let runner = query::pooled::PooledExecutor::wrap(Arc::new(query_runner), database.pool());
+        let pool = database.pool().cloned();
         #[cfg(feature = "vera")]
         let policy_lookup =
             acp_ops::PolicyLookup::new(acp_setup.local_zanzibar_store, acp_setup.vera_acp);
@@ -1742,10 +1873,10 @@ impl NodeBuilder {
         // Started last: nothing after this point fails, so a failed build
         // never leaves a task holding the store open.
         #[cfg(not(target_arch = "wasm32"))]
-        let background_tasks = BackgroundTasks(std::sync::Mutex::new(vec![
+        let background_tasks = BackgroundTasks::new([
             database.clone().start_vector_rebuild_task(),
             database.clone().start_downsample_task(),
-        ]));
+        ]);
         let block_ops: Arc<dyn BlockOps> = Arc::new(db_impls::DbBlockOps::new(
             database,
             document_acp.clone(),
@@ -1771,8 +1902,10 @@ impl NodeBuilder {
             embedding_config,
             node_identity_did,
             node_query_identity,
-            #[cfg(not(target_arch = "wasm32"))]
-            signed_query_runtime,
+            network,
+            close_database: closer,
+            pool,
+            remote_acp,
             #[cfg(not(target_arch = "wasm32"))]
             transaction_stats,
             #[cfg(feature = "http")]
@@ -1791,14 +1924,12 @@ impl NodeBuilder {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, LazyLock};
+    use std::sync::Arc;
 
     use defra_core::signing::{RemoteSigner, SigningConfig, SigningKeyType};
-    use query::{QueryRequest, QueryResponseError};
-    use tokio::sync::Mutex;
+    use regolith::sync::Mutex;
 
-    use super::{EmbeddedNode, ExecuteRetryPolicy};
+    use super::EmbeddedNode;
 
     #[cfg(feature = "http")]
     use axum::{routing::get, Router};
@@ -1806,7 +1937,7 @@ mod tests {
     #[cfg(feature = "http")]
     use super::HttpConfig;
 
-    pub(super) static SIGNING_STORE_GUARD: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+    pub(super) static SIGNING_STORE_GUARD: Mutex<()> = Mutex::new(());
     #[cfg(feature = "http")]
     #[test]
     fn http_config_accepts_extra_routes() {
@@ -1922,7 +2053,7 @@ mod tests {
             builder
                 .regolith_options
                 .as_ref()
-                .map(|options| options.engine.write_buffer_size),
+                .map(|options| options.engine.get_write_buffer_size()),
             Some(256 * 1024)
         );
     }
@@ -1934,12 +2065,12 @@ mod tests {
         let server = storage::RegolithStoreOptions::default();
 
         assert_eq!(
-            resolved.engine.write_buffer_size,
-            server.engine.write_buffer_size
+            resolved.engine.get_write_buffer_size(),
+            server.engine.get_write_buffer_size()
         );
         assert_eq!(
-            resolved.engine.block_cache_size,
-            server.engine.block_cache_size
+            resolved.engine.get_block_cache_size(),
+            server.engine.get_block_cache_size()
         );
     }
 
@@ -1952,8 +2083,8 @@ mod tests {
         let expected = storage::RegolithStoreOptions::embedded()
             .with_durability(storage::backends::DurabilityMode::Eventual);
 
-        assert_eq!(resolved.engine.write_buffer_size, 256 * 1024);
-        assert_eq!(resolved.engine.block_cache_size, 0);
+        assert_eq!(resolved.engine.get_write_buffer_size(), 256 * 1024);
+        assert_eq!(resolved.engine.get_block_cache_size(), 0);
         assert_eq!(format!("{resolved:?}"), format!("{expected:?}"));
     }
 
@@ -1971,101 +2102,6 @@ mod tests {
         assert_eq!(super::timeout_secs(std::time::Duration::from_millis(1)), 1);
         assert_eq!(super::timeout_secs(std::time::Duration::new(2, 1)), 3);
         assert_eq!(super::timeout_secs(std::time::Duration::from_secs(5)), 5);
-    }
-
-    #[test]
-    fn execute_retry_policy_defaults_are_bounded() {
-        let policy = ExecuteRetryPolicy::default();
-
-        assert_eq!(policy.max_retries, 3);
-        assert_eq!(policy.initial_backoff, std::time::Duration::from_millis(10));
-        assert_eq!(policy.max_backoff, std::time::Duration::from_millis(250));
-    }
-
-    #[test]
-    fn execute_retry_backoff_doubles_until_cap() {
-        let max = std::time::Duration::from_millis(25);
-
-        assert_eq!(
-            super::next_retry_backoff(std::time::Duration::from_millis(10), max),
-            std::time::Duration::from_millis(20)
-        );
-        assert_eq!(
-            super::next_retry_backoff(std::time::Duration::from_millis(20), max),
-            max
-        );
-    }
-
-    #[test]
-    fn execute_retry_classifier_matches_transaction_conflicts_only() {
-        let conflict = query::QueryResponse::transaction_conflict(
-            "commit error: datastore error: storage error: transaction conflict. Please retry",
-        );
-        assert!(super::is_transaction_conflict_response(&conflict));
-
-        let validation = query::QueryResponse::error("schema error: invalid field");
-        assert!(!super::is_transaction_conflict_response(&validation));
-
-        let partial = query::QueryResponse::partial(
-            serde_json::json!({"ok": true}),
-            vec![QueryResponseError::new(
-                "commit error: transaction conflict. Please retry",
-            )],
-        );
-        assert!(!super::is_transaction_conflict_response(&partial));
-    }
-
-    #[tokio::test]
-    async fn execute_retry_loop_retries_conflicts_until_success() {
-        // Asserts a delta on process-global conflict metrics, so it cannot run
-        // beside the other tests that drive the embedded execute path. They
-        // already take this guard.
-        let _serial = SIGNING_STORE_GUARD.lock().await;
-        let metrics_before = telemetry::conflict_metrics_snapshot().embedded_execute;
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let policy =
-            ExecuteRetryPolicy::new(3, std::time::Duration::ZERO, std::time::Duration::ZERO);
-
-        let response = super::execute_request_with_retry_loop(
-            QueryRequest::new("mutation { noop }"),
-            policy,
-            {
-                let attempts = attempts.clone();
-                move |_request| {
-                    let attempts = attempts.clone();
-                    async move {
-                        let attempt = attempts.fetch_add(1, Ordering::SeqCst);
-                        if attempt < 2 {
-                            query::QueryResponse::transaction_conflict(
-                                "commit error: storage error: transaction conflict. Please retry",
-                            )
-                        } else {
-                            query::QueryResponse::success(serde_json::json!({"ok": true}))
-                        }
-                    }
-                }
-            },
-        )
-        .await;
-
-        assert_eq!(attempts.load(Ordering::SeqCst), 3);
-        assert!(!response.has_errors());
-        assert_eq!(response.data, Some(serde_json::json!({"ok": true})));
-        // The conflict counters are process-global and every test that runs a
-        // query through the retry loop moves them, so an exact delta is a race:
-        // it read 3 where it wanted 2 in CI. The loop's own behaviour is pinned
-        // exactly by `attempts` above; what is left to check here is that the
-        // telemetry fired at all, which a lower bound does without depending on
-        // what else the binary is running.
-        let metrics_after = telemetry::conflict_metrics_snapshot().embedded_execute;
-        assert!(
-            metrics_after.attempts - metrics_before.attempts >= 2,
-            "the two retried attempts must be recorded"
-        );
-        assert!(
-            metrics_after.successes - metrics_before.successes >= 1,
-            "the eventual success must be recorded"
-        );
     }
 
     #[tokio::test]

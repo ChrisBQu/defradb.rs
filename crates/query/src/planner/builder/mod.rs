@@ -80,9 +80,14 @@ pub struct Planner {
     pub(crate) lens_store: Option<Arc<dyn lens::TransformStore>>,
     /// Optional ACP for permission filtering in plans
     acp: Option<Arc<dyn DocumentACP>>,
+    acp_registration_projection: Option<Arc<crate::txn::AcpRegistrationProjection>>,
     /// Identity for ACP permission checks
     identity_did: Option<Did>,
+    /// The request's DAC bypass (`RequestContext::dac_bypass`); that of
+    /// `RequestContext::ambient` until `with_dac_bypass` sets it
+    dac_bypass: bool,
     /// App read validator, applied after ACP
+    retry_inputs: Option<crate::prepared::PreparedInputMemo>,
     read_validator: Option<Arc<dyn crate::access_hooks::ReadValidator>>,
     /// Pre-computed FTS scores: output_name → (doc_id → score)
     pub(crate) fts_scores: RapidHashMap<String, RapidHashMap<String, f64>>,
@@ -126,8 +131,11 @@ impl Planner {
             fetcher: None,
             lens_store: None,
             acp: None,
+            acp_registration_projection: None,
             identity_did: None,
+            dac_bypass: defra_core::RequestContext::ambient().dac_bypass(),
             read_validator: None,
+            retry_inputs: None,
             fts_scores: RapidHashMap::new(),
             query_limits: QueryLimits::default(),
             index_estimates: None,
@@ -177,11 +185,33 @@ impl Planner {
         self
     }
 
+    /// Set the request's DAC bypass for permission filtering in plans.
+    pub fn with_dac_bypass(mut self, dac_bypass: bool) -> Self {
+        self.dac_bypass = dac_bypass;
+        self
+    }
+
+    pub fn with_acp_registration_projection(
+        mut self,
+        projection: Option<Arc<crate::txn::AcpRegistrationProjection>>,
+    ) -> Self {
+        self.acp_registration_projection = projection;
+        self
+    }
+
     pub fn with_read_validator(
         mut self,
         validator: Option<Arc<dyn crate::access_hooks::ReadValidator>>,
     ) -> Self {
         self.read_validator = validator;
+        self
+    }
+
+    pub(crate) fn with_retry_inputs(
+        mut self,
+        inputs: Option<crate::prepared::PreparedInputMemo>,
+    ) -> Self {
+        self.retry_inputs = inputs;
         self
     }
 
@@ -200,20 +230,28 @@ impl Planner {
         collection: &CollectionVersion,
     ) -> Box<dyn PlanNode> {
         let acp = match (&self.acp, &collection.policy) {
-            (Some(acp), Some(policy)) => Some((
-                acp.clone(),
-                acp::Identity::from(self.identity_did.clone()),
-                policy.id.clone(),
-                policy.resource_name.clone(),
-            )),
+            (Some(acp), Some(policy)) => Some(crate::plan::AcpRead {
+                acp: acp.clone(),
+                identity: acp::Identity::from(self.identity_did.clone()),
+                dac_bypass: self.dac_bypass,
+                policy_id: policy.id.clone(),
+                resource_name: policy.resource_name.clone(),
+            }),
             _ => None,
         };
         let app = crate::access_hooks::AppReadCheck::bind(
             self.read_validator.as_ref(),
             self.identity_did.clone(),
             collection,
-        );
-        PermissionFilterNode::wrap(plan, acp, app)
+        )
+        .map(|check| check.with_retry_inputs(self.retry_inputs.clone()));
+        PermissionFilterNode::wrap_with_projection_and_inputs(
+            plan,
+            acp,
+            app,
+            self.acp_registration_projection.clone(),
+            self.retry_inputs.clone(),
+        )
     }
 
     /// Get a collection by name or CollectionID.

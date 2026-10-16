@@ -17,6 +17,8 @@ mod iroh_restore;
 #[cfg(feature = "libp2p")]
 mod libp2p;
 pub mod manage;
+#[cfg(any(feature = "iroh", feature = "libp2p"))]
+mod pooled_doc_pusher;
 mod read_gate;
 mod replication_events;
 mod replicator_status;
@@ -42,11 +44,20 @@ pub use iroh_peer::{
 pub use iroh_restore::restore_iroh_p2p_state;
 #[cfg(feature = "libp2p")]
 pub use libp2p::{CollectionLookup, P2PAdapter, VersionSyncer};
+#[cfg(any(feature = "iroh", feature = "libp2p"))]
+pub use pooled_doc_pusher::pooled;
 pub use read_gate::{DbBlockClassifier, DbBlockReadGate};
 pub use replication_events::publish_replication_result;
-pub use replicator_status::{load_persisted_replicators, set_persisted_replicator_status};
+pub use replicator_status::{
+    load_persisted_replicators, set_persisted_replicator_status,
+    set_persisted_replicator_status_for_incarnation,
+    set_persisted_replicator_status_for_incarnation_with_marker_state,
+    set_persisted_replicator_status_for_scope_generation,
+};
 #[cfg(any(feature = "iroh", feature = "libp2p"))]
-pub use retry::{activate_retry_peer, run_retry_pass, spawn_failure_recorder, spawn_retry_loop};
+pub use retry::{
+    activate_retry_peer, run_retry_pass, spawn_failure_recorder, spawn_retry_loop, FailureRecorder,
+};
 #[cfg(any(feature = "iroh", feature = "libp2p"))]
 pub use transport_doc_pusher::{DbTransportDocPusher, TransportDocPusher};
 #[cfg(feature = "iroh")]

@@ -10,7 +10,7 @@ use web_time::Instant;
 
 use p2p::message::PushLogReply;
 use p2p::transport::PeerId;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use regolith::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// Maximum concurrent per-document push tasks during initial replay.
 ///
@@ -58,7 +58,7 @@ pub struct ReplayDocumentFailure {
 }
 
 /// Persist the receiver hint before crossing the legacy string error boundary.
-pub async fn persist_retry_after<S: storage::corekv::Store>(
+pub async fn persist_retry_after<S: storage::corekv::Store + 'static>(
     peerstore: &storage::stores::Peerstore<S>,
     peer_id: &PeerId,
     reply: &PushLogReply,
@@ -66,19 +66,21 @@ pub async fn persist_retry_after<S: storage::corekv::Store>(
     let Some(delay) = reply.retry_after() else {
         return Ok(());
     };
+    let peer = peer_id.as_str().to_owned();
     peerstore
-        .record_retry_after(peer_id.as_str(), delay)
+        .run(move |peerstore| async move { peerstore.record_retry_after(&peer, delay).await })
         .await
         .map(|_| ())
         .map_err(|error| format!("failed to persist receiver retry-after: {error}"))
 }
 
-pub async fn remaining_retry_after<S: storage::corekv::Store>(
+pub async fn remaining_retry_after<S: storage::corekv::Store + 'static>(
     peerstore: &storage::stores::Peerstore<S>,
     peer_id: &PeerId,
 ) -> Result<Option<Duration>, String> {
+    let peer = peer_id.as_str().to_owned();
     let Some(bytes) = peerstore
-        .get_retry_info(peer_id.as_str())
+        .run(move |peerstore| async move { peerstore.get_retry_info(&peer).await })
         .await
         .map_err(|e| e.to_string())?
     else {
@@ -93,7 +95,7 @@ pub async fn remaining_retry_after<S: storage::corekv::Store>(
         .filter(|delay| !delay.is_zero()))
 }
 
-pub async fn check_retry_admission<S: storage::corekv::Store>(
+pub async fn check_retry_admission<S: storage::corekv::Store + 'static>(
     peerstore: &storage::stores::Peerstore<S>,
     peer_id: &PeerId,
 ) -> Result<(), ReplayPushSendError> {
@@ -107,9 +109,8 @@ pub async fn check_retry_admission<S: storage::corekv::Store>(
 }
 
 /// Persist documents that did not finish their initial replay so the normal
-/// retry sweep owns them after the bounded attempt. Replay intentionally does
-/// not hold the peer writer across network waits, so the failure handoff must
-/// reacquire it before mutating the shared peer schedule.
+/// retry sweep owns them after the bounded attempt. Peer existence and marker
+/// writes are validated together by Peerstore transactions.
 pub async fn persist_replay_failures<S: storage::corekv::Store>(
     peerstore: &storage::stores::Peerstore<S>,
     peer_id: &PeerId,
@@ -119,15 +120,6 @@ pub async fn persist_replay_failures<S: storage::corekv::Store>(
         return Ok(());
     }
 
-    let Some(_retry_guard) = peerstore
-        .acquire_replicator_retry_guard(peer_id.as_str())
-        .await
-        .map_err(|error| format!("failed to coordinate replay failure persistence: {error}"))?
-    else {
-        // Forget won the race with the completed network attempt.  The removed
-        // replicator no longer owns a durable delivery obligation.
-        return Ok(());
-    };
     for failure in failures {
         let retry_info = storage::stores::RetryInfo::new_initial()
             .to_bytes()
@@ -239,6 +231,7 @@ pub struct ReplayPushGate {
     outbound_push_semaphore: Arc<Semaphore>,
     peer_pacer: ReplayPeerPacer,
     send_timeout: Duration,
+    network: p2p::network::Network,
 }
 
 impl ReplayPushGate {
@@ -260,17 +253,20 @@ impl ReplayPushGate {
             )),
             peer_pacer: ReplayPeerPacer::new(config.per_peer_rate_limit_burst.max(1), rate),
             send_timeout: config.send_timeout.max(Duration::from_millis(1)),
+            network: p2p::network::Network::default(),
         }
+    }
+
+    /// Paces and times its sends on `network`'s clock.
+    pub fn on(mut self, network: p2p::network::Network) -> Self {
+        self.network = network;
+        self
     }
 
     pub(crate) async fn acquire_document_task(
         &self,
     ) -> Result<OwnedSemaphorePermit, ReplayPushSendError> {
-        self.document_task_semaphore
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| ReplayPushSendError::SemaphoreClosed)
+        Ok(self.document_task_semaphore.acquire_owned(1).await)
     }
 
     pub async fn send_pushlog<F>(
@@ -301,21 +297,18 @@ impl ReplayPushGate {
             if let Some(retry_after) = self.peer_pacer.retry_after(peer_id.as_str()) {
                 return Err(ReplayPushSendError::Backpressure { retry_after });
             }
-            n0_future::time::sleep(delay).await;
+            self.network.sleep(delay).await;
         }
 
-        let _permit = self
-            .outbound_push_semaphore
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| ReplayPushSendError::SemaphoreClosed)?;
+        let _permit = self.outbound_push_semaphore.acquire_owned(1).await;
 
         if let Some(retry_after) = self.peer_pacer.retry_after(peer_id.as_str()) {
             return Err(ReplayPushSendError::Backpressure { retry_after });
         }
         admission.await?;
-        let reply = n0_future::time::timeout(self.send_timeout, send)
+        let reply = self
+            .network
+            .timeout(self.send_timeout, send)
             .await
             .map_err(|_| ReplayPushSendError::Timeout {
                 timeout: self.send_timeout,

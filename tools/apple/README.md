@@ -183,6 +183,21 @@ X9.63 / SEC1 public key bytes (`0x04 || X || Y`).
 - For Secure Enclave P-256 signing, use
   `SecKeyCreateSignature(..., .ecdsaSignatureMessageX962SHA256, ...)`.
 
+`DefraRemoteSignAsyncCallback`, registered with `register_remote_identity_async`
+or `register_remote_identity_bytes_async`, is the form for a signer that
+answers later (its own queue, a network round trip):
+
+- The callback receives the same values plus a `completion` value, and returns
+  `0` once the signature is under way (any other value fails the request).
+- `payload_ptr`, `did` and `key_type` are valid only during the callback: copy
+  the payload before signing on another queue.
+- Report the result exactly once with
+  `defra_remote_sign_complete(completion, status, signature_ptr, signature_len)`
+  from any thread: `status` `0` with the signature, `DEFRA_SIGN_RETRYABLE` when
+  the request never reached the signer, any other value for a refusal. It
+  returns `1` when nothing waits under `completion` any more.
+- The callback runs on a Defra thread that serves other work: return promptly.
+
 ## Validation
 
 `tools/apple/build-ffi.sh` now runs a Swift import smoke test after packaging.

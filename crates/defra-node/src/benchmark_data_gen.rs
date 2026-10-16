@@ -1,8 +1,8 @@
 //! Data generation helpers for benchmark fixtures.
 
+use crate::{Error, Result};
 use std::fmt::Write as _;
 
-use anyhow::{anyhow, bail, Context, Result};
 use serde_json::Value as JsonValue;
 
 use crate::benchmark_queries::escape_graphql;
@@ -70,11 +70,10 @@ pub(crate) async fn create_project(node: &EmbeddedNode, project_path: &str) -> R
         .and_then(extract_doc_id_value)
         .and_then(JsonValue::as_str)
         .map(ToOwned::to_owned)
-        .with_context(|| {
-            format!(
-                "missing CodingProject _docID for {} response={}",
-                project_path, data
-            )
+        .ok_or_else(|| Error::MissingCreatedDocId {
+            kind: "CodingProject _docID",
+            owner: project_path.to_owned(),
+            response: data.to_string(),
         })
 }
 
@@ -144,11 +143,10 @@ pub(crate) async fn create_session(
         .and_then(extract_doc_id_value)
         .and_then(JsonValue::as_str)
         .map(ToOwned::to_owned)
-        .with_context(|| {
-            format!(
-                "missing _docID for {} response={}",
-                session.session_id, data
-            )
+        .ok_or_else(|| Error::MissingCreatedDocId {
+            kind: "_docID",
+            owner: session.session_id.clone(),
+            response: data.to_string(),
         })
 }
 
@@ -423,13 +421,16 @@ async fn execute_batched_add_collect_doc_ids(
         let ids = data
             .get(format!("add_{collection_name}").as_str())
             .and_then(JsonValue::as_array)
-            .ok_or_else(|| anyhow!("missing add_{collection_name} array in {data}"))?
+            .ok_or_else(|| Error::MissingArray {
+                collection: format!("add_{collection_name}"),
+                within: data.to_string(),
+            })?
             .iter()
             .map(|item| {
                 item.get("_docID")
                     .and_then(JsonValue::as_str)
                     .map(ToOwned::to_owned)
-                    .ok_or_else(|| anyhow!("missing _docID in {item}"))
+                    .ok_or_else(|| Error::missing("_docID", item))
             })
             .collect::<Result<Vec<_>>>()?;
         doc_ids.extend(ids);
@@ -446,12 +447,15 @@ pub(crate) fn ensure_success(response: crate::QueryResponse, context: &str) -> R
             .map(|error| error.message)
             .collect::<Vec<_>>()
             .join("; ");
-        bail!("{context}: {messages}");
+        return Err(Error::QueryFailed {
+            context: context.to_owned(),
+            messages,
+        });
     }
 
     response
         .data
-        .ok_or_else(|| anyhow!("missing response data for {context}"))
+        .ok_or_else(|| Error::MissingResponseData(context.to_owned()))
 }
 
 fn extract_doc_id_value(value: &JsonValue) -> Option<&JsonValue> {

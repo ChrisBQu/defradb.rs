@@ -5,9 +5,7 @@ use document::DocID;
 use document::Document;
 use document::NormalValue;
 use rapidhash::RapidHashSet;
-use storage::corekv::Key;
 use storage::corekv::Store;
-use storage::keys::headstore::HeadstoreDocKey;
 use storage::namespace::Namespace;
 use storage::RegolithStore;
 
@@ -35,8 +33,9 @@ async fn update_keeps_doc_id_without_composite_heads() {
     )
     .await
     .unwrap();
-    headstore
-        .delete(&HeadstoreDocKey::new(identity.doc_short_id, "C", created.cid).bytes())
+    let mut removal = storage::merge::head_set::Write::default();
+    removal.supersede(&db::block::heads::document::name("C", &created.cid));
+    db::block::heads::document::commit(&headstore, identity.doc_short_id, &removal)
         .await
         .unwrap();
 

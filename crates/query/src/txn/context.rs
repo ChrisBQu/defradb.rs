@@ -1,15 +1,11 @@
 //! Transaction context trait.
 
-use acp::error::{Error as AcpError, Result as AcpResult};
+use acp::error::Result as AcpResult;
 use acp::DocumentACP;
 use acp::DocumentPermission;
 use acp::Identity;
-use defra_core::thread_bounds::MaybeBoxFuture;
-use futures::FutureExt;
+use defra_core::RequestContext;
 use identity::Did;
-use rapidhash::RapidHashMap;
-use std::future::Future;
-use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use storage::corekv::MaybeSendSync;
 
@@ -17,334 +13,397 @@ use crate::fetcher::CollectionProvider;
 use crate::fetcher::DocFetcher;
 use crate::mutator::DocMutator;
 
-#[cfg(not(target_arch = "wasm32"))]
-tokio::task_local! {
-    static TXN_DEFERRED_ACP_MUTATIONS: Arc<DeferredAcpMutations>;
+/// A transaction's view of the registrations its creates owe an external ACP
+/// provider (see [`acp::pending`]). The owed records are the transaction's own
+/// writes, so its statement savepoints and its rollback cover them and nothing
+/// is copied here: a lookup is one point read through the transaction, and the
+/// post-commit hooks that settle the records stay attached to the transaction
+/// that owns the document writes. Remote ACP updates are not atomic with
+/// storage; the records only keep each owed document readable by its creator
+/// alone until the provider confirms.
+#[derive(Clone, Default)]
+pub struct AcpRegistrationProjection {
+    pending: Option<acp::PendingRegistrations>,
 }
 
-#[cfg(target_arch = "wasm32")]
-thread_local! {
-    static TXN_DEFERRED_ACP_MUTATIONS: std::cell::RefCell<Option<Arc<DeferredAcpMutations>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-type DeferredAcpHook = Box<dyn FnOnce() -> MaybeBoxFuture<'static, Result<(), String>> + Send>;
-#[cfg(target_arch = "wasm32")]
-type DeferredAcpHook = Box<dyn FnOnce() -> MaybeBoxFuture<'static, Result<(), String>>>;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum ProjectedDocRegistration {
-    Registered { owner: Did },
-    Unregistered,
-}
-
-#[derive(Clone, Debug, Hash, PartialEq, Eq)]
-struct DocRegistrationKey {
-    policy_id: String,
-    resource_name: String,
-    doc_id: String,
-}
-
-struct DeferredAcpHookEntry {
-    description: &'static str,
-    callback: DeferredAcpHook,
-}
-
-#[derive(Default)]
-struct DeferredAcpState {
-    projected_registrations: RapidHashMap<DocRegistrationKey, ProjectedDocRegistration>,
-    hooks: Vec<DeferredAcpHookEntry>,
-}
-
-/// Deferred ACP mutations and their transaction-local registration projection.
-///
-/// Explicit database transactions use this to:
-/// - buffer ACP writes until commit succeeds
-/// - expose projected registration state to permission checks within the txn
-#[derive(Default)]
-pub struct DeferredAcpMutations {
-    state: std::sync::Mutex<DeferredAcpState>,
-}
-
-impl DeferredAcpMutations {
-    /// Create an empty deferred ACP state container.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    fn doc_key(policy_id: &str, resource_name: &str, doc_id: &str) -> DocRegistrationKey {
-        DocRegistrationKey {
-            policy_id: policy_id.to_string(),
-            resource_name: resource_name.to_string(),
-            doc_id: doc_id.to_string(),
+impl AcpRegistrationProjection {
+    /// Read owed registrations through the transaction behind `pending`.
+    pub fn new(pending: acp::PendingRegistrations) -> Self {
+        Self {
+            pending: Some(pending),
         }
     }
 
-    fn lock_state(&self) -> Result<std::sync::MutexGuard<'_, DeferredAcpState>, String> {
-        self.state
-            .lock()
-            .map_err(|_| "deferred ACP mutation state lock poisoned".to_string())
+    /// A projection with no transaction behind it: nothing is owed through it.
+    pub fn detached() -> Self {
+        Self::default()
     }
 
-    fn push_hook(
-        &self,
-        description: &'static str,
-        callback: DeferredAcpHook,
-    ) -> Result<(), String> {
-        let mut state = self.lock_state()?;
-        state.hooks.push(DeferredAcpHookEntry {
-            description,
-            callback,
-        });
-        Ok(())
+    /// A detached projection to share. It is not `Sync` in the single-threaded
+    /// browser build, where nothing shares it across threads.
+    #[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
+    pub fn detached_shared() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self::detached())
     }
 
-    fn with_request_bearer_token(
-        did: &Did,
-        token: Option<String>,
-    ) -> Option<RequestBearerTokenGuard> {
-        let token = token?;
-        Some(RequestBearerTokenGuard::new(did.as_str(), token))
-    }
-
-    /// Return the projected registration state for a document within the current transaction.
-    fn projected_registration(
+    /// The creator a registration is owed to, as this transaction sees it.
+    pub async fn owed_creator(
         &self,
         policy_id: &str,
         resource_name: &str,
         doc_id: &str,
-    ) -> AcpResult<Option<ProjectedDocRegistration>> {
-        let state = self.lock_state().map_err(AcpError::Storage)?;
-        Ok(state
-            .projected_registrations
-            .get(&Self::doc_key(policy_id, resource_name, doc_id))
-            .cloned())
-    }
-
-    /// Schedule a document registration to run after the storage transaction commits.
-    pub fn schedule_register_doc_object(
-        &self,
-        acp: Arc<dyn DocumentACP>,
-        identity: Did,
-        policy_id: String,
-        resource_name: String,
-        doc_id: String,
-        request_bearer_token: Option<String>,
-    ) -> Result<(), String> {
-        {
-            let mut state = self.lock_state()?;
-            state.projected_registrations.insert(
-                Self::doc_key(&policy_id, &resource_name, &doc_id),
-                ProjectedDocRegistration::Registered {
-                    owner: identity.clone(),
-                },
-            );
-        }
-
-        let doc_id_for_log = doc_id.clone();
-        let policy_id_for_log = policy_id.clone();
-        self.push_hook(
-            "register_doc_object",
-            Box::new(move || {
-                Box::pin(async move {
-                    let _request_token_guard =
-                        Self::with_request_bearer_token(&identity, request_bearer_token);
-                    acp.register_doc_object(&identity, &policy_id, &resource_name, &doc_id)
-                        .await
-                        .map_err(|e| {
-                            format!(
-                                "failed to register ACP document '{}' for policy '{}': {}",
-                                doc_id_for_log, policy_id_for_log, e
-                            )
-                        })
-                })
-            }),
-        )
-    }
-
-    /// Schedule a document unregistration to run after the storage transaction commits.
-    pub fn schedule_unregister_doc_object(
-        &self,
-        acp: Arc<dyn DocumentACP>,
-        policy_id: String,
-        resource_name: String,
-        doc_id: String,
-        caller_identity: Option<Did>,
-        request_bearer_token: Option<String>,
-    ) -> Result<(), String> {
-        {
-            let mut state = self.lock_state()?;
-            state.projected_registrations.insert(
-                Self::doc_key(&policy_id, &resource_name, &doc_id),
-                ProjectedDocRegistration::Unregistered,
-            );
-        }
-
-        let doc_id_for_log = doc_id.clone();
-        let policy_id_for_log = policy_id.clone();
-        self.push_hook(
-            "unregister_doc_object",
-            Box::new(move || {
-                Box::pin(async move {
-                    let _request_token_guard = caller_identity
-                        .as_ref()
-                        .and_then(|did| Self::with_request_bearer_token(did, request_bearer_token));
-
-                    if let Err(err) = acp
-                        .unregister_doc_object(&policy_id, &resource_name, &doc_id)
-                        .await
-                    {
-                        tracing::warn!(
-                            doc_id = %doc_id_for_log,
-                            policy_id = %policy_id_for_log,
-                            error = %err,
-                            "Deferred ACP unregister failed after commit"
-                        );
-                    }
-
-                    Ok(())
-                })
-            }),
-        )
-    }
-
-    /// Run all deferred ACP hooks in registration order.
-    pub async fn run_all_logged(&self) {
-        let hooks = match self.lock_state() {
-            Ok(mut state) => std::mem::take(&mut state.hooks),
-            Err(err) => {
-                tracing::error!(error = %err, "Failed to drain deferred ACP hooks");
-                return;
-            }
+    ) -> AcpResult<Option<Did>> {
+        let Some(pending) = &self.pending else {
+            return Ok(None);
         };
-
-        for hook in hooks {
-            let description = hook.description;
-            let result = AssertUnwindSafe((hook.callback)()).catch_unwind().await;
-            match result {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => {
-                    tracing::error!(
-                        hook = description,
-                        error = %err,
-                        "Deferred ACP hook failed after transaction commit"
-                    );
-                }
-                Err(panic) => {
-                    tracing::error!(
-                        hook = description,
-                        panic = ?panic,
-                        "Deferred ACP hook panicked after transaction commit"
-                    );
-                }
-            }
-        }
+        Ok(pending
+            .get(policy_id, resource_name, doc_id)
+            .await?
+            .map(|owed| owed.creator))
     }
 }
 
-struct RequestBearerTokenGuard {
-    did: String,
-    previous_token: Option<String>,
-}
-
-impl RequestBearerTokenGuard {
-    fn new(did: &str, new_token: String) -> Self {
-        let previous_token = defra_core::signing::get_request_bearer_token(did);
-        defra_core::signing::set_request_bearer_token(did, new_token);
-        Self {
-            did: did.to_string(),
-            previous_token,
-        }
-    }
-}
-
-impl Drop for RequestBearerTokenGuard {
-    fn drop(&mut self) {
-        if let Some(previous_token) = self.previous_token.take() {
-            defra_core::signing::set_request_bearer_token(&self.did, previous_token);
-        } else {
-            defra_core::signing::clear_request_bearer_token(&self.did);
-        }
-    }
-}
-
-/// Execute a future with the given deferred ACP mutation projection in scope.
-pub async fn scope_deferred_acp_mutations<Fut, T>(
-    mutations: Arc<DeferredAcpMutations>,
-    future: Fut,
-) -> T
-where
-    Fut: Future<Output = T>,
-{
-    #[cfg(not(target_arch = "wasm32"))]
-    return TXN_DEFERRED_ACP_MUTATIONS.scope(mutations, future).await;
-
-    #[cfg(target_arch = "wasm32")]
-    defra_core::wasm_task_local::scope(&TXN_DEFERRED_ACP_MUTATIONS, mutations, future).await
-}
-
-/// Return the current transaction's deferred ACP projection, if any.
-pub fn current_deferred_acp_mutations() -> Option<Arc<DeferredAcpMutations>> {
-    #[cfg(not(target_arch = "wasm32"))]
-    return TXN_DEFERRED_ACP_MUTATIONS.try_with(Clone::clone).ok();
-
-    #[cfg(target_arch = "wasm32")]
-    defra_core::wasm_task_local::try_with(&TXN_DEFERRED_ACP_MUTATIONS, Clone::clone)
-}
-
-/// Check document registration while honoring any ACP mutations buffered in the current txn.
-pub async fn is_doc_registered_with_overlay(
+/// Only an external provider is owed registrations; a transactional one
+/// registers inside the create's transaction, so nothing is read for it.
+async fn owed_creator(
     acp: &dyn DocumentACP,
+    projection: Option<&AcpRegistrationProjection>,
+    policy_id: &str,
+    resource_name: &str,
+    doc_id: &str,
+) -> AcpResult<Option<Did>> {
+    match projection {
+        Some(projection) if !acp.supports_transactions() => {
+            projection
+                .owed_creator(policy_id, resource_name, doc_id)
+                .await
+        }
+        _ => Ok(None),
+    }
+}
+
+fn is_creator(identity: &Identity, creator: &Did) -> bool {
+    matches!(identity, Identity::Authenticated(did) if did == creator)
+}
+
+/// Check document registration using an explicit request/transaction projection.
+pub async fn is_doc_registered_with_projection(
+    acp: &dyn DocumentACP,
+    projection: Option<&AcpRegistrationProjection>,
     policy_id: &str,
     resource_name: &str,
     doc_id: &str,
 ) -> AcpResult<bool> {
-    if let Some(mutations) = current_deferred_acp_mutations() {
-        if let Some(projected) =
-            mutations.projected_registration(policy_id, resource_name, doc_id)?
-        {
-            return Ok(matches!(
-                projected,
-                ProjectedDocRegistration::Registered { .. }
-            ));
-        }
+    if owed_creator(acp, projection, policy_id, resource_name, doc_id)
+        .await?
+        .is_some()
+    {
+        return Ok(true);
     }
-
     acp.is_doc_registered(policy_id, resource_name, doc_id)
         .await
 }
 
-/// Check document access while honoring any ACP mutations buffered in the current txn.
-pub async fn check_doc_access_with_overlay(
+/// Resolve registration state from attempt-local projection, the live
+/// transaction provider, or an exact request memo for external providers.
+pub async fn is_doc_registered_with_prepared_inputs(
     acp: &dyn DocumentACP,
+    projection: Option<&AcpRegistrationProjection>,
+    identity: &Identity,
+    policy_id: &str,
+    resource_name: &str,
+    doc_id: &str,
+    inputs: Option<&crate::prepared::PreparedInputMemo>,
+) -> crate::error::Result<bool> {
+    if owed_creator(acp, projection, policy_id, resource_name, doc_id)
+        .await
+        .map_err(|error| crate::error::QueryError::execution(error.to_string()))?
+        .is_some()
+    {
+        return Ok(true);
+    }
+    let Some(inputs) = inputs.filter(|_| !acp.supports_transactions()) else {
+        return is_doc_registered_with_projection(
+            acp,
+            projection,
+            policy_id,
+            resource_name,
+            doc_id,
+        )
+        .await
+        .map_err(|error| crate::error::QueryError::execution(error.to_string()));
+    };
+    let bearer = identity
+        .did()
+        .and_then(|did| acp.bearer_token_for(did.as_str()));
+    let exact_request = serde_json::to_vec(&(
+        identity.did().map(Did::as_str).unwrap_or("anonymous"),
+        "registered",
+        policy_id,
+        resource_name,
+        doc_id,
+        bearer,
+    ))
+    .map_err(|error| crate::error::QueryError::execution(error.to_string()))?;
+    let request = crate::prepared::PreparedInputRequest::new(
+        crate::prepared::PreparedInputKind::AcpDecision,
+        exact_request,
+    );
+    let Some(response) = inputs.get(&request) else {
+        return Err(crate::error::QueryError::NeedsInput(request));
+    };
+    serde_json::from_slice(&response).map_err(|error| {
+        crate::error::QueryError::execution(format!("cached ACP response is invalid: {error}"))
+    })
+}
+
+/// Check document access using an explicit request/transaction projection.
+pub async fn check_doc_access_with_projection(
+    acp: &dyn DocumentACP,
+    projection: Option<&AcpRegistrationProjection>,
     identity: &Identity,
     permission: DocumentPermission,
     policy_id: &str,
     resource_name: &str,
     doc_id: &str,
 ) -> AcpResult<bool> {
-    if let Some(mutations) = current_deferred_acp_mutations() {
-        if let Some(projected) =
-            mutations.projected_registration(policy_id, resource_name, doc_id)?
-        {
-            return Ok(match projected {
-                ProjectedDocRegistration::Unregistered => acp.unregistered_documents_are_public(),
-                ProjectedDocRegistration::Registered { owner } => {
-                    matches!(identity, Identity::Authenticated(did) if did == &owner)
-                }
-            });
-        }
+    if let Some(creator) = owed_creator(acp, projection, policy_id, resource_name, doc_id).await? {
+        return Ok(is_creator(identity, &creator));
     }
-
     acp.check_doc_access(identity, permission, policy_id, resource_name, doc_id)
         .await
+}
+
+/// Resolve a document permission through the request memo when running inside
+/// an engine retry attempt. A cache miss exits the attempt so the caller can
+/// ask the external ACP provider and re-enter with the exact answer.
+#[allow(clippy::too_many_arguments)]
+pub async fn check_doc_access_with_prepared_inputs(
+    acp: &dyn DocumentACP,
+    projection: Option<&AcpRegistrationProjection>,
+    identity: &Identity,
+    permission: DocumentPermission,
+    policy_id: &str,
+    resource_name: &str,
+    doc_id: &str,
+    inputs: Option<&crate::prepared::PreparedInputMemo>,
+) -> crate::error::Result<bool> {
+    // A registration this transaction owes overrides remote state, while
+    // transaction-capable providers stay live so their reads participate in OCC.
+    if let Some(creator) = owed_creator(acp, projection, policy_id, resource_name, doc_id)
+        .await
+        .map_err(|error| crate::error::QueryError::execution(error.to_string()))?
+    {
+        return Ok(is_creator(identity, &creator));
+    }
+    let Some(inputs) = inputs.filter(|_| !acp.supports_transactions()) else {
+        return check_doc_access_with_projection(
+            acp,
+            projection,
+            identity,
+            permission,
+            policy_id,
+            resource_name,
+            doc_id,
+        )
+        .await
+        .map_err(|error| crate::error::QueryError::execution(error.to_string()));
+    };
+    let bearer = identity
+        .did()
+        .and_then(|did| acp.bearer_token_for(did.as_str()));
+    let exact_request = serde_json::to_vec(&(
+        identity.did().map(Did::as_str).unwrap_or("anonymous"),
+        permission.as_str(),
+        policy_id,
+        resource_name,
+        doc_id,
+        bearer,
+    ))
+    .map_err(|error| crate::error::QueryError::execution(error.to_string()))?;
+    let request = crate::prepared::PreparedInputRequest::new(
+        crate::prepared::PreparedInputKind::AcpDecision,
+        exact_request,
+    );
+    let Some(response) = inputs.get(&request) else {
+        return Err(crate::error::QueryError::NeedsInput(request));
+    };
+    serde_json::from_slice(&response).map_err(|error| {
+        crate::error::QueryError::execution(format!("cached ACP response is invalid: {error}"))
+    })
+}
+
+/// Resolve shared object/branchable read permissions from the request memo while
+/// retaining live transaction reads and attempt-local projected registrations.
+#[allow(clippy::too_many_arguments)]
+pub async fn check_doc_read_access_with_prepared_inputs(
+    acp: &dyn DocumentACP,
+    projection: Option<&AcpRegistrationProjection>,
+    identity: &Identity,
+    policy_id: &str,
+    resource_name: &str,
+    collection_id: &str,
+    is_branchable: bool,
+    doc_id: &str,
+    inputs: Option<&crate::prepared::PreparedInputMemo>,
+) -> crate::error::Result<bool> {
+    check_doc_read_access_as(
+        &RequestContext::ambient(),
+        acp,
+        projection,
+        identity,
+        policy_id,
+        resource_name,
+        collection_id,
+        is_branchable,
+        doc_id,
+        inputs,
+    )
+    .await
+}
+
+/// [`check_doc_read_access_with_prepared_inputs`] for the request `context`
+/// serves: an authenticated reader whose node access grants it `bypass-dac`
+/// reads every document.
+#[allow(clippy::too_many_arguments)]
+pub async fn check_doc_read_access_as(
+    context: &RequestContext,
+    acp: &dyn DocumentACP,
+    projection: Option<&AcpRegistrationProjection>,
+    identity: &Identity,
+    policy_id: &str,
+    resource_name: &str,
+    collection_id: &str,
+    is_branchable: bool,
+    doc_id: &str,
+    inputs: Option<&crate::prepared::PreparedInputMemo>,
+) -> crate::error::Result<bool> {
+    use acp::read_access::DocAccess;
+
+    if identity.is_authenticated() && context.dac_bypass() {
+        return Ok(true);
+    }
+    let Some(inputs) = inputs.filter(|_| !acp.supports_transactions()) else {
+        let checker = crate::txn::OverlayChecker {
+            acp,
+            projection,
+            identity,
+        };
+        return acp::read_access::check_doc_read_access(
+            &checker,
+            policy_id,
+            resource_name,
+            collection_id,
+            is_branchable,
+            doc_id,
+        )
+        .await
+        .map_err(|error| crate::error::QueryError::execution(error.to_string()));
+    };
+
+    async fn access_for_object(
+        acp: &dyn DocumentACP,
+        projection: Option<&AcpRegistrationProjection>,
+        identity: &Identity,
+        policy_id: &str,
+        resource_name: &str,
+        object_id: &str,
+        inputs: &crate::prepared::PreparedInputMemo,
+    ) -> crate::error::Result<DocAccess> {
+        if let Some(creator) = owed_creator(acp, projection, policy_id, resource_name, object_id)
+            .await
+            .map_err(|error| crate::error::QueryError::execution(error.to_string()))?
+        {
+            return Ok(DocAccess {
+                has_access: is_creator(identity, &creator),
+                explicit: true,
+            });
+        }
+
+        let bearer = identity
+            .did()
+            .and_then(|did| acp.bearer_token_for(did.as_str()));
+        let request_bytes = serde_json::to_vec(&(
+            identity.did().map(Did::as_str).unwrap_or("anonymous"),
+            "registered",
+            policy_id,
+            resource_name,
+            object_id,
+            bearer,
+        ))
+        .map_err(|error| crate::error::QueryError::execution(error.to_string()))?;
+        let request = crate::prepared::PreparedInputRequest::new(
+            crate::prepared::PreparedInputKind::AcpDecision,
+            request_bytes,
+        );
+        let Some(response) = inputs.get(&request) else {
+            return Err(crate::error::QueryError::NeedsInput(request));
+        };
+        let registered = serde_json::from_slice::<bool>(&response)
+            .map_err(|error| crate::error::QueryError::execution(error.to_string()))?;
+        if !registered {
+            return Ok(DocAccess {
+                has_access: acp.unregistered_documents_are_public(),
+                explicit: false,
+            });
+        }
+        let allowed = check_doc_access_with_prepared_inputs(
+            acp,
+            projection,
+            identity,
+            DocumentPermission::Read,
+            policy_id,
+            resource_name,
+            object_id,
+            Some(inputs),
+        )
+        .await?;
+        Ok(DocAccess {
+            has_access: allowed,
+            explicit: true,
+        })
+    }
+
+    if !doc_id.is_empty() {
+        let object = access_for_object(
+            acp,
+            projection,
+            identity,
+            policy_id,
+            resource_name,
+            doc_id,
+            inputs,
+        )
+        .await?;
+        if object.explicit || !is_branchable {
+            return Ok(object.has_access);
+        }
+    }
+    if is_branchable {
+        let collection = access_for_object(
+            acp,
+            projection,
+            identity,
+            policy_id,
+            resource_name,
+            collection_id,
+            inputs,
+        )
+        .await?;
+        if !collection.has_access {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Transaction context that provides storage access within a transaction.
 ///
 /// This is implemented by the database layer to provide transaction-scoped
-/// document fetching and mutation.
+/// document fetching and mutation. A context is one request's view of a
+/// transaction on the worker that owns it ([`TxnTurn::context`](super::TxnTurn::context)):
+/// the handles it gives out share the transaction for that request and are
+/// dropped before the request ends.
 pub trait TransactionContext: MaybeSendSync {
     /// Get the transaction ID.
     fn id(&self) -> &str;
@@ -375,21 +434,8 @@ pub trait TransactionContext: MaybeSendSync {
         None
     }
 
-    /// Get deferred ACP mutations for this transaction.
-    ///
-    /// Implementations with transactional ACP buffering should override this to
-    /// return a shared state object that can be used both for commit-time hooks
-    /// and for transaction-local ACP projections.
-    fn deferred_acp_mutations(&self) -> Option<Arc<DeferredAcpMutations>> {
-        None
-    }
-
-    /// Get the mutex that serializes top-level actions on this transaction.
-    ///
-    /// Implementations that share one underlying storage transaction across
-    /// multiple public calls should override this so callers can prevent
-    /// concurrent use of that handle.
-    fn action_lock(&self) -> Option<Arc<async_lock::Mutex<()>>> {
+    /// Get transaction-scoped projection for external ACP registration writes.
+    fn acp_registration_projection(&self) -> Option<Arc<AcpRegistrationProjection>> {
         None
     }
 
@@ -414,99 +460,13 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn projected_registration_reports_registered_and_owner_only_access() {
-        let mutations = Arc::new(DeferredAcpMutations::new());
-        let owner: Did = "did:key:z6MksQ6mYqY1YxR4KQ2NW6y6x8vJrNs2LEd8w5pYxHw3rroA"
-            .parse()
-            .expect("owner did");
-        let stranger: Did = "did:key:z6MkwQm1zZ1p9raM2AfU4vX9y1Aq5PEYB9H9n1tFoZT3zh7T"
-            .parse()
-            .expect("stranger did");
-
-        mutations
-            .lock_state()
-            .expect("state lock")
-            .projected_registrations
-            .insert(
-                DeferredAcpMutations::doc_key("policy", "User", "doc-1"),
-                ProjectedDocRegistration::Registered {
-                    owner: owner.clone(),
-                },
-            );
-
-        let access = scope_deferred_acp_mutations(
-            mutations.clone(),
-            check_doc_access_with_overlay(
-                &NoopDocumentAcp(true),
-                &Identity::Authenticated(owner),
-                DocumentPermission::Read,
-                "policy",
-                "User",
-                "doc-1",
-            ),
-        )
-        .await
-        .expect("owner access");
-        assert!(access);
-
-        let access = scope_deferred_acp_mutations(
-            mutations,
-            check_doc_access_with_overlay(
-                &NoopDocumentAcp(true),
-                &Identity::Authenticated(stranger),
-                DocumentPermission::Read,
-                "policy",
-                "User",
-                "doc-1",
-            ),
-        )
-        .await
-        .expect("stranger access");
-        assert!(!access);
-    }
-
-    #[tokio::test]
-    async fn projected_unregistration_reports_public_access() {
-        let mutations = Arc::new(DeferredAcpMutations::new());
-        mutations
-            .lock_state()
-            .expect("state lock")
-            .projected_registrations
-            .insert(
-                DeferredAcpMutations::doc_key("policy", "User", "doc-1"),
-                ProjectedDocRegistration::Unregistered,
-            );
-
-        let access = scope_deferred_acp_mutations(
-            mutations.clone(),
-            check_doc_access_with_overlay(
-                &NoopDocumentAcp(true),
-                &Identity::Anonymous,
-                DocumentPermission::Read,
-                "policy",
-                "User",
-                "doc-1",
-            ),
-        )
-        .await
-        .expect("anonymous access");
-        assert!(access);
-
-        let registered = scope_deferred_acp_mutations(
-            mutations,
-            is_doc_registered_with_overlay(&NoopDocumentAcp(true), "policy", "User", "doc-1"),
-        )
-        .await
-        .expect("registration");
-        assert!(!registered);
-    }
-
-    #[tokio::test]
-    async fn private_unregistration_denies_overlay_and_shared_reads() {
+    async fn private_unregistered_doc_denies_overlay_and_shared_reads() {
         use acp::read_access::{check_doc_read_access, ObjectAccessChecker};
         let acp = NoopDocumentAcp(false);
+        let projection = AcpRegistrationProjection::detached();
         let checker = crate::txn::OverlayChecker {
             acp: &acp,
+            projection: Some(&projection),
             identity: &Identity::Anonymous,
         };
         let absent = checker
@@ -515,43 +475,78 @@ mod tests {
             .unwrap();
         assert!(!absent.has_access);
         assert!(!absent.explicit);
-        let mutations = Arc::new(DeferredAcpMutations::new());
-        mutations
-            .lock_state()
-            .unwrap()
-            .projected_registrations
-            .insert(
-                DeferredAcpMutations::doc_key("policy", "User", "doc-1"),
-                ProjectedDocRegistration::Unregistered,
-            );
-        scope_deferred_acp_mutations(mutations, async {
-            assert!(
-                !is_doc_registered_with_overlay(&acp, "policy", "User", "doc-1")
-                    .await
-                    .unwrap()
-            );
-            assert!(!check_doc_access_with_overlay(
-                &acp,
-                &Identity::Anonymous,
-                DocumentPermission::Read,
+        assert!(
+            !check_doc_read_access(&checker, "policy", "User", "collection", false, "doc-1",)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn unregistered_branchable_doc_falls_back_to_collection_policy() {
+        let projection = AcpRegistrationProjection::detached();
+        let memo = crate::prepared::PreparedInputMemo::default();
+        let doc_request = crate::prepared::PreparedInputRequest::new(
+            crate::prepared::PreparedInputKind::AcpDecision,
+            serde_json::to_vec(&(
+                "anonymous",
+                "registered",
                 "policy",
                 "User",
-                "doc-1"
-            )
-            .await
-            .unwrap());
-            assert!(!check_doc_read_access(
-                &checker,
+                "doc-1",
+                None::<String>,
+            ))
+            .unwrap(),
+        );
+        assert_eq!(&*memo.insert(doc_request, b"false".as_slice()), b"false");
+        let request_bytes = serde_json::to_vec(&(
+            "anonymous",
+            "registered",
+            "policy",
+            "User",
+            "collection-1",
+            None::<String>,
+        ))
+        .unwrap();
+        let request = crate::prepared::PreparedInputRequest::new(
+            crate::prepared::PreparedInputKind::AcpDecision,
+            request_bytes,
+        );
+        memo.insert(request, std::sync::Arc::<[u8]>::from(b"true".as_slice()));
+        let permission_request = crate::prepared::PreparedInputRequest::new(
+            crate::prepared::PreparedInputKind::AcpDecision,
+            serde_json::to_vec(&(
+                "anonymous",
+                "read",
                 "policy",
                 "User",
-                "collection",
-                false,
-                "doc-1"
-            )
-            .await
-            .unwrap());
-        })
-        .await;
+                "collection-1",
+                None::<String>,
+            ))
+            .unwrap(),
+        );
+        memo.insert(
+            permission_request,
+            std::sync::Arc::<[u8]>::from(b"false".as_slice()),
+        );
+
+        let allowed = check_doc_read_access_with_prepared_inputs(
+            &NoopDocumentAcp(true),
+            Some(&projection),
+            &Identity::Anonymous,
+            "policy",
+            "User",
+            "collection-1",
+            true,
+            "doc-1",
+            Some(&memo),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !allowed,
+            "a public unregistered object still falls back to its branchable collection"
+        );
     }
 
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]

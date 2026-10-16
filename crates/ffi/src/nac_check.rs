@@ -24,70 +24,81 @@ use crate::ERR_INVALID_NODE_HANDLE;
 /// - NAC enabled + identity has permission -> Ok
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn check_nac_permission(
-    rt: &tokio::runtime::Runtime,
     nac_manager: &Arc<FfiNacManager>,
     identity_did: *const c_char,
     permission: NodePermission,
 ) -> Result<(), FfiResult> {
-    // Check runtime NAC status directly rather than is_enabled(),
-    // because is_enabled() also requires config.enabled which is a
-    // startup flag. FFI nodes start with config.enabled=false and
-    // enable NAC at runtime via enable_nac().
-    let status = rt.block_on(nac_manager.status());
-    if status != NacStatus::Enabled {
-        return Ok(());
-    }
-
     // SAFETY: `identity_did` is either null or a valid C string from the FFI caller.
-    let identity_str = unsafe { c_str_to_string(identity_did) };
-
-    let err_msg = format!(
-        "not authorized to perform operation. Permission: {}",
-        permission.as_str()
-    );
-
-    let did = match identity_str {
-        Some(s) if !s.is_empty() => match identity::Did::new(&s) {
-            Ok(d) => d,
-            Err(_) => return Err(FfiResult::error(&err_msg)),
-        },
-        _ => {
-            // Empty identity: check if wildcard has the permission
-            let wildcard = identity::Did::wildcard();
-            let wildcard_has_perm = rt
-                .block_on(nac_manager.check_permission(&wildcard, permission))
-                .unwrap_or(false);
-            if wildcard_has_perm {
-                return Ok(());
-            }
-            return Err(FfiResult::error(&err_msg));
-        }
-    };
-
-    let has_perm = rt
-        .block_on(nac_manager.check_permission(&did, permission))
-        .unwrap_or(false);
-
-    if has_perm {
-        Ok(())
-    } else {
-        Err(FfiResult::error(&err_msg))
-    }
+    let identity = unsafe { c_str_to_string(identity_did) };
+    wait(admit(nac_manager.as_ref(), identity.as_deref(), permission))
 }
 
 /// Convenience: extract NAC manager from node and check permission.
 ///
 /// Returns `Ok(())` if authorized, `Err(FfiResult)` if the node handle
 /// is invalid or the caller is not authorized.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn check_nac_for_node(
-    rt: &tokio::runtime::Runtime,
     node_ptr: usize,
     identity_did: *const c_char,
+    permission: NodePermission,
+) -> Result<(), FfiResult> {
+    // SAFETY: `identity_did` is either null or a valid C string from the FFI caller.
+    let identity = unsafe { c_str_to_string(identity_did) };
+    wait(admit_on_node(node_ptr, identity.as_deref(), permission))
+}
+
+/// [`check_nac_for_node`] for a caller that awaits it.
+pub(crate) async fn admit_on_node(
+    node_ptr: usize,
+    identity: Option<&str>,
     permission: NodePermission,
 ) -> Result<(), FfiResult> {
     let nac_manager = NODES
         .get(node_ptr, |state| state.nac_manager.clone())
         .ok_or_else(|| FfiResult::error(ERR_INVALID_NODE_HANDLE))?;
+    admit(nac_manager.as_ref(), identity, permission).await
+}
 
-    check_nac_permission(rt, &nac_manager, identity_did, permission)
+/// Whether `identity` may perform `permission`. Check runtime NAC status
+/// directly rather than is_enabled(), because is_enabled() also requires
+/// config.enabled which is a startup flag. FFI nodes start with
+/// config.enabled=false and enable NAC at runtime via enable_nac(). An empty
+/// identity is checked as the wildcard; a malformed one is denied.
+async fn admit(
+    nac_manager: &FfiNacManager,
+    identity: Option<&str>,
+    permission: NodePermission,
+) -> Result<(), FfiResult> {
+    if nac_manager.status().await != NacStatus::Enabled {
+        return Ok(());
+    }
+    let did = match identity.filter(|s| !s.is_empty()) {
+        Some(s) => identity::Did::new(s).ok(),
+        None => Some(identity::Did::wildcard()),
+    };
+    let allowed = match did {
+        Some(did) => nac_manager
+            .check_permission(&did, permission)
+            .await
+            .unwrap_or(false),
+        None => false,
+    };
+    if allowed {
+        Ok(())
+    } else {
+        Err(FfiResult::error(format!(
+            "not authorized to perform operation. Permission: {}",
+            permission.as_str()
+        )))
+    }
+}
+
+/// The check, waited for on the caller's thread; a check that cannot wait
+/// there fails with its reason.
+fn wait<F>(check: F) -> Result<(), FfiResult>
+where
+    F: std::future::Future<Output = Result<(), FfiResult>>,
+{
+    crate::call::wait(async { Ok(check.await) }).map_err(FfiResult::error)?
 }

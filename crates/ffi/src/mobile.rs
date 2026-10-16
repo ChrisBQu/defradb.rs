@@ -6,7 +6,6 @@ use std::ptr;
 
 use acp::nac::NodePermission;
 
-use crate::helpers::get_rt;
 use crate::mobile_config::{
     c_string_ptr, decode_hex_field, ffi_result_error, maybe_cstring, MobileAddReplicatorRequest,
     MobileExecuteRequest, MobileNodeConfig, MobileSyncRequest,
@@ -366,13 +365,11 @@ pub extern "C" fn defra_mobile_ensure_schema(
             Some(value) => value,
             None => return FfiResult::error("invalid schema_sdl parameter"),
         };
-        let rt = try_ffi!(get_rt());
         let default_identity = match default_identity_cstring(node_ptr) {
             Ok(value) => value,
             Err(error) => return FfiResult::error(error),
         };
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             c_string_ptr(&default_identity),
             NodePermission::CollectionPatch
@@ -399,14 +396,12 @@ pub extern "C" fn defra_mobile_ensure_schema(
             None => None,
         };
 
-        // Bind the node's own identity into the ambient context so the DB-layer
-        // NAC gate on create_collection resolves the node (the NAC owner) instead
-        // of the wildcard. The body runs on this thread via `block_on`, so the
-        // thread-local is visible throughout it; the guard restores on drop.
-        let _identity_guard =
-            defra_core::current_identity::scoped_current_identity(node_identity_did);
+        // The node acts in the call's context, so the NAC gate on
+        // create_collection resolves the node (the NAC owner) instead of the
+        // wildcard.
+        let context = defra_core::RequestContext::default().with_identity(node_identity_did);
 
-        ffi_async!(rt, {
+        ffi_async!(node_ptr, {
             let existing_collections: RapidHashSet<String> =
                 database.list_collections().unwrap_or_default().into_iter().collect();
             let known_types = existing_collections.clone();
@@ -436,11 +431,7 @@ pub extern "C" fn defra_mobile_ensure_schema(
                 .map(|collection| collection.name.clone())
                 .collect::<Vec<_>>();
             database
-                .create_collections_atomic_with_acp_registration(
-                    to_create,
-                    document_acp.clone(),
-                    creator,
-                )
+                .create_collections_atomic_with_acp_registration_as(&context, to_create, document_acp.clone(), creator)
                 .await
                 .map_err(|error| format!("failed to create collection: {}", error))?;
 

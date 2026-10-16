@@ -25,7 +25,6 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
     ffi_entry! {
         let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::P2pSyncCollectionVersions
@@ -49,11 +48,9 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
             return FfiResult::ok();
         }
 
-        // Bind the caller's identity so any NAC-gated method reached by the body's
-        // block_on resolves the actual caller instead of the wildcard.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
-        );
+        // The caller acts in the call's context, so the NAC checks the body
+        // reaches resolve the actual caller instead of the wildcard.
+        let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()));
 
         let result = NODES
             .get(node_ptr, |state| {
@@ -63,9 +60,9 @@ pub unsafe extern "C" fn p2p_sync_collection_versions(
                 };
 
                 let version_ids = version_ids.clone();
-                rt.block_on(async move {
+                crate::helpers::block_on(rt, async move {
                     p2p.system
-                        .ops()
+                        .ops_for(&context)
                         .sync_collection_versions(version_ids)
                         .await
                         .map_err(FfiP2PError::from)

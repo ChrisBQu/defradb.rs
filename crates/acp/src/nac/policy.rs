@@ -5,7 +5,7 @@
 //! - `admin` relation: identities with admin access (can manage other relations)
 //! - One permission relation for each NodePermission
 //!
-//! All permissions have expression: `owner + admin` meaning either the owner
+//! All permissions have expression: `this + owner + admin` meaning either the owner
 //! or any admin can perform any operation.
 
 use super::permission::NodePermission;
@@ -26,7 +26,7 @@ pub const ADMIN_RELATION: &str = "admin";
 /// This policy defines:
 /// - `owner`: Direct relation for the node identity
 /// - `admin`: Computed relation (owner + direct admin), can manage all non-owner relations
-/// - All node permissions with expression `owner + admin`
+/// - All node permissions with expression `this + owner + admin`
 ///
 /// The admin relation has `manages` set to all permission relation names,
 /// allowing admins to grant/revoke any permission (except owner).
@@ -55,11 +55,12 @@ pub fn create_node_policy() -> Policy {
     resource = resource.with_relation(admin_relation);
 
     // Add a relation for each node permission.
-    // Each permission has expression: owner + admin
+    // Each permission accepts a direct grant, the owner, or an admin.
     for perm in NodePermission::all() {
         let perm_relation = Relation::computed(
             perm.as_str(),
             RelationExpression::union(vec![
+                RelationExpression::this(),
                 RelationExpression::computed_userset(OWNER_RELATION),
                 RelationExpression::computed_userset(ADMIN_RELATION),
             ]),

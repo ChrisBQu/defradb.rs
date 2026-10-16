@@ -6,7 +6,7 @@ use std::ffi::c_char;
 
 use acp::nac::NodePermission;
 
-use crate::helpers::{get_rt, require_c_str};
+use crate::helpers::require_c_str;
 use crate::nac_check::check_nac_for_node;
 use crate::state::NODES;
 use crate::types::{c_str_to_string, FfiResult};
@@ -39,19 +39,15 @@ pub unsafe extern "C" fn block_verify_signature(
     identity_did: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::SignatureVerify
         ));
 
-        // Bind the caller's identity so any DB-layer NAC gate reached by the body
-        // resolves the actual caller instead of the wildcard.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
-        );
+        // The caller acts in the call's context, so the NAC checks the body
+        // reaches resolve the actual caller instead of the wildcard.
+        let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()));
 
         let key_type_str = match c_str_to_string(key_type) {
             Some(s) if !s.is_empty() => s,
@@ -81,8 +77,9 @@ pub unsafe extern "C" fn block_verify_signature(
             .and_then(|d| identity::Did::try_from(d.clone()).ok())
             .into();
 
-        let result = rt.block_on(async {
-            db::block::verify::verify_block_signature(
+        let result = crate::call::on_node(node_ptr, move || async move {
+            db::block::verify::verify_block_signature_as(
+                &context,
                 &database,
                 document_acp.as_ref(),
                 &cid_str,
@@ -118,19 +115,15 @@ pub unsafe extern "C" fn block_verify_signature_in_txn(
     identity_did: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::SignatureVerify
         ));
 
-        // Bind the caller's identity so any registry-layer NAC gate reached by the
-        // body resolves the actual caller instead of the wildcard.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
-        );
+        // The caller acts in the call's context, so the NAC checks the body
+        // reaches resolve the actual caller instead of the wildcard.
+        let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()));
 
         let txn_str = try_ffi!(require_c_str(txn_id, "txn_id"));
         let key_type_str = match c_str_to_string(key_type) {
@@ -161,11 +154,12 @@ pub unsafe extern "C" fn block_verify_signature_in_txn(
             .and_then(|d| identity::Did::try_from(d.clone()).ok())
             .into();
 
-        ffi_async!(rt, {
+        ffi_async!(caller, {
             registry
-                .verify_block_signature_in_txn(
+                .verify_block_signature_in_txn_as(
+                    &context,
                     &txn_str,
-                    document_acp.as_ref(),
+                    document_acp.clone(),
                     &cid_str,
                     &pub_key_str,
                     crypto_key_type,

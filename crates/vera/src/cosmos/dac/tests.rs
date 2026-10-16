@@ -16,11 +16,15 @@ mod cache_race;
 struct MockProvider {
     verify_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Semaphore>)>,
     public_unregistered: bool,
+    archive_on_document_delete: bool,
+    archive_error: bool,
     registered: bool,
     owner_error: bool,
     decisions: SegQueue<bool>,
     created_decision: AtomOption<String>,
     verify_calls: AtomicUsize,
+    owner_queries: AtomicUsize,
+    archive_calls: AtomicUsize,
     set_relationship_called: AtomicBool,
     delete_relationship_called: AtomicBool,
     set_subject_call: AtomOption<(u8, String, String, String)>,
@@ -36,11 +40,15 @@ impl MockProvider {
         Self {
             verify_gate: None,
             public_unregistered: false,
+            archive_on_document_delete: true,
+            archive_error: false,
             registered: true,
             owner_error: false,
             decisions: queue,
             created_decision: AtomOption::none(),
             verify_calls: AtomicUsize::new(0),
+            owner_queries: AtomicUsize::new(0),
+            archive_calls: AtomicUsize::new(0),
             set_relationship_called: AtomicBool::new(false),
             delete_relationship_called: AtomicBool::new(false),
             set_subject_call: AtomOption::none(),
@@ -52,6 +60,14 @@ impl MockProvider {
         self.verify_calls.load(Ordering::Relaxed)
     }
 
+    fn owner_queries(&self) -> usize {
+        self.owner_queries.load(Ordering::Relaxed)
+    }
+
+    fn archive_calls(&self) -> usize {
+        self.archive_calls.load(Ordering::Relaxed)
+    }
+
     fn created_decision(&self) -> Option<String> {
         self.created_decision.load().map(|g| (*g).clone())
     }
@@ -61,6 +77,10 @@ impl MockProvider {
 impl VeraProvider for MockProvider {
     fn unregistered_documents_are_public(&self) -> bool {
         self.public_unregistered
+    }
+
+    fn archive_object_on_document_delete(&self) -> bool {
+        self.archive_on_document_delete
     }
 
     fn authorized_account(&self) -> String {
@@ -99,6 +119,10 @@ impl VeraProvider for MockProvider {
         _resource: &str,
         _object_id: &str,
     ) -> std::result::Result<(), ProviderError> {
+        self.archive_calls.fetch_add(1, Ordering::Relaxed);
+        if self.archive_error {
+            return Err(ProviderError::Transaction("archive rejected".into()));
+        }
         Ok(())
     }
 
@@ -182,6 +206,7 @@ impl VeraProvider for MockProvider {
         _resource: &str,
         _object_id: &str,
     ) -> std::result::Result<(bool, String), ProviderError> {
+        self.owner_queries.fetch_add(1, Ordering::Relaxed);
         if self.owner_error {
             return Err(ProviderError::Query("invalid owner proof".into()));
         }
@@ -222,6 +247,50 @@ impl VeraProvider for MockProvider {
         self.created_decision.store_some(decision_id.clone());
         Ok(Some(decision_id))
     }
+}
+
+#[tokio::test]
+async fn local_tombstone_preserves_shared_authorization_state() {
+    let mut provider = MockProvider::new(vec![true]);
+    provider.archive_on_document_delete = false;
+    let provider = Arc::new(provider);
+    let acp = VeraDocumentACP::without_access_cache(provider.clone());
+
+    acp.unregister_doc_object("policy-1", "users", "doc-1")
+        .await
+        .expect("local tombstone does not archive a shared object");
+
+    assert_eq!(provider.owner_queries(), 0);
+    assert_eq!(provider.archive_calls(), 0);
+    let identity = Identity::from(requestor());
+    assert!(acp
+        .check_doc_access(
+            &identity,
+            DocumentPermission::Read,
+            "policy-1",
+            "users",
+            "doc-1",
+        )
+        .await
+        .expect("the existing shared grant remains queryable"));
+    assert_eq!(provider.verify_calls(), 1);
+}
+
+#[tokio::test]
+async fn configured_shared_archive_still_runs_and_surfaces_provider_errors() {
+    let mut provider = MockProvider::new(vec![]);
+    provider.archive_error = true;
+    let provider = Arc::new(provider);
+    let acp = VeraDocumentACP::without_access_cache(provider.clone());
+
+    let error = acp
+        .unregister_doc_object("policy-1", "users", "doc-1")
+        .await
+        .expect_err("provider archive errors are not suppressed");
+
+    assert!(error.to_string().contains("archive rejected"));
+    assert_eq!(provider.owner_queries(), 1);
+    assert_eq!(provider.archive_calls(), 1);
 }
 
 #[tokio::test]

@@ -30,6 +30,8 @@ use schema::{CollectionVersion, FieldDescription, FieldKind};
 use storage::{RegolithStore, RegolithStoreOptions};
 use tempfile::TempDir;
 
+mod common;
+
 const CASE_VAR: &str = "DEFRA_MEMORY_CASE";
 const MARKER: &str = "DEFRA_PEAK_RSS_BYTES ";
 const COLLECTION: &str = "Users";

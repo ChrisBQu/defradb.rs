@@ -2,6 +2,23 @@
 
 use thiserror::Error;
 
+/// The `bind_request` an operations trait provides: the handle that serves
+/// one request (see `crate::request_scope`).
+macro_rules! bind_request {
+    ($operations:ident) => {
+        /// This handle bound to the request `context` serves, for an
+        /// implementation that reads it (the identity node access control
+        /// checks, the creator of what it writes); `None` serves every request
+        /// as it is.
+        fn bind_request(
+            &self,
+            _context: &defra_core::RequestContext,
+        ) -> Option<std::sync::Arc<dyn $operations>> {
+            None
+        }
+    };
+}
+
 pub type ReplicationFilters = std::collections::BTreeMap<String, ReplicationFilter>;
 
 /// HTTP wire shape for a per-collection replication filter.
@@ -160,6 +177,8 @@ impl std::fmt::Display for TransportPeerId {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait P2POperations: defra_core::thread_bounds::MaybeSendSync {
+    bind_request!(P2POperations);
+
     /// Get the local peer ID.
     async fn local_peer_id(&self) -> P2PResult<String>;
 
@@ -527,6 +546,8 @@ pub trait ManageRequester: defra_core::thread_bounds::MaybeSendSync {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait AcpOperations: defra_core::thread_bounds::MaybeSendSync {
+    bind_request!(AcpOperations);
+
     /// Add a new policy. Returns the policy ID on success.
     ///
     /// The policy should be valid YAML or JSON. Returns an error string
@@ -605,6 +626,8 @@ pub struct AcpLightClientStatus {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait IndexOperations: defra_core::thread_bounds::MaybeSendSync {
+    bind_request!(IndexOperations);
+
     /// Create an index on a collection. Returns the created index info.
     ///
     /// `name` of `None` auto-generates one. `vector` makes this a vector index,
@@ -658,6 +681,8 @@ pub struct IndexFieldInfo {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait EncryptedIndexOperations: defra_core::thread_bounds::MaybeSendSync {
+    bind_request!(EncryptedIndexOperations);
+
     /// Add an encrypted index on a collection field.
     async fn add_encrypted_index(
         &self,
@@ -698,6 +723,8 @@ pub struct EncryptedIndexInfo {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait BlockOperations: defra_core::thread_bounds::MaybeSendSync {
+    bind_request!(BlockOperations);
+
     /// Return canonical bytes for an authorized signed block and its detached
     /// signature so clients can verify content addressing and authorship
     /// locally.
@@ -841,6 +868,8 @@ pub struct NacStatusInfo {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait SchemaOperations: defra_core::thread_bounds::MaybeSendSync {
+    bind_request!(SchemaOperations);
+
     /// Add a schema from SDL string.
     ///
     /// Parses the SDL and creates collections for each type defined.
@@ -881,6 +910,8 @@ pub trait CollectionVersionOperations: defra_core::thread_bounds::MaybeSendSync 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait CollectionManagementOperations: defra_core::thread_bounds::MaybeSendSync {
+    bind_request!(CollectionManagementOperations);
+
     /// List actions that have not completed successfully.
     async fn list_actions(&self) -> Result<Vec<defra_core::ActionExecution>, String>;
 
@@ -968,6 +999,8 @@ pub trait CollectionManagementOperations: defra_core::thread_bounds::MaybeSendSy
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait LensOperations: defra_core::thread_bounds::MaybeSendSync {
+    bind_request!(LensOperations);
+
     /// Set a migration between schema versions.
     ///
     /// The config should be a JSON string containing:
@@ -1000,6 +1033,8 @@ pub trait LensOperations: defra_core::thread_bounds::MaybeSendSync {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait DocumentAcpOperations: defra_core::thread_bounds::MaybeSendSync {
+    bind_request!(DocumentAcpOperations);
+
     /// Check whether an actor has a document permission.
     ///
     /// This is a read-only preview of the current document ACP decision and
@@ -1055,6 +1090,8 @@ pub trait DocumentAcpOperations: defra_core::thread_bounds::MaybeSendSync {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait BackupOperations: defra_core::thread_bounds::MaybeSendSync {
+    bind_request!(BackupOperations);
+
     /// Export database to JSON.
     ///
     /// If `collections` is `None`, exports all collections.
@@ -1081,6 +1118,8 @@ pub trait BackupOperations: defra_core::thread_bounds::MaybeSendSync {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait TransactionOperations: defra_core::thread_bounds::MaybeSendSync {
+    bind_request!(TransactionOperations);
+
     /// Set a migration within an existing transaction.
     ///
     /// Registers a lens migration configuration within the specified transaction.
@@ -1116,6 +1155,8 @@ pub trait TransactionOperations: defra_core::thread_bounds::MaybeSendSync {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait ViewOperations: defra_core::thread_bounds::MaybeSendSync {
+    bind_request!(ViewOperations);
+
     /// Add a view from a GQL query and SDL schema.
     ///
     /// Returns the created collection versions for the view.

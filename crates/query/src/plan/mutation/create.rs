@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, FixedOffset};
+use defra_core::RequestContext;
 use document::Document;
 use schema::CollectionVersion;
 use serde_json::Value as JsonValue;
@@ -172,6 +173,9 @@ pub struct CreateNode {
     collection_name: String,
     /// Document mutator for storage operations
     mutator: Arc<dyn DocMutator>,
+    /// The context of the request the creates serve: [`RequestContext::ambient`]
+    /// until [`CreateNode::with_context`] sets it
+    context: RequestContext,
     /// Document mapping for field positions
     document_mapping: DocumentMapping,
     /// Collection schema for schema-aware type coercion (e.g., DateTime parsing)
@@ -180,6 +184,7 @@ pub struct CreateNode {
     request_time: Option<DateTime<FixedOffset>>,
     /// Input documents to create
     inputs: Vec<CreateInput>,
+    prepared_documents: Option<Vec<Document>>,
     /// Created documents (populated after first next())
     created_docs: Vec<Doc>,
     /// Current position in created_docs
@@ -208,16 +213,24 @@ impl CreateNode {
         Self {
             collection_name: collection_name.into(),
             mutator,
+            context: RequestContext::ambient(),
             document_mapping,
             collection: None,
             request_time: None,
             inputs: Vec::new(),
+            prepared_documents: None,
             created_docs: Vec::new(),
             position: 0,
             current_doc: Doc::default(),
             did_create: false,
             initialized: false,
         }
+    }
+
+    /// Serve the request `context` belongs to.
+    pub fn with_context(mut self, context: RequestContext) -> Self {
+        self.context = context;
+        self
     }
 
     /// Add an input document to create.
@@ -229,6 +242,11 @@ impl CreateNode {
     /// Add multiple input documents.
     pub fn with_inputs(mut self, inputs: Vec<CreateInput>) -> Self {
         self.inputs = inputs;
+        self
+    }
+
+    pub fn with_prepared_documents(mut self, docs: Option<Vec<Document>>) -> Self {
+        self.prepared_documents = docs;
         self
     }
 
@@ -301,20 +319,25 @@ impl PlanNode for CreateNode {
         // On first call, create all documents in a single batch transaction
         if !self.did_create {
             // Convert all inputs to Documents
-            let mut docs = Vec::with_capacity(self.inputs.len());
-            for input in &self.inputs {
-                let doc = if let Some(ref collection) = self.collection {
-                    input.to_document_with_schema_and_time(collection, self.request_time)?
-                } else {
-                    input.to_document()?
-                };
-                docs.push(doc);
-            }
+            let docs = if let Some(docs) = &self.prepared_documents {
+                docs.clone()
+            } else {
+                let mut docs = Vec::with_capacity(self.inputs.len());
+                for input in &self.inputs {
+                    let doc = if let Some(ref collection) = self.collection {
+                        input.to_document_with_schema_and_time(collection, self.request_time)?
+                    } else {
+                        input.to_document()?
+                    };
+                    docs.push(doc);
+                }
+                docs
+            };
 
             // Batch create: single transaction, single commit/fsync
             let results = self
                 .mutator
-                .create_many(&self.collection_name, docs)
+                .create_many_as(&self.context, &self.collection_name, docs)
                 .await?;
 
             for result in &results {

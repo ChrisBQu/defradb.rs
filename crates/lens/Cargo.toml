@@ -10,7 +10,7 @@ description = "Lens schema migration support for DefraDB"
 
 [features]
 default = ["wasmtime-runtime"]
-wasmtime-runtime = ["dep:wasmtime", "dep:tokio"]
+wasmtime-runtime = ["dep:wasmtime"]
 
 [lib]
 bench = false
@@ -23,8 +23,11 @@ futures.workspace = true
 # Hash maps
 rapidhash.workspace = true
 
-# Lock-free shared state
+# Lock-free shared state, and the waits a lens call makes
 kovan-map.workspace = true
+regolith.workspace = true
+# Epoch ticks as a job of the worker pool's deadline queue.
+workers = { path = "../workers" }
 
 # Serialization
 serde.workspace = true
@@ -43,9 +46,11 @@ base64.workspace = true
 sha2.workspace = true
 hex.workspace = true
 
-# Wasmtime runtime dependencies (optional for wasm32)
-tokio = { workspace = true, features = ["rt"], optional = true }
+# Wasmtime runtime (optional for wasm32). `async` runs a lens call on a fiber
+# its caller polls. `parallel-compilation` stays out, so wasmtime starts no
+# thread of its own.
 wasmtime = { version = "49.0.2", optional = true, default-features = false, features = [
+    "async",
     "runtime",
     "cranelift",
     "std",

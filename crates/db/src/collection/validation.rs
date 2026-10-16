@@ -82,10 +82,47 @@ impl Collection {
         old_doc: &Document,
         new_doc: &Document,
     ) -> Result<()> {
-        for field_def in self.def.fields.iter().filter(|field| field.immutable) {
-            let old_value = old_doc.get(&field_def.name);
-            let new_value = new_doc.get(&field_def.name);
-            if old_value != new_value {
+        self.validate_immutable_fields(old_doc, new_doc, |_| true)
+    }
+
+    pub(crate) fn validate_modified_immutable_fields(
+        &self,
+        old_doc: &Document,
+        new_doc: &Document,
+        modified: &rapidhash::RapidHashSet<String>,
+    ) -> Result<()> {
+        self.validate_immutable_fields(old_doc, new_doc, |name| modified.contains(name))
+    }
+
+    /// Refuse a change to each immutable field `checked` selects. A rewrite
+    /// that stores the value already stored is not a change, whichever variant
+    /// carries it: a stored value reads back without its kind.
+    fn validate_immutable_fields<F>(
+        &self,
+        old_doc: &Document,
+        new_doc: &Document,
+        checked: F,
+    ) -> Result<()>
+    where
+        F: Fn(&str) -> bool,
+    {
+        for field_def in self
+            .def
+            .fields
+            .iter()
+            .filter(|field| field.immutable && checked(&field.name))
+        {
+            let unchanged = ::document::stored::stores_same_lww(
+                old_doc.get(&field_def.name),
+                new_doc.get(&field_def.name),
+            )
+            .map_err(|error| {
+                Error::InvalidDocument(format!(
+                    "immutable field '{}' holds a value that cannot be stored: {error}",
+                    field_def.name
+                ))
+            })?;
+            if !unchanged {
                 return Err(Error::InvalidDocument(format!(
                     "immutable field '{}' cannot be changed",
                     field_def.name
@@ -316,6 +353,9 @@ fn is_empty_array(value: &NormalValue) -> bool {
         NormalValue::NillableFloat64ElementArray(arr) => arr.is_empty(),
         NormalValue::NillableStringElementArray(arr) => arr.is_empty(),
         NormalValue::NillableTimeElementArray(arr) => arr.is_empty(),
+        // Stored values decode without their kind, so every empty array reads
+        // back as an empty JSON array.
+        NormalValue::JsonArray(arr) => arr.is_empty(),
         _ => false,
     }
 }

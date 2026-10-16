@@ -1,6 +1,6 @@
 //! Mutation execution methods for QueryRunner.
 
-use acp::DocumentPermission;
+use acp::{DocumentPermission, Identity};
 use chrono::{DateTime, FixedOffset, Utc};
 use identity::Did;
 use rapidhash::RapidHashMap;
@@ -19,28 +19,55 @@ use crate::txn::TransactionRegistry;
 use super::plan_drive;
 use super::{DocFetcher, QueryRunner};
 
-/// RAII guard that clears the `encryption_config` thread-local on Drop.
-///
-/// `mutation.rs` sets the thread-local during execution. Without this
-/// guard, an early-return via `?` (or a panic unwind) leaves stale
-/// state on the blocking-pool worker thread, which the next
-/// `spawn_blocking` closure inherits — silent encryption-key confusion
-/// across requests. See #757.
-///
-/// Always clears to None on Drop, regardless of entry state. The
-/// function "owns" the mutation context for the duration of the call
-/// and leaves the worker thread in a clean state on exit (happy path,
-/// early-return via `?`, or panic unwind). This also self-heals against
-/// any previous task that may have leaked state.
+pub(super) struct AuthorizedMutation {
+    pub collection: Arc<schema::CollectionVersion>,
+    pub mapping: crate::document::DocumentMapping,
+    pub resolved_doc_ids: Option<Vec<String>>,
+    pub acp_filtered_doc_ids: Option<Vec<String>>,
+}
+
+/// The guard that cleared the encryption thread-local when mutations still
+/// set it. A mutation's encryption now travels in its `RequestContext`; the
+/// guard stays, test-only, for the tests written against it.
+#[cfg(test)]
 struct EncryptionConfigGuard;
 
+#[cfg(test)]
 impl Drop for EncryptionConfigGuard {
     fn drop(&mut self) {
         defra_core::encryption::set_encryption_config(None);
     }
 }
 
-impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
+fn preserve_acp_input_error(action: &str, doc_id: &str, error: QueryError) -> QueryError {
+    match error {
+        error @ QueryError::NeedsInput(_) => error,
+        error => QueryError::acp_check_failed(action, doc_id, error),
+    }
+}
+
+impl<F: DocFetcher + 'static, R: TransactionRegistry + 'static> QueryRunner<F, R> {
+    pub(crate) async fn check_doc_access_for_read(
+        &self,
+        identity: &Identity,
+        permission: DocumentPermission,
+        policy_id: &str,
+        resource_name: &str,
+        doc_id: &str,
+    ) -> Result<bool> {
+        crate::txn::check_doc_access_with_prepared_inputs(
+            self.acp.as_ref(),
+            self.acp_registration_projection.as_deref(),
+            identity,
+            permission,
+            policy_id,
+            resource_name,
+            doc_id,
+            self.retry_inputs.as_ref(),
+        )
+        .await
+    }
+
     /// Execute a GraphQL mutation and return JSON results.
     ///
     /// Requires a mutator to be configured via `with_mutator()`.
@@ -91,14 +118,48 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             QueryError::execution("mutations require a mutator; call with_mutator() first")
         })?;
 
-        self.execute_mutation_internal_with_vars(
-            mutation_str,
-            mutator.clone(),
-            caller_identity,
-            variables,
-            None,
-        )
-        .await
+        let mutations = parse_mutations_with_limits(mutation_str, variables, self.query_limits)?;
+        // What this request writes is created by its caller.
+        let runner = self.for_caller(caller_identity.as_ref());
+        let mut request = crate::executor::QueryRequest::new(mutation_str)
+            .with_context(runner.context().into_owned());
+        request.identity = caller_identity.clone();
+        request.variables = variables.map(|values| {
+            JsonValue::Object(
+                values
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect(),
+            )
+        });
+        let execution = Box::pin(async {
+            let mut prepared = runner.prepare_mutations(&request).await?;
+            loop {
+                let attempt_mutator = prepared
+                    .as_ref()
+                    .and_then(|prepared| mutator.with_prepared_inputs(prepared.inputs.clone()))
+                    .unwrap_or_else(|| mutator.clone());
+                match runner
+                    .execute_parsed_mutations(
+                        mutations.clone(),
+                        attempt_mutator,
+                        caller_identity.clone(),
+                        None,
+                        prepared.as_deref(),
+                    )
+                    .await
+                {
+                    Err(QueryError::NeedsInput(input)) => {
+                        prepared = crate::executor::QueryExecutor::resolve_retry_input(
+                            &runner, &request, prepared, &input,
+                        )
+                        .await?;
+                    }
+                    result => return result,
+                }
+            }
+        });
+        execution.await
     }
 
     /// Execute a GraphQL mutation with a specific mutator, caller_identity, and variables.
@@ -111,27 +172,16 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         fetcher_override: Option<Arc<dyn crate::fetcher::DocFetcher>>,
     ) -> Result<JsonValue> {
         let mutations = parse_mutations_with_limits(mutation_str, variables, self.query_limits)?;
-        let caller_did = caller_identity.as_ref().map(ToString::to_string);
-        // Embedded callers may establish a node identity outside the query.
-        // Preserve that identity when no request actor overrides it, while
-        // HTTP callers enter with neither ambient form for anonymous requests.
-        let acting_identity = caller_did
-            .clone()
-            .or_else(defra_core::current_identity::get_effective_identity);
+        // What this request writes is created by its caller.
+        let runner = self.for_caller(caller_identity.as_ref());
         // Keep the large mutation state machine off the Tokio worker stack.
-        // `task_local::scope` polls its child inline; boxing here prevents the
-        // scope wrapper from overflowing the default worker stack on the ACP
-        // create path.
-        let execution = Box::pin(self.execute_parsed_mutations(
+        Box::pin(runner.execute_parsed_mutations(
             mutations,
             mutator,
             caller_identity,
             fetcher_override,
-        ));
-        defra_core::current_identity::with_scoped_identity(
-            acting_identity,
-            defra_core::signing::scope_broadcast_creator_did(caller_did, execution),
-        )
+            None,
+        ))
         .await
     }
 
@@ -142,6 +192,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         mutator: Arc<dyn DocMutator>,
         caller_identity: Option<Did>,
         fetcher_override: Option<Arc<dyn crate::fetcher::DocFetcher>>,
+        prepared: Option<&crate::prepared::PreparedMutations>,
     ) -> Result<JsonValue> {
         if mutations
             .iter()
@@ -165,10 +216,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 )
             })?;
             truncator
-                .truncate(
+                .truncate_as(
+                    &self.context(),
                     &mutation.collection_name,
                     mutation.filter.clone(),
-                    caller_identity.as_ref(),
                 )
                 .await?;
 
@@ -179,67 +230,63 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // This ensures UTC_NOW resolves to the same timestamp across all mutations,
         // matching Go DefraDB's behavior.
         let utc_offset = FixedOffset::east_opt(0).unwrap();
-        let request_time = Utc::now().with_timezone(&utc_offset);
+        let request_time =
+            prepared.map_or_else(|| Utc::now().with_timezone(&utc_offset), |p| p.request_time);
+        let mut created_ids = RapidHashMap::default();
 
-        // Batch implicit multi-mutation requests when the mutator supports it.
-        //
-        // Explicit `/tx` requests already provide their own shared transaction
-        // through `fetcher_override`. Requests touching policy-backed collections
-        // still use the legacy per-mutation path because ACP post-write side
-        // effects are applied outside the storage transaction.
-        let has_policy_backed_mutation = if fetcher_override.is_none() {
-            let mut has_policy = false;
-            for mutation in &mutations {
-                match self.get_collection(&mutation.collection_name).await {
-                    Ok(collection) => {
-                        if collection.policy.is_some() {
-                            has_policy = true;
-                            break;
-                        }
-                    }
-                    Err(QueryError::CollectionNotFound(_)) => {}
-                    Err(err) => return Err(err),
-                }
-            }
-            has_policy
-        } else {
-            false
-        };
-
-        if mutations.len() > 1 && fetcher_override.is_none() && !has_policy_backed_mutation {
+        // Run eligible implicit mutations as one engine-owned retry unit so
+        // selection and expected-value reads are rebuilt after a conflict.
+        // Explicit `/tx` requests have their own transaction and are never
+        // replayed here. The prepared capsule records whether all policy and
+        // retry-boundary checks allowed engine ownership.
+        if fetcher_override.is_none()
+            && prepared.is_some_and(|prepared| prepared.engine_managed_retry)
+        {
             if let Some(batch) = mutator.begin_batch().await? {
-                let batch_mutator = batch.mutator();
-                let batch_fetcher = batch.fetcher();
-                let mut results = Map::new();
+                let runner = Arc::new(self.scoped_runner(self.acp.clone()));
+                let mutations = Arc::new(mutations);
+                let caller_identity = caller_identity.clone();
+                let prepared = prepared.cloned();
+                let acp = self.acp.clone();
+                let operation: crate::mutator::MutationBatchOperation =
+                    Arc::new(move |batch_mutator, batch_fetcher| {
+                        let runner = runner.clone();
+                        let mutations = mutations.clone();
+                        let caller_identity = caller_identity.clone();
+                        let prepared = prepared.clone();
+                        let acp = acp.clone();
+                        Box::pin(async move {
+                            batch_mutator.set_document_acp(acp.clone());
+                            let attempt_acp = batch_fetcher.scoped_acp(acp.clone()).await?;
+                            let mut batch_runner = runner.scoped_runner(attempt_acp);
+                            batch_runner.acp_registration_projection =
+                                batch_mutator.acp_registration_projection();
+                            batch_runner.retry_inputs = prepared.as_ref().map(|p| p.inputs.clone());
+                            let mut created_ids = RapidHashMap::default();
+                            let mut results = Map::new();
 
-                for mutation in mutations {
-                    let result = match self
-                        .execute_single_mutation(
-                            &mutation,
-                            batch_mutator.clone(),
-                            caller_identity.clone(),
-                            request_time,
-                            Some(batch_fetcher.clone()),
-                        )
-                        .await
-                    {
-                        Ok(result) => result,
-                        Err(err) => {
-                            if let Err(rollback_err) = batch.rollback().await {
-                                tracing::warn!(
-                                    error = %rollback_err,
-                                    "Failed to rollback implicit mutation batch"
-                                );
+                            for mutation in mutations.iter() {
+                                let result = batch_runner
+                                    .execute_single_mutation(
+                                        mutation,
+                                        batch_mutator.clone(),
+                                        caller_identity.clone(),
+                                        request_time,
+                                        Some(batch_fetcher.clone()),
+                                        prepared
+                                            .as_ref()
+                                            .and_then(|p| p.mutations.get(&mutation.output_name())),
+                                        prepared.as_ref().map(|p| p.inputs.clone()),
+                                        &mut created_ids,
+                                        true,
+                                    )
+                                    .await?;
+                                results.insert(mutation.output_name(), result);
                             }
-                            return Err(err);
-                        }
-                    };
-
-                    results.insert(mutation.output_name(), result);
-                }
-
-                batch.commit().await?;
-                return Ok(JsonValue::Object(results));
+                            Ok(JsonValue::Object(results))
+                        })
+                    });
+                return batch.run(operation).await;
             }
         }
 
@@ -253,6 +300,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     caller_identity.clone(),
                     request_time,
                     fetcher_override.clone(),
+                    prepared.and_then(|p| p.mutations.get(&mutation.output_name())),
+                    prepared.map(|p| p.inputs.clone()),
+                    &mut created_ids,
+                    false,
                 )
                 .await?;
             // Use alias if provided, otherwise full mutation name (e.g., "add_Users")
@@ -263,27 +314,58 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         Ok(JsonValue::Object(results))
     }
 
-    /// Execute a single mutation operation with ACP enforcement.
-    async fn execute_single_mutation(
+    #[allow(clippy::too_many_arguments)]
+    async fn check_doc_access_prepared(
+        &self,
+        identity: &Identity,
+        permission: DocumentPermission,
+        policy_id: &str,
+        resource_name: &str,
+        doc_id: &str,
+        prepared_inputs: Option<&crate::prepared::PreparedInputMemo>,
+        strict_attempt: bool,
+    ) -> Result<bool> {
+        let result = crate::txn::check_doc_access_with_prepared_inputs(
+            self.acp.as_ref(),
+            self.acp_registration_projection.as_deref(),
+            identity,
+            permission,
+            policy_id,
+            resource_name,
+            doc_id,
+            prepared_inputs,
+        )
+        .await;
+        match result {
+            Err(QueryError::NeedsInput(request)) if !strict_attempt => {
+                let allowed = self
+                    .acp
+                    .check_doc_access(identity, permission, policy_id, resource_name, doc_id)
+                    .await
+                    .map_err(|error| QueryError::execution(error.to_string()))?;
+                let Some(inputs) = prepared_inputs else {
+                    return Ok(allowed);
+                };
+                let response = serde_json::to_vec(&allowed)
+                    .map_err(|error| QueryError::execution(error.to_string()))?;
+                // Every use in the request shares the first answer.
+                let answer = inputs.insert(request, std::sync::Arc::<[u8]>::from(response));
+                serde_json::from_slice(&answer)
+                    .map_err(|error| QueryError::execution(error.to_string()))
+            }
+            result => result,
+        }
+    }
+
+    pub(super) async fn authorize_mutation(
         &self,
         mutation: &Mutation,
-        mutator: Arc<dyn DocMutator>,
-        caller_identity: Option<Did>,
-        request_time: DateTime<FixedOffset>,
-        fetcher_override: Option<Arc<dyn crate::fetcher::DocFetcher>>,
-    ) -> Result<JsonValue> {
-        struct SigningConfigReset(Option<defra_core::signing::SigningConfig>);
-
-        impl Drop for SigningConfigReset {
-            fn drop(&mut self) {
-                defra_core::signing::set_signing_config(self.0.clone());
-            }
-        }
-
-        let fetcher: Arc<dyn crate::fetcher::DocFetcher> =
-            fetcher_override.unwrap_or_else(|| self.fetcher.clone());
-        use acp::Identity;
-
+        caller_identity: &Option<Did>,
+        fetcher: &dyn crate::fetcher::DocFetcher,
+        projected_ids: Option<&rapidhash::RapidHashSet<String>>,
+        prepared_inputs: Option<&crate::prepared::PreparedInputMemo>,
+        strict_attempt: bool,
+    ) -> Result<AuthorizedMutation> {
         // Validate collection exists - resolve on-demand from provider
         let collection = self.get_collection(&mutation.collection_name).await?;
 
@@ -311,9 +393,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let mapping = self.build_mutation_mapping(mutation)?;
 
         // Resolve filter to doc_ids if filter is provided without doc_ids
-        let resolved_doc_ids = self
-            .resolve_filter_to_doc_ids(mutation, fetcher.as_ref())
-            .await?;
+        let resolved_doc_ids = self.resolve_filter_to_doc_ids(mutation, fetcher).await?;
 
         // Get doc_ids for permission checking (UPDATE/DELETE need this)
         let doc_ids_for_check = resolved_doc_ids
@@ -331,18 +411,48 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // This matches Go's behavior where GQL mutations on invisible documents return
         // empty results, while mutations on visible-but-unauthorized documents return errors.
         if let Some(validator) = &self.write_validator {
+            let validation_ids: Vec<_> = doc_ids_for_check
+                .iter()
+                .flatten()
+                .filter(|id| !projected_ids.is_some_and(|ids| ids.contains(*id)))
+                .cloned()
+                .collect();
             let request = crate::access_hooks::WriteRequest {
                 identity: caller_identity.as_ref(),
                 collection: &collection,
                 kind: mutation.mutation_type,
-                doc_ids: doc_ids_for_check.as_deref().unwrap_or_default(),
+                doc_ids: &validation_ids,
                 create_input: &mutation.create_input,
                 update_input: &mutation.update_input,
             };
-            validator
-                .validate_write(&request)
-                .await
-                .map_err(QueryError::execution)?;
+            if strict_attempt {
+                let exact_request = serde_json::to_vec(&(
+                    Arc::as_ptr(validator) as *const () as usize,
+                    caller_identity.as_ref().map(ToString::to_string),
+                    &collection.name,
+                    &collection.version_id,
+                    mutation.mutation_type.as_prefix(),
+                    &validation_ids,
+                    &mutation.create_input,
+                    &mutation.update_input,
+                ))
+                .map_err(|error| QueryError::execution(error.to_string()))?;
+                let prepared_request = crate::prepared::PreparedInputRequest::new(
+                    crate::prepared::PreparedInputKind::WriteValidation,
+                    exact_request,
+                );
+                let inputs = prepared_inputs.ok_or_else(|| {
+                    QueryError::execution("write validation attempt has no request memo")
+                })?;
+                if inputs.get(&prepared_request).is_none() {
+                    return Err(QueryError::NeedsInput(prepared_request));
+                }
+            } else {
+                validator
+                    .validate_write(&request)
+                    .await
+                    .map_err(QueryError::execution)?;
+            }
         }
 
         let mut acp_filtered_doc_ids: Option<Vec<String>> = None;
@@ -353,17 +463,25 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         let identity_for_acp = Identity::from(caller_identity.as_ref());
                         let mut visible_doc_ids = Vec::new();
                         for doc_id in doc_ids {
+                            // Projected creates have no ACP object yet. Execution checks
+                            // the real ID after its preceding create has registered it.
+                            if projected_ids.is_some_and(|ids| ids.contains(doc_id)) {
+                                visible_doc_ids.push(doc_id.clone());
+                                continue;
+                            }
                             // Phase 1: Check if the identity can read the document
-                            let can_read = crate::txn::check_doc_access_with_overlay(
-                                self.acp.as_ref(),
-                                &identity_for_acp,
-                                DocumentPermission::Read,
-                                &policy.id,
-                                &policy.resource_name,
-                                doc_id,
-                            )
-                            .await
-                            .unwrap_or(false);
+                            let can_read = self
+                                .check_doc_access_prepared(
+                                    &identity_for_acp,
+                                    DocumentPermission::Read,
+                                    &policy.id,
+                                    &policy.resource_name,
+                                    doc_id,
+                                    prepared_inputs,
+                                    strict_attempt,
+                                )
+                                .await
+                                .map_err(|error| preserve_acp_input_error("read", doc_id, error))?;
 
                             if !can_read {
                                 // Document is invisible to this identity -- skip silently
@@ -371,16 +489,21 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             }
 
                             // Phase 2: Check if the identity can update the document
-                            let can_update = crate::txn::check_doc_access_with_overlay(
-                                self.acp.as_ref(),
-                                &identity_for_acp,
-                                DocumentPermission::Update,
-                                &policy.id,
-                                &policy.resource_name,
-                                doc_id,
-                            )
-                            .await
-                            .map_err(|e| QueryError::acp_check_failed("update", doc_id, e))?;
+                            let can_update = self
+                                .check_doc_access_prepared(
+                                    &identity_for_acp,
+                                    DocumentPermission::Update,
+                                    &policy.id,
+                                    &policy.resource_name,
+                                    doc_id,
+                                    prepared_inputs,
+                                    strict_attempt,
+                                )
+                                .await
+                                .map_err(|error| match error {
+                                    error @ QueryError::NeedsInput(_) => error,
+                                    error => QueryError::acp_check_failed("update", doc_id, error),
+                                })?;
 
                             if !can_update {
                                 return Err(QueryError::document_not_found(
@@ -397,17 +520,25 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         let identity_for_acp = Identity::from(caller_identity.as_ref());
                         let mut visible_doc_ids = Vec::new();
                         for doc_id in doc_ids {
+                            // Projected creates have no ACP object yet. Execution checks
+                            // the real ID after its preceding create has registered it.
+                            if projected_ids.is_some_and(|ids| ids.contains(doc_id)) {
+                                visible_doc_ids.push(doc_id.clone());
+                                continue;
+                            }
                             // Phase 1: Check if the identity can read the document
-                            let can_read = crate::txn::check_doc_access_with_overlay(
-                                self.acp.as_ref(),
-                                &identity_for_acp,
-                                DocumentPermission::Read,
-                                &policy.id,
-                                &policy.resource_name,
-                                doc_id,
-                            )
-                            .await
-                            .unwrap_or(false);
+                            let can_read = self
+                                .check_doc_access_prepared(
+                                    &identity_for_acp,
+                                    DocumentPermission::Read,
+                                    &policy.id,
+                                    &policy.resource_name,
+                                    doc_id,
+                                    prepared_inputs,
+                                    strict_attempt,
+                                )
+                                .await
+                                .map_err(|error| preserve_acp_input_error("read", doc_id, error))?;
 
                             if !can_read {
                                 // Document is invisible to this identity -- skip silently
@@ -415,16 +546,21 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             }
 
                             // Phase 2: Check if the identity can delete the document
-                            let can_delete = crate::txn::check_doc_access_with_overlay(
-                                self.acp.as_ref(),
-                                &identity_for_acp,
-                                DocumentPermission::Delete,
-                                &policy.id,
-                                &policy.resource_name,
-                                doc_id,
-                            )
-                            .await
-                            .map_err(|e| QueryError::acp_check_failed("delete", doc_id, e))?;
+                            let can_delete = self
+                                .check_doc_access_prepared(
+                                    &identity_for_acp,
+                                    DocumentPermission::Delete,
+                                    &policy.id,
+                                    &policy.resource_name,
+                                    doc_id,
+                                    prepared_inputs,
+                                    strict_attempt,
+                                )
+                                .await
+                                .map_err(|error| match error {
+                                    error @ QueryError::NeedsInput(_) => error,
+                                    error => QueryError::acp_check_failed("delete", doc_id, error),
+                                })?;
 
                             if !can_delete {
                                 return Err(QueryError::document_not_found(
@@ -444,25 +580,106 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
         }
 
-        // Bind a RAII guard so the thread-local is cleared on every exit
-        // path (including `?`, panic unwind, and the happy path). See #757.
-        let _encryption_config_guard = EncryptionConfigGuard;
+        Ok(AuthorizedMutation {
+            collection,
+            mapping,
+            resolved_doc_ids,
+            acp_filtered_doc_ids,
+        })
+    }
 
-        // Set encryption config for this mutation (thread-local, read by AutoCommitMutator)
-        if mutation.encrypt_doc || !mutation.encrypt_fields.is_empty() {
-            defra_core::encryption::set_encryption_config(Some(
-                defra_core::encryption::EncryptionConfig {
-                    encrypt_doc: mutation.encrypt_doc,
-                    encrypt_fields: mutation.encrypt_fields.clone(),
-                },
-            ));
-        } else {
-            defra_core::encryption::set_encryption_config(None);
+    /// Execute a single mutation operation with ACP enforcement.
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_single_mutation(
+        &self,
+        mutation: &Mutation,
+        mutator: Arc<dyn DocMutator>,
+        caller_identity: Option<Did>,
+        request_time: DateTime<FixedOffset>,
+        fetcher_override: Option<Arc<dyn crate::fetcher::DocFetcher>>,
+        prepared: Option<&crate::prepared::PreparedMutation>,
+        prepared_inputs: Option<crate::prepared::PreparedInputMemo>,
+        created_ids: &mut RapidHashMap<String, String>,
+        strict_attempt: bool,
+    ) -> Result<JsonValue> {
+        let fetcher: Arc<dyn crate::fetcher::DocFetcher> =
+            fetcher_override.unwrap_or_else(|| self.fetcher.clone());
+        let mut selected_mutation = mutation.clone();
+        let mut authorization = None;
+        if let Some(ids) = prepared.and_then(|prepared| prepared.doc_ids.as_ref()) {
+            let mut ids: Vec<_> = ids
+                .iter()
+                .map(|id| created_ids.get(id).unwrap_or(id).clone())
+                .collect();
+            if mutation.doc_ids.is_none()
+                && mutation.filter.is_some()
+                && matches!(
+                    mutation.mutation_type,
+                    MutationType::Delete | MutationType::Upsert
+                )
+            {
+                let mut current = self
+                    .authorize_mutation(
+                        mutation,
+                        &caller_identity,
+                        fetcher.as_ref(),
+                        None,
+                        prepared_inputs.as_ref(),
+                        strict_attempt,
+                    )
+                    .await?;
+                let matching = current
+                    .acp_filtered_doc_ids
+                    .as_ref()
+                    .or(current.resolved_doc_ids.as_ref())
+                    .cloned()
+                    .unwrap_or_default();
+                if mutation.mutation_type == MutationType::Upsert
+                    && (matching.len() != ids.len() || matching.iter().any(|id| !ids.contains(id)))
+                {
+                    return Err(QueryError::execution(
+                        "upsert target changed after key preparation",
+                    ));
+                }
+                ids.retain(|id| matching.contains(id));
+                current.resolved_doc_ids = Some(ids.clone());
+                if current.acp_filtered_doc_ids.is_some() {
+                    current.acp_filtered_doc_ids = Some(ids.clone());
+                }
+                authorization = Some(current);
+            }
+            selected_mutation.doc_ids = Some(ids);
         }
+        let mutation = &selected_mutation;
+        let AuthorizedMutation {
+            collection,
+            mapping,
+            resolved_doc_ids,
+            acp_filtered_doc_ids,
+        } = match authorization {
+            Some(authorization) => authorization,
+            None => {
+                self.authorize_mutation(
+                    mutation,
+                    &caller_identity,
+                    fetcher.as_ref(),
+                    None,
+                    prepared_inputs.as_ref(),
+                    strict_attempt,
+                )
+                .await?
+            }
+        };
 
-        let _signing_config_reset = if matches!(mutation.mutation_type, MutationType::Create) {
-            let current_signing_config = defra_core::signing::get_signing_config();
-            match current_signing_config.clone() {
+        // This mutation's own encryption and, for a remote signer, the access
+        // decision its creates are signed under, so neither reaches another one.
+        let mut context = self
+            .context()
+            .into_owned()
+            .with_encryption(mutation.encryption());
+
+        if matches!(mutation.mutation_type, MutationType::Create) {
+            match context.signing().cloned() {
                 Some(mut config) if config.remote_signer.is_some() => {
                     tracing::info!(
                         collection = %mutation.collection_name,
@@ -482,22 +699,62 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             permission = "writer",
                             "create mutation requesting access decision"
                         );
-                        let decision_id = self
-                            .acp
-                            .create_access_decision(
-                                &Identity::from(identity_did.clone()),
+                        let request = crate::prepared::PreparedInputRequest::new(
+                            crate::prepared::PreparedInputKind::AcpDecision,
+                            serde_json::to_vec(&(
+                                identity_did.as_str(),
                                 &policy.id,
                                 &policy.resource_name,
                                 &policy.resource_name,
                                 "writer",
-                            )
-                            .await
-                            .map_err(|e| {
-                                QueryError::permission_denied(format!(
-                                    "create authorization failed: {}",
-                                    e
+                                self.acp.bearer_token_for(identity_did.as_str()),
+                            ))
+                            .map_err(|error| QueryError::execution(error.to_string()))?,
+                        );
+                        let decision_id = if let Some(bytes) = prepared_inputs
+                            .as_ref()
+                            .and_then(|inputs| inputs.get(&request))
+                        {
+                            serde_json::from_slice::<Option<String>>(&bytes).map_err(|error| {
+                                QueryError::execution(format!(
+                                    "cached create authorization response is invalid: {error}"
                                 ))
-                            })?;
+                            })?
+                        } else {
+                            if strict_attempt {
+                                return Err(QueryError::NeedsInput(request));
+                            }
+                            let decision_id = self
+                                .acp
+                                .create_access_decision(
+                                    &Identity::from(identity_did.clone()),
+                                    &policy.id,
+                                    &policy.resource_name,
+                                    &policy.resource_name,
+                                    "writer",
+                                )
+                                .await
+                                .map_err(|e| {
+                                    QueryError::permission_denied(format!(
+                                        "create authorization failed: {}",
+                                        e
+                                    ))
+                                })?;
+                            match prepared_inputs.as_ref() {
+                                Some(inputs) => {
+                                    let response =
+                                        serde_json::to_vec(&decision_id).map_err(|error| {
+                                            QueryError::execution(error.to_string())
+                                        })?;
+                                    // Every use in the request shares the first answer.
+                                    let answer = inputs
+                                        .insert(request, std::sync::Arc::<[u8]>::from(response));
+                                    serde_json::from_slice(&answer)
+                                        .map_err(|error| QueryError::execution(error.to_string()))?
+                                }
+                                None => decision_id,
+                            }
+                        };
 
                         tracing::info!(
                             actor_did = %identity_did,
@@ -513,14 +770,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                                 Some(defra_core::signing::SigningAuthorization::Decision {
                                     decision_id,
                                 });
-                            defra_core::signing::set_signing_config(Some(config));
-                            Some(SigningConfigReset(current_signing_config))
+                            context = context.with_signing(Some(config));
                         } else {
                             tracing::warn!(
                                 collection = %mutation.collection_name,
                                 "create mutation received no access decision for remote signer"
                             );
-                            None
                         }
                     } else {
                         tracing::warn!(
@@ -530,7 +785,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             has_policy = collection.policy.is_some(),
                             "create mutation skipped remote signer authorization due to missing prerequisites"
                         );
-                        None
                     }
                 }
                 Some(_) => {
@@ -538,7 +792,6 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         collection = %mutation.collection_name,
                         "create mutation using local signer; remote signer authorization skipped"
                     );
-                    None
                 }
                 None => {
                     // No signing config is the normal case for nodes that don't
@@ -550,35 +803,48 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         collection = %mutation.collection_name,
                         "create mutation has no signing config; remote signer authorization skipped"
                     );
-                    None
                 }
             }
-        } else {
-            None
-        };
+        }
+
+        let bound_prepared = prepared.map(|prepared| {
+            let mut prepared = prepared.clone();
+            prepared.bind_created(created_ids);
+            prepared
+        });
+        let prepared = bound_prepared.as_ref();
 
         // Build and execute the appropriate mutation plan
         let mut plan: Box<dyn PlanNode> = match mutation.mutation_type {
             MutationType::Create => {
                 let inputs = self.build_create_inputs(mutation, &collection)?;
                 Box::new(
-                    CreateNode::new(&mutation.collection_name, mutator, mapping.clone())
+                    CreateNode::new(&mutation.collection_name, mutator.clone(), mapping.clone())
+                        .with_context(context.clone())
                         .with_collection(collection.clone())
                         .with_request_time(request_time)
-                        .with_inputs(inputs),
+                        .with_inputs(inputs)
+                        .with_prepared_documents(prepared.map(|p| p.creates.clone())),
                 )
             }
             MutationType::Update => {
                 let input = self.build_update_input(mutation, &collection)?;
                 let mut node = UpdateNode::new(
                     &mutation.collection_name,
-                    mutator,
+                    mutator.clone(),
                     fetcher.clone(),
                     mapping.clone(),
                 )
+                .with_context(context.clone())
                 .with_collection(collection.clone())
                 .with_request_time(request_time)
-                .with_input(input);
+                .with_input(input)
+                .with_prepared_writes(prepared.map(|p| p.updates.clone()))
+                .with_prepared_update_targets(prepared.map(|p| p.update_targets.clone()))
+                .with_prepared_embeddings(
+                    prepared.map(|p| p.embeddings.clone()),
+                    prepared_inputs.clone(),
+                );
 
                 // Use ACP-filtered doc_ids (invisible docs removed), or resolved/original
                 if let Some(ref doc_ids) = acp_filtered_doc_ids {
@@ -602,10 +868,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             MutationType::Delete => {
                 let mut node = DeleteNode::new(
                     &mutation.collection_name,
-                    mutator,
+                    mutator.clone(),
                     fetcher.clone(),
                     mapping.clone(),
-                );
+                )
+                .with_context(context.clone());
 
                 // Use ACP-filtered doc_ids (invisible docs removed), or resolved/original
                 if let Some(ref doc_ids) = acp_filtered_doc_ids {
@@ -627,9 +894,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 Box::new(node)
             }
             MutationType::Upsert => {
-                let mut node = UpsertNode::new(&mutation.collection_name, mutator, mapping.clone())
-                    .with_collection(collection.clone())
-                    .with_request_time(request_time);
+                let mut node =
+                    UpsertNode::new(&mutation.collection_name, mutator.clone(), mapping.clone())
+                        .with_context(context.clone())
+                        .with_collection(collection.clone())
+                        .with_request_time(request_time)
+                        .with_prepared_writes(prepared.cloned());
 
                 // Set create_input (from Go's 'add' argument)
                 if !mutation.create_input.is_empty() {
@@ -707,10 +977,16 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             .await
             .map_err(map_doc_not_found)?;
 
-        // Note: encryption_config and broadcast_creator_did are cleared
-        // automatically by the RAII guards declared above when this
-        // function returns. The bearer token store stays alive — the
-        // ACP registration block below needs it for vera.rs auth.
+        if let Some(prepared) = prepared {
+            for (created, actual) in prepared.creates.iter().zip(&result_doc_ids) {
+                if let Some(write) = created.write_preparation() {
+                    created_ids.insert(
+                        crate::prepared::prepared_doc_id(write).to_string(),
+                        actual.clone(),
+                    );
+                }
+            }
+        }
 
         let plan_execution_elapsed = plan_execution_start.elapsed();
         for doc_id in &result_doc_ids {
@@ -721,139 +997,167 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             );
         }
 
-        // For CREATE/UPSERT operations with caller_identity: register created docs with ACP
-        if matches!(
-            mutation.mutation_type,
-            MutationType::Create | MutationType::Upsert
-        ) {
-            if let (Some(ref policy), Some(ref identity_did)) =
-                (&collection.policy, &caller_identity)
-            {
+        // External ACP cannot join the transaction: a create owes its
+        // registration through a record written in its own transaction (see
+        // `acp::pending`), and the ordered hook settles that record once the
+        // commit is durable. A document an upsert found and updated owes
+        // nothing, so its caller never becomes its owner.
+        if !self.acp.supports_transactions()
+            && !mutator.manages_external_acp_hooks()
+            && matches!(
+                mutation.mutation_type,
+                MutationType::Create | MutationType::Upsert
+            )
+        {
+            if let (Some(policy), Some(identity_did), Some(projection)) = (
+                collection.policy.as_ref(),
+                caller_identity.as_ref(),
+                self.acp_registration_projection.as_ref(),
+            ) {
                 for result in &results {
-                    if let Some(doc_id) = result.get("_docID").and_then(|v| v.as_str()) {
-                        // Check if document is already registered (for upsert of existing doc)
-                        let is_registered = crate::txn::is_doc_registered_with_overlay(
-                            self.acp.as_ref(),
-                            &policy.id,
-                            &policy.resource_name,
-                            doc_id,
-                        )
-                        .await
-                        .map_err(|e| {
-                            tracing::warn!(
-                                doc_id = %doc_id,
-                                policy_id = %policy.id,
-                                error = %e,
-                                "Failed to check ACP registration status - propagating error"
-                            );
-                            QueryError::acp_registration_check_failed(doc_id, e)
-                        })?;
+                    if let Some(doc_id) = result.get("_docID").and_then(|value| value.as_str()) {
+                        let owed = projection
+                            .owed_creator(&policy.id, &policy.resource_name, doc_id)
+                            .await
+                            .map_err(|error| {
+                                QueryError::acp_registration_check_failed(doc_id, error)
+                            })?;
+                        if owed.is_none() {
+                            continue;
+                        }
 
-                        // Only register if not already registered (new document)
-                        if !is_registered {
-                            if let Some(deferred_acp_mutations) =
-                                crate::txn::current_deferred_acp_mutations()
-                            {
-                                let request_bearer_token =
-                                    defra_core::signing::get_request_bearer_token(
-                                        identity_did.as_str(),
-                                    );
-                                deferred_acp_mutations
-                                    .schedule_register_doc_object(
-                                        self.acp.clone(),
-                                        identity_did.clone(),
-                                        policy.id.clone(),
-                                        policy.resource_name.clone(),
-                                        doc_id.to_string(),
-                                        request_bearer_token,
-                                    )
-                                    .map_err(QueryError::execution)?;
-                            } else {
-                                let acp_registration_start = Instant::now();
-                                self.acp
-                                    .register_doc_object(
+                        let acp = self.acp.clone();
+                        let identity = identity_did.clone();
+                        let policy_id = policy.id.clone();
+                        let resource_name = policy.resource_name.clone();
+                        let doc_id = doc_id.to_string();
+                        let token = self.acp.bearer_token_for(identity_did.as_str());
+                        let callback: storage::corekv::CommitHook = Box::new(move || {
+                            let acp = acp.clone();
+                            let identity = identity.clone();
+                            let policy_id = policy_id.clone();
+                            let resource_name = resource_name.clone();
+                            let doc_id = doc_id.clone();
+                            let token = token.clone();
+                            Box::pin(async move {
+                                acp::with_request_bearer(
+                                    &acp,
+                                    Some(identity.to_string()),
+                                    token,
+                                    |acp| async move {
+                                        acp.redrive_registration(
+                                            &policy_id,
+                                            &resource_name,
+                                            &doc_id,
+                                        )
+                                        .await
+                                        .map_err(|error| {
+                                            format!(
+                                                "failed to register ACP document {doc_id}: {error}"
+                                            )
+                                        })
+                                    },
+                                )
+                                .await
+                            })
+                        });
+                        mutator.register_ordered_async_hook(callback).await?;
+                    }
+                }
+            } else if let (Some(policy), Some(identity_did), MutationType::Create) = (
+                collection.policy.as_ref(),
+                caller_identity.as_ref(),
+                &mutation.mutation_type,
+            ) {
+                // A mutator with no transaction behind it records nothing owed;
+                // only a create's results are documents this request made.
+                for result in &results {
+                    if let Some(doc_id) = result.get("_docID").and_then(|value| value.as_str()) {
+                        if !self
+                            .acp
+                            .is_doc_registered(&policy.id, &policy.resource_name, doc_id)
+                            .await
+                            .map_err(|error| {
+                                QueryError::acp_registration_check_failed(doc_id, error)
+                            })?
+                        {
+                            self.acp
+                                .register_doc_object(
                                     identity_did,
                                     &policy.id,
                                     &policy.resource_name,
                                     doc_id,
                                 )
                                 .await
-                                .map_err(|e| {
-                                    tracing::error!(
-                                        doc_id = %doc_id,
-                                        error = %e,
-                                        "Failed to register document with ACP - aborting mutation"
-                                    );
-                                    QueryError::acp_registration_failed(doc_id, e)
+                                .map_err(|error| {
+                                    QueryError::acp_registration_failed(doc_id, error)
                                 })?;
-                                tracing::info!(
-                                    doc_id = %doc_id,
-                                    elapsed = ?acp_registration_start.elapsed(),
-                                    "ACP document registration completed"
-                                );
-                            }
                         }
                     }
                 }
             }
         }
 
-        // For DELETE operations: unregister deleted docs from ACP
-        // This cleans up ACP state to prevent orphaned registrations
-        if matches!(mutation.mutation_type, MutationType::Delete) {
-            if let Some(ref policy) = collection.policy {
-                let request_bearer_token = caller_identity
-                    .as_ref()
-                    .and_then(|did| defra_core::signing::get_request_bearer_token(did.as_str()));
+        // A local ACP provider already wrote registration in the authorized
+        // transaction. External unregistration is a fallible ordered hook.
+        if !mutator.manages_external_acp_hooks()
+            && matches!(mutation.mutation_type, MutationType::Delete)
+        {
+            if let Some(policy) = collection.policy.as_ref() {
                 for result in &results {
-                    if let Some(doc_id) = result.get("_docID").and_then(|v| v.as_str()) {
-                        // Best-effort unregistration - log failures but don't fail the delete
-                        // The document is already deleted from storage; ACP cleanup failure
-                        // leaves orphaned metadata but doesn't affect data integrity
-                        if let Some(deferred_acp_mutations) =
-                            crate::txn::current_deferred_acp_mutations()
-                        {
-                            if let Err(err) = deferred_acp_mutations.schedule_unregister_doc_object(
-                                self.acp.clone(),
-                                policy.id.clone(),
-                                policy.resource_name.clone(),
-                                doc_id.to_string(),
-                                caller_identity.clone(),
-                                request_bearer_token.clone(),
-                            ) {
-                                tracing::warn!(
-                                    doc_id = %doc_id,
-                                    policy_id = %policy.id,
-                                    error = %err,
-                                    "Failed to defer ACP unregister for deleted document"
-                                );
-                            }
-                        } else if let Err(e) = self
+                    if let Some(doc_id) = result.get("_docID").and_then(|value| value.as_str()) {
+                        if self.acp.supports_transactions() {
+                            self.acp
+                                .unregister_doc_object(&policy.id, &policy.resource_name, doc_id)
+                                .await
+                                .map_err(|error| QueryError::execution(error.to_string()))?;
+                        } else if self.acp_registration_projection.is_some() {
+                            let acp = self.acp.clone();
+                            let policy_id = policy.id.clone();
+                            let resource_name = policy.resource_name.clone();
+                            let doc_id = doc_id.to_string();
+                            let identity = caller_identity.clone();
+                            let token = identity
+                                .as_ref()
+                                .and_then(|identity| self.acp.bearer_token_for(identity.as_str()));
+                            let callback: storage::corekv::CommitHook = Box::new(move || {
+                                let acp = acp.clone();
+                                let policy_id = policy_id.clone();
+                                let resource_name = resource_name.clone();
+                                let doc_id = doc_id.clone();
+                                let identity = identity.clone();
+                                let token = token.clone();
+                                Box::pin(async move {
+                                    acp::with_request_bearer(
+                                        &acp,
+                                        identity.map(|identity| identity.to_string()),
+                                        token,
+                                        |acp| async move {
+                                            acp.unregister_doc_object(
+                                                &policy_id,
+                                                &resource_name,
+                                                &doc_id,
+                                            )
+                                            .await
+                                            .map_err(|error| {
+                                                format!("failed to unregister ACP document {doc_id}: {error}")
+                                            })
+                                        },
+                                    )
+                                    .await
+                                })
+                            });
+                            mutator.register_ordered_async_hook(callback).await?;
+                        } else if let Err(error) = self
                             .acp
                             .unregister_doc_object(&policy.id, &policy.resource_name, doc_id)
                             .await
                         {
-                            tracing::warn!(
-                                doc_id = %doc_id,
-                                policy_id = %policy.id,
-                                error = %e,
-                                "Failed to unregister deleted document from ACP - orphaned registration may remain"
-                            );
-                        } else {
-                            tracing::debug!(
-                                doc_id = %doc_id,
-                                policy_id = %policy.id,
-                                "Document unregistered from ACP after deletion"
-                            );
+                            tracing::warn!(%doc_id, policy_id = %policy.id, %error, "Failed to unregister deleted document from ACP - orphaned registration may remain");
                         }
                     }
                 }
             }
-        }
-
-        // Clear request bearer token after all ACP post-write work is queued or applied.
-        if let Some(ref identity_did) = caller_identity {
-            defra_core::signing::clear_request_bearer_token(identity_did.as_str());
         }
 
         // Enrich results with _version data if requested.
@@ -1005,6 +1309,7 @@ mod tests {
     use kovan_queue::seg_queue::SegQueue;
     use rapidhash::RapidHashSet;
     use schema::{CollectionVersion, FieldDescription, FieldKind};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::mutator::{CollectionTruncator, CreateResult, DeleteResult, UpdateResult};
     use crate::test_utils::MockFetcher;
@@ -1013,6 +1318,7 @@ mod tests {
     struct CapturingMutator {
         created_docs: SegQueue<Document>,
         broadcast_creators: SegQueue<Option<String>>,
+        prepared_writes: AtomicUsize,
     }
 
     #[derive(Default)]
@@ -1044,6 +1350,7 @@ mod tests {
             Self {
                 created_docs: SegQueue::new(),
                 broadcast_creators: SegQueue::new(),
+                prepared_writes: AtomicUsize::new(0),
             }
         }
 
@@ -1107,7 +1414,13 @@ mod tests {
 
         let mutations = crate::parse_mutations(r#"mutation { truncate_User }"#).unwrap();
         let transaction = runner
-            .execute_parsed_mutations(mutations, mutator, None, Some(Arc::new(MockFetcher::new())))
+            .execute_parsed_mutations(
+                mutations,
+                mutator,
+                None,
+                Some(Arc::new(MockFetcher::new())),
+                None,
+            )
             .await
             .unwrap_err();
         assert!(transaction
@@ -1118,6 +1431,17 @@ mod tests {
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     impl crate::mutator::DocMutator for CapturingMutator {
+        async fn prepare_write(
+            &self,
+            _collection_name: &str,
+            doc: Document,
+            _modified_fields: Option<RapidHashSet<String>>,
+            _encryption: Option<defra_core::encryption::EncryptionConfig>,
+        ) -> Result<Document> {
+            self.prepared_writes.fetch_add(1, Ordering::SeqCst);
+            Ok(doc)
+        }
+
         async fn create(&self, _collection_name: &str, mut doc: Document) -> Result<CreateResult> {
             self.broadcast_creators
                 .push(defra_core::signing::get_broadcast_creator_did());
@@ -1157,6 +1481,41 @@ mod tests {
         ) -> Result<Option<Document>> {
             Ok(None)
         }
+    }
+
+    #[tokio::test]
+    async fn update_preparation_keeps_custom_hook_and_only_records_found_targets() {
+        let collection = CollectionVersion::new(
+            "User",
+            "v1",
+            "coll-user",
+            vec![
+                FieldDescription::new("1", "_docID", FieldKind::doc_id()),
+                FieldDescription::new("2", "name", FieldKind::string()),
+            ],
+        );
+        let fetcher = MockFetcher::new();
+        let mut existing = Document::from_json_str(r#"{"name":"before"}"#).unwrap();
+        existing.set_id(DocID::new_v0_from_seed("preparation-existing"));
+        let existing_id = existing.id().unwrap().to_string();
+        let missing_id = "missing-before-preparation";
+        fetcher.add_doc("User", existing);
+        let mutator = Arc::new(CapturingMutator::new());
+        // This custom mutator has the trait defaults: it does not require
+        // external write preparation and does not opt in to projected reads.
+        assert!(!mutator.requires_write_preparation());
+        assert!(!mutator.supports_projected_updates());
+        let runner = QueryRunner::new(fetcher, vec![collection]).with_mutator(mutator.clone());
+        let request = QueryRequest::new(format!(
+            r#"mutation {{ update_User(docIDs: ["{existing_id}", "{missing_id}"], input: {{name: "after"}}) {{ _docID }} }}"#
+        ));
+
+        let prepared = runner.prepare_mutations(&request).await.unwrap().unwrap();
+        let entry = prepared.mutations.values().next().unwrap();
+        assert_eq!(entry.update_targets.len(), 1);
+        assert!(entry.update_targets.contains(&existing_id));
+        assert!(!entry.update_targets.contains(missing_id));
+        assert_eq!(mutator.prepared_writes.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

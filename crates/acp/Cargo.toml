@@ -19,10 +19,10 @@ bench = false
 defra-core = { path = "../defra-core" }
 identity = { path = "../identity" }
 storage = { path = "../storage" }
+datastore = { path = "../datastore" }
 zanzibar = { path = "../zanzibar" }
 
 async-trait.workspace = true
-async-lock.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -31,6 +31,7 @@ tracing.workspace = true
 sha2.workspace = true
 serde_yaml = "0.9"
 kovan.workspace = true
+regolith.workspace = true
 
 [dev-dependencies]
 bytes = { workspace = true }

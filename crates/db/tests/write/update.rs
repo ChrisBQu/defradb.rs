@@ -1,12 +1,16 @@
-use db::AutoCommitMutator;
 use db::DB;
+use db::{AutoCommitMutator, DbDocFetcher, DbDocMutator};
 use document::Document;
 use document::NormalValue;
+use kovan::AtomOption;
 use query::mutator::DocMutator;
+use query::planner::index_selection::{IndexScanParams, IndexScanType};
+use query::runner::DocFetcher;
 use rapidhash::RapidHashSet;
 use schema::CollectionVersion;
 use schema::FieldDescription;
 use schema::FieldKind;
+use schema::IndexDescription;
 use std::sync::Arc;
 use storage::RegolithStore;
 
@@ -31,9 +35,11 @@ fn test_collection() -> CollectionVersion {
 #[tokio::test]
 async fn stale_disjoint_field_update_without_precondition_preserves_committed_fields() {
     let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).expect("create db"));
-    db.create_collection(test_collection())
-        .await
-        .expect("schema");
+    db.create_collection(
+        test_collection().with_index(IndexDescription::new("by_left").with_field("left", false)),
+    )
+    .await
+    .expect("schema");
     let mutator = AutoCommitMutator::new(Arc::clone(&db));
 
     let initial = Document::from_json_str(r#"{"left": 0, "right": 0}"#).expect("initial document");
@@ -73,6 +79,192 @@ async fn stale_disjoint_field_update_without_precondition_preserves_committed_fi
         .expect("final document");
     assert_eq!(final_doc.get("left"), Some(&NormalValue::Int(1)));
     assert_eq!(final_doc.get("right"), Some(&NormalValue::Int(1)));
+}
+
+/// Two explicit transactions begin from independent copies of one document,
+/// then update disjoint fields. The update implementation must validate only
+/// the parts its maintenance decisions consume so both writes can commit.
+#[tokio::test]
+async fn explicit_disjoint_field_updates_on_one_document_both_commit() {
+    let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).expect("create db"));
+    db.create_collection(
+        test_collection().with_index(IndexDescription::new("by_left").with_field("left", false)),
+    )
+    .await
+    .expect("schema");
+    let auto = AutoCommitMutator::new(Arc::clone(&db));
+    let created = auto
+        .create(
+            "Patch",
+            Document::from_json_str(r#"{"left": 0, "right": 0}"#).unwrap(),
+        )
+        .await
+        .expect("create document");
+    let snapshot = auto
+        .get_for_update("Patch", &created.doc_id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let first = DbDocMutator::new(Arc::clone(&db), db.new_txn(false).await.unwrap());
+    let second = DbDocMutator::new(Arc::clone(&db), db.new_txn(false).await.unwrap());
+    let mut left = snapshot.clone();
+    left.set("left", NormalValue::Int(1));
+    first
+        .update("Patch", left, RapidHashSet::from_iter(["left".to_string()]))
+        .await
+        .expect("write left");
+    let mut right = snapshot;
+    right.set("right", NormalValue::Int(1));
+    second
+        .update(
+            "Patch",
+            right,
+            RapidHashSet::from_iter(["right".to_string()]),
+        )
+        .await
+        .expect("write right");
+
+    first
+        .take_txn()
+        .await
+        .unwrap()
+        .commit()
+        .await
+        .expect("first commit");
+    second
+        .take_txn()
+        .await
+        .unwrap()
+        .commit()
+        .await
+        .expect("second commit");
+
+    let result = auto
+        .get_for_update("Patch", &created.doc_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.get("left"), Some(&NormalValue::Int(1)));
+    assert_eq!(result.get("right"), Some(&NormalValue::Int(1)));
+}
+
+#[tokio::test]
+async fn stale_update_uses_fresh_unmodified_composite_index_component() {
+    let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).expect("create db"));
+    db.create_collection(
+        test_collection().with_index(
+            IndexDescription::new("by_left_right")
+                .with_field("left", false)
+                .with_field("right", false),
+        ),
+    )
+    .await
+    .expect("schema");
+    let mutator = AutoCommitMutator::new(Arc::clone(&db));
+    let created = mutator
+        .create(
+            "Patch",
+            Document::from_json_str(r#"{"left": 0, "right": 0}"#).unwrap(),
+        )
+        .await
+        .expect("create document");
+    let stale = mutator
+        .get_for_update("Patch", &created.doc_id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let mut right_update = stale.clone();
+    right_update.set("right", NormalValue::Int(1));
+    mutator
+        .update(
+            "Patch",
+            right_update,
+            RapidHashSet::from_iter(["right".to_string()]),
+        )
+        .await
+        .unwrap();
+
+    let mut left_update = stale;
+    left_update.set("left", NormalValue::Int(2));
+    let explicit = DbDocMutator::new(Arc::clone(&db), db.new_txn(false).await.unwrap());
+    explicit
+        .update(
+            "Patch",
+            left_update,
+            RapidHashSet::from_iter(["left".to_string()]),
+        )
+        .await
+        .unwrap();
+    explicit.take_txn().await.unwrap().commit().await.unwrap();
+
+    let txn = db.new_txn(true).await.unwrap();
+    let indexed_ids = DbDocFetcher::new(txn)
+        .get_by_index_scan(
+            "Patch",
+            &IndexScanParams {
+                index_name: "by_left_right".to_string(),
+                scan_type: IndexScanType::ExactMatch {
+                    values: vec![NormalValue::Int(2), NormalValue::Int(1)],
+                },
+                limit: None,
+                offset: 0,
+                value_filter: None,
+                cursor_seek: None,
+            },
+        )
+        .await
+        .expect("exact composite index lookup")
+        .into_doc_ids();
+    assert_eq!(indexed_ids, vec![created.doc_id.to_string()]);
+}
+
+#[tokio::test]
+async fn explicit_same_indexed_field_updates_conflict_on_the_old_index_entry() {
+    let db = Arc::new(DB::new(RegolithStore::in_memory().unwrap()).expect("create db"));
+    db.create_collection(
+        test_collection().with_index(IndexDescription::new("by_left").with_field("left", false)),
+    )
+    .await
+    .expect("schema");
+    let auto = AutoCommitMutator::new(Arc::clone(&db));
+    let created = auto
+        .create(
+            "Patch",
+            Document::from_json_str(r#"{"left": 0, "right": 0}"#).unwrap(),
+        )
+        .await
+        .expect("create document");
+    let snapshot = auto
+        .get_for_update("Patch", &created.doc_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let first = DbDocMutator::new(Arc::clone(&db), db.new_txn(false).await.unwrap());
+    let second = DbDocMutator::new(Arc::clone(&db), db.new_txn(false).await.unwrap());
+    let mut first_doc = snapshot.clone();
+    first_doc.set("left", NormalValue::Int(1));
+    first
+        .update(
+            "Patch",
+            first_doc,
+            RapidHashSet::from_iter(["left".to_string()]),
+        )
+        .await
+        .unwrap();
+    let mut second_doc = snapshot;
+    second_doc.set("left", NormalValue::Int(2));
+    second
+        .update(
+            "Patch",
+            second_doc,
+            RapidHashSet::from_iter(["left".to_string()]),
+        )
+        .await
+        .unwrap();
+    first.take_txn().await.unwrap().commit().await.unwrap();
+    assert!(second.take_txn().await.unwrap().commit().await.is_err());
 }
 
 /// Query mutations carry the snapshot against which their filter was
@@ -178,4 +370,99 @@ async fn conditional_update_of_concurrently_deleted_document_returns_conflict() 
         ),
         "unexpected error: {error:?}"
     );
+}
+
+/// Inject an external committed write immediately before the next mutation
+/// transaction opens. This bypasses the application document queue, as a
+/// storage-level writer can, and pins the old read-before-begin race.
+struct ChangeBeforeBegin {
+    inner: RegolithStore,
+    pending: AtomOption<(Vec<u8>, Vec<u8>)>,
+}
+
+impl storage::corekv::private::Sealed for ChangeBeforeBegin {}
+
+#[async_trait::async_trait]
+impl storage::corekv::Store for ChangeBeforeBegin {
+    async fn allocate(&self, key: &[u8], count: u64) -> storage::Result<std::ops::Range<u64>> {
+        self.inner.allocate(key, count).await
+    }
+
+    async fn new_txn(&self, readonly: bool) -> storage::Result<Box<dyn storage::Txn>> {
+        let pending = if readonly {
+            None
+        } else {
+            self.pending.take().map(|pending| (*pending).clone())
+        };
+        if let Some((key, value)) = pending {
+            let mut change = self.inner.new_txn(false).await?;
+            change.set(&key, &value).await?;
+            change.commit().await?;
+        }
+        self.inner.new_txn(readonly).await
+    }
+
+    async fn transact_retry(
+        &self,
+        options: storage::corekv::RetryOptions,
+        attempt: storage::corekv::RetryAttempt,
+    ) -> std::result::Result<storage::corekv::RetryAttemptValue, storage::corekv::RetryAttemptError>
+    {
+        let pending = self.pending.take().map(|pending| (*pending).clone());
+        if let Some((key, value)) = pending {
+            let mut change = self.inner.new_txn(false).await?;
+            change.set(&key, &value).await?;
+            change.commit().await?;
+        }
+        self.inner.transact_retry(options, attempt).await
+    }
+
+    async fn close(&self) -> storage::Result<()> {
+        self.inner.close().await
+    }
+}
+
+#[tokio::test]
+async fn update_reads_fresh_values_in_the_transaction_that_writes_them() {
+    let store = Arc::new(ChangeBeforeBegin {
+        inner: RegolithStore::in_memory().unwrap(),
+        pending: AtomOption::none(),
+    });
+    let db = Arc::new(DB::open_from_arc(store.clone()).await.unwrap());
+    db.create_collection(test_collection()).await.unwrap();
+    let mutator = AutoCommitMutator::new(db.clone());
+    let created = mutator
+        .create(
+            "Patch",
+            Document::from_json_str(r#"{"left":0,"right":0}"#).unwrap(),
+        )
+        .await
+        .unwrap();
+    let collection = db.get_collection("Patch").unwrap().unwrap();
+    let txn = db.new_txn(true).await.unwrap();
+    let short_id = collection
+        .resolve_doc_short_id(&txn.systemstore().unwrap(), &created.doc_id)
+        .await
+        .unwrap()
+        .unwrap();
+    txn.discard().unwrap();
+    let mut key = vec![b'd'];
+    key.extend(collection.doc_key(short_id));
+    let mut external = created.document.clone();
+    external.set("left", 7_i64);
+    store.pending.store_some((key, external.to_cbor().unwrap()));
+    let mut patch = created.document;
+    patch.set("right", 9_i64);
+    mutator
+        .update("Patch", patch, ["right".to_string()].into_iter().collect())
+        .await
+        .unwrap();
+    let result = mutator
+        .get_for_update("Patch", &created.doc_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.get("left"), Some(&NormalValue::Int(7)));
+    assert_eq!(result.get("right"), Some(&NormalValue::Int(9)));
+    assert!(store.pending.is_none());
 }

@@ -348,7 +348,8 @@ async fn offline_scan_is_read_only_and_matches_the_live_snapshot() {
     db.close().await.unwrap();
     drop(db);
     let before = files(&path);
-    let mut reader = RegolithTxn::open_read_only(&path).unwrap();
+    let mut reader =
+        RegolithTxn::open_read_only(&path, storage::RegolithStoreOptions::default()).unwrap();
     assert!(reader.set(b"forbidden", b"write").await.is_err());
     let offline = storage_stats::collect(&reader, true).await.unwrap();
     assert_eq!(
@@ -363,7 +364,7 @@ async fn offline_scan_is_read_only_and_matches_the_live_snapshot() {
 fn opening_missing_store_does_not_create_it() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("missing");
-    assert!(RegolithTxn::open_read_only(&path).is_err());
+    assert!(RegolithTxn::open_read_only(&path, storage::RegolithStoreOptions::default()).is_err());
     assert!(!path.exists());
 }
 

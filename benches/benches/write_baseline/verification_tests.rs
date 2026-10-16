@@ -64,3 +64,15 @@ async fn verification_rejects_an_obsolete_index_entry() {
     txn.commit().await.unwrap();
     verify::check(&fixture, Scenario::CountersIndexes, &[]).await;
 }
+
+#[tokio::test]
+async fn measured_engine_exhaustions_are_failures_not_commits() {
+    use super::{run, Scenario};
+
+    let sample = run(Scenario::SharedUpdates, 2, 4).await;
+    assert_eq!(
+        sample.commits + sample.client_conflicts + sample.engine_exhaustions,
+        8
+    );
+    assert_eq!(sample.engine_exhaustions, 0);
+}

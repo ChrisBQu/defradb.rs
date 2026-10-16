@@ -12,9 +12,8 @@ use std::sync::Arc;
 
 use crate::error::{Result, TransactionError};
 use crate::fetcher::{DocFetcher, FetchByIdsResult};
-use crate::txn::{
-    GetTransactionResult, TransactionContext, TransactionHandle, TransactionRegistry,
-};
+use crate::txn::{SharedTurn, TransactionContext, TransactionHandle, TransactionRegistry, TxnJob};
+use storage::corekv::MaybeSend;
 
 /// Mock fetcher for testing that stores documents in memory.
 pub struct MockFetcher {
@@ -142,22 +141,15 @@ pub struct MockTxnContext {
     id: String,
     readonly: bool,
     fetcher: Arc<dyn DocFetcher>,
-    action_lock: Arc<async_lock::Mutex<()>>,
 }
 
 impl MockTxnContext {
     /// Create a new mock transaction context.
-    pub fn new(
-        id: String,
-        readonly: bool,
-        fetcher: Arc<dyn DocFetcher>,
-        action_lock: Arc<async_lock::Mutex<()>>,
-    ) -> Self {
+    pub fn new(id: String, readonly: bool, fetcher: Arc<dyn DocFetcher>) -> Self {
         Self {
             id,
             readonly,
             fetcher,
-            action_lock,
         }
     }
 }
@@ -173,10 +165,6 @@ impl TransactionContext for MockTxnContext {
 
     fn doc_fetcher(&self) -> Arc<dyn DocFetcher> {
         self.fetcher.clone()
-    }
-
-    fn action_lock(&self) -> Option<Arc<async_lock::Mutex<()>>> {
-        Some(self.action_lock.clone())
     }
 }
 
@@ -216,18 +204,44 @@ impl TransactionRegistry for MockTxnRegistry {
             txn_id.clone(),
             readonly,
             self.fetcher.clone(),
-            Arc::new(async_lock::Mutex::new(())),
         ));
 
         self.transactions.insert(txn_id.clone(), ctx);
         Ok(TransactionHandle::new(txn_id))
     }
 
-    fn get(&self, handle: &TransactionHandle) -> GetTransactionResult {
-        match self.transactions.get(handle.as_str()) {
-            Some(ctx) => GetTransactionResult::Found(ctx),
-            None => GetTransactionResult::NotFound,
-        }
+    /// Runs the job inline on the caller's task: a mock has no owner to
+    /// queue on, so it does not order concurrent requests.
+    async fn run<T>(
+        &self,
+        handle: &TransactionHandle,
+        _timeout: Option<std::time::Duration>,
+        job: TxnJob<T>,
+    ) -> std::result::Result<T, TransactionError>
+    where
+        T: MaybeSend + 'static,
+    {
+        let ctx = self.transactions.get(handle.as_str()).ok_or_else(|| {
+            TransactionError::not_found(format!("transaction '{}' not found", handle))
+        })?;
+        Ok(job(&mut SharedTurn(ctx)).await)
+    }
+
+    async fn read<T>(
+        &self,
+        _timeout: Option<std::time::Duration>,
+        job: TxnJob<T>,
+    ) -> std::result::Result<T, TransactionError>
+    where
+        T: MaybeSend + 'static,
+    {
+        let id = self.counter.fetch_add(1, Ordering::SeqCst);
+        let ctx: Arc<dyn TransactionContext> = Arc::new(MockTxnContext::new(
+            format!("read-{}", id),
+            true,
+            self.fetcher.clone(),
+        ));
+        Ok(job(&mut SharedTurn(ctx)).await)
     }
 
     async fn commit(

@@ -18,13 +18,16 @@ pub(super) struct DocumentAcpSetup {
 
 impl Node {
     #[cfg_attr(not(feature = "vera"), allow(unused_variables))]
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn setup_document_acp(
         config: &Config,
         identity_key_bytes: Option<&[u8]>,
         _acp_store: Arc<dyn acp::AcpStore>,
+        store: Arc<storage::DynStore>,
         zanzibar_store: Arc<dyn acp::ZanzibarStore>,
         event_bus: Arc<dyn events::Bus>,
         nac_checker: Arc<dyn db::NodeAccessChecker>,
+        edge: &edge::Edge,
     ) -> Result<DocumentAcpSetup> {
         #[cfg(feature = "vera")]
         if config.acp.document_type == AcpDocumentType::Vera {
@@ -73,12 +76,12 @@ impl Node {
                 .map_err(|e| Error::InvalidConfig(format!("Vera provider: {}", e)))?,
             );
 
-            let document_acp = vera::VeraDocumentACP::new(provider, tuning.cache_ttl);
+            let document_acp = vera::VeraDocumentACP::tuned(provider, &tuning, Some(edge));
             let document_acp = if config.acp.vera_events_ws.is_empty() {
                 document_acp
             } else {
                 document_acp
-                    .with_cosmos_event_invalidation(config.acp.vera_events_ws.clone())
+                    .with_cosmos_event_invalidation(config.acp.vera_events_ws.clone(), edge)
                     .map_err(|e| Error::InvalidConfig(format!("Vera event subscriber: {}", e)))?
             };
             let document_acp = Arc::new(document_acp);
@@ -90,7 +93,7 @@ impl Node {
 
             info!("Document ACP configured (Vera)");
             return Ok(DocumentAcpSetup {
-                document_acp,
+                document_acp: gate_external_acp(document_acp, store),
                 http_adapter: Some(http_adapter),
             });
         }
@@ -166,7 +169,7 @@ impl Node {
 
             info!("Document ACP configured (vera.rs)");
             return Ok(DocumentAcpSetup {
-                document_acp,
+                document_acp: gate_external_acp(document_acp, store),
                 http_adapter: Some(http_adapter),
             });
         }
@@ -182,24 +185,56 @@ impl Node {
         })
     }
 
-    pub(super) async fn setup_nac_manager(
+    pub(super) async fn setup_nac_manager<S: storage::corekv::Store + 'static>(
         config: &Config,
         user_did: Option<&Did>,
+        store: Arc<S>,
+        pool: Option<&workers::Pool>,
     ) -> Result<Option<Arc<crate::nac_adapter::NacAdapter>>> {
         if !config.acp.node_enable {
             return Ok(None);
         }
 
         let nac_config = db::NacConfig::new().with_enabled();
-        let nac_manager: Arc<dyn db::NacManagerApi> =
-            Arc::new(db::create_memory_nac_manager(nac_config));
+        let nac_manager: Arc<dyn db::NacManagerApi> = Arc::new(db::NacManager::new(
+            Arc::new(acp::PersistentZanzibarStore::from_store(store)),
+            nac_config,
+        ));
         nac_manager
             .initialize(user_did)
             .await
             .map_err(|e| Error::InvalidConfig(format!("failed to initialize NAC: {}", e)))?;
 
-        Ok(Some(Arc::new(crate::nac_adapter::NacAdapter::new(
-            nac_manager,
-        ))))
+        Ok(Some(Arc::new(
+            crate::nac_adapter::NacAdapter::new(nac_manager).placed_on(pool),
+        )))
     }
+}
+
+/// Gate a Vera provider with the registrations creates still owe it, and
+/// settle in the background any a previous run left owed (a crash, or a
+/// provider call that failed). Until settled, such a document is readable only
+/// by its creator.
+#[cfg(feature = "vera")]
+fn gate_external_acp(
+    provider: Arc<dyn acp::DocumentACP>,
+    store: Arc<storage::DynStore>,
+) -> Arc<dyn acp::DocumentACP> {
+    let gate = Arc::new(acp::ExternalDocumentAcp::new(provider, store));
+    let redrive = Arc::clone(&gate);
+    tokio::spawn(async move {
+        match redrive.redrive_owed().await {
+            Ok(report) if report.settled > 0 => info!(
+                settled = report.settled,
+                failed = report.failed,
+                "Settled ACP registrations owed from a previous run"
+            ),
+            Ok(_) => {}
+            Err(error) => tracing::warn!(
+                %error,
+                "Could not read owed ACP registrations; their documents stay readable only by their creators"
+            ),
+        }
+    });
+    gate
 }

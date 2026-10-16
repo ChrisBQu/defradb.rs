@@ -12,7 +12,6 @@
 use rapidhash::RapidHashSet;
 use schema::CollectionVersion;
 use std::hint::black_box;
-use std::sync::LazyLock;
 
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
 use datastore::{Namespace, NamespaceView, SharedTxn};
@@ -20,9 +19,12 @@ use db::block::builder::{write_document_blocks, DocStorageIdentity};
 use document::{DocID, Document, NormalValue};
 use storage::{backends::RegolithStore, Store};
 
+mod common;
+
 const SCHEMA_VERSION_ID: &str = "bafyreihsneodeja4lfer5puptim3lkwvketyckrmkhfpgxm67ch5wenjwq";
-static COLLECTION: LazyLock<CollectionVersion> =
-    LazyLock::new(|| CollectionVersion::new("Bench", SCHEMA_VERSION_ID, "col-bench", vec![]));
+static COLLECTION: regolith::sync::Lazy<CollectionVersion> = regolith::sync::Lazy::new(|| {
+    CollectionVersion::new("Bench", SCHEMA_VERSION_ID, "col-bench", vec![])
+});
 const FIELD_COUNTS: [usize; 3] = [2, 8, 32];
 const VALUE_SIZES: [usize; 2] = [16, 1024];
 

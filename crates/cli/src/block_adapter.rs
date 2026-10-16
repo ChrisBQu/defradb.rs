@@ -1,6 +1,8 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use defra_core::RequestContext;
 
 use defra_http::router::BlockOperations;
 use storage::corekv::Store;
@@ -9,6 +11,8 @@ use storage::corekv::Store;
 pub struct BlockAdapter<S: Store> {
     database: Arc<db::DB<S>>,
     document_acp: Arc<dyn acp::DocumentACP>,
+    /// The request this adapter serves, for one bound to it.
+    context: Option<RequestContext>,
 }
 
 impl<S: Store + 'static> BlockAdapter<S> {
@@ -20,12 +24,25 @@ impl<S: Store + 'static> BlockAdapter<S> {
         Arc::new(Self {
             database,
             document_acp,
+            context: None,
         })
+    }
+
+    fn context(&self) -> Cow<'_, RequestContext> {
+        RequestContext::bound_or_ambient(self.context.as_ref())
     }
 }
 
 #[async_trait]
 impl<S: Store + 'static> BlockOperations for BlockAdapter<S> {
+    fn bind_request(&self, context: &RequestContext) -> Option<Arc<dyn BlockOperations>> {
+        Some(Arc::new(Self {
+            database: Arc::clone(&self.database),
+            document_acp: Arc::clone(&self.document_acp),
+            context: Some(context.clone()),
+        }))
+    }
+
     async fn signed_block_bytes(
         &self,
         cid: &str,
@@ -36,7 +53,8 @@ impl<S: Store + 'static> BlockOperations for BlockAdapter<S> {
             .transpose()
             .map_err(|error| format!("invalid caller DID: {error}"))?;
         let caller_identity: acp::Identity = caller_did.into();
-        db::block::verify::authorized_signed_block_bytes(
+        db::block::verify::authorized_signed_block_bytes_as(
+            &self.context(),
             &self.database,
             self.document_acp.as_ref(),
             cid,
@@ -65,7 +83,8 @@ impl<S: Store + 'static> BlockOperations for BlockAdapter<S> {
             .map_err(|error| format!("invalid caller DID: {error}"))?;
         let caller_identity: acp::Identity = caller_did.into();
 
-        db::block::verify::verify_block_signature(
+        db::block::verify::verify_block_signature_as(
+            &self.context(),
             &self.database,
             self.document_acp.as_ref(),
             cid,

@@ -35,6 +35,8 @@ fn make_data_block() -> cid::Cid {
     defra_core::block::generate_cid_from_bytes(&bytes).unwrap()
 }
 
+// The test counts the tasks of the runtime it runs on.
+#[allow(clippy::disallowed_methods)]
 fn live_tasks() -> usize {
     tokio::runtime::Handle::current()
         .metrics()

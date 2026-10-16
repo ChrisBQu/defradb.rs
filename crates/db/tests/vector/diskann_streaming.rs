@@ -96,7 +96,7 @@ async fn a_merged_node_is_reachable_through_back_edges() {
     index.build().await.unwrap();
 
     let m = index.state().await.unwrap().unwrap().m as usize;
-    let mut pointed_at = std::collections::HashSet::new();
+    let mut pointed_at = rapidhash::RapidHashSet::default();
     let limit = params().slack_limit();
     index
         .store()
@@ -274,7 +274,7 @@ async fn a_plan_applies_like_a_build() {
     index.merge(plan).await.unwrap();
     assert_eq!(count(&index, codec::PENDING).await, 0);
     assert_eq!(count(&index, codec::DELETED).await, 0);
-    let live: std::collections::HashSet<u64> = (131..=CORPUS as u64).collect();
+    let live: rapidhash::RapidHashSet<u64> = (131..=CORPUS as u64).collect();
     let recall = recall(&index, &vectors, &live, &queries).await;
     assert!(
         recall >= 0.9,

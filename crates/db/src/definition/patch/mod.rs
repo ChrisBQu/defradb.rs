@@ -18,11 +18,26 @@ use crate::definition::patch::json::{
 };
 use crate::error::{Error, Result};
 use schema::{CollectionSource, CollectionVersion};
-use storage::corekv::{Key, Store};
+use storage::corekv::{Key, OnCommit, Store};
 use storage::keys::systemstore::{CollectionKey, CollectionNameKey, CollectionVersionKey};
 use tracing::instrument;
 
 impl<S: Store> crate::database::DB<S> {
+    /// [`Self::patch_collection_as`] for `identity`, or for the identity acting in [`defra_core::RequestContext::ambient`] when there is none.
+    pub async fn patch_collection(
+        &self,
+        collection_name: &str,
+        patch: &str,
+        identity: Option<&identity::Did>,
+    ) -> Result<CollectionVersion> {
+        self.patch_collection_as(
+            &crate::access::nac::ambient_as(identity),
+            collection_name,
+            patch,
+        )
+        .await
+    }
+
     /// Apply a JSON Patch to a collection schema.
     ///
     /// This method takes a JSON Patch document (RFC 6902) and applies it to
@@ -52,18 +67,17 @@ impl<S: Store> crate::database::DB<S> {
     /// - `CollectionNotFound` if the collection doesn't exist
     /// - `InvalidPatch` if the patch is invalid or cannot be applied
     /// - `Schema` if the resulting schema is invalid
-    pub async fn patch_collection(
+    pub async fn patch_collection_as(
         &self,
+        context: &defra_core::RequestContext,
         collection_name: &str,
         patch: &str,
-        identity: Option<&identity::Did>,
     ) -> Result<CollectionVersion> {
-        self.patch_collection_with_migration(collection_name, patch, None, identity)
+        self.patch_collection_with_migration_as(context, collection_name, patch, None)
             .await
     }
 
-    /// Apply a JSON Patch and its migration as one operation.
-    #[instrument(skip(self, patch, migration), fields(collection = %collection_name), name = "db.patch_collection")]
+    /// [`Self::patch_collection_with_migration_as`] for `identity`, or for the identity acting in [`defra_core::RequestContext::ambient`] when there is none.
     pub async fn patch_collection_with_migration(
         &self,
         collection_name: &str,
@@ -71,7 +85,25 @@ impl<S: Store> crate::database::DB<S> {
         migration: Option<lens::LensConfig>,
         identity: Option<&identity::Did>,
     ) -> Result<CollectionVersion> {
-        self.check_node_access(identity, acp::nac::NodePermission::CollectionPatch)
+        self.patch_collection_with_migration_as(
+            &crate::access::nac::ambient_as(identity),
+            collection_name,
+            patch,
+            migration,
+        )
+        .await
+    }
+
+    /// Apply a JSON Patch and its migration as one operation.
+    #[instrument(skip(self, patch, migration), fields(collection = %collection_name), name = "db.patch_collection")]
+    pub async fn patch_collection_with_migration_as(
+        &self,
+        context: &defra_core::RequestContext,
+        collection_name: &str,
+        patch: &str,
+        migration: Option<lens::LensConfig>,
+    ) -> Result<CollectionVersion> {
+        self.check_node_access_as(context, acp::nac::NodePermission::CollectionPatch)
             .await?;
         // Parse the patch early - needed for both collection lookup fallbacks and processing
         let patch_ops: serde_json::Value =
@@ -104,10 +136,6 @@ impl<S: Store> crate::database::DB<S> {
         let actual_name = old_schema.name.clone();
         let old_version_id = old_schema.version_id.clone();
         let collection_id = old_schema.collection_id.clone();
-        let _collection_guards = self
-            .collection_write_guards(std::iter::once(collection_id.clone()))
-            .await?;
-
         // Collect known collection names for Kind validation
         let known_collection_names: Vec<String> = self
             .list_collections()
@@ -212,7 +240,8 @@ impl<S: Store> crate::database::DB<S> {
         {
             // True deletion: remove from store entirely (matches Go behavior)
             if is_deactivation {
-                self.delete_collection_version(&old_version_id, &[]).await?;
+                self.delete_collection_version_as(context, &old_version_id, &[])
+                    .await?;
                 new_schema.is_active = false;
                 new_schema.version_id = old_version_id.clone();
                 if !is_transform_only_change {
@@ -240,7 +269,28 @@ impl<S: Store> crate::database::DB<S> {
             }
 
             // Run cross-collection validators to catch issues like multiple active versions
-            let all_existing = self.get_all_collection_versions().await?;
+            // against the same snapshot that will store the in-place update.
+            let mut txn = self.new_txn(false).await?;
+            let all_existing = self.get_all_collection_versions_with_txn(&mut txn).await?;
+            let Some(persisted_old_schema) = all_existing.iter().find(|version| {
+                version.collection_id == collection_id && version.version_id == old_version_id
+            }) else {
+                return Err(Error::CollectionVersionNotFound(old_version_id.clone()));
+            };
+            if !crate::collection::loader::same_schema(persisted_old_schema, &old_schema) {
+                return Err(Error::Storage(storage::Error::TxnConflict));
+            }
+            let name_key = CollectionNameKey::new(&actual_name);
+            let persisted_name_version = txn
+                .systemstore()?
+                .get(&name_key.bytes())
+                .await
+                .map_err(Error::Storage)?;
+            if old_schema.is_active
+                && persisted_name_version.as_deref() != Some(old_version_id.as_bytes())
+            {
+                return Err(Error::Storage(storage::Error::TxnConflict));
+            }
             let new_collections: Vec<CollectionVersion> = all_existing
                 .iter()
                 .filter(|c| c.version_id != old_version_id)
@@ -254,7 +304,6 @@ impl<S: Store> crate::database::DB<S> {
             .map_err(Error::InvalidPatch)?;
 
             // Store the updated version
-            let txn = self.new_txn(false).await?;
             {
                 let systemstore = txn.systemstore()?;
                 let key = CollectionKey::new(&old_version_id);
@@ -286,21 +335,23 @@ impl<S: Store> crate::database::DB<S> {
                         .map_err(Error::Storage)?;
                 }
             }
+            let cached_collection =
+                Collection::load_index_actions(new_schema.clone(), &txn.systemstore()?).await?;
+            let collections = std::sync::Arc::clone(&self.collections);
+            let registered_name = actual_name.clone();
+            let active = new_schema.is_active;
+            txn.on_commit(OnCommit::Ordered(Box::new(move || {
+                collections.rcu(|old| {
+                    let mut cache = old.clone();
+                    if active {
+                        cache.put_named(&registered_name, cached_collection.clone());
+                    } else {
+                        cache.remove(&registered_name);
+                    }
+                    cache
+                });
+            })))?;
             txn.commit().await?;
-
-            // Update cache
-            let cached_collection = self
-                .collection_with_index_actions(new_schema.clone())
-                .await?;
-            self.collections.rcu(|old| {
-                let mut cache = old.clone();
-                if new_schema.is_active {
-                    cache.put_named(actual_name.as_str(), cached_collection.clone());
-                } else {
-                    cache.remove(actual_name.as_str());
-                }
-                cache
-            });
 
             tracing::info!(
                 collection = %actual_name,

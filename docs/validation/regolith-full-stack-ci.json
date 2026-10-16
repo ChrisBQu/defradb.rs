@@ -1,0 +1,210 @@
+{
+  "observed_utc": "2026-10-15T09:25:43Z",
+  "source_manifest": {
+    "path": "/tmp/defra-main-refreshed-heads.json",
+    "sha256": "17399b5526dd493514ddb81e084b15c15fb9c935d4e9c3e1e47a0233bc3cb6d3"
+  },
+  "stack": [
+    {
+      "pr": 1922,
+      "head_sha": "7b7fb91af990f368d29e79a65df4df366922222f",
+      "base": "main",
+      "base_sha": "8a38e96f213cd9edc55c89eed272ba8f83c76524",
+      "draft": true,
+      "merge_state": "CLEAN",
+      "mergeable": true,
+      "auto_merge": null,
+      "url": "https://github.com/sourcenetwork/defradb.rs/pull/1922",
+      "checks": {
+        "CI": {"run_id": 38690968968, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38690968968"},
+        "CI (macOS)": {"run_id": 38690968900, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38690968900"},
+        "Native consumer": {"run_id": 38690968876, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38690968876"},
+        "Performance (pull request)": {"run_id": 38690968855, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38690968855"}
+      }
+    },
+    {
+      "pr": 1949,
+      "head_sha": "ea27f8338922b64df273a3940a5b9dfffd4a653f",
+      "base": "fix/step0-kms-writes",
+      "base_sha": "7b7fb91af990f368d29e79a65df4df366922222f",
+      "draft": true,
+      "merge_state": "CLEAN",
+      "mergeable": true,
+      "auto_merge": null,
+      "url": "https://github.com/sourcenetwork/defradb.rs/pull/1949",
+      "checks": {
+        "CI": {"run_id": 38690967196, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38690967196"},
+        "CI (macOS)": {"run_id": 38690967315, "conclusion": "skipped", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38690967315"},
+        "Native consumer": {"run_id": 38690967152, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38690967152"},
+        "Performance (pull request)": {"run_id": 38690967160, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38690967160"}
+      }
+    },
+    {
+      "pr": 1920,
+      "head_sha": "e309501d211ec6fdf0a10c890c1a0c454745562d",
+      "base": "chore/regolith-defralevel-api",
+      "base_sha": "ea27f8338922b64df273a3940a5b9dfffd4a653f",
+      "draft": true,
+      "merge_state": "CLEAN",
+      "mergeable": true,
+      "auto_merge": null,
+      "url": "https://github.com/sourcenetwork/defradb.rs/pull/1920",
+      "checks": {
+        "CI": {"run_id": 38690969218, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38690969218"},
+        "CI (macOS)": {"run_id": 38690969106, "conclusion": "skipped", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38690969106"},
+        "Native consumer": {"run_id": 38690969092, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38690969092"},
+        "Performance (pull request)": {"run_id": 38690969082, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38690969082"}
+      }
+    },
+    {
+      "pr": 1951,
+      "head_sha": "7668ba87fb1cf7bd8401ece70a925a18128b5a2c",
+      "base": "defralevel/s0-change-markers",
+      "base_sha": "e309501d211ec6fdf0a10c890c1a0c454745562d",
+      "draft": true,
+      "merge_state": "CLEAN",
+      "mergeable": true,
+      "auto_merge": null,
+      "url": "https://github.com/sourcenetwork/defradb.rs/pull/1951",
+      "checks": {
+        "CI": {"run_id": 38690969344, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38690969344"},
+        "CI (macOS)": {"run_id": 38690969383, "conclusion": "skipped", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38690969383"},
+        "Native consumer": {"run_id": 38690969412, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38690969412"},
+        "Performance (pull request)": {"run_id": 38690969313, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38690969313"}
+      }
+    },
+    {
+      "pr": 1952,
+      "head_sha": "b65de36345b17168bb18e520eabfa3f392fb1856",
+      "base": "defralevel/01c-key-classifier",
+      "base_sha": "7668ba87fb1cf7bd8401ece70a925a18128b5a2c",
+      "draft": true,
+      "merge_state": "CLEAN",
+      "mergeable": true,
+      "auto_merge": null,
+      "url": "https://github.com/sourcenetwork/defradb.rs/pull/1952",
+      "checks": {
+        "CI": {"run_id": 38690970043, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38690970043"},
+        "CI (macOS)": {"run_id": 38690970138, "conclusion": "skipped", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38690970138"},
+        "Native consumer": {"run_id": 38690969893, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38690969893"},
+        "Performance (pull request)": {"run_id": 38690969892, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38690969892"}
+      }
+    },
+    {
+      "pr": 1953,
+      "head_sha": "78e48a854d7d9e18d06178eeeeb314036b00697a",
+      "base": "defralevel/02-transaction-decisions",
+      "base_sha": "b65de36345b17168bb18e520eabfa3f392fb1856",
+      "draft": true,
+      "merge_state": "CLEAN",
+      "mergeable": true,
+      "auto_merge": null,
+      "url": "https://github.com/sourcenetwork/defradb.rs/pull/1953",
+      "checks": {
+        "CI": {"run_id": 38690970826, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38690970826"},
+        "CI (macOS)": {"run_id": 38690970810, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38690970810"},
+        "Native consumer": {"run_id": 38690970769, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38690970769"},
+        "Performance (pull request)": {"run_id": 38690970797, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38690970797"}
+      }
+    },
+    {
+      "pr": 1955,
+      "head_sha": "ad6427264f4807452a74fd9e5fedc9b45e285182",
+      "base": "defralevel/03-engine-mechanisms",
+      "base_sha": "78e48a854d7d9e18d06178eeeeb314036b00697a",
+      "draft": true,
+      "merge_state": "CLEAN",
+      "mergeable": true,
+      "auto_merge": null,
+      "url": "https://github.com/sourcenetwork/defradb.rs/pull/1955",
+      "checks": {
+        "CI": {"run_id": 38690970607, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38690970607"},
+        "CI (macOS)": {"run_id": 38690970538, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38690970538"},
+        "Native consumer": {"run_id": 38690970625, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38690970625"},
+        "Performance (pull request)": {"run_id": 38690970587, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38690970587"}
+      }
+    },
+    {
+      "pr": 1956,
+      "head_sha": "913e98b280ee98b4e89545ce264c424de269cbeb",
+      "base": "defralevel/04-ordered-events",
+      "base_sha": "ad6427264f4807452a74fd9e5fedc9b45e285182",
+      "draft": true,
+      "merge_state": "CLEAN",
+      "mergeable": true,
+      "auto_merge": null,
+      "url": "https://github.com/sourcenetwork/defradb.rs/pull/1956",
+      "checks": {
+        "CI": {"run_id": 38690969249, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38690969249"},
+        "CI (macOS)": {"run_id": 38690969368, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38690969368"},
+        "Native consumer": {"run_id": 38690969405, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38690969405"},
+        "Performance (pull request)": {"run_id": 38690969205, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38690969205"}
+      }
+    },
+    {
+      "pr": 1959,
+      "head_sha": "89d71e2b7449e0b52a277996603ee3073f4d10f6",
+      "base": "defralevel/05-engine-retries",
+      "base_sha": "913e98b280ee98b4e89545ce264c424de269cbeb",
+      "draft": true,
+      "merge_state": "CLEAN",
+      "mergeable": true,
+      "auto_merge": null,
+      "url": "https://github.com/sourcenetwork/defradb.rs/pull/1959",
+      "checks": {
+        "CI": {"run_id": 38703087678, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38703087678"},
+        "CI (macOS)": {"run_id": 38703087766, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38703087766"},
+        "Native consumer": {"run_id": 38703087623, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38703087623"},
+        "Performance (pull request)": {"run_id": 38703087643, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38703087643"}
+      }
+    },
+    {
+      "pr": 1960,
+      "head_sha": "133a308aa62dfdddc2fa33b95b5d37e0676399c1",
+      "base": "defralevel/06-lock-removal",
+      "base_sha": "89d71e2b7449e0b52a277996603ee3073f4d10f6",
+      "draft": true,
+      "merge_state": "CLEAN",
+      "mergeable": true,
+      "auto_merge": null,
+      "url": "https://github.com/sourcenetwork/defradb.rs/pull/1960",
+      "checks": {
+        "CI": {"run_id": 38703089324, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38703089324"},
+        "CI (macOS)": {"run_id": 38703089390, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38703089390"},
+        "Native consumer": {"run_id": 38703089156, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38703089156"},
+        "Performance (pull request)": {"run_id": 38703089116, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38703089116"}
+      }
+    },
+    {
+      "pr": 1961,
+      "head_sha": "f7813d07f2f16eefb6ebc994ff09fc08b63e0742",
+      "base": "defralevel/07-engine-telemetry",
+      "base_sha": "133a308aa62dfdddc2fa33b95b5d37e0676399c1",
+      "draft": true,
+      "merge_state": "CLEAN",
+      "mergeable": true,
+      "auto_merge": null,
+      "url": "https://github.com/sourcenetwork/defradb.rs/pull/1961",
+      "checks": {
+        "CI": {"run_id": 38703087341, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38703087341"},
+        "CI (macOS)": {"run_id": 38703087339, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38703087339"},
+        "Native consumer": {"run_id": 38703087302, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38703087302"},
+        "Performance (pull request)": {"run_id": 38703087343, "conclusion": "success", "url": "https://github.com/sourcenetwork/defradb.rs/actions/runs/38703087343"}
+      }
+    }
+  ],
+  "audit": {
+    "exact_head_runs": "All listed check runs are pull_request workflows at the manifest head SHA for that PR.",
+    "explicit_skips": {
+      "workflow": "CI (macOS)",
+      "prs": [1949, 1920, 1951, 1952],
+      "conclusion": "skipped",
+      "detail": "The GitHub Actions run contains a single Unit tests job with conclusion skipped and no steps; it is an explicit workflow-level skip, not a failure."
+    },
+    "historical_cancellations": "Older same-head cancelled runs are superseded by later successful exact-head runs and are not treated as failures.",
+    "failures": [],
+    "draft_and_automerge": "All 11 PRs remain drafts; auto-merge is disabled for every PR.",
+    "base_chain": "Each PR base SHA matches the preceding stack head; PR 1922 is based on current main. All PRs report mergeable=true and merge_state=CLEAN.",
+    "absent_checks": []
+  }
+}

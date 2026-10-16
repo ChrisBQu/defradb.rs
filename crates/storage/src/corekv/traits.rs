@@ -17,8 +17,6 @@ use async_trait::async_trait;
 /// single-threaded. The `#[cfg_attr]` pattern is used to conditionally
 /// apply `async_trait(?Send)` for WASM builds.
 use bytes::Bytes;
-use std::future::Future;
-use std::pin::Pin;
 
 /// Sealed trait module preventing external implementations of core storage traits.
 pub mod private {
@@ -28,37 +26,11 @@ pub mod private {
     impl Sealed for Box<dyn super::super::iterator::Iterator> {}
 }
 
+use super::callbacks::{BeforeCommit, OnAbort, OnCommit};
 use super::errors::Result;
 use super::iterator::Iterator;
+use super::retry::{RetryAttempt, RetryAttemptError, RetryAttemptValue, RetryOptions};
 use super::types::IterOptions;
-
-// Conditional Send bounds for callbacks based on target architecture
-#[cfg(not(target_arch = "wasm32"))]
-/// Callback function type for transaction lifecycle events.
-///
-/// These callbacks are executed synchronously when transaction events occur.
-pub type TxnCallback = Box<dyn FnOnce() + Send + 'static>;
-
-#[cfg(target_arch = "wasm32")]
-/// Callback function type for transaction lifecycle events (WASM version).
-///
-/// These callbacks are executed synchronously when transaction events occur.
-/// No Send bound required in single-threaded WASM environment.
-pub type TxnCallback = Box<dyn FnOnce() + 'static>;
-
-#[cfg(not(target_arch = "wasm32"))]
-/// Asynchronous callback function type for transaction lifecycle events.
-///
-/// These callbacks are executed asynchronously when transaction events occur.
-pub type AsyncTxnCallback =
-    Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + 'static>;
-
-#[cfg(target_arch = "wasm32")]
-/// Asynchronous callback function type for transaction lifecycle events (WASM version).
-///
-/// These callbacks are executed asynchronously when transaction events occur.
-/// No Send bound required in single-threaded WASM environment.
-pub type AsyncTxnCallback = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()>>> + 'static>;
 
 pub use defra_core::thread_bounds::{MaybeSend, MaybeSendSync, MaybeSync};
 
@@ -82,6 +54,14 @@ pub trait Reader: MaybeSendSync + private::Sealed {
     /// * `Err(Error)` if an error occurred
     async fn get(&self, key: &[u8]) -> Result<Option<Bytes>>;
 
+    /// Read a value while validating only the named logical parts at commit.
+    /// Part IDs belong to the value's merge operator. An empty list requests
+    /// an unvalidated read; it must not drive an authoritative decision.
+    /// Backends without projection support conservatively validate the whole value.
+    async fn get_parts(&self, key: &[u8], _parts: &[u32]) -> Result<Option<Bytes>> {
+        self.get(key).await
+    }
+
     /// Check if a key exists in the store.
     ///
     /// # Arguments
@@ -99,17 +79,6 @@ pub trait Reader: MaybeSendSync + private::Sealed {
     /// Performance may vary by backend. Some backends may need to fetch the value
     /// to check existence.
     async fn has(&self, key: &[u8]) -> Result<bool>;
-
-    /// [`Reader::has`] that also enters `key` into the transaction's
-    /// conflict-detection read set, even when this transaction already wrote
-    /// it — a read served from its own write buffer never reaches the engine,
-    /// so plain `has` records nothing (#1599).
-    ///
-    /// Defaults to [`Reader::has`]: correct for any backend that does not
-    /// validate reads at commit.
-    async fn has_for_update(&self, key: &[u8]) -> Result<bool> {
-        self.has(key).await
-    }
 
     /// Get the size of a value without reading the entire value.
     ///
@@ -149,33 +118,58 @@ pub trait Reader: MaybeSendSync + private::Sealed {
     ///
     /// The caller is responsible for closing the iterator when done.
     async fn iterator(&self, opts: IterOptions) -> Result<Box<dyn Iterator>>;
-
-    /// Optional materialization of the exact head and marker prefixes supplied
-    /// by the collection-head owner, in this reader's key coordinates.
-    /// This reads the captured snapshot plus own writes;
-    /// it is not a general KV scan and does not add point reads to validation.
-    ///
-    /// Collection writers use immutable CID-owned keys and tolerate concurrent
-    /// supersession/reclamation (HeadSet.Core). Prune must anchor its shared
-    /// deletions with `has_for_update`. General KV scans use `iterator` and
-    /// retain the engine's observation semantics. Return
-    /// `None` when the backend, namespace, isolation level, or budget cannot serve
-    /// this projection; the head query then uses its ordinary scan.
-    async fn collection_head_entries(
-        &self,
-        _head_prefix: &[u8],
-        _marker_prefix: &[u8],
-    ) -> Result<Option<crate::stores::headstore::CollectionHeadEntries>> {
-        Ok(None)
-    }
 }
 
 /// Writer trait for write operations.
 ///
-/// This trait provides the core write operations: set and delete.
+/// Every write has two forms. The `_shared` one takes `&self`, as the engine
+/// takes its writes: it is how the handles that share one transaction (its
+/// namespace views) write without a lock, and it is what an implementation
+/// provides. The plain one takes `&mut self`, for a handle its caller holds
+/// alone, and does the same write.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait Writer: MaybeSendSync + private::Sealed {
+    /// [`merge`](Self::merge) through a shared reference.
+    async fn merge_shared(&self, _key: &[u8], _operand: &[u8]) -> Result<()> {
+        Err(super::errors::Error::Other(
+            "value merges are unsupported by this store".into(),
+        ))
+    }
+
+    /// [`append`](Self::append) through a shared reference.
+    async fn append_shared(
+        &self,
+        _log: &super::types::AppendLog,
+        _entry: &[u8],
+        _once_key: Option<&[u8]>,
+    ) -> Result<()> {
+        Err(super::errors::Error::Other(
+            "commit-ordered append is unsupported by this store".into(),
+        ))
+    }
+
+    /// [`set`](Self::set) through a shared reference.
+    async fn set_shared(&self, key: &[u8], value: &[u8]) -> Result<()>;
+
+    /// [`delete`](Self::delete) through a shared reference.
+    async fn delete_shared(&self, key: &[u8]) -> Result<()>;
+
+    /// Apply an operator-defined operand without reading the value first.
+    async fn merge(&mut self, key: &[u8], operand: &[u8]) -> Result<()> {
+        self.merge_shared(key, operand).await
+    }
+
+    /// Queue an entry whose position becomes visible only after commit.
+    async fn append(
+        &mut self,
+        log: &super::types::AppendLog,
+        entry: &[u8],
+        once_key: Option<&[u8]>,
+    ) -> Result<()> {
+        self.append_shared(log, entry, once_key).await
+    }
+
     /// Store a key-value pair.
     ///
     /// If the key already exists, its value is overwritten.
@@ -191,7 +185,9 @@ pub trait Writer: MaybeSendSync + private::Sealed {
     /// * `Err(Error::EmptyKey)` if the key is empty
     /// * `Err(Error::ReadOnlyTxn)` if called on a read-only transaction
     /// * `Err(Error)` for other errors
-    async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()>;
+    async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+        self.set_shared(key, value).await
+    }
 
     /// Delete a key from the store.
     ///
@@ -207,7 +203,9 @@ pub trait Writer: MaybeSendSync + private::Sealed {
     /// * `Err(Error::EmptyKey)` if the key is empty
     /// * `Err(Error::ReadOnlyTxn)` if called on a read-only transaction
     /// * `Err(Error)` for other errors
-    async fn delete(&mut self, key: &[u8]) -> Result<()>;
+    async fn delete(&mut self, key: &[u8]) -> Result<()> {
+        self.delete_shared(key).await
+    }
 }
 
 /// ReaderWriter trait combining read and write operations.
@@ -226,6 +224,11 @@ impl<T> ReaderWriter for T where T: Reader + Writer {}
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait Store: MaybeSendSync + private::Sealed {
+    /// Reserve IDs outside a transaction. Reservations survive aborted mutations.
+    /// Store wrappers must forward this capability; database schema and document
+    /// creation depend on it, so omission must fail at compile time.
+    async fn allocate(&self, key: &[u8], count: u64) -> Result<std::ops::Range<u64>>;
+
     /// Transaction diagnostics for stores that keep them.
     fn transaction_stats_handle(&self) -> Option<crate::backends::TransactionStatsHandle> {
         None
@@ -244,6 +247,15 @@ pub trait Store: MaybeSendSync + private::Sealed {
     /// * `Err(Error::DBClosed)` if the store is closed
     /// * `Err(Error)` for other errors
     async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>>;
+
+    /// Run an attempt in a transaction owned and committed by the store.
+    /// Only commit conflicts are retried; an error returned by the operation
+    /// is returned immediately. The restricted view cannot commit or escape.
+    async fn transact_retry(
+        &self,
+        options: RetryOptions,
+        attempt: RetryAttempt,
+    ) -> std::result::Result<RetryAttemptValue, RetryAttemptError>;
 
     /// Close the store and release resources.
     ///
@@ -288,38 +300,24 @@ pub trait Dropable: Store + private::Sealed {
 /// All operations within a transaction are isolated from other transactions until
 /// commit is called.
 ///
-/// # Lifecycle Callbacks
+/// # Callbacks
 ///
-/// Transactions support registering callbacks for lifecycle events:
-/// - `on_success`: Called when commit succeeds
-/// - `on_error`: Called when commit fails
-/// - `on_discard`: Called when transaction is discarded
-///
-/// Each callback type has both sync and async variants.
+/// [`on_commit`](Txn::on_commit) and [`on_abort`](Txn::on_abort) register
+/// what runs once the transaction ends: after a commit, or after any other
+/// end. The [`callbacks`](super::callbacks) module says in what order.
 ///
 /// # Callback Panic Handling
 ///
 /// Transaction callbacks run directly. In dev/test profiles, a callback panic
 /// unwinds through the transaction API. In release builds this workspace uses
 /// `panic = "abort"`, so a panicking callback aborts the process.
-///
-/// # Example
-///
-/// ```ignore
-/// let mut txn = store.new_txn(false).await?;
-///
-/// txn.on_success(Box::new(|| println!("Transaction committed!")));
-///
-/// txn.set(b"key", b"value").await?;
-/// txn.commit().await?; // Callbacks execute here
-/// ```
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait Txn: ReaderWriter + private::Sealed {
     /// Commit the transaction, making all changes permanent.
     ///
-    /// On success, all on_success callbacks are executed. On failure, all
-    /// on_error callbacks are executed.
+    /// On success the commit callbacks run; on failure the abort callbacks
+    /// are awaited.
     ///
     /// # Returns
     ///
@@ -339,10 +337,34 @@ pub trait Txn: ReaderWriter + private::Sealed {
     /// After calling commit (success or failure), the transaction cannot be reused.
     async fn commit(self: Box<Self>) -> Result<()>;
 
+    /// Save the current buffered writes and the registered callbacks.
+    /// Backends without statement savepoint support fail explicitly.
+    fn set_savepoint(&mut self) -> Result<()> {
+        Err(crate::Error::Other(
+            "transaction savepoints are unsupported by this backend".into(),
+        ))
+    }
+
+    /// Roll back writes and callbacks staged since the latest savepoint.
+    fn rollback_to_savepoint(&mut self) -> Result<()> {
+        Err(crate::Error::Other(
+            "transaction savepoints are unsupported by this backend".into(),
+        ))
+    }
+
+    /// Release the latest savepoint, retaining its writes and callbacks.
+    fn release_savepoint(&mut self) -> Result<()> {
+        Err(crate::Error::Other(
+            "transaction savepoints are unsupported by this backend".into(),
+        ))
+    }
+
     /// Discard the transaction, rolling back all changes.
     ///
-    /// All on_discard callbacks are executed. After calling discard, the
-    /// transaction cannot be used for any further operations.
+    /// The abort callbacks run, the async ones spawned as background tasks
+    /// that may not finish if the process exits first: `discard()` is
+    /// synchronous, as in Go DefraDB. After calling discard, the transaction
+    /// cannot be used for any further operations.
     ///
     /// # Callback Panic Handling
     ///
@@ -355,54 +377,40 @@ pub trait Txn: ReaderWriter + private::Sealed {
     /// This method consumes self, ensuring the transaction cannot be used after discard.
     fn discard(self: Box<Self>);
 
-    /// Register a synchronous callback to be called on successful commit.
+    /// Register `callback` to run once if the transaction commits.
     ///
-    /// Multiple callbacks can be registered and will be executed in order until
-    /// one panics or the list completes.
-    fn on_success(&mut self, callback: TxnCallback);
+    /// Plain callbacks run once the commit is durable. An ordered one goes
+    /// out with every commit's events in commit-receipt order, so it needs a
+    /// commit receipt: a read-only transaction refuses it with
+    /// [`Error::ReadOnlyTxn`](super::Error::ReadOnlyTxn).
+    ///
+    /// ```no_run
+    /// use storage::corekv::{OnAbort, OnCommit, Store};
+    ///
+    /// # async fn example(store: storage::RegolithStore) -> storage::Result<()> {
+    /// let mut txn = store.new_txn(false).await?;
+    /// txn.set(b"doc", b"v1").await?;
+    /// // Once the commit is durable.
+    /// txn.on_commit(OnCommit::Sync(Box::new(|| println!("committed"))))?;
+    /// // With every commit's events, in commit-receipt order.
+    /// txn.on_commit(OnCommit::Ordered(Box::new(|| println!("doc changed"))))?;
+    /// // Before this commit's events go out; a failure is reported and the
+    /// // commit stands.
+    /// txn.on_commit(OnCommit::OrderedAsync(Box::new(|| Box::pin(async { Ok(()) }))))?;
+    /// // Only if the transaction ends without committing.
+    /// txn.on_abort(OnAbort::Sync(Box::new(|| println!("rolled back"))));
+    /// txn.commit().await
+    /// # }
+    /// ```
+    fn on_commit(&mut self, callback: OnCommit) -> Result<()>;
 
-    /// Register an asynchronous callback to be called on successful commit.
-    ///
-    /// Multiple callbacks can be registered and will be executed sequentially
-    /// in registration order until one panics or the list completes.
-    fn on_success_async(&mut self, callback: AsyncTxnCallback);
+    /// Register `callback` to run once if the transaction ends without
+    /// committing: its commit fails, or it is discarded or dropped.
+    fn on_abort(&mut self, callback: OnAbort);
 
-    /// Register a synchronous callback to be called on commit error.
-    ///
-    /// Multiple callbacks can be registered and will be executed in order until
-    /// one panics or the list completes.
-    fn on_error(&mut self, callback: TxnCallback);
-
-    /// Register an asynchronous callback to be called on commit error.
-    ///
-    /// Multiple callbacks can be registered and will be executed sequentially
-    /// in registration order until one panics or the list completes.
-    fn on_error_async(&mut self, callback: AsyncTxnCallback);
-
-    /// Register a synchronous callback to be called on discard.
-    ///
-    /// Multiple callbacks can be registered and will be executed in order until
-    /// one panics or the list completes.
-    fn on_discard(&mut self, callback: TxnCallback);
-
-    /// Register an asynchronous callback to be called on discard.
-    ///
-    /// Multiple callbacks can be registered and will be executed sequentially
-    /// in registration order until one panics or the list completes.
-    ///
-    /// # Fire-and-Forget Warning
-    ///
-    /// Unlike `on_success_async` and `on_error_async` which are awaited during commit,
-    /// async discard callbacks are **spawned as background tasks** and may not complete
-    /// if the process exits before they finish. This matches Go DefraDB semantics where
-    /// `discard()` is a synchronous operation.
-    ///
-    /// If you need completion guarantees for async cleanup:
-    /// - Use `on_discard` (synchronous) instead
-    /// - Use `commit()` with `on_success_async` when possible
-    /// - Implement your own synchronization using `tokio::task::JoinSet`,
-    ///   `tokio_util::task::TaskTracker`, or third-party crates like `awaitgroup`
-    fn on_discard_async(&mut self, callback: AsyncTxnCallback);
+    /// Register `callback` to run once just before the commit is attempted.
+    /// An error from it fails the commit, and the abort callbacks run.
+    fn before_commit(&mut self, callback: BeforeCommit);
 
     /// Downcast to concrete type (for internal use in tests)
     fn as_any(&self) -> &dyn std::any::Any;
@@ -413,10 +421,8 @@ pub trait Txn: ReaderWriter + private::Sealed {
     /// Check if this is a read-only transaction.
     fn is_readonly(&self) -> bool;
 
-    /// Get the total number of callbacks registered on this transaction.
-    ///
-    /// This returns the sum of all callback types (success, error, discard)
-    /// including both sync and async variants.
+    /// Get the total number of callbacks registered on this transaction, of
+    /// every kind.
     ///
     /// Useful for monitoring callback accumulation in long-running transactions.
     fn callback_count(&self) -> usize;
@@ -441,12 +447,12 @@ impl Reader for Box<dyn Txn> {
         (**self).get(key).await
     }
 
-    async fn has(&self, key: &[u8]) -> Result<bool> {
-        (**self).has(key).await
+    async fn get_parts(&self, key: &[u8], parts: &[u32]) -> Result<Option<Bytes>> {
+        (**self).get_parts(key, parts).await
     }
 
-    async fn has_for_update(&self, key: &[u8]) -> Result<bool> {
-        (**self).has_for_update(key).await
+    async fn has(&self, key: &[u8]) -> Result<bool> {
+        (**self).has(key).await
     }
 
     async fn get_size(&self, key: &[u8]) -> Result<Option<usize>> {
@@ -456,16 +462,6 @@ impl Reader for Box<dyn Txn> {
     async fn iterator(&self, opts: IterOptions) -> Result<Box<dyn Iterator>> {
         (**self).iterator(opts).await
     }
-
-    async fn collection_head_entries(
-        &self,
-        head_prefix: &[u8],
-        marker_prefix: &[u8],
-    ) -> Result<Option<crate::stores::headstore::CollectionHeadEntries>> {
-        (**self)
-            .collection_head_entries(head_prefix, marker_prefix)
-            .await
-    }
 }
 
 /// Blanket implementation of Writer for Box<dyn Txn>.
@@ -474,84 +470,47 @@ impl Reader for Box<dyn Txn> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Writer for Box<dyn Txn> {
+    async fn merge_shared(&self, key: &[u8], operand: &[u8]) -> Result<()> {
+        (**self).merge_shared(key, operand).await
+    }
+
+    async fn append_shared(
+        &self,
+        log: &super::types::AppendLog,
+        entry: &[u8],
+        once_key: Option<&[u8]>,
+    ) -> Result<()> {
+        (**self).append_shared(log, entry, once_key).await
+    }
+
+    async fn set_shared(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        (**self).set_shared(key, value).await
+    }
+
+    async fn delete_shared(&self, key: &[u8]) -> Result<()> {
+        (**self).delete_shared(key).await
+    }
+
+    // The plain forms forward as themselves: through the defaults each would
+    // box a future here, another for the shared form, and a third inside.
+    async fn merge(&mut self, key: &[u8], operand: &[u8]) -> Result<()> {
+        (**self).merge(key, operand).await
+    }
+
+    async fn append(
+        &mut self,
+        log: &super::types::AppendLog,
+        entry: &[u8],
+        once_key: Option<&[u8]>,
+    ) -> Result<()> {
+        (**self).append(log, entry, once_key).await
+    }
+
     async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         (**self).set(key, value).await
     }
 
     async fn delete(&mut self, key: &[u8]) -> Result<()> {
         (**self).delete(key).await
-    }
-}
-
-/// Helper function to create a simple sync callback from a closure.
-///
-/// # Example
-///
-/// ```ignore
-/// txn.on_success(make_callback(|| println!("Success!")));
-/// ```
-#[cfg(not(target_arch = "wasm32"))]
-pub fn make_callback<F>(f: F) -> TxnCallback
-where
-    F: FnOnce() + Send + 'static,
-{
-    Box::new(f)
-}
-
-/// Helper function to create a simple sync callback from a closure (WASM version).
-#[cfg(target_arch = "wasm32")]
-pub fn make_callback<F>(f: F) -> TxnCallback
-where
-    F: FnOnce() + 'static,
-{
-    Box::new(f)
-}
-
-/// Helper function to create an async callback from a closure.
-///
-/// # Example
-///
-/// ```ignore
-/// txn.on_success_async(make_async_callback(|| async {
-///     println!("Async success!");
-/// }));
-/// ```
-#[cfg(not(target_arch = "wasm32"))]
-pub fn make_async_callback<F, Fut>(f: F) -> AsyncTxnCallback
-where
-    F: FnOnce() -> Fut + Send + 'static,
-    Fut: Future<Output = ()> + Send + 'static,
-{
-    Box::new(move || Box::pin(f()))
-}
-
-/// Helper function to create an async callback from a closure (WASM version).
-#[cfg(target_arch = "wasm32")]
-pub fn make_async_callback<F, Fut>(f: F) -> AsyncTxnCallback
-where
-    F: FnOnce() -> Fut + 'static,
-    Fut: Future<Output = ()> + 'static,
-{
-    Box::new(move || Box::pin(f()))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_make_callback() {
-        let _callback = make_callback(|| {
-            println!("Test callback");
-        });
-        // Just ensure it compiles and has the right type
-    }
-
-    #[test]
-    fn test_make_async_callback() {
-        let _callback = make_async_callback(|| async {
-            println!("Test async callback");
-        });
-        // Just ensure it compiles and has the right type
     }
 }

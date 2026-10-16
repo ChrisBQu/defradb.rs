@@ -25,25 +25,22 @@ pub unsafe extern "C" fn p2p_sync_status(
     ffi_entry! {
         let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::P2pPeerInfo
         ));
 
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
-        );
+        let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()));
 
         let result = NODES
             .get(node_ptr, |state| state.p2p.clone())
             .ok_or_else(FfiP2PError::invalid_node_handle)
             .and_then(|p2p| p2p.ok_or_else(FfiP2PError::no_p2p_system))
             .and_then(|p2p| {
-                rt.block_on(async {
+                crate::helpers::block_on(rt, async {
                     let status = p2p
                         .system
-                        .ops()
+                        .ops_for(&context)
                         .sync_status()
                         .await
                         .map_err(FfiP2PError::from)?;

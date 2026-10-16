@@ -4,11 +4,8 @@ use blockstore::DefraBlockstore;
 use cid::Cid;
 use crdt::traits::Context;
 use crdt::traits::ReplicatedData;
-use crdt::traits::ValueReader;
-use crdt::Counter;
 use crdt::Lww;
 use crdt::LwwDelta;
-use crdt::NumericKind;
 use crypto::PrivateKey as _;
 use db::collection::Collection;
 use db::database::DB;
@@ -30,6 +27,7 @@ use defra_core::block::Signature;
 use defra_core::block::SignatureHeader;
 use defra_core::block::SignatureType;
 use defra_core::merge::BlockMetadata;
+use defra_core::merge::ExplicitReplayAuthorization;
 use defra_core::merge::MergeBlock;
 use defra_core::merge::MergeErrorDisposition;
 use defra_core::merge::MergeHandler;
@@ -950,8 +948,11 @@ async fn synced_collection_definition_persists_short_id_mapping() {
     );
 }
 
+/// A standalone counter block for a document whose value does not exist yet
+/// is left to its composite: applying it alone would write a value holding
+/// one part. The composite applies it once and marks it merged.
 #[tokio::test]
-async fn counter_merge_marks_cid_merged() {
+async fn counter_merge_of_an_unmaterialized_document_waits_for_its_composite() {
     let (handler, blockstore) = make_handler_with_counter_schema().await;
     let doc_id = DocID::new_v0(
         "bafyreihgg6a5auqhikq4nvw6fj3kbreovdbazlisbs5kerkahoqwwiz75i"
@@ -994,36 +995,96 @@ async fn counter_merge_marks_cid_merged() {
         .process_counter_delta(&cid, &payload, &metadata)
         .await
         .unwrap();
-    assert_eq!(outcome, MergeOutcome::Merged);
-    // The blockstore merged-set is the single source of CRDT idempotency
-    // (see #847). The counter merge path no longer keeps per-delta nonce
-    // markers, so there is nothing else to assert here.
-    assert!(blockstore.is_merged(&cid).await.unwrap());
+    assert!(outcome.is_terminal_skip(), "{outcome:?}");
+    assert!(!blockstore.is_merged(&cid).await.unwrap());
+    let collection = handler.db().get_collection("Counters").unwrap().unwrap();
+    let txn = handler.db().new_txn(true).await.unwrap();
+    let stored = collection
+        .get_by_doc_id(
+            &txn.datastore().unwrap(),
+            &txn.systemstore().unwrap(),
+            &DocID::from_string(&doc_id).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(stored.is_none(), "no partial document value was written");
 }
 
-/// Read the PNCounter accumulation store value (authoritative store, not the
-/// materialized blob) for a doc/field via a fresh read txn on `db`.
-async fn read_counter_accumulation_store(
-    db: &Arc<DB<RegolithStore>>,
-    schema_version_id: &str,
-    doc_id: &str,
-    field: &str,
-) -> i64 {
-    let txn = db.new_txn(true).await.expect("read txn");
-    let datastore = txn.datastore().expect("datastore");
-    let counter = Counter::new(
-        schema_version_id.to_string(),
-        doc_id.as_bytes(),
-        field.to_string(),
-        true,
-        NumericKind::Int64,
+/// The counter block a standalone merge left to its composite is applied by
+/// that composite, once, and marked merged: the document holds its value.
+#[tokio::test]
+async fn counter_merge_marks_cid_merged() {
+    let (handler, blockstore) = make_handler_with_counter_schema().await;
+    let mut doc = Document::new();
+    doc.set_with_crdt("score", CType::PnCounter, NormalValue::Int(5))
+        .unwrap();
+    doc.set_schema_version_id("v1");
+    let built = db::block::builder::build_blocks_from_document(
+        &doc,
+        &crate::common::schema::version("v1"),
+        &blockstore,
     )
-    .expect("counter");
-    let bytes = ValueReader::value(&counter, &datastore)
+    .await
+    .unwrap();
+    let [counter_cid] = built.field_cids[..] else {
+        panic!("one counter field block, got {:?}", built.field_cids);
+    };
+    let counter_block =
+        Block::from_dag_cbor(&blockstore.get(&counter_cid).await.unwrap().unwrap()).unwrap();
+    let CrdtDelta::Counter(payload) = counter_block.delta else {
+        panic!("the counter field block carries a counter delta");
+    };
+    let collection_short_id = handler
+        .db()
+        .get_collection("Counters")
+        .unwrap()
+        .unwrap()
+        .resolved_root_id();
+    register_test_block_owner(&handler, collection_short_id, &built.doc_id, &counter_cid).await;
+    let metadata = BlockMetadata::normal(
+        &built.doc_id,
+        "col-counters",
+        "did:key:z6MkrCounterMergeTest",
+        None,
+        false,
+    );
+
+    let outcome = handler
+        .process_counter_delta(&counter_cid, &payload, &metadata)
         .await
-        .expect("counter value");
-    assert_eq!(bytes.len(), 8, "int64 counter store value is 8 bytes");
-    i64::from_be_bytes(bytes.as_ref().try_into().unwrap())
+        .unwrap();
+    assert!(outcome.is_terminal_skip(), "{outcome:?}");
+    assert!(!blockstore.is_merged(&counter_cid).await.unwrap());
+
+    let outcome = handler
+        .handle_block(&built.cid, &built.block, metadata)
+        .await
+        .unwrap();
+    assert_eq!(outcome, MergeOutcome::Merged);
+    assert!(blockstore.is_merged(&counter_cid).await.unwrap());
+    assert_eq!(
+        read_counter_value(handler.db(), &built.doc_id, "score").await,
+        5
+    );
+}
+
+/// A counter's committed value: its part of the document value, the counter's
+/// only stored copy, read through a fresh read txn on `db`.
+async fn read_counter_value(db: &Arc<DB<RegolithStore>>, doc_id: &str, field: &str) -> i64 {
+    let collection = db.get_collection("Counters").unwrap().unwrap();
+    let txn = db.new_txn(true).await.expect("read txn");
+    let doc = collection
+        .get_by_doc_id(
+            &txn.datastore().unwrap(),
+            &txn.systemstore().unwrap(),
+            &document::DocID::from_string(doc_id).unwrap(),
+        )
+        .await
+        .unwrap()
+        .expect("the document exists");
+    doc.get(field)
+        .and_then(NormalValue::as_int)
+        .expect("the counter has a value")
 }
 
 /// Build + store a standalone counter delta block for `doc_id`/`score` with the
@@ -1059,87 +1120,61 @@ async fn put_counter_delta_block(
     (cid, payload)
 }
 
-/// #1044 residual coverage gap: an interactive/explicit-transaction counter
-/// increment racing a same-document P2P merge.
-///
-/// PROPERTY (proven DETERMINISTICALLY by controlling ordering, not a real
-/// race): an interactive counter txn must NOT silently clobber a concurrent
-/// same-doc merge. The per-doc guard excludes partial-RMW interleaving during
-/// the finalize's held window, but a merge that COMMITS *before* the
-/// interactive finalize makes the interactive txn's `begin()` snapshot stale →
-/// on commit the storage SSI/OCC conflict tracker (`ConflictTracker` in
-/// `storage::backends::shared`, used by `RegolithStore`) aborts the interactive
-/// commit with a `TxnConflict` ("transaction conflict. Please retry"), and the
-/// merge's value survives. No data loss, no double-apply — the client retries.
-/// This matches Go's storage-txn isolation.
-///
-/// CONSTRUCTION (real merge handler, no fallback):
-///   1. Seed doc with `score` (PNCounter) at N=10 via the registry auto-finalize
-///      path; confirm the accumulation store == 10.
-///   2. `begin()` an explicit txn and `update` +3 through the interactive
-///      mutator — this RECORDS the pending op and writes the provisional blob but
-///      does NOT finalize. The txn's `read_version` snapshot is fixed here.
-///   3. BEFORE committing, apply a same-doc merge of +5 through the REAL merge
-///      handler (`process_counter_delta`, which takes its own `merge_queue`
-///      guard and commits its own txn). Confirm the store advanced to 15.
-///   4. Commit the interactive txn. ASSERT: commit returns a conflict ERROR and
-///      the store STILL == 15 (the merge survived; no clobber to 13).
-///   5. RETRY the +3 in a fresh explicit txn (snapshot now sees 15) → store == 18.
-///
-/// REGRESSION CAUGHT: if the finalize ignored OCC and force-wrote its stale RMW,
-/// the interactive commit would succeed and the store would be 13 (the merge's
-/// +5 lost) — both assertions (error + store==15) would fail.
+/// An interactive increment and a concurrent replicated increment of the same
+/// counter are both blind operands on the counter's part: both commit, and
+/// each is applied once.
 #[tokio::test]
-async fn interactive_counter_increment_conflicts_with_concurrent_same_doc_merge() {
+async fn interactive_counter_increment_and_concurrent_same_doc_merge_both_commit() {
     let (handler, blockstore) = make_handler_with_counter_schema().await;
     let db = Arc::clone(handler.db());
-    // Same DB / same RegolithStore => same ConflictTracker shared across the
-    // interactive registry txn and the merge handler's own txn.
+    // Both writers use the same engine.
     let registry = DbTransactionRegistry::new(Arc::clone(&db));
 
-    // (1) Seed the doc with score = 10 via the registry (auto-finalize on commit).
+    // (1) Seed the doc with score = 10.
     let handle = registry.begin(false).await.expect("begin seed");
-    let ctx = registry.get(&handle).into_result().unwrap().unwrap();
-    let mutator = ctx.doc_mutator().expect("mutator");
-    let created = mutator
-        .create(
-            "Counters",
-            Document::from_json_str(r#"{"score": 10}"#).unwrap(),
-        )
-        .await
-        .expect("create seed");
+    let created = crate::common::owned::in_txn(&registry, &handle, |ctx| {
+        Box::pin(async move {
+            let mutator = ctx.doc_mutator().expect("mutator");
+            mutator
+                .create(
+                    "Counters",
+                    Document::from_json_str(r#"{"score": 10}"#).unwrap(),
+                )
+                .await
+                .expect("create seed")
+        })
+    })
+    .await;
     let doc_id = created.doc_id.to_string();
-    drop(mutator);
-    drop(ctx);
     registry.commit(&handle).await.expect("commit seed");
     assert_eq!(
-        read_counter_accumulation_store(&db, "v1", &doc_id, "score").await,
+        read_counter_value(&db, &doc_id, "score").await,
         10,
-        "seed must leave the accumulation store at N=10"
+        "seed must store N=10"
     );
 
     // (2) Begin an EXPLICIT txn and increment +3 through the interactive
-    // mutator. This records the pending op + writes the provisional blob but
-    // does NOT finalize; the txn's read_version snapshot is fixed at begin().
+    // mutator. Its operand and document update belong to the open snapshot.
     let handle = registry.begin(false).await.expect("begin interactive");
-    let ctx = registry.get(&handle).into_result().unwrap().unwrap();
-    let mutator = ctx.doc_mutator().expect("mutator");
     let mut update_doc = Document::from_json_str(r#"{"score": 13}"#).unwrap();
     update_doc.set_id(document::DocID::from_string(&doc_id).unwrap());
     update_doc.set_counter_delta("score".to_string(), NormalValue::Int(3));
     let mut modified = rapidhash::RapidHashSet::new();
     modified.insert("score".to_string());
-    mutator
-        .update("Counters", update_doc, modified)
-        .await
-        .expect("interactive update +3");
-    drop(mutator);
-    drop(ctx);
+    crate::common::owned::in_txn(&registry, &handle, |ctx| {
+        Box::pin(async move {
+            let mutator = ctx.doc_mutator().expect("mutator");
+            mutator
+                .update("Counters", update_doc, modified)
+                .await
+                .expect("interactive update +3");
+        })
+    })
+    .await;
     // NOTE: NOT committed yet.
 
     // (3) BEFORE committing, apply a concurrent same-doc merge of +5 through the
-    // REAL merge handler. process_counter_delta takes its own merge_queue guard
-    // and commits its OWN txn, advancing the accumulation store to N+D2 = 15.
+    // REAL merge handler, in its OWN transaction: N+D2 = 15.
     let (merge_cid, merge_payload) =
         put_counter_delta_block(&blockstore, &doc_id, 5, 2, 7777).await;
     register_test_block_owner(&handler, 1, &doc_id, &merge_cid).await;
@@ -1156,120 +1191,38 @@ async fn interactive_counter_increment_conflicts_with_concurrent_same_doc_merge(
         .expect("merge handler must apply the +5 delta");
     assert_eq!(merge_outcome, MergeOutcome::Merged);
     assert_eq!(
-        read_counter_accumulation_store(&db, "v1", &doc_id, "score").await,
+        read_counter_value(&db, &doc_id, "score").await,
         15,
-        "merge of +5 must advance the accumulation store to N+D2 = 15"
+        "merge of +5 must advance the counter to N+D2 = 15"
     );
 
-    // (4) Now COMMIT the interactive txn. Its begin() snapshot is stale (the
-    // merge committed after it), so the OCC tracker aborts the commit with a
-    // TxnConflict.
-    let commit_result = registry.commit(&handle).await;
-    let err = commit_result.expect_err(
-        "interactive commit MUST conflict with the committed merge — if it \
-             succeeds it silently clobbered the merge (CRITICAL production bug)",
-    );
-    let err_msg = err.to_string().to_lowercase();
-    assert!(
-        err_msg.contains("transaction conflict"),
-        "interactive commit must fail with the storage OCC TxnConflict \
-             (corekv Error::TxnConflict = \"transaction conflict. Please retry\"), \
-             got: {err}"
-    );
-    // (4b) The merge's value survived; the interactive txn did NOT clobber it
-    // down to N+D1 = 13.
-    assert_eq!(
-        read_counter_accumulation_store(&db, "v1", &doc_id, "score").await,
-        15,
-        "after the conflicted interactive commit the merge's value (15) must \
-             survive — NOT be clobbered to 13"
-    );
-
-    // (5) Correct recovery: RETRY the +3 in a fresh explicit txn (snapshot now
-    // sees 15) → store == N+D2+D1 = 18. Conflict → retry → correct convergence.
-    let handle = registry.begin(false).await.expect("begin retry");
-    let ctx = registry.get(&handle).into_result().unwrap().unwrap();
-    let mutator = ctx.doc_mutator().expect("mutator");
-    let mut retry_doc = Document::from_json_str(r#"{"score": 18}"#).unwrap();
-    retry_doc.set_id(document::DocID::from_string(&doc_id).unwrap());
-    retry_doc.set_counter_delta("score".to_string(), NormalValue::Int(3));
-    let mut modified = rapidhash::RapidHashSet::new();
-    modified.insert("score".to_string());
-    mutator
-        .update("Counters", retry_doc, modified)
-        .await
-        .expect("retry update +3");
-    drop(mutator);
-    drop(ctx);
+    // (4) Now COMMIT the interactive txn. Its snapshot predates the merge, and
+    // both are blind operands on one part: it commits, and nothing is lost.
     registry
         .commit(&handle)
         .await
-        .expect("retry commit must succeed");
+        .expect("an increment never conflicts with a concurrent increment");
     assert_eq!(
-        read_counter_accumulation_store(&db, "v1", &doc_id, "score").await,
+        read_counter_value(&db, &doc_id, "score").await,
         18,
-        "retry on a fresh snapshot must converge to N+D2+D1 = 18"
+        "both increments land once: N+D2+D1 = 18"
     );
-}
-
-#[tokio::test]
-async fn handle_block_serializes_standalone_counter_by_doc_id() {
-    let (handler, blockstore) = make_handler_with_counter_schema().await;
-    let doc_id_str = DocID::new_v0(
-        "bafyreidwus7muqrpwwf22gvpqpow6xg37woh4ikztgl27deo37ehs5ehaa"
-            .parse()
-            .unwrap(),
-    )
-    .to_string();
-
-    let mut delta_data = Vec::new();
-    ciborium::into_writer(&5_i64, &mut delta_data).unwrap();
-
-    let payload = CounterDeltaPayload {
-        field_name: "score".to_string(),
-        schema_version_id: "v1".to_string(),
-        priority: 1,
-        data: delta_data,
-        nonce: 4243,
-    };
-    let block = Block {
-        delta: CrdtDelta::Counter(payload),
-        heads: None,
-        links: None,
-        encryption: None,
-        signature: None,
-    };
-    let cid = block.generate_cid().unwrap();
-    let block_data = block.to_dag_cbor().unwrap();
-    blockstore.put(&cid, &block_data).await.unwrap();
-    register_test_block_owner(&handler, 1, &doc_id_str, &cid).await;
-
-    let metadata = BlockMetadata::normal(
-        &doc_id_str,
-        "col-counters",
-        "did:key:z6MkrCounterMergeQueueTest",
-        None,
-        false,
-    );
-
-    let guard = handler.merge_queue().acquire(&doc_id_str).await;
-    let merge = handler.handle_block(&cid, &block_data, metadata);
-    tokio::pin!(merge);
-
-    assert!(
-        timeout(Duration::from_millis(50), merge.as_mut())
-            .await
-            .is_err(),
-        "standalone counter merge should wait on the per-document queue"
-    );
-
-    drop(guard);
-    let outcome = timeout(Duration::from_secs(1), merge)
+    let collection = db.get_collection("Counters").unwrap().unwrap();
+    let reader = db.new_txn(true).await.unwrap();
+    let doc = collection
+        .get_by_doc_id(
+            &reader.datastore().unwrap(),
+            &reader.systemstore().unwrap(),
+            &document::DocID::from_string(&doc_id).unwrap(),
+        )
         .await
-        .expect("counter merge should complete after releasing the queue")
+        .unwrap()
         .unwrap();
-    assert_eq!(outcome, MergeOutcome::Merged);
-    assert!(blockstore.is_merged(&cid).await.unwrap());
+    assert_eq!(
+        doc.get("score"),
+        Some(&NormalValue::Int(18)),
+        "the document value includes the replicated and the local increment"
+    );
 }
 
 #[tokio::test]
@@ -1389,19 +1342,91 @@ async fn shared_counter_block_is_applied_once_per_document() {
         {
             let mut datastore = txn.datastore().unwrap();
             let headstore = txn.headstore().unwrap();
-            let result = handler
-                .process_counter_delta_in_txn(
-                    &mut datastore,
-                    &headstore,
-                    &cid,
-                    &payload,
-                    Some("col-counters"),
-                    doc_id,
-                    doc_short_id,
-                )
+            for attempt in 0..2 {
+                let result = handler
+                    .process_counter_delta_in_txn(
+                        &mut datastore,
+                        &headstore,
+                        &cid,
+                        &payload,
+                        Some("col-counters"),
+                        doc_id,
+                        doc_short_id,
+                    )
+                    .await
+                    .unwrap();
+                // Once per document: the second delivery finds its applied key.
+                assert_eq!(result.applied(), attempt == 0);
+                // No document value exists yet: the first delivery hands its
+                // composite the sum to put, the second has nothing to add.
+                let expected = (attempt == 0).then_some(NormalValue::Int(5));
+                assert_eq!(result.value(), expected.as_ref());
+            }
+        }
+        txn.force_commit().await.unwrap();
+        if index == 0 {
+            blockstore.mark_as_merged(&cid).await.unwrap();
+        }
+    }
+}
+
+/// A counter block two stored documents share lands once on each of them,
+/// also after the first one marked it merged: each counter ends at its own
+/// value plus 5.
+#[tokio::test]
+async fn a_shared_counter_block_lands_once_on_each_stored_document() {
+    let (handler, blockstore) = make_handler_with_counter_schema().await;
+    let db = Arc::clone(handler.db());
+    let registry = DbTransactionRegistry::new(Arc::clone(&db));
+    let mut docs = Vec::new();
+    for seed in [0_i64, 10] {
+        let handle = registry.begin(false).await.expect("begin seed");
+        let created = crate::common::owned::in_txn(&registry, &handle, move |ctx| {
+            Box::pin(async move {
+                let mutator = ctx.doc_mutator().expect("mutator");
+                mutator
+                    .create(
+                        "Counters",
+                        Document::from_json_str(&format!(r#"{{"score": {seed}}}"#)).unwrap(),
+                    )
+                    .await
+                    .expect("create seed")
+            })
+        })
+        .await;
+        docs.push((created.doc_id.to_string(), seed));
+        registry.commit(&handle).await.expect("commit seed");
+    }
+    let (cid, payload) = put_counter_delta_block(&blockstore, &docs[0].0, 5, 1, 7).await;
+
+    for (index, (doc_id, _)) in docs.iter().enumerate() {
+        let txn = db.new_txn(false).await.unwrap();
+        let doc_short_id = {
+            let systemstore = txn.systemstore().unwrap();
+            db::docid::map::get_doc_ref(&systemstore, doc_id)
                 .await
-                .unwrap();
-            assert!(result.applied());
+                .unwrap()
+                .unwrap()
+                .doc_short_id
+        };
+        {
+            let mut datastore = txn.datastore().unwrap();
+            let headstore = txn.headstore().unwrap();
+            for attempt in 0..2 {
+                let result = handler
+                    .process_counter_delta_in_txn(
+                        &mut datastore,
+                        &headstore,
+                        &cid,
+                        &payload,
+                        Some("col-counters"),
+                        doc_id,
+                        doc_short_id,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(result.applied(), attempt == 0, "{doc_id}");
+            }
         }
         txn.force_commit().await.unwrap();
         if index == 0 {
@@ -1409,11 +1434,8 @@ async fn shared_counter_block_is_applied_once_per_document() {
         }
     }
 
-    for doc_id in &doc_ids {
-        assert_eq!(
-            read_counter_accumulation_store(handler.db(), "v1", doc_id, "score").await,
-            5
-        );
+    for (doc_id, seed) in &docs {
+        assert_eq!(read_counter_value(&db, doc_id, "score").await, seed + 5);
     }
 }
 
@@ -2407,12 +2429,14 @@ async fn composite_parent_replay_updates_headstore_for_merged_parent() {
             .unwrap()
             .expect("merged doc has a short-ID mapping")
             .doc_short_id;
-        let mut iter = headstore
-            .iterator(storage::corekv::IterOptions::new().with_prefix(
+        let mut iter = db::block::heads::document::iterator(
+            &headstore,
+            storage::corekv::IterOptions::new().with_prefix(
                 storage::keys::headstore::HeadstoreDocKey::field_prefix(doc_short_id, "name"),
-            ))
-            .await
-            .unwrap();
+            ),
+        )
+        .await
+        .unwrap();
         let mut keys = Vec::new();
         while let Some(pair) = iter.next().await.unwrap() {
             keys.push(pair.key);
@@ -2683,6 +2707,7 @@ enum StubKmsResponse {
 struct StubKms {
     response: StubKmsResponse,
     calls: std::sync::atomic::AtomicUsize,
+    contexts: kovan::Atom<Vec<(Option<String>, Option<String>)>>,
 }
 
 impl StubKms {
@@ -2690,6 +2715,7 @@ impl StubKms {
         Self {
             response: StubKmsResponse::Key(key),
             calls: std::sync::atomic::AtomicUsize::new(0),
+            contexts: kovan::Atom::new(Vec::new()),
         }
     }
 
@@ -2697,6 +2723,7 @@ impl StubKms {
         Self {
             response: StubKmsResponse::AccessDenied,
             calls: std::sync::atomic::AtomicUsize::new(0),
+            contexts: kovan::Atom::new(Vec::new()),
         }
     }
 
@@ -2704,6 +2731,7 @@ impl StubKms {
         Self {
             response: StubKmsResponse::UnavailableThenKey(key),
             calls: std::sync::atomic::AtomicUsize::new(0),
+            contexts: kovan::Atom::new(Vec::new()),
         }
     }
 }
@@ -2712,9 +2740,18 @@ impl StubKms {
 impl kms::KmsService for StubKms {
     async fn get_keys(
         &self,
-        _: &kms::RequestContext,
+        context: &kms::RequestContext,
         cids: &[kms::EncryptionCid],
     ) -> kms::Result<kms::KeyResults> {
+        let recorded = (
+            context.user_identity().map(ToString::to_string),
+            context.explicit_replay_capability().map(str::to_owned),
+        );
+        self.contexts.rcu(|contexts| {
+            let mut next = contexts.clone();
+            next.push(recorded.clone());
+            next
+        });
         let (results, tx) = kms::KeyResults::new(cids.len().max(1));
         let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         match &self.response {
@@ -2936,6 +2973,163 @@ async fn decrypt_block_data_routes_through_kms_when_set() {
         .await
         .expect("kms-keyed decryption should succeed");
     assert_eq!(decrypted, plaintext);
+}
+
+#[tokio::test]
+async fn merge_attempt_resolves_dek_outside_attempt_and_reuses_it() {
+    let (handler, blockstore, _) = make_handler_with_schema_and_bus().await;
+    let key = [17u8; 32];
+    let encryption = Encryption::new(key.to_vec());
+    let encryption_cid = encryption.generate_cid().unwrap();
+    blockstore
+        .put(&encryption_cid, &encryption.to_dag_cbor().unwrap())
+        .await
+        .unwrap();
+
+    let mut plaintext = Vec::new();
+    ciborium::into_writer(&NormalValue::String("prepared DEK".into()), &mut plaintext).unwrap();
+    let (ciphertext, _) =
+        crypto::encryption::aes::encrypt_aes(&plaintext, &key, &[], true).unwrap();
+    let field_block = Block::new_with_options(
+        CrdtDelta::Lww(LwwDeltaPayload {
+            field_name: "name".into(),
+            schema_version_id: "v1".into(),
+            priority: 1,
+            data: ciphertext,
+        }),
+        vec![],
+        vec![],
+        Some(encryption_cid),
+        None,
+    );
+    let field_cid = field_block.generate_cid().unwrap();
+    blockstore
+        .put(&field_cid, &field_block.to_dag_cbor().unwrap())
+        .await
+        .unwrap();
+
+    let composite_block = Block::new(
+        CrdtDelta::Composite(CompositeDeltaPayload {
+            schema_version_id: "v1".into(),
+            priority: 1,
+            status: 1,
+        }),
+        vec![],
+        vec![DAGLink::new("name", field_cid)],
+    );
+    let composite_cid = composite_block.generate_cid().unwrap();
+    let composite_data = composite_block.to_dag_cbor().unwrap();
+    let doc_id = db::block::builder::derive_doc_id(&composite_cid);
+    let metadata = BlockMetadata::normal(
+        &doc_id,
+        "col-users",
+        "did:key:z6MkrPreparedMergeDek",
+        None,
+        false,
+    );
+
+    let kms = Arc::new(StubKms::fixed_key(key));
+    handler.set_kms(kms.clone());
+    let outcome = handler
+        .handle_block(&composite_cid, &composite_data, metadata)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, MergeOutcome::Merged);
+    assert_eq!(kms.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn batch_merge_prepares_deks_outside_attempts_per_authorization_context() {
+    let (handler, blockstore, _) = make_handler_with_schema_and_bus().await;
+    let key = [29u8; 32];
+    let encryption_cid = Encryption::new(key.to_vec()).generate_cid().unwrap();
+    let mut blocks = Vec::new();
+    let contexts = [
+        (
+            "did:key:z6MksQ6mYqY1YxR4KQ2NW6y6x8vJrNs2LEd8w5pYxHw3rroA",
+            "capability-a",
+            "Alice",
+        ),
+        (
+            "did:key:z6MkwQm1zZ1p9raM2AfU4vX9y1Aq5PEYB9H9n1tFoZT3zh7T",
+            "capability-b",
+            "Bob",
+        ),
+    ];
+    for (creator, capability, value) in contexts {
+        let mut plaintext = Vec::new();
+        ciborium::into_writer(&NormalValue::String(value.into()), &mut plaintext).unwrap();
+        let (ciphertext, _) =
+            crypto::encryption::aes::encrypt_aes(&plaintext, &key, &[], true).unwrap();
+        let field = Block::new_with_options(
+            CrdtDelta::Lww(LwwDeltaPayload {
+                field_name: "name".into(),
+                schema_version_id: "v1".into(),
+                priority: 1,
+                data: ciphertext,
+            }),
+            vec![],
+            vec![],
+            Some(encryption_cid),
+            None,
+        );
+        let field_cid = field.generate_cid().unwrap();
+        blockstore
+            .put(&field_cid, &field.to_dag_cbor().unwrap())
+            .await
+            .unwrap();
+        let composite = Block::new(
+            CrdtDelta::Composite(CompositeDeltaPayload {
+                schema_version_id: "v1".into(),
+                priority: 1,
+                status: 1,
+            }),
+            vec![],
+            vec![DAGLink::new("name", field_cid)],
+        );
+        let cid = composite.generate_cid().unwrap();
+        let doc_id = db::block::builder::derive_doc_id(&cid);
+        blockstore
+            .put(&cid, &composite.to_dag_cbor().unwrap())
+            .await
+            .unwrap();
+        blocks.push(MergeBlock {
+            cid,
+            block_data: composite.to_dag_cbor().unwrap().into(),
+            doc_id,
+            collection_id: "col-users".into(),
+            creator: creator.into(),
+            sender_peer: None,
+            is_explicit_replicator: true,
+            explicit_replay_authorization: Some(ExplicitReplayAuthorization {
+                source_peer_id: "source-peer".into(),
+                target_peer_id: "target-peer".into(),
+                collection_id: "col-users".into(),
+                authorizer_did: creator.into(),
+                expires_at: u64::MAX,
+                capability: Some(capability.into()),
+            }),
+            verified_creator: None,
+        });
+    }
+
+    let kms = Arc::new(StubKms::fixed_key(key));
+    handler.set_kms(kms.clone());
+    let outcomes = handler.handle_block_batch(&blocks).await;
+
+    assert!(matches!(
+        outcomes.as_slice(),
+        [Ok(MergeOutcome::Merged), Ok(MergeOutcome::Merged)]
+    ));
+    assert_eq!(
+        kms.calls.load(Ordering::SeqCst),
+        2,
+        "the same encryption CID must be fetched separately for each block authorization context"
+    );
+    let recorded = kms.contexts.load();
+    assert!(recorded.contains(&(Some(contexts[0].0.into()), Some(contexts[0].1.into()))));
+    assert!(recorded.contains(&(Some(contexts[1].0.into()), Some(contexts[1].1.into()))));
 }
 
 #[tokio::test]
@@ -3781,4 +3975,133 @@ async fn first_materialization_arrivals_include_peer_batches_once() {
             .collect::<Vec<_>>(),
         vec![first_id.as_str(), second_id.as_str()]
     );
+}
+
+#[tokio::test]
+async fn first_materialization_and_local_create_arrive_in_commit_order() {
+    use query::fetcher::{DocFetcher, DocumentArrivalOptions};
+    use query::DocMutator;
+    let (handler, blockstore, _) = make_handler_with_schema_and_bus().await;
+    let local = db::DbDocMutator::new(
+        handler.db().clone(),
+        handler.db().new_txn(false).await.unwrap(),
+    );
+    let mut document = document::Document::new();
+    document.set("name", "local");
+    let local_id = local
+        .create("Users", document)
+        .await
+        .unwrap()
+        .doc_id
+        .to_string();
+    let peer = build_merge_block(&blockstore, "peer", 30).await;
+    let peer_id = peer.doc_id.clone();
+    let results = handler.handle_block_batch(&[peer]).await;
+    assert!(
+        results
+            .iter()
+            .all(|result| matches!(result, Ok(MergeOutcome::Merged))),
+        "{results:?}"
+    );
+    local.take_txn().await.unwrap().commit().await.unwrap();
+    let fetcher = db::LensedAutoCommitFetcher::new(handler.db().clone());
+    let page = fetcher
+        .get_document_arrivals(&DocumentArrivalOptions {
+            collection: "Users".into(),
+            after: 0,
+            limit: 10,
+            doc_ids: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(page.head, 2);
+    assert_eq!(page.entries[0].doc_id, peer_id);
+    assert_eq!(page.entries[1].doc_id, local_id);
+}
+
+#[tokio::test]
+async fn remote_field_tombstone_clears_materialized_value_and_keeps_its_priority() {
+    let (handler, blockstore) = make_handler_with_immutable_schema().await;
+    let collection = handler
+        .db()
+        .find_collection_by_id("col-agentdocs")
+        .unwrap()
+        .unwrap();
+    let mut doc =
+        Document::from_json_str(r#"{"agent_did":"did:key:alice","body":"before"}"#).unwrap();
+    doc.set_schema_version_id("v1");
+    let (doc_id, short_id, created) = create_doc_locally(&handler, &collection, &mut doc).await;
+    let field = Block::new(
+        CrdtDelta::Lww(LwwDeltaPayload {
+            field_name: "body".into(),
+            schema_version_id: "v1".into(),
+            priority: 2,
+            data: Vec::new(),
+        }),
+        created.field_cids,
+        vec![],
+    );
+    let field_cid = field.generate_cid().unwrap();
+    blockstore
+        .put(&field_cid, &field.to_dag_cbor().unwrap())
+        .await
+        .unwrap();
+    let payload = CompositeDeltaPayload {
+        schema_version_id: "v1".into(),
+        priority: 7,
+        status: 1,
+    };
+    let block = Block::new(
+        CrdtDelta::Composite(payload.clone()),
+        vec![created.cid],
+        vec![DAGLink::new("body", field_cid)],
+    );
+    let cid = block.generate_cid().unwrap();
+    blockstore
+        .put(&cid, &block.to_dag_cbor().unwrap())
+        .await
+        .unwrap();
+    let id = doc_id.to_string();
+    let result = handler
+        .process_composite_delta(
+            &cid,
+            &block,
+            &payload,
+            &BlockMetadata::normal(&id, "col-agentdocs", "did:key:z6MkrClr", None, false),
+            false,
+            0,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result, MergeOutcome::Merged);
+    let txn = handler.db().new_txn(true).await.unwrap();
+    let bytes = txn
+        .datastore()
+        .unwrap()
+        .get(&collection.doc_key(short_id))
+        .await
+        .unwrap()
+        .unwrap();
+    let stored = document::stored::StoredDocument::decode(&bytes).unwrap();
+    let body = stored
+        .fields
+        .values()
+        .find(|field| field.name == "body")
+        .unwrap();
+    let set = db::block::heads::document::load(&txn.headstore().unwrap(), short_id)
+        .await
+        .unwrap();
+    let field_name = db::block::heads::document::name("body", &field_cid);
+    let priority = set
+        .live()
+        .find(|(name, _)| *name == field_name.as_slice())
+        .map(|(_, priority)| priority)
+        .unwrap();
+    assert_eq!(
+        priority, 2,
+        "field heads retain their own priority, independent of the composite"
+    );
+    assert_eq!(body.priority, 2);
+    assert!(body.value.is_empty());
+    assert!(stored.materialize().unwrap().get("body").is_none());
 }

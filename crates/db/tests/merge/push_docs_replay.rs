@@ -270,7 +270,7 @@ async fn unfinished_replay_uses_configured_schedule_and_marks_replicator_inactiv
 }
 
 #[tokio::test]
-async fn unfinished_replay_uses_the_peer_retry_writer() {
+async fn forgotten_peer_cannot_be_resurrected_by_unfinished_replay() {
     use storage::RegolithStore;
 
     let store = Arc::new(RegolithStore::in_memory().unwrap());
@@ -283,37 +283,29 @@ async fn unfinished_replay_uses_the_peer_retry_writer() {
         .await
         .unwrap();
 
-    let writer = peerstore
-        .acquire_replicator_retry_guard(peer.as_str())
-        .await
-        .unwrap()
-        .unwrap();
     let persistence_peer = peer.clone();
-    let mut persistence = tokio::spawn(async move {
-        persist_replay_failures(
-            &storage::stores::Peerstore::new(store),
-            &persistence_peer,
-            &[ReplayDocumentFailure {
-                doc_id: "doc-1".to_string(),
-                collection_id: "collection".to_string(),
-            }],
-        )
-        .await
-    });
-
-    assert!(
-        tokio::time::timeout(Duration::from_millis(25), &mut persistence)
-            .await
-            .is_err(),
-        "replay failure persistence bypassed the peer retry writer"
+    let persistence_store = storage::stores::Peerstore::new(store.clone());
+    let failures = [ReplayDocumentFailure {
+        doc_id: "doc-1".to_string(),
+        collection_id: "collection".to_string(),
+    }];
+    let (persisted, deleted) = tokio::join!(
+        persist_replay_failures(&persistence_store, &persistence_peer, &failures),
+        peerstore.delete_replicator(peer.as_str()),
     );
-
-    drop(writer);
-    tokio::time::timeout(Duration::from_secs(1), persistence)
+    persisted.unwrap();
+    deleted.unwrap();
+    assert!(!peerstore.has_replicator(peer.as_str()).await.unwrap());
+    assert!(peerstore
+        .get_retry_documents(peer.as_str())
         .await
         .unwrap()
+        .is_empty());
+    assert!(peerstore
+        .get_retry_info(peer.as_str())
+        .await
         .unwrap()
-        .unwrap();
+        .is_none());
 }
 
 /// The first history replay has a replicator row but no retry schedule yet.

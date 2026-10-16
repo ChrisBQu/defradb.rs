@@ -340,7 +340,7 @@ fn test_nonce_uniqueness_per_encryption() {
     let aad = b"context";
 
     // Collect nonces
-    let mut nonces: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+    let mut nonces: rapidhash::RapidHashSet<Vec<u8>> = rapidhash::RapidHashSet::default();
     for i in 0..100 {
         let (_ciphertext, nonce) = encrypt_aes(plaintext, &key, aad, false).unwrap();
         assert!(

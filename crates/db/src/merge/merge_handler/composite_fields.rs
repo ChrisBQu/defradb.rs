@@ -158,6 +158,9 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             for effective in deltas {
                 match effective {
                     CrdtDelta::Lww(lww_payload) => {
+                        state
+                            .field_block_priorities
+                            .insert(link_cid, lww_payload.priority);
                         let result = self
                             .process_lww_delta_in_txn(
                                 datastore,
@@ -167,8 +170,16 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                                 context.metadata.collection_id,
                                 context.doc_id_str,
                                 context.doc_short_id,
+                                &mut state.reads,
                             )
                             .await?;
+                        state.field_priorities.insert(
+                            lww_payload.field_name.clone(),
+                            crate::collection::value::FieldOrder {
+                                priority: result.priority,
+                                raw_value: Some(result.raw_value),
+                            },
+                        );
                         if result.applied {
                             state.any_field_applied = true;
                         }
@@ -179,6 +190,9 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                         }
                     }
                     CrdtDelta::Counter(counter_payload) => {
+                        state
+                            .field_block_priorities
+                            .insert(link_cid, counter_payload.priority);
                         let result = self
                             .process_counter_delta_in_txn(
                                 datastore,
@@ -190,6 +204,8 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                                 context.doc_short_id,
                             )
                             .await?;
+                        // A counter's increment is an operand on the stored value.
+                        state.reads.wrote_document();
                         if result.applied {
                             state.any_field_applied = true;
                         }
@@ -290,6 +306,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                         );
                         return Ok(EffectiveLinkedDelta::SkipField);
                     }
+                    Err(error @ MergeError::NeedsDecryptionKey(_)) => return Err(error),
                     Err(error @ MergeError::Kms(_)) => return Err(error),
                     Err(error) => {
                         tracing::debug!(
@@ -321,6 +338,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                         );
                         return Ok(EffectiveLinkedDelta::SkipField);
                     }
+                    Err(error @ MergeError::NeedsDecryptionKey(_)) => return Err(error),
                     Err(error @ MergeError::Kms(_)) => return Err(error),
                     Err(error) => {
                         tracing::debug!(

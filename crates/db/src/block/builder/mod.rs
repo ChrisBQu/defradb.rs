@@ -17,10 +17,14 @@ mod write;
 pub(crate) use batch_signing::collect_on_commit;
 pub use build::build_blocks_from_document;
 pub use collection::write_collection_block;
+pub(crate) use collection::write_collection_block_with_inputs;
+pub(crate) use compute::compute_document_blocks_with_inputs;
 pub use compute::{compute_document_blocks, insert_computed_blocks, ComputedBlocks};
+pub(crate) use write::inherited_encryption_policy;
 pub use write::{write_delete_block, write_document_blocks};
+pub(crate) use write::{write_delete_block_with_inputs, write_document_blocks_with_inputs};
 
-use immutable::{compute_immutable_block, immutable_field_names};
+use immutable::{compute_immutable_block, immutable_field_names, immutable_for_pass};
 
 use bytes::Bytes;
 use rapidhash::{HashMapExt, RapidHashMap};
@@ -35,13 +39,58 @@ use defra_core::block::{
     CounterDeltaPayload, CrdtDelta, DAGLink, Encryption, LwwDeltaPayload, Signature,
     SignatureHeader,
 };
+use defra_core::cid_encoding::cid_bytes;
 use defra_core::encryption::EncryptionConfig;
 use defra_core::signing::SigningConfig;
 use document::{DocID, Document, NormalValue};
 use schema::CollectionVersion;
 use storage::corekv::Key;
 use storage::keys::doc_id_index::DocRef;
-use storage::keys::headstore::{HeadstoreColKey, HeadstoreDocKey, HeadstorePriorityKey};
+use storage::keys::headstore::HeadstorePriorityKey;
+
+#[derive(Debug, thiserror::Error)]
+pub enum BuildError {
+    #[error("{0}")]
+    Message(String),
+    #[error("external signature input required")]
+    NeedsInput(query::prepared::PreparedInputRequest),
+}
+
+impl From<String> for BuildError {
+    fn from(value: String) -> Self {
+        Self::Message(value)
+    }
+}
+
+impl From<query::error::QueryError> for BuildError {
+    fn from(value: query::error::QueryError) -> Self {
+        match value {
+            query::error::QueryError::NeedsInput(request) => Self::NeedsInput(request),
+            other => Self::Message(other.to_string()),
+        }
+    }
+}
+
+impl BuildError {
+    pub fn into_query_error(self) -> query::error::QueryError {
+        match self {
+            Self::NeedsInput(request) => query::error::QueryError::NeedsInput(request),
+            Self::Message(message) => query::error::QueryError::execution(message),
+        }
+    }
+
+    /// [`into_query_error`](Self::into_query_error) with `context`, naming the
+    /// write, before a failure's message. A missing input stays a request for
+    /// it, so the caller can fetch it and run the write again.
+    pub fn into_query_error_in(self, context: &str) -> query::error::QueryError {
+        match self {
+            Self::NeedsInput(request) => query::error::QueryError::NeedsInput(request),
+            Self::Message(message) => {
+                query::error::QueryError::execution(format!("{context}: {message}"))
+            }
+        }
+    }
+}
 
 /// Node-local storage identity of a document.
 ///
@@ -79,6 +128,63 @@ pub(crate) fn encrypt_delta(plaintext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>,
     Ok(ciphertext)
 }
 
+/// Keep locally generated keys stable for one request's preparation passes.
+pub(crate) fn encryption_key_prepared(
+    doc_ref: &[u8],
+    field: Option<&str>,
+    inputs: Option<&query::prepared::PreparedInputMemo>,
+) -> Result<[u8; 32], String> {
+    let Some(inputs) = inputs else {
+        return Ok(defra_core::encryption::generate_encryption_key_for(
+            doc_ref, field,
+        ));
+    };
+    let exact = serde_json::to_vec(&("local-encryption-key-v1", doc_ref, field))
+        .map_err(|error| error.to_string())?;
+    let request = query::prepared::PreparedInputRequest::new(
+        query::prepared::PreparedInputKind::Encryption,
+        exact,
+    );
+    if let Some(key) = inputs.get(&request) {
+        return key
+            .as_ref()
+            .try_into()
+            .map_err(|_| "invalid prepared local encryption key".into());
+    }
+    let key = defra_core::encryption::generate_encryption_key_for(doc_ref, field);
+    inputs
+        .insert(request, std::sync::Arc::<[u8]>::from(key))
+        .as_ref()
+        .try_into()
+        .map_err(|_| "invalid prepared local encryption key".into())
+}
+
+/// Preserve a randomized ciphertext across transaction re-entry when a later
+/// prepared input (such as a remote signature) suspends the attempt.
+pub(crate) fn encrypt_delta_prepared(
+    plaintext: &[u8],
+    key: &[u8; 32],
+    inputs: &query::prepared::PreparedInputMemo,
+) -> Result<Vec<u8>, String> {
+    let mut exact = Vec::with_capacity(40 + plaintext.len());
+    exact.extend_from_slice(b"AES-GCM-delta-v1");
+    exact.extend_from_slice(key);
+    exact.extend_from_slice(&(plaintext.len() as u64).to_be_bytes());
+    exact.extend_from_slice(plaintext);
+    let request = query::prepared::PreparedInputRequest::new(
+        query::prepared::PreparedInputKind::Encryption,
+        exact,
+    );
+    if let Some(ciphertext) = inputs.get(&request) {
+        return Ok(ciphertext.to_vec());
+    }
+    let ciphertext = encrypt_delta(plaintext, key)?;
+    // Every use in the request shares the first ciphertext.
+    Ok(inputs
+        .insert(request, std::sync::Arc::<[u8]>::from(ciphertext))
+        .to_vec())
+}
+
 /// Compute a signature block without writing to storage.
 ///
 /// Pure function: returns `(sig_cid, sig_cbor_bytes)` for the caller to store.
@@ -88,7 +194,7 @@ pub fn compute_signature(
     signer: &SigningConfig,
 ) -> Result<Option<(Cid, Bytes)>, String> {
     // Only sign first field blocks (priority <= 1) and composite blocks.
-    // Higher-priority field blocks are not signed — their integrity is
+    // Higher-priority field blocks are not signed: their integrity is
     // guaranteed by the signature on the parent composite block.
     let is_field = matches!(&block.delta, CrdtDelta::Lww(_) | CrdtDelta::Counter(_));
     if is_field && block.delta.priority() > 1 {
@@ -177,6 +283,69 @@ pub fn compute_signature(
     Ok(Some((sig_cid, sig_cbor.into())))
 }
 
+/// Compute or request a signature using the exact-input memo for the active
+/// autocommit request. Local signing and non-requested paths retain the normal
+/// synchronous behavior.
+fn compute_signature_prepared(
+    block: &Block,
+    signer: &SigningConfig,
+    inputs: Option<&query::prepared::PreparedInputMemo>,
+) -> Result<Option<(Cid, Bytes)>, BuildError> {
+    if signer.remote_signer.is_none() || inputs.is_none() {
+        return compute_signature(block, signer).map_err(BuildError::Message);
+    }
+    let is_field = matches!(&block.delta, CrdtDelta::Lww(_) | CrdtDelta::Counter(_));
+    if is_field && block.delta.priority() > 1 {
+        return Ok(None);
+    }
+    let data = block
+        .to_dag_cbor()
+        .map_err(|e| BuildError::Message(format!("Failed to encode block for signing: {e}")))?;
+    let input = defra_core::signing::RemoteSignatureInput {
+        data,
+        key_type: signer.key_type,
+        public_key_hex: signer.public_key_hex.clone(),
+        authorization: signer.signing_authorization.clone(),
+    };
+    let request = query::prepared::PreparedInputRequest::new(
+        query::prepared::PreparedInputKind::Signature,
+        input.encode().map_err(BuildError::Message)?,
+    );
+    let sig_type: defra_core::block::SignatureType = signer.key_type.into();
+    if !sig_type.is_go_verifiable()
+        && !defra_core::block::go_verifiable_policy::non_go_verifiable_signing_allowed()
+    {
+        return Err(BuildError::Message(format!(
+            "refusing to sign a block with {sig_type:?} ({}): Go peers cannot verify it and will reject the block during replication. Set {}=1 to allow it on this node.",
+            signer.key_type,
+            defra_core::block::go_verifiable_policy::ALLOW_ENV,
+        )));
+    }
+    if !sig_type.is_go_verifiable() {
+        warn!(
+            signature_type = ?sig_type,
+            key_type = %signer.key_type,
+            "signing a block Go peers cannot verify; it will be rejected when replicating to a Go node"
+        );
+    }
+    // A miss is noted and the pass goes on: every signature of a wave is
+    // asked for at once.
+    let response = inputs
+        .expect("checked above")
+        .get_or_want(&request)
+        .ok_or(BuildError::NeedsInput(request))?;
+    let signature = Signature::new(
+        SignatureHeader::new(sig_type, signer.public_key_hex.as_bytes().to_vec()),
+        response.to_vec(),
+    );
+    let sig_cbor = signature
+        .to_dag_cbor()
+        .map_err(|e| BuildError::Message(format!("Failed to encode signature block: {e}")))?;
+    let sig_cid = generate_cid_from_bytes(&sig_cbor)
+        .map_err(|e| BuildError::Message(format!("Failed to generate signature CID: {e}")))?;
+    Ok(Some((sig_cid, sig_cbor.into())))
+}
+
 /// Sign a block and store the signature as a separate IPLD block.
 ///
 /// Delegates to `compute_signature()` for the pure computation, then writes
@@ -186,15 +355,16 @@ pub(crate) async fn sign_block(
     block: &Block,
     signer: &SigningConfig,
     blockstore: &NamespaceView,
-) -> Result<Option<Cid>, String> {
-    let Some((sig_cid, sig_cbor)) = compute_signature(block, signer)? else {
+    inputs: Option<&query::prepared::PreparedInputMemo>,
+) -> Result<Option<Cid>, BuildError> {
+    let Some((sig_cid, sig_cbor)) = compute_signature_prepared(block, signer, inputs)? else {
         return Ok(None);
     };
 
     blockstore
-        .set(&sig_cid.to_bytes(), &sig_cbor)
+        .set(&cid_bytes(&sig_cid), &sig_cbor)
         .await
-        .map_err(|e| format!("Failed to store signature block: {}", e))?;
+        .map_err(|e| BuildError::Message(format!("Failed to store signature block: {}", e)))?;
 
     Ok(Some(sig_cid))
 }
@@ -217,7 +387,7 @@ pub struct BlockResult {
 
 /// Encode a NormalValue as CBOR bytes.
 pub fn encode_value_as_cbor(value: &NormalValue) -> Result<Vec<u8>, String> {
-    let mut bytes = Vec::new();
+    let mut bytes = Vec::with_capacity(value.cbor_size_hint());
     ciborium::into_writer(value, &mut bytes)
         .map_err(|e| format!("Failed to encode value as CBOR: {}", e))?;
     Ok(bytes)
@@ -256,127 +426,44 @@ pub(crate) fn priority_index_key(doc_short_id: u64, priority: u64, cid: Cid) -> 
     HeadstorePriorityKey::new(doc_short_id, priority, cid).bytes()
 }
 
-/// A single head entry for a document field.
-#[derive(Clone)]
-pub struct FieldHeadEntry {
-    /// The CID of the head
-    pub cid: Cid,
-    /// The full key (for deletion when replacing)
-    pub key: Vec<u8>,
-}
-
-/// Get all existing heads for a specific field of a document.
-///
-/// During concurrent P2P updates, a field can have multiple heads (branches).
-/// Returns all current head CIDs for the field, sorted by CID string
-/// representation to match Go's deterministic head ordering.
-pub async fn get_all_field_heads(
-    headstore: &NamespaceView,
-    doc_short_id: u64,
-    field_id: &str,
-) -> Result<Vec<FieldHeadEntry>, String> {
-    use storage::corekv::IterOptions;
-
-    let prefix = HeadstoreDocKey::field_prefix(doc_short_id, field_id);
-    let prefix_len = prefix.len();
-    let opts = IterOptions::new().with_prefix(prefix);
-
-    let mut iter = headstore
-        .iterator(opts)
-        .await
-        .map_err(|e| format!("Failed to create headstore iterator: {}", e))?;
-
-    let mut entries = Vec::new();
-    while let Some(kv_pair) = iter
-        .next()
-        .await
-        .map_err(|e| format!("Failed to iterate headstore: {}", e))?
-    {
-        // Key: /d/{doc_short_id}/{field_id}/{cid} — the CID is the suffix
-        // after the scanned prefix (the short ID segment is binary, so the
-        // key cannot be split on '/').
-        let cid_str = String::from_utf8_lossy(&kv_pair.key[prefix_len..]);
-        if let Ok(cid) = cid_str.parse::<Cid>() {
-            entries.push(FieldHeadEntry {
-                cid,
-                key: kv_pair.key.clone(),
-            });
-        }
-    }
-
-    // Sort by CID string representation to match Go's Block.New() sorting.
-    entries.sort_by_cached_key(|a| a.cid.to_string());
-    Ok(entries)
-}
-
-/// Snapshot of all head entries for a single document, loaded in one scan.
-///
-/// Replaces multiple overlapping headstore scans with a single prefix scan
-/// of `/d/{doc_id}/`.
+/// A document's live heads, read with one point read of its head set.
+#[derive(Clone, PartialEq)]
 pub struct DocHeadsSnapshot {
     max_priority: u64,
     max_priority_by_field: RapidHashMap<String, u64>,
-    entries_by_field: RapidHashMap<String, Vec<FieldHeadEntry>>,
+    heads_by_field: RapidHashMap<String, Vec<Cid>>,
 }
 
 impl DocHeadsSnapshot {
-    /// Load all heads for a document in a single headstore scan.
+    /// Load all heads for a document: one point read, validated by nothing.
     pub async fn load(headstore: &NamespaceView, doc_short_id: u64) -> Result<Self, String> {
-        use storage::corekv::IterOptions;
-
-        let prefix = HeadstoreDocKey::document_prefix(doc_short_id);
-        let prefix_len = prefix.len();
-        let opts = IterOptions::new().with_prefix(prefix);
-
-        let mut iter = headstore
-            .iterator(opts)
+        let set = crate::block::heads::document::load(headstore, doc_short_id)
             .await
-            .map_err(|e| format!("Failed to create headstore iterator: {}", e))?;
-
-        let mut max_priority: u64 = 0;
-        let mut max_priority_by_field: RapidHashMap<String, u64> = RapidHashMap::new();
-        let mut entries_by_field: RapidHashMap<String, Vec<FieldHeadEntry>> = RapidHashMap::new();
-
-        while let Some(kv_pair) = iter
-            .next()
-            .await
-            .map_err(|e| format!("Failed to iterate headstore: {}", e))?
-        {
-            let priority = decode_priority_varint(&kv_pair.value);
-            if priority > max_priority {
-                max_priority = priority;
-            }
-
-            // Key: /d/{doc_short_id}/{field_id}/{cid} — parse the suffix
-            // after the scanned prefix (the short ID segment is binary).
-            let suffix = String::from_utf8_lossy(&kv_pair.key[prefix_len..]);
-            if let Some((field_id, cid_str)) = suffix.split_once('/') {
-                if let Ok(cid) = cid_str.parse::<Cid>() {
-                    max_priority_by_field
-                        .entry(field_id.to_string())
-                        .and_modify(|max| *max = (*max).max(priority))
-                        .or_insert(priority);
-                    entries_by_field
-                        .entry(field_id.to_string())
-                        .or_default()
-                        .push(FieldHeadEntry {
-                            cid,
-                            key: kv_pair.key.clone(),
-                        });
-                }
-            }
+            .map_err(|e| format!("Failed to read document heads: {}", e))?;
+        let mut snapshot = Self {
+            max_priority: 0,
+            max_priority_by_field: RapidHashMap::new(),
+            heads_by_field: RapidHashMap::new(),
+        };
+        // A name is `{field}/{cid}`; names ascend, so each field's heads are
+        // already in CID text order, as Go's Block.New() sorts them.
+        for (name, priority) in set.live() {
+            let Some((field, cid)) = crate::block::heads::document::parse_name(name) else {
+                continue;
+            };
+            snapshot.max_priority = snapshot.max_priority.max(priority);
+            let max = snapshot
+                .max_priority_by_field
+                .entry(field.to_string())
+                .or_default();
+            *max = (*max).max(priority);
+            snapshot
+                .heads_by_field
+                .entry(field.to_string())
+                .or_default()
+                .push(cid);
         }
-
-        // Sort each field's entries by CID string to match Go's deterministic ordering.
-        for entries in entries_by_field.values_mut() {
-            entries.sort_by_cached_key(|a| a.cid.to_string());
-        }
-
-        Ok(Self {
-            max_priority,
-            max_priority_by_field,
-            entries_by_field,
-        })
+        Ok(snapshot)
     }
 
     pub fn max_priority(&self) -> u64 {
@@ -390,11 +477,137 @@ impl DocHeadsSnapshot {
             .unwrap_or_default()
     }
 
-    /// Get heads for a specific field (returns empty vec if none).
-    pub fn field_heads(&self, field_id: &str) -> Vec<FieldHeadEntry> {
-        self.entries_by_field
+    /// Heads for a specific field (empty if none).
+    pub fn field_heads(&self, field_id: &str) -> Vec<Cid> {
+        self.heads_by_field
             .get(field_id)
             .cloned()
             .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod prepared_signature_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingSigner(AtomicUsize);
+
+    impl defra_core::signing::RemoteSigner for CountingSigner {
+        fn sign_sync(
+            &self,
+            data: &[u8],
+            _authorization: Option<&defra_core::signing::SigningAuthorization>,
+        ) -> Result<Vec<u8>, String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(data.iter().rev().copied().collect())
+        }
+    }
+
+    fn block(parent: Option<Cid>) -> Block {
+        let payload = CompositeDeltaPayload {
+            schema_version_id: "schema-v1".into(),
+            priority: 2,
+            status: 0,
+        };
+        Block::new(
+            CrdtDelta::Composite(payload),
+            parent.into_iter().collect(),
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn remote_signature_input_is_exact_and_reused_only_for_same_head_bytes() {
+        let remote = std::sync::Arc::new(CountingSigner(AtomicUsize::new(0)));
+        let signer = SigningConfig {
+            key_type: defra_core::signing::SigningKeyType::Ed25519,
+            private_key_bytes: Vec::new(),
+            public_key_bytes: vec![1, 2, 3],
+            public_key_hex: "010203".into(),
+            remote_signer: Some(remote.clone()),
+            signing_authorization: Some(defra_core::signing::SigningAuthorization::Decision {
+                decision_id: "decision-9".into(),
+            }),
+        };
+        let memo = query::prepared::PreparedInputMemo::default();
+        let parent_a = generate_cid_from_bytes(b"parent-a").unwrap();
+        let first = block(Some(parent_a));
+        let request = match compute_signature_prepared(&first, &signer, Some(&memo)) {
+            Err(BuildError::NeedsInput(request)) => request,
+            other => panic!("expected deferred signature, got {other:?}"),
+        };
+        // Reaching NeedsInput leaves the transaction attempt before invoking
+        // the remote signer.
+        assert_eq!(remote.0.load(Ordering::SeqCst), 0);
+        let input =
+            defra_core::signing::RemoteSignatureInput::decode(request.exact_request()).unwrap();
+        assert_eq!(input.data, first.to_dag_cbor().unwrap());
+        let changed_authorization = SigningConfig {
+            key_type: signer.key_type,
+            private_key_bytes: signer.private_key_bytes.clone(),
+            public_key_bytes: signer.public_key_bytes.clone(),
+            public_key_hex: signer.public_key_hex.clone(),
+            remote_signer: signer.remote_signer.clone(),
+            signing_authorization: Some(defra_core::signing::SigningAuthorization::Decision {
+                decision_id: "decision-10".into(),
+            }),
+        };
+        assert!(input.resolve(&changed_authorization).is_err());
+        assert_eq!(remote.0.load(Ordering::SeqCst), 0);
+        let signature = input.resolve(&signer).unwrap();
+        assert_eq!(remote.0.load(Ordering::SeqCst), 1);
+        memo.insert(request.clone(), std::sync::Arc::<[u8]>::from(signature));
+        assert!(compute_signature_prepared(&first, &signer, Some(&memo)).is_ok());
+        assert_eq!(remote.0.load(Ordering::SeqCst), 1);
+
+        let parent_b = generate_cid_from_bytes(b"parent-b").unwrap();
+        let changed = block(Some(parent_b));
+        let changed_request = match compute_signature_prepared(&changed, &signer, Some(&memo)) {
+            Err(BuildError::NeedsInput(request)) => request,
+            other => panic!("changed head must request a new signature, got {other:?}"),
+        };
+        assert_ne!(request, changed_request);
+    }
+
+    #[test]
+    fn changed_kms_encryption_scope_requests_a_fresh_key() {
+        let identity = DocStorageIdentity::new(1, 2);
+        let mut doc = Document::new();
+        doc.set("secret", "value");
+        let mut prepared = document::WritePreparation::new(1, 2);
+        prepared.set_requires_kms_keys(true);
+        prepared.insert_scoped_key("secret".into(), Cid::default(), [7; 32], None);
+        doc.set_write_preparation(std::sync::Arc::new(prepared));
+
+        // Changing document-level encryption to field-level encryption
+        // changes the KMS scope, so the previously prepared key cannot match.
+        let config = EncryptionConfig {
+            encrypt_doc: false,
+            encrypt_fields: vec!["secret".into()],
+        };
+        let memo = query::prepared::PreparedInputMemo::default();
+        let schema = CollectionVersion::new("Users", "schema-v1", "users", vec![]);
+        let error = compute_document_blocks_with_inputs(
+            &doc,
+            &schema,
+            identity,
+            Some(&config),
+            None,
+            Some(&memo),
+        )
+        .unwrap_err();
+        let BuildError::NeedsInput(request) = error else {
+            panic!("expected fresh KMS input request, got {error:?}");
+        };
+        let operation: crate::write::prepare::PreparedKmsOperation =
+            serde_json::from_slice(request.exact_request()).unwrap();
+        assert!(matches!(
+            operation,
+            crate::write::prepare::PreparedKmsOperation::Generate {
+                doc_id,
+                field: Some(field),
+            } if doc_id == hex::encode(identity.doc_ref_bytes()) && field == "secret"
+        ));
     }
 }

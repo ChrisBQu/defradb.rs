@@ -1,8 +1,126 @@
+use document::stored::StoredDocument;
 use storage::keys::doc_id_index::decode_doc_short_id;
 
 use super::*;
 
 impl Collection {
+    /// Read all schema fields used to materialize a document. Until the value
+    /// merge operator is installed, whole-value writes still validate the blob.
+    pub(crate) async fn read_document_blob(
+        &self,
+        datastore: &NamespaceView,
+        doc_short_id: u64,
+    ) -> Result<Option<bytes::Bytes>> {
+        self.read_document_blob_and_version(datastore, doc_short_id, false)
+            .await
+            .map(|(data, _)| data)
+    }
+
+    async fn read_document_blob_and_version(
+        &self,
+        datastore: &NamespaceView,
+        doc_short_id: u64,
+        full_value_read: bool,
+    ) -> Result<(Option<bytes::Bytes>, Option<String>)> {
+        let key = self.doc_key(doc_short_id);
+        // Writable callers retain the all-declared-fields projection so the
+        // engine validates schema part identities. A read-only full-document
+        // fetch can use the whole key directly because it needs every field
+        // and does not commit a dependency set. A schema transition replaces
+        // the whole value, but a full read works for current and historical
+        // versions.
+        let version = self.load_version(datastore, doc_short_id).await?;
+        let data = if full_value_read {
+            datastore.get(&key).await
+        } else {
+            let parts = self
+                .part_ids_of(
+                    datastore,
+                    self.def.fields.iter().map(|field| field.name.as_str()),
+                )
+                .await?;
+            match parts {
+                Some(parts)
+                    if !parts.is_empty() && version.as_deref() == Some(self.version_id()) =>
+                {
+                    datastore.get_parts(&key, &parts).await
+                }
+                _ => datastore.get(&key).await,
+            }
+        }
+        .map_err(Error::Storage)?;
+        Ok((data, version))
+    }
+
+    /// Read the complete document while validating only the named field parts
+    /// when the stored schema version is current; with no fields, nothing is
+    /// validated but the deletion marker. A lens transition needs the
+    /// conservative whole-blob dependency.
+    pub(crate) async fn get_with_datastore_fields(
+        &self,
+        datastore: &NamespaceView,
+        doc_short_id: u64,
+        doc_id: &DocID,
+        fields: &rapidhash::RapidHashSet<String>,
+    ) -> Result<Option<Document>> {
+        let version = self.load_version(datastore, doc_short_id).await?;
+        self.get_with_datastore_fields_at(datastore, doc_short_id, doc_id, fields, version)
+            .await
+    }
+
+    /// [`get_with_datastore_fields`](Self::get_with_datastore_fields) for a
+    /// caller that has already read the document's stored `version`.
+    pub(crate) async fn get_with_datastore_fields_at(
+        &self,
+        datastore: &NamespaceView,
+        doc_short_id: u64,
+        doc_id: &DocID,
+        fields: &rapidhash::RapidHashSet<String>,
+        version: Option<String>,
+    ) -> Result<Option<Document>> {
+        let deleted_key = self.deleted_key(doc_short_id);
+        if datastore.has(&deleted_key).await.map_err(Error::Storage)? {
+            return Ok(None);
+        }
+        let parts = self
+            .part_ids_of(datastore, fields.iter().map(String::as_str))
+            .await?;
+        let key = self.doc_key(doc_short_id);
+        let whole = |data: Option<bytes::Bytes>| {
+            data.map(|data| Document::from_storage_cbor(&data))
+                .transpose()
+        };
+        // No fields is a read no decision rests on, never validated.
+        let doc = match (version.as_deref() == Some(self.version_id()), parts) {
+            (true, Some(parts)) => {
+                let projected = datastore
+                    .get_parts(&key, &parts)
+                    .await
+                    .map_err(Error::Storage)?;
+                // A legacy or structural whole-value write is not a part map.
+                // Keep its full dependency and let the caller rebase every field.
+                // A part map is decoded once: every field of one that decodes
+                // materializes.
+                match projected {
+                    Some(bytes) => match StoredDocument::decode(&bytes)
+                        .and_then(|stored| stored.materialize())
+                    {
+                        Some(doc) => Some(doc),
+                        None => whole(datastore.get(&key).await.map_err(Error::Storage)?)?,
+                    },
+                    None => None,
+                }
+            }
+            _ => whole(datastore.get(&key).await.map_err(Error::Storage)?)?,
+        };
+        let Some(mut doc) = doc else { return Ok(None) };
+        doc.set_id(doc_id.clone());
+        if let Some(version) = version {
+            doc.set_schema_version_id(version);
+        }
+        Ok(Some(doc))
+    }
+
     /// Get a document by its public DocID, resolving the short ID through
     /// the systemstore mapping. Returns None for unknown or deleted docs.
     pub async fn get_by_doc_id(
@@ -17,6 +135,24 @@ impl Collection {
             return Ok(None);
         };
         self.get_with_datastore(datastore, doc_short_id, &canonical_doc_id)
+            .await
+    }
+
+    /// Get a complete document on a read-only snapshot without loading the
+    /// field-part map used by projected reads. Writable callers keep using
+    /// `get_by_doc_id`, which validates the declared field parts separately.
+    pub(crate) async fn get_by_doc_id_read_only(
+        &self,
+        datastore: &NamespaceView,
+        systemstore: &NamespaceView,
+        doc_id: &DocID,
+    ) -> Result<Option<Document>> {
+        let Some((doc_short_id, canonical_doc_id)) =
+            self.resolve_doc_identity(systemstore, doc_id).await?
+        else {
+            return Ok(None);
+        };
+        self.get_with_datastore_full_value(datastore, doc_short_id, &canonical_doc_id)
             .await
     }
 
@@ -67,17 +203,47 @@ impl Collection {
         doc_id: &DocID,
         check_deleted: bool,
     ) -> Result<Option<(Document, bool)>> {
-        let key = self.doc_key(doc_short_id);
-        let data = datastore.get(&key).await.map_err(Error::Storage)?;
+        self.get_with_datastore_include_deleted_impl(
+            datastore,
+            doc_short_id,
+            doc_id,
+            check_deleted,
+            false,
+        )
+        .await
+    }
+
+    async fn get_with_datastore_full_value(
+        &self,
+        datastore: &NamespaceView,
+        doc_short_id: u64,
+        doc_id: &DocID,
+    ) -> Result<Option<Document>> {
+        self.get_with_datastore_include_deleted_impl(datastore, doc_short_id, doc_id, false, true)
+            .await
+            .map(|result| result.map(|(doc, _)| doc))
+    }
+
+    async fn get_with_datastore_include_deleted_impl(
+        &self,
+        datastore: &NamespaceView,
+        doc_short_id: u64,
+        doc_id: &DocID,
+        check_deleted: bool,
+        full_value_read: bool,
+    ) -> Result<Option<(Document, bool)>> {
+        let (data, version) = self
+            .read_document_blob_and_version(datastore, doc_short_id, full_value_read)
+            .await?;
 
         match data {
             Some(bytes) => {
-                let mut doc = Document::from_cbor(&bytes)?;
+                let mut doc = Document::from_storage_cbor(&bytes)?;
                 // The blob stores values only; identity lives in the mapping.
                 doc.set_id(doc_id.clone());
 
                 // Load and set the schema version
-                if let Some(version) = self.load_version(datastore, doc_short_id).await? {
+                if let Some(version) = version {
                     doc.set_schema_version_id(version);
                 }
 
@@ -146,9 +312,44 @@ impl Collection {
         systemstore: &NamespaceView,
         show_deleted: bool,
     ) -> Result<Vec<(u64, Document, bool)>> {
+        self.scan_documents(datastore, systemstore, show_deleted, None)
+            .await
+    }
+
+    /// Every live document, for an update whose decision rests only on
+    /// `fields`: a document this transaction later merges into is validated
+    /// over those parts alone, so a write of another field does not conflict.
+    /// A version without part IDs scans as [`Self::get_all_with_datastore`].
+    pub(crate) async fn get_all_with_datastore_deciding_on(
+        &self,
+        datastore: &NamespaceView,
+        systemstore: &NamespaceView,
+        fields: &rapidhash::RapidHashSet<String>,
+    ) -> Result<Vec<Document>> {
+        let parts = self
+            .part_ids_of(datastore, fields.iter().map(String::as_str))
+            .await?;
+        let entries = self
+            .scan_documents(
+                datastore,
+                systemstore,
+                false,
+                parts.map(Vec::into_boxed_slice),
+            )
+            .await?;
+        Ok(entries.into_iter().map(|(_, doc, _)| doc).collect())
+    }
+
+    async fn scan_documents(
+        &self,
+        datastore: &NamespaceView,
+        systemstore: &NamespaceView,
+        show_deleted: bool,
+        parts: Option<Box<[u32]>>,
+    ) -> Result<Vec<(u64, Document, bool)>> {
         let prefix = self.collection_key_prefix();
         let prefix_len = prefix.len();
-        let opts = IterOptions::new().with_prefix(prefix);
+        let opts = IterOptions::new().with_prefix(prefix).with_parts(parts);
 
         let mut iter = datastore.iterator(opts).await.map_err(Error::Storage)?;
 
@@ -158,7 +359,7 @@ impl Collection {
                 continue;
             };
 
-            let doc = Document::from_cbor(&pair.value)
+            let doc = Document::from_storage_cbor(&pair.value)
                 .map_err(|e| Error::document_at_key(&pair.key, e))?;
             entries.push((doc_short_id, doc));
         }
@@ -203,7 +404,7 @@ impl Collection {
             else {
                 continue;
             };
-            let doc = Document::from_cbor(&bytes)
+            let doc = Document::from_storage_cbor(&bytes)
                 .map_err(|e| Error::document_at_key(&self.doc_key(doc_short_id), e))?;
             if let Some(hydrated) = self
                 .hydrate(datastore, systemstore, doc_short_id, doc, show_deleted)
@@ -268,12 +469,10 @@ impl Collection {
             .cloned()
             .ok_or_else(|| Error::InvalidDocument("Document must have an ID".into()))?;
 
-        // Serialize document to CBOR
-        let data = doc.to_cbor()?;
+        self.claim_series(datastore, doc).await?;
 
-        // Store document
-        let key = self.doc_key(doc_short_id);
-        datastore.set(&key, &data).await.map_err(Error::Storage)?;
+        self.put_document_value(datastore, doc_short_id, doc, true, None)
+            .await?;
 
         // Store schema version
         self.store_version(datastore, doc_short_id).await?;
@@ -298,11 +497,12 @@ impl Collection {
             .id()
             .ok_or_else(|| Error::InvalidDocument("Document must have an ID".into()))?;
 
-        let key = self.doc_key(doc_short_id);
-
-        let old_doc = match datastore.get(&key).await.map_err(Error::Storage)? {
+        if self.is_deleted(datastore, doc_short_id).await? {
+            return Err(Error::DocumentNotFound(doc_id.to_string()));
+        }
+        let old_doc = match self.read_document_blob(datastore, doc_short_id).await? {
             Some(bytes) => {
-                let mut d = Document::from_cbor(&bytes)?;
+                let mut d = Document::from_storage_cbor(&bytes)?;
                 d.set_id(doc_id.clone());
                 d
             }
@@ -311,10 +511,11 @@ impl Collection {
 
         self.validate_immutable_fields_unchanged(&old_doc, doc)?;
 
-        // Serialize and store
-        let data = doc.to_cbor()?;
+        self.release_series(datastore, &old_doc).await?;
+        self.claim_series(datastore, doc).await?;
 
-        datastore.set(&key, &data).await.map_err(Error::Storage)?;
+        self.put_document_value(datastore, doc_short_id, doc, false, None)
+            .await?;
 
         // Update schema version to current collection version
         self.store_version(datastore, doc_short_id).await?;
@@ -337,6 +538,19 @@ impl Collection {
         // Check if document exists
         if !datastore.has(&key).await.map_err(Error::Storage)? {
             return Ok(false);
+        }
+
+        if self.def.downsample_source.is_some() {
+            let systemstore = datastore.sibling(storage::namespace::Namespace::Systemstore);
+            if let Some(doc_id) = crate::docid::map::get_doc_id(&systemstore, doc_short_id).await? {
+                let doc_id = DocID::from_string(&doc_id)?;
+                if let Some((doc, _)) = self
+                    .get_with_datastore_include_deleted(datastore, doc_short_id, &doc_id, false)
+                    .await?
+                {
+                    self.release_series(datastore, &doc).await?;
+                }
+            }
         }
 
         // Delete document
@@ -394,25 +608,68 @@ impl Collection {
         doc: &Document,
         doc_short_id: u64,
     ) -> Result<DocID> {
+        self.save_with_datastore_priorities(datastore, doc, doc_short_id, None)
+            .await
+    }
+
+    pub(crate) async fn save_with_datastore_priorities(
+        &self,
+        datastore: &NamespaceView,
+        doc: &Document,
+        doc_short_id: u64,
+        priorities: Option<&rapidhash::RapidHashMap<String, super::value::FieldOrder>>,
+    ) -> Result<DocID> {
+        let target = if let Some(version) = doc
+            .schema_version_id()
+            .filter(|version| *version != self.version_id())
+        {
+            let system = datastore.sibling(storage::namespace::Namespace::Systemstore);
+            crate::definition::loader::get_collection_by_version_id(&system, version)
+                .await?
+                .map(Collection::new)
+        } else {
+            None
+        };
+        let value_collection = target.as_ref().unwrap_or(self);
         let doc_id = doc
             .id()
             .cloned()
             .ok_or_else(|| Error::InvalidDocument("Document must have an ID".into()))?;
 
-        let key = self.doc_key(doc_short_id);
+        if !self.is_deleted(datastore, doc_short_id).await? {
+            self.claim_series(datastore, doc).await?;
+        }
 
-        // Serialize and store (upsert)
-        let data = doc.to_cbor()?;
-
-        datastore.set(&key, &data).await.map_err(Error::Storage)?;
+        if target.is_none()
+            && doc
+                .schema_version_id()
+                .is_some_and(|version| version != self.version_id())
+        {
+            // An as-yet unknown definition has no local part IDs. A plain put
+            // stays whole-value validated until that definition can be loaded.
+            datastore
+                .set(&self.doc_key(doc_short_id), &doc.to_cbor()?)
+                .await
+                .map_err(Error::Storage)?;
+        } else {
+            let merged = if let Some(priorities) = priorities {
+                value_collection
+                    .merge_resolved_document_value(datastore, doc_short_id, doc, priorities)
+                    .await?
+            } else {
+                false
+            };
+            if !merged {
+                value_collection
+                    .put_document_value(datastore, doc_short_id, doc, false, priorities)
+                    .await?;
+            }
+        }
 
         // Store schema version - preserve document's version if set, otherwise use collection's
-        let version_key = self.version_key(doc_short_id);
         let version = doc.schema_version_id().unwrap_or(&self.def.version_id);
-        datastore
-            .set(&version_key, version.as_bytes())
-            .await
-            .map_err(Error::Storage)?;
+        self.store_document_version(datastore, doc_short_id, version)
+            .await?;
 
         Ok(doc_id)
     }

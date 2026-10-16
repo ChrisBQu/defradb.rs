@@ -34,6 +34,9 @@ members = [
     "crates/defra-node",
     "crates/replication-filter",
     "crates/telemetry",
+    "crates/edge",
+    "crates/workers",
+    "crates/inputs",
     "tools/lens-host",
     "tools/ffi-test",
     "tools/integration-test",
@@ -58,7 +61,7 @@ repository = "https://github.com/sourcenetwork/defradb.rs"
 # entire duration of the future and can deadlock a multi-threaded
 # runtime. The audit in #673 confirmed no current site triggers this,
 # but the lint enforces the discipline going forward so future
-# contributors can't accidentally introduce it. Use `tokio::sync::Mutex`
+# contributors can't accidentally introduce it. Use `regolith::sync::Mutex`
 # (or restructure to drop the guard before awaiting) in any flagged
 # site.
 [workspace.lints.clippy]
@@ -89,7 +92,6 @@ rustls = { version = "0.23", default-features = false }
 # Async runtime
 tokio = { version = "1.35" }
 async-trait = "0.1.92"
-async-lock = "3"
 futures = "0.3"
 
 # Serialization
@@ -120,7 +122,7 @@ iroh-tickets = "1.0.0"
 postcard = { version = "1.0", features = ["alloc"] }
 
 # Storage
-regolith = { git = "https://github.com/sourcenetwork/regolith.git", rev = "72a7b8b8ce802832d777b8156cd0dd1a136c4c0b" }
+regolith = { git = "https://github.com/sourcenetwork/regolith.git", rev = "3ed721c513a7e3a177fbcb0bf7cea54c7a17dfef" }
 
 # Cryptography
 ed25519-dalek = { version = "2.1", features = ["serde", "zeroize"] }
@@ -172,7 +174,6 @@ hyper = "1.9.0"
 
 # Error handling
 thiserror = "2"
-anyhow = "1.0"
 
 # gRPC (Orbis ring integration)
 tonic = "0.14"
@@ -184,6 +185,12 @@ tonic-prost-build = "0.14"
 # Bytes
 bytes = "1.5"
 
+# The process allocator of the defra binaries and the benches (never set by a
+# library): a heap per thread, and a block freed on another thread returns to
+# its heap without a lock, which thread-per-core hand-offs do all the time.
+# Native targets only.
+mimalloc = { version = "0.1.52", default-features = false }
+
 # Logging
 tracing = "0.1"
 
@@ -192,7 +199,6 @@ proptest = "1.11.0"
 criterion = { version = "0.6", features = ["async_tokio"] }
 
 # Synchronization (non-poisoning locks)
-parking_lot = "0.12"
 
 # Caching
 lru = "0.18.2"

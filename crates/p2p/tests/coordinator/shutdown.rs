@@ -137,7 +137,7 @@ async fn task_registration_racing_shutdown_does_not_leave_resources_alive() {
         let shutdown = SyncShutdownHandle::new(1);
         let resource = Arc::new(());
         let retained = Arc::downgrade(&resource);
-        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let barrier = Arc::new(regolith::sync::Barrier::new(2));
         let registration = tokio::spawn({
             let shutdown = shutdown.clone();
             let barrier = barrier.clone();

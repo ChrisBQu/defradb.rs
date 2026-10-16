@@ -5,11 +5,19 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum Error {
+    #[error("a different policy already exists under ID {0}")]
+    PolicyAlreadyExists(String),
+
     #[error("cannot resolve an exclusion through a relationship cycle")]
     IndeterminateExclusion,
 
     #[error("permission evaluation {0} limit exceeded")]
     EvaluationLimitExceeded(&'static str),
+
+    #[error(
+        "the permission check needs a store read that is not ready; use the asynchronous check"
+    )]
+    EvaluationPending,
 
     #[error("serialization error: {0}")]
     Json(#[from] serde_json::Error),

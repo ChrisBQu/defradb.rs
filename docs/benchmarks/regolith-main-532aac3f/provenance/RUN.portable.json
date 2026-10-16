@@ -1,0 +1,570 @@
+{
+  "revision": "532aac3fd06a61c319c2d5fbde84da42aab67f0d",
+  "label": "main-532aac3f",
+  "source_path": "source checkout omitted; identify source with revision",
+  "profile": "release-fast",
+  "binary_paths": {
+    "allocs": "omitted-binaries/allocs",
+    "document_write": "omitted-binaries/document_write",
+    "startup": "omitted-binaries/startup",
+    "write_baseline": "omitted-binaries/write_baseline"
+  },
+  "sha256": {
+    "allocs": "a1b68c22e10f4cb75f8e0f091bc35636b2d02fc2bd0ba0a7a05bd0ed807f99ed",
+    "document_write": "5e4943b5dbdfdd4ea9d0d58ccfbbd58d956b7172fe166b92a7e1054d88bf1801",
+    "startup": "2272920ea00a9028e7436db99d3392b2f72e92e5380bb27ebb5188ef745129c1",
+    "write_baseline": "2339c971d4fbd3a0f3c731cded4afe9c28fc8dc8a83ba0acfd49423f634a8c5d"
+  },
+  "build_metadata": {
+    "format": "legacy-BUILD.txt",
+    "text": "Revision: 532aac3fd06a61c319c2d5fbde84da42aab67f0d\nTree: clean at build\nToolchain: rustc 1.99.0 (b940084d7 2026-09-28)\nProfile: release-fast\nBuild command: CARGO_TARGET_DIR=/tmp/defra-perf-artifacts/main-532aac3f CARGO_BUILD_JOBS=8 cargo bench -p benches --bench allocs --bench write_baseline --bench document_write --bench startup --profile release-fast --no-run\nThese executables were built, not run; no timings or allocation counts were collected.\nRun from: /Users/johnzampolin/go/src/github.com/sourcenetwork/defradb-alloc-main\n"
+  },
+  "criterion_target_dir": "criterion",
+  "started_unix": 1792036971.774823,
+  "commands": [
+    {
+      "name": "write_baseline",
+      "binary": "write_baseline",
+      "binary_path": "omitted-binaries/write_baseline",
+      "binary_sha256": "2339c971d4fbd3a0f3c731cded4afe9c28fc8dc8a83ba0acfd49423f634a8c5d",
+      "argv": [
+        "omitted-binaries/write_baseline"
+      ],
+      "guard_path": "commands/write_baseline-loadguard-attempt-01.json",
+      "guard": {
+        "passed": true,
+        "cores": 18,
+        "loadavg": [
+          8.01123046875,
+          25.3642578125,
+          32.0498046875
+        ],
+        "ceiling": 9.0,
+        "note": "one-minute load 8.01 on 18 core(s), at or under the 9.00 ceiling: the host was quiet."
+      },
+      "guard_sha256": "bdf856e345c25da55c8c5ea0fa30b92f1bd53899ab883a1a37f0c6bcf903ca19",
+      "guard_attempt": 1,
+      "started_unix": 1792036971.867747,
+      "exit_code": 0,
+      "artifacts_valid": true,
+      "log_path": "commands/write_baseline.log",
+      "families_path": "commands/write_baseline.families.jsonl",
+      "finished_unix": 1792037790.9339478,
+      "log_sha256": "e1219c2055b6ea83b31cab99272d8f9798beac33ff9b48da68fadb79437549e6",
+      "families": [
+        {
+          "name": "write_baseline_creates",
+          "sha256": "68d7d863ac2e43d2208d77ac0b3ccfc88be2c9b9b888143d4ef25242645ff36c"
+        },
+        {
+          "name": "write_baseline_shared_updates",
+          "sha256": "4a684a42480ebf2be8d6e9aaf2ade1dfc23f1a02e8f03bbd203795d365ebb631"
+        },
+        {
+          "name": "write_baseline_counters_indexes",
+          "sha256": "a25c38914e44eaaf64ef4a55bf23a56c3617b74a746ecd934693ced260ae95e4"
+        }
+      ],
+      "families_sha256": "1226e65da8536633fa8333e9959d4c0a25ede19aaecb1e70b49ea2503f4aee12",
+      "criterion_target_dir": "criterion/write_baseline"
+    },
+    {
+      "name": "document_write",
+      "binary": "document_write",
+      "binary_path": "omitted-binaries/document_write",
+      "binary_sha256": "5e4943b5dbdfdd4ea9d0d58ccfbbd58d956b7172fe166b92a7e1054d88bf1801",
+      "argv": [
+        "omitted-binaries/document_write",
+        "--bench",
+        "document_create/(4|16)$|document_create_branchable/14$"
+      ],
+      "guard_path": "commands/document_write-loadguard-attempt-01.json",
+      "guard": {
+        "passed": true,
+        "cores": 18,
+        "loadavg": [
+          7.70947265625,
+          8.0537109375,
+          16.04052734375
+        ],
+        "ceiling": 9.0,
+        "note": "one-minute load 7.71 on 18 core(s), at or under the 9.00 ceiling: the host was quiet."
+      },
+      "guard_sha256": "31dd0a24413136b88acc0de764359c4f6c172761fdba11c62308d37d274bd20b",
+      "guard_attempt": 1,
+      "started_unix": 1792037791.0605319,
+      "exit_code": 0,
+      "artifacts_valid": true,
+      "log_path": "commands/document_write.log",
+      "families_path": "commands/document_write.families.jsonl",
+      "finished_unix": 1792037821.752888,
+      "log_sha256": "9dd663726fd2f98a5fbad25db758da85e6ca3fe81245d750f814d9bc2f9f0a91",
+      "families": [
+        {
+          "name": "document_ops",
+          "sha256": "ea9f3f589bc91d4657fcaf16745ca341859c37bf369a8d711010d84fbbe2cac4"
+        }
+      ],
+      "families_sha256": "38723b47875fb804844a62a6b3df4e462edf8f0623c88cfd2036c407d5276ae2",
+      "criterion_target_dir": "criterion/document_write",
+      "criterion_estimates": {
+        "document_create/4": {
+          "path": "document_write/criterion/document_create/4/new/estimates.json",
+          "sha256": "7bb404e4d21fd5eeb67f634d2f31cb2792e43e7412f9ba7998b3ac43b57361b5",
+          "median_point_estimate": 22326.80504889456
+        },
+        "document_create/16": {
+          "path": "document_write/criterion/document_create/16/new/estimates.json",
+          "sha256": "39508dcaa077cf83b68cfbf48a35b2d2575d1fab6bbfd8c4d6a6446cb77d5334",
+          "median_point_estimate": 77180.26381578948
+        },
+        "document_create_branchable/14": {
+          "path": "document_write/criterion/document_create_branchable/14/new/estimates.json",
+          "sha256": "5e01d3516a3c69ac7a46d3c328685267c9f526bbf61143a2c64ca91528898ef5",
+          "median_point_estimate": 29464.610620999825
+        }
+      }
+    },
+    {
+      "name": "startup",
+      "binary": "startup",
+      "binary_path": "omitted-binaries/startup",
+      "binary_sha256": "2272920ea00a9028e7436db99d3392b2f72e92e5380bb27ebb5188ef745129c1",
+      "argv": [
+        "omitted-binaries/startup",
+        "--bench",
+        "startup/cold_open/embedded/10_collections"
+      ],
+      "guard_path": "commands/startup-loadguard-attempt-01.json",
+      "guard": {
+        "passed": true,
+        "cores": 18,
+        "loadavg": [
+          6.79541015625,
+          7.78125,
+          15.66259765625
+        ],
+        "ceiling": 9.0,
+        "note": "one-minute load 6.80 on 18 core(s), at or under the 9.00 ceiling: the host was quiet."
+      },
+      "guard_sha256": "935561bb1d701344faeb3b20a3c2db193c5737b1878cec6bc08b8208b21d81b1",
+      "guard_attempt": 1,
+      "started_unix": 1792037821.8609438,
+      "exit_code": 0,
+      "artifacts_valid": true,
+      "log_path": "commands/startup.log",
+      "families_path": "commands/startup.families.jsonl",
+      "finished_unix": 1792037838.117008,
+      "log_sha256": "3dac907b3a782208f64a3605adddd4d0e95234a5236ab6d381c2b365d9c1f70d",
+      "families": [
+        {
+          "name": "startup",
+          "sha256": "e8633634998671e7c82b4bb563572c0e6dd47d2725b3dc304ca0e03e5a40a937"
+        },
+        {
+          "name": "disk_footprint",
+          "sha256": "97f195872acf29de189d3473621aa5d97d9ac843a65ef169bd420bb79d58b36d"
+        }
+      ],
+      "families_sha256": "99e96b490c3670a15162dc7596dc359c07a906a813c1c317053b600e9d1235f1",
+      "criterion_target_dir": "criterion/startup",
+      "criterion_estimates": {
+        "startup/cold_open/embedded/10_collections": {
+          "path": "startup/criterion/startup/cold_open_embedded_10_collections/new/estimates.json",
+          "sha256": "99864d002010691bf8ff95afce19d50876eff4f9d0f90cd6d3b6f8999f2376bf",
+          "median_point_estimate": 8972135.375
+        }
+      }
+    },
+    {
+      "name": "allocs-1",
+      "binary": "allocs",
+      "binary_path": "omitted-binaries/allocs",
+      "binary_sha256": "a1b68c22e10f4cb75f8e0f091bc35636b2d02fc2bd0ba0a7a05bd0ed807f99ed",
+      "argv": [
+        "omitted-binaries/allocs"
+      ],
+      "guard_path": "commands/allocs-1-loadguard-attempt-01.json",
+      "guard": {
+        "passed": true,
+        "cores": 18,
+        "loadavg": [
+          6.24365234375,
+          7.61181640625,
+          15.4638671875
+        ],
+        "ceiling": 9.0,
+        "note": "one-minute load 6.24 on 18 core(s), at or under the 9.00 ceiling: the host was quiet."
+      },
+      "guard_sha256": "5dee2004a4b58c2eac91a10c949d9dc8956053d216f570f47cde37950fc86623",
+      "guard_attempt": 1,
+      "started_unix": 1792037838.225947,
+      "exit_code": 0,
+      "artifacts_valid": true,
+      "log_path": "commands/allocs-1.log",
+      "families_path": "commands/allocs-1.families.jsonl",
+      "finished_unix": 1792037838.2963681,
+      "log_sha256": "709d2ffea292304eaa6fcb9bddbbfa7961e4ccda5af4866acdb04925c1b085ea",
+      "families": [
+        {
+          "name": "allocs",
+          "sha256": "0392633e5f179b9e33fe4ebc12c94beca242f26154834fba88c77460b0672012"
+        }
+      ],
+      "families_sha256": "8a360bf86af255bc702ee510cf7c6630de957797e5997e62cb184e56af7fa241",
+      "criterion_target_dir": "criterion/allocs-1",
+      "document_create_allocations_per_op": 2994.695,
+      "alloc_sample": 1
+    },
+    {
+      "name": "allocs-2",
+      "binary": "allocs",
+      "binary_path": "omitted-binaries/allocs",
+      "binary_sha256": "a1b68c22e10f4cb75f8e0f091bc35636b2d02fc2bd0ba0a7a05bd0ed807f99ed",
+      "argv": [
+        "omitted-binaries/allocs"
+      ],
+      "guard_path": "commands/allocs-2-loadguard-attempt-01.json",
+      "guard": {
+        "passed": true,
+        "cores": 18,
+        "loadavg": [
+          6.24365234375,
+          7.61181640625,
+          15.4638671875
+        ],
+        "ceiling": 9.0,
+        "note": "one-minute load 6.24 on 18 core(s), at or under the 9.00 ceiling: the host was quiet."
+      },
+      "guard_sha256": "5dee2004a4b58c2eac91a10c949d9dc8956053d216f570f47cde37950fc86623",
+      "guard_attempt": 1,
+      "started_unix": 1792037838.4083369,
+      "exit_code": 0,
+      "artifacts_valid": true,
+      "log_path": "commands/allocs-2.log",
+      "families_path": "commands/allocs-2.families.jsonl",
+      "finished_unix": 1792037838.455334,
+      "log_sha256": "2e56b6c9189eca549268e9678d5e8a32236b02d6ce265d7a5ca5197d9b668c48",
+      "families": [
+        {
+          "name": "allocs",
+          "sha256": "50e31b8bed00bb5e62f7d38b45ce2e12f48bcf16e86f4507ebe33ebf99698faf"
+        }
+      ],
+      "families_sha256": "e2bc26737dceb41feb271f3e7623571c48615f814e3079422980f2ec00ba640a",
+      "criterion_target_dir": "criterion/allocs-2",
+      "document_create_allocations_per_op": 2993.465,
+      "alloc_sample": 2
+    },
+    {
+      "name": "allocs-3",
+      "binary": "allocs",
+      "binary_path": "omitted-binaries/allocs",
+      "binary_sha256": "a1b68c22e10f4cb75f8e0f091bc35636b2d02fc2bd0ba0a7a05bd0ed807f99ed",
+      "argv": [
+        "omitted-binaries/allocs"
+      ],
+      "guard_path": "commands/allocs-3-loadguard-attempt-01.json",
+      "guard": {
+        "passed": true,
+        "cores": 18,
+        "loadavg": [
+          6.38427734375,
+          7.6181640625,
+          15.419921875
+        ],
+        "ceiling": 9.0,
+        "note": "one-minute load 6.38 on 18 core(s), at or under the 9.00 ceiling: the host was quiet."
+      },
+      "guard_sha256": "e7b70a55d41fa6351057781570ac964ea3049a4aa0d7c0f66996f3a2abb7ecda",
+      "guard_attempt": 1,
+      "started_unix": 1792037838.553248,
+      "exit_code": 0,
+      "artifacts_valid": true,
+      "log_path": "commands/allocs-3.log",
+      "families_path": "commands/allocs-3.families.jsonl",
+      "finished_unix": 1792037838.6022289,
+      "log_sha256": "a4ef400218c1123de9a1f7debd56008850d284c27f4d8658e3d70e42781a82fe",
+      "families": [
+        {
+          "name": "allocs",
+          "sha256": "ec497d12276b6162f7634da7731788284811c18fdc95a8f1fe2f824c0fbd2cf2"
+        }
+      ],
+      "families_sha256": "e00543e5a34af16a9a88d61214dcd96ea75af4f97ef122d999d4497a103e8293",
+      "criterion_target_dir": "criterion/allocs-3",
+      "document_create_allocations_per_op": 2989.575,
+      "alloc_sample": 3
+    },
+    {
+      "name": "allocs-4",
+      "binary": "allocs",
+      "binary_path": "omitted-binaries/allocs",
+      "binary_sha256": "a1b68c22e10f4cb75f8e0f091bc35636b2d02fc2bd0ba0a7a05bd0ed807f99ed",
+      "argv": [
+        "omitted-binaries/allocs"
+      ],
+      "guard_path": "commands/allocs-4-loadguard-attempt-01.json",
+      "guard": {
+        "passed": true,
+        "cores": 18,
+        "loadavg": [
+          6.38427734375,
+          7.6181640625,
+          15.419921875
+        ],
+        "ceiling": 9.0,
+        "note": "one-minute load 6.38 on 18 core(s), at or under the 9.00 ceiling: the host was quiet."
+      },
+      "guard_sha256": "e7b70a55d41fa6351057781570ac964ea3049a4aa0d7c0f66996f3a2abb7ecda",
+      "guard_attempt": 1,
+      "started_unix": 1792037838.714245,
+      "exit_code": 0,
+      "artifacts_valid": true,
+      "log_path": "commands/allocs-4.log",
+      "families_path": "commands/allocs-4.families.jsonl",
+      "finished_unix": 1792037838.76226,
+      "log_sha256": "73de439cf392dbce9900bd9e38923a6cf57e6d54226473a25bf76d62dfd685c5",
+      "families": [
+        {
+          "name": "allocs",
+          "sha256": "2485b6c4a42962d0f61b89fba0c6a4e639f0241a1f200606a6475900ea921830"
+        }
+      ],
+      "families_sha256": "8717ea810a932b46bb9ed4b504e0798a8cd0dcc46e431f758afcd2fbd09d4f7f",
+      "criterion_target_dir": "criterion/allocs-4",
+      "document_create_allocations_per_op": 2984.645,
+      "alloc_sample": 4
+    },
+    {
+      "name": "allocs-5",
+      "binary": "allocs",
+      "binary_path": "omitted-binaries/allocs",
+      "binary_sha256": "a1b68c22e10f4cb75f8e0f091bc35636b2d02fc2bd0ba0a7a05bd0ed807f99ed",
+      "argv": [
+        "omitted-binaries/allocs"
+      ],
+      "guard_path": "commands/allocs-5-loadguard-attempt-01.json",
+      "guard": {
+        "passed": true,
+        "cores": 18,
+        "loadavg": [
+          6.38427734375,
+          7.6181640625,
+          15.419921875
+        ],
+        "ceiling": 9.0,
+        "note": "one-minute load 6.38 on 18 core(s), at or under the 9.00 ceiling: the host was quiet."
+      },
+      "guard_sha256": "e7b70a55d41fa6351057781570ac964ea3049a4aa0d7c0f66996f3a2abb7ecda",
+      "guard_attempt": 1,
+      "started_unix": 1792037838.867179,
+      "exit_code": 0,
+      "artifacts_valid": true,
+      "log_path": "commands/allocs-5.log",
+      "families_path": "commands/allocs-5.families.jsonl",
+      "finished_unix": 1792037838.917304,
+      "log_sha256": "fe353701b26969966ecf0c733653c918b215dbccac72a6c3fef973b3f42c2e76",
+      "families": [
+        {
+          "name": "allocs",
+          "sha256": "02c5ec2a878f4c982bdc16007644342d65376c9eff79a92b8fea0a0bb6a6a248"
+        }
+      ],
+      "families_sha256": "cbfca7b1b2c12e1504d100ca0cde1b8c7f1623638f26f7eb2922aba4471a7f77",
+      "criterion_target_dir": "criterion/allocs-5",
+      "document_create_allocations_per_op": 2981.695,
+      "alloc_sample": 5
+    }
+  ],
+  "guard_attempts": [
+    {
+      "name": "write_baseline",
+      "attempt": 1,
+      "path": "commands/write_baseline-loadguard-attempt-01.json",
+      "return_code": 0,
+      "guard": {
+        "passed": true,
+        "cores": 18,
+        "loadavg": [
+          8.01123046875,
+          25.3642578125,
+          32.0498046875
+        ],
+        "ceiling": 9.0,
+        "note": "one-minute load 8.01 on 18 core(s), at or under the 9.00 ceiling: the host was quiet."
+      },
+      "stdout": "{\n \"passed\": true,\n \"cores\": 18,\n \"loadavg\": [\n  8.01123046875,\n  25.3642578125,\n  32.0498046875\n ],\n \"ceiling\": 9.0,\n \"note\": \"one-minute load 8.01 on 18 core(s), at or under the 9.00 ceiling: the host was quiet.\"\n}\n",
+      "stderr": "",
+      "guard_sha256": "bdf856e345c25da55c8c5ea0fa30b92f1bd53899ab883a1a37f0c6bcf903ca19",
+      "started_unix": 1792036971.839361,
+      "finished_unix": 1792036971.867522,
+      "passed": true
+    },
+    {
+      "name": "document_write",
+      "attempt": 1,
+      "path": "commands/document_write-loadguard-attempt-01.json",
+      "return_code": 0,
+      "guard": {
+        "passed": true,
+        "cores": 18,
+        "loadavg": [
+          7.70947265625,
+          8.0537109375,
+          16.04052734375
+        ],
+        "ceiling": 9.0,
+        "note": "one-minute load 7.71 on 18 core(s), at or under the 9.00 ceiling: the host was quiet."
+      },
+      "stdout": "{\n \"passed\": true,\n \"cores\": 18,\n \"loadavg\": [\n  7.70947265625,\n  8.0537109375,\n  16.04052734375\n ],\n \"ceiling\": 9.0,\n \"note\": \"one-minute load 7.71 on 18 core(s), at or under the 9.00 ceiling: the host was quiet.\"\n}\n",
+      "stderr": "",
+      "guard_sha256": "31dd0a24413136b88acc0de764359c4f6c172761fdba11c62308d37d274bd20b",
+      "started_unix": 1792037791.02282,
+      "finished_unix": 1792037791.060308,
+      "passed": true
+    },
+    {
+      "name": "startup",
+      "attempt": 1,
+      "path": "commands/startup-loadguard-attempt-01.json",
+      "return_code": 0,
+      "guard": {
+        "passed": true,
+        "cores": 18,
+        "loadavg": [
+          6.79541015625,
+          7.78125,
+          15.66259765625
+        ],
+        "ceiling": 9.0,
+        "note": "one-minute load 6.80 on 18 core(s), at or under the 9.00 ceiling: the host was quiet."
+      },
+      "stdout": "{\n \"passed\": true,\n \"cores\": 18,\n \"loadavg\": [\n  6.79541015625,\n  7.78125,\n  15.66259765625\n ],\n \"ceiling\": 9.0,\n \"note\": \"one-minute load 6.80 on 18 core(s), at or under the 9.00 ceiling: the host was quiet.\"\n}\n",
+      "stderr": "",
+      "guard_sha256": "935561bb1d701344faeb3b20a3c2db193c5737b1878cec6bc08b8208b21d81b1",
+      "started_unix": 1792037821.830362,
+      "finished_unix": 1792037821.860234,
+      "passed": true
+    },
+    {
+      "name": "allocs-1",
+      "attempt": 1,
+      "path": "commands/allocs-1-loadguard-attempt-01.json",
+      "return_code": 0,
+      "guard": {
+        "passed": true,
+        "cores": 18,
+        "loadavg": [
+          6.24365234375,
+          7.61181640625,
+          15.4638671875
+        ],
+        "ceiling": 9.0,
+        "note": "one-minute load 6.24 on 18 core(s), at or under the 9.00 ceiling: the host was quiet."
+      },
+      "stdout": "{\n \"passed\": true,\n \"cores\": 18,\n \"loadavg\": [\n  6.24365234375,\n  7.61181640625,\n  15.4638671875\n ],\n \"ceiling\": 9.0,\n \"note\": \"one-minute load 6.24 on 18 core(s), at or under the 9.00 ceiling: the host was quiet.\"\n}\n",
+      "stderr": "",
+      "guard_sha256": "5dee2004a4b58c2eac91a10c949d9dc8956053d216f570f47cde37950fc86623",
+      "started_unix": 1792037838.190618,
+      "finished_unix": 1792037838.2253828,
+      "passed": true
+    },
+    {
+      "name": "allocs-2",
+      "attempt": 1,
+      "path": "commands/allocs-2-loadguard-attempt-01.json",
+      "return_code": 0,
+      "guard": {
+        "passed": true,
+        "cores": 18,
+        "loadavg": [
+          6.24365234375,
+          7.61181640625,
+          15.4638671875
+        ],
+        "ceiling": 9.0,
+        "note": "one-minute load 6.24 on 18 core(s), at or under the 9.00 ceiling: the host was quiet."
+      },
+      "stdout": "{\n \"passed\": true,\n \"cores\": 18,\n \"loadavg\": [\n  6.24365234375,\n  7.61181640625,\n  15.4638671875\n ],\n \"ceiling\": 9.0,\n \"note\": \"one-minute load 6.24 on 18 core(s), at or under the 9.00 ceiling: the host was quiet.\"\n}\n",
+      "stderr": "",
+      "guard_sha256": "5dee2004a4b58c2eac91a10c949d9dc8956053d216f570f47cde37950fc86623",
+      "started_unix": 1792037838.379052,
+      "finished_unix": 1792037838.407665,
+      "passed": true
+    },
+    {
+      "name": "allocs-3",
+      "attempt": 1,
+      "path": "commands/allocs-3-loadguard-attempt-01.json",
+      "return_code": 0,
+      "guard": {
+        "passed": true,
+        "cores": 18,
+        "loadavg": [
+          6.38427734375,
+          7.6181640625,
+          15.419921875
+        ],
+        "ceiling": 9.0,
+        "note": "one-minute load 6.38 on 18 core(s), at or under the 9.00 ceiling: the host was quiet."
+      },
+      "stdout": "{\n \"passed\": true,\n \"cores\": 18,\n \"loadavg\": [\n  6.38427734375,\n  7.6181640625,\n  15.419921875\n ],\n \"ceiling\": 9.0,\n \"note\": \"one-minute load 6.38 on 18 core(s), at or under the 9.00 ceiling: the host was quiet.\"\n}\n",
+      "stderr": "",
+      "guard_sha256": "e7b70a55d41fa6351057781570ac964ea3049a4aa0d7c0f66996f3a2abb7ecda",
+      "started_unix": 1792037838.5253289,
+      "finished_unix": 1792037838.552982,
+      "passed": true
+    },
+    {
+      "name": "allocs-4",
+      "attempt": 1,
+      "path": "commands/allocs-4-loadguard-attempt-01.json",
+      "return_code": 0,
+      "guard": {
+        "passed": true,
+        "cores": 18,
+        "loadavg": [
+          6.38427734375,
+          7.6181640625,
+          15.419921875
+        ],
+        "ceiling": 9.0,
+        "note": "one-minute load 6.38 on 18 core(s), at or under the 9.00 ceiling: the host was quiet."
+      },
+      "stdout": "{\n \"passed\": true,\n \"cores\": 18,\n \"loadavg\": [\n  6.38427734375,\n  7.6181640625,\n  15.419921875\n ],\n \"ceiling\": 9.0,\n \"note\": \"one-minute load 6.38 on 18 core(s), at or under the 9.00 ceiling: the host was quiet.\"\n}\n",
+      "stderr": "",
+      "guard_sha256": "e7b70a55d41fa6351057781570ac964ea3049a4aa0d7c0f66996f3a2abb7ecda",
+      "started_unix": 1792037838.686025,
+      "finished_unix": 1792037838.7139788,
+      "passed": true
+    },
+    {
+      "name": "allocs-5",
+      "attempt": 1,
+      "path": "commands/allocs-5-loadguard-attempt-01.json",
+      "return_code": 0,
+      "guard": {
+        "passed": true,
+        "cores": 18,
+        "loadavg": [
+          6.38427734375,
+          7.6181640625,
+          15.419921875
+        ],
+        "ceiling": 9.0,
+        "note": "one-minute load 6.38 on 18 core(s), at or under the 9.00 ceiling: the host was quiet."
+      },
+      "stdout": "{\n \"passed\": true,\n \"cores\": 18,\n \"loadavg\": [\n  6.38427734375,\n  7.6181640625,\n  15.419921875\n ],\n \"ceiling\": 9.0,\n \"note\": \"one-minute load 6.38 on 18 core(s), at or under the 9.00 ceiling: the host was quiet.\"\n}\n",
+      "stderr": "",
+      "guard_sha256": "e7b70a55d41fa6351057781570ac964ea3049a4aa0d7c0f66996f3a2abb7ecda",
+      "started_unix": 1792037838.83621,
+      "finished_unix": 1792037838.86691,
+      "passed": true
+    }
+  ],
+  "complete": true,
+  "finished_unix": 1792037838.939734,
+  "binary_paths_note": "Executable files intentionally omitted; hashes are retained and verified against provenance/build metadata.",
+  "portable_paths_note": "All included artifacts use paths relative to this evidence-pack root. Executable binaries and the source checkout are intentionally omitted; their exact revision, build command, and SHA-256 identities are retained."
+}

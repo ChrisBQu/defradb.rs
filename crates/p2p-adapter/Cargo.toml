@@ -26,10 +26,13 @@ identity = { path = "../identity" }
 lens = { path = "../lens", default-features = false }
 p2p = { path = "../p2p", default-features = false }
 kms = { path = "../kms", optional = true }
+# The network runtime the peer runs on.
+edge = { path = "../edge" }
 query = { path = "../query" }
 replication-filter = { path = "../replication-filter" }
 schema = { path = "../schema" }
 storage = { path = "../storage" }
+workers = { path = "../workers" }
 
 async-trait.workspace = true
 bytes.workspace = true
@@ -37,6 +40,7 @@ chrono = { version = "0.4", features = ["serde"] }
 cid.workspace = true
 hex.workspace = true
 kovan.workspace = true
+regolith.workspace = true
 kovan-map.workspace = true
 kovan-queue.workspace = true
 n0-future.workspace = true
@@ -52,6 +56,7 @@ web-time.workspace = true
 zeroize = "1"
 
 [dev-dependencies]
+edge = { path = "../edge", features = ["testing"] }
 tokio = { workspace = true, features = ["test-util"] }
 crypto = { path = "../crypto" }
 data-encoding = "2"

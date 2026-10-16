@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{http_error_from_backend_message, HttpError};
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
+use crate::request_scope::bound;
 use crate::router::{AcpLightClientStatus, AppState, NodePermission, PolicyInfo};
 
 /// Response for adding a policy.
@@ -47,7 +48,7 @@ pub async fn add_policy(
         .did()
         .ok_or_else(|| HttpError::BadRequest("policy creator can not be empty".into()))?;
 
-    let acp = state.require_acp()?;
+    let acp = bound(state.require_acp()?, &identity.context());
 
     if body.trim().is_empty() {
         return Err(HttpError::BadRequest("policy data can not be empty".into()));
@@ -72,7 +73,7 @@ pub async fn list_policies(
 ) -> Result<Json<Vec<PolicyInfo>>, HttpError> {
     require_permission(&state, &identity, NodePermission::DacStatus).await?;
 
-    let acp = state.require_acp()?;
+    let acp = bound(state.require_acp()?, &identity.context());
 
     let policies = acp.list_policies().await.map_err(HttpError::Internal)?;
 
@@ -91,7 +92,7 @@ pub async fn get_policy(
 ) -> Result<Json<PolicyInfo>, HttpError> {
     require_permission(&state, &identity, NodePermission::DacStatus).await?;
 
-    let acp = state.require_acp()?;
+    let acp = bound(state.require_acp()?, &identity.context());
 
     let policy = acp
         .get_policy(&id)
@@ -113,7 +114,7 @@ pub async fn get_status(
 ) -> Result<Json<AcpLightClientStatus>, HttpError> {
     require_permission(&state, &identity, NodePermission::DacStatus).await?;
 
-    let acp = state.require_acp()?;
+    let acp = bound(state.require_acp()?, &identity.context());
     let status = acp
         .get_light_client_status()
         .await
@@ -242,7 +243,7 @@ pub async fn decide_doc_access(
         .map_err(|e| HttpError::BadRequest(format!("invalid actor DID: {}", e)))?;
     let permission = parse_doc_permission(&body.permission)?;
 
-    let doc_acp = state.require_doc_acp()?;
+    let doc_acp = bound(state.require_doc_acp()?, &identity.context());
     let allowed = doc_acp
         .check_doc_access(
             &actor,
@@ -274,7 +275,7 @@ pub async fn add_doc_relationship(
         .ok_or_else(|| HttpError::BadRequest("identity required for document ACP".into()))?;
 
     validate_add_doc_relationship(&body)?;
-    let doc_acp = state.require_doc_acp()?;
+    let doc_acp = bound(state.require_doc_acp()?, &identity.context());
     Ok(Json(
         apply_add_doc_relationship(doc_acp.as_ref(), requestor, &body).await?,
     ))
@@ -302,7 +303,7 @@ pub async fn add_doc_relationships(
         validate_add_doc_relationship(body)?;
     }
 
-    let doc_acp = state.require_doc_acp()?;
+    let doc_acp = bound(state.require_doc_acp()?, &identity.context());
     let mut results = Vec::with_capacity(bodies.len());
     for body in &bodies {
         results.push(apply_add_doc_relationship(doc_acp.as_ref(), requestor, body).await?);
@@ -343,7 +344,7 @@ pub async fn remove_doc_relationship(
         ));
     }
 
-    let doc_acp = state.require_doc_acp()?;
+    let doc_acp = bound(state.require_doc_acp()?, &identity.context());
 
     let was_removed = doc_acp
         .delete_doc_relationship(
@@ -459,10 +460,12 @@ mod tests {
     #[tokio::test]
     async fn add_doc_relationships_validates_every_item_before_writing() {
         let doc_acp = Arc::new(MockDocumentAcpOperations::new());
-        let state =
-            AppStateBuilder::new(Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>)
-                .with_doc_acp(Arc::clone(&doc_acp) as Arc<dyn DocumentAcpOperations>)
-                .build();
+        let state = AppStateBuilder::new(
+            Arc::new(MockQueryExecutor::new()) as Arc<dyn QueryExecutor>,
+            edge::testing::edge(),
+        )
+        .with_doc_acp(Arc::clone(&doc_acp) as Arc<dyn DocumentAcpOperations>)
+        .build();
         let requestor = identity::Did::new("did:key:requestor").unwrap();
         let identity = ExtractIdentity::from_did(Some(requestor));
 

@@ -1,6 +1,6 @@
 /// Traits for the datastore layer matching Go's internal/datastore/txn.go.
 use crate::multistore::{NamespaceView, RootView};
-use storage::corekv::{MaybeSendSync, TxnCallback};
+use storage::corekv::{MaybeSendSync, OnAbort, OnCommit};
 
 /// Transaction trait for DefraDB operations.
 ///
@@ -34,12 +34,14 @@ pub trait Txn: MaybeSendSync {
     /// Check if this is a read-only transaction.
     fn is_readonly(&self) -> bool;
 
-    /// Register a callback to be called on successful commit.
-    fn on_success(&mut self, callback: TxnCallback);
+    /// Register `callback` to run once if the transaction commits.
+    fn on_commit(&mut self, callback: OnCommit) -> storage::corekv::Result<()>;
 
-    /// Register a callback to be called on commit error.
-    fn on_error(&mut self, callback: TxnCallback);
+    /// Register `callback` to run once if the transaction ends without
+    /// committing.
+    fn on_abort(&mut self, callback: OnAbort);
 
-    /// Register a callback to be called on discard.
-    fn on_discard(&mut self, callback: TxnCallback);
+    /// Register `callback` to run once just before the commit is attempted.
+    /// An error from it fails the commit, and the abort callbacks run.
+    fn before_commit(&mut self, callback: storage::corekv::BeforeCommit);
 }

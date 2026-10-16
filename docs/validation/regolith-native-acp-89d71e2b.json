@@ -1,0 +1,142 @@
+{
+  "baseline_revision": "e95a271125314cacc2a71b9771f02d498ee8a104",
+  "fix_revision": "89d71e2b7449e0b52a277996603ee3073f4d10f6",
+  "vera_pin": "1dab0c4562da551b1a7f00fcea643b914769891c",
+  "lock_sha256": "7ddc320067cee80decf4c35b6efddf46eb5d28ca6cc13c8f99ab2d52d6019798",
+  "executables": {
+    "defra": {
+      "path": "/tmp/defra-kms-ci-target/super-dev/defra",
+      "sha256": "309e23d7922056ea85d327e889b5993a831eaddf0f9c92e960c3178dafccb197"
+    },
+    "verad": {
+      "path": "/tmp/defra-native-vera-target/debug/verad",
+      "sha256": "a721702069978e8c2a79dbbc84b1a67114fdafe1c246ed0b8537bfd92578021e"
+    },
+    "verars_test_binary": {
+      "sha256": "57597a7c8b74049dc4ad4a2727c126077f759a1c85f2b65d8f3760f416c7993b"
+    }
+  },
+  "cases": [
+    {
+      "name": "vera-library",
+      "log_sha256": "3bbf537e43379cfa56f1cdd7df74ccc0fef6d1d6c5ab3249757342d8e935eeac",
+      "result": [
+        67,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "revoked-delete",
+      "log_sha256": "d7baafe899a47e81163da94672aa0cba4e5b8f4b8a0f2dbf846967f0beeff27f",
+      "result": [
+        1,
+        0,
+        0
+      ],
+      "selector": "policy_generations::strict_replication::native_replicated_delete_rejects_revoked_writer"
+    },
+    {
+      "name": "policy-lifecycle",
+      "log_sha256": "fabcb3ca5045fff5995393f5e32ecd0b311c28c7253bde6ece815668f7fc6f52",
+      "result": [
+        1,
+        0,
+        0
+      ],
+      "selector": "policy_generations::native_protected_collection_keeps_revocations_across_relation_recreation"
+    },
+    {
+      "name": "replication-restart",
+      "log_sha256": "ab3dd660d3121e89fe053feb6c7c64db3d185eb5bfe44fdcf38f6770a288bc64",
+      "result": [
+        1,
+        0,
+        0
+      ],
+      "selector": "policy_generations::native_replicated_collection_keeps_revocations_across_relation_recreation_and_restart"
+    },
+    {
+      "name": "peer-authorization",
+      "log_sha256": "eaed76e86fd5b836a5e7185872077378381c4d0adc980524f52fa12f2056edaa",
+      "result": [
+        1,
+        0,
+        0
+      ],
+      "selector": "policy_generations::peer_authorization::native_ungranted_peer_is_filtered_until_explicitly_trusted_replay"
+    },
+    {
+      "name": "reader-update",
+      "log_sha256": "47b4d659d7cae90738435baaa163c5b5ace1c5d88fa93ff9fe2c26406f296c72",
+      "result": [
+        1,
+        0,
+        0
+      ],
+      "selector": "policy_generations::strict_replication::native_replicated_update_rejects_reader_only_signer"
+    },
+    {
+      "name": "writer-update",
+      "log_sha256": "26e6758cb9a94b7a10db82ef8a87004e0517eb3deffd450edc998ff0034a4203",
+      "result": [
+        1,
+        0,
+        0
+      ],
+      "selector": "policy_generations::strict_replication::native_replicated_update_accepts_granted_writer"
+    },
+    {
+      "name": "writer-delete",
+      "log_sha256": "db1d98f912f853c426cba93edf6f371efaca7faa90972b665592ea32617e3ef3",
+      "result": [
+        1,
+        0,
+        0
+      ],
+      "selector": "policy_generations::strict_replication::native_replicated_delete_accepts_granted_writer"
+    },
+    {
+      "name": "clippy-provider-cli",
+      "log_sha256": "1168cd03951b7c50a5b108eade33ca9f479b3143015d7cec248e39ac077385f5",
+      "result": "pass"
+    },
+    {
+      "name": "clippy-native",
+      "log_sha256": "c72a07c86faef814d62eca43a1539cece2cd0af1e547bb7652f81609b7e97a3f",
+      "result": "pass"
+    }
+  ],
+  "failure_category": "ordered ACP unregister -> rejected Vera archive submission (baseline only)",
+  "failure_baseline": {
+    "log_sha256": "0094bf648c54fafd23396d2ddd114b9f6bda348703c642d3357434203db1df24",
+    "category": "ordered ACP unregister -> rejected Vera archive submission"
+  },
+  "commands": {
+    "cli_build": "cargo +1.98.0 build --frozen -p cli --bin defra --features vera --profile super-dev",
+    "vera_lib": "cargo +1.98.0 test --frozen --profile super-dev -p vera --lib",
+    "native_case_template": "<verars test binary> <exact selector> --exact --nocapture --test-threads=1",
+    "clippy_provider_cli": "cargo +1.98.0 clippy --frozen --profile super-dev -p vera -p cli --features cli/vera --lib --tests -- -D warnings",
+    "clippy_native": "cargo +1.98.0 clippy --frozen --profile super-dev -p integration-test --test verars -- -D warnings",
+    "verad_build": "cargo +1.98.0 build --frozen -p verad --bin verad (Vera checkout at pinned commit; separate CARGO_TARGET_DIR)",
+    "native_test_compile": "cargo +1.98.0 test --frozen --profile super-dev -p integration-test --test verars --no-run",
+    "native_case_environment": "Set CARGO_TARGET_DIR=/tmp/defra-kms-ci-target, CARGO_BUILD_JOBS=4, RUNNER_TEMP=<private fixture root>, VERA_E2E_DIR=<private fixture root>/vera-state, VERA_E2E_KEEP=1, DEFRA_E2E_KEEP=1, RUST_LOG=info, DEFRA_RUST_BINARY=/tmp/defra-kms-ci-target/super-dev/defra, VERAD_BINARY=/tmp/defra-native-vera-target/debug/verad.",
+    "result_tuple": "For test summaries, [passed, failed, ignored]."
+  },
+  "environment": {
+    "toolchain": "1.98.0",
+    "host_platform": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
+    "required_variable_names": [
+      "CARGO_TARGET_DIR",
+      "CARGO_BUILD_JOBS",
+      "RUNNER_TEMP",
+      "VERA_E2E_DIR",
+      "VERA_E2E_KEEP",
+      "DEFRA_E2E_KEEP",
+      "RUST_LOG",
+      "DEFRA_RUST_BINARY",
+      "VERAD_BINARY"
+    ],
+    "note": "Values for fixture directories and binary paths are local /tmp locations; no credentials or private fixture contents are included."
+  }
+}

@@ -54,7 +54,7 @@ impl ExplainType {
 }
 
 /// Result of parsing a GraphQL request.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ParsedOperation {
     /// Query operations (SELECT)
     Query {

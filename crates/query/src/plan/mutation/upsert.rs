@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, FixedOffset, Utc};
+use defra_core::RequestContext;
 use document::{DocID, Document};
 use schema::{CType, CollectionVersion};
 use serde_json::Value as JsonValue;
@@ -132,6 +133,9 @@ pub struct UpsertNode {
     collection_name: String,
     /// Document mutator for storage operations
     mutator: Arc<dyn DocMutator>,
+    /// The context of the request the upserts serve: [`RequestContext::ambient`]
+    /// until [`UpsertNode::with_context`] sets it
+    context: RequestContext,
     /// Document mapping for field positions
     document_mapping: DocumentMapping,
     /// Collection schema for schema-aware type coercion (e.g., DateTime/UTC_NOW)
@@ -148,6 +152,7 @@ pub struct UpsertNode {
     update_input: Option<UpsertInput>,
     /// Single input to apply to all doc_ids (same fields for create and update)
     single_input: Option<UpsertInput>,
+    prepared_writes: Option<crate::prepared::PreparedMutation>,
     /// Upserted documents (populated after first next())
     upserted_docs: Vec<Doc>,
     /// Actions taken for each document
@@ -172,6 +177,7 @@ impl UpsertNode {
         Self {
             collection_name: collection_name.into(),
             mutator,
+            context: RequestContext::ambient(),
             document_mapping,
             collection: None,
             request_time: None,
@@ -180,6 +186,7 @@ impl UpsertNode {
             create_input: None,
             update_input: None,
             single_input: None,
+            prepared_writes: None,
             upserted_docs: Vec::new(),
             actions: Vec::new(),
             position: 0,
@@ -187,6 +194,20 @@ impl UpsertNode {
             did_upsert: false,
             initialized: false,
         }
+    }
+
+    /// Serve the request `context` belongs to.
+    pub fn with_context(mut self, context: RequestContext) -> Self {
+        self.context = context;
+        self
+    }
+
+    pub fn with_prepared_writes(
+        mut self,
+        prepared: Option<crate::prepared::PreparedMutation>,
+    ) -> Self {
+        self.prepared_writes = prepared;
+        self
     }
 
     /// Set the collection schema for schema-aware type coercion.
@@ -285,9 +306,20 @@ impl UpsertNode {
             // Collect the modified field names for block creation
             let modified_fields: RapidHashSet<String> = input.fields.keys().cloned().collect();
 
+            if let Some(prepared) = &self.prepared_writes {
+                let id = doc.id().map(ToString::to_string).unwrap_or_default();
+                if !prepared.update_targets.contains(&id) {
+                    return Err(QueryError::transaction_conflict(
+                        "upsert target changed after key preparation",
+                    ));
+                }
+                if let Some(write) = prepared.updates.get(&id) {
+                    doc.set_write_preparation(Arc::clone(write));
+                }
+            }
             let result = self
                 .mutator
-                .update(&self.collection_name, doc, modified_fields)
+                .update_as(&self.context, &self.collection_name, doc, modified_fields)
                 .await?;
 
             let plan_doc = self.result_to_doc(&result.document)?;
@@ -334,7 +366,11 @@ impl UpsertNode {
                     })?;
             }
 
-            let result = self.mutator.create(&self.collection_name, doc).await?;
+            let doc = self.prepared_create(doc)?;
+            let result = self
+                .mutator
+                .create_as(&self.context, &self.collection_name, doc)
+                .await?;
 
             let plan_doc = self.result_to_doc(&result.document)?;
             self.upserted_docs.push(plan_doc);
@@ -342,6 +378,15 @@ impl UpsertNode {
         }
 
         Ok(())
+    }
+
+    fn prepared_create(&self, doc: Document) -> Result<Document> {
+        match &self.prepared_writes {
+            None => Ok(doc),
+            Some(prepared) => prepared.creates.first().cloned().ok_or_else(|| {
+                QueryError::transaction_conflict("upsert target changed after key preparation")
+            }),
+        }
     }
 
     /// Create a new document (no ID specified - generates new ID).
@@ -357,7 +402,11 @@ impl UpsertNode {
             create_input.to_document()?
         };
 
-        let result = self.mutator.create(&self.collection_name, doc).await?;
+        let doc = self.prepared_create(doc)?;
+        let result = self
+            .mutator
+            .create_as(&self.context, &self.collection_name, doc)
+            .await?;
 
         let plan_doc = self.result_to_doc(&result.document)?;
         self.upserted_docs.push(plan_doc);

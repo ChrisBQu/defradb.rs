@@ -18,6 +18,7 @@ mod coordinator;
 mod dag_sync;
 mod event_dispatcher;
 mod head_provider;
+mod head_scope;
 mod manager;
 
 pub use manager::pending::PENDING_RECOVERY_WORST_CASE_SECS;
@@ -30,14 +31,14 @@ pub(crate) mod rate_limiter;
 mod replication;
 
 pub use broadcaster::{BroadcastResult, Broadcaster};
-pub use collection_store::{NoOpCollectionStorage, P2PCollectionStorage, P2PCollectionStore};
+pub use collection_store::{MemoryCollectionStorage, P2PCollectionStorage, P2PCollectionStore};
 #[cfg(feature = "iroh-transport")]
 pub use coordinator::IrohSyncCoordinator;
 #[cfg(feature = "libp2p-transport")]
 pub use coordinator::Libp2pSyncCoordinator;
 pub use coordinator::{
-    CreateReplicatorResult, HeadAckFence, HeadHintCarAuthority, HeadHintCarGrant,
-    LoadReplicatorsResult, PushFailure, SyncCoordinator, SyncShutdownHandle, SyncStatus,
+    CreateReplicatorResult, HeadHintCarAuthority, HeadHintCarGrant, LoadReplicatorsResult,
+    PushFailure, PushFailureReceiver, SyncCoordinator, SyncShutdownHandle, SyncStatus,
 };
 pub use dag_sync::{DagSync, DagSyncConfig, DagSyncState, NeedsFetchData, SyncPlan};
 pub(crate) use event_dispatcher::classify_p2p_event;
@@ -61,8 +62,8 @@ pub use merge::{
 };
 pub use peer_state::{PeerStateTracker, PeerStats};
 pub use pending_store::{
-    PendingDagStorage, PendingDagStore, PersistedPendingDag, PersistedQuarantinedDag,
-    PersistedReplayAuthorization,
+    pooled_pending_store, Admission, PendingDagStorage, PendingDagStore, PersistedPendingDag,
+    PersistedQuarantinedDag, PersistedReplayAuthorization, PersistedView, Registration,
 };
 pub use push_backlog::{
     EnqueueOutcome, PeerBacklogSnapshot, PushBacklog, PushBacklogSnapshot, PushJobSpec,

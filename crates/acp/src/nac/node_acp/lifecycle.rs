@@ -7,7 +7,7 @@ use crate::error::{Error, Result};
 use crate::nac::policy::{create_node_policy, NODE_POLICY_ID, NODE_RESOURCE_NAME, OWNER_RELATION};
 use zanzibar::{Relationship, ZanzibarStore};
 
-impl<S: ZanzibarStore + Send + Sync + 'static> NodeACP<S> {
+impl<S: ZanzibarStore + ?Sized + 'static> NodeACP<S> {
     /// Enable NAC with the given owner identity.
     ///
     /// The owner identity has full control over the node and can grant
@@ -26,8 +26,7 @@ impl<S: ZanzibarStore + Send + Sync + 'static> NodeACP<S> {
 
         // Load policy into engine
         {
-            let mut engine = self.engine.write().await;
-            engine.add_policy(&policy);
+            self.engine.edit(|engine| engine.add_policy(&policy));
         }
 
         // Create owner relationship
@@ -179,8 +178,8 @@ impl<S: ZanzibarStore + Send + Sync + 'static> NodeACP<S> {
 
         // Clear engine cache
         {
-            let mut engine = self.engine.write().await;
-            engine.remove_policy(NODE_POLICY_ID);
+            self.engine
+                .edit(|engine| engine.remove_policy(NODE_POLICY_ID));
         }
 
         // Reset state

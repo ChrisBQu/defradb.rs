@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 #[cfg(any(feature = "libp2p", feature = "iroh"))]
-use anyhow::{anyhow, Result};
+use crate::error::{Error, Result};
 #[cfg(any(feature = "libp2p", feature = "iroh"))]
 use p2p::sync::SyncConfig;
 #[cfg(feature = "libp2p")]
@@ -83,6 +83,7 @@ pub(crate) async fn setup_libp2p<S>(
     config: &Libp2pConfig,
     sync_config: SyncConfig,
     peer_keyring: Option<&crate::PeerKeyring>,
+    edge: &edge::Edge,
 ) -> Result<P2PSetup>
 where
     S: storage::corekv::Store + 'static,
@@ -91,18 +92,30 @@ where
     use p2p::sync::DocumentHeadProvider;
     use storage::stores::Peerstore;
 
+    let max_txn_retries = database.options().max_txn_retries();
+
     let listen_addr = config
         .listen_addr
         .parse()
-        .map_err(|error| anyhow!("invalid multiaddr '{}': {error}", config.listen_addr))?;
-    let blockstore = Arc::new(EmbeddedBlockstore::new(store.clone(), true));
+        .map_err(|source| Error::InvalidMultiaddr {
+            addr: config.listen_addr.clone(),
+            source,
+        })?;
+    let blockstore = Arc::new(
+        EmbeddedBlockstore::new(store.clone(), true)
+            .with_max_txn_retries(max_txn_retries)
+            .placed_on(database.pool()),
+    );
     let bitswap_store = BitswapStoreAdapter::new(blockstore.clone());
 
-    let mut seed =
-        crate::node_peer_key::load_with_keyring(&Peerstore::new(store.clone()), None, peer_keyring)
-            .await?;
-    let p2p_keypair = libp2p::identity::Keypair::ed25519_from_bytes(&mut *seed)
-        .map_err(|error| anyhow!("invalid peer key: {error}"))?;
+    let mut seed = crate::node_peer_key::load_with_keyring(
+        &Peerstore::new(store.clone()).with_max_txn_retries(max_txn_retries),
+        None,
+        peer_keyring,
+    )
+    .await?;
+    let p2p_keypair =
+        libp2p::identity::Keypair::ed25519_from_bytes(&mut *seed).map_err(Error::InvalidPeerKey)?;
 
     let classifier = defra_p2p_adapter::DbBlockClassifier::new_arc(database.clone());
     let serve_acp = Arc::new(p2p::bitswap::LateBoundServeAcp::new());
@@ -116,14 +129,14 @@ where
             serve_acp.clone(),
         )
         .await
-        .map_err(|error| anyhow!("failed to create P2P host: {error}"))?;
+        .map_err(Error::HostCreate)?;
     let host_task = tokio::spawn(async move {
         host.run().await;
     });
 
     if let Err(error) = handle.listen(listen_addr).await {
         shutdown_libp2p_host(&handle, host_task).await;
-        return Err(anyhow!("failed to start listening: {error}"));
+        return Err(Error::Listen(error));
     }
 
     for topic in [
@@ -136,8 +149,9 @@ where
         }
     }
 
-    let collection_store: Arc<dyn p2p::sync::P2PCollectionStorage> =
-        Arc::new(p2p::sync::P2PCollectionStore::new(store.clone()));
+    let collection_store: Arc<dyn p2p::sync::P2PCollectionStorage> = Arc::new(
+        p2p::sync::P2PCollectionStore::new(store.clone()).with_max_txn_retries(max_txn_retries),
+    );
     let head_provider: Arc<dyn DocumentHeadProvider> =
         Arc::new(db::merge::create_head_provider(database.clone()));
     let (mut coordinator, sync_events_rx) =
@@ -158,14 +172,24 @@ where
             Ok(coordinator) => coordinator,
             Err(error) => {
                 shutdown_libp2p_host(&handle, host_task).await;
-                return Err(anyhow!("failed to create sync coordinator: {error}"));
+                return Err(Error::SyncCoordinator(error));
             }
         };
 
     let failure_rx = db::merge::attach_failure_channel(&mut coordinator, 1024);
     let coordinator = Arc::new(coordinator);
+    // Its network work runs on the edge, also when a write on a pool worker
+    // hands it a broadcast.
+    coordinator.use_network(p2p::network::Network::on(edge.clone()));
+    // Its durable registrations change on the database's worker pool.
     coordinator
-        .install_pending_dag_store(Arc::new(p2p::sync::PendingDagStore::new(store.clone())))
+        .install_pending_dag_store(p2p::sync::pooled_pending_store(
+            Arc::new(
+                p2p::sync::PendingDagStore::new(store.clone())
+                    .with_max_txn_retries(max_txn_retries),
+            ),
+            database.pool(),
+        ))
         .await;
     let replication = db::merge::create_replication_stack(
         database.clone(),
@@ -181,6 +205,7 @@ where
     let kms_transport = match p2p::kms::PubsubKeyTransport::new(
         kms_libp2p_transport,
         Arc::new(p2p::HandlePeerIdentityResolver::new(handle.clone())),
+        edge.clone(),
     )
     .await
     {
@@ -188,7 +213,7 @@ where
         Err(error) => {
             coordinator.shutdown().await;
             shutdown_libp2p_host(&handle, host_task).await;
-            return Err(anyhow!("failed to create KMS transport: {error}"));
+            return Err(Error::KmsTransport(error));
         }
     };
     coordinator.install_kms_transport(kms_transport.clone());
@@ -214,15 +239,15 @@ where
     // The fallback for a deferred verdict no arrival can release: one named
     // nothing, one past the index's capacity, and everything the index held
     // before this process started.
-    let sweep_handler = replication.merge_handler_inner.clone();
-    let sweep_shutdown = coordinator.shutdown_handle();
+    // It runs on the database's worker pool and ends with the coordinator's
+    // shutdown; the network task here only follows it for the node's teardown.
+    let governance_sweep = db::merge::governance::start_governance_sweep(
+        replication.merge_handler_inner.clone(),
+        db::merge::governance::SWEEP_INTERVAL,
+        coordinator.shutdown_handle(),
+    );
     let governance_sweep_task = tokio::spawn(async move {
-        db::merge::governance::run_governance_sweep(
-            sweep_handler,
-            db::merge::governance::SWEEP_INTERVAL,
-            sweep_shutdown,
-        )
-        .await;
+        let _ = governance_sweep.await;
     });
 
     match db::merge::load_persisted_collections(&coordinator).await {
@@ -249,10 +274,15 @@ where
     let manage_correlator = p2p::ManageCorrelator::new();
     let manage_query_correlator = p2p::ManageQueryCorrelator::new();
     let manage_hooks = defra_p2p_adapter::manage::hooks::new_manage_hooks_cell();
+    // The sender's retry state: its calls from the edge run on the pool.
+    let retry_peers = Peerstore::new(store.clone())
+        .with_max_txn_retries(max_txn_retries)
+        .placed_on(database.pool());
     let host_event_task = spawn_libp2p_event_handler(
         event_rx,
         coordinator.clone(),
         store.clone(),
+        retry_peers.clone(),
         event_bus.clone(),
         handle.clone(),
         se_correlator,
@@ -261,11 +291,11 @@ where
     let replication_task = spawn_replication_loop(
         coordinator.clone(),
         sync_events_rx,
-        replication.merge_handler.clone(),
+        replication.merge_handler_on_pool(),
         event_bus.clone(),
     );
     let failure_recorder_task =
-        defra_p2p_adapter::spawn_failure_recorder(Peerstore::new(store.clone()), failure_rx);
+        defra_p2p_adapter::spawn_failure_recorder(retry_peers.clone(), failure_rx);
 
     let doc_pusher_impl = Arc::new(DbTransportDocPusher::new(
         database.clone(),
@@ -273,7 +303,9 @@ where
         coordinator.head_hint_car_authority(),
     ));
     let doc_pusher_for_acp = doc_pusher_impl.clone();
-    let doc_pusher: Arc<dyn TransportDocPusher> = doc_pusher_impl;
+    // Its storage calls run on the database's worker pool.
+    let doc_pusher: Arc<dyn TransportDocPusher> =
+        defra_p2p_adapter::pooled(doc_pusher_impl, database.pool());
     let version_syncer = Some(DbVersionSyncer::new_arc(
         blockstore.clone(),
         replication.merge_handler_inner.clone(),
@@ -283,18 +315,18 @@ where
     replication
         .merge_handler_inner
         .set_se_repusher(se_repusher.clone());
-    let retry_store = store.clone();
     let retry_transport = p2p::Libp2pTransport::new(handle.clone());
     let retry_doc_pusher = doc_pusher.clone();
     let retry_se_repusher = se_repusher.clone();
     let retry_loop_task = defra_p2p_adapter::spawn_retry_loop(
-        Peerstore::new(store.clone()),
+        retry_peers.clone(),
         p2p::Libp2pTransport::new(handle.clone()),
         doc_pusher.clone(),
         Some(se_repusher),
+        edge,
     );
 
-    let restore_peerstore = storage::stores::Peerstore::new(store.clone());
+    let restore_peerstore = Peerstore::new(store.clone()).with_max_txn_retries(max_txn_retries);
     restore_libp2p_replicators(&handle, &restore_peerstore).await;
     let restored_doc_ids = restore_libp2p_documents(&handle, &restore_peerstore).await;
 
@@ -332,6 +364,7 @@ where
             se_correlator_for_transport,
             coordinator.replicators().clone(),
             se_key_handle,
+            coordinator.network(),
         )) as Arc<dyn query::SeQueryTransport>);
     let manage_controller: Arc<dyn defra_http::P2POperations> = Arc::new(adapter);
     let system = Arc::new(ManagedP2PSystem::with_replicator_push_options_callback(
@@ -344,24 +377,24 @@ where
                 host_task,
                 host_event_task,
                 replication_task,
-                failure_recorder_task,
-                retry_loop_task,
                 pending_dag_resync_task,
                 pending_dag_retry_task,
                 governance_sweep_task,
             ],
+            retry_loop_task,
+            failure_recorder_task,
         ),
         replicator_push_options,
         Some(se_options_callback),
     ));
     system.set_retry_replicators(Arc::new(move || {
-        let store = retry_store.clone();
+        let peerstore = retry_peers.clone();
         let transport = retry_transport.clone();
         let doc_pusher = retry_doc_pusher.clone();
         let se_repusher = retry_se_repusher.clone();
         Box::pin(async move {
             defra_p2p_adapter::run_retry_pass(
-                &Peerstore::new(store),
+                &peerstore,
                 &transport,
                 &doc_pusher,
                 Some(&se_repusher),
@@ -446,6 +479,7 @@ pub(crate) async fn setup_iroh<S>(
     document_acp: Arc<dyn acp::DocumentACP>,
     strict_replicated_doc_access: bool,
     peer_keyring: Option<&crate::PeerKeyring>,
+    edge: &edge::Edge,
 ) -> Result<P2PSetup>
 where
     S: storage::corekv::Store + 'static,
@@ -453,8 +487,10 @@ where
     use defra_p2p_adapter::{IrohPeer, IrohPeerConfig, TransportDocPusher};
     use storage::stores::Peerstore;
 
+    let max_txn_retries = database.options().max_txn_retries();
+
     let seed = crate::node_peer_key::load_with_keyring(
-        &Peerstore::new(store.clone()),
+        &Peerstore::new(store.clone()).with_max_txn_retries(max_txn_retries),
         config.secret_key_path.as_deref(),
         peer_keyring,
     )
@@ -473,14 +509,15 @@ where
             allowlist: config.allowlist.clone(),
         },
         document_acp,
+        edge.clone(),
     );
     peer_config.strict_replicated_doc_access = strict_replicated_doc_access;
     peer_config.sync = sync_config;
     let replicator_push_options = ReplicatorPushOptionsState::default();
     peer_config.replicator_push_options = Some(replicator_push_options.clone());
-    let peer = IrohPeer::start(store.clone(), database, event_bus, peer_config)
+    let peer = IrohPeer::start(store.clone(), database.clone(), event_bus, peer_config)
         .await
-        .map_err(|error| anyhow!("failed to start iroh peer: {error}"))?;
+        .map_err(Error::IrohStart)?;
 
     // The SE key arrives at runtime through set_se_options, so the query
     // transport reads it lazily from a handle that callback fills.
@@ -506,14 +543,17 @@ where
     let retry_doc_pusher: Arc<dyn TransportDocPusher> = Arc::clone(&peer.doc_pusher);
     let retry_se_repusher: Arc<dyn db::merge::SeArtifactRepusher> =
         peer.replication.broadcast_mutator.clone();
+    let retry_peers = Peerstore::new(store.clone())
+        .with_max_txn_retries(max_txn_retries)
+        .placed_on(database.pool());
     system.set_retry_replicators(Arc::new(move || {
-        let store = store.clone();
+        let peerstore = retry_peers.clone();
         let transport = retry_transport.clone();
         let doc_pusher = retry_doc_pusher.clone();
         let se_repusher = retry_se_repusher.clone();
         Box::pin(async move {
             defra_p2p_adapter::run_retry_pass(
-                &Peerstore::new(store),
+                &peerstore,
                 &transport,
                 &doc_pusher,
                 Some(&se_repusher),

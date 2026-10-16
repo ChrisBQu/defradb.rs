@@ -3,7 +3,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::anyhow;
 use async_trait::async_trait;
 use bitswap::{Bitswap, Block, Config, ServerConfig, Store};
 use cid::Cid;
@@ -200,19 +199,22 @@ struct SlowStore {
 
 #[async_trait]
 impl Store for SlowStore {
-    async fn get_size(&self, cid: &Cid) -> anyhow::Result<usize> {
+    async fn get_size(&self, cid: &Cid) -> bitswap::store::Result<usize> {
         self.inner.get_size(cid).await
     }
 
-    async fn get(&self, cid: &Cid) -> anyhow::Result<Block> {
+    async fn get(&self, cid: &Cid) -> bitswap::store::Result<Block> {
         if self.slow.contains(cid) {
             self.slow_gets.fetch_add(1, Ordering::SeqCst);
             tokio::time::sleep(Duration::from_millis(40)).await;
         }
-        self.inner.get(cid).await.map_err(|_| anyhow!("not found"))
+        self.inner
+            .get(cid)
+            .await
+            .map_err(|_| bitswap::StoreError("not found".into()))
     }
 
-    async fn has(&self, cid: &Cid) -> anyhow::Result<bool> {
+    async fn has(&self, cid: &Cid) -> bitswap::store::Result<bool> {
         self.inner.has(cid).await
     }
 }

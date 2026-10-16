@@ -1,24 +1,16 @@
 //! Iteration over a regolith transaction or snapshot.
 //!
 //! Nothing here ever holds the range. A read-only scan is a cursor that
-//! holds one entry, and a scan over a writing transaction holds one
-//! bounded page, the same shape as regolith's own `scan_page`. Values
-//! arrive as [`regolith::DbSlice`] and are handed on as [`Bytes`] without
-//! a copy.
+//! holds one entry, and a scan over a writing transaction is one
+//! [`regolith::TxnCursor`] read a bounded page at a time. Values arrive as
+//! [`regolith::DbSlice`] and are handed on as [`Bytes`] without a copy.
 //!
-//! # Why a writing transaction is paged
-//!
-//! regolith merges a transaction's buffered writes over the snapshot
-//! beneath it, and the stream that does so borrows the transaction. A
-//! `Box<dyn Iterator>` is `'static`, so that stream cannot be kept
-//! between calls. It is rebuilt instead, resuming from the last key
-//! returned, draining a page each time. The transaction is held through
-//! an `Arc`, so the borrow lives and dies inside one call.
-//!
-//! Resuming is sound because both sides are anchored: the snapshot side
-//! is pinned at the transaction's read sequence and the buffered side is
-//! the transaction's own writes, so a rebuild cannot pick up a write that
-//! committed in between.
+//! A `TxnCursor` holds no borrow of its transaction, so one cursor serves
+//! the whole scan: it merges the transaction's buffered writes over the
+//! snapshot and folds them again only when the transaction wrote since the
+//! last page. An unvalidated scan reads pages bounded by bytes; a validated
+//! one reads one entry per call, so the range it validates at commit is
+//! exactly the range the caller consumed.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -27,21 +19,26 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use super::handle::Handle;
+use super::worker_io::wait_out;
 use crate::corekv::{Error, IterOptions, Iterator, KvPair, Result};
 
-/// Bytes a page may hold before it stops filling.
+/// Bytes of keys and values a page may hold before it stops filling.
 ///
 /// Bounding by bytes, not entries: an entry count says nothing about
 /// memory when values vary from a few bytes to megabytes, and this runs
 /// on devices where the difference is the whole budget.
 const PAGE_BYTES: usize = 256 * 1024;
 
-/// A ceiling on entries per page as well, so a range of tiny values does
-/// not turn one page into a very long list.
+/// About how many entries a page holds, so a range of tiny values does not
+/// turn one page into a very long list: each page asks for this many
+/// entries at the average size seen so far, never more than [`PAGE_BYTES`].
 ///
 /// Visible to the backend conformance suite, which sizes its ranges around a
 /// page boundary so a scan that spans one is actually exercised.
 pub(crate) const PAGE_ENTRIES: usize = 1024;
+
+/// The size the first page assumes an entry has, before any was seen.
+const FIRST_ENTRY_BYTES: usize = 16;
 
 /// Where a walk begins.
 #[derive(Clone)]
@@ -49,20 +46,16 @@ enum Anchor {
     /// The natural start of the range for the direction being walked: the
     /// lower bound going forward, the upper bound going back.
     RangeStart,
-    /// An explicit key, from `seek`. Included when it exists, which is what
-    /// separates a seek from a resume.
+    /// An explicit key, from `seek`, included when it exists.
     At(Vec<u8>),
-    /// Everything past this key, which is where the previous page stopped.
-    After(Vec<u8>),
 }
 
 impl Anchor {
-    /// The key to seek to, and whether it has already been returned.
-    fn seek_target(&self) -> (Option<&[u8]>, bool) {
+    /// The key to seek to.
+    fn seek_target(&self) -> Option<&[u8]> {
         match self {
-            Anchor::RangeStart => (None, false),
-            Anchor::At(key) => (Some(key), false),
-            Anchor::After(key) => (Some(key), true),
+            Anchor::RangeStart => None,
+            Anchor::At(key) => Some(key),
         }
     }
 }
@@ -88,11 +81,16 @@ enum Source {
     /// A positioned cursor, owned and `'static`, holding one entry rather
     /// than the range.
     Cursor(regolith::Entries<regolith::OwnedSnapshotIter>),
-    /// Rebuilt per page from the transaction the `Arc` keeps alive.
-    Paged {
-        /// Where the next page starts. `None` once the range ran out.
-        resume: Option<Anchor>,
-        page: VecDeque<KvPair>,
+    /// One cursor over the transaction the `Arc` keeps alive, for the whole
+    /// scan, and the page it last read.
+    Txn {
+        cursor: regolith::TxnCursor,
+        page: VecDeque<(Vec<u8>, regolith::DbSlice)>,
+        /// The cursor reported the end of its range.
+        done: bool,
+        /// Entries and bytes read so far, which size the next page.
+        entries: usize,
+        bytes: usize,
     },
     /// The anchor fell outside the range, so there is nothing to walk.
     Empty,
@@ -108,8 +106,14 @@ pub(crate) struct RegolithIterator {
     /// excludes the rest, except for a prefix with no expressible
     /// successor, which is a prefix of all `0xff` bytes.
     prefix: Option<Vec<u8>>,
+    /// The range is exactly the prefix's: it starts at the prefix and ends
+    /// where the prefix does.
+    prefix_range: bool,
     reverse: bool,
     keys_only: bool,
+    validated: bool,
+    /// The parts a scan's decision used; see [`IterOptions::with_parts`].
+    parts: Option<Box<[u32]>>,
     closed: bool,
     /// An entry `seek` pulled off to answer whether one exists, handed
     /// back by the next `next` rather than skipped.
@@ -119,17 +123,20 @@ pub(crate) struct RegolithIterator {
 impl RegolithIterator {
     pub(crate) fn open(handle: Arc<Handle>, opts: &IterOptions) -> Result<Self> {
         let (start, end) = range_bounds(opts);
+        let prefix_range = opts.prefix().is_some_and(|prefix| {
+            start.as_deref() == Some(prefix) && end == prefix_successor(prefix)
+        });
         let mut iter = Self {
-            source: Source::Paged {
-                resume: None,
-                page: VecDeque::new(),
-            },
+            source: Source::Empty,
             handle,
             start,
             end,
             prefix: opts.prefix().map(<[u8]>::to_vec),
+            prefix_range,
             reverse: opts.reverse(),
             keys_only: opts.keys_only(),
+            validated: opts.validated(),
+            parts: opts.parts().map(Box::from),
             closed: false,
             peeked: None,
         };
@@ -156,8 +163,14 @@ impl RegolithIterator {
                 } else {
                     // The cursor skips entries this snapshot cannot see
                     // before it reports a key; only a bound it holds stops
-                    // that skip at the end of the range.
+                    // that skip at the end of the range. A walk of exactly
+                    // the prefix seeks it as one, which holds the same bound
+                    // and lets regolith pass over the tables whose prefix
+                    // filter lacks it (`prefix`).
                     match (self.floor(&anchor), self.end.as_deref()) {
+                        (Some(floor), _) if self.walks_prefix_from(&floor) => {
+                            cursor.seek_prefix(&floor)
+                        }
                         (floor, Some(end)) => cursor.seek_bounded(&floor.unwrap_or_default(), end),
                         (Some(floor), None) => cursor.seek(&floor),
                         (None, None) => cursor.seek_to_first(),
@@ -167,7 +180,10 @@ impl RegolithIterator {
                 // reads an invalid cursor as one that was never positioned:
                 // it would restart at the far end of the store and hand back
                 // keys the caller seeked away from. So it must not see one.
-                if !cursor.valid() {
+                // A seek that stopped on a block the worker's cache does not
+                // hold, or on an error, is no end: `Entries` hands either out
+                // and resumes the seek after a `WouldBlock`.
+                if !cursor.valid() && cursor.status().is_ok() {
                     Source::Empty
                 } else if self.reverse {
                     Source::Cursor(cursor.entries_rev())
@@ -175,17 +191,41 @@ impl RegolithIterator {
                     Source::Cursor(cursor.entries())
                 }
             }
-            Handle::Writable(_) => Source::Paged {
-                resume: Some(anchor),
-                page: VecDeque::new(),
-            },
+            Handle::Writable(txn) => {
+                let (start, end, direction) = if self.reverse {
+                    let end = match self.ceiling(&anchor) {
+                        Ceiling::At(key) => Some(above(&key)),
+                        Ceiling::Below(end) => Some(end),
+                        Ceiling::Last => None,
+                    };
+                    (self.start.clone(), end, regolith::ScanDirection::Reverse)
+                } else {
+                    (
+                        self.floor(&anchor),
+                        self.end.clone(),
+                        regolith::ScanDirection::Forward,
+                    )
+                };
+                let check = match (&self.parts, self.validated) {
+                    (_, true) => regolith::ScanCheck::Range,
+                    (Some(parts), false) => regolith::ScanCheck::Parts(parts.clone()),
+                    (None, false) => regolith::ScanCheck::Stretch,
+                };
+                Source::Txn {
+                    cursor: txn.cursor(start.as_deref(), end.as_deref(), direction, check),
+                    page: VecDeque::new(),
+                    done: false,
+                    entries: 0,
+                    bytes: 0,
+                }
+            }
         };
     }
 
     /// The lowest key a forward walk may stand on: the range's start, raised
     /// to an explicit seek target. Seeking below the start lands on the start.
     fn floor(&self, anchor: &Anchor) -> Option<Vec<u8>> {
-        match anchor.seek_target().0 {
+        match anchor.seek_target() {
             Some(key) => Some(match &self.start {
                 Some(start) if start.as_slice() > key => start.clone(),
                 _ => key.to_vec(),
@@ -194,10 +234,16 @@ impl RegolithIterator {
         }
     }
 
+    /// Whether a forward walk from `floor` covers exactly the prefix: the
+    /// range is the prefix's, and the walk starts at its first key.
+    fn walks_prefix_from(&self, floor: &[u8]) -> bool {
+        self.prefix_range && self.prefix.as_deref() == Some(floor)
+    }
+
     /// The highest key a backward walk may stand on. Seeking at or past the
     /// exclusive end lands on the highest key the range admits.
     fn ceiling(&self, anchor: &Anchor) -> Ceiling {
-        match (anchor.seek_target().0, self.end.as_deref()) {
+        match (anchor.seek_target(), self.end.as_deref()) {
             (Some(key), Some(end)) if key >= end => Ceiling::Below(end.to_vec()),
             (Some(key), _) => Ceiling::At(key.to_vec()),
             (None, Some(end)) => Ceiling::Below(end.to_vec()),
@@ -205,100 +251,57 @@ impl RegolithIterator {
         }
     }
 
-    /// Fill the page buffer from the transaction, resuming where the last
-    /// page stopped.
-    fn refill(&mut self) {
-        let (anchor, mut filled, mut last) = match &mut self.source {
-            Source::Paged { resume, .. } => match resume.take() {
-                Some(anchor) => (anchor, VecDeque::new(), None),
-                None => return,
-            },
-            _ => return,
-        };
-        let Handle::Writable(txn) = self.handle.as_ref() else {
-            return;
-        };
-        let (target, already_returned) = anchor.seek_target();
-        let mut page_bytes = 0usize;
-
-        // Going back, the page's own upper bound is what resumes it: an
-        // exclusive end just below the last key returned. That is expressible,
-        // so a reverse page needs no skip, where a forward one resumes *at*
-        // the last key and drops it.
-        let reverse_end = self.reverse.then(|| match &anchor {
-            Anchor::RangeStart => self.end.clone(),
-            // A seek includes its target, so the exclusive bound sits one
-            // byte above it.
-            Anchor::At(key) => Some(above(key)),
-            Anchor::After(key) => Some(key.clone()),
-        });
-        let reverse_end = reverse_end.map(|end| match (end, self.end.as_ref()) {
-            // A seek past the range's end is clamped back into it.
-            (Some(end), Some(limit)) if end > *limit => Some(limit.clone()),
-            (end, _) => end,
-        });
-        // Same clamp the read-only arm gets from `floor`. Without it a seek
-        // below `start` on a writing transaction walks from the raw key and
-        // returns entries outside the iterator's own range.
-        let floor = self.floor(&anchor);
-
-        // The borrow of the transaction opens and closes inside this
-        // call, so the iterator outlives no borrow.
-        let entries: Box<dyn std::iter::Iterator<Item = (Vec<u8>, regolith::DbSlice)>> =
-            match &reverse_end {
-                Some(end) => Box::new(txn.scan_stream_in(
-                    self.start.as_deref(),
-                    end.as_deref(),
-                    regolith::ScanDirection::Reverse,
-                )),
-                None => Box::new(txn.scan_stream(floor.as_deref(), self.end.as_deref())),
-            };
-        for (key, value) in entries {
-            // A resume key was returned by the previous page; a seek key was
-            // not, and skipping it would make `seek` land past its target.
-            // Only forward pages need this: a reverse page excludes the key
-            // it resumes below through its own bound.
-            if !self.reverse && already_returned && target == Some(key.as_slice()) {
-                continue;
-            }
-            last = Some(key.clone());
-            page_bytes += key.len() + value.len();
-            let value = if self.keys_only {
-                Bytes::new()
-            } else {
-                // `DbSlice` holds a refcount on bytes the database already
-                // has, so adopting it copies nothing.
-                Bytes::from_owner(value)
-            };
-            filled.push_back(KvPair { key, value });
-            if page_bytes >= PAGE_BYTES || filled.len() >= PAGE_ENTRIES {
-                break;
-            }
-        }
-
-        // A page that stopped on a bound has more behind it; one that ran
-        // out did not.
-        let full = page_bytes >= PAGE_BYTES || filled.len() >= PAGE_ENTRIES;
-        if let Source::Paged { resume, page } = &mut self.source {
-            *page = filled;
-            // A short page means the range ran out, so there is nothing
-            // left to resume from.
-            *resume = if full { last.map(Anchor::After) } else { None };
-        }
-    }
-
-    fn step(&mut self) -> Option<KvPair> {
+    async fn step(&mut self) -> Result<Option<KvPair>> {
         let (key, value) = match &mut self.source {
-            Source::Empty => return None,
-            Source::Cursor(entries) => entries.next()?,
-            Source::Paged { page, .. } => {
-                if page.is_empty() {
-                    self.refill();
+            Source::Empty => return Ok(None),
+            Source::Cursor(entries) => loop {
+                match entries.next() {
+                    Some(Ok(entry)) => break entry,
+                    // The worker's queue reads the block; the next item
+                    // resumes the walk where it stopped.
+                    Some(Err(regolith::Error::WouldBlock(would_block))) => {
+                        wait_out(would_block)
+                            .await
+                            .map_err(|error| Error::Backend(error.to_string()))?;
+                    }
+                    Some(Err(error)) => return Err(Error::Backend(error.to_string())),
+                    None => return Ok(None),
                 }
-                return match &mut self.source {
-                    Source::Paged { page, .. } => page.pop_front(),
-                    _ => None,
-                };
+            },
+            Source::Txn {
+                cursor,
+                page,
+                done,
+                entries,
+                bytes,
+            } => {
+                if page.is_empty() && !*done {
+                    let Handle::Writable(txn) = self.handle.as_ref() else {
+                        return Err(Error::ReadOnlyTxn);
+                    };
+                    // A validated scan reads one entry per call, so the range
+                    // it validates is exactly what the caller consumed.
+                    let request = if self.validated {
+                        0
+                    } else {
+                        page_request(*entries, *bytes)
+                    };
+                    let next = regolith::ready(|| cursor.next_page(txn, request))
+                        .await
+                        .map_err(super::transaction::map_txn_error)?;
+                    *done = next.done;
+                    *entries += next.entries.len();
+                    *bytes += next
+                        .entries
+                        .iter()
+                        .map(|(key, value)| key.len() + value.len())
+                        .sum::<usize>();
+                    page.extend(next.entries);
+                }
+                match page.pop_front() {
+                    Some(entry) => entry,
+                    None => return Ok(None),
+                }
             }
         };
         let value = if self.keys_only {
@@ -306,24 +309,24 @@ impl RegolithIterator {
         } else {
             Bytes::from_owner(value)
         };
-        Some(KvPair { key, value })
+        Ok(Some(KvPair { key, value }))
     }
 
     /// The next entry inside the range, or `None` at its end.
-    fn next_in_range(&mut self) -> Option<KvPair> {
-        while let Some(pair) = self.step() {
+    async fn next_in_range(&mut self) -> Result<Option<KvPair>> {
+        while let Some(pair) = self.step().await? {
             // A reverse walk runs down to `start`, which is inclusive, so it
             // stops at the first key below it; a forward walk runs up to
             // `end`, which is not.
             if self.reverse {
                 if let Some(start) = &self.start {
                     if pair.key.as_slice() < start.as_slice() {
-                        return None;
+                        return Ok(None);
                     }
                 }
             } else if let Some(end) = &self.end {
                 if pair.key.as_slice() >= end.as_slice() {
-                    return None;
+                    return Ok(None);
                 }
             }
             if let Some(prefix) = &self.prefix {
@@ -331,10 +334,21 @@ impl RegolithIterator {
                     continue;
                 }
             }
-            return Some(pair);
+            return Ok(Some(pair));
         }
-        None
+        Ok(None)
     }
+}
+
+/// The bytes the next page of a scan asks for: [`PAGE_ENTRIES`] entries at
+/// the average size of the `entries` read so far, which held `bytes` of keys
+/// and values, never more than [`PAGE_BYTES`].
+fn page_request(entries: usize, bytes: usize) -> usize {
+    let average = bytes
+        .checked_div(entries)
+        .unwrap_or(FIRST_ENTRY_BYTES)
+        .max(1);
+    average.saturating_mul(PAGE_ENTRIES).min(PAGE_BYTES)
 }
 
 /// Lower and upper bound for the scan, folding a prefix into the range so
@@ -392,7 +406,7 @@ impl Iterator for RegolithIterator {
         if let Some(peeked) = self.peeked.take() {
             return Ok(Some(peeked));
         }
-        Ok(self.next_in_range())
+        self.next_in_range().await
     }
 
     async fn close(&mut self) -> Result<()> {
@@ -408,7 +422,7 @@ impl Iterator for RegolithIterator {
         self.position(Anchor::At(key.to_vec()));
         // Pull the entry the seek landed on so the caller learns whether
         // one exists; `next` hands back that same entry.
-        self.peeked = self.next_in_range();
+        self.peeked = self.next_in_range().await?;
         Ok(self.peeked.is_some())
     }
 
@@ -427,3 +441,71 @@ impl Iterator for RegolithIterator {
 }
 
 impl crate::corekv::private::Sealed for RegolithIterator {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_page_asks_for_about_page_entries_and_never_more_than_page_bytes() {
+        assert_eq!(page_request(0, 0), FIRST_ENTRY_BYTES * PAGE_ENTRIES);
+        assert_eq!(page_request(10, 100), 10 * PAGE_ENTRIES);
+        assert_eq!(page_request(1, 1 << 30), PAGE_BYTES);
+        assert_eq!(page_request(1000, 0), PAGE_ENTRIES);
+    }
+}
+
+#[cfg(test)]
+mod scan_tests {
+    use super::*;
+    use crate::backends::RegolithStore;
+    use crate::corekv::IterOptions;
+    use crate::corekv::{Store, Txn};
+    use regolith::{PerfContext, PerfLevel};
+
+    async fn scan_lookups(txn: &dyn Txn, rows: usize) -> u64 {
+        PerfContext::reset();
+        let mut iter = txn
+            .iterator(IterOptions::new().with_prefix(b"row/".to_vec()))
+            .await
+            .unwrap();
+        let mut count = 0;
+        while iter.next().await.unwrap().is_some() {
+            count += 1;
+        }
+        iter.close().await.unwrap();
+        assert_eq!(count, rows);
+        PerfContext::capture().block_cache_lookup_count
+    }
+
+    /// A scan of a writing transaction walks the tables once, as a snapshot
+    /// scan does, rather than seeking them again for every page.
+    #[tokio::test]
+    async fn an_unvalidated_scan_of_a_writing_transaction_reads_each_block_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = RegolithStore::open(directory.path()).unwrap();
+        let rows = 3 * PAGE_ENTRIES + 7;
+        let mut seed = store.new_txn(false).await.unwrap();
+        for row in 0..rows {
+            seed.set(format!("row/{row:06}").as_bytes(), &[7; 64])
+                .await
+                .unwrap();
+        }
+        seed.commit().await.unwrap();
+        store.engine().db().flush().unwrap();
+
+        let level = PerfContext::set_level(PerfLevel::EnableCount);
+        let snapshot = store.new_txn(true).await.unwrap();
+        let snapshot_lookups = scan_lookups(snapshot.as_ref(), rows).await;
+        snapshot.discard();
+        let mut writing = store.new_txn(false).await.unwrap();
+        writing.set(b"other", b"own").await.unwrap();
+        let writing_lookups = scan_lookups(writing.as_ref(), rows).await;
+        writing.discard();
+        PerfContext::set_level(level);
+
+        assert!(snapshot_lookups > 0);
+        assert_eq!(writing_lookups, snapshot_lookups);
+        store.close().await.unwrap();
+    }
+}

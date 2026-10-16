@@ -9,10 +9,38 @@ use rapidhash::{HashSetExt, RapidHashSet};
 use crate::{libp2p::VersionSyncer, P2PError, P2PErrorExt as _, P2PResult};
 
 /// Database-backed version syncer that fetches schema blocks via Bitswap.
+///
+/// A sync is storage work (block reads, merges, lens registrations): it runs
+/// on the database's worker pool, its requests to peers and its waits on the
+/// node's network edge (`db::DB::network`).
 pub struct DbVersionSyncer<S: storage::corekv::Store, B: Blockstore> {
     blockstore: Arc<B>,
     merge_handler: Arc<db::merge::DbMergeHandler<S, B>>,
     db: Arc<db::DB<S>>,
+}
+
+impl<S: storage::corekv::Store, B: Blockstore> Clone for DbVersionSyncer<S, B> {
+    fn clone(&self) -> Self {
+        Self {
+            blockstore: Arc::clone(&self.blockstore),
+            merge_handler: Arc::clone(&self.merge_handler),
+            db: Arc::clone(&self.db),
+        }
+    }
+}
+
+/// Asks `peers` for `cid` over Bitswap, on the network edge.
+async fn request_block(
+    network: &p2p::network::Network,
+    handle: &P2PHostHandle,
+    cid: cid::Cid,
+    peers: &[libp2p::PeerId],
+) -> p2p::Result<p2p::QueryId> {
+    let (handle, peers) = (handle.clone(), peers.to_vec());
+    network
+        .hand_off(move || async move { handle.bitswap_sync(cid, peers, vec![cid]).await })
+        .await
+        .unwrap_or_else(|| Err(p2p::Error::Transport("the network is shutting down".into())))
 }
 
 impl<S: storage::corekv::Store + 'static, B: Blockstore + 'static> DbVersionSyncer<S, B> {
@@ -40,6 +68,7 @@ impl<S: storage::corekv::Store + 'static, B: Blockstore + 'static> DbVersionSync
 async fn fetch_block<B: Blockstore>(
     target_cid: cid::Cid,
     blockstore: &Arc<B>,
+    network: &p2p::network::Network,
     handle: &P2PHostHandle,
     peers: &[libp2p::PeerId],
     timeout_secs: u64,
@@ -48,8 +77,7 @@ async fn fetch_block<B: Blockstore>(
         return Ok(data);
     }
 
-    handle
-        .bitswap_sync(target_cid, peers.to_vec(), vec![target_cid])
+    request_block(network, handle, target_cid, peers)
         .await
         .map_err(|error| P2PError::transport(format!("bitswap sync for {target_cid}: {error}")))?;
 
@@ -59,7 +87,7 @@ async fn fetch_block<B: Blockstore>(
         if let Ok(Some(data)) = blockstore.get(&target_cid).await {
             return Ok(data);
         }
-        n0_future::time::sleep(std::time::Duration::from_millis(100)).await;
+        network.sleep(std::time::Duration::from_millis(100)).await;
     }
 
     Err(P2PError::transport(format!(
@@ -76,20 +104,45 @@ async fn sync_lens<S: storage::corekv::Store + 'static, B: Blockstore>(
 ) -> P2PResult<()> {
     use defra_core::{LensConfigBlock, LensModuleBlock, LensWasmBlock};
 
-    let config_data = fetch_block(*transform_cid, blockstore, handle, connected_peers, 10).await?;
+    let network = db.network();
+
+    let config_data = fetch_block(
+        *transform_cid,
+        blockstore,
+        &network,
+        handle,
+        connected_peers,
+        10,
+    )
+    .await?;
     let config_block: LensConfigBlock = serde_ipld_dagcbor::from_slice(&config_data)
         .map_err(|error| P2PError::internal(format!("decode config block: {error}")))?;
 
     let mut lens_modules = Vec::new();
     for module_cid in &config_block.modules {
-        let module_data = fetch_block(*module_cid, blockstore, handle, connected_peers, 10).await?;
+        let module_data = fetch_block(
+            *module_cid,
+            blockstore,
+            &network,
+            handle,
+            connected_peers,
+            10,
+        )
+        .await?;
         let module_block: LensModuleBlock =
             serde_ipld_dagcbor::from_slice(&module_data).map_err(|error| {
                 P2PError::internal(format!("decode module block {module_cid}: {error}"))
             })?;
 
-        let lens_data =
-            fetch_block(module_block.lens, blockstore, handle, connected_peers, 10).await?;
+        let lens_data = fetch_block(
+            module_block.lens,
+            blockstore,
+            &network,
+            handle,
+            connected_peers,
+            10,
+        )
+        .await?;
         let wasm_block: LensWasmBlock =
             serde_ipld_dagcbor::from_slice(&lens_data).map_err(|error| {
                 P2PError::internal(format!("decode lens block {}: {error}", module_block.lens))
@@ -100,8 +153,15 @@ async fn sync_lens<S: storage::corekv::Store + 'static, B: Blockstore>(
             LensWasmBlock::Chunked { chunks } => {
                 let mut all_bytes = Vec::new();
                 for chunk_cid in chunks {
-                    let chunk_data =
-                        fetch_block(*chunk_cid, blockstore, handle, connected_peers, 10).await?;
+                    let chunk_data = fetch_block(
+                        *chunk_cid,
+                        blockstore,
+                        &network,
+                        handle,
+                        connected_peers,
+                        10,
+                    )
+                    .await?;
                     let decoded: serde_bytes::ByteBuf = serde_ipld_dagcbor::from_slice(&chunk_data)
                         .map_err(|error| {
                             P2PError::internal(format!("decode WASM chunk {chunk_cid}: {error}"))
@@ -158,13 +218,29 @@ impl<S: storage::corekv::Store + 'static, B: Blockstore + 'static> VersionSyncer
         version_ids: Vec<String>,
         connected_peers: Vec<libp2p::PeerId>,
     ) -> P2PResult<()> {
+        let (syncer, handle) = (self.clone(), handle.clone());
+        let target = workers::Target::LeastLoaded;
+        workers::run_on(self.db.pool(), target, move || async move {
+            syncer.sync(&handle, version_ids, connected_peers).await
+        })
+        .await
+        .map_err(|_| P2PError::internal("the node is shutting down; try again"))?
+    }
+}
+
+impl<S: storage::corekv::Store + 'static, B: Blockstore + 'static> DbVersionSyncer<S, B> {
+    async fn sync(
+        &self,
+        handle: &P2PHostHandle,
+        version_ids: Vec<String>,
+        connected_peers: Vec<libp2p::PeerId>,
+    ) -> P2PResult<()> {
+        let network = self.db.network();
         for version_id_str in &version_ids {
             let version_cid = cid::Cid::try_from(version_id_str.as_str())
                 .map_err(|error| P2PError::invalid_input(format!("invalid cid: {error}")))?;
 
-            if let Err(error) = handle
-                .bitswap_sync(version_cid, connected_peers.clone(), vec![version_cid])
-                .await
+            if let Err(error) = request_block(&network, handle, version_cid, &connected_peers).await
             {
                 tracing::warn!(cid = %version_cid, error = %error, "bitswap sync failed");
                 continue;
@@ -194,9 +270,7 @@ impl<S: storage::corekv::Store + 'static, B: Blockstore + 'static> VersionSyncer
                         block_found = true;
                         break;
                     }
-                    Ok(false) => {
-                        n0_future::time::sleep(std::time::Duration::from_millis(100)).await
-                    }
+                    Ok(false) => network.sleep(std::time::Duration::from_millis(100)).await,
                     Err(error) => {
                         tracing::warn!(error = %error, "blockstore check failed");
                         break;
@@ -248,9 +322,8 @@ impl<S: storage::corekv::Store + 'static, B: Blockstore + 'static> VersionSyncer
                 };
 
                 if !already_present {
-                    if let Err(error) = handle
-                        .bitswap_sync(link_cid, connected_peers.clone(), vec![link_cid])
-                        .await
+                    if let Err(error) =
+                        request_block(&network, handle, link_cid, &connected_peers).await
                     {
                         tracing::warn!(cid = %link_cid, error = %error, "bitswap sync failed for link");
                         continue;
@@ -266,7 +339,7 @@ impl<S: storage::corekv::Store + 'static, B: Blockstore + 'static> VersionSyncer
                                 break;
                             }
                             Ok(None) => {
-                                n0_future::time::sleep(std::time::Duration::from_millis(100)).await;
+                                network.sleep(std::time::Duration::from_millis(100)).await;
                             }
                             Err(error) => {
                                 tracing::warn!(cid = %link_cid, error = %error, "error waiting for link");

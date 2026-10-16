@@ -15,6 +15,7 @@ use axum::{
     Json,
 };
 
+use defra_core::RequestContext;
 use identity::{from_token, verify_auth_token, Did, Identity, TokenIdentity};
 
 use crate::error::ErrorResponse;
@@ -29,34 +30,52 @@ use crate::error::ErrorResponse;
 /// The inner field is private to prevent construction without proper validation.
 /// Use the extractor mechanism or `ExtractIdentity::anonymous()` for testing.
 #[derive(Debug, Clone)]
-pub struct ExtractIdentity(Option<Did>);
+pub struct ExtractIdentity {
+    did: Option<Did>,
+    /// The request's context, as the auth middleware built it.
+    context: Option<RequestContext>,
+}
 
 impl ExtractIdentity {
     /// Create an anonymous identity (no authentication).
     /// Use this for testing or internal code that needs to represent anonymous access.
     pub fn anonymous() -> Self {
-        Self(None)
+        Self::from_did(None)
     }
 
     /// Create an ExtractIdentity from an already-parsed DID.
     /// Used by the auth middleware to construct an ExtractIdentity for permission checks.
     pub(crate) fn from_did(did: Option<Did>) -> Self {
-        Self(did)
+        Self { did, context: None }
     }
 
     /// Returns a reference to the extracted DID if present.
     pub fn did(&self) -> Option<&Did> {
-        self.0.as_ref()
+        self.did.as_ref()
     }
 
     /// Consumes self and returns the extracted DID if present.
     pub fn into_did(self) -> Option<Did> {
-        self.0
+        self.did
     }
 
     /// Check if this is an anonymous (unauthenticated) request.
     pub fn is_anonymous(&self) -> bool {
-        self.0.is_none()
+        self.did.is_none()
+    }
+
+    /// The context of the request this identity acts in: the one the auth
+    /// middleware built, or [`RequestContext::ambient`] with this DID acting
+    /// in it on a route served without the middleware.
+    pub fn context(&self) -> RequestContext {
+        if let Some(context) = &self.context {
+            return context.clone();
+        }
+        let context = RequestContext::ambient();
+        match &self.did {
+            Some(did) => context.with_identity(Some(did.to_string())),
+            None => context,
+        }
     }
 }
 
@@ -239,11 +258,6 @@ fn extract_identity_from_auth_header(
         .did()
         .map_err(|e| IdentityExtractionError::InvalidToken(e.to_string()))?;
 
-    // Store the raw JWT keyed by DID for passthrough to Vera/vera.rs ACP operations.
-    // Go DefraDB's BearerToken() pattern: the original JWT (signed by the user's key)
-    // is forwarded to Vera for register_object and other bearer policy commands.
-    defra_core::signing::set_request_bearer_token(did.as_str(), token.to_string());
-
     Ok(Some(did))
 }
 
@@ -255,13 +269,17 @@ where
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         // If the auth middleware already parsed identity, reuse it.
+        let context = parts.extensions.get::<RequestContext>().cloned();
         if let Some(mid) = parts.extensions.get::<MiddlewareIdentity>() {
-            return Ok(ExtractIdentity(mid.0.clone()));
+            return Ok(ExtractIdentity {
+                did: mid.0.clone(),
+                context,
+            });
         }
 
         // Fallback: parse from headers (for routes/tests without the middleware).
         let did = parse_identity_from_headers(&parts.headers)?;
-        Ok(ExtractIdentity(did))
+        Ok(ExtractIdentity { did, context })
     }
 }
 

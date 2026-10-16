@@ -1,5 +1,6 @@
 #[cfg(feature = "iroh")]
 mod access_hooks;
+mod error;
 mod node;
 mod node_acp;
 mod node_identity;
@@ -14,6 +15,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 pub use defra_p2p_adapter::{ReplicatorPushOptions, ReplicatorPushOptionsState};
+pub use error::{Error, Result};
 
 #[cfg(feature = "iroh")]
 pub use access_hooks::AccessHooks;
@@ -21,7 +23,9 @@ pub use keyring;
 pub use keyring::Keyring;
 #[cfg(feature = "iroh")]
 pub use node::build_with_store_and_access_hooks;
-pub use node::{build_with_store, EmbeddedNode, NodeBuilder};
+pub use node::{
+    build_with_store, build_with_store_on_pool, start_node_pool, EmbeddedNode, NodeBuilder,
+};
 pub use node_tasks::BackgroundTasks;
 pub use peer_keyring::PeerKeyring;
 pub use zeroize::Zeroizing;
@@ -150,6 +154,9 @@ pub struct EmbeddedNodeConfig {
     pub peer_keyring: Option<PeerKeyring>,
     pub persistence: Persistence,
     pub transport: TransportConfig,
+    /// The network runtime the transport runs on. A node with a transport
+    /// needs one; a node without networking starts none.
+    pub edge: Option<edge::Edge>,
     pub signing: SigningConfig,
     pub document_acp: DocumentAcpConfig,
     pub query_limits: query::QueryLimits,
@@ -176,11 +183,11 @@ pub struct ManagedP2PSystem {
     ops: Arc<dyn defra_http::P2POperations>,
     replicator_push_options: ReplicatorPushOptionsState,
     on_replicator_push_options: Option<ReplicatorPushOptionsCallback>,
-    retry_replicators: std::sync::OnceLock<RetryReplicatorsCallback>,
+    retry_replicators: regolith::sync::OnceCell<RetryReplicatorsCallback>,
     /// Outbound management requester (Task 7a): relays management requests to
     /// P2P-only peers on behalf of an HTTP caller. Set once during P2P setup
     /// (after the system is built), consumed when wiring `AppState`.
-    manage_requester: std::sync::OnceLock<Arc<dyn defra_http::ManageRequester>>,
+    manage_requester: regolith::sync::OnceCell<Arc<dyn defra_http::ManageRequester>>,
     shutdown: node::ShutdownHandle,
 }
 
@@ -225,8 +232,8 @@ impl ManagedP2PSystem {
             ops,
             replicator_push_options,
             on_replicator_push_options,
-            retry_replicators: std::sync::OnceLock::new(),
-            manage_requester: std::sync::OnceLock::new(),
+            retry_replicators: regolith::sync::OnceCell::new(),
+            manage_requester: regolith::sync::OnceCell::new(),
             shutdown,
         }
     }
@@ -266,6 +273,17 @@ impl ManagedP2PSystem {
         &self.ops
     }
 
+    /// The P2P operations serving the request `context` serves: their node
+    /// access checks check the identity acting in it.
+    pub fn ops_for(
+        &self,
+        context: &defra_core::RequestContext,
+    ) -> Arc<dyn defra_http::P2POperations> {
+        self.ops
+            .bind_request(context)
+            .unwrap_or_else(|| Arc::clone(&self.ops))
+    }
+
     pub fn set_replicator_push_options(
         &self,
         options: ReplicatorPushOptions,
@@ -295,34 +313,45 @@ impl ManagedP2PSystem {
 pub enum EmbeddedStore {
     /// A regolith database, in memory or on a path.
     Regolith(storage::RegolithStore),
-    /// A store wrapped in transparent at-rest value encryption.
-    Encrypted(Box<storage::encrypted_store::EncryptedStore<EmbeddedStore>>),
-}
-
-impl EmbeddedStore {
-    /// Wrap this store in transparent at-rest value encryption keyed by `key`.
-    pub fn encrypted(self, key: [u8; 32]) -> Self {
-        Self::Encrypted(Box::new(storage::encrypted_store::EncryptedStore::new(
-            self, key,
-        )))
-    }
 }
 
 impl storage::corekv::private::Sealed for EmbeddedStore {}
 
 #[async_trait]
 impl storage::Store for EmbeddedStore {
+    async fn allocate(&self, key: &[u8], count: u64) -> storage::Result<std::ops::Range<u64>> {
+        match self {
+            Self::Regolith(store) => store.allocate(key, count).await,
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn transaction_stats_handle(&self) -> Option<storage::backends::TransactionStatsHandle> {
+        match self {
+            Self::Regolith(store) => store.transaction_stats_handle(),
+        }
+    }
+
     async fn new_txn(&self, readonly: bool) -> storage::Result<Box<dyn storage::Txn>> {
         match self {
             Self::Regolith(store) => store.new_txn(readonly).await,
-            Self::Encrypted(store) => store.new_txn(readonly).await,
+        }
+    }
+
+    async fn transact_retry(
+        &self,
+        options: storage::corekv::RetryOptions,
+        attempt: storage::corekv::RetryAttempt,
+    ) -> std::result::Result<storage::corekv::RetryAttemptValue, storage::corekv::RetryAttemptError>
+    {
+        match self {
+            Self::Regolith(store) => store.transact_retry(options, attempt).await,
         }
     }
 
     async fn close(&self) -> storage::Result<()> {
         match self {
             Self::Regolith(store) => store.close().await,
-            Self::Encrypted(store) => store.close().await,
         }
     }
 }

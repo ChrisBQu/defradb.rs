@@ -1,14 +1,12 @@
 use super::batch::{PendingFieldBlockFinalization, PendingMergeEvent, PendingPostCommitAction};
+use super::frame_source::FrameSource;
 use super::*;
 
 enum CollectionMergeFrame {
     Enter {
         cid: Cid,
-        block: Option<Block>,
-        payload: Option<defra_core::block::CollectionDeltaPayload>,
-        child_cid: Option<Cid>,
+        source: FrameSource<defra_core::block::CollectionDeltaPayload>,
         depth: usize,
-        is_root: bool,
     },
     Exit {
         cid: Cid,
@@ -26,31 +24,6 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
 
     fn has_batch_merged_collection(batch_merged_collections: &CidSet, cid: &Cid) -> bool {
         batch_merged_collections.contains_key(cid)
-    }
-
-    async fn load_parent_collection(&self, parent_cid: &Cid, child_cid: &Cid) -> Option<Block> {
-        let data = match self.blockstore.get(parent_cid).await {
-            Ok(Some(data)) => data,
-            Ok(None) => {
-                tracing::debug!(
-                    %parent_cid,
-                    %child_cid,
-                    "Parent collection block not in blockstore, skipping"
-                );
-                return None;
-            }
-            Err(error) => {
-                tracing::debug!(
-                    %parent_cid,
-                    %child_cid,
-                    %error,
-                    "Failed to load parent collection block, skipping"
-                );
-                return None;
-            }
-        };
-
-        Block::from_dag_cbor(&data).ok()
     }
 
     /// Process a Collection delta from a block.
@@ -71,23 +44,14 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     ) -> std::result::Result<MergeOutcome, MergeError> {
         let mut frames = vec![CollectionMergeFrame::Enter {
             cid: *cid,
-            block: Some(block.clone()),
-            payload: Some(payload.clone()),
-            child_cid: None,
+            source: FrameSource::root(block, payload),
             depth,
-            is_root: true,
         }];
 
         while let Some(frame) = frames.pop() {
             match frame {
-                CollectionMergeFrame::Enter {
-                    cid,
-                    block,
-                    payload,
-                    child_cid,
-                    depth,
-                    is_root,
-                } => {
+                CollectionMergeFrame::Enter { cid, source, depth } => {
+                    let is_root = source.is_root();
                     if let Err(error) = self.ensure_merge_depth(&cid, depth) {
                         if is_root {
                             return Err(error);
@@ -106,29 +70,8 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                         continue;
                     }
 
-                    let block = match block {
-                        Some(block) => block,
-                        None => {
-                            let Some(block) = self
-                                .load_parent_collection(
-                                    &cid,
-                                    &child_cid.expect("parent frame has a child CID"),
-                                )
-                                .await
-                            else {
-                                continue;
-                            };
-                            block
-                        }
-                    };
-                    let payload = match payload {
-                        Some(payload) => payload,
-                        None => {
-                            let CrdtDelta::Collection(payload) = &block.delta else {
-                                continue;
-                            };
-                            payload.clone()
-                        }
+                    let Some((block, payload)) = self.frame_block(&cid, source).await else {
+                        continue;
                     };
 
                     tracing::debug!(
@@ -152,11 +95,8 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                         for parent_cid in heads.into_iter().rev() {
                             frames.push(CollectionMergeFrame::Enter {
                                 cid: parent_cid,
-                                block: None,
-                                payload: None,
-                                child_cid: Some(cid),
+                                source: FrameSource::Parent { child_cid: cid },
                                 depth: depth + 1,
-                                is_root: false,
                             });
                         }
                     }
@@ -295,22 +235,6 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                             Ok(MergeOutcome::Merged) => {
                                 tracing::debug!(link_cid = %link_cid, "Composite merged successfully");
                                 any_merged = true;
-
-                                // Publish per-document MergeComplete so the Go test
-                                // framework's WaitForSync can track each document.
-                                if let Some(bus) = self.db.event_bus() {
-                                    let col_id = metadata
-                                        .collection_id
-                                        .unwrap_or(&payload.schema_version_id)
-                                        .to_string();
-                                    bus.publish(Message::merge_complete(MergeCompleteData {
-                                        doc_id: doc_id_str,
-                                        subject_doc_id: None,
-                                        cid: *link_cid,
-                                        collection_id: col_id,
-                                        by_peer: metadata.sender_peer.unwrap_or("").to_string(),
-                                    }));
-                                }
                             }
                             Ok(outcome) if outcome.is_terminal_skip() => {
                                 tracing::debug!(
@@ -401,15 +325,13 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         // Only remove heads that this block explicitly supersedes (listed in block.heads),
         // preserving concurrent branches for later merge via write_collection_block.
         let collection_id = metadata.collection_id.unwrap_or(&payload.schema_version_id);
-        let _collection_guard = match self.db.find_collection_by_id(collection_id)? {
-            Some(collection) => Some(
-                self.db
-                    .collection_read_guard(collection.collection_id())
-                    .await?,
-            ),
-            None => None,
-        };
+        let collection = self.db.find_collection_by_id(collection_id)?;
         let txn = self.db.new_txn(false).await?;
+        if let Some(collection) = collection.as_ref() {
+            txn.validate_collection_schema_for_write(collection)
+                .await
+                .map_err(MergeError::Database)?;
+        }
         let short_id = if let Ok(systemstore) = txn.systemstore() {
             crate::collection::require_persisted_collection_short_id(&systemstore, collection_id)
                 .await?
@@ -418,45 +340,9 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                 "failed to access systemstore while resolving collection root_id".to_string(),
             )));
         };
-        if let Ok(headstore) = txn.headstore() {
-            // Record the heads this block supersedes rather than deleting
-            // them. Two peers replicating siblings would otherwise both delete
-            // the shared parent's key, and one of the merges would be refused.
-            if let Some(heads) = &block.heads {
-                if let Err(e) =
-                    crate::block::heads::record_supersedes(&headstore, short_id, heads, *cid).await
-                {
-                    tracing::warn!(
-                        error = %e,
-                        collection_id = %collection_id,
-                        "Failed to record superseded collection heads"
-                    );
-                }
-            }
-
-            // Add the new collection head (idempotent if already exists)
-            let col_key = storage::keys::headstore::HeadstoreColKey::new(short_id, *cid);
-            let priority_bytes = encode_priority_varint(payload.priority);
-            if let Err(e) = headstore
-                .set(
-                    &<storage::keys::headstore::HeadstoreColKey as storage::corekv::Key>::bytes(
-                        &col_key,
-                    ),
-                    &priority_bytes,
-                )
-                .await
-            {
-                tracing::warn!(
-                    error = %e,
-                    collection_id = %collection_id,
-                    "Failed to write collection head to headstore"
-                );
-            }
-        }
+        append_merged_collection_head(&txn.headstore()?, short_id, block, cid, payload.priority)
+            .await?;
         txn.force_commit().await?;
-        // Replication supersedes heads the same way a local append does, so
-        // the same reclamation applies.
-        self.db.maybe_prune_collection_heads(short_id).await;
 
         tracing::info!(
             cid = %cid,
@@ -500,23 +386,14 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
     ) -> std::result::Result<MergeOutcome, MergeError> {
         let mut frames = vec![CollectionMergeFrame::Enter {
             cid: *cid,
-            block: Some(block.clone()),
-            payload: Some(payload.clone()),
-            child_cid: None,
+            source: FrameSource::root(block, payload),
             depth,
-            is_root: true,
         }];
 
         while let Some(frame) = frames.pop() {
             match frame {
-                CollectionMergeFrame::Enter {
-                    cid,
-                    block,
-                    payload,
-                    child_cid,
-                    depth,
-                    is_root,
-                } => {
+                CollectionMergeFrame::Enter { cid, source, depth } => {
+                    let is_root = source.is_root();
                     if let Err(error) = self.ensure_merge_depth(&cid, depth) {
                         if is_root {
                             return Err(error);
@@ -543,29 +420,8 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                         continue;
                     }
 
-                    let block = match block {
-                        Some(block) => block,
-                        None => {
-                            let Some(block) = self
-                                .load_parent_collection(
-                                    &cid,
-                                    &child_cid.expect("parent frame has a child CID"),
-                                )
-                                .await
-                            else {
-                                continue;
-                            };
-                            block
-                        }
-                    };
-                    let payload = match payload {
-                        Some(payload) => payload,
-                        None => {
-                            let CrdtDelta::Collection(payload) = &block.delta else {
-                                continue;
-                            };
-                            payload.clone()
-                        }
+                    let Some((block, payload)) = self.frame_block(&cid, source).await else {
+                        continue;
                     };
 
                     tracing::debug!(
@@ -586,11 +442,8 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                         for parent_cid in heads.into_iter().rev() {
                             frames.push(CollectionMergeFrame::Enter {
                                 cid: parent_cid,
-                                block: None,
-                                payload: None,
-                                child_cid: Some(cid),
+                                source: FrameSource::Parent { child_cid: cid },
                                 depth: depth + 1,
-                                is_root: false,
                             });
                         }
                     }
@@ -814,23 +667,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
 
         batch_merged_collections.insert(*cid, ());
 
-        {
-            if let Some(heads) = &block.heads {
-                let _ =
-                    crate::block::heads::record_supersedes(headstore, short_id, heads, *cid).await;
-            }
-
-            let col_key = storage::keys::headstore::HeadstoreColKey::new(short_id, *cid);
-            let priority_bytes = encode_priority_varint(payload.priority);
-            let _ = headstore
-                .set(
-                    &<storage::keys::headstore::HeadstoreColKey as storage::corekv::Key>::bytes(
-                        &col_key,
-                    ),
-                    &priority_bytes,
-                )
-                .await;
-        }
+        append_merged_collection_head(headstore, short_id, block, cid, payload.priority).await?;
 
         if any_merged {
             Ok(MergeOutcome::Merged)
@@ -840,4 +677,30 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             ))
         }
     }
+}
+
+/// Add a replicated collection block to its collection's head set, in the
+/// caller's transaction, as one blind merge: peers replicating siblings both
+/// commit. Both merge paths call this, and a failed write fails the merge.
+async fn append_merged_collection_head(
+    headstore: &NamespaceView,
+    short_id: u32,
+    block: &Block,
+    cid: &Cid,
+    priority: u64,
+) -> std::result::Result<(), MergeError> {
+    let storage_error = |e: storage::corekv::Error| MergeError::Storage(e.to_string());
+    let set = crate::block::heads::collection_set(headstore, short_id)
+        .await
+        .map_err(storage_error)?;
+    crate::block::heads::publish_collection_block(
+        headstore,
+        short_id,
+        &set,
+        *cid,
+        priority,
+        block.heads.as_deref().unwrap_or_default(),
+    )
+    .await
+    .map_err(storage_error)
 }

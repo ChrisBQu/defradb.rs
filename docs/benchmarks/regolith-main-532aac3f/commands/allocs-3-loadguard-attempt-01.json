@@ -1,0 +1,11 @@
+{
+ "passed": true,
+ "cores": 18,
+ "loadavg": [
+  6.38427734375,
+  7.6181640625,
+  15.419921875
+ ],
+ "ceiling": 9.0,
+ "note": "one-minute load 6.38 on 18 core(s), at or under the 9.00 ceiling: the host was quiet."
+}

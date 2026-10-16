@@ -27,19 +27,14 @@ pub unsafe extern "C" fn p2p_add_documents(
     ffi_entry! {
         let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::P2pDocumentAdd
         ));
 
-        // Bind the caller's identity so the adapter's inner NAC check resolves the
-        // actual caller instead of the wildcard. The body runs on this thread via
-        // `block_on`, so the thread-local is visible throughout; the guard restores
-        // on drop so it never leaks into the next request on this pooled thread.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
-        );
+        // The caller acts in the call's context, so the NAC checks the body
+        // reaches resolve the actual caller instead of the wildcard.
+        let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()));
 
         let doc_ids_str = try_ffi!(require_c_str(doc_ids_json, "doc_ids_json"));
         let doc_ids = match parse_doc_ids_json(&doc_ids_str) {
@@ -62,9 +57,9 @@ pub unsafe extern "C" fn p2p_add_documents(
                     None => return Err(FfiP2PError::no_p2p_system()),
                 };
 
-                rt.block_on(async {
+                crate::helpers::block_on(rt, async {
                     p2p.system
-                        .ops()
+                        .ops_for(&context)
                         .add_documents(docs)
                         .await
                         .map_err(FfiP2PError::from)
@@ -92,19 +87,14 @@ pub unsafe extern "C" fn p2p_delete_documents(
     ffi_entry! {
         let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::P2pDocumentDelete
         ));
 
-        // Bind the caller's identity so the adapter's inner NAC check resolves the
-        // actual caller instead of the wildcard. The body runs on this thread via
-        // `block_on`, so the thread-local is visible throughout; the guard restores
-        // on drop so it never leaks into the next request on this pooled thread.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
-        );
+        // The caller acts in the call's context, so the NAC checks the body
+        // reaches resolve the actual caller instead of the wildcard.
+        let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()));
 
         let doc_ids_str = try_ffi!(require_c_str(doc_ids_json, "doc_ids_json"));
         let doc_ids = match parse_doc_ids_json(&doc_ids_str) {
@@ -127,9 +117,9 @@ pub unsafe extern "C" fn p2p_delete_documents(
                     None => return Err(FfiP2PError::no_p2p_system()),
                 };
 
-                rt.block_on(async {
+                crate::helpers::block_on(rt, async {
                     p2p.system
-                        .ops()
+                        .ops_for(&context)
                         .remove_documents(docs)
                         .await
                         .map_err(FfiP2PError::from)
@@ -156,19 +146,14 @@ pub unsafe extern "C" fn p2p_list_documents(
     ffi_entry! {
         let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::P2pDocumentList
         ));
 
-        // Bind the caller's identity so the adapter's inner NAC check resolves the
-        // actual caller instead of the wildcard. The body runs on this thread via
-        // `block_on`, so the thread-local is visible throughout; the guard restores
-        // on drop so it never leaks into the next request on this pooled thread.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
-        );
+        // The caller acts in the call's context, so the NAC checks the body
+        // reaches resolve the actual caller instead of the wildcard.
+        let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()));
 
         let result = NODES
             .get(node_ptr, |state| {
@@ -177,10 +162,10 @@ pub unsafe extern "C" fn p2p_list_documents(
                     None => return Err(FfiP2PError::no_p2p_system()),
                 };
 
-                rt.block_on(async {
+                crate::helpers::block_on(rt, async {
                     let documents = p2p
                         .system
-                        .ops()
+                        .ops_for(&context)
                         .get_documents()
                         .await
                         .map_err(FfiP2PError::from)?;

@@ -80,19 +80,11 @@ pub unsafe extern "C" fn add_dac_policy(
     policy: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             _identity_did,
             NodePermission::DacPolicyAdd
         ));
-
-        // Bind the caller's identity so any NAC-gated method reached by the body's
-        // block_on resolves the actual caller instead of the wildcard.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            crate::types::c_str_to_string(_identity_did).filter(|s| !s.is_empty()),
-        );
 
         let policy_str = try_ffi!(require_c_str(policy, "policy"));
 
@@ -137,8 +129,8 @@ pub unsafe extern "C" fn add_dac_policy(
 
         #[cfg(feature = "vera")]
         if let Some(sh_acp) = sh_acp {
-            // Vera mode: submit MsgCreatePolicy transaction
-            let result = rt.block_on(async {
+            // Vera mode: submit MsgCreatePolicy transaction, network work.
+            let result = crate::helpers::block_on(try_ffi!(get_rt()), async {
                 let policy_id = sh_acp
                     .add_policy(&identity_str, &policy_str)
                     .await
@@ -172,7 +164,13 @@ pub unsafe extern "C" fn add_dac_policy(
                 return FfiResult::error("local ACP backend is not available");
             };
 
-            let counter = match rt.block_on(local_zanzibar_store.next_policy_counter()) {
+            let counter_store = std::sync::Arc::clone(&local_zanzibar_store);
+            let counter = match crate::call::on_node(node_ptr, move || async move {
+                counter_store
+                    .next_policy_counter()
+                    .await
+                    .map_err(|e| e.to_string())
+            }) {
                 Ok(counter) => counter,
                 Err(e) => {
                     return FfiResult::error(format!("failed to advance policy counter: {}", e))
@@ -190,14 +188,15 @@ pub unsafe extern "C" fn add_dac_policy(
                 .with_validation()
                 .with_dpi_enforcement();
 
-            let result = rt.block_on(async {
+            let stored_id = policy_id.clone();
+            let result = crate::call::on_node(node_ptr, move || async move {
                 local_zanzibar_store
                     .store_policy_with_options(&policy, &options)
                     .await
                     .map_err(|e| format!("failed to store policy: {}", e))?;
                 Ok::<String, String>(
                     serde_json::json!({
-                        "PolicyID": policy_id
+                        "PolicyID": stored_id
                     })
                     .to_string(),
                 )
@@ -297,17 +296,10 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
     ffi_entry! {
         let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             requestor_did,
             NodePermission::DacRelationAdd
         ));
-
-        // Bind the caller's identity so any NAC-gated method reached by the body
-        // resolves the actual caller instead of the wildcard.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            crate::types::c_str_to_string(requestor_did).filter(|s| !s.is_empty()),
-        );
 
         let requestor_str = try_ffi!(require_c_str(requestor_did, "requestor_did"));
         let target_str = try_ffi!(require_c_str(target_did, "target_did"));
@@ -383,7 +375,7 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
             Err(e) => return FfiResult::error(e),
         };
 
-        let result = rt.block_on(async {
+        let result = crate::helpers::block_on(rt, async {
             let requestor = identity::Did::new(&requestor_str)
                 .map_err(|e| format!("invalid requestor DID '{}': {}", requestor_str, e))?;
             let target = if target_str == "*" {
@@ -453,17 +445,10 @@ pub unsafe extern "C" fn delete_dac_actor_relationship(
     ffi_entry! {
         let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             requestor_did,
             NodePermission::DacRelationDelete
         ));
-
-        // Bind the caller's identity so any NAC-gated method reached by the body
-        // resolves the actual caller instead of the wildcard.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            crate::types::c_str_to_string(requestor_did).filter(|s| !s.is_empty()),
-        );
 
         let requestor_str = try_ffi!(require_c_str(requestor_did, "requestor_did"));
         let target_str = try_ffi!(require_c_str(target_did, "target_did"));
@@ -533,7 +518,7 @@ pub unsafe extern "C" fn delete_dac_actor_relationship(
             Err(e) => return FfiResult::error(e),
         };
 
-        let result = rt.block_on(async {
+        let result = crate::helpers::block_on(rt, async {
             let requestor = identity::Did::new(&requestor_str)
                 .map_err(|e| format!("invalid requestor DID '{}': {}", requestor_str, e))?;
             let target = if target_str == "*" {

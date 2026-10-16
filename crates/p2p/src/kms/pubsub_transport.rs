@@ -27,9 +27,12 @@ use kms::{
     EncodedFetchRequest, FetchEncryptionKeyReply, FetchEncryptionKeyRequest, IncomingHandler,
     KeyTransport, Result as KmsResult, TransportReplyStream,
 };
-use std::sync::{Arc, OnceLock, Weak};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Weak};
 
 use cid::Cid;
+use edge::Edge;
 use kovan::AtomOption;
 use kovan_map::HopscotchMap;
 use std::time::Duration;
@@ -50,8 +53,11 @@ use crate::transport::{P2PTransport, PeerId};
 /// with `InsufficientPeers` — the request never reaches the wire (#976).
 const SUBSCRIBER_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Poll interval while waiting for an encryption-topic subscriber to appear.
-const SUBSCRIBER_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// Gossipsub's heartbeat: it grafts the mesh on this beat, and no event
+/// marks a graft. A wait for a subscriber wakes on the transport's
+/// subscription event, and re-checks at most once a beat for a transport that
+/// surfaces none.
+const GOSSIP_HEARTBEAT: Duration = Duration::from_secs(1);
 
 /// Upper bound on the total wait for a key-holding peer's reply. Mirrors Go's
 /// `fetchEncryptionKeyResponseTimeout` (internal/kms/pubsub.go). Without this
@@ -96,15 +102,22 @@ pub struct PubsubKeyTransport<T: P2PTransport> {
     pending_requests: HopscotchMap<Cid, (String, Vec<u8>), rapidhash::fast::RandomState>,
     /// Back-reference so `install_handler` can replay the buffer through the
     /// normal dispatch path.
-    self_ref: OnceLock<Weak<Self>>,
+    self_ref: regolith::sync::OnceCell<Weak<Self>>,
+    /// The network runtime buffered requests are replayed on.
+    edge: Edge,
+    /// Woken when a peer subscribes to the encryption topic
+    /// ([`peer_subscribed`](Self::peer_subscribed)).
+    subscribed: regolith::sync::Notify,
 }
 
 impl<T: P2PTransport> PubsubKeyTransport<T> {
     /// Construct, subscribe to ENCRYPTION_TOPIC and the local `_response`
-    /// sub-topic, and register both for raw routing.
+    /// sub-topic, and register both for raw routing. Requests that arrive
+    /// before a handler is installed are replayed on `edge`.
     pub async fn new(
         transport: T,
         identity_resolver: Arc<dyn PeerIdentityResolver>,
+        edge: Edge,
     ) -> KmsResult<Arc<Self>> {
         let local_peer_id = transport.local_peer_id().to_string();
         // Canonicalize through `libp2p::PeerId` when that dep is compiled in
@@ -144,10 +157,20 @@ impl<T: P2PTransport> PubsubKeyTransport<T> {
             local_peer_id,
             self_response_topic,
             pending_requests: HopscotchMap::with_hasher(rapidhash::fast::RandomState::default()),
-            self_ref: OnceLock::new(),
+            self_ref: regolith::sync::OnceCell::new(),
+            edge,
+            subscribed: regolith::sync::Notify::new(),
         });
         let _ = transport.self_ref.set(Arc::downgrade(&transport));
         Ok(transport)
+    }
+
+    /// Called by the sync coordinator when a peer subscribes to `topic`: a
+    /// request waiting for an encryption-topic subscriber looks again.
+    pub fn peer_subscribed(&self, topic: &str) {
+        if topic == ENCRYPTION_TOPIC {
+            self.subscribed.notify_waiters();
+        }
     }
 
     /// The `encryption/<self>/_response` sub-topic this transport owns. The
@@ -322,8 +345,11 @@ impl<T: P2PTransport> PubsubKeyTransport<T> {
     /// [`SUBSCRIBER_WAIT_TIMEOUT`]. Timing out is not fatal: the caller still
     /// attempts the publish (it may yet succeed, or surface a clear error).
     async fn wait_for_subscriber(&self) {
-        let deadline = n0_future::time::Instant::now() + SUBSCRIBER_WAIT_TIMEOUT;
+        let mut deadline = std::pin::pin!(n0_future::time::sleep(SUBSCRIBER_WAIT_TIMEOUT));
         loop {
+            // Registered before the check, so a subscription that lands
+            // between the two still wakes the wait.
+            let subscribed = self.subscribed.notified();
             match self.transport.topic_peers(DefraTopic::Encryption).await {
                 Ok(peers) if !peers.is_empty() => return,
                 Ok(_) => {}
@@ -332,25 +358,48 @@ impl<T: P2PTransport> PubsubKeyTransport<T> {
                     return;
                 }
             }
-            if n0_future::time::Instant::now() >= deadline {
+            if !Self::next_chance(subscribed, deadline.as_mut()).await {
                 warn!(
                     "no encryption-topic subscriber appeared within {:?}; publishing anyway",
                     SUBSCRIBER_WAIT_TIMEOUT
                 );
                 return;
             }
-            n0_future::time::sleep(SUBSCRIBER_POLL_INTERVAL).await;
         }
     }
 
-    /// Publish on `topic`, retrying briefly on `InsufficientPeers`.
+    /// Waits for a peer to subscribe to the encryption topic, or for the next
+    /// gossip heartbeat, whichever comes first: `false` once `deadline`
+    /// passes before either.
+    async fn next_chance<D>(subscribed: regolith::sync::Notified<'_>, deadline: Pin<&mut D>) -> bool
+    where
+        D: Future<Output = ()>,
+    {
+        use n0_future::FutureExt;
+        async {
+            subscribed
+                .or(n0_future::time::sleep(GOSSIP_HEARTBEAT))
+                .await;
+            true
+        }
+        .or(async {
+            deadline.await;
+            false
+        })
+        .await
+    }
+
+    /// Publish on `topic`, retrying on `InsufficientPeers` once a peer
+    /// subscribes or the mesh's next graft (a gossip heartbeat) may have
+    /// added one, within the same bounded window.
     ///
     /// Even after a subscriber is known, the very first publish can still race
     /// the mesh graft (gossipsub heartbeat). Retry within the same bounded
     /// window rather than failing outright.
     async fn publish_with_graft_retry(&self, topic: String, payload: Vec<u8>) -> KmsResult<()> {
-        let deadline = n0_future::time::Instant::now() + SUBSCRIBER_WAIT_TIMEOUT;
+        let mut deadline = std::pin::pin!(n0_future::time::sleep(SUBSCRIBER_WAIT_TIMEOUT));
         loop {
+            let subscribed = self.subscribed.notified();
             match self
                 .transport
                 .publish_raw(topic.clone(), payload.clone())
@@ -358,11 +407,12 @@ impl<T: P2PTransport> PubsubKeyTransport<T> {
             {
                 Ok(_) => return Ok(()),
                 Err(ref e @ crate::error::Error::GossipSubPublish(ref message))
-                    if message == "InsufficientPeers"
-                        && n0_future::time::Instant::now() < deadline =>
+                    if message == "InsufficientPeers" =>
                 {
                     debug!(topic = %topic, error = %e, "publish not yet ready; retrying");
-                    n0_future::time::sleep(SUBSCRIBER_POLL_INTERVAL).await;
+                    if !Self::next_chance(subscribed, deadline.as_mut()).await {
+                        return Err(kms::Error::Internal(format!("publish KMS message: {e}")));
+                    }
                 }
                 Err(e) => return Err(kms::Error::Internal(format!("publish KMS message: {e}"))),
             }
@@ -528,22 +578,15 @@ impl<T: P2PTransport> KeyTransport for PubsubKeyTransport<T> {
         let Some(me) = self.self_ref.get().and_then(Weak::upgrade) else {
             return;
         };
-        match tokio::runtime::Handle::try_current() {
-            Ok(rt) => {
-                // One task per request, bounded by PENDING_CAP: a reply that
-                // blocks on publishing cannot head-of-line-block the other
-                // buffered callers past their response timeout.
-                for (from, payload) in buffered {
-                    let me = Arc::clone(&me);
-                    rt.spawn(async move {
-                        me.handle_request(from, payload).await;
-                    });
-                }
-            }
-            Err(_) => warn!(
-                count = buffered.len(),
-                "no async runtime to replay buffered KMS requests; dropping"
-            ),
+        // One task per request, bounded by PENDING_CAP: a reply that blocks
+        // on publishing cannot head-of-line-block the other buffered callers
+        // past their response timeout. Each request's requester waits on its
+        // own timeout, so the replays run detached.
+        for (from, payload) in buffered {
+            let me = Arc::clone(&me);
+            drop(self.edge.spawn(async move {
+                me.handle_request(from, payload).await;
+            }));
         }
     }
 }
@@ -782,9 +825,13 @@ mod tests {
         let transport = RacyTransport::new(3);
         let publish_attempts = transport.publish_attempts.clone();
         let published = transport.published.clone();
-        let kt = PubsubKeyTransport::new(transport, Arc::new(crate::AnonymousResolver))
-            .await
-            .unwrap();
+        let kt = PubsubKeyTransport::new(
+            transport,
+            Arc::new(crate::AnonymousResolver),
+            edge::testing::edge(),
+        )
+        .await
+        .unwrap();
 
         let req = EncodedFetchRequest {
             payload: b"fetch".to_vec(),
@@ -806,13 +853,49 @@ mod tests {
         assert_eq!(pubs[0].1, b"fetch");
     }
 
+    /// A subscription event wakes a request waiting for a subscriber at once,
+    /// not at the next gossip heartbeat.
+    #[tokio::test(start_paused = true)]
+    async fn a_subscription_event_wakes_a_waiting_request_before_the_heartbeat() {
+        let transport = RacyTransport::new(2);
+        let published = transport.published.clone();
+        let kt = PubsubKeyTransport::new(
+            transport,
+            Arc::new(crate::AnonymousResolver),
+            edge::testing::edge(),
+        )
+        .await
+        .unwrap();
+        let started = n0_future::time::Instant::now();
+        let request = EncodedFetchRequest {
+            payload: b"fetch".to_vec(),
+            request_id: "r1".to_string(),
+        };
+        let (sent, ()) = tokio::join!(kt.send_request(request), async {
+            n0_future::time::sleep(Duration::from_millis(10)).await;
+            kt.peer_subscribed(ENCRYPTION_TOPIC);
+        });
+
+        sent.expect("send_request must succeed");
+        assert_eq!(published.load().len(), 1);
+        assert!(
+            started.elapsed() < GOSSIP_HEARTBEAT,
+            "woken by the event: {:?}",
+            started.elapsed()
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn send_request_stops_when_transport_is_closed() {
         let transport = RacyTransport::new(usize::MAX);
         let publish_attempts = transport.publish_attempts.clone();
-        let kt = PubsubKeyTransport::new(transport.clone(), Arc::new(crate::AnonymousResolver))
-            .await
-            .unwrap();
+        let kt = PubsubKeyTransport::new(
+            transport.clone(),
+            Arc::new(crate::AnonymousResolver),
+            edge::testing::edge(),
+        )
+        .await
+        .unwrap();
         transport.close();
 
         let request = EncodedFetchRequest {
@@ -833,9 +916,13 @@ mod tests {
     #[tokio::test]
     async fn response_envelope_routes_to_waiting_request() {
         let transport = RacyTransport::new(1);
-        let kt = PubsubKeyTransport::new(transport, Arc::new(crate::AnonymousResolver))
-            .await
-            .unwrap();
+        let kt = PubsubKeyTransport::new(
+            transport,
+            Arc::new(crate::AnonymousResolver),
+            edge::testing::edge(),
+        )
+        .await
+        .unwrap();
 
         let payload = b"the-request-bytes".to_vec();
         let req = EncodedFetchRequest {
@@ -883,9 +970,13 @@ mod tests {
     #[tokio::test]
     async fn empty_reply_does_not_hide_later_key_reply() {
         let transport = RacyTransport::new(1);
-        let kt = PubsubKeyTransport::new(transport, Arc::new(crate::AnonymousResolver))
-            .await
-            .unwrap();
+        let kt = PubsubKeyTransport::new(
+            transport,
+            Arc::new(crate::AnonymousResolver),
+            edge::testing::edge(),
+        )
+        .await
+        .unwrap();
 
         let payload = b"multi-peer-key-request".to_vec();
         let req = EncodedFetchRequest {
@@ -944,9 +1035,13 @@ mod tests {
     #[tokio::test]
     async fn partial_replies_are_collected_until_all_requested_links_arrive() {
         let transport = RacyTransport::new(1);
-        let kt = PubsubKeyTransport::new(transport, Arc::new(crate::AnonymousResolver))
-            .await
-            .unwrap();
+        let kt = PubsubKeyTransport::new(
+            transport,
+            Arc::new(crate::AnonymousResolver),
+            edge::testing::edge(),
+        )
+        .await
+        .unwrap();
 
         let first_link = vec![1, 2, 3];
         let second_link = vec![4, 5, 6];
@@ -1012,9 +1107,13 @@ mod tests {
     #[tokio::test]
     async fn claimed_complete_reply_does_not_hide_later_verified_candidate() {
         let transport = RacyTransport::new(1);
-        let kt = PubsubKeyTransport::new(transport, Arc::new(crate::AnonymousResolver))
-            .await
-            .unwrap();
+        let kt = PubsubKeyTransport::new(
+            transport,
+            Arc::new(crate::AnonymousResolver),
+            edge::testing::edge(),
+        )
+        .await
+        .unwrap();
 
         let requested_link = vec![1, 2, 3];
         let request = FetchEncryptionKeyRequest {
@@ -1076,9 +1175,13 @@ mod tests {
     async fn request_republishes_until_reply_arrives() {
         let transport = RacyTransport::new(0);
         let published = transport.published.clone();
-        let kt = PubsubKeyTransport::new(transport, Arc::new(crate::AnonymousResolver))
-            .await
-            .unwrap();
+        let kt = PubsubKeyTransport::new(
+            transport,
+            Arc::new(crate::AnonymousResolver),
+            edge::testing::edge(),
+        )
+        .await
+        .unwrap();
 
         let payload = b"retry-me".to_vec();
         let req = EncodedFetchRequest {
@@ -1136,9 +1239,13 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn request_with_no_reply_reports_unavailable() {
         let transport = RacyTransport::new(0);
-        let kt = PubsubKeyTransport::new(transport, Arc::new(crate::AnonymousResolver))
-            .await
-            .unwrap();
+        let kt = PubsubKeyTransport::new(
+            transport,
+            Arc::new(crate::AnonymousResolver),
+            edge::testing::edge(),
+        )
+        .await
+        .unwrap();
 
         let req = EncodedFetchRequest {
             payload: b"never-answered".to_vec(),
@@ -1210,6 +1317,7 @@ mod tests {
         let kt = PubsubKeyTransport::new(
             transport,
             Arc::new(FixedIdentityResolver(resolved_did.clone())),
+            edge::testing::edge(),
         )
         .await
         .unwrap();
@@ -1255,6 +1363,26 @@ mod tests {
     /// startup-wiring window.
     #[tokio::test]
     async fn request_before_handler_is_served_after_install() {
+        assert_buffered_request_is_served(|kt, handler| kt.install_handler(handler)).await;
+    }
+
+    /// The replay runs on the network runtime the transport was given, so a
+    /// handler installed from a thread outside any runtime still serves the
+    /// buffered request.
+    #[tokio::test]
+    async fn request_before_handler_is_served_when_installed_outside_a_runtime() {
+        assert_buffered_request_is_served(|kt, handler| {
+            std::thread::spawn(move || kt.install_handler(handler))
+                .join()
+                .expect("installing thread panicked");
+        })
+        .await;
+    }
+
+    async fn assert_buffered_request_is_served<I>(install: I)
+    where
+        I: FnOnce(Arc<PubsubKeyTransport<RacyTransport>>, Arc<dyn IncomingHandler>),
+    {
         struct FixedIdentityResolver(identity::Did);
         #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
         #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -1292,6 +1420,7 @@ mod tests {
         let kt = PubsubKeyTransport::new(
             transport,
             Arc::new(FixedIdentityResolver(resolved_did.clone())),
+            edge::testing::edge(),
         )
         .await
         .unwrap();
@@ -1306,7 +1435,10 @@ mod tests {
         kt.dispatch_incoming(caller.to_string(), ENCRYPTION_TOPIC.to_string(), req_bytes)
             .await;
 
-        kt.install_handler(Arc::new(EchoHandler { seen: seen.clone() }));
+        install(
+            Arc::clone(&kt),
+            Arc::new(EchoHandler { seen: seen.clone() }),
+        );
 
         let expected_topic = response_topic(ENCRYPTION_TOPIC, &caller);
         let mut served = false;

@@ -1,4 +1,3 @@
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use integration_test::{open_events_sse, poll_until, TestCluster};
@@ -86,10 +85,8 @@ fn json_f64(value: &Value, field: &str) -> f64 {
         .unwrap_or_else(|| panic!("missing float field {field} in row: {}", value))
 }
 
-fn count_update_events_for_doc(events: &Arc<Mutex<Vec<Value>>>, doc_id: &str) -> usize {
+fn count_update_events_for_doc(events: &[Value], doc_id: &str) -> usize {
     events
-        .lock()
-        .unwrap()
         .iter()
         .filter(|event| event.pointer("/data/doc_id").and_then(Value::as_str) == Some(doc_id))
         .count()
@@ -317,7 +314,10 @@ async fn continuous_rollup_test(cluster: TestCluster) {
 
         let expected_events = event_count + 1;
         poll_until(
-            || count_update_events_for_doc(&events, &source_doc_id) >= expected_events,
+            || {
+                count_update_events_for_doc(&events.lock().expect("events lock"), &source_doc_id)
+                    >= expected_events
+            },
             EVENT_TIMEOUT,
             POLL_INTERVAL,
             "raw metric update event should arrive",

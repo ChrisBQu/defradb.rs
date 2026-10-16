@@ -61,12 +61,12 @@ impl<S: Store + 'static> crate::database::DB<S> {
     async fn current_head_cids(&self, doc_short_id: u64) -> Result<RapidHashSet<Cid>> {
         let txn = self.new_txn(true).await?;
         let headstore = txn.headstore()?;
-        let mut iter = headstore
-            .iterator(
-                IterOptions::new().with_prefix(HeadstoreDocKey::document_prefix(doc_short_id)),
-            )
-            .await
-            .map_err(Error::Storage)?;
+        let mut iter = crate::block::heads::document::iterator(
+            &headstore,
+            IterOptions::new().with_prefix(HeadstoreDocKey::document_prefix(doc_short_id)),
+        )
+        .await
+        .map_err(Error::Storage)?;
 
         let mut cids = RapidHashSet::new();
         while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
@@ -253,8 +253,18 @@ impl<S: Store + 'static> crate::database::DB<S> {
         Ok(())
     }
 
+    /// [`Self::gc_downsample_histories_as`] in [`defra_core::RequestContext::ambient`].
     pub async fn gc_downsample_histories(
         self: &Arc<Self>,
+        options: Option<GcDownsampleHistoriesOptions>,
+    ) -> Result<()> {
+        self.gc_downsample_histories_as(&defra_core::RequestContext::ambient(), options)
+            .await
+    }
+
+    pub async fn gc_downsample_histories_as(
+        self: &Arc<Self>,
+        context: &defra_core::RequestContext,
         options: Option<GcDownsampleHistoriesOptions>,
     ) -> Result<()> {
         let names_filter = options
@@ -265,7 +275,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
         let bootstrap_names = names_filter
             .as_ref()
             .map(|names| names.iter().cloned().collect::<Vec<_>>());
-        self.bootstrap_downsamples(bootstrap_names.as_deref())
+        self.bootstrap_downsamples_as(context, bootstrap_names.as_deref())
             .await?;
 
         let mut grouped_plans: RapidHashMap<String, Vec<DownsamplePlan>> = RapidHashMap::new();

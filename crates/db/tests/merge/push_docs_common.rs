@@ -6,7 +6,6 @@ use defra_core::CompositeDeltaPayload;
 use defra_core::CrdtDelta;
 use std::sync::Arc;
 use storage::corekv::Key;
-use storage::keys::headstore::HeadstoreDocKey;
 use storage::keys::headstore::HeadstorePriorityKey;
 use storage::RegolithStore;
 
@@ -54,20 +53,10 @@ async fn current_composite_frontier_retains_lower_priority_sibling() {
         .set(&second_cid.to_bytes(), &second_bytes)
         .await
         .unwrap();
-    txn.headstore()
-        .unwrap()
-        .set(
-            &HeadstoreDocKey::new(doc_short_id, "C", first_cid).bytes(),
-            &[],
-        )
-        .await
-        .unwrap();
-    txn.headstore()
-        .unwrap()
-        .set(
-            &HeadstoreDocKey::new(doc_short_id, "C", second_cid).bytes(),
-            &[],
-        )
+    let mut heads = storage::merge::head_set::Write::default();
+    heads.add(&db::block::heads::document::name("C", &first_cid), 1);
+    heads.add(&db::block::heads::document::name("C", &second_cid), 2);
+    db::block::heads::document::commit(&txn.headstore().unwrap(), doc_short_id, &heads)
         .await
         .unwrap();
     txn.headstore()
@@ -115,9 +104,10 @@ async fn stale_retry_heads_cannot_clear_a_newer_document_marker() {
         .create_replicator(peer_id, b"replicator")
         .await
         .unwrap();
-    peerstore
-        .observe_push_head(peer_id, doc_id, collection_id)
+    let marker_generation = peerstore
+        .observe_push_head_with_generation(peer_id, doc_id, collection_id)
         .await
+        .unwrap()
         .unwrap();
 
     let old = Block::new_with_options(
@@ -174,6 +164,7 @@ async fn stale_retry_heads_cannot_clear_a_newer_document_marker() {
         collection_id,
         doc_short_id,
         &[old_cid],
+        marker_generation,
     )
     .await
     .unwrap_err();
@@ -190,6 +181,7 @@ async fn stale_retry_heads_cannot_clear_a_newer_document_marker() {
         collection_id,
         doc_short_id,
         &[current_cid],
+        marker_generation,
     )
     .await
     .unwrap();

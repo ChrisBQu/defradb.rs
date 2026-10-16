@@ -38,7 +38,7 @@ pub async fn get_document(
 ) -> Result<Json<JsonValue>, HttpError> {
     require_permission(&state, &identity, NodePermission::DocumentRead).await?;
 
-    let rest = rest_for_request(&state, &headers)?;
+    let rest = rest_for_request(&state, &identity, &headers)?;
 
     match rest
         .get_document(&collection, &doc_id, identity.did())
@@ -82,7 +82,7 @@ pub async fn create_document(
 ) -> Result<Json<Vec<String>>, HttpError> {
     require_permission(&state, &identity, NodePermission::DocumentUpdate).await?;
 
-    let rest = rest_for_request(&state, &headers)?;
+    let rest = rest_for_request(&state, &identity, &headers)?;
 
     let result = if body.is_array() {
         let docs: Vec<JsonValue> = body
@@ -141,7 +141,7 @@ pub async fn update_document(
 ) -> Result<StatusCode, HttpError> {
     require_permission(&state, &identity, NodePermission::DocumentUpdate).await?;
 
-    let rest = rest_for_request(&state, &headers)?;
+    let rest = rest_for_request(&state, &identity, &headers)?;
 
     match rest
         .update_document(&collection, &doc_id, patch, identity.did())
@@ -186,7 +186,7 @@ pub async fn delete_document(
 ) -> Result<StatusCode, HttpError> {
     require_permission(&state, &identity, NodePermission::DocumentDelete).await?;
 
-    let rest = rest_for_request(&state, &headers)?;
+    let rest = rest_for_request(&state, &identity, &headers)?;
 
     match rest
         .delete_document(&collection, &doc_id, identity.did())
@@ -330,7 +330,7 @@ pub async fn delete_documents_with_filter(
 
     let filter = required_filter(&request_body(&body)?)?;
 
-    let rest = rest_for_request(&state, &headers)?;
+    let rest = rest_for_request(&state, &identity, &headers)?;
 
     match rest
         .delete_documents_with_filter(&collection, &filter, identity.did())
@@ -372,7 +372,7 @@ pub async fn update_documents_with_filter(
     let filter = required_filter(&request)?;
     let updater = required_updater(&request)?;
 
-    let rest = rest_for_request(&state, &headers)?;
+    let rest = rest_for_request(&state, &identity, &headers)?;
 
     match rest
         .update_documents_with_filter(&collection, &filter, &updater, identity.did())

@@ -1,8 +1,31 @@
-use anyhow::{bail, ensure, Context, Result};
 use defra_harness::TestCluster;
 use serde_json::Value;
 use std::process::Command;
 use std::time::Duration;
+
+#[derive(Debug, thiserror::Error)]
+pub enum MutationError {
+    #[error("execute mutation: {0}")]
+    Spawn(std::io::Error),
+    #[error("mutation command failed: {0}")]
+    Failed(String),
+    #[error("mutation output is not UTF-8: {0}")]
+    NotUtf8(#[from] std::string::FromUtf8Error),
+    #[error("mutation returned no JSON")]
+    NoJson,
+    #[error("mutation response is not JSON: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("invalid GraphQL errors")]
+    InvalidErrors,
+    #[error("mutation returned GraphQL errors: {0}")]
+    GraphQl(Value),
+    #[error("mutation returned no data")]
+    NoData,
+    #[error("mutation aborted after five transaction conflicts: {0}")]
+    Aborted(String),
+}
+
+type Result<T> = std::result::Result<T, MutationError>;
 
 /// Both runtimes end a conflict message with corekv's wording; Go emits it
 /// bare, Rust prefixes it with the commit-error chain.
@@ -16,12 +39,12 @@ pub async fn execute(cluster: &TestCluster, node: usize, query: &str) -> Result<
         let output = Command::new(cluster.client(node).binary_path())
             .args(["--url", address, "client", "query", query])
             .output()
-            .context("execute mutation")?;
-        ensure!(
-            output.status.success(),
-            "mutation command failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+            .map_err(MutationError::Spawn)?;
+        if !output.status.success() {
+            return Err(MutationError::Failed(
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            ));
+        }
         let stdout = String::from_utf8(output.stdout)?;
         if let Some(data) = mutation_result(&stdout)? {
             return Ok(data);
@@ -30,14 +53,14 @@ pub async fn execute(cluster: &TestCluster, node: usize, query: &str) -> Result<
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
-    bail!("mutation aborted after five transaction conflicts: {query}")
+    Err(MutationError::Aborted(query.to_owned()))
 }
 
 fn mutation_result(stdout: &str) -> Result<Option<Value>> {
-    let start = stdout.find('{').context("mutation returned no JSON")?;
+    let start = stdout.find('{').ok_or(MutationError::NoJson)?;
     let response: Value = serde_json::from_str(&stdout[start..])?;
     if let Some(errors) = response.get("errors").filter(|value| !value.is_null()) {
-        let errors = errors.as_array().context("invalid GraphQL errors")?;
+        let errors = errors.as_array().ok_or(MutationError::InvalidErrors)?;
         if !errors.is_empty() {
             if errors.iter().all(|error| {
                 error["message"]
@@ -46,13 +69,13 @@ fn mutation_result(stdout: &str) -> Result<Option<Value>> {
             }) {
                 return Ok(None);
             }
-            bail!("mutation returned GraphQL errors: {response}");
+            return Err(MutationError::GraphQl(response));
         }
     }
     let data = response
         .get("data")
         .filter(|data| !data.is_null())
-        .context("mutation returned no data")?;
+        .ok_or(MutationError::NoData)?;
     Ok(Some(data.clone()))
 }
 

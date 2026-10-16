@@ -2,8 +2,8 @@
 
 use lens::{LensConfig, TransformId};
 use schema::CollectionSource;
-use storage::corekv::{Key, Store};
-use storage::keys::systemstore::{CollectionKey, CollectionVersionKey, LensConfigKey};
+use storage::corekv::{Key, OnCommit, Store};
+use storage::keys::systemstore::{CollectionKey, CollectionVersionKey};
 use tracing::instrument;
 
 use super::helpers::{create_orphan_placeholder, create_placeholder_with_source};
@@ -33,12 +33,22 @@ impl<S: Store> DB<S> {
         source = %config.source_schema_version_id,
         dest = %config.destination_schema_version_id
     ))]
+    /// [`Self::set_migration_as`] for `identity`, or for the identity acting in [`defra_core::RequestContext::ambient`] when there is none.
     pub async fn set_migration(
         &self,
         config: LensConfig,
         identity: Option<&identity::Did>,
     ) -> Result<TransformId> {
-        self.check_node_access(identity, acp::nac::NodePermission::MigrationSet)
+        self.set_migration_as(&crate::access::nac::ambient_as(identity), config)
+            .await
+    }
+
+    pub async fn set_migration_as(
+        &self,
+        context: &defra_core::RequestContext,
+        config: LensConfig,
+    ) -> Result<TransformId> {
+        self.check_node_access_as(context, acp::nac::NodePermission::MigrationSet)
             .await?;
         let dest_version_id = config.destination_schema_version_id.clone();
         let source_version_id = config.source_schema_version_id.clone();
@@ -214,43 +224,47 @@ impl<S: Store> DB<S> {
                     .map_err(Error::Storage)?;
             }
 
-            let lens_key = LensConfigKey::new(transform_id.to_string());
-            let lens_data = serde_json::to_vec(&config_for_persistence)
-                .map_err(|e| Error::lens_config_json("failed to serialize lens config", e))?;
-            systemstore
-                .set(&lens_key.bytes(), &lens_data)
-                .await
-                .map_err(Error::Storage)?;
+            super::committed_lenses::write_lens_config(
+                &systemstore,
+                &transform_id,
+                &config_for_persistence,
+            )
+            .await?;
+            if !dst_col.name.is_empty() {
+                super::owe_reindex(
+                    &systemstore,
+                    &self.collections,
+                    &dst_col.collection_id,
+                    Some(&dest_version_id),
+                )
+                .await?;
+            }
+        }
+        if !collection_name.is_empty() {
+            let cached_collection = crate::collection::Collection::load_index_actions(
+                dst_col.clone(),
+                &txn.systemstore()?,
+            )
+            .await?;
+            let collections = std::sync::Arc::clone(&self.collections);
+            let collection_name = collection_name.clone();
+            let dest_version_id = dest_version_id.clone();
+            txn.on_commit(OnCommit::Ordered(Box::new(move || {
+                collections.rcu(|old| {
+                    let mut cache = old.clone();
+                    let matches_dest = cache
+                        .get(collection_name.as_str())
+                        .is_some_and(|cached| cached.schema().version_id == dest_version_id);
+                    if matches_dest {
+                        cache.put_named(collection_name.as_str(), cached_collection.clone());
+                    }
+                    cache
+                });
+            })))?;
         }
         txn.commit().await?;
         self.bump_migration_generation();
-
-        if !collection_name.is_empty() {
-            let cached_collection = self.collection_with_index_actions(dst_col.clone()).await?;
-            self.collections.rcu(|old| {
-                let mut cache = old.clone();
-                let matches_dest = cache
-                    .get(collection_name.as_str())
-                    .is_some_and(|cached| cached.schema().version_id == dest_version_id);
-                if matches_dest {
-                    cache.put_named(collection_name.as_str(), cached_collection.clone());
-                }
-                cache
-            });
-        }
-
-        if !collection_name.is_empty() {
-            if let Err(e) = self
-                .maybe_reindex_after_migration(&collection_name, &dest_version_id)
-                .await
-            {
-                tracing::warn!(
-                    error = %e,
-                    collection = %collection_name,
-                    "Failed to reindex after migration"
-                );
-            }
-        }
+        self.settle_owed_reindexes_after_commit().await;
 
         Ok(transform_id)
     }
@@ -266,13 +280,24 @@ impl<S: Store> DB<S> {
         source = %config.source_schema_version_id,
         dest = %config.destination_schema_version_id
     ))]
+    /// [`Self::set_migration_in_txn_as`] for `identity`, or for the identity acting in [`defra_core::RequestContext::ambient`] when there is none.
     pub async fn set_migration_in_txn(
         &self,
         txn: &DbTxn<S>,
         config: LensConfig,
         identity: Option<&identity::Did>,
     ) -> Result<TransformId> {
-        self.check_node_access(identity, acp::nac::NodePermission::MigrationSet)
+        self.set_migration_in_txn_as(&crate::access::nac::ambient_as(identity), txn, config)
+            .await
+    }
+
+    pub async fn set_migration_in_txn_as(
+        &self,
+        context: &defra_core::RequestContext,
+        txn: &DbTxn<S>,
+        config: LensConfig,
+    ) -> Result<TransformId> {
+        self.check_node_access_as(context, acp::nac::NodePermission::MigrationSet)
             .await?;
         self.set_migration_in_txn_with_store(txn, self.lens_store.clone(), config)
             .await
@@ -456,13 +481,21 @@ impl<S: Store> DB<S> {
                     .map_err(Error::Storage)?;
             }
 
-            let lens_key = LensConfigKey::new(transform_id.to_string());
-            let lens_data = serde_json::to_vec(&config_for_persistence)
-                .map_err(|e| Error::lens_config_json("failed to serialize lens config", e))?;
-            systemstore
-                .set(&lens_key.bytes(), &lens_data)
-                .await
-                .map_err(Error::Storage)?;
+            super::committed_lenses::write_lens_config(
+                &systemstore,
+                &transform_id,
+                &config_for_persistence,
+            )
+            .await?;
+            if !dst_col.name.is_empty() {
+                super::owe_reindex(
+                    &systemstore,
+                    &self.collections,
+                    &dst_col.collection_id,
+                    Some(&dest_version_id),
+                )
+                .await?;
+            }
         }
 
         Ok(SetMigrationInTxnOutcome {

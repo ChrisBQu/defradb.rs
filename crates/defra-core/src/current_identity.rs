@@ -1,13 +1,10 @@
-//! Ambient acting-identity DID for the current request thread.
+//! The acting identity tests set the old way: a thread-local, and a
+//! task-local a scope binds to a task.
 //!
-//! HTTP/FFI run the whole async operation inside `spawn_blocking` +
-//! `block_on`, pinning it to one OS thread. Boundaries set the acting
-//! identity here so DB-layer NAC checks (which receive no explicit
-//! identity) can resolve who is acting.
-//!
-//! These threads are pooled and reused across requests. Use
-//! [`scoped_current_identity`] at request boundaries so the identity is
-//! always cleared on exit and never leaks into the next request.
+//! Production code never reads or writes it: the acting identity travels in
+//! the request's [`RequestContext`](crate::RequestContext). Tests written
+//! against this API still set it, and [`crate::ambient`] reads it back into a
+//! context; it is compiled only for tests.
 //!
 //! Stored as `String` because `defra-core` does not depend on the
 //! `identity` crate; callers parse it back into a `Did` where needed.
@@ -105,18 +102,66 @@ where
     SCOPED_IDENTITY.scope(did, fut).await
 }
 
-/// On wasm, the scope is a no-op pass-through.
+/// Browser tasks share a thread but can interleave at every await. Install the
+/// identity only while polling this future, restoring it before another task
+/// can run. Holding a thread-local guard across an await would leak identities.
 #[cfg(target_arch = "wasm32")]
-pub async fn with_scoped_identity<F, T>(_did: Option<String>, fut: F) -> T
+pub async fn with_scoped_identity<F, T>(did: Option<String>, fut: F) -> T
 where
     F: std::future::Future<Output = T>,
 {
-    fut.await
+    with_poll_scoped_identity(did, fut).await
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+async fn with_poll_scoped_identity<F: std::future::Future>(
+    did: Option<String>,
+    fut: F,
+) -> F::Output {
+    let mut fut = std::pin::pin!(fut);
+    std::future::poll_fn(|cx| {
+        let _identity = scoped_current_identity(did.clone());
+        fut.as_mut().poll(cx)
+    })
+    .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interleaved_poll_scopes_restore_identity_and_mask_anonymous_callers() {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+
+        let _outer = scoped_current_identity(Some("did:key:outer".into()));
+        let future = |identity: Option<String>| {
+            let expected = identity.clone();
+            let mut polled = false;
+            with_poll_scoped_identity(
+                identity,
+                std::future::poll_fn(move |_| {
+                    assert_eq!(get_current_identity(), expected);
+                    if std::mem::replace(&mut polled, true) {
+                        Poll::Ready(())
+                    } else {
+                        Poll::Pending
+                    }
+                }),
+            )
+        };
+        let mut alice = std::pin::pin!(future(Some("did:key:alice".into())));
+        let mut anonymous = std::pin::pin!(future(None));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(alice.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(get_current_identity().as_deref(), Some("did:key:outer"));
+        assert!(anonymous.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(get_current_identity().as_deref(), Some("did:key:outer"));
+        assert!(alice.as_mut().poll(&mut cx).is_ready());
+        assert!(anonymous.as_mut().poll(&mut cx).is_ready());
+        assert_eq!(get_current_identity().as_deref(), Some("did:key:outer"));
+    }
 
     #[test]
     fn scoped_identity_restores_previous_on_drop() {

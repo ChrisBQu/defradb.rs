@@ -13,7 +13,6 @@
 use crate::error::{Error, Result};
 use crate::index::IndexManager;
 use datastore::NamespaceView;
-use defra_core::ActionStatus;
 use document::{DocID, Document, NormalValue};
 use schema::{
     legacy_collection_short_id, CollectionVersion, FieldKind, IndexDescription, ScalarArrayKind,
@@ -29,11 +28,12 @@ pub mod cache;
 mod crud;
 pub(crate) mod epoch;
 mod index;
+pub(crate) mod index_status;
 pub mod loader;
-pub(crate) mod locks;
 pub mod map;
 pub mod name;
 pub(crate) mod ops;
+mod series;
 pub use map::{Cached, CollectionMap};
 pub(crate) mod provider;
 pub mod retriever;
@@ -43,6 +43,7 @@ pub mod stream;
 mod truncator;
 pub mod validation;
 
+pub(crate) use index_status::IndexStatuses;
 pub use truncator::DbCollectionTruncator;
 
 /// Derive the legacy short ID from a collection_id string.
@@ -147,24 +148,50 @@ pub(super) const DELETED_MARKER: u8 = 0x01;
 #[derive(Debug, Clone)]
 pub struct Collection {
     /// The collection schema definition.
-    def: CollectionVersion,
+    def: Arc<CollectionVersion>,
+    /// A canonical serialized definition captured once when this immutable
+    /// collection is built. It is only a fast-path hint: snapshot readers must
+    /// still fetch the persisted value and require an exact byte match.
+    definition_wire: Option<Arc<[u8]>>,
     write_indexes: Vec<IndexDescription>,
-    queryable_indexes: Vec<IndexDescription>,
+    /// The indexes that were built and that no action is changing.
+    built_indexes: Vec<IndexDescription>,
+    /// A reindex is owed, so no index answers queries ([`index_status`]).
+    reindex_owed: bool,
     /// `def` with the queryable index set substituted, built once here
     /// because a `Collection` never changes after construction. Query-side
     /// callers take a pointer clone of this instead of deep-copying the
     /// definition on every lookup.
     query_schema: Arc<CollectionVersion>,
+    /// This version's decoded part-ID map, shared with every handle built
+    /// from the same definition (see `parts`).
+    part_id_snapshot: Arc<parts::PartIdSnapshot>,
+}
+
+/// The indexes of `built_indexes` that answer queries.
+fn queryable(built_indexes: &[IndexDescription], reindex_owed: bool) -> &[IndexDescription] {
+    if reindex_owed {
+        &[]
+    } else {
+        built_indexes
+    }
 }
 
 /// `def` with the queryable index set substituted in.
 fn query_schema_of(
-    def: &CollectionVersion,
+    def: &Arc<CollectionVersion>,
     queryable_indexes: &[IndexDescription],
 ) -> Arc<CollectionVersion> {
-    let mut schema = def.clone();
+    if def.indexes == queryable_indexes {
+        return Arc::clone(def);
+    }
+    let mut schema = def.as_ref().clone();
     schema.indexes = queryable_indexes.to_vec();
     Arc::new(schema)
+}
+
+fn serialize_definition_hint(def: &CollectionVersion) -> Option<Arc<[u8]>> {
+    serde_json::to_vec(def).ok().map(Arc::from)
 }
 
 impl Collection {
@@ -172,46 +199,110 @@ impl Collection {
         def: CollectionVersion,
         systemstore: &datastore::NamespaceView,
     ) -> crate::error::Result<Self> {
-        let actions =
-            crate::database::action::index_action_statuses(systemstore, &def.collection_id).await?;
-        Ok(Self::with_index_actions(def, &actions))
+        let statuses = IndexStatuses::load_for(systemstore, &def).await?;
+        Ok(Self::with_index_actions(def, &statuses))
     }
 
     /// Create a new collection with the given schema definition.
     pub fn new(def: CollectionVersion) -> Self {
+        let def = Arc::new(def);
+        let definition_wire = serialize_definition_hint(&def);
         let indexes = def.indexes.clone();
         let query_schema = query_schema_of(&def, &indexes);
         Self {
             def,
+            definition_wire,
             write_indexes: indexes.clone(),
-            queryable_indexes: indexes,
+            built_indexes: indexes,
+            reindex_owed: false,
             query_schema,
+            part_id_snapshot: Arc::default(),
         }
     }
 
-    pub(crate) fn with_index_actions(
+    pub(crate) fn with_index_actions(def: CollectionVersion, statuses: &IndexStatuses) -> Self {
+        let def = Arc::new(def);
+        let definition_wire = serialize_definition_hint(&def);
+        Self::with_index_actions_and_wire(def, definition_wire, Arc::default(), statuses)
+    }
+
+    /// `def` with `statuses`, keeping no serialized definition: for a handle
+    /// that is only compared, never loaded through.
+    pub(crate) fn with_index_actions_unwired(
         def: CollectionVersion,
-        actions: &rapidhash::RapidHashMap<u32, ActionStatus>,
+        statuses: &IndexStatuses,
+    ) -> Self {
+        Self::with_index_actions_and_wire(Arc::new(def), None, Arc::default(), statuses)
+    }
+
+    /// `expected`'s definition with fresh index statuses. The definition is
+    /// the same version, so its decoded part-ID map is shared as well.
+    pub(crate) fn with_index_actions_reusing_schema(
+        expected: &Self,
+        statuses: &IndexStatuses,
+    ) -> Self {
+        Self::with_index_actions_and_wire(
+            Arc::clone(&expected.def),
+            expected.definition_wire.clone(),
+            Arc::clone(&expected.part_id_snapshot),
+            statuses,
+        )
+    }
+
+    fn with_index_actions_and_wire(
+        def: Arc<CollectionVersion>,
+        definition_wire: Option<Arc<[u8]>>,
+        part_id_snapshot: Arc<parts::PartIdSnapshot>,
+        statuses: &IndexStatuses,
     ) -> Self {
         let write_indexes = def
             .indexes
             .iter()
-            .filter(|index| actions.get(&index.id) != Some(&ActionStatus::ERRORED))
+            .filter(|index| statuses.takes_writes(index))
             .cloned()
             .collect();
-        let queryable_indexes: Vec<IndexDescription> = def
+        let built_indexes: Vec<IndexDescription> = def
             .indexes
             .iter()
-            .filter(|index| !actions.contains_key(&index.id))
+            .filter(|index| statuses.is_built(index))
             .cloned()
             .collect();
-        let query_schema = query_schema_of(&def, &queryable_indexes);
+        let reindex_owed = statuses.reindex_owed();
+        let query_schema = query_schema_of(&def, queryable(&built_indexes, reindex_owed));
         Self {
             def,
+            definition_wire,
             write_indexes,
-            queryable_indexes,
+            built_indexes,
+            reindex_owed,
             query_schema,
+            part_id_snapshot,
         }
+    }
+
+    /// This collection with a reindex owed or settled, as the cache publishes
+    /// it when the owed record commits or is cleared.
+    pub(crate) fn with_reindex_owed(&self, reindex_owed: bool) -> Self {
+        Self {
+            reindex_owed,
+            query_schema: query_schema_of(&self.def, queryable(&self.built_indexes, reindex_owed)),
+            ..self.clone()
+        }
+    }
+
+    /// Whether `other` has the same indexes taking writes and built: what a
+    /// writer checks its cached definition against. An owed reindex does not
+    /// count, since it changes only which indexes answer queries.
+    pub(crate) fn same_index_statuses(&self, other: &Self) -> bool {
+        let normalize = |indexes: &[IndexDescription]| {
+            indexes
+                .iter()
+                .cloned()
+                .map(IndexDescription::normalized)
+                .collect::<Vec<_>>()
+        };
+        normalize(&self.write_indexes) == normalize(&other.write_indexes)
+            && normalize(&self.built_indexes) == normalize(&other.built_indexes)
     }
 
     /// Get the collection name.
@@ -236,6 +327,10 @@ impl Collection {
         &self.def
     }
 
+    pub(crate) fn definition_wire(&self) -> Option<&[u8]> {
+        self.definition_wire.as_deref()
+    }
+
     /// Get the storage prefix ID used for indexes, heads, and view cache keys.
     pub fn resolved_root_id(&self) -> u32 {
         self.def.resolved_root_id()
@@ -250,12 +345,19 @@ impl Collection {
         &self.write_indexes
     }
 
+    /// The indexes that answer queries: the built ones, none while a reindex is owed.
     pub(crate) fn queryable_indexes(&self) -> &[IndexDescription] {
-        &self.queryable_indexes
+        queryable(&self.built_indexes, self.reindex_owed)
     }
 
     pub(crate) fn schema_for_queries(&self) -> Arc<CollectionVersion> {
         Arc::clone(&self.query_schema)
+    }
+
+    /// The collection schema, shared: what a job computing on another worker
+    /// is handed.
+    pub(crate) fn shared_schema(&self) -> Arc<CollectionVersion> {
+        Arc::clone(&self.def)
     }
 
     /// Check if an index exists on this collection.
@@ -266,6 +368,38 @@ impl Collection {
     /// Get an index by name.
     pub fn get_index(&self, name: &str) -> Option<&IndexDescription> {
         self.def.indexes.iter().find(|idx| idx.name == name)
+    }
+
+    /// Record the definition and active-name mapping in the writer's read set.
+    /// Historical merge inputs may name an older version, but still validate
+    /// both that definition and the current mapping against concurrent DDL.
+    pub(crate) async fn validate_write_definition(
+        &self,
+        datastore: &NamespaceView,
+        require_current: bool,
+    ) -> Result<()> {
+        use storage::corekv::Key;
+        use storage::keys::systemstore::{CollectionKey, CollectionNameKey};
+        let system = datastore.sibling(storage::namespace::Namespace::Systemstore);
+        let active = system
+            .get(&CollectionNameKey::new(self.name()).bytes())
+            .await
+            .map_err(Error::Storage)?;
+        let Some(active) = active else {
+            return Err(Error::CollectionNotFound(self.name().to_string()));
+        };
+        if require_current && active.as_ref() != self.version_id().as_bytes() {
+            return Err(Error::Storage(storage::Error::TxnConflict));
+        }
+        if system
+            .get(&CollectionKey::new(self.version_id()).bytes())
+            .await
+            .map_err(Error::Storage)?
+            .is_none()
+        {
+            return Err(Error::CollectionNotFound(self.name().to_string()));
+        }
+        Ok(())
     }
 
     /// Generate the storage key for a document blob.
@@ -363,9 +497,32 @@ impl Collection {
         datastore: &NamespaceView,
         doc_short_id: u64,
     ) -> Result<()> {
+        self.store_document_version(datastore, doc_short_id, &self.def.version_id)
+            .await
+    }
+
+    /// Validate the version even when its value does not need rewriting.
+    /// A concurrent schema transition must invalidate an old-schema writer.
+    pub(crate) async fn store_document_version(
+        &self,
+        datastore: &NamespaceView,
+        doc_short_id: u64,
+        version: &str,
+    ) -> Result<()> {
         let key = self.version_key(doc_short_id);
-        let version = self.def.version_id.as_bytes();
-        datastore.set(&key, version).await.map_err(Error::Storage)
+        if datastore
+            .get(&key)
+            .await
+            .map_err(Error::Storage)?
+            .as_deref()
+            == Some(version.as_bytes())
+        {
+            return Ok(());
+        }
+        datastore
+            .set(&key, version.as_bytes())
+            .await
+            .map_err(Error::Storage)
     }
 
     /// Load the schema version for a document.
@@ -396,3 +553,58 @@ impl Collection {
         datastore.delete(&key).await.map_err(Error::Storage)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Collection, IndexStatuses};
+    use defra_core::ActionStatus;
+    use rapidhash::{HashMapExt, RapidHashMap};
+    use schema::{CollectionVersion, IndexDescription};
+    use std::sync::Arc;
+
+    #[test]
+    fn reused_schema_arc_gets_fresh_snapshot_index_statuses() {
+        let mut schema = CollectionVersion::new("users", "version", "collection", vec![]);
+        let mut index = IndexDescription::new("by_name");
+        index.id = 1;
+        schema.indexes.push(index);
+        let expected = Collection::new(schema);
+
+        let mut actions = RapidHashMap::new();
+        actions.insert(1, ActionStatus::IN_PROGRESS);
+        let snapshot = Collection::with_index_actions_reusing_schema(
+            &expected,
+            &IndexStatuses::from_actions(actions),
+        );
+
+        assert!(Arc::ptr_eq(&expected.def, &snapshot.def));
+        assert_eq!(snapshot.write_indexes().len(), 1);
+        assert!(snapshot.queryable_indexes().is_empty());
+    }
+
+    #[test]
+    fn an_owed_reindex_hides_every_index_from_queries_but_not_from_writes() {
+        let mut schema = CollectionVersion::new("users", "version", "collection", vec![]);
+        let mut index = IndexDescription::new("by_name");
+        index.id = 1;
+        schema.indexes.push(index);
+        let settled = Collection::new(schema);
+
+        let owed = settled.with_reindex_owed(true);
+        assert!(owed.queryable_indexes().is_empty());
+        assert!(owed.schema_for_queries().indexes.is_empty());
+        assert_eq!(owed.write_indexes().len(), 1);
+        assert!(
+            owed.same_index_statuses(&settled),
+            "a writer's check is not about which indexes answer queries"
+        );
+
+        let again = owed.with_reindex_owed(false);
+        assert_eq!(again.queryable_indexes().len(), 1);
+        assert_eq!(again.schema_for_queries().indexes.len(), 1);
+    }
+}
+
+pub(crate) mod parts;
+
+pub(crate) mod value;

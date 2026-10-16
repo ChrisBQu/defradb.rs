@@ -2,6 +2,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use defra_core::RequestContext;
+
+use crate::error::{Error, Result};
 use crate::node_acp::{create_document_acp, create_nac_manager};
 use crate::node_identity::create_node_identity;
 use crate::node_tasks::BackgroundTasks;
@@ -15,7 +18,6 @@ use crate::{
     EmbeddedNodeConfig, EmbeddedStore, ManagedP2PSystem, Persistence, SigningConfig, SigningKey,
     TransportConfig,
 };
-use anyhow::{anyhow, Context, Result};
 #[cfg(feature = "libp2p")]
 use kovan_queue::seg_queue::SegQueue;
 #[cfg(any(feature = "libp2p", feature = "iroh"))]
@@ -31,18 +33,16 @@ type EmbeddedTxnRegistry<S> = db::DbTransactionRegistry<S>;
 pub(crate) type WireDocumentAcpCallback = Box<dyn FnOnce(Arc<dyn acp::DocumentACP>, bool)>;
 pub(crate) type WireKmsCallback = Box<dyn FnOnce(Arc<dyn kms::KmsService>) + Send>;
 
-/// Resolve the ambient (scoped, then process) identity into a creator DID for
-/// ACP registration. Returns `Ok(None)` when no identity is present (the
+/// Resolve the identity acting in `context` into a creator DID for ACP
+/// registration. Returns `Ok(None)` when no identity is present (the
 /// collection stays public/unregistered, as intended), but fails closed when an
-/// identity string is present yet malformed — never silently degrading a
+/// identity string is present yet malformed, never silently degrading a
 /// permissioned collection to public.
-fn resolve_creator_identity() -> Result<Option<identity::Did>> {
-    match defra_core::current_identity::get_effective_identity() {
-        Some(raw) => {
-            Ok(Some(identity::Did::new(raw).map_err(|error| {
-                anyhow!("malformed ambient identity: {error}")
-            })?))
-        }
+fn resolve_creator_identity(context: &RequestContext) -> Result<Option<identity::Did>> {
+    match context.identity() {
+        Some(raw) => Ok(Some(
+            identity::Did::new(raw).map_err(Error::InvalidActingIdentity)?,
+        )),
         None => Ok(None),
     }
 }
@@ -84,31 +84,53 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
         self.background_tasks.clone()
     }
 
+    /// [`Self::execute_as`] in [`RequestContext::ambient`].
     pub async fn execute(&self, query_str: &str) -> query::QueryResponse {
+        self.execute_as(&RequestContext::ambient(), query_str).await
+    }
+
+    /// Execute a GraphQL query or mutation for the request `context` serves.
+    pub async fn execute_as(
+        &self,
+        context: &RequestContext,
+        query_str: &str,
+    ) -> query::QueryResponse {
         self.query_runner
-            .execute(query::QueryRequest::new(query_str))
+            .execute(query::QueryRequest::new(query_str).with_context(context.clone()))
             .await
     }
 
+    /// The context the node's own operations run in: the node's identity acts
+    /// in it when one is configured, and [`RequestContext::ambient`] otherwise.
+    fn node_context(&self) -> RequestContext {
+        let context = RequestContext::ambient();
+        match &self.node_identity_did {
+            Some(did) => context.with_identity(Some(did.clone())),
+            None => context,
+        }
+    }
+
     pub async fn add_schema(&self, sdl: &str) -> Result<()> {
-        let collections =
-            query::parse_sdl(sdl).map_err(|error| anyhow!("SDL parse error: {error}"))?;
-        schema::definition_validation::validate_new_collections(&collections)
-            .map_err(|error| anyhow!("schema validation error: {error}"))?;
-
-        let _id_guard =
-            defra_core::current_identity::scoped_current_identity(self.node_identity_did.clone());
-        let creator = resolve_creator_identity()?;
-        self.database
-            .create_collections_atomic_with_acp_registration(
-                collections,
-                self.document_acp.clone(),
-                creator,
-            )
-            .await
-            .map_err(|error| anyhow!("create collection error: {error}"))?;
-
-        Ok(())
+        let context = self.node_context();
+        let (database, document_acp) = (Arc::clone(&self.database), self.document_acp.clone());
+        let sdl = sdl.to_owned();
+        self.on_pool(move || async move {
+            let collections = query::parse_sdl(&sdl).map_err(Error::SchemaParse)?;
+            schema::definition_validation::validate_new_collections(&collections)
+                .map_err(Error::SchemaValidation)?;
+            let creator = resolve_creator_identity(&context)?;
+            database
+                .create_collections_atomic_with_acp_registration_as(
+                    &context,
+                    collections,
+                    document_acp,
+                    creator,
+                )
+                .await
+                .map_err(Error::CollectionCreate)?;
+            Ok(())
+        })
+        .await
     }
 
     /// Add an equality encrypted (searchable-encryption) index on `field_name`
@@ -116,66 +138,24 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
     /// `encrypted_index_add` / HTTP `EncryptedIndexOperations::add_encrypted_index`,
     /// so embedded nodes can write SE artifacts and act as SE query owners (#976).
     pub async fn add_encrypted_index(&self, collection: &str, field_name: &str) -> Result<()> {
-        use storage::corekv::Key;
-
-        let col = self
-            .database
-            .get_collection(collection)
-            .map_err(|error| anyhow!("get collection error: {error}"))?
-            .ok_or_else(|| anyhow!("collection '{collection}' not found"))?;
-        let schema = col.schema();
-
-        if !schema.fields.iter().any(|f| f.name == field_name) {
-            return Err(anyhow!(
-                "encrypted index on non-existent field: {field_name}"
-            ));
-        }
-        if schema
-            .encrypted_indexes
-            .iter()
-            .any(|idx| idx.field_name == field_name)
-        {
-            return Err(anyhow!(
-                "encrypted index already exists on field: {field_name}"
-            ));
-        }
-
-        let txn = self
-            .database
-            .new_txn(false)
+        let database = Arc::clone(&self.database);
+        let (collection, field_name) = (collection.to_owned(), field_name.to_owned());
+        self.on_pool(move || add_encrypted_index(database, collection, field_name))
             .await
-            .map_err(|error| anyhow!("failed to create transaction: {error}"))?;
-        {
-            let mut updated_schema = schema.clone();
-            updated_schema
-                .encrypted_indexes
-                .push(schema::EncryptedIndexDescription::new(field_name));
+    }
 
-            let collection_key =
-                storage::keys::systemstore::CollectionKey::new(&updated_schema.version_id);
-            let schema_data = serde_json::to_vec(&updated_schema)
-                .map_err(|error| anyhow!("failed to serialize schema: {error}"))?;
-            let systemstore = txn
-                .systemstore()
-                .map_err(|error| anyhow!("failed to get systemstore: {error}"))?;
-            systemstore
-                .set(&collection_key.bytes(), &schema_data)
-                .await
-                .map_err(|error| anyhow!("failed to save schema: {error}"))?;
-            let name_key = storage::keys::systemstore::CollectionNameKey::new(collection);
-            systemstore
-                .set(&name_key.bytes(), updated_schema.version_id.as_bytes())
-                .await
-                .map_err(|error| anyhow!("failed to save name mapping: {error}"))?;
-        }
-        txn.commit()
+    /// Runs the data-path call `make` builds on the database's worker pool (in
+    /// place on a worker, or without a pool). The request context the call
+    /// acts in travels inside it.
+    async fn on_pool<F, Fut, T>(&self, make: F) -> Result<T>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<T>> + 'static,
+        T: Send + 'static,
+    {
+        workers::run_on(self.database.pool(), workers::Target::LeastLoaded, make)
             .await
-            .map_err(|error| anyhow!("failed to commit: {error}"))?;
-        self.database
-            .reload_cache()
-            .await
-            .map_err(|error| anyhow!("failed to reload cache: {error}"))?;
-        Ok(())
+            .map_err(Error::PoolRun)?
     }
 
     /// Shut the node down cleanly.
@@ -187,8 +167,8 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
     ///    iroh warning downstream embedders have been hitting.
     /// 2. **Background tasks** — aborts and awaits node-owned tasks.
     /// 3. **Database** — close-guards future transactions (new `begin_txn`
-    ///    calls will return `Error::DatabaseClosed`) and closes the
-    ///    underlying store.
+    ///    calls will return `Error::DatabaseClosed`), lets the worker pool
+    ///    finish what it admitted and stop, and closes the underlying store.
     ///
     /// This method is **idempotent** — the first caller performs the
     /// work, concurrent callers wait for that teardown to finish and
@@ -259,11 +239,66 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
 }
 
 /// Builder for memory/regolith embedded nodes.
+/// Adds the encrypted index [`EmbeddedNode::add_encrypted_index`] names, on
+/// the worker it runs on.
+async fn add_encrypted_index<S: storage::corekv::Store + 'static>(
+    database: Arc<db::DB<S>>,
+    collection: String,
+    field_name: String,
+) -> Result<()> {
+    use storage::corekv::Key;
+
+    let (collection, field_name) = (collection.as_str(), field_name.as_str());
+    let col = database
+        .get_collection(collection)
+        .map_err(Error::CollectionLookup)?
+        .ok_or_else(|| Error::CollectionNotFound(collection.to_owned()))?;
+    let schema = col.schema();
+
+    if !schema.fields.iter().any(|f| f.name == field_name) {
+        return Err(Error::EncryptedIndexFieldMissing(field_name.to_owned()));
+    }
+    if schema
+        .encrypted_indexes
+        .iter()
+        .any(|idx| idx.field_name == field_name)
+    {
+        return Err(Error::EncryptedIndexExists(field_name.to_owned()));
+    }
+
+    let txn = database.new_txn(false).await.map_err(Error::TxnCreate)?;
+    {
+        let mut updated_schema = schema.clone();
+        updated_schema
+            .encrypted_indexes
+            .push(schema::EncryptedIndexDescription::new(field_name));
+
+        let collection_key =
+            storage::keys::systemstore::CollectionKey::new(&updated_schema.version_id);
+        let schema_data = serde_json::to_vec(&updated_schema).map_err(Error::SchemaSerialize)?;
+        let systemstore = txn.systemstore().map_err(Error::SystemstoreOpen)?;
+        systemstore
+            .set(&collection_key.bytes(), &schema_data)
+            .await
+            .map_err(Error::SchemaSave)?;
+        let name_key = storage::keys::systemstore::CollectionNameKey::new(collection);
+        systemstore
+            .set(&name_key.bytes(), updated_schema.version_id.as_bytes())
+            .await
+            .map_err(Error::NameMappingSave)?;
+    }
+    txn.commit().await.map_err(Error::Commit)?;
+    database.reload_cache().await.map_err(Error::CacheReload)?;
+    Ok(())
+}
+
 #[derive(Default)]
 pub struct NodeBuilder {
     data_path: Option<PathBuf>,
     config: EmbeddedNodeConfig,
+    workers: Option<workers::Config>,
     at_rest_encryption_key: Option<[u8; 32]>,
+    previous_at_rest_encryption_keys: Vec<[u8; 32]>,
     #[cfg(feature = "iroh")]
     access_hooks: Option<crate::AccessHooks>,
 }
@@ -290,6 +325,19 @@ impl NodeBuilder {
     #[cfg(feature = "iroh")]
     pub fn with_iroh(mut self, config: IrohConfig) -> Self {
         self.config.transport = TransportConfig::Iroh(config);
+        self
+    }
+
+    /// The worker pool the node's data path runs on. Unset, the pool's own
+    /// defaults (`workers::Config::default()`).
+    pub fn with_workers(mut self, config: workers::Config) -> Self {
+        self.workers = Some(config);
+        self
+    }
+
+    /// The network runtime a configured transport runs on.
+    pub fn with_edge(mut self, edge: edge::Edge) -> Self {
+        self.config.edge = Some(edge);
         self
     }
 
@@ -347,19 +395,48 @@ impl NodeBuilder {
         self
     }
 
-    /// Enable transparent at-rest value encryption for the storage backend,
+    /// Enable engine file encryption at rest for the storage backend,
     /// keyed by the given 32-byte AES-256 key. Opt-in; off by default.
     pub fn with_at_rest_encryption_key(mut self, key: [u8; 32]) -> Self {
         self.at_rest_encryption_key = Some(key);
         self
     }
 
+    /// Keys the store's files may still be sealed under after a rotation to
+    /// the key given to [`NodeBuilder::with_at_rest_encryption_key`]. They
+    /// only open what they sealed; new files use the current key.
+    pub fn with_previous_at_rest_encryption_keys<I>(mut self, keys: I) -> Self
+    where
+        I: IntoIterator<Item = [u8; 32]>,
+    {
+        self.previous_at_rest_encryption_keys = keys.into_iter().collect();
+        self
+    }
+
+    fn with_at_rest_keys(
+        &self,
+        options: storage::RegolithStoreOptions,
+    ) -> Result<storage::RegolithStoreOptions> {
+        match self.at_rest_encryption_key {
+            Some(key) => options
+                .with_encryption_keys(key, self.previous_at_rest_encryption_keys.iter().copied())
+                .map_err(Error::AtRestKeys),
+            None => Ok(options),
+        }
+    }
+
     pub async fn build(mut self) -> Result<EmbeddedNode<EmbeddedStore>> {
+        // The data path's worker pool comes before the store, which places
+        // its compaction threads by the pool's plan.
+        let pool = start_node_pool(self.workers.take(), self.config.edge.as_ref())?;
         let (store, persistence) = if let Some(path) = self.data_path.take() {
             if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent).await.with_context(|| {
-                    format!("failed to create parent directory for '{}'", path.display())
-                })?;
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(|source| Error::DataDirCreate {
+                        path: path.clone(),
+                        source,
+                    })?;
             }
 
             #[cfg(feature = "iroh")]
@@ -378,10 +455,14 @@ impl NodeBuilder {
 
             // `Options::embedded` sizes the engine for a 1-4 MiB working
             // set, which is what an embedded node has to live inside.
-            let opts = storage::RegolithStoreOptions::embedded();
+            let opts =
+                self.with_at_rest_keys(storage::RegolithStoreOptions::embedded().placed_on(&pool))?;
             let store =
-                storage::RegolithStore::open_with_options(&path, opts).with_context(|| {
-                    format!("failed to open regolith store at '{}'", path.display())
+                storage::RegolithStore::open_with_options(&path, opts).map_err(|source| {
+                    Error::StoreOpen {
+                        path: path.clone(),
+                        source,
+                    }
                 })?;
 
             (EmbeddedStore::Regolith(store), Persistence::Persistent)
@@ -392,26 +473,27 @@ impl NodeBuilder {
             );
             (
                 EmbeddedStore::Regolith(
-                    storage::RegolithStore::in_memory()
-                        .context("failed to open in-memory regolith store")?,
+                    storage::RegolithStore::open_with_options(
+                        "memory",
+                        self.with_at_rest_keys(
+                            storage::RegolithStoreOptions::memory().placed_on(&pool),
+                        )?,
+                    )
+                    .map_err(Error::MemoryStoreOpen)?,
                 ),
                 Persistence::Memory,
             )
         };
 
-        let store = match self.at_rest_encryption_key.take() {
-            Some(key) => {
-                tracing::info!("at-rest encryption enabled (value-only, AES-256-GCM)");
-                Arc::new(store.encrypted(key))
-            }
-            None => Arc::new(store),
-        };
+        let store = Arc::new(store);
 
         self.config.persistence = persistence;
         #[cfg(feature = "iroh")]
-        return build_with_store_and_access_hooks(store, self.config, self.access_hooks).await;
+        check_access_hooks(&self.config, self.access_hooks.as_ref())?;
+        #[cfg(feature = "iroh")]
+        return build_node(store, self.config, self.access_hooks, pool).await;
         #[cfg(not(feature = "iroh"))]
-        build_with_store(store, self.config).await
+        build_node(store, self.config, None, pool).await
     }
 }
 
@@ -427,6 +509,10 @@ enum ShutdownKind {
         handle: Box<p2p::P2PHostHandle>,
         coordinator: p2p::sync::SyncShutdownHandle,
         tasks: Box<SegQueue<tokio::task::JoinHandle<()>>>,
+        /// The retry sweep, on the network edge.
+        retry_loop: Box<SegQueue<edge::Task<()>>>,
+        /// The push failure recorder, on the worker pool.
+        recorder: Box<SegQueue<workers::Background>>,
     },
     #[cfg(feature = "iroh")]
     Iroh(defra_p2p_adapter::IrohPeerShutdown),
@@ -438,16 +524,16 @@ impl ShutdownHandle {
         handle: p2p::P2PHostHandle,
         coordinator: p2p::sync::SyncShutdownHandle,
         tasks: Vec<tokio::task::JoinHandle<()>>,
+        retry_loop: edge::Task<()>,
+        recorder: workers::Background,
     ) -> Self {
-        let pending = SegQueue::new();
-        for task in tasks {
-            pending.push(task);
-        }
         Self {
             inner: ShutdownKind::Libp2p {
                 handle: Box::new(handle),
                 coordinator,
-                tasks: Box::new(pending),
+                tasks: queued(tasks),
+                retry_loop: queued([retry_loop]),
+                recorder: queued([recorder]),
             },
         }
     }
@@ -467,9 +553,13 @@ impl ShutdownHandle {
                 handle,
                 coordinator,
                 tasks,
+                retry_loop,
+                recorder,
             } => {
                 coordinator.shutdown().await;
-                abort_and_join(tasks).await;
+                abort_and_join(retry_loop, edge::Task::abort).await;
+                abort_and_join(recorder, workers::Background::abort).await;
+                abort_and_join(tasks, tokio::task::JoinHandle::abort).await;
                 let _ = handle.shutdown().await;
             }
             #[cfg(feature = "iroh")]
@@ -480,11 +570,19 @@ impl ShutdownHandle {
     }
 }
 
+/// `tasks` in a queue a shutdown through `&self` can take them from.
 #[cfg(feature = "libp2p")]
-async fn abort_and_join(tasks: &SegQueue<tokio::task::JoinHandle<()>>) {
+fn queued<T: 'static>(tasks: impl IntoIterator<Item = T>) -> Box<SegQueue<T>> {
+    let pending = SegQueue::new();
+    tasks.into_iter().for_each(|task| pending.push(task));
+    Box::new(pending)
+}
+
+#[cfg(feature = "libp2p")]
+async fn abort_and_join<T: std::future::Future + 'static>(tasks: &SegQueue<T>, abort: impl Fn(&T)) {
     let mut aborted = Vec::with_capacity(tasks.len());
     while let Some(task) = tasks.pop() {
-        task.abort();
+        abort(&task);
         aborted.push(task);
     }
     for task in aborted {
@@ -492,6 +590,23 @@ async fn abort_and_join(tasks: &SegQueue<tokio::task::JoinHandle<()>>) {
     }
 }
 
+/// The worker pool a node's data path runs on: `config` (the pool's
+/// defaults when unset), with the network runtime's timer running its
+/// stuck-poll monitor when the node has one.
+pub fn start_node_pool(
+    config: Option<workers::Config>,
+    edge: Option<&edge::Edge>,
+) -> Result<workers::Pool> {
+    storage::start_pool(
+        config.unwrap_or_default(),
+        edge.map(edge::Edge::pool_monitor),
+    )
+    .map_err(Error::PoolStart)
+}
+
+/// A node over a store the application opened, on a worker pool of the
+/// pool's default configuration. The store's own threads are not placed by
+/// the pool: [`NodeBuilder`] opens the store on the pool and places them.
 pub async fn build_with_store<S>(
     store: Arc<S>,
     config: EmbeddedNodeConfig,
@@ -499,7 +614,34 @@ pub async fn build_with_store<S>(
 where
     S: storage::corekv::Store + 'static,
 {
-    build_node(store, config, None).await
+    let pool = start_node_pool(None, config.edge.as_ref())?;
+    build_node(store, config, None, pool).await
+}
+
+/// A node over a store the application opened on `pool`
+/// ([`storage::RegolithStoreOptions::placed_on`]), whose data path runs on
+/// it. Start the pool with [`start_node_pool`].
+pub async fn build_with_store_on_pool<S>(
+    store: Arc<S>,
+    config: EmbeddedNodeConfig,
+    pool: workers::Pool,
+) -> Result<EmbeddedNode<S>>
+where
+    S: storage::corekv::Store + 'static,
+{
+    build_node(store, config, None, pool).await
+}
+
+/// Access hooks need the iroh transport.
+#[cfg(feature = "iroh")]
+fn check_access_hooks(
+    config: &EmbeddedNodeConfig,
+    hooks: Option<&crate::AccessHooks>,
+) -> Result<()> {
+    if hooks.is_some() && !matches!(config.transport, TransportConfig::Iroh(_)) {
+        return Err(Error::AccessHooksNeedIroh);
+    }
+    Ok(())
 }
 
 /// Build an iroh node whose access control the app supplies. Fails when
@@ -513,10 +655,9 @@ pub async fn build_with_store_and_access_hooks<S>(
 where
     S: storage::corekv::Store + 'static,
 {
-    if hooks.is_some() && !matches!(config.transport, TransportConfig::Iroh(_)) {
-        return Err(anyhow!("access hooks require the iroh transport"));
-    }
-    build_node(store, config, hooks).await
+    check_access_hooks(&config, hooks.as_ref())?;
+    let pool = start_node_pool(None, config.edge.as_ref())?;
+    build_node(store, config, hooks, pool).await
 }
 
 #[cfg(feature = "iroh")]
@@ -528,6 +669,7 @@ async fn build_node<S>(
     store: Arc<S>,
     config: EmbeddedNodeConfig,
     access_hooks: NodeAccessHooks,
+    pool: workers::Pool,
 ) -> Result<EmbeddedNode<S>>
 where
     S: storage::corekv::Store + 'static,
@@ -536,15 +678,18 @@ where
 
     let (raw_identity, node_identity_did) = create_node_identity(&config.signing)?;
     let raw_identity = raw_identity.map(Arc::new);
-    let mut db_options = db::DbOptions::default();
+    let mut db_options = db::DbOptions::default().with_pool(pool);
     if let Some(identity) = raw_identity.as_ref() {
         db_options = db_options.with_node_identity_arc(identity.clone());
     }
 
     let mut database = db::DB::open_from_arc_with_options(store.clone(), db_options)
         .await
-        .map_err(|error| anyhow!("failed to open database: {error}"))?;
+        .map_err(Error::DbOpen)?;
     database.set_event_bus(event_bus.clone());
+    if let Some(edge) = config.edge.as_ref() {
+        database.set_network(edge.clone());
+    }
     #[cfg(feature = "iroh")]
     if let Some(hooks) = &access_hooks {
         hooks.install(&database);
@@ -577,8 +722,13 @@ where
         ..Default::default()
     };
 
-    let acp_setup =
-        create_document_acp(store.clone(), config.persistence, &config.document_acp).await?;
+    let acp_setup = create_document_acp(
+        store.clone(),
+        config.persistence,
+        &config.document_acp,
+        config.edge.as_ref(),
+    )
+    .await?;
     let document_acp = acp_setup.document_acp;
     let local_zanzibar_store = acp_setup.local_zanzibar_store;
     #[cfg(feature = "vera")]
@@ -588,34 +738,48 @@ where
     #[cfg(all(not(feature = "vera"), any(feature = "libp2p", feature = "iroh")))]
     let strict_replicated_doc_access = false;
 
-    let p2p_setup: Result<Option<crate::node_p2p::P2PSetup>> = match &config.transport {
-        TransportConfig::None => Ok(None),
-        #[cfg(feature = "libp2p")]
-        TransportConfig::Libp2p(libp2p) => crate::node_p2p::setup_libp2p(
-            store.clone(),
-            database.clone(),
-            event_bus.clone(),
-            libp2p,
-            sync_config.clone(),
-            config.peer_keyring.as_ref(),
-        )
-        .await
-        .map(Some),
-        #[cfg(feature = "iroh")]
-        TransportConfig::Iroh(iroh) => crate::node_p2p::setup_iroh(
-            store.clone(),
-            database.clone(),
-            event_bus.clone(),
-            iroh,
-            sync_config.clone(),
-            raw_identity.clone(),
-            document_acp.clone(),
-            strict_replicated_doc_access,
-            config.peer_keyring.as_ref(),
-        )
-        .await
-        .map(Some),
+    // A transport runs on the network runtime the config names, or on the
+    // process's own, started on first use, when it names none; a node
+    // without networking needs none.
+    let edge = match &config.edge {
+        _ if matches!(config.transport, TransportConfig::None) => None,
+        Some(edge) => Some(edge.clone()),
+        None => Some(edge::on_demand().map_err(Error::NetworkStart)?.clone()),
     };
+    let p2p_setup: Result<Option<crate::node_p2p::P2PSetup>> =
+        match (&config.transport, edge.as_ref()) {
+            #[cfg(feature = "libp2p")]
+            (TransportConfig::Libp2p(libp2p), Some(edge)) => crate::node_p2p::setup_libp2p(
+                store.clone(),
+                database.clone(),
+                event_bus.clone(),
+                libp2p,
+                sync_config.clone(),
+                config.peer_keyring.as_ref(),
+                edge,
+            )
+            .await
+            .map(Some),
+            #[cfg(feature = "iroh")]
+            (TransportConfig::Iroh(iroh), Some(edge)) => crate::node_p2p::setup_iroh(
+                store.clone(),
+                database.clone(),
+                event_bus.clone(),
+                iroh,
+                sync_config.clone(),
+                raw_identity.clone(),
+                document_acp.clone(),
+                strict_replicated_doc_access,
+                config.peer_keyring.as_ref(),
+                edge,
+            )
+            .await
+            .map(Some),
+            (TransportConfig::None, _) => Ok(None),
+            // A transport always has a runtime here.
+            #[cfg(any(feature = "libp2p", feature = "iroh"))]
+            (_, None) => Ok(None),
+        };
     let mut p2p_setup = match p2p_setup {
         Ok(setup) => setup,
         Err(error) => {
@@ -630,7 +794,7 @@ where
     let nac_manager = create_nac_manager(store.clone(), config.persistence).await?;
 
     // Wire the NAC manager into the DB so DB-layer `check_node_access` calls go
-    // live. First-call-wins via the DB's OnceLock setter. Covers both the
+    // live. First-call-wins via the DB's OnceCell setter. Covers both the
     // embedded node and the FFI node (which also builds via `build_with_store`).
     database.set_nac_manager(nac_manager.clone());
 
@@ -661,7 +825,9 @@ where
         // the blockstore Arc (set_kms_blockstore) so the adapter can hold a Weak
         // and avoid the lock-pinning cycle (#976) while sharing the block cache.
         let kms_blockstore = database.set_kms_blockstore(Arc::new(
-            blockstore::DefraBlockstore::new(store.clone(), true),
+            blockstore::DefraBlockstore::new(store.clone(), true)
+                .with_max_txn_retries(database.options().max_txn_retries())
+                .placed_on(database.pool()),
         ));
         let enc_block_store: Arc<dyn kms::EncBlockStore> =
             Arc::new(db::DbEncBlockStore::new(database.clone(), kms_blockstore));
@@ -683,12 +849,17 @@ where
             None => vec![],
         };
 
-        Arc::new(kms::DefraKms::new(
+        Arc::new(kms::DefraKms::with_inputs(
             store,
             transports,
             policy as Arc<dyn kms::AccessPolicy>,
             Arc::new(db::DbBlockDocIDResolver::new(database.clone())),
             node_did,
+            config
+                .edge
+                .as_ref()
+                .map(kms::KmsInputs::on)
+                .unwrap_or_default(),
         ))
     };
 
@@ -776,7 +947,9 @@ where
     #[cfg(not(feature = "iroh"))]
     let _ = access_hooks;
 
-    let query_runner: Arc<dyn query::QueryExecutor> = Arc::new(query_runner);
+    // GraphQL requests run on the database's worker pool, routed there once
+    // at the boundary.
+    let query_runner = query::pooled::PooledExecutor::wrap(Arc::new(query_runner), database.pool());
 
     Ok(EmbeddedNode {
         database,

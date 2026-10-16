@@ -1,192 +1,146 @@
-//! Query execution with thread-local signing and DAC bypass context.
+//! Query execution with the request's context.
 //!
-//! HTTP handlers must set `signing_config` and `dac_bypass` thread-locals
-//! before executing queries to match FFI behavior. Because tokio's
-//! work-stealing scheduler can move tasks between OS threads at `.await`
-//! points, we pin execution to a single thread using `spawn_blocking` +
-//! `Handle::block_on` — the same pattern the FFI uses with `rt.block_on()`.
+//! The acting identity, the signing config, the batch signing session and the
+//! DAC bypass travel in the request's `RequestContext`, so a query runs on the
+//! task that received it, with no hop to another thread.
 
-use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
 
+use defra_core::signing::SigningConfig;
+use edge::Edge;
 use query::executor::{QueryExecutor, QueryRequest, QueryResponse};
 use query::txn::TransactionHandle;
-use rand::Rng;
 
 use crate::identity_extractor::ExtractIdentity;
 use crate::router::AppState;
-
-const INITIAL_RETRY_BACKOFF: Duration = Duration::from_millis(10);
-const MAX_RETRY_BACKOFF: Duration = Duration::from_millis(250);
 
 /// Execute a GraphQL query with signing config and DAC bypass context.
 pub async fn execute_with_context(
     state: &AppState,
     identity: &ExtractIdentity,
-    request: QueryRequest,
+    mut request: QueryRequest,
 ) -> QueryResponse {
-    execute_request_with_retry_loop(
-        request,
-        state.max_txn_retries,
-        INITIAL_RETRY_BACKOFF,
-        MAX_RETRY_BACKOFF,
-        |request| execute_once_with_context(state, identity, request),
-    )
-    .await
+    request.context = request_context(state, identity).await;
+    let context = request.context.clone();
+    context
+        .mirror(execute_prepared_with_executor(
+            state.executor.as_ref(),
+            request,
+        ))
+        .await
 }
 
-async fn execute_once_with_context(
-    state: &AppState,
-    identity: &ExtractIdentity,
+async fn execute_prepared_with_executor(
+    executor: &dyn QueryExecutor,
     request: QueryRequest,
 ) -> QueryResponse {
-    let signing_config = resolve_signing_config(state, identity);
-
-    let dac_bypass = resolve_dac_bypass(state, identity).await;
-
-    // Fast path: when there is nothing to put on the thread-locals, skip
-    // spawn_blocking entirely.
-    if signing_config.is_none() && state.nac.is_none() && !dac_bypass {
-        return state.executor.execute(request).await;
-    }
-    let executor = state.executor.clone();
-    let handle = tokio::runtime::Handle::current();
-
-    let batch_session_key = signing_config.as_ref().map(|s| s.public_key_hex.clone());
-    let acting_did = identity.did().map(|d| d.as_str().to_string());
-
-    match tokio::task::spawn_blocking(move || {
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(acting_did);
-        defra_core::signing::set_signing_config(signing_config);
-        defra_core::batch_signing::set_batch_session_key(batch_session_key);
-        defra_core::dac_bypass::set_dac_bypass(dac_bypass);
-        handle.block_on(async { executor.execute(request).await })
-    })
-    .await
-    {
-        Ok(response) => response,
-        Err(join_err) => QueryResponse::error(format!("query execution task failed: {join_err}")),
-    }
+    let prepared = match executor.prepare_request(&request).await {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return QueryResponse::error(query::executor::QueryResponseError::from_query_error(
+                error,
+            ))
+        }
+    };
+    execute_prepared_request_resolving_inputs(executor, request, prepared).await
 }
 
-async fn execute_request_with_retry_loop<F, Fut>(
+async fn execute_prepared_request_resolving_inputs(
+    executor: &dyn QueryExecutor,
     request: QueryRequest,
-    max_retries: u32,
-    initial_backoff: Duration,
-    max_backoff: Duration,
-    mut execute_once: F,
-) -> QueryResponse
-where
-    F: FnMut(QueryRequest) -> Fut,
-    Fut: Future<Output = QueryResponse>,
-{
-    let mut retry_count = 0;
-    let mut backoff = initial_backoff.min(max_backoff);
-
+    mut prepared: Option<Arc<query::prepared::PreparedMutations>>,
+) -> QueryResponse {
     loop {
-        let response = execute_once(request.clone()).await;
-        if !response.is_transaction_conflict() {
-            if retry_count > 0 {
-                telemetry::record_retry_success(telemetry::RetryLayer::HttpAutoCommit);
+        let response = executor
+            .execute_prepared(request.clone(), prepared.clone())
+            .await;
+        if let Some(input) = response.retry_input() {
+            match executor
+                .resolve_retry_input(&request, prepared.clone(), input)
+                .await
+            {
+                Ok(Some(updated)) => {
+                    prepared = Some(updated);
+                    continue;
+                }
+                Ok(None) => {
+                    return QueryResponse::error(
+                        "retry input resolution returned no preparation capsule",
+                    )
+                }
+                Err(error) => {
+                    return QueryResponse::error(
+                        query::executor::QueryResponseError::from_query_error(error),
+                    )
+                }
             }
-            return response;
         }
-        if retry_count >= max_retries {
-            telemetry::record_retry_exhaustion(telemetry::RetryLayer::HttpAutoCommit);
-            return response;
-        }
-
-        telemetry::record_retry_attempt(telemetry::RetryLayer::HttpAutoCommit);
-        retry_count += 1;
-        let delay = jittered_backoff(backoff);
-        tracing::warn!(
-            retry = retry_count,
-            max_retries,
-            backoff_ms = delay.as_millis(),
-            "retrying auto-commit GraphQL request after transaction conflict"
-        );
-        tokio::time::sleep(delay).await;
-        backoff = next_retry_backoff(backoff, max_backoff);
+        return response;
     }
-}
-
-fn jittered_backoff(max_backoff: Duration) -> Duration {
-    if max_backoff.is_zero() {
-        return Duration::ZERO;
-    }
-
-    let max_nanos = max_backoff.as_nanos().min(u64::MAX as u128) as u64;
-    Duration::from_nanos(rand::thread_rng().gen_range(0..=max_nanos))
-}
-
-fn next_retry_backoff(current: Duration, max_backoff: Duration) -> Duration {
-    current.saturating_mul(2).min(max_backoff)
 }
 
 /// Execute a GraphQL query within a transaction with signing config and DAC bypass context.
 pub async fn execute_in_txn_with_context(
     state: &AppState,
     identity: &ExtractIdentity,
-    request: QueryRequest,
+    mut request: QueryRequest,
     txn_handle: TransactionHandle,
 ) -> QueryResponse {
-    let signing_config = resolve_signing_config(state, identity);
-
-    let dac_bypass = resolve_dac_bypass(state, identity).await;
-
-    // Fast path: see the note in `execute_once_with_context`.
-    if signing_config.is_none() && state.nac.is_none() && !dac_bypass {
-        return state.executor.execute_in_txn(request, &txn_handle).await;
-    }
-
-    let executor = state.executor.clone();
-    let handle = tokio::runtime::Handle::current();
-
-    let batch_session_key = signing_config.as_ref().map(|s| s.public_key_hex.clone());
-    let acting_did = identity.did().map(|d| d.as_str().to_string());
-
-    match tokio::task::spawn_blocking(move || {
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(acting_did);
-        defra_core::signing::set_signing_config(signing_config);
-        defra_core::batch_signing::set_batch_session_key(batch_session_key);
-        defra_core::dac_bypass::set_dac_bypass(dac_bypass);
-        handle.block_on(async { executor.execute_in_txn(request, &txn_handle).await })
-    })
-    .await
-    {
-        Ok(response) => response,
-        Err(join_err) => QueryResponse::error(format!("query execution task failed: {join_err}")),
-    }
+    request.context = request_context(state, identity).await;
+    let context = request.context.clone();
+    context
+        .mirror(state.executor.execute_in_txn(request, &txn_handle))
+        .await
 }
 
-/// Execute a query inside `spawn_blocking` with pre-resolved context values.
+/// Execute a query with pre-resolved context values, `acting_did` acting in
+/// it.
 ///
 /// Used by SSE streams where signing config and DAC bypass are resolved once
-/// at subscription setup time, then reused for each per-event query.
+/// at subscription setup time, then reused for each per-event query. The
+/// query runs on the calling task; `_edge` is unused.
 pub async fn execute_with_resolved_context(
+    _edge: &Edge,
     executor: Arc<dyn QueryExecutor>,
-    request: QueryRequest,
-    signing_config: Option<defra_core::signing::SigningConfig>,
+    mut request: QueryRequest,
+    signing_config: Option<SigningConfig>,
     dac_bypass: bool,
     acting_did: Option<String>,
 ) -> QueryResponse {
-    let handle = tokio::runtime::Handle::current();
+    request.context = with_signing_and_bypass(
+        request.context.with_identity(acting_did),
+        signing_config,
+        dac_bypass,
+    );
+    let context = request.context.clone();
+    context.mirror(executor.execute(request)).await
+}
 
-    let batch_session_key = signing_config.as_ref().map(|s| s.public_key_hex.clone());
+/// The context of the request `identity` acts in, with the signing config,
+/// batch session and DAC bypass it resolves to.
+async fn request_context(
+    state: &AppState,
+    identity: &ExtractIdentity,
+) -> defra_core::RequestContext {
+    with_signing_and_bypass(
+        identity.context(),
+        resolve_signing_config(state, identity),
+        resolve_dac_bypass(state, identity).await,
+    )
+}
 
-    match tokio::task::spawn_blocking(move || {
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(acting_did);
-        defra_core::signing::set_signing_config(signing_config);
-        defra_core::batch_signing::set_batch_session_key(batch_session_key);
-        defra_core::dac_bypass::set_dac_bypass(dac_bypass);
-        handle.block_on(async { executor.execute(request).await })
-    })
-    .await
-    {
-        Ok(response) => response,
-        Err(join_err) => QueryResponse::error(format!("query execution task failed: {join_err}")),
-    }
+/// `context` signing with `signing_config`, collecting into its batch session,
+/// and with the DAC bypass `dac_bypass`.
+fn with_signing_and_bypass(
+    context: defra_core::RequestContext,
+    signing_config: Option<SigningConfig>,
+    dac_bypass: bool,
+) -> defra_core::RequestContext {
+    let batch_session = signing_config.as_ref().map(|s| s.public_key_hex.clone());
+    context
+        .with_dac_bypass(dac_bypass)
+        .with_signing(signing_config)
+        .with_batch_session(batch_session)
 }
 
 /// Resolve the signing config for a request identity.
@@ -196,7 +150,7 @@ pub async fn execute_with_resolved_context(
 pub(crate) fn resolve_signing_config(
     state: &AppState,
     identity: &ExtractIdentity,
-) -> Option<defra_core::signing::SigningConfig> {
+) -> Option<SigningConfig> {
     defra_core::signing::resolve_signing_config_with_flag(
         identity.did().map(|d| d.as_str()),
         state.node_identity_did.as_deref(),
@@ -232,20 +186,66 @@ mod tests {
 
     #[derive(Default)]
     struct ConflictExecutor {
+        preparations: AtomicUsize,
         auto_commit_attempts: AtomicUsize,
         explicit_txn_attempts: AtomicUsize,
+        input_on_second: bool,
+        input_resolutions: AtomicUsize,
+        engine_managed_retry: bool,
     }
 
     #[async_trait]
     impl QueryExecutor for ConflictExecutor {
+        async fn prepare_request(
+            &self,
+            _request: &QueryRequest,
+        ) -> Result<Option<Arc<query::prepared::PreparedMutations>>> {
+            self.preparations.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(Arc::new(query::prepared::PreparedMutations {
+                engine_managed_retry: self.engine_managed_retry,
+                ..Default::default()
+            })))
+        }
+
         fn abandon_txn(&self, _handle: &TransactionHandle) {}
 
         async fn execute(&self, _request: QueryRequest) -> QueryResponse {
-            if self.auto_commit_attempts.fetch_add(1, Ordering::SeqCst) < 2 {
+            assert_eq!(self.preparations.load(Ordering::SeqCst), 1);
+            let attempt = self.auto_commit_attempts.fetch_add(1, Ordering::SeqCst);
+            if self.input_on_second {
+                match attempt {
+                    0 => QueryResponse::error(query::QueryResponseError::from_query_error(
+                        query::error::QueryError::NeedsInput(
+                            query::prepared::PreparedInputRequest::new(
+                                query::prepared::PreparedInputKind::Embedding,
+                                br#"{"model":"m","input":"source"}"#.as_slice(),
+                            ),
+                        ),
+                    )),
+                    1 => QueryResponse::transaction_conflict("transaction conflict"),
+                    _ => QueryResponse::success(serde_json::json!({"_docID": "doc"})),
+                }
+            } else if attempt < 2 {
                 QueryResponse::transaction_conflict("transaction conflict")
             } else {
                 QueryResponse::success(serde_json::json!({"_docID": "doc"}))
             }
+        }
+
+        async fn resolve_retry_input(
+            &self,
+            _request: &QueryRequest,
+            prepared: Option<Arc<query::prepared::PreparedMutations>>,
+            input: &query::prepared::PreparedInputRequest,
+        ) -> Result<Option<Arc<query::prepared::PreparedMutations>>> {
+            self.input_resolutions.fetch_add(1, Ordering::SeqCst);
+            let Some(prepared) = prepared else {
+                return Ok(None);
+            };
+            if prepared.inputs.get(input).is_none() {
+                prepared.inputs.insert(input.clone(), b"[1.0]".as_slice());
+            }
+            Ok(Some(prepared))
         }
 
         async fn execute_in_txn(
@@ -284,12 +284,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auto_commit_execution_retries_typed_conflicts() {
-        let metrics_before = telemetry::conflict_metrics_snapshot().http_auto_commit;
+    async fn auto_commit_returns_business_conflict_without_replaying_request() {
         let executor = Arc::new(ConflictExecutor::default());
-        let state = AppStateBuilder::new(executor.clone())
-            .with_max_txn_retries(3)
-            .build();
+        let state = AppStateBuilder::new(executor.clone(), edge::testing::edge()).build();
 
         let response = execute_with_context(
             &state,
@@ -298,19 +295,56 @@ mod tests {
         )
         .await;
 
-        assert_eq!(executor.auto_commit_attempts.load(Ordering::SeqCst), 3);
-        assert!(!response.has_errors());
-        let metrics_after = telemetry::conflict_metrics_snapshot().http_auto_commit;
-        assert_eq!(metrics_after.attempts - metrics_before.attempts, 2);
-        assert_eq!(metrics_after.successes - metrics_before.successes, 1);
+        assert_eq!(executor.preparations.load(Ordering::SeqCst), 1);
+        assert_eq!(executor.auto_commit_attempts.load(Ordering::SeqCst), 1);
+        assert!(response.is_transaction_conflict());
+    }
+
+    #[tokio::test]
+    async fn engine_managed_batch_conflict_is_not_replayed_by_http() {
+        let executor = Arc::new(ConflictExecutor {
+            engine_managed_retry: true,
+            ..Default::default()
+        });
+        let state = AppStateBuilder::new(executor.clone(), edge::testing::edge()).build();
+
+        let response = execute_with_context(
+            &state,
+            &ExtractIdentity::anonymous(),
+            QueryRequest::new("mutation { first: create_User(input: {}) { _docID } second: create_User(input: {}) { _docID } }"),
+        )
+        .await;
+
+        assert!(response.is_transaction_conflict());
+        assert_eq!(executor.preparations.load(Ordering::SeqCst), 1);
+        assert_eq!(executor.auto_commit_attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn auto_commit_resolves_input_then_returns_conflict_without_replaying_it() {
+        let executor = Arc::new(ConflictExecutor {
+            input_on_second: true,
+            ..Default::default()
+        });
+        let state = AppStateBuilder::new(executor.clone(), edge::testing::edge()).build();
+
+        let response = execute_with_context(
+            &state,
+            &ExtractIdentity::anonymous(),
+            QueryRequest::new("mutation { update_User(input: {}) { _docID } }"),
+        )
+        .await;
+
+        assert_eq!(executor.preparations.load(Ordering::SeqCst), 1);
+        assert_eq!(executor.auto_commit_attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(executor.input_resolutions.load(Ordering::SeqCst), 1);
+        assert!(response.is_transaction_conflict());
     }
 
     #[tokio::test]
     async fn explicit_transaction_execution_is_not_retried() {
         let executor = Arc::new(ConflictExecutor::default());
-        let state = AppStateBuilder::new(executor.clone())
-            .with_max_txn_retries(3)
-            .build();
+        let state = AppStateBuilder::new(executor.clone(), edge::testing::edge()).build();
 
         let response = execute_in_txn_with_context(
             &state,
@@ -331,6 +365,7 @@ mod tests {
     #[derive(Default)]
     struct DacBypassRecorder {
         observed: std::sync::atomic::AtomicBool,
+        bearer: kovan::Atom<Option<String>>,
     }
 
     #[async_trait]
@@ -340,6 +375,8 @@ mod tests {
         async fn execute(&self, _request: QueryRequest) -> QueryResponse {
             self.observed
                 .store(defra_core::dac_bypass::get_dac_bypass(), Ordering::SeqCst);
+            self.bearer
+                .store(defra_core::signing::get_request_bearer_token(OWNER_DID));
             QueryResponse::success(serde_json::json!({}))
         }
 
@@ -350,6 +387,8 @@ mod tests {
         ) -> QueryResponse {
             self.observed
                 .store(defra_core::dac_bypass::get_dac_bypass(), Ordering::SeqCst);
+            self.bearer
+                .store(defra_core::signing::get_request_bearer_token(OWNER_DID));
             QueryResponse::success(serde_json::json!({}))
         }
 
@@ -386,12 +425,12 @@ mod tests {
     #[tokio::test]
     async fn node_owner_is_not_promoted_to_nac_dac_bypass() {
         let executor = Arc::new(DacBypassRecorder::default());
-        let state = AppStateBuilder::new(executor.clone())
+        let state = AppStateBuilder::new(executor.clone(), edge::testing::edge())
             .with_node_identity_did(OWNER_DID.to_string())
             .with_signing_enabled(false)
             .build();
 
-        execute_once_with_context(
+        execute_with_context(
             &state,
             &owner_identity(),
             QueryRequest::new("{ __typename }"),
@@ -404,12 +443,12 @@ mod tests {
     #[tokio::test]
     async fn a_stranger_gets_no_dac_bypass() {
         let executor = Arc::new(DacBypassRecorder::default());
-        let state = AppStateBuilder::new(executor.clone())
+        let state = AppStateBuilder::new(executor.clone(), edge::testing::edge())
             .with_node_identity_did(OWNER_DID.to_string())
             .with_signing_enabled(false)
             .build();
 
-        execute_once_with_context(
+        execute_with_context(
             &state,
             &ExtractIdentity::from_did(Some(identity::Did::new_unchecked(
                 "did:key:z6MkSomeoneElse".to_string(),
@@ -419,5 +458,186 @@ mod tests {
         .await;
 
         assert!(!executor.observed.load(Ordering::SeqCst));
+    }
+    #[tokio::test]
+    async fn bearer_scope_crosses_each_blocking_execution_boundary() {
+        let executor = Arc::new(DacBypassRecorder::default());
+        let state = AppStateBuilder::new(executor.clone(), edge::testing::edge())
+            .with_signing_enabled(false)
+            .with_nac(Arc::new(crate::MockNodeAcpOperations::new()))
+            .build();
+        for path in 0..3 {
+            executor.bearer.store(None);
+            defra_core::signing::scope_request_bearer_token(
+                Some(OWNER_DID.to_string()),
+                Some("request-token".to_string()),
+                async {
+                    let request = QueryRequest::new("{ __typename }");
+                    match path {
+                        0 => execute_with_context(&state, &owner_identity(), request).await,
+                        1 => {
+                            execute_in_txn_with_context(
+                                &state,
+                                &owner_identity(),
+                                request,
+                                TransactionHandle::new("txn".into()),
+                            )
+                            .await
+                        }
+                        _ => {
+                            execute_with_resolved_context(
+                                &state.edge,
+                                executor.clone(),
+                                request,
+                                None,
+                                false,
+                                Some(OWNER_DID.to_string()),
+                            )
+                            .await
+                        }
+                    }
+                },
+            )
+            .await;
+            assert_eq!(
+                executor.bearer.load_clone().as_deref(),
+                Some("request-token")
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod context_tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use kovan_queue::seg_queue::SegQueue;
+    use query::error::{Result, TransactionError};
+
+    use super::*;
+    use crate::router::AppStateBuilder;
+
+    const OWNER_DID: &str = "did:key:z6MkTestNodeOwner";
+    const ADMIN_DID: &str = "did:key:z6MkDacBypassAdmin";
+
+    /// Records the context of every request it serves.
+    #[derive(Default)]
+    struct ContextRecorder {
+        contexts: SegQueue<defra_core::RequestContext>,
+    }
+
+    impl ContextRecorder {
+        fn last(&self) -> Option<defra_core::RequestContext> {
+            std::iter::from_fn(|| self.contexts.pop()).last()
+        }
+    }
+
+    #[async_trait]
+    impl QueryExecutor for ContextRecorder {
+        fn abandon_txn(&self, _handle: &TransactionHandle) {}
+
+        async fn execute(&self, request: QueryRequest) -> QueryResponse {
+            self.contexts.push(request.context);
+            QueryResponse::success(serde_json::json!({}))
+        }
+
+        async fn execute_in_txn(
+            &self,
+            request: QueryRequest,
+            _handle: &TransactionHandle,
+        ) -> QueryResponse {
+            self.contexts.push(request.context);
+            QueryResponse::success(serde_json::json!({}))
+        }
+
+        async fn begin_txn(
+            &self,
+            _readonly: bool,
+        ) -> std::result::Result<TransactionHandle, TransactionError> {
+            Err(TransactionError::not_supported("test executor"))
+        }
+
+        async fn commit_txn(
+            &self,
+            _handle: &TransactionHandle,
+        ) -> std::result::Result<(), TransactionError> {
+            Err(TransactionError::not_supported("test executor"))
+        }
+
+        async fn rollback_txn(
+            &self,
+            _handle: &TransactionHandle,
+        ) -> std::result::Result<(), TransactionError> {
+            Err(TransactionError::not_supported("test executor"))
+        }
+
+        async fn schema(&self) -> Result<String> {
+            Ok(String::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_nac_admin_with_bypass_dac_carries_the_bypass_and_identity_in_its_request() {
+        let admin = identity::Did::new_unchecked(ADMIN_DID.to_string());
+        let executor = Arc::new(ContextRecorder::default());
+        let state = AppStateBuilder::new(executor.clone(), edge::testing::edge())
+            .with_signing_enabled(false)
+            .with_nac(Arc::new(
+                crate::MockNodeAcpOperations::enabled_with_owner(identity::Did::new_unchecked(
+                    OWNER_DID.to_string(),
+                ))
+                .with_grant(admin.clone(), acp::nac::NodePermission::DacBypass),
+            ))
+            .build();
+        let caller = ExtractIdentity::from_did(Some(admin));
+
+        execute_with_context(&state, &caller, QueryRequest::new("{ __typename }")).await;
+        let context = executor.last().expect("the query ran");
+        assert!(context.dac_bypass());
+        assert_eq!(context.identity(), Some(ADMIN_DID));
+
+        execute_in_txn_with_context(
+            &state,
+            &caller,
+            QueryRequest::new("{ __typename }"),
+            TransactionHandle::new("txn".into()),
+        )
+        .await;
+        let context = executor.last().expect("the query ran");
+        assert!(context.dac_bypass());
+        assert_eq!(context.identity(), Some(ADMIN_DID));
+
+        execute_with_resolved_context(
+            &state.edge,
+            executor.clone(),
+            QueryRequest::new("{ __typename }"),
+            None,
+            true,
+            Some(ADMIN_DID.to_string()),
+        )
+        .await;
+        let context = executor.last().expect("the query ran");
+        assert!(context.dac_bypass());
+        assert_eq!(context.identity(), Some(ADMIN_DID));
+    }
+
+    #[tokio::test]
+    async fn a_stranger_carries_no_bypass_in_its_request() {
+        let executor = Arc::new(ContextRecorder::default());
+        let state = AppStateBuilder::new(executor.clone(), edge::testing::edge())
+            .with_signing_enabled(false)
+            .with_nac(Arc::new(crate::MockNodeAcpOperations::enabled_with_owner(
+                identity::Did::new_unchecked(OWNER_DID.to_string()),
+            )))
+            .build();
+        let stranger = ExtractIdentity::from_did(Some(identity::Did::new_unchecked(
+            "did:key:z6MkSomeoneElse".to_string(),
+        )));
+
+        execute_with_context(&state, &stranger, QueryRequest::new("{ __typename }")).await;
+        let context = executor.last().expect("the query ran");
+        assert!(!context.dac_bypass());
+        assert_eq!(context.identity(), Some("did:key:z6MkSomeoneElse"));
     }
 }

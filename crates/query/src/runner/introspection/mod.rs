@@ -180,6 +180,7 @@ pub fn build_introspection_schema(
             TypeRef::named_nn("DocumentArrivalPage"),
             |_| FieldFuture::new(async { Ok(Some(GqlValue::Null)) }),
         )
+        .description("Reads committed document arrivals in local commit order. Creates made by the current transaction appear only after that transaction commits.")
         .argument(InputValue::new("collection", TypeRef::named_nn("String")))
         .argument(InputValue::new("after", TypeRef::named("String")))
         .argument(InputValue::new("limit", TypeRef::named("Int")))
@@ -357,7 +358,7 @@ pub(crate) async fn execute_against(schema: &Schema, query: &str) -> Result<Json
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Barrier;
+    use regolith::sync::Barrier;
 
     use super::*;
     use schema::{FieldDescription, FieldKind, ScalarArrayKind};
@@ -509,8 +510,8 @@ mod tests {
         assert_eq!(tags["type"]["ofType"]["name"], "String");
     }
 
-    #[test]
-    fn mutation_input_is_safe_for_concurrent_first_use() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
+    async fn mutation_input_is_safe_for_concurrent_first_use() {
         const CALLERS: usize = 16;
         const QUERY: &str = r#"{
             __type(name: "UsersMutationInputArg") {
@@ -535,27 +536,23 @@ mod tests {
             ],
         );
         let schema = build_introspection_schema(&[Arc::new(collection)]).unwrap();
-        let barrier = Barrier::new(CALLERS);
+        let barrier = Arc::new(Barrier::new(CALLERS));
 
-        let results = std::thread::scope(|scope| {
-            let handles: Vec<_> = (0..CALLERS)
-                .map(|_| {
-                    scope.spawn(|| {
-                        barrier.wait();
-                        let response = futures::executor::block_on(
-                            schema.execute(async_graphql::Request::new(QUERY)),
-                        );
-                        assert!(response.errors.is_empty(), "{:?}", response.errors);
-                        serde_json::to_value(response.data).unwrap()
-                    })
+        let handles: Vec<_> = (0..CALLERS)
+            .map(|_| {
+                let (schema, barrier) = (schema.clone(), barrier.clone());
+                tokio::spawn(async move {
+                    barrier.wait().await;
+                    let response = schema.execute(async_graphql::Request::new(QUERY)).await;
+                    assert!(response.errors.is_empty(), "{:?}", response.errors);
+                    serde_json::to_value(response.data).unwrap()
                 })
-                .collect();
-
-            handles
-                .into_iter()
-                .map(|handle| handle.join().unwrap())
-                .collect::<Vec<JsonValue>>()
-        });
+            })
+            .collect();
+        let mut results = Vec::<JsonValue>::with_capacity(CALLERS);
+        for handle in handles {
+            results.push(handle.await.unwrap());
+        }
 
         for result in &results[1..] {
             assert_eq!(result, &results[0]);

@@ -49,46 +49,36 @@ pub use verify::verify_block_cid;
 use async_trait::async_trait;
 use bytes::Bytes;
 use cid::Cid;
-use lru::LruCache;
 use multihash_codetable::Code;
-use parking_lot::Mutex;
 use std::fmt;
-use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use storage::corekv::{IterOptions, Key, Store};
+use storage::corekv::{IterOptions, Key, RetryOptions, Store};
 use storage::keys::blockstore::{BlockstoreKey, ToMergeIndexKey};
 use storage::stores::blockstore::BlockstoreTxn;
+use storage::stores::BlockWrite;
 use storage::stores::Blockstore as InternalBlockstore;
 use tracing::instrument;
-
-/// Default number of entries in the block cache (matches Go's 1M entry LRU).
-const DEFAULT_BLOCK_CACHE_SIZE: usize = 1_000_000;
-
-/// Number of entries in the merged CID cache.
-///
-/// Tracks CIDs that have been merged so `is_merged()` can skip storage reads
-/// during P2P DAG sync hot loops. Sized smaller than the block cache since
-/// only merged CIDs are tracked (not full block data).
-const DEFAULT_MERGED_CACHE_SIZE: usize = 100_000;
 
 /// DefraDB blockstore implementation
 ///
 /// Wraps the internal storage::stores::Blockstore with a clean public API.
 /// Supports both P2P mode (with merge tracking) and local mode (no tracking).
 ///
-/// Includes a process-wide LRU cache for recently accessed blocks, reducing
-/// storage reads during merge, query, and P2P sync operations.
+/// It keeps no cache of its own: every read goes to the engine, whose block
+/// cache serves a repeated read, so every handle over one store sees the same
+/// blocks and merge marks. A read is zero-copy: the `Bytes` it returns hold
+/// the engine's own bytes, which stay unchanged for as long as they are held,
+/// whatever the store does after.
 pub struct DefraBlockstore<S: Store> {
     store: InternalBlockstore<S>,
     /// Whether to verify hash on read
     rehash: AtomicBool,
-    /// LRU cache for recently accessed blocks (CID → block bytes).
-    /// Uses `Bytes` for O(1) clone on cache hits instead of O(n) `Vec<u8>::clone`.
-    cache: Mutex<LruCache<Cid, Bytes>>,
-    /// LRU cache for merged CIDs — fast path for `is_merged()` checks
-    /// during P2P DAG sync. Only positive results are cached (merged = true).
-    merged_cache: Mutex<LruCache<Cid, ()>>,
+    /// The engine retry policy every block write runs under.
+    retry: RetryOptions,
+    /// The worker pool its reads and writes run on, for a caller off it (the
+    /// P2P layer on the network edge).
+    pool: Option<workers::Pool>,
 }
 
 impl<S: Store> fmt::Debug for DefraBlockstore<S> {
@@ -112,13 +102,62 @@ impl<S: Store + 'static> DefraBlockstore<S> {
         Self {
             store: InternalBlockstore::new(store, is_p2p),
             rehash: AtomicBool::new(false),
-            cache: Mutex::new(LruCache::new(
-                NonZeroUsize::new(DEFAULT_BLOCK_CACHE_SIZE).unwrap(),
-            )),
-            merged_cache: Mutex::new(LruCache::new(
-                NonZeroUsize::new(DEFAULT_MERGED_CACHE_SIZE).unwrap(),
-            )),
+            retry: storage::corekv::engine_retry_options(storage::corekv::DEFAULT_MAX_TXN_RETRIES),
+            pool: None,
         }
+    }
+
+    /// Runs its reads and writes on `pool`: a caller off the pool hands each
+    /// to a worker, a worker makes it in place.
+    pub fn placed_on(mut self, pool: Option<&workers::Pool>) -> Self {
+        self.pool = pool.cloned();
+        self
+    }
+
+    /// Runs `call` with the store on the pool the blockstore is placed on: in
+    /// place on a worker, or without a pool.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn on_pool<T, F, Fut>(&self, call: F) -> Result<T>
+    where
+        F: FnOnce(InternalBlockstore<S>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<T>> + 'static,
+        T: Send + 'static,
+    {
+        let store = self.store.clone();
+        workers::run_on(
+            self.pool.as_ref(),
+            workers::Target::LeastLoaded,
+            move || call(store),
+        )
+        .await
+        .map_err(|error| Error::Internal(format!("the block store call did not run: {error}")))?
+    }
+
+    /// A browser's one worker is the page's thread: the call runs in place.
+    #[cfg(target_arch = "wasm32")]
+    async fn on_pool<T, F, Fut>(&self, call: F) -> Result<T>
+    where
+        F: FnOnce(InternalBlockstore<S>) -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        call(self.store.clone()).await
+    }
+
+    /// Writes `writes` in one engine transaction, on the pool.
+    async fn write(&self, writes: Vec<BlockWrite>) -> Result<()> {
+        let retry = self.retry;
+        self.on_pool(move |store| async move {
+            store.write_blocks(retry, writes).await?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Re-run a conflicting block write up to `max_txn_retries` times, the
+    /// node's `datastore.max_txn_retries`.
+    pub fn with_max_txn_retries(mut self, max_txn_retries: u32) -> Self {
+        self.retry = storage::corekv::engine_retry_options(max_txn_retries);
+        self
     }
 
     /// Check if hash verification on read is currently enabled
@@ -180,188 +219,71 @@ impl<S: Store + 'static> DefraBlockstore<S> {
 impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
     #[instrument(level = "trace", skip(self))]
     async fn get(&self, cid: &Cid) -> Result<Option<Bytes>> {
-        // Check LRU cache first (skip cache when hash verification is enabled,
-        // since cached data may not have been verified yet)
-        if !self.rehash.load(Ordering::Acquire) {
-            let mut cache = self.cache.lock();
-            if let Some(data) = cache.get(cid) {
-                return Ok(Some(data.clone()));
-            }
-        }
+        let at = *cid;
+        let result = self
+            .on_pool(move |store| async move {
+                let txn = store.new_txn(true).await?;
+                Ok(block_txn(&*txn)?.get_block(&at).await?)
+            })
+            .await?;
 
-        let txn = self.store.new_txn(true).await?;
-        let bs_txn = txn
-            .as_any()
-            .downcast_ref::<BlockstoreTxn>()
-            .ok_or_else(|| Error::Internal("Failed to downcast transaction".to_string()))?;
-        let result = bs_txn.get_block(cid).await?;
-
-        // If hash_on_read is enabled and we got data, verify the hash
         if self.rehash.load(Ordering::Acquire) {
             if let Some(ref data) = result {
                 self.verify_hash(cid, data)?;
             }
         }
 
-        if let Some(data) = result {
-            // The cache gets its own copy, not the engine's.
-            //
-            // A read hands back `Bytes` over a regolith `DbSlice`, which is a
-            // refcount on whatever owns those bytes: a 16 KiB SSTable block, or
-            // a memtable arena. Holding one keeps that owner resident even
-            // after the block cache evicts it, so caching the slice itself
-            // would let a million-entry LRU pin an unbounded amount of engine
-            // memory, and a 200-byte value would hold a whole block down.
-            // regolith's own guidance is to copy when the value outlives the
-            // read, which is exactly what a cache does.
-            self.cache.lock().put(*cid, Bytes::from(data.to_vec()));
-            return Ok(Some(data));
-        }
-
-        Ok(None)
+        Ok(result)
     }
 
     #[instrument(level = "trace", skip(self))]
     async fn put(&self, cid: &Cid, data: &[u8]) -> Result<()> {
-        // Check cache for existence (avoids storage read for recently-written blocks)
-        if self.cache.lock().contains(cid) {
-            return Ok(());
-        }
-
-        let mut txn = self.store.new_txn(false).await?;
-        let already_exists = {
-            let bs_txn = txn
-                .as_any_mut()
-                .downcast_mut::<BlockstoreTxn>()
-                .ok_or_else(|| Error::Internal("Failed to downcast transaction".to_string()))?;
-            if bs_txn.has_block(cid).await? {
-                true
-            } else {
-                bs_txn.put_block(cid, data).await?;
-                false
-            }
-        };
-        if already_exists {
-            txn.discard();
-            return Ok(());
-        }
-        txn.commit().await?;
-
-        // Write-through: populate cache
-        self.cache.lock().put(*cid, Bytes::copy_from_slice(data));
-        Ok(())
+        self.write(vec![BlockWrite::Put {
+            cid: *cid,
+            data: Bytes::copy_from_slice(data),
+        }])
+        .await
     }
 
     async fn put_many(&self, blocks: &[(&Cid, &[u8])]) -> Result<()> {
         if blocks.is_empty() {
             return Ok(());
         }
-
-        let blocks_to_write: Vec<_> = {
-            let cache = self.cache.lock();
-            blocks
-                .iter()
-                .copied()
-                .filter(|(cid, _)| !cache.contains(cid))
-                .collect()
-        };
-        if blocks_to_write.is_empty() {
-            return Ok(());
-        }
-
-        let mut txn = self.store.new_txn(false).await?;
-        let mut written: Vec<(Cid, Bytes)> = Vec::new();
-        {
-            let bs_txn = txn
-                .as_any_mut()
-                .downcast_mut::<BlockstoreTxn>()
-                .ok_or_else(|| Error::Internal("Failed to downcast transaction".to_string()))?;
-            for (cid, data) in blocks_to_write {
-                if bs_txn.has_block(cid).await? {
-                    continue;
-                }
-                bs_txn.put_block(cid, data).await?;
-                written.push((*cid, Bytes::copy_from_slice(data)));
-            }
-        }
-        txn.commit().await?;
-
-        // Write-through: populate cache for all written blocks
-        let mut cache = self.cache.lock();
-        for (cid, data) in written {
-            cache.put(cid, data);
-        }
-        Ok(())
+        let writes = blocks
+            .iter()
+            .map(|(cid, data)| BlockWrite::Put {
+                cid: **cid,
+                data: Bytes::copy_from_slice(data),
+            })
+            .collect();
+        self.write(writes).await
     }
 
     async fn has(&self, cid: &Cid) -> Result<bool> {
-        // Check cache first
-        if self.cache.lock().contains(cid) {
-            return Ok(true);
-        }
-
-        let txn = self.store.new_txn(true).await?;
-        let bs_txn = txn
-            .as_any()
-            .downcast_ref::<BlockstoreTxn>()
-            .ok_or_else(|| Error::Internal("Failed to downcast transaction".to_string()))?;
-        let result = bs_txn.has_block(cid).await?;
-        Ok(result)
+        let at = *cid;
+        self.on_pool(move |store| async move {
+            let txn = store.new_txn(true).await?;
+            Ok(block_txn(&*txn)?.has_block(&at).await?)
+        })
+        .await
     }
 
     async fn delete(&self, cid: &Cid) -> Result<()> {
-        // Evict from both caches
-        self.cache.lock().pop(cid);
-        self.merged_cache.lock().pop(cid);
-
-        let mut txn = self.store.new_txn(false).await?;
-        {
-            let bs_txn = txn
-                .as_any_mut()
-                .downcast_mut::<BlockstoreTxn>()
-                .ok_or_else(|| Error::Internal("Failed to downcast transaction".to_string()))?;
-            bs_txn.delete_block(cid).await?;
-        }
-        txn.commit().await?;
-        Ok(())
+        self.write(vec![BlockWrite::Delete(*cid)]).await
     }
 
     async fn get_size(&self, cid: &Cid) -> Result<Option<usize>> {
-        let txn = self.store.new_txn(true).await?;
         let block_key = BlockstoreKey::new(*cid);
-        let result = txn.get_size(&block_key.bytes()).await?;
-        Ok(result)
+        self.on_pool(move |store| async move {
+            let txn = store.new_txn(true).await?;
+            Ok(txn.get_size(&block_key.bytes()).await?)
+        })
+        .await
     }
 
     async fn all_cids(&self) -> Result<Vec<Cid>> {
-        let txn = self.store.new_txn(true).await?;
-
-        // Iterate all keys that don't start with merge prefix
-        // Block keys are raw CID bytes, merge keys start with 'm'
-        let opts = IterOptions::new().with_keys_only(true);
-        let mut iter = txn.iterator(opts).await?;
-
-        let mut cids = Vec::new();
-        while let Some(pair) = iter.next().await? {
-            // Skip merge marker keys (start with 'm')
-            if ToMergeIndexKey::is_merge_key(&pair.key) {
-                continue;
-            }
-
-            // Parse the key as a CID
-            match BlockstoreKey::from_bytes(&pair.key) {
-                Ok(key) => cids.push(key.cid),
-                Err(e) => {
-                    tracing::warn!(
-                        key_bytes = ?pair.key,
-                        error = %e,
-                        "Skipping key that could not be parsed as CID"
-                    );
-                }
-            }
-        }
-
-        Ok(cids)
+        self.on_pool(|store| async move { all_cids(&store).await })
+            .await
     }
 
     fn hash_on_read(&self, enabled: bool) {
@@ -369,80 +291,78 @@ impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
     }
 
     async fn is_merged(&self, cid: &Cid) -> Result<bool> {
-        // Fast path: check merged cache
-        if self.merged_cache.lock().contains(cid) {
-            return Ok(true);
-        }
-
-        // Slow path: check storage
-        let txn = self.store.new_txn(true).await?;
-        let bs_txn = txn
-            .as_any()
-            .downcast_ref::<BlockstoreTxn>()
-            .ok_or_else(|| Error::Internal("Failed to downcast transaction".to_string()))?;
-
-        let has_block = bs_txn.has_block(cid).await?;
-        if !has_block {
-            return Ok(false);
-        }
-
-        let result = bs_txn.is_merged(cid).await?;
-
-        // Cache positive results
-        if result {
-            self.merged_cache.lock().put(*cid, ());
-        }
-
-        Ok(result)
+        let at = *cid;
+        self.on_pool(move |store| async move {
+            let txn = store.new_txn(true).await?;
+            let bs_txn = block_txn(&*txn)?;
+            if !bs_txn.has_block(&at).await? {
+                return Ok(false);
+            }
+            Ok(bs_txn.is_merged(&at).await?)
+        })
+        .await
     }
 
     async fn mark_as_merged(&self, cid: &Cid) -> Result<()> {
-        let mut txn = self.store.new_txn(false).await?;
-        let block_exists;
-        {
-            let bs_txn = txn
-                .as_any_mut()
-                .downcast_mut::<BlockstoreTxn>()
-                .ok_or_else(|| Error::Internal("Failed to downcast transaction".to_string()))?;
-            block_exists = bs_txn.has_block(cid).await?;
-            bs_txn.mark_as_merged(cid).await?;
-        }
-        txn.commit().await?;
-        if block_exists {
-            self.merged_cache.lock().put(*cid, ());
-        }
-        Ok(())
+        self.write(vec![BlockWrite::MarkMerged(*cid)]).await
     }
 
     async fn mark_batch_as_merged(&self, cids: &[Cid]) -> Result<()> {
         if cids.is_empty() {
             return Ok(());
         }
-        let mut txn = self.store.new_txn(false).await?;
-        {
-            let bs_txn = txn
-                .as_any_mut()
-                .downcast_mut::<BlockstoreTxn>()
-                .ok_or_else(|| Error::Internal("Failed to downcast transaction".to_string()))?;
-            for cid in cids {
-                bs_txn.mark_as_merged(cid).await?;
-            }
-        }
-        txn.commit().await?;
-        let mut cache = self.merged_cache.lock();
-        for cid in cids {
-            cache.put(*cid, ());
-        }
-        Ok(())
+        self.write(cids.iter().copied().map(BlockWrite::MarkMerged).collect())
+            .await
     }
 
     async fn get_unmerged(&self) -> Result<Vec<Cid>> {
-        let txn = self.store.new_txn(true).await?;
-        let bs_txn = txn
-            .as_any()
-            .downcast_ref::<BlockstoreTxn>()
-            .ok_or_else(|| Error::Internal("Failed to downcast transaction".to_string()))?;
-        let result = bs_txn.get_unmerged_cids().await?;
-        Ok(result)
+        self.on_pool(|store| async move {
+            let txn = store.new_txn(true).await?;
+            Ok(block_txn(&*txn)?.get_unmerged_cids().await?)
+        })
+        .await
     }
 }
+
+/// The blockstore view of a transaction `InternalBlockstore::new_txn` opened.
+fn block_txn(txn: &dyn storage::corekv::Txn) -> Result<&BlockstoreTxn> {
+    txn.as_any()
+        .downcast_ref::<BlockstoreTxn>()
+        .ok_or_else(|| Error::Internal("Failed to downcast transaction".to_string()))
+}
+
+/// Every block's CID, skipping the merge markers.
+async fn all_cids<S: Store>(store: &InternalBlockstore<S>) -> Result<Vec<Cid>> {
+    let txn = store.new_txn(true).await?;
+
+    // Iterate all keys that don't start with merge prefix
+    // Block keys are raw CID bytes, merge keys start with 'm'
+    let opts = IterOptions::new().with_keys_only(true);
+    let mut iter = txn.iterator(opts).await?;
+
+    let mut cids = Vec::new();
+    while let Some(pair) = iter.next().await? {
+        // Skip merge marker keys (start with 'm')
+        if ToMergeIndexKey::is_merge_key(&pair.key) {
+            continue;
+        }
+
+        // Parse the key as a CID
+        match BlockstoreKey::from_bytes(&pair.key) {
+            Ok(key) => cids.push(key.cid),
+            Err(e) => {
+                tracing::warn!(
+                    key_bytes = ?pair.key,
+                    error = %e,
+                    "Skipping key that could not be parsed as CID"
+                );
+            }
+        }
+    }
+
+    Ok(cids)
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "placed_tests.rs"]
+mod placed_tests;

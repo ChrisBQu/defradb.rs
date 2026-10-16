@@ -4,23 +4,17 @@
 //! cargo bench -p benches --bench contention
 //! ```
 //!
-//! Every other bench in this suite is a single-threaded loop, which measures
-//! a shared structure at its cheapest: one thread, no contention, the branch
-//! never mispredicted. That is the case a lock is best at and a lock-free
-//! structure is worst at, so a suite made only of those rows can only ever
-//! show the cost of removing a lock and never the benefit.
-//!
-//! These rows put several threads on one structure at once and report total
-//! throughput, which is where the two designs actually differ: a reader lock
-//! serialises on one cache line that every thread writes, while a lock-free
-//! read is a plain load that stays in each core's cache.
+//! These rows put several threads on one shared structure at once and report
+//! aggregate throughput, exposing contention in the collection cache and
+//! event-bus subscriber map. Actual document writes are covered by
+//! `write_baseline` and the document-write benchmarks.
 //!
 //! Every structure here is reached through a public API that exists on both
 //! sides of the lock-free change, so the same file measures both.
 
 use std::hint::black_box;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Barrier};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
@@ -71,25 +65,30 @@ fn populated_db() -> Arc<DB<RegolithStore>> {
 ///
 /// Wall time rather than a criterion iteration count: what matters here is
 /// aggregate throughput as threads are added, and criterion times one
-/// iteration on one thread. Every thread waits on a barrier so none of them
+/// iteration on one thread. Every thread waits for a start gate so none of them
 /// measures another's startup.
 fn throughput<W>(threads: usize, duration: std::time::Duration, work: W) -> f64
 where
     W: Fn(usize) -> u64 + Send + Sync + 'static,
 {
     let work = Arc::new(work);
-    let barrier = Arc::new(Barrier::new(threads + 1));
+    let ready = Arc::new(AtomicUsize::new(0));
+    let go = Arc::new(AtomicBool::new(false));
     let stop = Arc::new(AtomicBool::new(false));
     let total = Arc::new(AtomicU64::new(0));
 
     let handles: Vec<_> = (0..threads)
         .map(|id| {
             let work = Arc::clone(&work);
-            let barrier = Arc::clone(&barrier);
+            let ready = Arc::clone(&ready);
+            let go = Arc::clone(&go);
             let stop = Arc::clone(&stop);
             let total = Arc::clone(&total);
             std::thread::spawn(move || {
-                barrier.wait();
+                ready.fetch_add(1, Ordering::AcqRel);
+                while !go.load(Ordering::Acquire) {
+                    std::thread::yield_now();
+                }
                 let mut done = 0u64;
                 while !stop.load(Ordering::Relaxed) {
                     // A batch between stop checks, so the flag read does not
@@ -103,7 +102,10 @@ where
         })
         .collect();
 
-    barrier.wait();
+    while ready.load(Ordering::Acquire) < threads {
+        std::thread::yield_now();
+    }
+    go.store(true, Ordering::Release);
     let start = Instant::now();
     std::thread::sleep(duration);
     stop.store(true, Ordering::Relaxed);
@@ -177,40 +179,5 @@ fn event_publish(c: &mut Criterion) {
     group.finish();
 }
 
-/// The per-document write queue's lock registry: every local write and every
-/// merge looks a document up in it, and a lookup that misses inserts.
-fn doc_write_queue(c: &mut Criterion) {
-    let db = populated_db();
-    let queue = db.doc_write_queue();
-    let rt = common::owned_runtime();
-    let handle = rt.handle().clone();
-    let mut group = c.benchmark_group("contention_doc_write_queue");
-    group.sample_size(10);
-    for threads in THREADS {
-        group.throughput(Throughput::Elements(1));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(threads),
-            &threads,
-            |b, &threads| {
-                b.iter_custom(|iters| {
-                    let queue = Arc::clone(&queue);
-                    let handle = handle.clone();
-                    let ops = throughput(threads, MEASURE, move |id| {
-                        // A document per thread, so the guard is never
-                        // contended and what is measured is the registry
-                        // lookup rather than the per-document serialization.
-                        let doc_id = format!("doc-{id}");
-                        let guard = handle.block_on(queue.acquire(&doc_id));
-                        drop(black_box(guard));
-                        1
-                    });
-                    std::time::Duration::from_secs_f64(iters as f64 / ops)
-                });
-            },
-        );
-    }
-    group.finish();
-}
-
-criterion_group!(benches, collection_cache, event_publish, doc_write_queue);
+criterion_group!(benches, collection_cache, event_publish);
 criterion_main!(benches);

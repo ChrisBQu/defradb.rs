@@ -14,6 +14,7 @@ pub mod broadcast;
 
 use async_trait::async_trait;
 use blockstore::Blockstore;
+use defra_core::RequestContext;
 use document::{DocID, Document};
 use kovan::Atom;
 use p2p::message::SEArtifact;
@@ -99,7 +100,7 @@ pub struct BroadcastMutator<S: Store, B: Blockstore, T: P2PTransport> {
     se_options: Atom<BroadcastSeOptions>,
 }
 
-impl<S: Store, B: Blockstore + 'static, T: P2PTransport> BroadcastMutator<S, B, T> {
+impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> BroadcastMutator<S, B, T> {
     /// Create a new broadcast-enabled mutator.
     pub fn new(db: Arc<DB<S>>, sync: Arc<SyncCoordinator<B, T>>) -> Self {
         Self {
@@ -110,7 +111,10 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport> BroadcastMutator<S, B, 
         }
     }
 
-    pub fn set_document_acp(&self, acp: Arc<dyn acp::DocumentACP>) {
+    pub fn set_document_acp(&self, acp: Arc<dyn acp::DocumentACP>)
+    where
+        S: 'static,
+    {
         self.inner.set_document_acp(acp);
     }
 
@@ -130,11 +134,26 @@ impl<S: Store, B: Blockstore + 'static, T: P2PTransport> BroadcastMutator<S, B, 
         doc: &Document,
         field_names: &[String],
     ) -> Vec<SEArtifact> {
+        Self::generate_se_artifacts_with_options(
+            self.load_se_options(),
+            collection,
+            doc_id,
+            doc,
+            field_names,
+        )
+    }
+
+    pub(super) fn generate_se_artifacts_with_options(
+        se_options: BroadcastSeOptions,
+        collection: &CollectionVersion,
+        doc_id: &str,
+        doc: &Document,
+        field_names: &[String],
+    ) -> Vec<SEArtifact> {
         if collection.encrypted_indexes.is_empty() {
             return Vec::new();
         }
 
-        let se_options = self.load_se_options();
         let Some(se_key) = se_options.encryption_key else {
             return Vec::new();
         };
@@ -256,6 +275,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> SeArtifactRep
 impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> BroadcastMutator<S, B, T> {
     async fn broadcast_update_result(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         se_fields: Vec<String>,
         result: UpdateResult,
@@ -301,7 +321,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> BroadcastMuta
             field_cids: vec![],
             encryption_cids: vec![],
         };
-        let creator_did = defra_core::signing::get_broadcast_creator_did();
+        let creator_did = context.creator().map(str::to_owned);
         let branchable_data = if let (Some(col_cid), Some(col_block)) =
             (result.broadcast_cid, result.broadcast_block.as_ref())
         {
@@ -412,26 +432,163 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> BroadcastMuta
 impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
     for BroadcastMutator<S, B, T>
 {
+    fn with_prepared_inputs(
+        &self,
+        inputs: query::prepared::PreparedInputMemo,
+    ) -> Option<Arc<dyn DocMutator>> {
+        Some(Arc::new(Self {
+            inner: self.inner.with_prepared_inputs_value(inputs),
+            sync: self.sync.clone(),
+            db: self.db.clone(),
+            se_options: Atom::new(self.load_se_options()),
+        }))
+    }
+
+    fn acp_registration_projection(&self) -> Option<Arc<query::txn::AcpRegistrationProjection>> {
+        self.inner.acp_registration_projection()
+    }
+
+    fn manages_external_acp_hooks(&self) -> bool {
+        self.inner.manages_external_acp_hooks()
+    }
+
+    fn supports_projected_updates(&self) -> bool {
+        self.inner.supports_projected_updates()
+    }
+
+    async fn register_ordered_async_hook(
+        &self,
+        callback: storage::corekv::CommitHook,
+    ) -> query::error::Result<()> {
+        self.inner.register_ordered_async_hook(callback).await
+    }
+
+    async fn resolve_prepared_input(
+        &self,
+        request: &query::prepared::PreparedInputRequest,
+    ) -> query::error::Result<Arc<[u8]>> {
+        self.resolve_prepared_input_as(&RequestContext::ambient(), request)
+            .await
+    }
+
+    async fn resolve_prepared_input_as(
+        &self,
+        context: &RequestContext,
+        request: &query::prepared::PreparedInputRequest,
+    ) -> query::error::Result<Arc<[u8]>> {
+        self.inner.resolve_prepared_input_as(context, request).await
+    }
+
+    async fn resolve_prepared_inputs(
+        &self,
+        requests: Vec<query::prepared::PreparedInputRequest>,
+    ) -> query::error::Result<Vec<Arc<[u8]>>> {
+        self.resolve_prepared_inputs_as(&RequestContext::ambient(), requests)
+            .await
+    }
+
+    async fn resolve_prepared_inputs_as(
+        &self,
+        context: &RequestContext,
+        requests: Vec<query::prepared::PreparedInputRequest>,
+    ) -> query::error::Result<Vec<Arc<[u8]>>> {
+        self.inner
+            .resolve_prepared_inputs_as(context, requests)
+            .await
+    }
+
+    async fn prepared_embedding_request(
+        &self,
+        collection_name: &str,
+        field_name: &str,
+        doc: &Document,
+    ) -> query::error::Result<Option<query::prepared::PreparedInputRequest>> {
+        self.inner
+            .prepared_embedding_request(collection_name, field_name, doc)
+            .await
+    }
+
+    fn engine_retries_batches(&self) -> bool {
+        true
+    }
+
+    fn requires_write_preparation(&self) -> bool {
+        self.requires_write_preparation_as(&RequestContext::ambient())
+    }
+
+    fn requires_write_preparation_as(&self, context: &RequestContext) -> bool {
+        self.inner.requires_write_preparation_as(context)
+    }
+
+    async fn prepare_write(
+        &self,
+        collection_name: &str,
+        doc: Document,
+        modified_fields: Option<rapidhash::RapidHashSet<String>>,
+        encryption: Option<defra_core::encryption::EncryptionConfig>,
+    ) -> query::error::Result<Document> {
+        self.prepare_write_as(
+            &RequestContext::ambient().or_encryption(encryption),
+            collection_name,
+            doc,
+            modified_fields,
+        )
+        .await
+    }
+
+    async fn prepare_write_as(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        doc: Document,
+        modified_fields: Option<rapidhash::RapidHashSet<String>>,
+    ) -> query::error::Result<Document> {
+        self.inner
+            .prepare_write_as(context, collection_name, doc, modified_fields)
+            .await
+    }
+
+    async fn prepare_creates_as(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        docs: Vec<Document>,
+    ) -> query::error::Result<Vec<Document>> {
+        self.inner
+            .prepare_creates_as(context, collection_name, docs)
+            .await
+    }
+
     fn set_document_acp(&self, acp: Arc<dyn acp::DocumentACP>) {
         BroadcastMutator::set_document_acp(self, acp);
     }
 
     async fn begin_batch(&self) -> query::error::Result<Option<MutationBatch>> {
-        let (inner_batch, fetcher) = self.inner.new_batch_components().await?;
+        let inner_batch = self.inner.new_retryable_batch_controller();
         let inner_controller: Arc<dyn MutationBatchController> = inner_batch.clone();
         let broadcast_batch = Arc::new(BroadcastBatchMutator::new(
             inner_batch,
             inner_controller,
             self.sync.clone(),
             self.db.clone(),
+            self.load_se_options(),
         ));
-        let mutator: Arc<dyn DocMutator> = broadcast_batch.clone();
         let controller: Arc<dyn MutationBatchController> = broadcast_batch;
-        Ok(Some(MutationBatch::new(mutator, fetcher, controller)))
+        Ok(Some(MutationBatch::new_retryable(controller)))
     }
 
     async fn create(
         &self,
+        collection_name: &str,
+        doc: Document,
+    ) -> query::error::Result<CreateResult> {
+        self.create_as(&RequestContext::ambient(), collection_name, doc)
+            .await
+    }
+
+    async fn create_as(
+        &self,
+        context: &RequestContext,
         collection_name: &str,
         doc: Document,
     ) -> query::error::Result<CreateResult> {
@@ -444,7 +601,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         let collection_id = collection.collection_id().to_string();
 
         // Execute the create mutation
-        let result = self.inner.create(collection_name, doc).await?;
+        let result = self.inner.create_as(context, collection_name, doc).await?;
 
         // Build the block result for broadcast
         let (cid, block, doc_id_str) =
@@ -484,8 +641,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             encryption_cids: vec![],
         };
 
-        // Read broadcast creator DID before spawning (reads thread-local state).
-        let creator_did = defra_core::signing::get_broadcast_creator_did();
+        let creator_did = context.creator().map(str::to_owned);
 
         // Capture branchable collection broadcast data before spawning.
         let branchable_data = if let (Some(col_cid), Some(col_block)) =
@@ -607,6 +763,16 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         collection_name: &str,
         docs: Vec<Document>,
     ) -> query::error::Result<Vec<query::mutator::CreateResult>> {
+        self.create_many_as(&RequestContext::ambient(), collection_name, docs)
+            .await
+    }
+
+    async fn create_many_as(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        docs: Vec<Document>,
+    ) -> query::error::Result<Vec<query::mutator::CreateResult>> {
         let collection = self
             .db
             .get_collection(collection_name)
@@ -615,10 +781,12 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         let collection_id = collection.collection_id().to_string();
 
         // Delegate to inner (single transaction for all docs)
-        let results = self.inner.create_many(collection_name, docs).await?;
+        let results = self
+            .inner
+            .create_many_as(context, collection_name, docs)
+            .await?;
 
-        // Read broadcast creator DID before spawning (reads thread-local state).
-        let creator_did = defra_core::signing::get_broadcast_creator_did();
+        let creator_did = context.creator().map(str::to_owned);
 
         // Build block results and collect broadcast work items.
         // Block building failures return Failed status immediately (not spawned).
@@ -812,12 +980,28 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         doc: Document,
         modified_fields: rapidhash::RapidHashSet<String>,
     ) -> query::error::Result<UpdateResult> {
+        self.update_as(
+            &RequestContext::ambient(),
+            collection_name,
+            doc,
+            modified_fields,
+        )
+        .await
+    }
+
+    async fn update_as(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        doc: Document,
+        modified_fields: rapidhash::RapidHashSet<String>,
+    ) -> query::error::Result<UpdateResult> {
         let se_fields: Vec<String> = modified_fields.iter().cloned().collect();
         let result = self
             .inner
-            .update(collection_name, doc, modified_fields)
+            .update_as(context, collection_name, doc, modified_fields)
             .await?;
-        self.broadcast_update_result(collection_name, se_fields, result)
+        self.broadcast_update_result(context, collection_name, se_fields, result)
             .await
     }
 
@@ -828,17 +1012,45 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         doc: Document,
         modified_fields: rapidhash::RapidHashSet<String>,
     ) -> query::error::Result<UpdateResult> {
+        self.update_if_unchanged_as(
+            &RequestContext::ambient(),
+            collection_name,
+            expected,
+            doc,
+            modified_fields,
+        )
+        .await
+    }
+
+    async fn update_if_unchanged_as(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        expected: Document,
+        doc: Document,
+        modified_fields: rapidhash::RapidHashSet<String>,
+    ) -> query::error::Result<UpdateResult> {
         let se_fields: Vec<String> = modified_fields.iter().cloned().collect();
         let result = self
             .inner
-            .update_if_unchanged(collection_name, expected, doc, modified_fields)
+            .update_if_unchanged_as(context, collection_name, expected, doc, modified_fields)
             .await?;
-        self.broadcast_update_result(collection_name, se_fields, result)
+        self.broadcast_update_result(context, collection_name, se_fields, result)
             .await
     }
 
     async fn delete(
         &self,
+        collection_name: &str,
+        doc_id: &DocID,
+    ) -> query::error::Result<DeleteResult> {
+        self.delete_as(&RequestContext::ambient(), collection_name, doc_id)
+            .await
+    }
+
+    async fn delete_as(
+        &self,
+        context: &RequestContext,
         collection_name: &str,
         doc_id: &DocID,
     ) -> query::error::Result<DeleteResult> {
@@ -863,7 +1075,10 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         };
 
         // Execute the delete mutation
-        let result = self.inner.delete(collection_name, doc_id).await?;
+        let result = self
+            .inner
+            .delete_as(context, collection_name, doc_id)
+            .await?;
 
         // No-op delete (missing doc): the inner mutator wrote nothing, so
         // there's no tombstone block to read or broadcast. Returning here
@@ -905,8 +1120,7 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
                 }
             };
 
-        // Read broadcast creator DID before spawning (reads thread-local state).
-        let creator_did = defra_core::signing::get_broadcast_creator_did();
+        let creator_did = context.creator().map(str::to_owned);
 
         // For branchable collections, capture the collection-level head block
         // so we can broadcast it alongside the composite delete (Go emits two

@@ -6,49 +6,96 @@
 //! wrapper owns the bump rather than each of the many swap sites, so a swap
 //! that skips it cannot be written.
 
-use kovan::Atom;
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use crate::collection::CollectionMap;
+use kovan::Atom;
+
+#[derive(Clone)]
+struct VersionedMap {
+    map: CollectionMap,
+    epoch: u64,
+}
 
 /// The process-wide [`CollectionMap`] with an epoch that advances on every swap.
 pub(crate) struct EpochedCollections {
-    map: Atom<CollectionMap>,
-    epoch: AtomicU64,
+    map: Atom<VersionedMap>,
 }
 
 impl EpochedCollections {
     pub(crate) fn new(map: CollectionMap) -> Self {
         Self {
-            map: Atom::new(map),
-            epoch: AtomicU64::new(0),
+            map: Atom::new(VersionedMap { map, epoch: 0 }),
         }
     }
 
     /// Read the map without cloning it.
     pub(crate) fn peek<R>(&self, f: impl FnOnce(&CollectionMap) -> R) -> R {
-        self.map.peek(f)
+        self.map.peek(|versioned| f(&versioned.map))
     }
 
     /// Clone the current map out.
     pub(crate) fn load_clone(&self) -> CollectionMap {
-        self.map.load_clone()
+        self.map.load_clone().map
     }
 
-    /// Swap the map via read-copy-update, then advance the epoch.
-    ///
-    /// Bump after the swap so a reader can only pair a newer map with an
-    /// older epoch (a harmless rebuild), never the reverse.
-    pub(crate) fn rcu<F>(&self, f: F)
+    /// Swap the map and its epoch in one RCU publication.
+    pub(crate) fn rcu<F>(&self, mut f: F)
     where
         F: FnMut(&CollectionMap) -> CollectionMap,
     {
-        self.map.rcu(f);
-        self.epoch.fetch_add(1, Ordering::AcqRel);
+        self.map.rcu(|old| VersionedMap {
+            map: f(&old.map),
+            epoch: old.epoch.wrapping_add(1),
+        });
+    }
+
+    /// Publish a reload only if no cache update has landed since it began.
+    pub(crate) fn rcu_if_epoch<F>(&self, expected: u64, mut f: F) -> bool
+    where
+        F: FnMut(&CollectionMap) -> CollectionMap,
+    {
+        let mut applied = false;
+        self.map.rcu(|old| {
+            if old.epoch != expected {
+                applied = false;
+                old.clone()
+            } else {
+                applied = true;
+                VersionedMap {
+                    map: f(&old.map),
+                    epoch: old.epoch.wrapping_add(1),
+                }
+            }
+        });
+        applied
     }
 
     /// The current schema epoch.
     pub(crate) fn epoch(&self) -> u64 {
-        self.epoch.load(Ordering::Acquire)
+        self.map.peek(|versioned| versioned.epoch)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reload_cannot_overwrite_a_newer_publication() {
+        let collections = EpochedCollections::new(CollectionMap::default());
+        let snapshot_epoch = collections.epoch();
+
+        collections.rcu(|map| map.clone());
+
+        assert!(!collections.rcu_if_epoch(snapshot_epoch, |map| map.clone()));
+        assert_eq!(collections.epoch(), snapshot_epoch + 1);
+    }
+
+    #[test]
+    fn reload_publishes_when_no_publication_intervened() {
+        let collections = EpochedCollections::new(CollectionMap::default());
+        let snapshot_epoch = collections.epoch();
+
+        assert!(collections.rcu_if_epoch(snapshot_epoch, |map| map.clone()));
+        assert_eq!(collections.epoch(), snapshot_epoch + 1);
     }
 }

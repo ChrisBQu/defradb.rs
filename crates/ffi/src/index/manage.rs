@@ -5,7 +5,7 @@ use defra_core::{ActionExecution, ActionStatus};
 use serde::Serialize;
 use storage::corekv::Key;
 
-use crate::helpers::{get_node_database, get_rt, require_c_str};
+use crate::helpers::{get_node_database, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::types::FfiResult;
 use crate::{ffi_async, ffi_entry, try_ffi};
@@ -110,9 +110,7 @@ pub unsafe extern "C" fn delete_index(
     index_name: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::IndexDelete
@@ -121,13 +119,7 @@ pub unsafe extern "C" fn delete_index(
         let index_name_str = try_ffi!(require_c_str(index_name, "index_name"));
         let database = try_ffi!(get_node_database(node_ptr));
 
-        // Bind the caller's identity so any DB-layer NAC gate reached by the body
-        // resolves the actual caller instead of the wildcard.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
-        );
-
-        ffi_async!(rt, {
+        ffi_async!(node_ptr, {
             // Get the collection
             let collection = database
                 .get_collection(&collection_name_str)
@@ -251,9 +243,7 @@ pub unsafe extern "C" fn get_indexes(
     collection_name: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::IndexList
@@ -261,13 +251,11 @@ pub unsafe extern "C" fn get_indexes(
         let collection_name_str = try_ffi!(require_c_str(collection_name, "collection_name"));
         let database = try_ffi!(get_node_database(node_ptr));
 
-        // Bind the caller's identity so any DB-layer NAC gate reached by the body
-        // resolves the actual caller instead of the wildcard.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
-        );
+        // The caller acts in the call's context, so the NAC checks the body
+        // reaches resolve the actual caller instead of the wildcard.
+        let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()));
 
-        ffi_async!(rt, {
+        ffi_async!(node_ptr, {
             // Get the collection
             let collection = database
                 .get_collection(&collection_name_str)
@@ -275,7 +263,7 @@ pub unsafe extern "C" fn get_indexes(
                 .ok_or_else(|| format!("collection '{}' not found", collection_name_str))?;
 
             let actions = database
-                .list_index_actions(collection.collection_id())
+                .list_index_actions_as(&context, collection.collection_id())
                 .await
                 .map_err(|e| format!("failed to list index actions: {}", e))?;
             let indexes = index_results(&collection, &actions);
@@ -308,22 +296,18 @@ pub unsafe extern "C" fn list_all_indexes(
     identity_did: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::IndexList
         ));
         let database = try_ffi!(get_node_database(node_ptr));
 
-        // Bind the caller's identity so any DB-layer NAC gate reached by the body
-        // resolves the actual caller instead of the wildcard.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
-        );
+        // The caller acts in the call's context, so the NAC checks the body
+        // reaches resolve the actual caller instead of the wildcard.
+        let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()));
 
-        ffi_async!(rt, {
+        ffi_async!(node_ptr, {
             // Get all collection names
             let names = database
                 .list_collections()
@@ -337,7 +321,7 @@ pub unsafe extern "C" fn list_all_indexes(
                 match database.get_collection(&name) {
                     Ok(Some(collection)) => {
                         let actions = database
-                            .list_index_actions(collection.collection_id())
+                            .list_index_actions_as(&context, collection.collection_id())
                             .await
                             .map_err(|e| format!("failed to list index actions: {}", e))?;
                         let indexes = index_results(&collection, &actions);

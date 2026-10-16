@@ -24,6 +24,8 @@ mod arrivals;
 mod commits;
 mod commits_height;
 mod commits_numeric;
+#[cfg(test)]
+mod context_tests;
 mod executor;
 mod explain;
 mod fetcher;
@@ -35,15 +37,22 @@ mod plan_aggregates;
 mod plan_drive;
 mod plan_formatting;
 mod plan_validation;
+mod prepare;
+mod prepare_fetcher;
+#[cfg(test)]
+mod prepare_parse_tests;
 mod query;
 mod se_transport;
+mod turn;
 mod version;
 
+pub use executor::within_deadline;
 pub use se_transport::SeQueryTransport;
 
 use acp::nac::NodePermission;
 use acp::{DocumentACP, Identity as AcpIdentity};
 use async_trait::async_trait;
+use defra_core::RequestContext;
 use identity::Did;
 use rapidhash::{HashMapExt, RapidHashMap};
 use schema::CollectionVersion;
@@ -57,44 +66,7 @@ use crate::limits::QueryLimits;
 use crate::mutator::CollectionTruncator;
 use crate::mutator::DocMutator;
 use crate::planner::Doc;
-use crate::txn::{NoOpTransactionRegistry, TransactionRegistry};
-
-#[cfg(not(target_arch = "wasm32"))]
-tokio::task_local! {
-    /// Per-request collection provider override for transaction-scoped schema resolution.
-    ///
-    /// When a query executes within a transaction that has uncommitted schema changes,
-    /// this is set to a transaction-aware provider so `get_collection()` sees the new schemas.
-    static TXN_COLLECTION_PROVIDER: Arc<dyn CollectionProvider>;
-}
-
-#[cfg(target_arch = "wasm32")]
-thread_local! {
-    static TXN_COLLECTION_PROVIDER: std::cell::RefCell<Option<Arc<dyn CollectionProvider>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-async fn scope_txn_collection_provider<F>(
-    provider: Arc<dyn CollectionProvider>,
-    future: F,
-) -> F::Output
-where
-    F: std::future::Future,
-{
-    #[cfg(not(target_arch = "wasm32"))]
-    return TXN_COLLECTION_PROVIDER.scope(provider, future).await;
-
-    #[cfg(target_arch = "wasm32")]
-    defra_core::wasm_task_local::scope(&TXN_COLLECTION_PROVIDER, provider, future).await
-}
-
-fn current_txn_collection_provider() -> Option<Arc<dyn CollectionProvider>> {
-    #[cfg(not(target_arch = "wasm32"))]
-    return TXN_COLLECTION_PROVIDER.try_with(Clone::clone).ok();
-
-    #[cfg(target_arch = "wasm32")]
-    defra_core::wasm_task_local::try_with(&TXN_COLLECTION_PROVIDER, Clone::clone)
-}
+use crate::txn::{AcpRegistrationProjection, NoOpTransactionRegistry, TransactionRegistry};
 
 // Re-export for backwards compatibility
 pub use crate::fetcher::{DocFetcher, FetchByIdsResult, IndexScanResult};
@@ -204,6 +176,8 @@ pub struct QueryRunner<F: DocFetcher, R: TransactionRegistry = NoOpTransactionRe
     /// Defaults to a no-op ACP implementation that allows access and treats
     /// documents as unregistered, matching the "ACP not configured" behavior.
     pub(crate) acp: Arc<dyn DocumentACP>,
+    /// Explicit transaction/request projection for external ACP registrations.
+    pub(crate) acp_registration_projection: Option<Arc<AcpRegistrationProjection>>,
     /// Default identity for ACP permission checks.
     ///
     /// Used when a request doesn't include an explicit identity (e.g., no bearer token).
@@ -226,11 +200,46 @@ pub struct QueryRunner<F: DocFetcher, R: TransactionRegistry = NoOpTransactionRe
     /// `None` keeps the back-compat local-plaintext path (unit/FFI/non-P2P).
     pub(crate) se_transport: Option<Arc<dyn SeQueryTransport>>,
     /// App read validator, checked after ACP on every read path.
+    pub(crate) retry_inputs: Option<crate::prepared::PreparedInputMemo>,
     pub(crate) read_validator: Option<Arc<dyn crate::access_hooks::ReadValidator>>,
     /// App write validator, checked before ACP on every mutation.
     pub(crate) write_validator: Option<Arc<dyn crate::access_hooks::WriteValidator>>,
-    /// Cache of built introspection schemas.
-    pub(crate) introspection_cache: introspection::cache::IntrospectionSchemaCache,
+    /// Cache of built introspection schemas, shared by the runners bound to
+    /// requests from this one.
+    pub(crate) introspection_cache: Arc<introspection::cache::IntrospectionSchemaCache>,
+    /// The context of the request this runner serves; `None` for a runner
+    /// bound to none (see [`QueryRunner::for_request`]), which reads
+    /// [`RequestContext::ambient`] at each use.
+    context: Option<RequestContext>,
+}
+
+impl<F, R> Clone for QueryRunner<F, R>
+where
+    F: DocFetcher,
+    R: TransactionRegistry,
+{
+    fn clone(&self) -> Self {
+        Self {
+            fetcher: self.fetcher.clone(),
+            collection_provider: self.collection_provider.clone(),
+            registry: self.registry.clone(),
+            mutator: self.mutator.clone(),
+            collection_truncator: self.collection_truncator.clone(),
+            acp: self.acp.clone(),
+            acp_registration_projection: self.acp_registration_projection.clone(),
+            default_identity: self.default_identity.clone(),
+            lens_store: self.lens_store.clone(),
+            nac: self.nac.clone(),
+            query_timeout: self.query_timeout,
+            query_limits: self.query_limits,
+            se_transport: self.se_transport.clone(),
+            retry_inputs: self.retry_inputs.clone(),
+            read_validator: self.read_validator.clone(),
+            write_validator: self.write_validator.clone(),
+            introspection_cache: self.introspection_cache.clone(),
+            context: self.context.clone(),
+        }
+    }
 }
 
 impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
@@ -246,6 +255,7 @@ impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
             mutator: None,
             collection_truncator: None,
             acp: Arc::new(NoOpDocumentAcp),
+            acp_registration_projection: None,
             default_identity: None,
             lens_store: None,
             nac: Arc::new(NoOpNacChecker),
@@ -253,8 +263,10 @@ impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
             query_limits: QueryLimits::default(),
             read_validator: None,
             write_validator: None,
+            retry_inputs: None,
             se_transport: None,
             introspection_cache: Default::default(),
+            context: None,
         }
     }
 
@@ -270,6 +282,7 @@ impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
             mutator: None,
             collection_truncator: None,
             acp: Arc::new(NoOpDocumentAcp),
+            acp_registration_projection: None,
             default_identity: None,
             lens_store: None,
             nac: Arc::new(NoOpNacChecker),
@@ -277,8 +290,10 @@ impl<F: DocFetcher + 'static> QueryRunner<F, NoOpTransactionRegistry> {
             query_limits: QueryLimits::default(),
             read_validator: None,
             write_validator: None,
+            retry_inputs: None,
             se_transport: None,
             introspection_cache: Default::default(),
+            context: None,
         }
     }
 }
@@ -296,6 +311,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             mutator: None,
             collection_truncator: None,
             acp: Arc::new(NoOpDocumentAcp),
+            acp_registration_projection: None,
             default_identity: None,
             lens_store: None,
             nac: Arc::new(NoOpNacChecker),
@@ -303,8 +319,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             query_limits: QueryLimits::default(),
             read_validator: None,
             write_validator: None,
+            retry_inputs: None,
             se_transport: None,
             introspection_cache: Default::default(),
+            context: None,
         }
     }
 
@@ -325,15 +343,18 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             mutator: None,
             collection_truncator: None,
             acp: Arc::new(NoOpDocumentAcp),
+            acp_registration_projection: None,
             default_identity: None,
             lens_store: None,
             nac: Arc::new(NoOpNacChecker),
             query_timeout: 30,
             query_limits: QueryLimits::default(),
             read_validator: None,
+            retry_inputs: None,
             write_validator: None,
             se_transport: None,
             introspection_cache: Default::default(),
+            context: None,
         }
     }
 
@@ -353,15 +374,18 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             mutator: None,
             collection_truncator: None,
             acp: Arc::new(NoOpDocumentAcp),
+            acp_registration_projection: None,
             default_identity: None,
             lens_store: None,
             nac: Arc::new(NoOpNacChecker),
             query_timeout: 30,
             query_limits: QueryLimits::default(),
             read_validator: None,
+            retry_inputs: None,
             write_validator: None,
             se_transport: None,
             introspection_cache: Default::default(),
+            context: None,
         }
     }
 
@@ -383,6 +407,65 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
     ///
     /// When set, queries will filter results based on the identity's permissions.
     /// Collections with a policy will have ACP enforced; others are unaffected.
+    pub(crate) fn scoped_runner(&self, acp: Arc<dyn DocumentACP>) -> Self {
+        Self {
+            acp: acp::bound_to_request(&acp, &self.context()),
+            introspection_cache: Arc::new(introspection::cache::IntrospectionSchemaCache::new(
+                false,
+            )),
+            ..self.clone()
+        }
+    }
+
+    /// This runner serving one request: everything it runs reads `context`
+    /// for that request's own state, and its ACP acts with the credentials
+    /// the request carries.
+    pub fn for_request(&self, context: RequestContext) -> Self {
+        Self {
+            acp: acp::bound_to_request(&self.acp, &context),
+            context: Some(context),
+            ..self.clone()
+        }
+    }
+
+    /// This runner serving `request`, in its context; a request built
+    /// without one runs in [`RequestContext::ambient`].
+    pub(crate) fn for_query(&self, request: &crate::executor::QueryRequest) -> Self {
+        self.for_request(request.context.clone().or_ambient())
+    }
+
+    /// The context of the request this runner serves.
+    pub(crate) fn context(&self) -> std::borrow::Cow<'_, RequestContext> {
+        RequestContext::bound_or_ambient(self.context.as_ref())
+    }
+
+    /// This runner serving a request `caller` makes: the creator of what it
+    /// writes and, when there is one, the identity acting in it. Without a
+    /// caller, the identity its boundary established acts.
+    pub(crate) fn for_caller(&self, caller: Option<&Did>) -> Self {
+        self.for_request(
+            self.context()
+                .into_owned()
+                .with_identity(self.acting_identity(caller))
+                .with_creator(caller.map(ToString::to_string)),
+        )
+    }
+
+    /// The identity acting in a request `caller` makes: the caller, or the
+    /// identity its boundary established when there is no caller.
+    pub(crate) fn acting_identity(&self, caller: Option<&Did>) -> Option<String> {
+        caller
+            .map(ToString::to_string)
+            .or_else(|| self.context().identity().map(str::to_owned))
+    }
+
+    /// This runner resolving collections through `provider`.
+    pub(crate) fn with_collection_provider(&self, provider: Arc<dyn CollectionProvider>) -> Self {
+        let mut runner = self.scoped_runner(self.acp.clone());
+        runner.collection_provider = provider;
+        runner
+    }
+
     pub fn with_acp(mut self, acp: Arc<dyn DocumentACP>) -> Self {
         if let Some(mutator) = &self.mutator {
             mutator.set_document_acp(acp.clone());
@@ -417,23 +500,36 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         identity: Option<&Did>,
         collection: &CollectionVersion,
         doc_id: &str,
-    ) -> bool {
-        let Some(validator) = self
-            .read_validator
-            .as_ref()
-            .filter(|validator| validator.governs(collection))
-        else {
-            return true;
-        };
-        let request = crate::access_hooks::ReadRequest {
-            identity,
-            collection,
+    ) -> Result<bool> {
+        crate::access_hooks::read::app_allows(
+            self.app_read_check(identity.cloned(), collection).as_ref(),
             doc_id,
-        };
-        validator.may_read(&request).await.unwrap_or_else(|error| {
-            tracing::warn!(%doc_id, collection = %collection.name, %error, "Read validator failed, hiding document");
-            false
-        })
+        )
+        .await
+    }
+
+    pub(crate) async fn resolve_read_validation_input(
+        &self,
+        input: &crate::prepared::PreparedInputRequest,
+    ) -> Result<Arc<[u8]>> {
+        let input: crate::access_hooks::read::ReadValidationInput =
+            serde_json::from_slice(input.exact_request())
+                .map_err(|error| QueryError::execution(error.to_string()))?;
+        let identity = input
+            .identity
+            .as_deref()
+            .map(Did::new)
+            .transpose()
+            .map_err(|error| QueryError::execution(error.to_string()))?;
+        let check = crate::access_hooks::AppReadCheck::bind(
+            self.read_validator.as_ref(),
+            identity,
+            &input.collection,
+        );
+        let allowed = crate::access_hooks::read::app_allows(check.as_ref(), &input.doc_id).await?;
+        Ok(serde_json::to_vec(&allowed)
+            .map_err(|error| QueryError::execution(error.to_string()))?
+            .into())
     }
 
     /// Doc IDs the app read validator lets this identity read.
@@ -442,14 +538,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         identity: Option<&Did>,
         collection: &CollectionVersion,
         doc_ids: Vec<String>,
-    ) -> Vec<String> {
+    ) -> Result<Vec<String>> {
         let mut readable = Vec::with_capacity(doc_ids.len());
         for doc_id in doc_ids {
-            if self.app_may_read(identity, collection, &doc_id).await {
+            if self.app_may_read(identity, collection, &doc_id).await? {
                 readable.push(doc_id);
             }
         }
-        readable
+        Ok(readable)
     }
 
     pub(crate) fn app_read_check(
@@ -458,6 +554,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         collection: &CollectionVersion,
     ) -> Option<crate::access_hooks::AppReadCheck> {
         crate::access_hooks::AppReadCheck::bind(self.read_validator.as_ref(), identity, collection)
+            .map(|check| check.with_retry_inputs(self.retry_inputs.clone()))
     }
 
     /// Set the searchable-encryption remote query transport.
@@ -512,7 +609,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
 
     /// Enable or disable the introspection schema cache.
     pub fn with_introspection_cache(mut self, enabled: bool) -> Self {
-        self.introspection_cache = introspection::cache::IntrospectionSchemaCache::new(enabled);
+        self.introspection_cache =
+            Arc::new(introspection::cache::IntrospectionSchemaCache::new(enabled));
         self
     }
 
@@ -531,27 +629,23 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         request_identity.or_else(|| self.default_identity.clone())
     }
 
-    /// Get the effective collection provider.
-    ///
-    /// Returns the transaction-scoped provider if set (via task-local storage),
-    /// otherwise returns the default process-wide provider.
+    /// The provider this runner resolves collections through: a transaction's
+    /// own provider for a runner scoped to that transaction, so its uncommitted
+    /// schemas are visible, and the process-wide one otherwise.
     fn effective_provider(&self) -> Arc<dyn CollectionProvider> {
-        current_txn_collection_provider().unwrap_or_else(|| self.collection_provider.clone())
+        self.collection_provider.clone()
     }
 
     pub(crate) fn transaction_collection_provider(
         &self,
         handle: &crate::txn::TransactionHandle,
     ) -> Result<Arc<dyn CollectionProvider>> {
-        let context = self
-            .registry
-            .get(handle)
-            .into_result()
-            .map_err(|error| QueryError::execution(error.to_string()))?
-            .ok_or_else(|| QueryError::execution(format!("transaction '{handle}' not found")))?;
-        Ok(context
-            .collection_provider()
-            .unwrap_or_else(|| self.collection_provider.clone()))
+        Ok(Arc::new(crate::txn::TxnCollections::new(
+            Arc::clone(&self.registry),
+            self.context().into_owned(),
+            handle.clone(),
+            Arc::clone(&self.collection_provider),
+        )))
     }
 
     /// Get the names of all collections.

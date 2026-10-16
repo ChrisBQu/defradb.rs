@@ -12,10 +12,10 @@
 //!    production middleware stack (CORS, trace, timeout, concurrency limit,
 //!    body limit, auth). The deltas attribute cost to each layer.
 //!
-//! 2. **What does `spawn_blocking` cost?** `crates/http/src/query_context.rs`
+//! 2. **What does the pinned hop cost?** `crates/http/src/query_context.rs`
 //!    takes a fast path that awaits the executor directly when no signing
-//!    config and no NAC are configured, and otherwise hops the request onto a
-//!    blocking thread (`spawn_blocking` + `Handle::block_on`) so that
+//!    config and no NAC are configured, and otherwise hops the request onto
+//!    one thread of the network runtime (`Edge::spawn_pinned`) so that
 //!    thread-locals stay pinned. Default deployments take the fast path, so
 //!    the cost of the slow path has never been measured. `query_context_*`
 //!    runs both branches on an identical workload.
@@ -38,6 +38,8 @@ use defra_http::{create_router_with_state, AppStateBuilder, Server};
 use query::executor::{QueryExecutor, QueryRequest, QueryResponse};
 use query::txn::TransactionHandle;
 use query::TransactionError;
+
+mod common;
 
 /// The GraphQL endpoint under the v1 API prefix.
 const GRAPHQL_URI: &str = "/api/v1/graphql";
@@ -101,9 +103,8 @@ impl QueryExecutor for NoopExecutor {
     }
 }
 
-/// A multi-threaded runtime is required, not merely preferred: the slow path
-/// calls `Handle::block_on` inside `spawn_blocking`, which deadlocks on a
-/// current-thread runtime.
+/// The runtime the benchmark drives requests from. The slow path's pinned
+/// hop runs on the network runtime the state carries, not on this one.
 fn runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
@@ -161,8 +162,9 @@ fn bench_transport(c: &mut Criterion) {
     let rt = runtime();
 
     let direct = executor();
-    let bare = create_router_with_state(AppStateBuilder::new(executor()).build());
-    let layered = Server::from_arc(executor())
+    let bare =
+        create_router_with_state(AppStateBuilder::new(executor(), edge::testing::edge()).build());
+    let layered = Server::from_arc(executor(), edge::testing::edge())
         .router()
         .expect("server router should build");
 
@@ -203,13 +205,13 @@ fn signing_config() -> SigningConfig {
     }
 }
 
-/// The `spawn_blocking` delta.
+/// The pinned-thread delta.
 ///
 /// All three routers below serve the identical request against the identical
 /// no-op executor. `fast_path` satisfies `signing_config.is_none() &&
 /// state.nac.is_none()` and awaits the executor inline. The other two fail
-/// that condition and therefore pay `spawn_blocking` + `Handle::block_on` plus
-/// the thread-local setup:
+/// that condition and therefore pay a pinned run on the network runtime
+/// (`Edge::spawn_pinned`) plus the thread-local setup:
 ///
 /// * `spawn_blocking_signing` trips it via the signing config alone, which
 ///   isolates the hop itself.
@@ -219,19 +221,20 @@ fn signing_config() -> SigningConfig {
 fn bench_query_context(c: &mut Criterion) {
     let rt = runtime();
 
-    let fast_path = create_router_with_state(AppStateBuilder::new(executor()).build());
+    let fast_path =
+        create_router_with_state(AppStateBuilder::new(executor(), edge::testing::edge()).build());
 
     // The signing registry is process-global and keyed by DID, so this bench
     // uses a DID of its own rather than sharing one with any other test.
     let signing_did = "did:key:defra-http-transport-bench";
     defra_core::signing::store_identity(signing_did, signing_config());
-    let signing_state = AppStateBuilder::new(executor())
+    let signing_state = AppStateBuilder::new(executor(), edge::testing::edge())
         .with_node_identity_did(signing_did.to_string())
         .with_signing_enabled(true)
         .build();
     let signing_path = create_router_with_state(signing_state);
 
-    let nac_state = AppStateBuilder::new(executor())
+    let nac_state = AppStateBuilder::new(executor(), edge::testing::edge())
         .with_nac(Arc::new(MockNodeAcpOperations::new()))
         .build();
     let nac_path = create_router_with_state(nac_state);

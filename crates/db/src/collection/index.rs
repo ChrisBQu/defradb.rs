@@ -22,12 +22,10 @@ impl Collection {
             .cloned()
             .ok_or_else(|| Error::InvalidDocument("Document must have an ID".into()))?;
 
-        // Serialize document to CBOR
-        let data = doc.to_cbor()?;
+        self.claim_series(datastore, doc).await?;
 
-        // Store document
-        let key = self.doc_key(doc_short_id);
-        datastore.set(&key, &data).await.map_err(Error::Storage)?;
+        self.put_document_value(datastore, doc_short_id, doc, true, None)
+            .await?;
 
         // Store schema version for lens migration support
         self.store_version(datastore, doc_short_id).await?;
@@ -50,6 +48,27 @@ impl Collection {
         doc_short_id: u64,
         index_manager: &IndexManager,
     ) -> Result<()> {
+        self.update_with_indexes_parts(datastore, doc, doc_short_id, index_manager, None)
+            .await
+    }
+
+    /// With `update`, a partial update of those fields, written as operands
+    /// ordered by the document heads it builds its blocks from, by the run of
+    /// its write that decides; without, a structural rewrite of the whole
+    /// value.
+    pub(crate) async fn update_with_indexes_parts(
+        &self,
+        datastore: &NamespaceView,
+        doc: &Document,
+        doc_short_id: u64,
+        index_manager: &IndexManager,
+        update: Option<(
+            &rapidhash::RapidHashSet<String>,
+            &crate::block::builder::DocHeadsSnapshot,
+            query::update_parts::Run,
+        )>,
+    ) -> Result<()> {
+        let modified = update.map(|(fields, _, _)| fields);
         // Validate document against schema
         self.validate_document(doc)?;
 
@@ -57,32 +76,104 @@ impl Collection {
             .id()
             .ok_or_else(|| Error::InvalidDocument("Document must have an ID".into()))?;
 
-        let key = self.doc_key(doc_short_id);
+        if self.is_deleted(datastore, doc_short_id).await? {
+            return Err(Error::DocumentNotFound(doc_id.to_string()));
+        }
 
         // Get old document for index update
-        let old_doc = match datastore.get(&key).await.map_err(Error::Storage)? {
-            Some(bytes) => {
-                let mut d = Document::from_cbor(&bytes)?;
-                d.set_id(doc_id.clone());
-                d
+        let old_doc = match update {
+            Some((changed, _, run)) => {
+                let fields = run.written(&self.def, index_manager.get_indexes(), changed, |name| {
+                    doc.get_counter_delta(name).is_some()
+                });
+                self.get_with_datastore_fields(datastore, doc_short_id, doc_id, &fields)
+                    .await?
             }
+            None => {
+                self.get_with_datastore(datastore, doc_short_id, doc_id)
+                    .await?
+            }
+        };
+        let old_doc = match old_doc {
+            Some(doc) => doc,
             None => return Err(Error::DocumentNotFound(doc_id.to_string())),
         };
 
-        self.validate_immutable_fields_unchanged(&old_doc, doc)?;
+        // Mutation callers may hold a document fetched before this
+        // transaction began. For touched composite indexes, use fresh values
+        // for their unmodified components while preserving the caller's patch
+        // fields. The projected read above includes every such dependency.
+        let mut indexed_new_doc = doc.clone();
+        if let Some(changed) = modified {
+            for index in index_manager.get_indexes() {
+                if !index
+                    .fields
+                    .iter()
+                    .any(|field| changed.contains(&field.name))
+                {
+                    continue;
+                }
+                for field in &index.fields {
+                    if changed.contains(&field.name) {
+                        continue;
+                    }
+                    indexed_new_doc.set(
+                        field.name.clone(),
+                        old_doc
+                            .get(&field.name)
+                            .cloned()
+                            .unwrap_or(NormalValue::Null),
+                    );
+                }
+            }
+        }
 
-        // Serialize and store
-        let data = doc.to_cbor()?;
+        match modified {
+            Some(changed) => self.validate_modified_immutable_fields(&old_doc, doc, changed)?,
+            None => self.validate_immutable_fields_unchanged(&old_doc, doc)?,
+        }
 
-        datastore.set(&key, &data).await.map_err(Error::Storage)?;
+        let series_changed =
+            modified.is_none_or(|changed| changed.contains(crate::downsample::SERIES_FIELD));
+        if series_changed {
+            self.release_series(datastore, &old_doc).await?;
+            self.claim_series(datastore, doc).await?;
+        }
+
+        match update {
+            Some((fields, heads, _)) => {
+                self.merge_local_document_value(datastore, doc_short_id, doc, fields, heads)
+                    .await?
+            }
+            None => {
+                self.put_document_value(datastore, doc_short_id, doc, false, None)
+                    .await?
+            }
+        }
 
         // Update schema version to current collection version
         self.store_version(datastore, doc_short_id).await?;
 
         // Update indexes
-        index_manager
-            .on_document_update(datastore, &old_doc, doc, doc_short_id, &self.def)
-            .await?;
+        match modified {
+            Some(changed) => {
+                index_manager
+                    .on_document_update_modified(
+                        datastore,
+                        &old_doc,
+                        &indexed_new_doc,
+                        doc_short_id,
+                        &self.def,
+                        changed,
+                    )
+                    .await?
+            }
+            None => {
+                index_manager
+                    .on_document_update(datastore, &old_doc, doc, doc_short_id, &self.def)
+                    .await?
+            }
+        }
 
         Ok(())
     }
@@ -99,6 +190,8 @@ impl Collection {
         doc_short_id: u64,
         index_manager: &IndexManager,
     ) -> Result<bool> {
+        self.validate_write_definition(datastore, true).await?;
+
         let key = self.doc_key(doc_short_id);
         let deleted_key = self.deleted_key(doc_short_id);
 
@@ -110,12 +203,14 @@ impl Collection {
         // Get the document for index cleanup
         let doc = match datastore.get(&key).await.map_err(Error::Storage)? {
             Some(bytes) => {
-                let mut d = Document::from_cbor(&bytes)?;
+                let mut d = Document::from_storage_cbor(&bytes)?;
                 d.set_id(doc_id.clone());
                 d
             }
             None => return Ok(false),
         };
+
+        self.release_series(datastore, &doc).await?;
 
         // Set deletion marker (logical delete, keep document data)
         datastore

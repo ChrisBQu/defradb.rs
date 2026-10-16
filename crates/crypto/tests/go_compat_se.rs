@@ -230,7 +230,7 @@ fn test_key_sensitivity() {
 #[test]
 fn test_truncation_uniqueness() {
     let key = [0x77u8; 32];
-    let mut seen_tags = std::collections::HashSet::new();
+    let mut seen_tags = rapidhash::RapidHashSet::default();
 
     // Generate 1000 tags and ensure no collisions
     for i in 0..1000 {

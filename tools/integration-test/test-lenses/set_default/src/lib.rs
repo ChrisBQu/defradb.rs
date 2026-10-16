@@ -1,6 +1,5 @@
-use std::collections::HashMap;
+use std::cell::{BorrowError, BorrowMutError, Ref, RefCell, RefMut};
 use std::error::Error;
-use std::sync::RwLock;
 
 use lens_sdk::error::LensError;
 use lens_sdk::StreamOption;
@@ -14,11 +13,29 @@ pub struct Parameters {
     pub value: serde_json::Value,
 }
 
-static PARAMETERS: RwLock<Option<Parameters>> = RwLock::new(None);
+type Row = serde_json::Map<String, serde_json::Value>;
+
+/// The parameter slot the `lens_sdk` macros expect: `read()` and `write()` returning a `Result`.
+struct ParameterSlot(RefCell<Option<Parameters>>);
+
+// SAFETY: a wasm lens guest runs on a single thread, so the slot is never shared across threads.
+unsafe impl Sync for ParameterSlot {}
+
+impl ParameterSlot {
+    fn read(&self) -> Result<Ref<'_, Option<Parameters>>, BorrowError> {
+        self.0.try_borrow()
+    }
+
+    fn write(&self) -> Result<RefMut<'_, Option<Parameters>>, BorrowMutError> {
+        self.0.try_borrow_mut()
+    }
+}
+
+static PARAMETERS: ParameterSlot = ParameterSlot(RefCell::new(None));
 
 fn try_transform(
-    iter: &mut dyn Iterator<Item = lens_sdk::Result<Option<HashMap<String, serde_json::Value>>>>,
-) -> Result<StreamOption<HashMap<String, serde_json::Value>>, Box<dyn Error>> {
+    iter: &mut dyn Iterator<Item = lens_sdk::Result<Option<Row>>>,
+) -> Result<StreamOption<Row>, Box<dyn Error>> {
     let params = PARAMETERS
         .read()?
         .clone()
@@ -39,8 +56,8 @@ fn try_transform(
 }
 
 fn try_inverse(
-    iter: &mut dyn Iterator<Item = lens_sdk::Result<Option<HashMap<String, serde_json::Value>>>>,
-) -> Result<StreamOption<HashMap<String, serde_json::Value>>, Box<dyn Error>> {
+    iter: &mut dyn Iterator<Item = lens_sdk::Result<Option<Row>>>,
+) -> Result<StreamOption<Row>, Box<dyn Error>> {
     let params = PARAMETERS
         .read()?
         .clone()

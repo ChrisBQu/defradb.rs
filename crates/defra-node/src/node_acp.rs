@@ -1,8 +1,7 @@
-use std::sync::Arc;
-
 #[cfg(feature = "vera")]
-use anyhow::anyhow;
-use anyhow::Result;
+use crate::Error;
+use crate::Result;
+use std::sync::Arc;
 
 pub(crate) enum Persistence {
     Persistent,
@@ -18,8 +17,9 @@ pub(crate) struct DocumentAcpSetup {
 
 pub(crate) async fn create_document_acp<S>(
     store: Arc<S>,
-    persistence: Persistence,
+    _persistence: Persistence,
     config: &crate::DocumentAcpConfig,
+    #[cfg_attr(not(feature = "vera"), allow(unused_variables))] network: Option<&edge::Edge>,
 ) -> Result<DocumentAcpSetup>
 where
     S: storage::corekv::Store + 'static,
@@ -36,11 +36,11 @@ where
                     &vera_config.chain_id,
                     &tuning,
                 )
-                .map_err(|error| anyhow!("failed to create Vera provider: {error}"))?,
+                .map_err(Error::VeraProvider)?,
             );
-            let sh_acp = Arc::new(vera::VeraDocumentACP::new(provider, tuning.cache_ttl));
+            let sh_acp = Arc::new(vera::VeraDocumentACP::tuned(provider, &tuning, network));
             Ok(DocumentAcpSetup {
-                document_acp: sh_acp.clone(),
+                document_acp: gate_external_acp(sh_acp.clone(), store),
                 local_zanzibar_store: None,
                 vera_acp: Some(sh_acp),
             })
@@ -60,28 +60,53 @@ where
                     &vera_config.chain_id,
                     &tuning,
                 )
-                .map_err(|error| anyhow!("failed to create Vera provider: {error}"))?,
+                .map_err(Error::VeraProvider)?,
             );
-            let vera_acp = Arc::new(vera::VeraDocumentACP::new(provider, tuning.cache_ttl));
+            let vera_acp = Arc::new(vera::VeraDocumentACP::tuned(provider, &tuning, network));
             Ok(DocumentAcpSetup {
-                document_acp: vera_acp.clone(),
+                document_acp: gate_external_acp(vera_acp.clone(), store),
                 local_zanzibar_store: None,
                 vera_acp: Some(vera_acp),
             })
         }
-        crate::DocumentAcpConfig::Local => match persistence {
-            Persistence::Persistent => {
-                let zanzibar_store = Arc::new(acp::PersistentZanzibarStore::from_store(store));
-                let document_acp = Arc::new(acp::ZanzibarDocumentACP::new(zanzibar_store.clone()));
-                Ok(local_document_acp_setup(document_acp, zanzibar_store))
-            }
-            Persistence::Memory => {
-                let zanzibar_store = Arc::new(acp::MemoryZanzibarStore::new());
-                let document_acp = Arc::new(acp::ZanzibarDocumentACP::new(zanzibar_store.clone()));
-                Ok(local_document_acp_setup(document_acp, zanzibar_store))
-            }
-        },
+        crate::DocumentAcpConfig::Local => {
+            // Memory and disk profiles both share the engine with document rows.
+            let zanzibar_store = Arc::new(acp::PersistentZanzibarStore::from_store(store));
+            let document_acp = Arc::new(acp::ZanzibarDocumentACP::new(zanzibar_store.clone()));
+            Ok(local_document_acp_setup(document_acp, zanzibar_store))
+        }
     }
+}
+
+/// Gate a Vera provider with the registrations creates still owe it, and
+/// settle in the background any a previous run left owed (a crash, or a
+/// provider call that failed). Until settled, such a document is readable only
+/// by its creator.
+#[cfg(feature = "vera")]
+fn gate_external_acp<S>(
+    provider: Arc<dyn acp::DocumentACP>,
+    store: Arc<S>,
+) -> Arc<dyn acp::DocumentACP>
+where
+    S: storage::corekv::Store + 'static,
+{
+    let gate = Arc::new(acp::ExternalDocumentAcp::new(provider, store));
+    let redrive = Arc::clone(&gate);
+    tokio::spawn(async move {
+        match redrive.redrive_owed().await {
+            Ok(report) if report.settled > 0 => tracing::info!(
+                settled = report.settled,
+                failed = report.failed,
+                "Settled ACP registrations owed from a previous run"
+            ),
+            Ok(_) => {}
+            Err(error) => tracing::warn!(
+                %error,
+                "Could not read owed ACP registrations; their documents stay readable only by their creators"
+            ),
+        }
+    });
+    gate
 }
 
 fn local_document_acp_setup(
@@ -111,9 +136,10 @@ mod tests {
     #[tokio::test]
     async fn local_document_acp_enforces_stored_custom_policy() {
         let store = Arc::new(storage::RegolithStore::in_memory().unwrap());
-        let acp_setup = create_document_acp(store, Persistence::Memory, &DocumentAcpConfig::Local)
-            .await
-            .unwrap();
+        let acp_setup =
+            create_document_acp(store, Persistence::Memory, &DocumentAcpConfig::Local, None)
+                .await
+                .unwrap();
 
         #[cfg(feature = "vera")]
         assert!(acp_setup.vera_acp.is_none());

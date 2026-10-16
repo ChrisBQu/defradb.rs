@@ -12,10 +12,9 @@ async fn update_and_upsert_resolve_object_variables() {
         .await;
     assert!(!created.has_errors(), "{:?}", created.errors);
 
-    let updated = node.execute_request_with_retry(
+    let updated = node.execute_request(
         QueryRequest::new("mutation($input: ProbeMutationInputArg!) { update_Probe(filter: {key: {_eq: \"first\"}}, input: $input) { label payload } }")
             .with_variables(json!({"input": {"label": "after", "payload": {"nested": [1, null, true]}}})),
-        Default::default(),
     ).await;
     assert!(!updated.has_errors(), "{:?}", updated.errors);
     assert_eq!(
@@ -24,11 +23,10 @@ async fn update_and_upsert_resolve_object_variables() {
     );
 
     for expected in ["created", "updated"] {
-        let result = node.execute_request_with_retry(
+        let result = node.execute_request(
             QueryRequest::new("mutation($add: ProbeMutationInputArg!, $update: ProbeMutationInputArg!) { upsert_Probe(filter: {key: {_eq: \"second\"}}, add: $add, update: $update) { label } }")
                 .with_variables(json!({"add": {"key": "second", "label": "created"}, "update": {"label": "updated"}})),
-            Default::default(),
-        ).await;
+            ).await;
         assert!(!result.has_errors(), "{:?}", result.errors);
         assert_eq!(
             result.data.as_ref().unwrap()["upsert_Probe"][0]["label"],

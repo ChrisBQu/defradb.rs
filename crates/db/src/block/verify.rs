@@ -1,17 +1,41 @@
+//! Block signature verification, gated by the caller's read access.
+//!
+//! Every entry point checks document ACP as `caller_identity`, honouring
+//! the DAC bypass of the request it serves (`RequestContext::dac_bypass`).
+
 use std::sync::Arc;
 
 use datastore::NamespaceView;
+use defra_core::RequestContext;
 use storage::corekv::Store;
 
 use crate::database::DB;
 use crate::txn::DbTxn;
+
+/// [`verified_block_signer_did_as`] in [`RequestContext::ambient`].
+pub async fn verified_block_signer_did<S: Store>(
+    database: &Arc<DB<S>>,
+    document_acp: &dyn acp::DocumentACP,
+    cid_str: &str,
+    caller_identity: &acp::Identity,
+) -> Result<String, String> {
+    verified_block_signer_did_as(
+        &RequestContext::ambient(),
+        database,
+        document_acp,
+        cid_str,
+        caller_identity,
+    )
+    .await
+}
 
 /// Verify a block's embedded signature and return the signer's DID.
 ///
 /// The public key and algorithm are read from the signed block's signature
 /// header. The DID is returned only after the signature has been verified over
 /// the canonical DAG-CBOR block bytes.
-pub async fn verified_block_signer_did<S: Store>(
+pub async fn verified_block_signer_did_as<S: Store>(
+    context: &RequestContext,
     database: &Arc<DB<S>>,
     document_acp: &dyn acp::DocumentACP,
     cid_str: &str,
@@ -35,6 +59,24 @@ pub async fn verified_block_signer_did<S: Store>(
         systemstore,
         cid_str,
         caller_identity,
+        context.dac_bypass(),
+    )
+    .await
+}
+
+/// [`authorized_signed_block_bytes_as`] in [`RequestContext::ambient`].
+pub async fn authorized_signed_block_bytes<S: Store>(
+    database: &Arc<DB<S>>,
+    document_acp: &dyn acp::DocumentACP,
+    cid_str: &str,
+    caller_identity: &acp::Identity,
+) -> Result<(Vec<u8>, Vec<u8>), String> {
+    authorized_signed_block_bytes_as(
+        &RequestContext::ambient(),
+        database,
+        document_acp,
+        cid_str,
+        caller_identity,
     )
     .await
 }
@@ -42,7 +84,8 @@ pub async fn verified_block_signer_did<S: Store>(
 /// Load one authorized signed block and its detached signature block as
 /// canonical DAG-CBOR bytes. Remote clients use this to verify CID integrity
 /// and authorship locally instead of trusting a server-side yes/no verdict.
-pub async fn authorized_signed_block_bytes<S: Store>(
+pub async fn authorized_signed_block_bytes_as<S: Store>(
+    context: &RequestContext,
     database: &Arc<DB<S>>,
     document_acp: &dyn acp::DocumentACP,
     cid_str: &str,
@@ -65,13 +108,34 @@ pub async fn authorized_signed_block_bytes<S: Store>(
         systemstore,
         cid_str,
         caller_identity,
+        context.dac_bypass(),
     )
     .await?;
     Ok((block_bytes, signature_bytes))
 }
 
-/// Verify a block visible inside an active transaction and return its signer DID.
+/// [`verified_block_signer_did_in_txn_as`] in [`RequestContext::ambient`].
 pub async fn verified_block_signer_did_in_txn<S: Store>(
+    database: &Arc<DB<S>>,
+    document_acp: &dyn acp::DocumentACP,
+    txn: &DbTxn<S>,
+    cid_str: &str,
+    caller_identity: &acp::Identity,
+) -> Result<String, String> {
+    verified_block_signer_did_in_txn_as(
+        &RequestContext::ambient(),
+        database,
+        document_acp,
+        txn,
+        cid_str,
+        caller_identity,
+    )
+    .await
+}
+
+/// Verify a block visible inside an active transaction and return its signer DID.
+pub async fn verified_block_signer_did_in_txn_as<S: Store>(
+    context: &RequestContext,
     database: &Arc<DB<S>>,
     document_acp: &dyn acp::DocumentACP,
     txn: &DbTxn<S>,
@@ -92,6 +156,7 @@ pub async fn verified_block_signer_did_in_txn<S: Store>(
         systemstore,
         cid_str,
         caller_identity,
+        context.dac_bypass(),
     )
     .await
 }
@@ -103,6 +168,7 @@ pub(crate) async fn verified_block_signer_did_with_blockstore<S: Store>(
     systemstore: NamespaceView,
     cid_str: &str,
     caller_identity: &acp::Identity,
+    dac_bypass: bool,
 ) -> Result<String, String> {
     let (block, signature, _, _) = load_authorized_block_signature(
         database,
@@ -111,6 +177,7 @@ pub(crate) async fn verified_block_signer_did_with_blockstore<S: Store>(
         systemstore,
         cid_str,
         caller_identity,
+        dac_bypass,
     )
     .await?;
     verified_signature_signer_did(&block, &signature)
@@ -137,6 +204,27 @@ pub fn verified_signature_signer_did(
         .map_err(|e| format!("failed to derive signer DID: {}", e))
 }
 
+/// [`verify_block_signature_as`] in [`RequestContext::ambient`].
+pub async fn verify_block_signature<S: Store>(
+    database: &Arc<DB<S>>,
+    document_acp: &dyn acp::DocumentACP,
+    cid_str: &str,
+    public_key_hex: &str,
+    key_type: crypto::KeyType,
+    caller_identity: &acp::Identity,
+) -> Result<(), String> {
+    verify_block_signature_as(
+        &RequestContext::ambient(),
+        database,
+        document_acp,
+        cid_str,
+        public_key_hex,
+        key_type,
+        caller_identity,
+    )
+    .await
+}
+
 /// Verify the signature of a block.
 ///
 /// Loads a block from the blockstore by CID, checks that it has a signature,
@@ -145,7 +233,8 @@ pub fn verified_signature_signer_did(
 ///
 /// Also checks document-level ACP permission (Read) if the block has a delta
 /// with schema_version_id.
-pub async fn verify_block_signature<S: Store>(
+pub async fn verify_block_signature_as<S: Store>(
+    context: &RequestContext,
     database: &Arc<DB<S>>,
     document_acp: &dyn acp::DocumentACP,
     cid_str: &str,
@@ -176,11 +265,37 @@ pub async fn verify_block_signature<S: Store>(
         pub_key.as_ref(),
         public_key_hex,
         caller_identity,
+        context.dac_bypass(),
     )
     .await
 }
 
+/// [`verify_block_signature_in_txn_as`] in [`RequestContext::ambient`].
 pub async fn verify_block_signature_in_txn<S: Store>(
+    database: &Arc<DB<S>>,
+    document_acp: &dyn acp::DocumentACP,
+    txn: &DbTxn<S>,
+    cid_str: &str,
+    public_key_hex: &str,
+    key_type: crypto::KeyType,
+    caller_identity: &acp::Identity,
+) -> Result<(), String> {
+    verify_block_signature_in_txn_as(
+        &RequestContext::ambient(),
+        database,
+        document_acp,
+        txn,
+        cid_str,
+        public_key_hex,
+        key_type,
+        caller_identity,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn verify_block_signature_in_txn_as<S: Store>(
+    context: &RequestContext,
     database: &Arc<DB<S>>,
     document_acp: &dyn acp::DocumentACP,
     txn: &DbTxn<S>,
@@ -208,6 +323,7 @@ pub async fn verify_block_signature_in_txn<S: Store>(
         pub_key.as_ref(),
         public_key_hex,
         caller_identity,
+        context.dac_bypass(),
     )
     .await
 }
@@ -222,6 +338,7 @@ async fn verify_block_signature_with_blockstore<S: Store>(
     pub_key: &dyn crypto::PublicKey,
     public_key_hex: &str,
     caller_identity: &acp::Identity,
+    dac_bypass: bool,
 ) -> Result<(), String> {
     let (block, signature, _, _) = load_authorized_block_signature(
         database,
@@ -230,6 +347,7 @@ async fn verify_block_signature_with_blockstore<S: Store>(
         systemstore,
         cid_str,
         caller_identity,
+        dac_bypass,
     )
     .await?;
 
@@ -249,6 +367,7 @@ async fn load_authorized_block_signature<S: Store>(
     systemstore: NamespaceView,
     cid_str: &str,
     caller_identity: &acp::Identity,
+    dac_bypass: bool,
 ) -> Result<
     (
         defra_core::block::Block,
@@ -309,21 +428,25 @@ async fn load_authorized_block_signature<S: Store>(
                     owning_doc_ids
                 };
 
-                let mut has_permission = false;
-                for doc_id in &candidates {
-                    if acp::read_access::check_doc_read_access(
-                        &checker,
-                        &policy.id,
-                        &policy.resource_name,
-                        &collection.collection_id,
-                        collection.is_branchable,
-                        doc_id,
-                    )
-                    .await
-                    .map_err(|e| format!("ACP check failed: {}", e))?
-                    {
-                        has_permission = true;
-                        break;
+                // The NAC `bypass-dac` privilege reads every block, the first
+                // check of the read rule on every path.
+                let mut has_permission = caller_identity.is_authenticated() && dac_bypass;
+                if !has_permission {
+                    for doc_id in &candidates {
+                        if acp::read_access::check_doc_read_access(
+                            &checker,
+                            &policy.id,
+                            &policy.resource_name,
+                            &collection.collection_id,
+                            collection.is_branchable,
+                            doc_id,
+                        )
+                        .await
+                        .map_err(|e| format!("ACP check failed: {}", e))?
+                        {
+                            has_permission = true;
+                            break;
+                        }
                     }
                 }
 

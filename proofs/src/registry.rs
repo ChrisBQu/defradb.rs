@@ -48,6 +48,14 @@ use Tier::{Behavioral, Boundary, Contract};
 
 pub const PROPERTIES: &[Property] = &[
     Property {
+        family: "Vector index link maintenance",
+        name: "INV_NoLostLinks — blind additions preserve links and stale structural pruning aborts",
+        axis: Tla,
+        anchor: "crates/storage/src/backends/regolith/merge/vector.rs; crates/db/src/index/vector/engine/hnsw/insert.rs; crates/db/tests/vector/concurrent_hnsw.rs",
+        model_ref: "MC_VectorLinks_Green.cfg / MC_VectorLinks_Red_Puts.cfg / MC_VectorLinks_Red_Prune.cfg",
+        tiers: &[Contract],
+    },
+    Property {
         // Two writers appending to one collection without seeing each other must
         // both land, leaving two tips for a later merge: that is what makes the
         // head set a CRDT rather than a last-writer-wins cell. The eager-delete
@@ -62,6 +70,19 @@ pub const PROPERTIES: &[Property] = &[
         tiers: &[Behavioral],
     },
     Property {
+        // A replicated block is published into its document's head set once:
+        // its priority index entry records the publication, so a replay never
+        // makes a superseded head live again, and a parent held ahead is read
+        // by its own part of the set, so the parent's concurrent publication
+        // (and nothing unrelated) refuses that decision. No guard key exists.
+        family: "Concurrent collection-head transitions",
+        name: "INV_LiveExact / INV_AheadExact / INV_NoUnrelatedAbort — document head publication without guard keys",
+        axis: Tla,
+        anchor: "crates/db/src/block/heads/document.rs publish/was_published; crates/storage/src/backends/regolith/merge/head_set.rs part/touches; crates/db/tests/block/document_heads.rs, crates/db/tests/merge/head_publication.rs",
+        model_ref: "MC_HeadPublication_Green.cfg (GREEN) / MC_HeadPublication_Red_{NoRecord,OwnUnvalidated,NoPartRead,WholeSet}.cfg (RED)",
+        tiers: &[Contract],
+    },
+    Property {
         // The algebra the temporal model rests on: every key a writer writes
         // names that writer, so two writers cannot collide (disjointness), and
         // the eager strategy demonstrably does collide (non-vacuity). Appending
@@ -70,25 +91,57 @@ pub const PROPERTIES: &[Property] = &[
         family: "Concurrent collection-head transitions",
         name: "derived_writeSets_disjoint / eager_writeSets_overlap / applyDerived_parents_not_head",
         axis: Lean,
-        anchor: "crates/db/src/block/heads.rs live_collection_heads; crates/db/src/block/builder/collection.rs write_collection_block",
+        anchor: "crates/db/src/block/heads/document.rs iterator/supersede; crates/db/src/block/heads.rs live_collection_heads; crates/db/src/block/builder/collection.rs write_collection_block",
         model_ref: "HeadSet.Core (lake build)",
         tiers: &[Contract],
     },
     Property {
-        family: "Concurrent collection-head transitions",
-        name: "INV_CacheExact / INV_CacheReadExact / INV_CacheWarmWork",
+        family: "Commit-ordered document arrivals",
+        name: "dense positions / commit order / at-most-once / snapshot prefix",
         axis: Tla,
-        anchor: "crates/db/src/block/heads.rs live_collection_heads; crates/storage/src/backends/regolith/transaction.rs",
-        model_ref: "HeadSetCache.tla / MC_HeadSetCache_Green.cfg and four RED cache configurations",
+        anchor: "crates/db/src/event/arrivals.rs record; crates/storage/src/backends/regolith/transaction.rs append; crates/db/tests/read/arrival_transactions.rs",
+        model_ref: "regolith@e844baefe838f3af76403afd46c4b42f1a0b98a5 proofs/tla/CommitOrderedAppend.tla (GREEN Groups/Pipeline/Faults, RED Counter/OnceFromView/AssignBeforeValidation)",
         tiers: &[Behavioral],
     },
     Property {
-        family: "Concurrent collection-head transitions",
-        name: "cached_read_exact / publish_preserves_exact / same_epoch_same_store / warm_work_ignores_tombstones",
-        axis: Lean,
-        anchor: "crates/db/src/block/heads.rs live_collection_heads; crates/storage/src/backends/regolith/transaction.rs",
-        model_ref: "HeadSet.Cache (lake build)",
-        tiers: &[Contract],
+        family: "Retry input and marker fencing",
+        name: "INV_ProviderOncePerContext / INV_NewRegistrationSurvivesOldAck / INV_NewRegistrationSurvivesOldClear",
+        axis: Tla,
+        anchor: "crates/db/src/write/autocommit/{create,update,delete}.rs NeedsInput resolver; crates/query/src/prepared.rs; crates/storage/src/stores/peerstore.rs register/complete/clear retry scope",
+        model_ref: "MC_RetryPreparedInputs_{Green,Red_*}.cfg / MC_RetryMarkerGeneration_{Green,Red_*}.cfg",
+        tiers: &[Boundary],
+    },
+    Property {
+        family: "Retry input and marker fencing",
+        name: "INV_QueuedPushOwnsLiveMarker — admission requires current durable ownership and elapsed backpressure",
+        axis: Tla,
+        anchor: "crates/storage/src/stores/peerstore.rs admit_push_scope; crates/p2p-adapter/src/retry.rs spawn_failure_recorder; crates/p2p/src/sync/coordinator/push_worker.rs run_push_job",
+        model_ref: "MC_RetryPushAdmission_{Green,Red_*}.cfg",
+        tiers: &[Boundary],
+    },
+    Property {
+        family: "Retry input and marker fencing",
+        name: "INV_RegistrationCannotCrossFence — allocated registrations preserve peer incarnation and marker order",
+        axis: Tla,
+        anchor: "crates/storage/src/stores/peerstore.rs RegisterScopeMarkerAttempt; create_replicator",
+        model_ref: "MC_RetryRegistrationFence_{Green,Red_*}.cfg",
+        tiers: &[Boundary],
+    },
+    Property {
+        family: "Collection schema-version OCC",
+        name: "INV_NoStaleSchemaWrite — a writer cannot commit against an obsolete structural version",
+        axis: Tla,
+        anchor: "crates/db/src/txn/mod.rs validate_collection_for_write; crates/db/src/write/autocommit/{create,update,delete}.rs; crates/db/src/definition structural updates",
+        model_ref: "MC_CollectionVersionOCC_Green.cfg / MC_CollectionVersionOCC_Red_NoValidation.cfg",
+        tiers: &[Boundary],
+    },
+    Property {
+        family: "Explicit transaction statement atomicity",
+        name: "INV_AbortedEffectsRemoved / INV_SuccessfulEffectsRetained / INV_NoCommitWhileCleanupPending",
+        axis: Tla,
+        anchor: "crates/query/src/runner/mutation.rs explicit transaction mutation execution; crates/db/src/txn/mod.rs statement savepoint; crates/storage/src/backends/regolith/transaction.rs savepoint callbacks",
+        model_ref: "MC_StatementAtomicity_Green.cfg / MC_StatementAtomicity_Red_*.cfg",
+        tiers: &[Boundary],
     },
     Property {
         family: "B3 filtered replication",
@@ -254,11 +307,11 @@ pub const PROPERTIES: &[Property] = &[
         tiers: &[Behavioral, Contract],
     },
     Property {
-        family: "Storage SSI serializability (point + range/scan carve-out)",
-        name: "INV_Serializable — MVSG acyclicity (no write-skew)",
+        family: "Storage transaction validation",
+        name: "Validated point reads reject crossing writes",
         axis: Tla,
-        anchor: "crates/storage ConflictTracker",
-        model_ref: "MC_Ssi_Green.cfg / MC_SsiRange_Green_Correct.cfg",
+        anchor: "crates/storage/src/backends/regolith/transaction.rs; proofs/tests/behavioral/ssi.rs",
+        model_ref: "regolith@e844baefe838f3af76403afd46c4b42f1a0b98a5 proofs/tla/DefraLevel.tla",
         tiers: &[Behavioral, Boundary],
     },
     Property {
@@ -288,20 +341,17 @@ pub const PROPERTIES: &[Property] = &[
         // assert the product state (LWW name + counter views) after live, restart,
         // and 3-node full-mesh replay; `MC_MixedFieldMaterialization` proves the
         // stale whole-document commit hazard RED/GREEN.
-        // This found and fixed #1021's residual two-store counter race — local writes and merges both
-        // RMW the authoritative accumulation store, serialized per-doc by
-        // `crates/db/src/write/queue.rs` (shared by the local-write and merge
-        // paths). The internal `INV_SameDocSerialized` "≤1 worker in the critical
-        // section" + the txn-registry sweep remain a structural Boundary.
-        // `MC_TwoStoreCounter` proves BOTH counter hazards RED-then-GREEN: the
-        // two-store split lost-update (`MC_TwoStoreCounter_Red_Split`, INV_NoLoss) and
-        // the merged-set/is_merged double-apply (`MC_TwoStoreCounter_Red_DoubleApply`,
-        // INV_NoDoubleApply — the model twin of upstream Go #4935 / our #1043).
+        // The process-local document queue and counter-finalize gate are gone.
+        // Ordinary application markers validate exactly-once decisions; counter
+        // operands fold in the engine. Materialized mirrors retain validated
+        // reads. The adapter test `interactive_counter_increment_conflicts_with_concurrent_same_doc_merge`
+        // checks conflict/rollback/retry convergence. Engine OCC is a boundary;
+        // the historical serialized MergeQueue model is deliberately retired.
         family: "Transaction & merge-queue concurrency",
         name: "INV_NoLoss / INV_NoDoubleApply under concurrent same-doc mutation",
         axis: Tla,
-        anchor: "crates/db/src/write/queue.rs (per-doc write lock, shared with crates/db (merge) merge handler); crates/db txn registry",
-        model_ref: "MC_MergeQueue_Green.cfg / MC_TxnRegistry_Green.cfg / MC_TwoStoreCounter_Green.cfg / MC_MixedFieldMaterialization_Green.cfg",
+        anchor: "crates/db/src/merge/merge_handler/counter.rs; crates/db/src/write/doc.rs; crates/db/tests/merge/merge_handler_tests.rs; crates/db txn registry",
+        model_ref: "MC_TxnRegistry_Green.cfg / MC_TwoStoreCounter_Green.cfg / MC_MixedFieldMaterialization_Green.cfg",
         tiers: &[Behavioral, Boundary],
     },
     Property {
@@ -343,7 +393,7 @@ pub const PROPERTIES: &[Property] = &[
         family: "Deferred-ACP overlay consistency",
         name: "INV_FailClosedActive — txn-local ACP projection gates as committed state would",
         axis: Tla,
-        anchor: "crates/query deferred-acp overlay",
+        anchor: "crates/query/src/txn/context.rs; crates/db/src/write/autocommit/batch.rs",
         model_ref: "MC_DeferredAcp_Green.cfg",
         tiers: &[Behavioral],
     },

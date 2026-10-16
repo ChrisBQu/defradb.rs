@@ -2,7 +2,7 @@ use std::ffi::c_char;
 
 use acp::nac::NodePermission;
 
-use crate::helpers::{get_node_database, get_rt, require_c_str};
+use crate::helpers::{get_node_database, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::types::{c_str_to_string, FfiResult};
 use crate::{ffi_async, ffi_entry, try_ffi};
@@ -38,21 +38,15 @@ pub unsafe extern "C" fn delete_documents(
     doc_ids_json: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::DocumentDelete
         ));
 
-        // Bind the caller's identity so the NAC-gated document mutator delete
-        // resolves the actual caller instead of the wildcard. The body runs on
-        // this thread via `block_on`, so the thread-local is visible throughout;
-        // the guard restores on drop.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            c_str_to_string(identity_did).filter(|s| !s.is_empty()),
-        );
+        // The caller acts in the call's context, so the NAC checks the body
+        // reaches resolve the actual caller instead of the wildcard.
+        let context = defra_core::RequestContext::default().with_identity(c_str_to_string(identity_did).filter(|s| !s.is_empty()));
 
         let col_name = try_ffi!(require_c_str(collection_name, "collection_name"));
         let ids_json = try_ffi!(require_c_str(doc_ids_json, "doc_ids_json"));
@@ -62,7 +56,7 @@ pub unsafe extern "C" fn delete_documents(
         let doc_id_strings: Vec<String> = try_ffi!(serde_json::from_str(&ids_json)
             .map_err(|e| FfiResult::error(format!("invalid doc_ids_json: {}", e))));
 
-        ffi_async!(rt, {
+        ffi_async!(node_ptr, {
             let mutator = AutoCommitMutator::new(database.clone());
 
             let doc_ids: Vec<DocID> = doc_id_strings
@@ -71,7 +65,7 @@ pub unsafe extern "C" fn delete_documents(
                 .collect::<Result<Vec<_>, _>>()?;
 
             let results = mutator
-                .delete_many_impl(&col_name, &doc_ids)
+                .delete_many_impl_as(&context, &col_name, &doc_ids)
                 .await
                 .map_err(|e| format!("batch delete failed: {}", e))?;
 

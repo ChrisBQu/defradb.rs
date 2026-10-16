@@ -30,6 +30,7 @@ bench = false
 
 [dependencies]
 bytes.workspace = true
+regolith.workspace = true
 ciborium.workspace = true
 defra-core = { path = "../defra-core" }
 crypto = { path = "../crypto" }
@@ -40,6 +41,13 @@ identity = { path = "../identity" }
 orbis = { path = "../orbis", optional = true }
 vera = { path = "../vera", optional = true }
 
+# Peer key requests: single-flight per CID, one request per batch, a
+# deadline, retries and metrics.
+inputs = { path = "../inputs" }
+# The network runtime peer requests run on.
+edge = { path = "../edge" }
+# Every transport's replies to one request, read together.
+futures.workspace = true
 async-trait.workspace = true
 kovan.workspace = true
 kovan-map.workspace = true
@@ -54,14 +62,8 @@ rand = { workspace = true }
 uuid = { workspace = true }
 cid = { workspace = true }
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }
-
-[target.'cfg(target_arch = "wasm32")'.dependencies]
+# The KMS's bounded channels, on every target.
 async-channel = "2"
-futures.workspace = true
-wasm-bindgen-futures = "0.4"
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = { version = "1.35", default-features = false, features = ["rt", "sync", "macros"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "test-util"] }

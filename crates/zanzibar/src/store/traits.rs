@@ -16,6 +16,17 @@ use crate::types::{ObjectRef, Policy, Relationship, Subject};
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait ZanzibarStore: MaybeSendSync {
+    /// Whether this store participates in an application's storage transaction.
+    fn supports_transactions(&self) -> bool {
+        false
+    }
+
+    /// Open one snapshot for a complete standalone authorization operation.
+    /// A store already bound to a caller's transaction returns `None`.
+    async fn begin_scope(&self, _readonly: bool) -> Result<Option<Box<dyn ZanzibarScope>>> {
+        Ok(None)
+    }
+
     async fn store_policy(&self, policy: &Policy) -> Result<()>;
 
     async fn store_policy_with_options(
@@ -33,6 +44,11 @@ pub trait ZanzibarStore: MaybeSendSync {
     }
 
     async fn get_policy(&self, policy_id: &str) -> Result<Option<Policy>>;
+
+    /// Whether a policy is stored under `policy_id`, without parsing it.
+    async fn has_policy(&self, policy_id: &str) -> Result<bool> {
+        Ok(self.get_policy(policy_id).await?.is_some())
+    }
 
     async fn list_policies(&self) -> Result<Vec<Policy>>;
 
@@ -85,4 +101,13 @@ pub trait ZanzibarStore: MaybeSendSync {
         resource: &str,
         object_id: &str,
     ) -> Result<()>;
+}
+
+/// Owns commit/rollback for a standalone authorization operation. Dropping the
+/// scope without committing must discard every staged change.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait ZanzibarScope: crate::thread_bounds::MaybeSend {
+    fn store(&self) -> std::sync::Arc<dyn ZanzibarStore>;
+    async fn commit(self: Box<Self>) -> Result<()>;
 }

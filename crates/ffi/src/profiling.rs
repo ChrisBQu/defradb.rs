@@ -1,7 +1,7 @@
+use regolith::sync::OnceCell;
 use std::ffi::c_char;
 use std::fs::File;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::OnceLock;
 
 use kovan_queue::seg_queue::SegQueue;
 use tracing_chrome::{ChromeLayerBuilder, FlushGuard};
@@ -12,11 +12,11 @@ use crate::helpers::require_c_str;
 use crate::types::FfiResult;
 use crate::{ffi_entry, try_ffi};
 
-static PROFILING_GUARD: OnceLock<SegQueue<FlushGuard>> = OnceLock::new();
+static PROFILING_GUARD: OnceCell<SegQueue<FlushGuard>> = OnceCell::new();
 static PROFILING_RUNNING: AtomicBool = AtomicBool::new(false);
 
 fn guard_slot() -> &'static SegQueue<FlushGuard> {
-    PROFILING_GUARD.get_or_init(SegQueue::new)
+    PROFILING_GUARD.get_or_init_racy(SegQueue::new)
 }
 
 fn with_default_transport_noise_filters(filter: EnvFilter) -> EnvFilter {

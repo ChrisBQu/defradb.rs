@@ -20,7 +20,7 @@ use super::protocols;
 /// multiplexed over [`protocols::ALPN_MUX`], so identity is the whole key.
 pub(super) struct ConnectionCacheState {
     connections: HopscotchMap<iroh::EndpointId, iroh::endpoint::Connection, RandomState>,
-    dial_guards: HopscotchMap<iroh::EndpointId, Arc<tokio::sync::Mutex<()>>, RandomState>,
+    dial_guards: HopscotchMap<iroh::EndpointId, Arc<regolith::sync::Mutex<()>>, RandomState>,
 }
 
 pub(super) type ConnectionCache = Arc<ConnectionCacheState>;
@@ -274,10 +274,10 @@ fn retire_timed_out_connection(
 fn dial_guard(
     cache: &ConnectionCache,
     endpoint_id: iroh::EndpointId,
-) -> Arc<tokio::sync::Mutex<()>> {
+) -> Arc<regolith::sync::Mutex<()>> {
     cache
         .dial_guards
-        .get_or_insert(endpoint_id, Arc::new(tokio::sync::Mutex::new(())))
+        .get_or_insert(endpoint_id, Arc::new(regolith::sync::Mutex::new(())))
 }
 
 /// QUIC application error code used when locally closing a connection in
@@ -1329,7 +1329,7 @@ mod tests {
         let peer_id = PeerId::new(accept_ep.id().to_string());
         let cache = new_connection_cache();
         let admission = Arc::new(PeerAdmission::new(AllowlistState::AcceptAll));
-        let barrier = Arc::new(tokio::sync::Barrier::new(CALLERS));
+        let barrier = Arc::new(regolith::sync::Barrier::new(CALLERS));
         let (accepted_tx, mut accepted_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let accept_task = n0_future::task::spawn({

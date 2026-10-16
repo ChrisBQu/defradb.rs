@@ -3,6 +3,7 @@
 /// This module provides the foundational abstractions for key-value storage,
 /// including the Key trait for typed keys and iteration options.
 use std::fmt;
+use std::sync::Arc;
 
 /// Trait for keys that can be serialized to bytes.
 ///
@@ -86,6 +87,11 @@ pub struct IterOptions {
     /// When true, the iterator will not fetch values from storage,
     /// improving performance when only keys are needed.
     keys_only: bool,
+    /// Validate consumed ranges, including absent keys, in a writing transaction.
+    validated: bool,
+    /// Validate a key the transaction later merges into inside the scanned
+    /// range over these value parts only.
+    parts: Option<Box<[u32]>>,
 }
 
 impl IterOptions {
@@ -121,6 +127,45 @@ impl IterOptions {
     /// Enable keys-only mode (don't fetch values).
     pub fn with_keys_only(mut self, keys_only: bool) -> Self {
         self.keys_only = keys_only;
+        self
+    }
+
+    /// Validate the consumed range against concurrent inserts, updates and deletes.
+    /// Read-only snapshots remain write-free and never conflict.
+    pub fn with_validation(mut self, validated: bool) -> Self {
+        self.validated = validated;
+        self
+    }
+
+    pub fn validated(&self) -> bool {
+        self.validated
+    }
+
+    /// Scan for a decision that used only these parts of the values it reads
+    /// (sorted part IDs of the value's merge operator): a key the transaction
+    /// later merges into inside the scanned range is validated over these
+    /// parts only, and one it puts or deletes there in whole. With no parts
+    /// the scan validates nothing. A validated scan ignores this.
+    pub fn with_parts(mut self, parts: Option<Box<[u32]>>) -> Self {
+        self.parts = parts;
+        self
+    }
+
+    /// The parts a scan's decision used, if it named them.
+    pub fn parts(&self) -> Option<&[u32]> {
+        self.parts.as_deref()
+    }
+
+    /// These options with each bound (prefix, start and end) passed through
+    /// `map` and every other option kept: how a view scopes a scan to its
+    /// keyspace.
+    pub fn map_keys<F>(mut self, map: F) -> Self
+    where
+        F: Fn(&[u8]) -> Vec<u8>,
+    {
+        self.prefix = self.prefix.as_deref().map(&map);
+        self.start = self.start.as_deref().map(&map);
+        self.end = self.end.as_deref().map(&map);
         self
     }
 
@@ -211,5 +256,49 @@ mod tests {
         let display = format!("{}", opts);
         assert!(display.contains("prefix"));
         assert!(display.contains("reverse: true"));
+    }
+}
+
+/// Layout of an append-only journal. Entry keys append a zero-padded, 20-digit
+/// decimal position to the entry prefix; positions are assigned only at commit.
+///
+/// Clones share one layout, and an append hands the engine that shared
+/// layout rather than a copy of it.
+#[derive(Debug, Clone)]
+pub struct AppendLog(Arc<LogKeys>);
+
+/// The keys an [`AppendLog`] names, shared by its clones.
+#[derive(Debug)]
+pub(crate) struct LogKeys {
+    pub(crate) head_key: Vec<u8>,
+    pub(crate) entry_prefix: Vec<u8>,
+}
+
+impl AppendLog {
+    pub fn new(head_key: Vec<u8>, entry_prefix: Vec<u8>) -> Self {
+        Self(Arc::new(LogKeys {
+            head_key,
+            entry_prefix,
+        }))
+    }
+
+    pub fn head_key(&self) -> &[u8] {
+        &self.0.head_key
+    }
+
+    pub fn entry_prefix(&self) -> &[u8] {
+        &self.0.entry_prefix
+    }
+
+    pub fn prefixed(&self, prefix: &[u8]) -> Self {
+        Self::new(
+            [prefix, self.head_key()].concat(),
+            [prefix, self.entry_prefix()].concat(),
+        )
+    }
+
+    /// The shared layout, as the engine takes it.
+    pub(crate) fn keys(&self) -> &Arc<LogKeys> {
+        &self.0
     }
 }

@@ -56,6 +56,11 @@ commonware-codec = "2026.9.0"
 # Lock-free shared state
 kovan.workspace = true
 kovan-map.workspace = true
+kovan-queue.workspace = true
+
+# Remote decisions: single-flight, a deadline, retries, an in-flight cap,
+# metrics; the byte-bounded registration cache.
+inputs = { path = "../inputs" }
 
 # Logging
 tracing.workspace = true
@@ -63,6 +68,7 @@ sha2.workspace = true
 
 # Hashing
 rapidhash.workspace = true
+regolith.workspace = true
 
 # Base64 for bearer token
 base64.workspace = true
@@ -76,6 +82,8 @@ bs58.workspace = true
 acp-light-client = { git = "https://github.com/sourcenetwork/backbone.git", rev = "7d67ddbbb0d3d671b95dfe322b920e2e943c1daa" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# The Cosmos event stream runs on the network runtime it is given.
+edge = { path = "../edge" }
 futures.workspace = true
 prost.workspace = true
 tonic.workspace = true
@@ -83,7 +91,8 @@ tonic-prost.workspace = true
 tokio-tungstenite = { version = "0.26.2", features = ["rustls-tls-webpki-roots"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "net"] }
+edge = { path = "../edge", features = ["testing"] }
+tokio = { workspace = true, features = ["macros", "net", "test-util"] }
 kovan-queue.workspace = true
 
 [lints]

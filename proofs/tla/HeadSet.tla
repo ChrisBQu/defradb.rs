@@ -1,7 +1,11 @@
 ---- MODULE HeadSet ----
-\* Concurrent collection-head transitions, abstracting
-\* crates/db/src/block/builder/collection.rs (write_collection_block) over the
+\* Concurrent document/field and collection-head transitions, abstracting
+\* crates/db/src/block/heads/document.rs and builder/collection.rs over the
 \* regolith-backed store in crates/storage/src/backends/regolith.
+\*
+\* A document head's publication is recorded by its priority index entry
+\* (h/p, empty value), not by a guard key: a block publishes its head at most
+\* once, even after it is superseded. HeadPublication.tla models that protocol.
 \*
 \* THE MECHANISM. A collection's head set is the set of blocks in its DAG that no
 \* other block names as a parent. `write_collection_block` maintains it by:
@@ -74,7 +78,7 @@
 \* unchanged. The abort is spurious, and it inverts the design: the sweep is
 \* the side that is meant to lose. `RepeatableRead` is the regolith level for this
 \* read: a point read is validated as at `Serializable`, a scan is recorded
-\* per stretch and never per key. DefraDB runs its store at `RepeatableRead`.
+\* per stretch and never per key. DefraDB uses DefraLevel CommutativePrefix for the head and marker families.
 \*
 \*   ScanReads = "Stretch" - RepeatableRead: what a scan walked is not in the read
 \*                           set, so a sweep cannot abort an append.  [GREEN]

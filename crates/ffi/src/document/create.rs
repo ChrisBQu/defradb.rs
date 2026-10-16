@@ -3,7 +3,7 @@ use std::ffi::c_char;
 use acp::nac::NodePermission;
 use serde_json::Value as JsonValue;
 
-use crate::helpers::{get_node_runner, get_rt, require_c_str};
+use crate::helpers::{get_node_runner, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::state::NODES;
 use crate::types::{c_str_to_string, FfiResult};
@@ -77,9 +77,7 @@ pub unsafe extern "C" fn collection_create(
     batch_session_id: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::DocumentUpdate
@@ -87,7 +85,7 @@ pub unsafe extern "C" fn collection_create(
         let collection = try_ffi!(require_c_str(collection_name, "collection_name"));
         let json_str = try_ffi!(require_c_str(json_data, "json_data"));
 
-        // Set up thread-local signing config and batch session key (same as exec_request)
+        // The signing config and batch session key (same as exec_request)
         let identity_str = c_str_to_string(identity_did);
         let batch_session = c_str_to_string(batch_session_id);
         let (node_did, signing_enabled) = NODES
@@ -99,17 +97,12 @@ pub unsafe extern "C" fn collection_create(
             signing_enabled,
         );
         let session_key = batch_session.or_else(|| signing.as_ref().map(|s| s.public_key_hex.clone()));
-        defra_core::batch_signing::set_batch_session_key(session_key);
-        defra_core::signing::set_signing_config(signing);
-
-        // Bind the caller's identity into the ambient context so DB-layer NAC
-        // checks resolve the actual caller instead of the wildcard. The body
-        // runs on this thread via `block_on`, so the thread-local is visible
-        // throughout it, and the guard restores the prior value on drop so it
-        // never leaks into the next request on this pooled thread.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            identity_str.as_ref().filter(|s| !s.is_empty()).cloned(),
-        );
+        // The caller acts in the request's context, so DB-layer NAC checks
+        // resolve the actual caller instead of the wildcard.
+        let context = defra_core::RequestContext::default()
+            .with_identity(identity_str.as_ref().filter(|s| !s.is_empty()).cloned())
+            .with_signing(signing)
+            .with_batch_session(session_key);
 
         // Parse JSON to detect array vs object
         let parsed: JsonValue = match serde_json::from_str(&json_str) {
@@ -135,8 +128,8 @@ pub unsafe extern "C" fn collection_create(
 
         let runner = try_ffi!(get_node_runner(node_ptr));
 
-        ffi_async!(rt, {
-            let request = query::QueryRequest::new(mutation);
+        ffi_async!(caller, {
+            let request = query::QueryRequest::new(mutation).with_context(context);
             let response = runner.execute(request).await;
 
             if !response.errors.is_empty() {

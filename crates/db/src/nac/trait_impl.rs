@@ -11,7 +11,7 @@ use super::{NacInfo, NacManager, NacManagerApi};
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<S: ZanzibarStore + Send + Sync + 'static> NacManagerApi for NacManager<S> {
+impl<S: ZanzibarStore + ?Sized + 'static> NacManagerApi for NacManager<S> {
     async fn initialize(&self, owner_identity: Option<&Did>) -> Result<()> {
         NacManager::initialize(self, owner_identity).await
     }
@@ -26,6 +26,28 @@ impl<S: ZanzibarStore + Send + Sync + 'static> NacManagerApi for NacManager<S> {
     }
     async fn check_permission(&self, identity: &Did, permission: NodePermission) -> Result<bool> {
         NacManager::check_permission(self, identity, permission).await
+    }
+    #[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
+    async fn check_permission_in_txn(
+        &self,
+        view: datastore::NamespaceView,
+        identity: &Did,
+        permission: NodePermission,
+    ) -> Result<bool> {
+        if !self.nac.supports_transactions() {
+            return self.check_permission(identity, permission).await;
+        }
+        let scoped = self.nac.scoped(std::sync::Arc::new(
+            acp::zanzibar::store::TransactionZanzibarStore::new(view),
+        ));
+        scoped
+            .load()
+            .await
+            .map_err(|error| super::error::Error::Other(error.to_string()))?;
+        scoped
+            .check_permission(identity, permission)
+            .await
+            .map_err(|error| super::error::Error::Other(error.to_string()))
     }
     async fn is_admin(&self, identity: &Did) -> Result<bool> {
         NacManager::is_admin(self, identity).await

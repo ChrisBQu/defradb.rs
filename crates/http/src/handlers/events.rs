@@ -74,9 +74,12 @@ struct EventAccessContext {
     executor: Arc<dyn query::executor::QueryExecutor>,
     collection_mgmt: Option<Arc<dyn crate::router::CollectionManagementOperations>>,
     signing_config: Option<defra_core::signing::SigningConfig>,
-    dac_bypass: bool,
+    state: AppState,
+    identity: ExtractIdentity,
     did: Option<identity::Did>,
     acp_enabled: bool,
+    /// The subscriber's bearer, which every per-event query presents.
+    bearer: defra_core::RequestContext,
 }
 
 impl EventAccessContext {
@@ -85,6 +88,7 @@ impl EventAccessContext {
         collection_id: &str,
         doc_id: &str,
     ) -> Result<bool, HttpError> {
+        let dac_bypass = resolve_dac_bypass(&self.state, &self.identity).await;
         if !self.acp_enabled {
             return Ok(true);
         }
@@ -94,14 +98,19 @@ impl EventAccessContext {
             return Ok(false);
         };
 
-        let collection = collection_mgmt
+        // The version lookup reads the store for a version the cache does not
+        // hold: only when the ID is not a known collection's.
+        let collection = match collection_mgmt
             .find_collection_by_id(collection_id)
             .await
             .map_err(HttpError::Internal)?
-            .or(collection_mgmt
+        {
+            Some(collection) => Some(collection),
+            None => collection_mgmt
                 .get_collection_by_version_id(collection_id)
                 .await
-                .map_err(HttpError::Internal)?);
+                .map_err(HttpError::Internal)?,
+        };
 
         let Some(collection) = collection else {
             return Ok(false);
@@ -123,10 +132,13 @@ impl EventAccessContext {
                 collection.name, subject_doc_id
             );
             let response = execute_with_resolved_context(
+                &self.state.edge,
                 self.executor.clone(),
-                QueryRequest::new(query).with_identity(self.did.clone()),
+                QueryRequest::new(query)
+                    .with_identity(self.did.clone())
+                    .with_context(self.bearer.clone()),
                 self.signing_config.clone(),
-                self.dac_bypass,
+                dac_bypass,
                 self.did.as_ref().map(|d| d.as_str().to_string()),
             )
             .await;
@@ -140,10 +152,13 @@ impl EventAccessContext {
 
         let query = format!(r#"query {{ {}(limit: 1) {{ _docID }} }}"#, collection.name);
         let response = execute_with_resolved_context(
+            &self.state.edge,
             self.executor.clone(),
-            QueryRequest::new(query).with_identity(self.did.clone()),
+            QueryRequest::new(query)
+                .with_identity(self.did.clone())
+                .with_context(self.bearer.clone()),
             self.signing_config.clone(),
-            self.dac_bypass,
+            dac_bypass,
             self.did.as_ref().map(|d| d.as_str().to_string()),
         )
         .await;
@@ -175,9 +190,16 @@ pub async fn events_sse(
         executor: state.executor.clone(),
         collection_mgmt: state.collection_mgmt.clone(),
         signing_config: resolve_signing_config(&state, &identity),
-        dac_bypass: resolve_dac_bypass(&state, &identity).await,
+        state: state.clone(),
+        identity: identity.clone(),
         did: identity.did().cloned(),
         acp_enabled: state.doc_acp.is_some() || state.acp.is_some(),
+        bearer: defra_core::RequestContext::default().with_bearer(
+            identity.did().map(ToString::to_string),
+            identity
+                .did()
+                .and_then(|did| identity.context().bearer_token_for(did.as_str())),
+        ),
     };
 
     let stream = async_stream::stream! {

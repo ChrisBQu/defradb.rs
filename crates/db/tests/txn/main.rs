@@ -5,6 +5,10 @@ mod common;
 mod guard;
 mod lifecycle;
 mod registry_suite;
+mod requests;
+mod statement_savepoint;
 
+mod context_ownership;
 mod ownership;
+mod schema_visibility;
 mod store_release;

@@ -1,8 +1,8 @@
 //! Read-path coverage for cross-object (collection-level) ACP grants.
 //!
 //! The query engine gates every read — User queries (`select`, `aggregate`) and
-//! Commits queries alike — through `check_doc_access_with_overlay`. That gate's
-//! overlay only projects deferred *registration*; access resolution falls
+//! Commits queries alike — through `check_doc_access_with_projection`. That gate's
+//! projection only projects transaction-scoped *registration*; access resolution falls
 //! straight through to the backend's `check_doc_access`. So a cross-object grant
 //! resolved by the Zanzibar backend is honoured uniformly across both read
 //! paths. This proves it at the gate the runner actually calls.
@@ -19,7 +19,7 @@ use acp::{
     MemoryZanzibarStore, Subject, ZanzibarDocumentACP, ZanzibarStore, READER_RELATION,
 };
 use identity::Did;
-use query::txn::{check_doc_access_with_overlay, OverlayChecker};
+use query::txn::{check_doc_access_with_projection, OverlayChecker};
 
 const FS_POLICY: &str = r#"
 name: filesystem
@@ -61,8 +61,9 @@ async fn gate_allows(
     resource: &str,
     doc: &str,
 ) -> bool {
-    check_doc_access_with_overlay(
+    check_doc_access_with_projection(
         acp,
+        None,
         &Identity::Authenticated(who.clone()),
         DocumentPermission::Read,
         policy_id,
@@ -145,6 +146,7 @@ async fn overlay_checker_applies_branchable_collection_fallback() {
         .unwrap();
     let checker = OverlayChecker {
         acp: &acp,
+        projection: None,
         identity: &identity,
     };
 

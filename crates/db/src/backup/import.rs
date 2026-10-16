@@ -26,6 +26,21 @@ struct PendingRelation {
     imported_doc_id: String,
 }
 
+/// [`import_database_as`] in [`defra_core::RequestContext::ambient`].
+pub async fn import_database<S: Store + 'static>(
+    database: &Arc<DB<S>>,
+    _runner: &Arc<dyn query::QueryExecutor>,
+    data: &str,
+) -> Result<ImportStats, String> {
+    import_database_as(
+        &defra_core::RequestContext::ambient(),
+        database,
+        _runner,
+        data,
+    )
+    .await
+}
+
 /// Import documents from a JSON string into the database.
 ///
 /// The data must be a JSON object mapping collection names to arrays of documents:
@@ -40,7 +55,8 @@ struct PendingRelation {
 /// `_docID`/`_docIDNew` values are registered as aliases of the new
 /// identity and relation fields are remapped through them, matching Go
 /// v1.0.0's import behavior.
-pub async fn import_database<S: Store + 'static>(
+pub async fn import_database_as<S: Store + 'static>(
+    context: &defra_core::RequestContext,
     database: &Arc<DB<S>>,
     _runner: &Arc<dyn query::QueryExecutor>,
     data: &str,
@@ -172,7 +188,7 @@ pub async fn import_database<S: Store + 'static>(
                 })?;
             doc.set_collection(schema.clone());
 
-            let create_result = mutator.create(collection_name, doc).await;
+            let create_result = mutator.create_as(context, collection_name, doc).await;
             let created_doc = match create_result {
                 Ok(result) => result.document,
                 Err(e) => {
@@ -246,7 +262,7 @@ pub async fn import_database<S: Store + 'static>(
         modified_fields.insert(pending.fk_name.clone());
 
         mutator
-            .update(&pending.collection_name, doc, modified_fields)
+            .update_as(context, &pending.collection_name, doc, modified_fields)
             .await
             .map_err(|e| {
                 format!(

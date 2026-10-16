@@ -314,11 +314,11 @@ fn extract_regclass_table(sql: &str) -> Option<String> {
 
 /// Extract (field, value) from a GraphQL filter pattern like `filter: {field: {_eq: "value"}}`.
 fn extract_filter_from_graphql(gql: &str) -> (String, String) {
-    static RE_STR: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    static RE_STR: regolith::sync::Lazy<regex::Regex> = regolith::sync::Lazy::new(|| {
         regex::Regex::new(r#"filter:\s*\{(\w+):\s*\{_eq:\s*"([^"]*)"\}\}"#)
             .expect("valid regex literal")
     });
-    static RE_NUM: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    static RE_NUM: regolith::sync::Lazy<regex::Regex> = regolith::sync::Lazy::new(|| {
         regex::Regex::new(r#"filter:\s*\{(\w+):\s*\{_eq:\s*(\d+)\}\}"#)
             .expect("valid regex literal")
     });

@@ -3,7 +3,7 @@ use crate::benchmark_queries::{
     format_vector, render_action_ranked_query, render_message_ranked_query, RankedQueryOrder,
 };
 use axum::{extract::State, routing::post, Json, Router};
-use rapidhash::{HashMapExt, RapidHashMap, RapidHashSet};
+use rapidhash::{HashMapExt, HashSetExt, RapidHashMap, RapidHashSet};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::cmp::Ordering;
@@ -127,10 +127,25 @@ struct MockEmbeddingState {
     dimensions: [usize; 3],
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+/// One text the mock embedded, with the model it was asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct EmbeddingRequest {
     model: String,
     input: String,
+}
+
+/// An OpenAI-compatible request: one text, or an array of them.
+#[derive(Debug, Deserialize)]
+struct EmbeddingRequestBody {
+    model: String,
+    input: EmbeddingInputs,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum EmbeddingInputs {
+    One(String),
+    Many(Vec<String>),
 }
 
 #[derive(Debug, Serialize)]
@@ -140,6 +155,7 @@ struct EmbeddingResponse {
 
 #[derive(Debug, Serialize)]
 struct EmbeddingResponseItem {
+    index: usize,
     embedding: Vec<f64>,
 }
 
@@ -194,23 +210,40 @@ impl Drop for MockEmbeddingServer {
 
 async fn mock_embedding_handler(
     State(state): State<MockEmbeddingState>,
-    Json(request): Json<EmbeddingRequest>,
+    Json(body): Json<EmbeddingRequestBody>,
 ) -> Json<EmbeddingResponse> {
-    state.requests.rcu(|requests| {
-        let mut requests = requests.clone();
-        requests.push(request.clone());
-        requests
+    let inputs = match body.input {
+        EmbeddingInputs::One(input) => vec![input],
+        EmbeddingInputs::Many(inputs) => inputs,
+    };
+    let requests: Vec<EmbeddingRequest> = inputs
+        .into_iter()
+        .map(|input| EmbeddingRequest {
+            model: body.model.clone(),
+            input,
+        })
+        .collect();
+    state.requests.rcu(|recorded| {
+        let mut recorded = recorded.clone();
+        recorded.extend(requests.iter().cloned());
+        recorded
     });
 
-    let mut embedding = deterministic_embedding(&request.model, &request.input);
-    let model_index = match request.model.as_str() {
+    let model_index = match body.model.as_str() {
         "coding-action-model" => 1,
         "coding-search-chunk-model" => 2,
         _ => 0,
     };
-    embedding.resize(state.dimensions[model_index], 0.0);
     Json(EmbeddingResponse {
-        data: vec![EmbeddingResponseItem { embedding }],
+        data: requests
+            .iter()
+            .enumerate()
+            .map(|(index, request)| {
+                let mut embedding = deterministic_embedding(&request.model, &request.input);
+                embedding.resize(state.dimensions[model_index], 0.0);
+                EmbeddingResponseItem { index, embedding }
+            })
+            .collect(),
     })
 }
 
@@ -495,10 +528,46 @@ async fn total_embedding_documents(node: &crate::EmbeddedNode) -> usize {
         .sum()
 }
 
+/// The distinct (model, text) pairs the fixture's documents embed: each is
+/// embedded once, however many documents carry it.
+async fn embedded_source_texts(node: &crate::EmbeddedNode) -> usize {
+    let data = ensure_success(
+        node.execute(
+            r#"{
+  CodingMessage { content }
+  CodingAction { command }
+  CodingSearchChunk { content }
+}"#,
+        )
+        .await,
+        "read embedding sources",
+    )
+    .unwrap();
+
+    let mut texts = RapidHashSet::new();
+    for (collection_name, field, model) in [
+        ("CodingMessage", "content", "coding-message-model"),
+        ("CodingAction", "command", "coding-action-model"),
+        ("CodingSearchChunk", "content", "coding-search-chunk-model"),
+    ] {
+        for doc in data
+            .get(collection_name)
+            .and_then(JsonValue::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+        {
+            if let Some(text) = doc.get(field).and_then(JsonValue::as_str) {
+                texts.insert((model, format!("{text}\n")));
+            }
+        }
+    }
+    texts.len()
+}
+
 async fn lookup_session_doc_id(
     node: &crate::EmbeddedNode,
     session_id: &str,
-) -> anyhow::Result<String> {
+) -> crate::Result<String> {
     let query = format!(
         r#"{{
   CodingSession(filter: {{ session_id: {{ _eq: "{session_id}" }} }}, limit: 1) {{
@@ -514,7 +583,7 @@ _docID
         .and_then(|session| session.get("_docID"))
         .and_then(JsonValue::as_str)
         .map(ToOwned::to_owned)
-        .ok_or_else(|| anyhow::anyhow!("missing session _docID for {}", session_id))
+        .ok_or_else(|| Error::MissingSessionDocId(session_id.to_owned()))
 }
 
 async fn run_hybrid_comparison(
@@ -525,7 +594,7 @@ async fn run_hybrid_comparison(
     query: &str,
     vector: &[f64],
     limit: usize,
-) -> anyhow::Result<HybridComparisonSummary> {
+) -> crate::Result<HybridComparisonSummary> {
     let session_doc_id = lookup_session_doc_id(node, session_id).await?;
 
     let bm25_query = match target {
@@ -581,10 +650,11 @@ async fn assert_hits_belong_to_session(
     target: crate::CodingSearchTarget,
     hits: &[crate::CodingHybridSearchHit],
     expected_session_doc_id: &str,
-) -> anyhow::Result<()> {
-    if hits.is_empty() {
-        anyhow::bail!("expected at least one hit to validate session scope");
-    }
+) -> crate::Result<()> {
+    assert!(
+        !hits.is_empty(),
+        "expected at least one hit to validate session scope"
+    );
 
     let collection_name = match target {
         crate::CodingSearchTarget::Messages => "CodingMessage",
@@ -613,7 +683,10 @@ _sessionID
     let items = data
         .get(collection_name)
         .and_then(JsonValue::as_array)
-        .ok_or_else(|| anyhow::anyhow!("missing {collection_name} array in {data}"))?;
+        .ok_or_else(|| Error::MissingArray {
+            collection: collection_name.to_string(),
+            within: data.to_string(),
+        })?;
 
     assert_eq!(
         items.len(),
@@ -640,10 +713,11 @@ async fn assert_doc_ids_belong_to_session(
     collection_name: &str,
     doc_ids: &[String],
     expected_session_doc_id: &str,
-) -> anyhow::Result<()> {
-    if doc_ids.is_empty() {
-        anyhow::bail!("expected at least one hit to validate session scope");
-    }
+) -> crate::Result<()> {
+    assert!(
+        !doc_ids.is_empty(),
+        "expected at least one hit to validate session scope"
+    );
 
     let rendered_doc_ids = doc_ids
         .iter()
@@ -663,7 +737,10 @@ _sessionID
     let items = data
         .get(collection_name)
         .and_then(JsonValue::as_array)
-        .ok_or_else(|| anyhow::anyhow!("missing {collection_name} array in {data}"))?;
+        .ok_or_else(|| Error::MissingArray {
+            collection: collection_name.to_string(),
+            within: data.to_string(),
+        })?;
 
     assert_eq!(
         items.len(),
@@ -685,7 +762,7 @@ _sessionID
     Ok(())
 }
 
-fn parse_ranked_hits(data: &JsonValue, target: SearchTarget) -> anyhow::Result<Vec<RankedHit>> {
+fn parse_ranked_hits(data: &JsonValue, target: SearchTarget) -> crate::Result<Vec<RankedHit>> {
     let collection_name = match target {
         SearchTarget::Messages => "CodingMessage",
         SearchTarget::Actions => "CodingAction",
@@ -693,7 +770,10 @@ fn parse_ranked_hits(data: &JsonValue, target: SearchTarget) -> anyhow::Result<V
     let items = data
         .get(collection_name)
         .and_then(JsonValue::as_array)
-        .ok_or_else(|| anyhow::anyhow!("missing {collection_name} array in {data}"))?;
+        .ok_or_else(|| Error::MissingArray {
+            collection: collection_name.to_string(),
+            within: data.to_string(),
+        })?;
 
     items
         .iter()
@@ -701,17 +781,17 @@ fn parse_ranked_hits(data: &JsonValue, target: SearchTarget) -> anyhow::Result<V
             let doc_id = item
                 .get("_docID")
                 .and_then(JsonValue::as_str)
-                .ok_or_else(|| anyhow::anyhow!("missing _docID in {item}"))?
+                .ok_or_else(|| Error::missing("_docID", item))?
                 .to_string();
             let (label, preview) = match target {
                 SearchTarget::Messages => (
                     item.get("message_id")
                         .and_then(JsonValue::as_str)
-                        .ok_or_else(|| anyhow::anyhow!("missing message_id in {item}"))?
+                        .ok_or_else(|| Error::missing("message_id", item))?
                         .to_string(),
                     item.get("content")
                         .and_then(JsonValue::as_str)
-                        .ok_or_else(|| anyhow::anyhow!("missing content in {item}"))?
+                        .ok_or_else(|| Error::missing("content", item))?
                         .to_string(),
                 ),
                 SearchTarget::Actions => (
@@ -719,14 +799,14 @@ fn parse_ranked_hits(data: &JsonValue, target: SearchTarget) -> anyhow::Result<V
                         "{} {}",
                         item.get("action_type")
                             .and_then(JsonValue::as_str)
-                            .ok_or_else(|| anyhow::anyhow!("missing action_type in {item}"))?,
+                            .ok_or_else(|| Error::missing("action_type", item))?,
                         item.get("target")
                             .and_then(JsonValue::as_str)
-                            .ok_or_else(|| anyhow::anyhow!("missing target in {item}"))?,
+                            .ok_or_else(|| Error::missing("target", item))?,
                     ),
                     item.get("command")
                         .and_then(JsonValue::as_str)
-                        .ok_or_else(|| anyhow::anyhow!("missing command in {item}"))?
+                        .ok_or_else(|| Error::missing("command", item))?
                         .to_string(),
                 ),
             };
@@ -953,7 +1033,7 @@ async fn coding_session_embedding_fixture_supports_similarity_queries() {
         .unwrap();
 
     let requests = server.requests();
-    assert_eq!(requests.len(), total_embedding_documents(&node).await);
+    assert_eq!(requests.len(), embedded_source_texts(&node).await);
     assert!(requests
         .iter()
         .any(|request| request.model == "coding-message-model"));
@@ -1157,7 +1237,7 @@ async fn coding_session_embedding_fixture_supports_query_text_hybrid_search_api(
     }
 
     let requests = server.requests();
-    assert_eq!(requests.len(), total_embedding_documents(&node).await + 2);
+    assert_eq!(requests.len(), embedded_source_texts(&node).await + 2);
     assert_eq!(
         requests
             .iter()
@@ -1250,7 +1330,7 @@ async fn coding_session_embedding_fixture_hybrid_search_api_honors_session_scope
 
     assert_eq!(
         server.requests().len(),
-        total_embedding_documents(&node).await + 2
+        embedded_source_texts(&node).await + 2
     );
 }
 
@@ -1386,7 +1466,7 @@ async fn dense_search_v1_supports_production_coding_search_chunks() {
     }));
 
     let requests = server.requests();
-    assert_eq!(requests.len(), total_embedding_documents(&node).await + 2);
+    assert_eq!(requests.len(), embedded_source_texts(&node).await + 2);
     assert_eq!(
         requests
             .iter()
@@ -1493,7 +1573,7 @@ async fn dense_search_v1_supports_query_text_api() {
     }
 
     let requests = server.requests();
-    assert_eq!(requests.len(), total_embedding_documents(&node).await + 2);
+    assert_eq!(requests.len(), embedded_source_texts(&node).await + 2);
     assert_eq!(
         requests
             .iter()
@@ -1594,7 +1674,7 @@ async fn dense_search_v1_honors_filter_and_exclusions() {
 
     assert_eq!(
         server.requests().len(),
-        total_embedding_documents(&node).await + 2
+        embedded_source_texts(&node).await + 2
     );
 }
 
@@ -1604,7 +1684,7 @@ struct RealEmbeddingServer {
 }
 
 impl RealEmbeddingServer {
-    async fn start() -> anyhow::Result<Self> {
+    async fn start() -> crate::Result<Self> {
         let port = std::net::TcpListener::bind("127.0.0.1:0")?
             .local_addr()?
             .port();
@@ -1633,7 +1713,7 @@ impl RealEmbeddingServer {
         Ok(server)
     }
 
-    async fn wait_until_ready(&self) -> anyhow::Result<()> {
+    async fn wait_until_ready(&self) -> crate::Result<()> {
         let client = reqwest::Client::new();
         let health_url = self.base_url.trim_end_matches("/v1").to_string() + "/health";
 
@@ -1646,7 +1726,7 @@ impl RealEmbeddingServer {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
 
-        anyhow::bail!(
+        panic!(
             "timed out waiting for local embedding server at {}",
             health_url
         );
@@ -1664,7 +1744,7 @@ async fn seed_real_embedding_fixture(
     node: &crate::EmbeddedNode,
     config: &CodingSessionFixtureConfig,
     server: &RealEmbeddingServer,
-) -> anyhow::Result<CodingSessionFixture> {
+) -> crate::Result<CodingSessionFixture> {
     let mut dimensions = [0; 3];
     for (width, model) in dimensions.iter_mut().zip([
         "coding-message-model",
@@ -1682,7 +1762,7 @@ async fn request_real_embedding(
     base_url: &str,
     model: &str,
     input: &str,
-) -> anyhow::Result<Vec<f64>> {
+) -> crate::Result<Vec<f64>> {
     let response = reqwest::Client::new()
         .post(format!("{}/embeddings", base_url.trim_end_matches('/')))
         .json(&serde_json::json!({
@@ -1697,16 +1777,16 @@ async fn request_real_embedding(
     let values = body
         .pointer("/data/0/embedding")
         .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| anyhow::anyhow!("missing data[0].embedding in response: {}", body))?;
+        .unwrap_or_else(|| panic!("missing data[0].embedding in response: {}", body));
 
-    values
+    Ok(values
         .iter()
         .map(|value| {
             value
                 .as_f64()
-                .ok_or_else(|| anyhow::anyhow!("non-numeric embedding value: {}", value))
+                .unwrap_or_else(|| panic!("non-numeric embedding value: {}", value))
         })
-        .collect()
+        .collect())
 }
 
 fn render_real_message_similarity_query(vector: &[f64]) -> String {
