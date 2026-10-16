@@ -1,21 +1,28 @@
 //! The storage engine's tickers, exported as one OpenTelemetry counter.
 //!
 //! Every open store hands its engine statistics to [`export_engine_tickers`]
-//! and holds the returned [`EngineTickerExport`] while it is open. When the
-//! guard drops, what that engine counted moves into the retired totals, so an
-//! exported total never goes back when a store closes. The
-//! `defradb.storage.engine.tickers` counter reports, per exported ticker, the
-//! retired total plus what every live engine counts now
-//! ([`engine_ticker_totals`]).
+//! and holds the returned [`EngineTickerExport`] while it is open. The
+//! `defradb.storage.engine.tickers` counter reports, per exported ticker, a
+//! total that only grows ([`engine_ticker_totals`]): each read first adds to it
+//! what every live engine counted since it was last added, and a store that
+//! closes adds its last counts as its guard drops, so an exported total never
+//! goes back when a store closes.
+//!
+//! Opening and closing a store costs the same however many stores are open:
+//! one entry in a lock-free map, and a closing store's counts added once.
+//! Each count is added exactly once whoever adds it, a read or the close: an
+//! adder claims the counts it adds with a compare-and-swap on the engine's
+//! published mark.
 //!
 //! The exported tickers are the engine's commit and policy families, read from
 //! `regolith::Ticker::ALL` by [`exported_engine_tickers`]; a store's statistics
 //! snapshot reports the same list through the same function.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
-use regolith::sync::{Atom, OnceCell};
+use rapidhash::fast::RandomState;
+use regolith::sync::{HopscotchMap, Lazy};
 use regolith::{Statistics, Ticker};
 
 /// Name prefixes of the ticker families reported outside the engine.
@@ -23,13 +30,28 @@ const EXPORTED_FAMILIES: [&str; 2] = ["regolith.commit.", "regolith.policy."];
 
 const TICKERS: usize = Ticker::ALL.len();
 
-/// The engine tickers reported outside the engine: its commit and policy
-/// families, in `Ticker::ALL` order.
-pub fn exported_engine_tickers() -> impl Iterator<Item = Ticker> {
+/// The exported tickers, in `Ticker::ALL` order.
+static EXPORTED: Lazy<Vec<Ticker>> = Lazy::new(|| {
     Ticker::ALL
         .iter()
         .copied()
         .filter(|ticker| is_exported(*ticker))
+        .collect()
+});
+
+/// What every engine counted and was added, by position in `Ticker::ALL`.
+static TOTALS: [AtomicU64; TICKERS] = [const { AtomicU64::new(0) }; TICKERS];
+
+/// The live engines, by export id.
+static LIVE: Lazy<HopscotchMap<u64, Arc<Source>, RandomState>> =
+    Lazy::new(|| HopscotchMap::with_hasher(RandomState::default()));
+
+static NEXT_SOURCE: AtomicU64 = AtomicU64::new(0);
+
+/// The engine tickers reported outside the engine: its commit and policy
+/// families, in `Ticker::ALL` order.
+pub fn exported_engine_tickers() -> impl Iterator<Item = Ticker> {
+    EXPORTED.iter().copied()
 }
 
 fn is_exported(ticker: Ticker) -> bool {
@@ -38,24 +60,44 @@ fn is_exported(ticker: Ticker) -> bool {
         .any(|family| ticker.name().starts_with(family))
 }
 
-/// The engines whose tickers are exported, and what the closed ones counted.
-#[derive(Clone)]
-struct Sources {
-    live: Vec<(u64, Arc<Statistics>)>,
-    /// Final totals of the engines that closed, by position in `Ticker::ALL`.
-    retired: [u64; TICKERS],
+/// One live engine: its statistics and, per exported ticker, its count when
+/// that count was last added to [`TOTALS`].
+///
+/// Weak, so the map entry a close retires (freed later by the map's
+/// reclamation) never keeps an engine's per-thread statistics alive: they go
+/// when the store lets go of them.
+struct Source {
+    statistics: Weak<Statistics>,
+    published: [AtomicU64; TICKERS],
 }
 
-static SOURCES: OnceCell<Atom<Sources>> = OnceCell::new();
-static NEXT_SOURCE: AtomicU64 = AtomicU64::new(0);
-
-fn sources() -> &'static Atom<Sources> {
-    SOURCES.get_or_init_racy(|| {
-        Atom::new(Sources {
-            live: Vec::new(),
-            retired: [0; TICKERS],
-        })
-    })
+impl Source {
+    /// Add to [`TOTALS`] what `statistics` counted since the last addition.
+    ///
+    /// Counts only grow, so a reading at or below the mark was added already,
+    /// by an earlier call or by one racing this one with a newer reading. A
+    /// count `Statistics::reset` took back is added again only past the mark.
+    fn publish(&self, statistics: &Statistics) {
+        for ticker in exported_engine_tickers() {
+            let at = ticker as usize;
+            let now = statistics.get_ticker(ticker);
+            let mut seen = self.published[at].load(Ordering::Acquire);
+            while now > seen {
+                match self.published[at].compare_exchange_weak(
+                    seen,
+                    now,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => {
+                        TOTALS[at].fetch_add(now - seen, Ordering::AcqRel);
+                        break;
+                    }
+                    Err(current) => seen = current,
+                }
+            }
+        }
+    }
 }
 
 /// Keeps one engine's tickers in the export until it is dropped; then what the
@@ -63,47 +105,50 @@ fn sources() -> &'static Atom<Sources> {
 #[must_use = "the engine leaves the export when this guard is dropped"]
 pub struct EngineTickerExport {
     id: u64,
+    source: Arc<Source>,
+    /// Held so the last counts can be added when the guard drops, whoever
+    /// else let go of the statistics first.
+    statistics: Arc<Statistics>,
 }
 
 /// Export `statistics`' tickers until the returned guard is dropped.
 pub fn export_engine_tickers(statistics: &Arc<Statistics>) -> EngineTickerExport {
     let id = NEXT_SOURCE.fetch_add(1, Ordering::Relaxed);
-    sources().rcu(|current| {
-        let mut next = current.clone();
-        next.live.push((id, Arc::clone(statistics)));
-        next
+    let source = Arc::new(Source {
+        statistics: Arc::downgrade(statistics),
+        published: [const { AtomicU64::new(0) }; TICKERS],
     });
-    EngineTickerExport { id }
+    LIVE.insert(id, Arc::clone(&source));
+    EngineTickerExport {
+        id,
+        source,
+        statistics: Arc::clone(statistics),
+    }
 }
 
 impl Drop for EngineTickerExport {
     fn drop(&mut self) {
-        sources().rcu(|current| {
-            let mut next = current.clone();
-            if let Some(at) = next.live.iter().position(|(id, _)| *id == self.id) {
-                let (_, statistics) = next.live.swap_remove(at);
-                for (total, ticker) in next.retired.iter_mut().zip(Ticker::ALL) {
-                    *total = total.wrapping_add(statistics.get_ticker(*ticker));
-                }
-            }
-            next
-        });
+        // Added before the entry leaves the map: a read that no longer finds
+        // the entry finds its counts in the totals.
+        self.source.publish(&self.statistics);
+        LIVE.remove(&self.id);
     }
 }
 
 /// Every exported ticker's name and total: what closed engines counted plus
 /// what each live engine counts now.
 pub fn engine_ticker_totals() -> Vec<(&'static str, u64)> {
-    let sources = sources().load();
-    Ticker::ALL
-        .iter()
-        .zip(sources.retired)
-        .filter(|(ticker, _)| is_exported(**ticker))
-        .map(|(ticker, retired)| {
-            let total = sources.live.iter().fold(retired, |sum, (_, statistics)| {
-                sum.wrapping_add(statistics.get_ticker(*ticker))
-            });
-            (ticker.name(), total)
+    for (_, source) in LIVE.iter() {
+        if let Some(statistics) = source.statistics.upgrade() {
+            source.publish(&statistics);
+        }
+    }
+    exported_engine_tickers()
+        .map(|ticker| {
+            (
+                ticker.name(),
+                TOTALS[ticker as usize].load(Ordering::Acquire),
+            )
         })
         .collect()
 }
@@ -128,7 +173,7 @@ mod tests {
     use super::*;
 
     fn live_ids() -> Vec<u64> {
-        sources().load().live.iter().map(|(id, _)| *id).collect()
+        LIVE.keys().collect()
     }
 
     #[test]
@@ -154,5 +199,44 @@ mod tests {
         assert!(live_ids().contains(&id));
         drop(export);
         assert!(!live_ids().contains(&id));
+    }
+
+    fn exported_commits() -> u64 {
+        engine_ticker_totals()
+            .into_iter()
+            .find(|(name, _)| *name == Ticker::CommitCount.name())
+            .map_or(0, |(_, total)| total)
+    }
+
+    /// Reads and the close each add what they find not yet added, and every
+    /// commit lands in the total exactly once, however the two interleave.
+    /// The only commits in this test binary are this test's.
+    #[test]
+    fn every_count_reaches_the_total_once_through_reads_and_the_close() {
+        let statistics = Arc::new(Statistics::new());
+        let options = regolith::Options::memory().statistics(Some(Arc::clone(&statistics)));
+        let db = regolith::OptimisticTransactionDb::open("engine-tickers-once", options).unwrap();
+        let commit = |key: &[u8]| {
+            let txn = db.begin(&regolith::TxnOptions::new());
+            txn.put(key, b"value").unwrap();
+            txn.commit().unwrap();
+        };
+        let export = export_engine_tickers(&statistics);
+        let before = exported_commits();
+        for round in 0..3u8 {
+            commit(&[round]);
+            let total = exported_commits();
+            assert_eq!(total, before + u64::from(round) + 1);
+            assert_eq!(exported_commits(), total, "a second read adds nothing");
+        }
+        commit(b"after the last read");
+        drop(export);
+        assert_eq!(exported_commits(), before + 4);
+        commit(b"after the close");
+        assert_eq!(
+            exported_commits(),
+            before + 4,
+            "a closed engine adds nothing"
+        );
     }
 }

@@ -628,8 +628,7 @@ impl<S: Store> DB<S> {
     /// Wraps a BasicTxn created by a storage-owned retry attempt while keeping
     /// database-scoped caches shared with ordinary transactions.
     pub(crate) fn new_db_txn(&self, basic_txn: BasicTxn) -> DbTxn<S> {
-        DbTxn::new(basic_txn)
-            .with_vector_codes(self.vector_codes.clone())
+        DbTxn::of_database(basic_txn, self.vector_codes.clone())
             .with_shared_collections(Arc::clone(&self.collections))
     }
 
@@ -817,5 +816,20 @@ mod vector_cache_tests {
         let ordinary_cache = ordinary.vector_codes().get(17, 29);
         let retry_cache = retry.vector_codes().get(17, 29);
         assert!(Arc::ptr_eq(&ordinary_cache, &retry_cache));
+    }
+
+    /// A transaction of a database is built with the database's caches, so
+    /// it builds none of its own: each would allocate a lock-free map only to
+    /// drop it, on every transaction.
+    #[tokio::test]
+    async fn a_database_transaction_builds_no_code_caches() {
+        use crate::index::vector::engine::diskann::CODE_CACHES_BUILT;
+
+        let db = DB::new(storage::RegolithStore::in_memory().unwrap()).unwrap();
+        let built = CODE_CACHES_BUILT.with(std::cell::Cell::get);
+        for readonly in [true, false] {
+            db.new_txn(readonly).await.unwrap().discard().unwrap();
+        }
+        assert_eq!(CODE_CACHES_BUILT.with(std::cell::Cell::get), built);
     }
 }

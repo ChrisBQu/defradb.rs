@@ -40,6 +40,8 @@ mod graph;
 mod merge;
 mod params;
 
+#[cfg(test)]
+pub(crate) use cache::BUILT as CODE_CACHES_BUILT;
 pub use cache::{CodeCache, CodeCaches, Codes};
 pub use codec::State;
 pub use merge::MergePlan;

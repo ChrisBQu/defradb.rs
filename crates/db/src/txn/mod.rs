@@ -132,20 +132,26 @@ where
 impl<S: Store> DbTxn<S> {
     /// Create a new implicit DbTxn.
     pub fn new(txn: BasicTxn) -> Self {
+        Self::with_codes(txn, false, Arc::default())
+    }
+
+    /// An implicit transaction of a database, sharing its vector code caches.
+    /// Built with them rather than given them after: caches of its own would
+    /// allocate a lock-free map only to drop it, on every transaction.
+    pub(crate) fn of_database(txn: BasicTxn, codes: Arc<CodeCaches>) -> Self {
+        Self::with_codes(txn, false, codes)
+    }
+
+    fn with_codes(txn: BasicTxn, explicit: bool, vector_codes: Arc<CodeCaches>) -> Self {
         Self {
             txn: Some(txn),
-            explicit: false,
+            explicit,
             catalog: Catalog::new(),
-            vector_codes: Arc::default(),
+            vector_codes,
             shared_collections: None,
             statement_savepoint: None,
             _marker: std::marker::PhantomData,
         }
-    }
-
-    pub(crate) fn with_vector_codes(mut self, codes: Arc<CodeCaches>) -> Self {
-        self.vector_codes = codes;
-        self
     }
 
     pub(crate) fn vector_codes(&self) -> &Arc<CodeCaches> {
@@ -169,15 +175,7 @@ impl<S: Store> DbTxn<S> {
 
     /// Create a new explicit DbTxn.
     pub fn new_explicit(txn: BasicTxn) -> Self {
-        Self {
-            txn: Some(txn),
-            explicit: true,
-            catalog: Catalog::new(),
-            vector_codes: Arc::default(),
-            shared_collections: None,
-            statement_savepoint: None,
-            _marker: std::marker::PhantomData,
-        }
+        Self::with_codes(txn, true, Arc::default())
     }
 
     /// Consume this DB transaction into the engine's scoped retry attempt.
