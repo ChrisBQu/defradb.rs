@@ -38,6 +38,7 @@ pub mod action;
 pub mod backup;
 pub mod batch;
 pub mod block;
+pub mod call;
 pub mod collection;
 pub mod document;
 pub mod encrypted_index;
@@ -53,6 +54,7 @@ mod policy_yaml;
 #[cfg(feature = "profiling")]
 pub mod profiling;
 pub mod query;
+pub mod remote_signer;
 pub mod runtime;
 pub mod schema;
 pub mod se_key;
@@ -156,28 +158,34 @@ macro_rules! try_ffi {
     };
 }
 
-/// Run an async block, convert `Result<String, String>` to `FfiResult`.
+/// Run an async block on node `$node`'s worker pool, the C caller's thread
+/// parked until it completes, and convert its `Result<String, String>` to
+/// `FfiResult`. `caller` instead of a node runs the block on the caller's
+/// thread: for work that routes itself into the pool (a GraphQL request, an
+/// explicit transaction's call) or that only reads memory.
 #[macro_export]
 macro_rules! ffi_async {
-    ($rt:expr, $body:block) => {{
-        let result: Result<String, String> = $crate::helpers::block_on($rt, async $body);
-        match result {
-            Ok(json) => $crate::types::FfiResult::success(json),
-            Err(e) => $crate::types::FfiResult::error(e),
-        }
+    (caller, $body:block) => {
+        $crate::ffi_async!(@into String, $crate::call::wait(async move $body))
+    };
+    ($node:expr, $body:block) => {
+        $crate::ffi_async!(@into String, $crate::call::on_node($node, move || async move $body))
+    };
+    (@into $value:ty, $result:expr) => {{
+        let result: Result<$value, String> = $result;
+        $crate::types::FfiResult::from(result)
     }};
 }
 
-/// Run an async block for void operations, convert `Result<(), String>` to `FfiResult`.
+/// [`ffi_async!`] for void operations: `Result<(), String>` to `FfiResult`.
 #[macro_export]
 macro_rules! ffi_async_ok {
-    ($rt:expr, $body:block) => {{
-        let result: Result<(), String> = $crate::helpers::block_on($rt, async $body);
-        match result {
-            Ok(()) => $crate::types::FfiResult::ok(),
-            Err(e) => $crate::types::FfiResult::error(e),
-        }
-    }};
+    (caller, $body:block) => {
+        $crate::ffi_async!(@into (), $crate::call::wait(async move $body))
+    };
+    ($node:expr, $body:block) => {
+        $crate::ffi_async!(@into (), $crate::call::on_node($node, move || async move $body))
+    };
 }
 
 /// Expand the common `FfiResult` wrapper body for the
@@ -200,9 +208,7 @@ macro_rules! ffi_node_db_async_body {
         $body:block
     ) => {
         $crate::ffi_entry! {
-            let rt = $crate::try_ffi!($crate::helpers::get_rt());
             $crate::try_ffi!($crate::nac_check::check_nac_for_node(
-                rt,
                 $node_ptr,
                 $identity_did,
                 $permission
@@ -224,7 +230,7 @@ macro_rules! ffi_node_db_async_body {
                     .filter(|s| !s.is_empty());
             let $context = defra_core::RequestContext::default().with_identity(__ffi_identity);
 
-            $crate::ffi_async!(rt, $body)
+            $crate::ffi_async!($node_ptr, $body)
         }
     };
 }
@@ -235,7 +241,7 @@ pub use acp::{
     bind_identity_bearer_token, create_identity, delete_dac_actor_relationship,
     delete_nac_actor_relationship, disable_nac, enable_nac, get_dac_policy, get_nac_status,
     get_node_identity, list_dac_policies, node_set_default_identity, re_enable_nac,
-    register_remote_identity, register_remote_identity_bytes, RegisterIdentity,
+    RegisterIdentity,
 };
 pub use action::list_actions;
 pub use backup::{basic_export, basic_import};
@@ -269,7 +275,11 @@ pub use p2p::{
     p2p_shareable_address, p2p_sync_branchable_collection, p2p_sync_collection_versions,
     p2p_sync_documents, p2p_sync_status,
 };
-pub use query::exec_request;
+pub use query::{exec_request, exec_request_async};
+pub use remote_signer::{
+    defra_remote_sign_complete, register_remote_identity, register_remote_identity_async,
+    register_remote_identity_bytes, register_remote_identity_bytes_async,
+};
 pub use schema::{add_schema, add_schema_in_txn, get_collections, get_collections_in_txn};
 pub use se_key::set_se_encryption_key;
 pub use subscription::{

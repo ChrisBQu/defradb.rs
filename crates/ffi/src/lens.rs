@@ -8,7 +8,7 @@ use acp::nac::NodePermission;
 use std::ffi::c_char;
 
 use crate::ffi_entry;
-use crate::helpers::{get_rt, require_c_str};
+use crate::helpers::require_c_str;
 use crate::nac_check::check_nac_for_node;
 use crate::state::NODES;
 use crate::types::FfiResult;
@@ -42,9 +42,7 @@ pub unsafe extern "C" fn lens_add(
     lens_json: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::LensCreate
@@ -67,7 +65,7 @@ pub unsafe extern "C" fn lens_add(
                     None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
                 };
 
-                let result = crate::helpers::block_on(rt, async {
+                let result = crate::call::on_node(node_ptr, move || async move {
                     let transform_id = database
                         .set_migration_as(&context, full_config)
                         .await
@@ -88,7 +86,7 @@ pub unsafe extern "C" fn lens_add(
             None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
         };
 
-        let result = crate::helpers::block_on(rt, async {
+        let result = crate::call::on_node(node_ptr, move || async move {
             // Try parsing as Go's model.Lens format ({"Lenses": [...]}) first,
             // then fall back to single LensModule
             let modules: Vec<LensModule> =
@@ -147,9 +145,7 @@ pub unsafe extern "C" fn lens_add_in_txn(
     lens_json: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::LensCreate
@@ -166,7 +162,7 @@ pub unsafe extern "C" fn lens_add_in_txn(
         // reaches resolve the actual caller instead of the wildcard.
         let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()));
 
-        let result = crate::helpers::block_on(rt, async {
+        let result = crate::call::wait(async move {
             let modules: Vec<LensModule> =
                 if let Ok(lens_obj) = serde_json::from_str::<serde_json::Value>(&lens_str) {
                     if let Some(lenses_arr) = lens_obj.get("Lenses").and_then(|v| v.as_array()) {
@@ -216,9 +212,7 @@ pub unsafe extern "C" fn lens_add_in_txn(
 #[no_mangle]
 pub unsafe extern "C" fn lens_list(node_ptr: usize, identity_did: *const c_char) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::LensList
@@ -229,7 +223,7 @@ pub unsafe extern "C" fn lens_list(node_ptr: usize, identity_did: *const c_char)
             None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
         };
 
-        ffi_async!(rt, {
+        ffi_async!(node_ptr, {
             let lenses = lens_store
                 .list()
                 .await
@@ -255,9 +249,7 @@ pub unsafe extern "C" fn lens_list_in_txn(
     identity_did: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::LensList
@@ -273,7 +265,7 @@ pub unsafe extern "C" fn lens_list_in_txn(
         // reaches resolve the actual caller instead of the wildcard.
         let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()));
 
-        ffi_async!(rt, {
+        ffi_async!(caller, {
             let lenses = registry
                 .list_lenses_in_txn_as(&context, &txn_str)
                 .await

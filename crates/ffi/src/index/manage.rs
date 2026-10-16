@@ -5,7 +5,7 @@ use defra_core::{ActionExecution, ActionStatus};
 use serde::Serialize;
 use storage::corekv::Key;
 
-use crate::helpers::{get_node_database, get_rt, require_c_str};
+use crate::helpers::{get_node_database, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::types::FfiResult;
 use crate::{ffi_async, ffi_entry, try_ffi};
@@ -110,9 +110,7 @@ pub unsafe extern "C" fn delete_index(
     index_name: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::IndexDelete
@@ -121,7 +119,7 @@ pub unsafe extern "C" fn delete_index(
         let index_name_str = try_ffi!(require_c_str(index_name, "index_name"));
         let database = try_ffi!(get_node_database(node_ptr));
 
-        ffi_async!(rt, {
+        ffi_async!(node_ptr, {
             // Get the collection
             let collection = database
                 .get_collection(&collection_name_str)
@@ -245,9 +243,7 @@ pub unsafe extern "C" fn get_indexes(
     collection_name: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::IndexList
@@ -259,7 +255,7 @@ pub unsafe extern "C" fn get_indexes(
         // reaches resolve the actual caller instead of the wildcard.
         let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()));
 
-        ffi_async!(rt, {
+        ffi_async!(node_ptr, {
             // Get the collection
             let collection = database
                 .get_collection(&collection_name_str)
@@ -300,9 +296,7 @@ pub unsafe extern "C" fn list_all_indexes(
     identity_did: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::IndexList
@@ -313,7 +307,7 @@ pub unsafe extern "C" fn list_all_indexes(
         // reaches resolve the actual caller instead of the wildcard.
         let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()));
 
-        ffi_async!(rt, {
+        ffi_async!(node_ptr, {
             // Get all collection names
             let names = database
                 .list_collections()

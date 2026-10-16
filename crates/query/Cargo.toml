@@ -81,6 +81,8 @@ tokio = { version = "1.35", default-features = false, features = ["rt", "time"] 
 async-lock.workspace = true
 defra-core = { path = "../defra-core", features = ["ambient"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+# regolith::sync events the pooled boundary's tests wait on.
+regolith.workspace = true
 
 [lints]
 workspace = true

@@ -280,7 +280,7 @@ pub extern "C" fn node_close(node_ptr: usize) -> FfiResult {
 
         let removed_subs = SUBSCRIPTIONS.remove_for_node(node_ptr);
         for sub_state in removed_subs {
-            let sub_id = sub_state.subscription.lock().id();
+            let sub_id = sub_state.subscription.id();
             NODES.get(node_ptr, |state| {
                 state.event_bus.unsubscribe(sub_id);
             });

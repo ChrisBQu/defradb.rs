@@ -14,7 +14,11 @@
 //!   come: its transaction registry sends each to the worker that owns the
 //!   transaction, so routing them here would add a hop;
 //! - preparing a request's remote inputs (embeddings, keys) is network
-//!   work: it runs where the caller is, before the request enters the pool.
+//!   work: it runs where the caller is, before the request enters the pool;
+//! - a request whose caller is called back ([`QueryExecutor::execute_then`],
+//!   the C FFI's asynchronous calls) is admitted and left running: its
+//!   response goes to the callback on the worker that ran it, so it crosses
+//!   back no thread at all.
 //!
 //! A request carries its [`RequestContext`] into the pool, and the
 //! transaction calls that take one pass it through to the inner executor.
@@ -27,10 +31,11 @@ use async_trait::async_trait;
 
 pub use route::document_key;
 
+use defra_core::thread_bounds::MaybeBoxFuture;
 use defra_core::RequestContext;
 
 use crate::error::{QueryError, Result, TransactionError};
-use crate::executor::{QueryExecutor, QueryRequest, QueryResponse};
+use crate::executor::{QueryExecutor, QueryRequest, QueryResponse, ResponseCallback};
 use crate::prepared::{PreparedInputRequest, PreparedMutations};
 use crate::txn::TransactionHandle;
 
@@ -195,6 +200,30 @@ impl QueryExecutor for PooledExecutor {
             inner.schema().await
         })
         .await?
+    }
+
+    fn execute_then<'a>(
+        &'a self,
+        request: QueryRequest,
+        done: ResponseCallback,
+    ) -> MaybeBoxFuture<'a, ()> {
+        let target = route::request_target(&request);
+        let inner = Arc::clone(&self.inner);
+        Box::pin(async move {
+            // The completion is dropped: the task runs on and answers `done`
+            // itself. A pool that refuses the request drops the task, and
+            // `done` with it, uncalled.
+            if let Err(error) = self
+                .pool
+                .submit(
+                    target,
+                    move || async move { done(inner.execute(request).await) },
+                )
+                .await
+            {
+                tracing::debug!(%error, "an asynchronous request was not admitted");
+            }
+        })
     }
 }
 

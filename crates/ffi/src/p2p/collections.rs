@@ -26,7 +26,6 @@ pub unsafe extern "C" fn p2p_add_collections(
     ffi_entry! {
         let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::P2pCollectionAdd
@@ -79,7 +78,6 @@ pub unsafe extern "C" fn p2p_delete_collections(
     ffi_entry! {
         let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::P2pCollectionDelete
@@ -131,7 +129,6 @@ pub unsafe extern "C" fn p2p_list_collections(
     ffi_entry! {
         let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::P2pCollectionList

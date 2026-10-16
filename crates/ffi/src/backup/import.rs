@@ -2,7 +2,7 @@ use std::ffi::c_char;
 use std::fs;
 
 use crate::ffi_entry;
-use crate::helpers::{get_rt, require_c_str};
+use crate::helpers::require_c_str;
 use crate::state::NODES;
 use crate::types::FfiResult;
 use crate::{ffi_async_ok, try_ffi, ERR_INVALID_NODE_HANDLE};
@@ -26,7 +26,6 @@ use crate::{ffi_async_ok, try_ffi, ERR_INVALID_NODE_HANDLE};
 #[no_mangle]
 pub unsafe extern "C" fn basic_import(node_ptr: usize, filepath: *const c_char) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         let path_str = try_ffi!(require_c_str(filepath, "filepath"));
 
         let (database, runner) = match NODES.get(node_ptr, |state| {
@@ -36,7 +35,7 @@ pub unsafe extern "C" fn basic_import(node_ptr: usize, filepath: *const c_char) 
             None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
         };
 
-        ffi_async_ok!(rt, {
+        ffi_async_ok!(node_ptr, {
             let content = fs::read_to_string(&path_str).map_err(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {
                     format!("failed to open file '{}': {}", path_str, e)

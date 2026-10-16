@@ -26,7 +26,6 @@ pub unsafe extern "C" fn p2p_sync_documents(
     ffi_entry! {
         let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::P2pSyncDocuments
@@ -81,7 +80,6 @@ pub unsafe extern "C" fn p2p_sync_branchable_collection(
     ffi_entry! {
         let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::P2pSyncBranchableCollection

@@ -80,9 +80,7 @@ pub unsafe extern "C" fn add_dac_policy(
     policy: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             _identity_did,
             NodePermission::DacPolicyAdd
@@ -131,8 +129,8 @@ pub unsafe extern "C" fn add_dac_policy(
 
         #[cfg(feature = "vera")]
         if let Some(sh_acp) = sh_acp {
-            // Vera mode: submit MsgCreatePolicy transaction
-            let result = crate::helpers::block_on(rt, async {
+            // Vera mode: submit MsgCreatePolicy transaction, network work.
+            let result = crate::helpers::block_on(try_ffi!(get_rt()), async {
                 let policy_id = sh_acp
                     .add_policy(&identity_str, &policy_str)
                     .await
@@ -166,8 +164,9 @@ pub unsafe extern "C" fn add_dac_policy(
                 return FfiResult::error("local ACP backend is not available");
             };
 
-            let counter = match crate::helpers::block_on(rt, async {
-                local_zanzibar_store
+            let counter_store = std::sync::Arc::clone(&local_zanzibar_store);
+            let counter = match crate::call::on_node(node_ptr, move || async move {
+                counter_store
                     .next_policy_counter()
                     .await
                     .map_err(|e| e.to_string())
@@ -189,14 +188,15 @@ pub unsafe extern "C" fn add_dac_policy(
                 .with_validation()
                 .with_dpi_enforcement();
 
-            let result = crate::helpers::block_on(rt, async {
+            let stored_id = policy_id.clone();
+            let result = crate::call::on_node(node_ptr, move || async move {
                 local_zanzibar_store
                     .store_policy_with_options(&policy, &options)
                     .await
                     .map_err(|e| format!("failed to store policy: {}", e))?;
                 Ok::<String, String>(
                     serde_json::json!({
-                        "PolicyID": policy_id
+                        "PolicyID": stored_id
                     })
                     .to_string(),
                 )
@@ -296,7 +296,6 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
     ffi_entry! {
         let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             requestor_did,
             NodePermission::DacRelationAdd
@@ -446,7 +445,6 @@ pub unsafe extern "C" fn delete_dac_actor_relationship(
     ffi_entry! {
         let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             requestor_did,
             NodePermission::DacRelationDelete

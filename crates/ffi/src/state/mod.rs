@@ -168,9 +168,10 @@ impl NodeState {
 
 /// State held for each FFI subscription.
 pub struct SubscriptionState {
-    /// The underlying events subscription. `events::Subscription::try_recv`
-    /// takes `&mut self`, so polling needs exclusive access to this one value.
-    pub subscription: parking_lot::Mutex<events::Subscription>,
+    /// The underlying events subscription, polled through a shared
+    /// reference (`try_take`): polls of one handle never wait on each other,
+    /// and each event goes to exactly one of them.
+    pub subscription: events::Subscription,
     /// The node handle this subscription belongs to.
     pub node_handle: NodeHandle,
     /// Optional collection name filter (None = all collections).

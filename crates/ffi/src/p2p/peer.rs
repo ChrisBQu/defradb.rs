@@ -22,7 +22,6 @@ pub unsafe extern "C" fn p2p_peer_info(node_ptr: usize, identity_did: *const c_c
     ffi_entry! {
         let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::P2pPeerInfo
@@ -106,7 +105,6 @@ pub unsafe extern "C" fn p2p_shareable_address(
     ffi_entry! {
         let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::P2pPeerInfo
@@ -161,7 +159,6 @@ pub unsafe extern "C" fn p2p_notify_network_change(
     ffi_entry! {
         let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::P2pPeerConnect
@@ -207,7 +204,6 @@ pub unsafe extern "C" fn p2p_active_peers(
     ffi_entry! {
         let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::P2pPeerActive
@@ -262,7 +258,6 @@ pub unsafe extern "C" fn p2p_connect(
     ffi_entry! {
         let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::P2pPeerConnect
@@ -311,7 +306,6 @@ pub unsafe extern "C" fn p2p_disconnect(
     ffi_entry! {
         let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::P2pPeerDisconnect

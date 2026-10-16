@@ -28,7 +28,6 @@ pub unsafe extern "C" fn p2p_add_replicator(
     ffi_entry! {
         let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::P2pReplicatorAdd
@@ -94,7 +93,6 @@ pub unsafe extern "C" fn p2p_add_replicator_with_filter(
     ffi_entry! {
         let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::P2pReplicatorAdd
@@ -163,7 +161,6 @@ pub unsafe extern "C" fn p2p_delete_replicator(
     ffi_entry! {
         let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::P2pReplicatorDelete
@@ -225,7 +222,6 @@ pub unsafe extern "C" fn p2p_list_replicators(
     ffi_entry! {
         let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::P2pReplicatorList
