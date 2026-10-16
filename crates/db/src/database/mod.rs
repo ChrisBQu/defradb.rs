@@ -47,8 +47,8 @@ pub struct DbOptions {
     pub embedding_api_key: String,
     /// The worker pool this database's work runs on: its periodic and
     /// detached jobs, and the pool [`DB::close`] stops before the store
-    /// closes. `None` (a test, a one-shot tool) runs them on the fallback
-    /// pool.
+    /// closes. `None` (a test, a one-shot tool) runs them on the process's
+    /// default pool.
     pub pool: Option<workers::Pool>,
 }
 
@@ -719,6 +719,15 @@ impl<S: Store> DB<S> {
     /// The pool this database's work runs on, when it was given one.
     pub fn pool(&self) -> Option<&workers::Pool> {
         self.options.pool.as_ref()
+    }
+
+    /// The pool this database's pool work runs on: its own, else the
+    /// process's default pool ([`workers::default_pool`]).
+    pub fn pool_or_default(&self) -> std::result::Result<workers::Pool, workers::Error> {
+        self.options
+            .pool
+            .clone()
+            .map_or_else(workers::default_pool, Ok)
     }
 
     /// Returns true if the database has been closed.

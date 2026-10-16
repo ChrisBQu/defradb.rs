@@ -11,6 +11,9 @@ use crate::block::builder::{
 };
 use crate::write::prepare::PreparedCreateBlocks;
 
+#[cfg(feature = "native")]
+mod runs;
+
 struct AcpRegistration {
     acp: Arc<dyn acp::DocumentACP>,
     creator: identity::Did,
@@ -636,78 +639,51 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             identities.push(identity);
         }
 
-        // Compute blocks (spread over the pool's workers on native,
-        // sequential on WASM). A failure aborts the batch: without blocks
-        // there is no derived DocID. Each document's blocks are a task on the
-        // least-loaded worker, its inputs passed by value; this task joins
-        // them. A database with no pool computes them inline.
+        // Compute blocks (spread over a pool's workers and this task on
+        // native, sequential on WASM): the database's pool, else the
+        // process's default pool; on a worker before the default pool has
+        // started (starting it would block the worker), all here. A failure
+        // aborts the batch: without blocks there is no derived DocID.
         #[cfg(feature = "native")]
-        let computed_blocks: Vec<ComputedBlocks> = {
-            let pool = self.db.pool().cloned();
-            let block_futures: Vec<_> = prepared_docs
-                .iter()
-                .zip(identities.iter())
-                .map(|(doc, identity)| {
-                    let doc_clone = doc.clone();
-                    let schema = schema_version_id.clone();
-                    let identity = *identity;
-                    let context = context.clone();
-                    let memo = self.prepared_inputs.clone();
-                    let compute = move || async move {
-                        compute_document_blocks_with_inputs(
-                            &doc_clone,
-                            &schema,
-                            identity,
-                            context.encryption(),
-                            context.signing(),
-                            memo.as_ref(),
-                        )
-                    };
-                    let pool = pool.clone();
-                    async move {
-                        match pool {
-                            Some(pool) => {
-                                pool.submit_with(
-                                    workers::Target::LeastLoaded,
-                                    workers::Submit {
-                                        name: Some("db::create_blocks"),
-                                        bytes: None,
-                                    },
-                                    compute,
-                                )
-                                .await?
-                                .await
-                            }
-                            None => Ok(compute().await),
-                        }
-                    }
-                })
-                .collect();
-
-            let computed_results = futures::future::join_all(block_futures).await;
-
-            let mut computed = Vec::with_capacity(computed_results.len());
-            for join_result in computed_results {
-                let blocks = match join_result {
-                    Ok(Ok(blocks)) => blocks,
-                    Ok(Err(crate::block::builder::BuildError::NeedsInput(request))) => {
+        let (prepared_docs, computed_blocks): (Vec<Document>, Vec<ComputedBlocks>) = {
+            let pool = match self.db.pool_or_default() {
+                Ok(pool) => Some(pool),
+                Err(workers::Error::OnWorker) => None,
+                Err(error) => {
+                    return Err(query::error::QueryError::execution(format!(
+                        "no worker pool can compute the document blocks: {error}"
+                    )));
+                }
+            };
+            let count = prepared_docs.len();
+            let computed = runs::compute_blocks(
+                pool.as_ref(),
+                prepared_docs
+                    .into_iter()
+                    .zip(identities.iter().copied())
+                    .collect(),
+                &schema_version_id,
+                context,
+                self.prepared_inputs.as_ref(),
+            )
+            .await?;
+            let mut docs = Vec::with_capacity(count);
+            let mut blocks = Vec::with_capacity(count);
+            for (doc, computed) in computed {
+                match computed {
+                    Ok(computed) => blocks.push(computed),
+                    Err(crate::block::builder::BuildError::NeedsInput(request)) => {
                         return Err(query::error::QueryError::NeedsInput(request));
                     }
-                    Ok(Err(error)) => {
+                    Err(error) => {
                         return Err(query::error::QueryError::execution(format!(
                             "failed to compute document blocks: {error}"
                         )));
                     }
-                    Err(e) => {
-                        return Err(query::error::QueryError::execution(format!(
-                            "block computation task failed: {}",
-                            e
-                        )));
-                    }
-                };
-                computed.push(blocks);
+                }
+                docs.push(doc);
             }
-            computed
+            (docs, blocks)
         };
 
         #[cfg(not(feature = "native"))]

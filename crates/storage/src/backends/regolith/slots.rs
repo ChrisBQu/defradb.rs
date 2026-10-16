@@ -77,7 +77,7 @@ impl TxnSlots {
             return Ok(());
         }
         // The deadline is a timer on the pool's deadline queue: the calling
-        // worker's, or the fallback pool's off the pool.
+        // worker's, or the process's default pool's off the pool.
         match workers::timeout(timeout, self.idle.wait()).await {
             Ok(()) => Ok(()),
             Err(workers::Error::TimedOut) => Err(Error::Backend(format!(

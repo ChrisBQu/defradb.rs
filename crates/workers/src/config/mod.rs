@@ -24,15 +24,26 @@ pub enum Workers {
     /// Linux: the allowed physical cores (logical CPUs with [`Smt::All`]),
     /// within the cgroup CPU quota, minus the edge's and compaction's threads.
     /// macOS: the performance cores. Elsewhere: the available parallelism.
+    /// A placed pool counts only the cores no other placed pool holds, and
+    /// what those hold counts against the quota; with none free it is one
+    /// unpinned worker, and its report says so.
     Auto,
-    /// Exactly this many (at least one).
+    /// Exactly this many (at least one). A placed pool that cannot give each
+    /// a CPU no other pool holds shares CPUs with them, and its report says
+    /// so.
     Count(usize),
 }
 
-/// Where workers run.
+/// Where workers run. A pinned (placed) pool holds whole cores no other
+/// placed pool of the process holds: its workers' cores and the spare cores
+/// its other threads run on, until it and everything placed through it are
+/// gone. Where the OS cannot pin (macOS), the hold still divides the
+/// machine's cores between pools for sizing, and the OS decides where each
+/// thread runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Placement {
-    /// Not pinned: the OS places them. The default on macOS, which cannot pin.
+    /// Not pinned: the OS places them, beside whatever runs, and the pool
+    /// holds no CPU. The default on macOS, which cannot pin.
     Unpinned,
     /// Pinned, alternating NUMA nodes, and L3 domains within a node, so load
     /// reaches every memory controller and cache first. The default on Linux.
@@ -190,10 +201,33 @@ impl Default for Config {
 }
 
 impl Config {
+    /// A pool of its own for one kind of work (compute, say): as many
+    /// workers as there are cores no other pool of the process holds
+    /// ([`Workers::Auto`]), placed as by default, keeping no cores for a
+    /// network edge or compaction, its threads named `name-<index>`. Change
+    /// fields as needed; the pool finds its CPUs, never its caller.
+    ///
+    /// ```no_run
+    /// let compute = workers::Pool::start(workers::Config::named("compute"))?;
+    /// let sum = compute.submit_and_wait(workers::Target::LeastLoaded, || async {
+    ///     (1..=10u64).sum::<u64>()
+    /// })?;
+    /// assert_eq!(sum, 55);
+    /// # Ok::<(), workers::Error>(())
+    /// ```
+    pub fn named(name: &str) -> Config {
+        Config {
+            thread_name: name.to_owned(),
+            edge_threads: Some(0),
+            compaction_threads: 0,
+            ..Config::default()
+        }
+    }
+
     /// `workers` workers that leave the machine as they found it: unpinned,
     /// at the priority and memory policy their threads start with, beside
     /// one blocking thread. For a pool that runs beside other work rather
-    /// than owning the machine: a test, a one-shot tool, the fallback pool.
+    /// than owning the machine: a test, a one-shot tool.
     pub fn unplaced(workers: usize) -> Config {
         Config {
             workers: Workers::Count(workers.max(1)),

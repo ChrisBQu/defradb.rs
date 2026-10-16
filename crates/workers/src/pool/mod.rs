@@ -1,12 +1,13 @@
 //! The pool: its workers' threads, submission and admission, the blocking
 //! pool, the stuck-poll monitor, the placement of every thread, and shutdown.
 //!
-//! [`Pool::start`] reads the topology, plans each worker's place, locks
-//! memory if asked, starts one thread per worker (each pins itself, sets its
-//! memory policy and priority, then builds its hook so what the hook
-//! allocates is node-local), waits for all of them, and logs once what the OS
-//! granted. [`Pool::driven`] is the same pool with one worker that the
-//! caller's thread drives (wasm, single-core embedded).
+//! [`Pool::start`] reads the topology, plans each worker's place on the
+//! cores no other placed pool of the process holds, locks memory if asked,
+//! starts one thread per worker (each pins itself, sets its memory policy
+//! and priority, then builds its hook so what the hook allocates is
+//! node-local), waits for all of them, and logs once what the OS granted.
+//! [`Pool::driven`] is the same pool with one worker that the caller's thread
+//! drives (wasm, single-core embedded).
 
 mod background;
 mod batch;
@@ -15,6 +16,7 @@ mod blocking;
 #[cfg(all(test, not(target_family = "wasm")))]
 mod datapath_tests;
 mod deadline;
+mod default;
 mod detached;
 mod driven;
 mod env;
@@ -36,7 +38,8 @@ use regolith::sync::{Latch, LatchWait};
 
 pub use background::{spawn_background, Background};
 pub use deadline::{delay, timeout, Delay};
-pub use detached::{fallback, run_on, spawn, spawn_detached};
+pub use default::default_pool;
+pub use detached::{run_on, spawn, spawn_detached};
 pub use driven::Driver;
 pub use env::PlacedEnv;
 pub use monitor::{Monitor, MonitorDriver};

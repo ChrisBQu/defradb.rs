@@ -196,8 +196,8 @@ pub(crate) struct PreparedLens {
 impl PreparedLens {
     /// Builds the blocks of `config`'s first module, read from its bytes or
     /// its path. A path is read here, once, on a blocking thread of `pool`
-    /// (the fallback pool's without one): committing the lens later never
-    /// reads it again.
+    /// (the process's default pool's without one): committing the lens later
+    /// never reads it again.
     pub(crate) async fn new(config: LensConfig, pool: Option<&workers::Pool>) -> Result<Self> {
         let first_lens = config
             .lens()
@@ -213,8 +213,8 @@ impl PreparedLens {
                     Error::Lens(format!("failed to read WASM from {}: {}", path, e))
                 };
                 let pool = match pool {
-                    Some(pool) => pool,
-                    None => workers::fallback().map_err(|e| unread(&e))?,
+                    Some(pool) => pool.clone(),
+                    None => workers::default_pool().map_err(|e| unread(&e))?,
                 };
                 pool.spawn_blocking(move || std::fs::read(clean_path))
                     .await

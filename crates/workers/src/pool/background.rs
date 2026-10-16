@@ -35,7 +35,8 @@ enum State {
 }
 
 /// Runs the future `make` builds in the background: on the calling worker
-/// when called on one, else on `pool` (the fallback pool when `None`), until
+/// when called on one, else on `pool` (the process's default pool when
+/// `None`), until
 /// it ends, [`Background::abort`] is called, or its worker stops. When no
 /// pool can take it (it shut down, or none can start on this target) that
 /// is logged as an error, and awaiting the handle gives the reason.

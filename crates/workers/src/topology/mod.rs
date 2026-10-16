@@ -141,6 +141,32 @@ impl Topology {
         all
     }
 
+    /// This machine restricted to `cpus`: each core keeps only those of its
+    /// CPUs, and cores and nodes left with none are dropped.
+    pub(crate) fn within(&self, cpus: &CpuSet) -> Topology {
+        let nodes = self
+            .nodes
+            .iter()
+            .map(|node| Node {
+                id: node.id,
+                cores: node
+                    .cores
+                    .iter()
+                    .map(|core| Core {
+                        cpus: core.cpus.intersection(cpus),
+                        ..core.clone()
+                    })
+                    .filter(|core| !core.cpus.is_empty())
+                    .collect(),
+            })
+            .filter(|node| !node.cores.is_empty())
+            .collect();
+        Topology {
+            nodes,
+            ..self.clone()
+        }
+    }
+
     /// The node `cpu` belongs to, if it is allowed.
     pub fn node_of(&self, cpu: usize) -> Option<usize> {
         self.cores()

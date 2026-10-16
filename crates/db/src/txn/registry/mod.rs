@@ -77,7 +77,7 @@ impl CleanupResult {
 ///
 /// Implements `query::TransactionRegistry`. The transactions live on the
 /// workers of a [`workers::Pool`]: the one given at construction, else the
-/// database's, else the process-wide fallback pool. In a browser the page's
+/// database's, else the process's default pool. In a browser the page's
 /// one worker owns them all.
 pub struct DbTransactionRegistry<S: Store + 'static> {
     db: Arc<DB<S>>,
@@ -210,12 +210,9 @@ fn unavailable(error: Unavailable, handle: &query::txn::TransactionHandle) -> Tr
 }
 
 /// The pool a registry built without one runs on: the database's, else the
-/// process-wide fallback pool (a test, a one-shot tool).
+/// process's default pool (a test, a one-shot tool).
 fn pool_of<S: Store>(db: &DB<S>) -> std::result::Result<workers::Pool, workers::Error> {
-    match db.pool() {
-        Some(pool) => Ok(pool.clone()),
-        None => workers::fallback().cloned(),
-    }
+    db.pool_or_default()
 }
 
 #[cfg(not(target_family = "wasm"))]

@@ -4,19 +4,19 @@
 //!
 //! Called on a worker, the work is a task of that worker: it stays on the
 //! core that started it. Called anywhere else, it goes to the pool the
-//! caller names, or, for code that runs where no pool was set up (a test, a
-//! one-shot tool), to a small process-wide fallback pool started on first
-//! use. A submission that finds no room waits for it on the calling plain
-//! thread, so spawned work is never dropped.
+//! caller names, or to the process's default pool ([`default_pool`]). A
+//! submission that finds no room waits for it on the calling plain thread,
+//! so spawned work is never dropped.
 
 use std::future::Future;
 
-use super::{Pool, Submit, Target};
+use super::{default_pool, Pool, Submit, Target};
 use crate::Error;
 
 /// Runs the future `make` builds to its end: on the calling worker when
-/// called on one; otherwise on `pool`, or on the fallback pool when `pool` is
-/// `None`. Returns its completion; dropping it leaves the work running.
+/// called on one; otherwise on `pool`, or on the process's default pool
+/// ([`default_pool`]) when `pool` is `None`. Returns its completion; dropping
+/// it leaves the work running.
 /// Errors only when no pool can take it: the pool shut down, or no pool can
 /// start on this target.
 ///
@@ -40,15 +40,14 @@ where
     if crate::worker::on_worker() {
         return crate::worker::spawn_named(name, make());
     }
-    let pool = match pool {
-        Some(pool) => pool,
-        None => fallback()?,
-    };
     let options = Submit {
         name: Some(name),
         bytes: None,
     };
-    submit_now(pool, Target::LeastLoaded, options, make)
+    match pool {
+        Some(pool) => submit_now(pool, Target::LeastLoaded, options, make),
+        None => submit_now(&default_pool()?, Target::LeastLoaded, options, make),
+    }
 }
 
 /// Runs the future `make` builds on the pool and hands its output back: in
@@ -156,33 +155,6 @@ where
     Fut::Output: Send + 'static,
 {
     Err(Error::Full)
-}
-
-/// The process-wide pool for work submitted where no pool runs: one worker,
-/// unplaced ([`Config::unplaced`](crate::Config::unplaced)), started on first
-/// use and kept for the life of the process. It serves code that runs off
-/// every pool (a test, a one-shot tool) and the timers of waits made off a
-/// worker, such as the deadline of a pool's own [`Pool::stop`].
-#[cfg(not(target_family = "wasm"))]
-pub fn fallback() -> Result<&'static Pool, Error> {
-    static FALLBACK: regolith::sync::OnceCell<Pool> = regolith::sync::OnceCell::new();
-    if let Some(pool) = FALLBACK.get() {
-        return Ok(pool);
-    }
-    let pool = Pool::start(crate::Config {
-        thread_name: "defra-fallback".to_owned(),
-        ..crate::Config::unplaced(1)
-    })?;
-    // A racing start loses here; its pool shuts down when dropped.
-    let _ = FALLBACK.set(pool);
-    FALLBACK.get().ok_or(Error::ShutDown)
-}
-
-/// A browser starts no threads: its one worker is the page's own, driven by
-/// its event loop, and work submitted off it has nowhere else to go.
-#[cfg(target_family = "wasm")]
-pub fn fallback() -> Result<&'static Pool, Error> {
-    Err(Error::NotOnWorker)
 }
 
 #[cfg(all(test, not(target_family = "wasm")))]

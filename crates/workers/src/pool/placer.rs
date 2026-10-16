@@ -4,12 +4,16 @@
 //!
 //! Workers take the plan's seats. Every other class (edge, periodic,
 //! compaction, blocking) takes the background CPUs, one node per thread in
-//! turn. A class's first fallback is warned about once; the workers' are
-//! summed up in the start-up report instead.
+//! turn. The placer keeps the pool's hold on its CPUs: they go back to the
+//! ledger once the pool, its blocking threads and every env placing threads
+//! through it are gone. A class's first fallback is warned about once; the
+//! workers' are summed up in the start-up report instead.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::config::{MemoryPolicy, Priorities, ThreadClass};
+#[cfg(not(target_family = "wasm"))]
+use crate::ledger::Hold;
 use crate::os::{self, Os, Outcome, Scheduling};
 use crate::placement::Plan;
 use crate::topology::CpuSet;
@@ -44,6 +48,10 @@ pub(crate) struct Placer {
     placed: [AtomicUsize; 5],
     /// Whether a class's fallback was warned about already.
     warned: [AtomicBool; 5],
+    /// The CPUs the plan holds in the process's ledger, given back once
+    /// nothing places threads through this placer any more.
+    #[cfg(not(target_family = "wasm"))]
+    _hold: Option<Hold<'static>>,
 }
 
 fn slot(class: ThreadClass) -> usize {
@@ -67,6 +75,17 @@ impl Placer {
             memory_policy,
             placed: Default::default(),
             warned: Default::default(),
+            #[cfg(not(target_family = "wasm"))]
+            _hold: None,
+        }
+    }
+
+    /// This placer, keeping `hold` for as long as it lives.
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) fn holding(self, hold: Option<Hold<'static>>) -> Placer {
+        Placer {
+            _hold: hold,
+            ..self
         }
     }
 

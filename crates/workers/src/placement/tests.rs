@@ -3,7 +3,7 @@ use crate::topology::{Node, Source};
 
 /// A Linux-numbered machine: `nodes` nodes of `domains` L3 domains of `cores`
 /// cores, `smt` siblings each; core `c`'s siblings are `c`, `c + total`, ...
-fn machine(nodes: usize, domains: usize, cores: usize, smt: usize) -> Topology {
+pub(super) fn machine(nodes: usize, domains: usize, cores: usize, smt: usize) -> Topology {
     let total = nodes * domains * cores;
     let mut next = 0;
     let nodes = (0..nodes)
@@ -33,7 +33,7 @@ fn machine(nodes: usize, domains: usize, cores: usize, smt: usize) -> Topology {
     }
 }
 
-fn config(workers: Workers, placement: Placement) -> Config {
+pub(super) fn config(workers: Workers, placement: Placement) -> Config {
     Config {
         workers,
         placement,

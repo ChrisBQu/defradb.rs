@@ -9,12 +9,20 @@
 //! CPUs were asked for, which the plan flags. CPUs no worker sits on (whole
 //! spare cores first, spare siblings otherwise) are the background set the
 //! edge, compaction and blocking threads run on.
+//!
+//! A pool that starts plans on the CPUs no other placed pool holds
+//! ([`reserve`]), so pools never share a core.
+
+#[cfg(not(target_family = "wasm"))]
+mod reserve;
+#[cfg(test)]
+mod tests;
+
+#[cfg(not(target_family = "wasm"))]
+pub(crate) use reserve::{reserve, Reserved};
 
 use crate::config::{Config, Placement, Smt, Workers};
 use crate::topology::{Core, CoreKind, CpuSet, Topology};
-
-#[cfg(test)]
-mod tests;
 
 /// One worker's place.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -39,10 +47,17 @@ pub(crate) struct Plan {
 
 impl Plan {
     /// The background CPUs for the `index`th thread of a class: one node per
-    /// thread, round robin; empty (unpinned) when nothing is left over.
+    /// thread, round robin. When nothing is left over, the workers' own CPUs,
+    /// so a placed pool's threads stay on the CPUs it holds; empty
+    /// (unpinned) for an unpinned pool.
     pub fn background_for(&self, index: usize) -> (usize, CpuSet) {
         if self.background.is_empty() {
-            return (0, CpuSet::new());
+            let mut seated = CpuSet::new();
+            self.seats
+                .iter()
+                .for_each(|seat| seated.union_with(&seat.cpus));
+            let node = self.seats.first().map_or(0, |seat| seat.node);
+            return (node, seated);
         }
         self.background[index % self.background.len()].clone()
     }
@@ -74,12 +89,17 @@ fn auto_count(topology: &Topology, config: &Config) -> usize {
     }
     let all: usize = topology.cores().map(|(_, core)| units(core)).sum();
     let usable = topology.cpu_quota.map_or(all, |quota| all.min(quota));
+    usable.saturating_sub(set_aside(topology, config)).max(1)
+}
+
+/// The cores a pool keeps for its own threads besides the workers: the
+/// network edge's (one per node, at least two, unless configured) and
+/// compaction's. [`Workers::Auto`] leaves them out of its count.
+fn set_aside(topology: &Topology, config: &Config) -> usize {
     let edge = config
         .edge_threads
         .unwrap_or_else(|| topology.nodes.len().max(2));
-    usable
-        .saturating_sub(edge + config.compaction_threads)
-        .max(1)
+    edge + config.compaction_threads
 }
 
 /// Every worker's place on `topology` under `config`.

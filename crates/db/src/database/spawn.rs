@@ -1,6 +1,6 @@
 //! Detached work of a database: a task of the worker that starts it, or,
-//! off the pool, of the database's pool (the fallback pool where it has
-//! none: a test, a one-shot tool).
+//! off the pool, of the database's pool (the process's default pool where
+//! it has none: a test, a one-shot tool).
 
 /// Runs `future` to its end with nobody awaiting it. Failing to place it is
 /// said out loud: only a stopped pool refuses work.

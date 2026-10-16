@@ -387,7 +387,7 @@ impl Ended {
 }
 
 /// Runs `callbacks` in order as one detached task: on the worker that ended
-/// the transaction, or, off the pool, on the fallback pool (a test, a tool).
+/// the transaction, or, off the pool, on the process's default pool.
 fn spawn_in_order(callbacks: Vec<AsyncTxnCallback>) {
     let count = callbacks.len();
     let run = async move {

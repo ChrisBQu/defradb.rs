@@ -13,6 +13,7 @@ use super::report::{Report, TopologySummary, WorkerReport};
 use super::{build_hook, Pool, PoolShared};
 use crate::config::Config;
 use crate::hook::HookFactory;
+use crate::ledger::Ledger;
 use crate::topology::Topology;
 use crate::worker::{every, Parker, Tuning, Worker};
 use crate::{clock, os, placement, Error};
@@ -31,12 +32,28 @@ impl Startup {
 }
 
 impl Pool {
-    /// Starts a pool on this machine as `config` says. No OS setting it asks
-    /// for is a hard error: each falls back to a weaker one, and
-    /// [`report`](Pool::report) says what was granted. Errors only on a
-    /// configuration no pool can run, a thread the OS will not start, a hook
-    /// factory that panics, or a call from a worker thread.
+    /// Starts a pool on this machine as `config` says. A placed pool runs on
+    /// CPUs no other placed pool of the process holds, and holds them until
+    /// it and everything placed through it are gone; when too few are free
+    /// it shares, and its [`report`](Pool::report) says so. No OS setting it
+    /// asks for is a hard error: each falls back to a weaker one, and the
+    /// report says what was granted. Errors only on a configuration no pool
+    /// can run, a thread the OS will not start, a hook factory that panics,
+    /// or a call from a worker thread.
+    ///
+    /// ```no_run
+    /// // A pool of its own, on the cores no other pool holds.
+    /// let compute = workers::Pool::start(workers::Config::named("compute"))?;
+    /// let answer = compute.submit_and_wait(workers::Target::LeastLoaded, || async { 6 * 7 })?;
+    /// assert_eq!(answer, 42);
+    /// # Ok::<(), workers::Error>(())
+    /// ```
     pub fn start(config: Config) -> Result<Pool, Error> {
+        Pool::start_in(config, Ledger::process())
+    }
+
+    /// [`start`](Pool::start), holding its CPUs in `ledger`.
+    pub(crate) fn start_in(config: Config, ledger: Ledger<'static>) -> Result<Pool, Error> {
         config.validate()?;
         if crate::worker::on_worker() {
             return Err(Error::OnWorker);
@@ -44,7 +61,7 @@ impl Pool {
         let os = os::system();
         let allowed = os.thread_affinity().unwrap_or_default();
         let topology = Topology::detect();
-        let plan = placement::plan(&topology, &config);
+        let placement::Reserved { plan, hold } = placement::reserve(&topology, &config, ledger);
         let notes = plan.notes.clone();
         let memory_lock = os::lock_memory(os, &config.memory_lock);
         let clock = config
@@ -52,12 +69,15 @@ impl Pool {
             .clone()
             .or_else(clock::platform)
             .ok_or_else(|| Error::Config("this target has no clock; set Config::clock".into()))?;
-        let placer = Arc::new(Placer::new(
-            plan,
-            allowed,
-            config.priorities.clone(),
-            config.memory_policy.clone(),
-        ));
+        let placer = Arc::new(
+            Placer::new(
+                plan,
+                allowed,
+                config.priorities.clone(),
+                config.memory_policy.clone(),
+            )
+            .holding(hold),
+        );
         let blocking = Blocking::start(
             config.blocking_threads,
             config.blocking_queue,

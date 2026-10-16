@@ -77,7 +77,9 @@ pub fn with_worker_io(config: workers::Config) -> workers::Config {
 /// Starts the pool a database's data path runs on: `config` with the hook
 /// that gives each worker its regolith queues ([`with_worker_io`]), and with
 /// `monitor` (the network edge's timer) running its stuck-poll scan when one
-/// is given. What every node builder starts its pool with.
+/// is given. What every node builder starts its pool with; it becomes the
+/// process's default pool ([`workers::Pool::make_default`]), so work
+/// submitted without a pool runs on it too.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn start_pool(
     config: workers::Config,
@@ -87,7 +89,9 @@ pub fn start_pool(
         monitor: monitor.or(config.monitor.clone()),
         ..config
     };
-    workers::Pool::start(with_worker_io(config))
+    let pool = workers::Pool::start(with_worker_io(config))?;
+    pool.make_default();
+    Ok(pool)
 }
 
 /// The calling worker's queue for `db`, opened on first use; `None` off a
