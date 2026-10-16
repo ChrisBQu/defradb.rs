@@ -362,8 +362,10 @@ that is correct but slower is not done.
 
   not `fn apply<T: Encode + Send, S: Store>(value: T, store: &S)`.
 - Callback shapes are named traits or `type` aliases, with lifetimes that have meaningful names.
-- No `anyhow`, in library code, binaries or tests. Errors are typed: each crate has its own error enum (`thiserror`), and a
-  test returns `()` and asserts, or returns the crate's `Result`. Remove `anyhow` wherever it is found.
+- Errors use `thiserror`, and only `thiserror`, everywhere: library code, binaries, tools and tests. Each crate has its own
+  error enum derived with `thiserror`; a public API returns that crate's `Result`. No `anyhow`, `eyre` or
+  `Box<dyn Error>` in a signature. A test returns `()` and asserts, or returns the crate's `Result`. Remove `anyhow`
+  wherever it is found.
 
 ## Build Dependencies
 
