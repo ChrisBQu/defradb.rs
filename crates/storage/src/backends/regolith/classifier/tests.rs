@@ -126,8 +126,8 @@ async fn one_head_set_commutes() {
         first.commit().await.unwrap();
         second.commit().await.unwrap();
         let read = store.new_txn(true).await.unwrap();
-        let set = crate::merge::head_set::Set::read(&read.get(&key).await.unwrap().unwrap())
-            .unwrap();
+        let set =
+            crate::merge::head_set::Set::read(&read.get(&key).await.unwrap().unwrap()).unwrap();
         assert_eq!(set.live().count(), 3, "{key:?}");
     }
 }

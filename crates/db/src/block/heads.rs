@@ -29,8 +29,9 @@ where
 {
     match reader.get_parts(key, &[]).await? {
         None => Ok(Set::default()),
-        Some(bytes) => Set::read(&bytes)
-            .ok_or_else(|| Error::Other("a stored head set is malformed".into())),
+        Some(bytes) => {
+            Set::read(&bytes).ok_or_else(|| Error::Other("a stored head set is malformed".into()))
+        }
     }
 }
 
@@ -56,7 +57,11 @@ pub async fn collection_set<R>(reader: &R, collection_short_id: u32) -> Result<S
 where
     R: Reader + ?Sized,
 {
-    read_set(reader, &HeadstoreColSetKey::new(collection_short_id).bytes()).await
+    read_set(
+        reader,
+        &HeadstoreColSetKey::new(collection_short_id).bytes(),
+    )
+    .await
 }
 
 impl CollectionHeads {

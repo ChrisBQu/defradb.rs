@@ -21,12 +21,12 @@
 
 use std::collections::BTreeMap;
 
-use datastore::NamespaceView;
 use cid::Cid;
+use datastore::NamespaceView;
 use storage::corekv::{IterOptions, Key, KvPair, Store};
-use storage::keys::ToMergeIndexKey;
-use storage::keys::headstore::{HeadstoreColPublishedKey, HeadstoreColSetKey, HeadstoreDocKey};
 use storage::keys::doc_id_index::decode_doc_short_id_prefix;
+use storage::keys::headstore::{HeadstoreColPublishedKey, HeadstoreColSetKey, HeadstoreDocKey};
+use storage::keys::ToMergeIndexKey;
 use storage::merge::head_set::Write;
 
 use crate::block::builder::decode_priority_varint;
@@ -142,7 +142,11 @@ fn document_marker(key: &[u8]) -> Option<HeadstoreDocKey> {
     let text = std::str::from_utf8(rest.strip_prefix(b"/")?).ok()?;
     let (head, _child) = text.rsplit_once('/')?;
     let (field, parent) = head.rsplit_once('/')?;
-    Some(HeadstoreDocKey::new(doc_short_id, field, parent.parse().ok()?))
+    Some(HeadstoreDocKey::new(
+        doc_short_id,
+        field,
+        parent.parse().ok()?,
+    ))
 }
 
 /// Whether the key was moved. A stored parent head is superseded: it goes,
@@ -204,7 +208,10 @@ async fn move_key(
             // A collection block is published once it is stored and no longer
             // waits to be merged.
             let merged = async {
-                Ok(blockstore.has(&parent.to_bytes()).await.map_err(Error::Storage)?
+                Ok(blockstore
+                    .has(&parent.to_bytes())
+                    .await
+                    .map_err(Error::Storage)?
                     && !blockstore
                         .has(&ToMergeIndexKey::new(parent).bytes())
                         .await
@@ -240,11 +247,10 @@ async fn move_key(
             let [cid] = cids[..] else {
                 return Ok(false);
             };
-            writes
-                .collections
-                .entry(collection)
-                .or_default()
-                .add(cid.to_string().as_bytes(), decode_priority_varint(&pair.value));
+            writes.collections.entry(collection).or_default().add(
+                cid.to_string().as_bytes(),
+                decode_priority_varint(&pair.value),
+            );
             headstore
                 .set(&HeadstoreColPublishedKey::new(collection, cid).bytes(), &[])
                 .await

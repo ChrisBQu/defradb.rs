@@ -415,6 +415,69 @@ pub fn decode_priority_varint(buf: &[u8]) -> u64 {
     n
 }
 
+pub(crate) fn priority_index_key(doc_short_id: u64, priority: u64, cid: Cid) -> Vec<u8> {
+    HeadstorePriorityKey::new(doc_short_id, priority, cid).bytes()
+}
+
+/// A document's live heads, read with one point read of its head set.
+pub struct DocHeadsSnapshot {
+    max_priority: u64,
+    max_priority_by_field: RapidHashMap<String, u64>,
+    heads_by_field: RapidHashMap<String, Vec<Cid>>,
+}
+
+impl DocHeadsSnapshot {
+    /// Load all heads for a document: one point read, validated by nothing.
+    pub async fn load(headstore: &NamespaceView, doc_short_id: u64) -> Result<Self, String> {
+        let set = crate::block::heads::document::load(headstore, doc_short_id)
+            .await
+            .map_err(|e| format!("Failed to read document heads: {}", e))?;
+        let mut snapshot = Self {
+            max_priority: 0,
+            max_priority_by_field: RapidHashMap::new(),
+            heads_by_field: RapidHashMap::new(),
+        };
+        // A name is `{field}/{cid}`; names ascend, so each field's heads are
+        // already in CID text order, as Go's Block.New() sorts them.
+        for (name, priority) in set.live() {
+            let Some((field, cid)) = crate::block::heads::document::parse_name(name) else {
+                continue;
+            };
+            snapshot.max_priority = snapshot.max_priority.max(priority);
+            let max = snapshot
+                .max_priority_by_field
+                .entry(field.to_string())
+                .or_default();
+            *max = (*max).max(priority);
+            snapshot
+                .heads_by_field
+                .entry(field.to_string())
+                .or_default()
+                .push(cid);
+        }
+        Ok(snapshot)
+    }
+
+    pub fn max_priority(&self) -> u64 {
+        self.max_priority
+    }
+
+    pub fn field_max_priority(&self, field_id: &str) -> u64 {
+        self.max_priority_by_field
+            .get(field_id)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Heads for a specific field (empty if none).
+    pub fn field_heads(&self, field_id: &str) -> Vec<Cid> {
+        self.heads_by_field
+            .get(field_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
 #[cfg(test)]
 mod prepared_signature_tests {
     use super::*;
@@ -537,68 +600,5 @@ mod prepared_signature_tests {
                 field: Some(field),
             } if doc_id == hex::encode(identity.doc_ref_bytes()) && field == "secret"
         ));
-    }
-}
-
-pub(crate) fn priority_index_key(doc_short_id: u64, priority: u64, cid: Cid) -> Vec<u8> {
-    HeadstorePriorityKey::new(doc_short_id, priority, cid).bytes()
-}
-
-/// A document's live heads, read with one point read of its head set.
-pub struct DocHeadsSnapshot {
-    max_priority: u64,
-    max_priority_by_field: RapidHashMap<String, u64>,
-    heads_by_field: RapidHashMap<String, Vec<Cid>>,
-}
-
-impl DocHeadsSnapshot {
-    /// Load all heads for a document: one point read, validated by nothing.
-    pub async fn load(headstore: &NamespaceView, doc_short_id: u64) -> Result<Self, String> {
-        let set = crate::block::heads::document::load(headstore, doc_short_id)
-            .await
-            .map_err(|e| format!("Failed to read document heads: {}", e))?;
-        let mut snapshot = Self {
-            max_priority: 0,
-            max_priority_by_field: RapidHashMap::new(),
-            heads_by_field: RapidHashMap::new(),
-        };
-        // A name is `{field}/{cid}`; names ascend, so each field's heads are
-        // already in CID text order, as Go's Block.New() sorts them.
-        for (name, priority) in set.live() {
-            let Some((field, cid)) = crate::block::heads::document::parse_name(name) else {
-                continue;
-            };
-            snapshot.max_priority = snapshot.max_priority.max(priority);
-            let max = snapshot
-                .max_priority_by_field
-                .entry(field.to_string())
-                .or_default();
-            *max = (*max).max(priority);
-            snapshot
-                .heads_by_field
-                .entry(field.to_string())
-                .or_default()
-                .push(cid);
-        }
-        Ok(snapshot)
-    }
-
-    pub fn max_priority(&self) -> u64 {
-        self.max_priority
-    }
-
-    pub fn field_max_priority(&self, field_id: &str) -> u64 {
-        self.max_priority_by_field
-            .get(field_id)
-            .copied()
-            .unwrap_or_default()
-    }
-
-    /// Heads for a specific field (empty if none).
-    pub fn field_heads(&self, field_id: &str) -> Vec<Cid> {
-        self.heads_by_field
-            .get(field_id)
-            .cloned()
-            .unwrap_or_default()
     }
 }

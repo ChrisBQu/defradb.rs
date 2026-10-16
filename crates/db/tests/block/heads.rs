@@ -54,7 +54,11 @@ async fn live(store: &RegolithStore) -> (Vec<Cid>, usize) {
     let view = headstore(&shared);
     let mut cids = live_collection_heads(&view, COLLECTION).await.unwrap().live;
     cids.sort_by_cached_key(Cid::to_string);
-    let ahead = collection_set(&view, COLLECTION).await.unwrap().ahead().count();
+    let ahead = collection_set(&view, COLLECTION)
+        .await
+        .unwrap()
+        .ahead()
+        .count();
     (cids, ahead)
 }
 

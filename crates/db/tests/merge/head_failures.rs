@@ -44,9 +44,7 @@ impl FailPoint {
             })
         };
         match self {
-            Self::SetHead(cid) | Self::SupersedeHead(cid) => {
-                key.starts_with(b"/hd/") && names(cid)
-            }
+            Self::SetHead(cid) | Self::SupersedeHead(cid) => key.starts_with(b"/hd/") && names(cid),
             Self::SetPriority(cid) => {
                 value.is_some() && key.starts_with(b"/p/") && key.ends_with(&cid.to_bytes())
             }

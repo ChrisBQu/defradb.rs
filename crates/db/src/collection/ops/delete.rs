@@ -372,8 +372,11 @@ impl<S: Store> crate::database::DB<S> {
                 .delete(&HeadstoreColSetKey::new(short_id).bytes())
                 .await
                 .map_err(Error::Storage)?;
-            delete_prefix(&headstore, HeadstoreColPublishedKey::collection_prefix(short_id))
-                .await?;
+            delete_prefix(
+                &headstore,
+                HeadstoreColPublishedKey::collection_prefix(short_id),
+            )
+            .await?;
 
             crate::block::cleanup::delete_owned_dag(&blockstore, &systemstore, &block_cids, "")
                 .await?;

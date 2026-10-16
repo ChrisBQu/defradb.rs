@@ -9,8 +9,8 @@ use document::{DocID, Document, NormalValue};
 use query::mutator::DocMutator;
 use rapidhash::RapidHashSet;
 use schema::{CollectionVersion, FieldDescription, FieldKind};
-use storage::keys::HeadstoreDocSetKey;
 use storage::corekv::Key;
+use storage::keys::HeadstoreDocSetKey;
 use storage::namespace::Namespace;
 use storage::RegolithStore;
 
