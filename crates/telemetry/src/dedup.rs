@@ -12,7 +12,7 @@
 //!
 //! - An event reporting an unreachable collector (matches a known needle) is
 //!   suppressed, and Go's hint is emitted **once per process** — via a global
-//!   `OnceLock` shared across every layer the filter is attached to, so the
+//!   `OnceCell` shared across every layer the filter is attached to, so the
 //!   hint appears exactly once regardless of layer count.
 //! - Any other `opentelemetry*` event passes through and logs normally
 //!   (matching Go's `else` branch — genuine errors stay visible).
@@ -23,7 +23,7 @@
 //! crate's existing operator-warning style (see `handle.rs`).
 
 use std::fmt;
-use std::sync::OnceLock;
+use regolith::sync::OnceCell;
 
 use tracing::field::{Field, Visit};
 use tracing::{Event, Metadata, Subscriber};
@@ -52,7 +52,7 @@ const UNREACHABLE_HINT: &str =
 /// Guards the hint so it is emitted at most once per process, across every
 /// layer this filter is attached to. Go uses a single `sync.Once` for the
 /// same effect.
-static HINT_ONCE: OnceLock<()> = OnceLock::new();
+static HINT_ONCE: OnceCell<()> = OnceCell::new();
 
 #[derive(Default)]
 pub struct OtelDedupFilter;

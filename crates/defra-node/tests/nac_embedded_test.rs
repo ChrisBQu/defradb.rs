@@ -6,8 +6,6 @@
 //! with that identity as owner, and asserts schema + document operations all
 //! succeed because the node operates as itself.
 
-use std::sync::LazyLock;
-
 use crypto::Key;
 use defra_core::signing::{SigningConfig, SigningKeyType};
 use defra_node::EmbeddedNode;
@@ -18,7 +16,7 @@ use regolith::sync::Mutex;
 /// not run concurrently (cargo runs tests in a binary in parallel). Without
 /// this, one test's `clear_identity_store()` can wipe the other's node
 /// identity mid-run, making `execute()` fall back to the unauthenticated path.
-static SIGNING_STORE_GUARD: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+static SIGNING_STORE_GUARD: Mutex<()> = Mutex::new(());
 
 /// Generate a fresh Ed25519 node identity, register it in the process-local
 /// signing registry with exportable key bytes, and return its DID.

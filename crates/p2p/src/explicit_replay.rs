@@ -23,7 +23,7 @@ use identity::FullIdentity;
 use kovan_map::HopscotchMap;
 use rapidhash::fast::RandomState;
 use serde::{Deserialize, Serialize};
-use std::sync::LazyLock;
+use regolith::sync::Lazy;
 
 use crate::error::{Error, Result};
 
@@ -34,8 +34,8 @@ const CAPABILITY_PURPOSE: &str = "explicit-replay";
 pub const DEFAULT_CAPABILITY_TTL: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 pub const MAX_CAPABILITY_TTL: Duration = DEFAULT_CAPABILITY_TTL;
 
-static PROCESS_REVOCATIONS: LazyLock<ExplicitReplayRevocationRegistry> =
-    LazyLock::new(ExplicitReplayRevocationRegistry::default);
+static PROCESS_REVOCATIONS: Lazy<ExplicitReplayRevocationRegistry> =
+    Lazy::new(ExplicitReplayRevocationRegistry::default);
 
 #[cfg(any(feature = "libp2p-transport", feature = "iroh-transport"))]
 #[derive(Debug, Clone)]

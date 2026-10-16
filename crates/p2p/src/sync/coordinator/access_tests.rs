@@ -400,9 +400,9 @@ fn create_test_coordinator_with_blockstore_and_head_provider<B: Blockstore + 'st
         authorizer,
         classifier: Arc::new(crate::bitswap::DefaultBlockClassifier),
         serve_acp: Arc::new(crate::bitswap::LateBoundServeAcp::new()),
-        document_acp: std::sync::OnceLock::new(),
+        document_acp: regolith::sync::OnceCell::new(),
         #[cfg(feature = "kms")]
-        kms_transport: std::sync::OnceLock::new(),
+        kms_transport: regolith::sync::OnceCell::new(),
         #[cfg(feature = "libp2p-transport")]
         pubsub_services: None,
     };

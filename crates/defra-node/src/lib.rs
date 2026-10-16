@@ -1840,7 +1840,7 @@ impl NodeBuilder {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, LazyLock};
+    use std::sync::Arc;
 
     use defra_core::signing::{RemoteSigner, SigningConfig, SigningKeyType};
     use regolith::sync::Mutex;
@@ -1853,7 +1853,7 @@ mod tests {
     #[cfg(feature = "http")]
     use super::HttpConfig;
 
-    pub(super) static SIGNING_STORE_GUARD: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+    pub(super) static SIGNING_STORE_GUARD: Mutex<()> = Mutex::new(());
     #[cfg(feature = "http")]
     #[test]
     fn http_config_accepts_extra_routes() {

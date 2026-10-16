@@ -271,9 +271,9 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                 authorizer,
                 classifier,
                 serve_acp,
-                document_acp: std::sync::OnceLock::new(),
+                document_acp: regolith::sync::OnceCell::new(),
                 #[cfg(feature = "kms")]
-                kms_transport: std::sync::OnceLock::new(),
+                kms_transport: regolith::sync::OnceCell::new(),
                 #[cfg(feature = "libp2p-transport")]
                 pubsub_services,
             },

@@ -1,6 +1,6 @@
 //! HTTP client for communicating with DefraDB server
 
-use std::sync::OnceLock;
+use regolith::sync::OnceCell;
 use std::time::Duration;
 
 use reqwest::{Client, RequestBuilder, Response, StatusCode};
@@ -56,10 +56,10 @@ pub const INITIAL_BACKOFF_MS: u64 = 100;
 pub const RETRYABLE_STATUS_CODES: &[u16] = &[408, 429, 500, 502, 503, 504];
 
 /// Global shared HTTP client for connection reuse across commands
-static SHARED_CLIENT: OnceLock<std::result::Result<Client, String>> = OnceLock::new();
+static SHARED_CLIENT: OnceCell<std::result::Result<Client, String>> = OnceCell::new();
 
 fn get_shared_client() -> Result<&'static Client> {
-    let result = SHARED_CLIENT.get_or_init(|| {
+    let result = SHARED_CLIENT.get_or_init_racy(|| {
         Client::builder()
             .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
             .connect_timeout(Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECS))

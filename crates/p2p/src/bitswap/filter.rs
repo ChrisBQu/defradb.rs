@@ -189,18 +189,15 @@ mod tests {
         }
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-    impl Store for InMemoryStore {
-        async fn get_size(&self, cid: &Cid) -> anyhow::Result<usize> {
-            Ok(self
-                .inner
+    impl InMemoryStore {
+        async fn block_size(&self, cid: &Cid) -> crate::Result<usize> {
+            self.inner
                 .get(cid)
                 .map(|b| b.len())
-                .ok_or_else(|| crate::Error::BlockNotFound(cid.to_string()))?)
+                .ok_or_else(|| crate::Error::BlockNotFound(cid.to_string()))
         }
 
-        async fn get(&self, cid: &Cid) -> anyhow::Result<Block> {
+        async fn block(&self, cid: &Cid) -> crate::Result<Block> {
             let data = self
                 .inner
                 .get(cid)
@@ -208,10 +205,12 @@ mod tests {
             Ok(Block::new(data, *cid))
         }
 
-        async fn has(&self, cid: &Cid) -> anyhow::Result<bool> {
+        async fn contains(&self, cid: &Cid) -> crate::Result<bool> {
             Ok(self.inner.contains_key(cid))
         }
     }
+
+    crate::bitswap::store_trait::impl_bitswap_store!([] InMemoryStore);
 
     fn cid_for(data: &[u8]) -> Cid {
         defra_core::block::generate_cid_from_bytes(data).unwrap()

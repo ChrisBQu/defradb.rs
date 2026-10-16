@@ -792,7 +792,7 @@ where
     let nac_manager = create_nac_manager(store.clone(), config.persistence).await?;
 
     // Wire the NAC manager into the DB so DB-layer `check_node_access` calls go
-    // live. First-call-wins via the DB's OnceLock setter. Covers both the
+    // live. First-call-wins via the DB's OnceCell setter. Covers both the
     // embedded node and the FFI node (which also builds via `build_with_store`).
     database.set_nac_manager(nac_manager.clone());
 

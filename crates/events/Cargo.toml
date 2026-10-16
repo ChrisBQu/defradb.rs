@@ -44,6 +44,7 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+regolith.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 
 [lints]

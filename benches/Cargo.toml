@@ -15,6 +15,7 @@ default = []
 
 [dev-dependencies]
 rapidhash.workspace = true
+regolith.workspace = true
 bytes.workspace = true
 criterion.workspace = true
 tokio = { workspace = true, features = [

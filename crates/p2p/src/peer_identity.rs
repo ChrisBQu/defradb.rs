@@ -267,7 +267,7 @@ mod tests {
         let state = IrohPeerIdentityState::new();
         let peer = PeerId::new("peer-a".to_string());
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(17));
+        let barrier = std::sync::Arc::new(regolith::sync::Barrier::new(17));
         let mut tasks = tokio::task::JoinSet::new();
 
         for _ in 0..16 {

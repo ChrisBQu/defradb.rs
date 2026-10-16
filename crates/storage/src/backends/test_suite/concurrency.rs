@@ -191,7 +191,7 @@ pub async fn test_snapshot_isolation_concurrent<S: Store + 'static>(store: Arc<S
     let total_checks = Arc::new(AtomicUsize::new(0));
 
     // Barrier to synchronize start
-    let barrier = Arc::new(tokio::sync::Barrier::new(21)); // 10 readers + 10 writers + 1 main
+    let barrier = Arc::new(regolith::sync::Barrier::new(21)); // 10 readers + 10 writers + 1 main
 
     let mut handles = vec![];
 

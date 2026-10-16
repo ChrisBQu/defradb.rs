@@ -43,7 +43,7 @@ fn db_kms_accessor_round_trips() {
     db.set_kms(first);
     assert!(db.kms().is_some());
 
-    // OnceLock: second set is silently ignored.
+    // OnceCell: second set is silently ignored.
     let second: Arc<dyn kms::KmsService> = Arc::new(StubKms);
     db.set_kms(second);
     assert!(db.kms().is_some());

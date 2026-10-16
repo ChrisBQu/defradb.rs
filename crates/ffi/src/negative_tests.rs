@@ -7,7 +7,9 @@
 mod tests {
     use std::ffi::{c_char, CStr, CString};
     use std::ptr;
-    use std::sync::{Arc, Barrier};
+    use std::sync::Arc;
+
+    use regolith::sync::Barrier;
     use std::thread;
 
     use crate::node::{new_node, node_close};
@@ -391,7 +393,10 @@ mod tests {
             let barrier = Arc::clone(&barrier);
             join_handles.push(thread::spawn(move || {
                 // All threads start simultaneously to maximize contention.
-                barrier.wait();
+                crate::runtime::edge()
+                    .expect("runtime started")
+                    .block_on(barrier.wait())
+                    .expect("the barrier wait runs on the runtime");
 
                 let mut local_handles = Vec::with_capacity(NODES_PER_THREAD);
                 for _ in 0..NODES_PER_THREAD {
@@ -432,7 +437,10 @@ mod tests {
             let barrier = Arc::clone(&barrier);
             let node_ptr = *node;
             join_handles.push(thread::spawn(move || {
-                barrier.wait();
+                crate::runtime::edge()
+                    .expect("runtime started")
+                    .block_on(barrier.wait())
+                    .expect("the barrier wait runs on the runtime");
 
                 for _ in 0..OPS_PER_THREAD {
                     let r = unsafe { create_subscription(node_ptr, ptr::null()) };

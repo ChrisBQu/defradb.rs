@@ -5,7 +5,8 @@
 //! documents in a batch are created, the collected CIDs are used to compute a
 //! Merkle root which is then signed as a single batch.
 
-use std::sync::{Arc, OnceLock};
+use regolith::sync::OnceCell;
+use std::sync::Arc;
 
 use cid::Cid;
 use kovan_map::HopscotchMap;
@@ -68,11 +69,11 @@ pub fn compute_merkle_root(cids: &[Cid]) -> Option<[u8; 32]> {
 // Global batch collector  (same pattern as IDENTITY_STORE in signing.rs)
 // ---------------------------------------------------------------------------
 
-static BATCH_COLLECTORS: OnceLock<HopscotchMap<String, Arc<SegQueue<Cid>>, RandomState>> =
-    OnceLock::new();
+static BATCH_COLLECTORS: OnceCell<HopscotchMap<String, Arc<SegQueue<Cid>>, RandomState>> =
+    OnceCell::new();
 
 fn collectors() -> &'static HopscotchMap<String, Arc<SegQueue<Cid>>, RandomState> {
-    BATCH_COLLECTORS.get_or_init(|| HopscotchMap::with_hasher(RandomState::default()))
+    BATCH_COLLECTORS.get_or_init_racy(|| HopscotchMap::with_hasher(RandomState::default()))
 }
 
 /// Start (or reset) a batch collection session for `session_key`.

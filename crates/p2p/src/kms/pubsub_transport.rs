@@ -29,7 +29,7 @@ use kms::{
 };
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, OnceLock, Weak};
+use std::sync::{Arc, Weak};
 
 use cid::Cid;
 use edge::Edge;
@@ -102,7 +102,7 @@ pub struct PubsubKeyTransport<T: P2PTransport> {
     pending_requests: HopscotchMap<Cid, (String, Vec<u8>), rapidhash::fast::RandomState>,
     /// Back-reference so `install_handler` can replay the buffer through the
     /// normal dispatch path.
-    self_ref: OnceLock<Weak<Self>>,
+    self_ref: regolith::sync::OnceCell<Weak<Self>>,
     /// The network runtime buffered requests are replayed on.
     edge: Edge,
     /// Woken when a peer subscribes to the encryption topic
@@ -157,7 +157,7 @@ impl<T: P2PTransport> PubsubKeyTransport<T> {
             local_peer_id,
             self_response_topic,
             pending_requests: HopscotchMap::with_hasher(rapidhash::fast::RandomState::default()),
-            self_ref: OnceLock::new(),
+            self_ref: regolith::sync::OnceCell::new(),
             edge,
             subscribed: regolith::sync::Notify::new(),
         });

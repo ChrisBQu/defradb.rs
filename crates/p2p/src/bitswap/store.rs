@@ -12,14 +12,13 @@
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use anyhow::Result;
-use async_trait::async_trait;
 use cid::Cid;
-use iroh_bitswap::{Block, Store};
+use iroh_bitswap::Block;
 
 use blockstore::Blockstore;
 
-use crate::Error;
+use super::store_trait::impl_bitswap_store;
+use crate::{Error, Result};
 
 /// Adapter that implements iroh_bitswap::Store for any `Blockstore`.
 ///
@@ -54,21 +53,16 @@ impl<B: Blockstore> BitswapStoreAdapter<B> {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<B: Blockstore + Debug + 'static> Store for BitswapStoreAdapter<B> {
-    /// Get the size of a block by CID.
-    async fn get_size(&self, cid: &Cid) -> Result<usize> {
-        Ok(self
-            .blockstore
+impl<B: Blockstore + Debug + 'static> BitswapStoreAdapter<B> {
+    async fn block_size(&self, cid: &Cid) -> Result<usize> {
+        self.blockstore
             .get_size(cid)
             .await
             .map_err(|e| Error::BlockstoreError(e.to_string()))?
-            .ok_or_else(|| Error::BlockNotFound(cid.to_string()))?)
+            .ok_or_else(|| Error::BlockNotFound(cid.to_string()))
     }
 
-    /// Get block data by CID.
-    async fn get(&self, cid: &Cid) -> Result<Block> {
+    async fn block(&self, cid: &Cid) -> Result<Block> {
         let data = self
             .blockstore
             .get(cid)
@@ -78,12 +72,12 @@ impl<B: Blockstore + Debug + 'static> Store for BitswapStoreAdapter<B> {
         Ok(Block::new(data, *cid))
     }
 
-    /// Check if the blockstore contains a block with the given CID.
-    async fn has(&self, cid: &Cid) -> Result<bool> {
-        Ok(self
-            .blockstore
+    async fn contains(&self, cid: &Cid) -> Result<bool> {
+        self.blockstore
             .has(cid)
             .await
-            .map_err(|e| Error::BlockstoreError(e.to_string()))?)
+            .map_err(|e| Error::BlockstoreError(e.to_string()))
     }
 }
+
+impl_bitswap_store!([B: Blockstore + Debug + 'static] BitswapStoreAdapter<B>);

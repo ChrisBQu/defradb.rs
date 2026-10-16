@@ -183,11 +183,11 @@ pub struct ManagedP2PSystem {
     ops: Arc<dyn defra_http::P2POperations>,
     replicator_push_options: ReplicatorPushOptionsState,
     on_replicator_push_options: Option<ReplicatorPushOptionsCallback>,
-    retry_replicators: std::sync::OnceLock<RetryReplicatorsCallback>,
+    retry_replicators: regolith::sync::OnceCell<RetryReplicatorsCallback>,
     /// Outbound management requester (Task 7a): relays management requests to
     /// P2P-only peers on behalf of an HTTP caller. Set once during P2P setup
     /// (after the system is built), consumed when wiring `AppState`.
-    manage_requester: std::sync::OnceLock<Arc<dyn defra_http::ManageRequester>>,
+    manage_requester: regolith::sync::OnceCell<Arc<dyn defra_http::ManageRequester>>,
     shutdown: node::ShutdownHandle,
 }
 
@@ -232,8 +232,8 @@ impl ManagedP2PSystem {
             ops,
             replicator_push_options,
             on_replicator_push_options,
-            retry_replicators: std::sync::OnceLock::new(),
-            manage_requester: std::sync::OnceLock::new(),
+            retry_replicators: regolith::sync::OnceCell::new(),
+            manage_requester: regolith::sync::OnceCell::new(),
             shutdown,
         }
     }

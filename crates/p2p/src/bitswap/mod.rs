@@ -30,6 +30,8 @@ mod read_gate;
 mod registry;
 #[cfg(feature = "libp2p-transport")]
 mod store;
+#[cfg(feature = "libp2p-transport")]
+pub(crate) mod store_trait;
 
 pub use access::AccessMode;
 #[cfg(feature = "libp2p-transport")]

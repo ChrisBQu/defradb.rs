@@ -13,8 +13,9 @@
 
 use kovan_map::HopscotchMap;
 use rapidhash::fast::RandomState;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use regolith::sync::OnceCell;
+use std::sync::Arc;
 
 const GUARD_TARGET: &str = "db::collection::locks";
 
@@ -75,13 +76,25 @@ impl tracing::Subscriber for Recorder {
 }
 
 pub fn recorder() -> Arc<Recorder> {
-    static RECORDER: OnceLock<Arc<Recorder>> = OnceLock::new();
-    RECORDER
-        .get_or_init(|| {
-            let recorder = Arc::new(Recorder(HopscotchMap::with_hasher(RandomState::default())));
-            tracing::subscriber::set_global_default(recorder.clone())
-                .expect("this test binary installs no other global subscriber");
-            recorder
-        })
-        .clone()
+    static RECORDER: OnceCell<Arc<Recorder>> = OnceCell::new();
+    static CLAIMED: AtomicBool = AtomicBool::new(false);
+    // The one caller that claims the install builds and installs it; the rest
+    // wait, bounded, for it to be published.
+    if !CLAIMED.swap(true, Ordering::AcqRel) {
+        let recorder = Arc::new(Recorder(HopscotchMap::with_hasher(RandomState::default())));
+        tracing::subscriber::set_global_default(recorder.clone())
+            .expect("this test binary installs no other global subscriber");
+        let _ = RECORDER.set(recorder);
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        if let Some(recorder) = RECORDER.get() {
+            return recorder.clone();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the recorder was never installed"
+        );
+        std::thread::yield_now();
+    }
 }

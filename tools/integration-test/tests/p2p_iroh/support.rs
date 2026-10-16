@@ -1,9 +1,9 @@
 use std::path::PathBuf;
-use std::sync::OnceLock;
 
 use integration_test::{build_cli_variant, workspace_root};
+use regolith::sync::OnceCell;
 
-static VERA_IROH_BINARY: OnceLock<PathBuf> = OnceLock::new();
+static VERA_IROH_BINARY: OnceCell<PathBuf> = OnceCell::new();
 
 #[ctor::ctor]
 fn prepare_iroh_binary() {
@@ -28,7 +28,9 @@ pub fn vera_binary_available() -> bool {
 
 pub fn vera_iroh_binary() -> PathBuf {
     VERA_IROH_BINARY
-        .get_or_init(|| build_cli_variant(&workspace_root(), &["iroh", "vera"], "defra-iroh-vera"))
+        .get_or_init_racy(|| {
+            build_cli_variant(&workspace_root(), &["iroh", "vera"], "defra-iroh-vera")
+        })
         .clone()
 }
 

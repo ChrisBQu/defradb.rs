@@ -183,7 +183,7 @@ impl Node {
         .await?;
 
         // Wire the NAC manager into the DB so DB-layer `check_node_access` calls
-        // go live (first-call-wins via the DB's OnceLock). Without this the CLI
+        // go live (first-call-wins via the DB's OnceCell). Without this the CLI
         // server's DB-layer NAC checks are inert.
         if let Some(adapter) = nac_adapter.as_ref() {
             database.set_nac_manager(adapter.nac_manager());

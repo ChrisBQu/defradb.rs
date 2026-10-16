@@ -13,11 +13,11 @@ use std::{
     collections::VecDeque,
     sync::{
         atomic::{AtomicU64, Ordering},
-        LazyLock,
     },
 };
 
 use kovan::Atom;
+use regolith::sync::Lazy;
 
 /// Process-global counter of gossip payload decode failures.
 ///
@@ -28,8 +28,8 @@ use kovan::Atom;
 static GOSSIP_DECODE_FAILURES: AtomicU64 = AtomicU64::new(0);
 /// A bounded, deduplicated ring of at most `GOSSIP_DECODE_FAILURE_SAMPLE_LIMIT`
 /// samples, replaced as a unit on every rare decode failure.
-static RECENT_GOSSIP_DECODE_FAILURES: LazyLock<Atom<VecDeque<GossipDecodeFailureSample>>> =
-    LazyLock::new(|| Atom::new(VecDeque::with_capacity(GOSSIP_DECODE_FAILURE_SAMPLE_LIMIT)));
+static RECENT_GOSSIP_DECODE_FAILURES: Lazy<Atom<VecDeque<GossipDecodeFailureSample>>> =
+    Lazy::new(|| Atom::new(VecDeque::with_capacity(GOSSIP_DECODE_FAILURE_SAMPLE_LIMIT)));
 
 const GOSSIP_DECODE_FAILURE_SAMPLE_LIMIT: usize = 16;
 

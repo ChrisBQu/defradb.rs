@@ -8,6 +8,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use kovan_map::HopscotchMap;
+use regolith::sync::OnceCell;
 
 use crate::thread_bounds::MaybeBoxFuture;
 use rapidhash::fast::RandomState;
@@ -344,11 +345,11 @@ impl SigningConfig {
 /// Global identity store mapping DID → SigningConfig.
 /// When create_identity() generates a keypair, we store it here so that
 /// exec_request() can look up the signing key from just a DID string.
-static IDENTITY_STORE: std::sync::OnceLock<HopscotchMap<String, SigningConfig, RandomState>> =
-    std::sync::OnceLock::new();
+static IDENTITY_STORE: OnceCell<HopscotchMap<String, SigningConfig, RandomState>> =
+    OnceCell::new();
 
 fn identity_store() -> &'static HopscotchMap<String, SigningConfig, RandomState> {
-    IDENTITY_STORE.get_or_init(|| HopscotchMap::with_hasher(RandomState::default()))
+    IDENTITY_STORE.get_or_init_racy(|| HopscotchMap::with_hasher(RandomState::default()))
 }
 
 /// Store a signing config for a DID.
@@ -429,15 +430,13 @@ pub fn clear_identity_store() {
 // Request Bearer Token — keyed by DID for ACP registration passthrough
 // ---------------------------------------------------------------------------
 
-use std::sync::OnceLock;
-
 /// The bearer tokens bound to DIDs for requests that carry none of their own
 /// (see [`RequestContext::bearer_token_for`](crate::RequestContext::bearer_token_for)).
 /// A request authenticated over HTTP carries its own token, so concurrent
 /// requests for the same DID never replace each other's JWT.
 fn request_token_store() -> &'static HopscotchMap<String, String, RandomState> {
-    static STORE: OnceLock<HopscotchMap<String, String, RandomState>> = OnceLock::new();
-    STORE.get_or_init(|| HopscotchMap::with_hasher(RandomState::default()))
+    static STORE: OnceCell<HopscotchMap<String, String, RandomState>> = OnceCell::new();
+    STORE.get_or_init_racy(|| HopscotchMap::with_hasher(RandomState::default()))
 }
 
 /// Bind `token` to `did` for requests that carry no bearer of their own.

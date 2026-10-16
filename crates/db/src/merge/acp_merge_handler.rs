@@ -44,7 +44,7 @@ impl CompositePostCommitAction for RegisterReplicatedDocAction {
 }
 
 pub struct AcpCompositeMergeHook {
-    document_acp: std::sync::OnceLock<Arc<dyn DocumentACP>>,
+    document_acp: regolith::sync::OnceCell<Arc<dyn DocumentACP>>,
     local_identity: Option<Identity>,
     strict_replicated_doc_access: AtomicBool,
 }
@@ -52,7 +52,7 @@ pub struct AcpCompositeMergeHook {
 impl AcpCompositeMergeHook {
     pub fn new(local_identity: Option<Identity>) -> Self {
         Self {
-            document_acp: std::sync::OnceLock::new(),
+            document_acp: regolith::sync::OnceCell::new(),
             local_identity,
             strict_replicated_doc_access: AtomicBool::new(false),
         }
