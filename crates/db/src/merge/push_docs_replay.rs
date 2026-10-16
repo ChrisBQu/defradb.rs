@@ -58,7 +58,7 @@ pub struct ReplayDocumentFailure {
 }
 
 /// Persist the receiver hint before crossing the legacy string error boundary.
-pub async fn persist_retry_after<S: storage::corekv::Store>(
+pub async fn persist_retry_after<S: storage::corekv::Store + 'static>(
     peerstore: &storage::stores::Peerstore<S>,
     peer_id: &PeerId,
     reply: &PushLogReply,
@@ -66,19 +66,21 @@ pub async fn persist_retry_after<S: storage::corekv::Store>(
     let Some(delay) = reply.retry_after() else {
         return Ok(());
     };
+    let peer = peer_id.as_str().to_owned();
     peerstore
-        .record_retry_after(peer_id.as_str(), delay)
+        .run(move |peerstore| async move { peerstore.record_retry_after(&peer, delay).await })
         .await
         .map(|_| ())
         .map_err(|error| format!("failed to persist receiver retry-after: {error}"))
 }
 
-pub async fn remaining_retry_after<S: storage::corekv::Store>(
+pub async fn remaining_retry_after<S: storage::corekv::Store + 'static>(
     peerstore: &storage::stores::Peerstore<S>,
     peer_id: &PeerId,
 ) -> Result<Option<Duration>, String> {
+    let peer = peer_id.as_str().to_owned();
     let Some(bytes) = peerstore
-        .get_retry_info(peer_id.as_str())
+        .run(move |peerstore| async move { peerstore.get_retry_info(&peer).await })
         .await
         .map_err(|e| e.to_string())?
     else {
@@ -93,7 +95,7 @@ pub async fn remaining_retry_after<S: storage::corekv::Store>(
         .filter(|delay| !delay.is_zero()))
 }
 
-pub async fn check_retry_admission<S: storage::corekv::Store>(
+pub async fn check_retry_admission<S: storage::corekv::Store + 'static>(
     peerstore: &storage::stores::Peerstore<S>,
     peer_id: &PeerId,
 ) -> Result<(), ReplayPushSendError> {

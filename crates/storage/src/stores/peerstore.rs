@@ -35,6 +35,8 @@ pub struct Peerstore<S: Store> {
     store: NamespacedStore<S>,
     retry_schedule: super::RetrySchedule,
     retry: RetryOptions,
+    /// The pool [`run`](Self::run) runs calls on (`peerstore_placed.rs`).
+    pool: Option<workers::Pool>,
 }
 
 struct RegisterScopeMarkerAttempt {
@@ -634,6 +636,7 @@ impl<S: Store> Peerstore<S> {
             store: NamespacedStore::new(store, Namespace::Peerstore),
             retry_schedule: super::RetrySchedule::default(),
             retry: crate::corekv::engine_retry_options(crate::corekv::DEFAULT_MAX_TXN_RETRIES),
+            pool: None,
         }
     }
 
@@ -1468,6 +1471,9 @@ impl<S: Store> Store for Peerstore<S> {
         self.store.close().await
     }
 }
+
+#[path = "peerstore_placed.rs"]
+mod placed;
 
 #[cfg(test)]
 #[path = "peerstore_tests.rs"]

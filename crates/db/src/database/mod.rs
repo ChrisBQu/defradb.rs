@@ -742,6 +742,7 @@ impl<S: Store> DB<S> {
     pub fn peerstore(&self) -> storage::stores::Peerstore<S> {
         storage::stores::Peerstore::new(self.store.clone())
             .with_max_txn_retries(self.options.max_txn_retries())
+            .placed_on(self.pool())
     }
 
     /// Returns the node identity, if one was configured.

@@ -20,10 +20,11 @@ pub(super) enum P2PTasks {
         replication_task: JoinHandle<()>,
         /// Host event handler task (processes P2P events through coordinator)
         event_handler_task: Option<JoinHandle<()>>,
-        /// Records push failures for retry
-        failure_recorder_task: JoinHandle<()>,
-        /// Periodically retries failed doc pushes with exponential backoff
-        retry_loop_task: JoinHandle<()>,
+        /// Records push failures for retry, on the worker pool
+        failure_recorder_task: workers::Background,
+        /// Periodically retries failed doc pushes with exponential backoff, on
+        /// the network edge
+        retry_loop_task: edge::Task<()>,
     },
     #[cfg(feature = "iroh")]
     Iroh {
