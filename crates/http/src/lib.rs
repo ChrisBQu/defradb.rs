@@ -112,6 +112,8 @@ pub mod pool_layer;
 #[cfg(feature = "server")]
 pub mod query_context;
 #[cfg(feature = "server")]
+pub mod request_scope;
+#[cfg(feature = "server")]
 pub mod route_permissions;
 pub mod router;
 #[cfg(feature = "server")]

@@ -7,6 +7,7 @@ use super::{map_p2p_bad_request, map_p2p_internal};
 use crate::error::HttpError;
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
+use crate::request_scope::bound;
 use crate::router::{AppState, NodePermission};
 use crate::validation::validate_multiaddr;
 
@@ -50,7 +51,7 @@ pub async fn get_info(
 ) -> Result<Json<P2pInfoResponse>, HttpError> {
     require_permission(&state, &identity, NodePermission::P2pPeerInfo).await?;
 
-    let p2p = state.require_p2p()?;
+    let p2p = bound(state.require_p2p()?, &identity.context());
 
     let peer_id = p2p.local_peer_id().await.map_err(map_p2p_internal)?;
 
@@ -85,7 +86,7 @@ pub async fn sync_status(
 ) -> Result<Json<serde_json::Value>, HttpError> {
     require_permission(&state, &identity, NodePermission::P2pPeerInfo).await?;
 
-    let p2p = state.require_p2p()?;
+    let p2p = bound(state.require_p2p()?, &identity.context());
     let status = p2p.sync_status().await.map_err(map_p2p_internal)?;
     Ok(Json(status))
 }
@@ -101,7 +102,7 @@ pub async fn get_shareable_address(
 ) -> Result<Json<ShareableAddressResponse>, HttpError> {
     require_permission(&state, &identity, NodePermission::P2pPeerInfo).await?;
 
-    let p2p = state.require_p2p()?;
+    let p2p = bound(state.require_p2p()?, &identity.context());
     let address = p2p.shareable_address().await.map_err(map_p2p_internal)?;
 
     Ok(Json(ShareableAddressResponse { address }))
@@ -118,7 +119,7 @@ pub async fn list_peers(
 ) -> Result<Json<Vec<PeerInfo>>, HttpError> {
     require_permission(&state, &identity, NodePermission::P2pPeerConnect).await?;
 
-    let p2p = state.require_p2p()?;
+    let p2p = bound(state.require_p2p()?, &identity.context());
 
     let peers = p2p.connected_peers().await.map_err(map_p2p_internal)?;
 
@@ -143,7 +144,7 @@ pub async fn active_peers(
 ) -> Result<Json<Vec<String>>, HttpError> {
     require_permission(&state, &identity, NodePermission::P2pPeerActive).await?;
 
-    let p2p = state.require_p2p()?;
+    let p2p = bound(state.require_p2p()?, &identity.context());
 
     let peers = p2p.connected_peers().await.map_err(map_p2p_internal)?;
 
@@ -164,7 +165,7 @@ pub async fn connect_peer(
 ) -> Result<Json<()>, HttpError> {
     require_permission(&state, &identity, NodePermission::P2pPeerConnect).await?;
 
-    let p2p = state.require_p2p()?;
+    let p2p = bound(state.require_p2p()?, &identity.context());
 
     // Validate the multiaddr format
     validate_multiaddr(&request.address)?;
@@ -190,7 +191,7 @@ pub async fn connect(
 ) -> Result<(), HttpError> {
     require_permission(&state, &identity, NodePermission::P2pPeerConnect).await?;
 
-    let p2p = state.require_p2p()?;
+    let p2p = bound(state.require_p2p()?, &identity.context());
 
     for addr in &addresses {
         validate_multiaddr(addr)?;
@@ -214,7 +215,7 @@ pub async fn disconnect(
 ) -> Result<(), HttpError> {
     require_permission(&state, &identity, NodePermission::P2pPeerDisconnect).await?;
 
-    let p2p = state.require_p2p()?;
+    let p2p = bound(state.require_p2p()?, &identity.context());
 
     for addr in &addresses {
         validate_multiaddr(addr)?;

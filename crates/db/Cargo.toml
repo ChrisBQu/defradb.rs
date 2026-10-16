@@ -109,6 +109,7 @@ p2p = { path = "../p2p", default-features = false }
 p2p = { path = "../p2p", default-features = false, features = ["iroh-transport"] }
 
 [dev-dependencies]
+defra-core = { path = "../defra-core", features = ["ambient"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "sync", "time", "test-util"] }
 axum.workspace = true
 proptest.workspace = true

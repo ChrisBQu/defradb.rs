@@ -11,8 +11,7 @@ use super::*;
 const CHUNK_SIZE: usize = 1000;
 
 impl<S: Store> crate::database::DB<S> {
-    /// Permanently remove documents matching `filter` while preserving the collection.
-    #[instrument(skip(self, filter), fields(collection = %name), name = "db.truncate_collection_filtered")]
+    /// [`Self::truncate_collection_with_filter_as`] for `identity`, or for the identity acting in [`defra_core::RequestContext::ambient`] when there is none.
     pub async fn truncate_collection_with_filter(
         self: &Arc<Self>,
         name: &str,
@@ -22,7 +21,26 @@ impl<S: Store> crate::database::DB<S> {
     where
         S: 'static,
     {
-        self.check_node_access(identity, acp::nac::NodePermission::CollectionTruncate)
+        self.truncate_collection_with_filter_as(
+            &crate::access::nac::ambient_as(identity),
+            name,
+            filter,
+        )
+        .await
+    }
+
+    /// Permanently remove documents matching `filter` while preserving the collection.
+    #[instrument(skip(self, filter), fields(collection = %name), name = "db.truncate_collection_filtered")]
+    pub async fn truncate_collection_with_filter_as(
+        self: &Arc<Self>,
+        context: &defra_core::RequestContext,
+        name: &str,
+        filter: query::Filter,
+    ) -> Result<()>
+    where
+        S: 'static,
+    {
+        self.check_node_access_as(context, acp::nac::NodePermission::CollectionTruncate)
             .await?;
         filter.validate_depth()?;
 

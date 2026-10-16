@@ -344,11 +344,13 @@ pub(crate) fn compute_document_blocks_with_inputs(
     })
 }
 
-/// Batch-insert pre-computed blocks into blockstore and headstore.
+/// Batch-insert pre-computed blocks into blockstore and headstore, their CIDs
+/// collected into `batch_session` once they commit.
 pub async fn insert_computed_blocks(
     blockstore: &NamespaceView,
     headstore: &NamespaceView,
     blocks: &ComputedBlocks,
+    batch_session: Option<&str>,
 ) -> Result<(), String> {
     for (key, value) in &blocks.blockstore_entries {
         blockstore
@@ -367,6 +369,7 @@ pub async fn insert_computed_blocks(
         .map_err(|e| format!("Failed to write heads: {}", e))?;
     collect_on_commit(
         blockstore,
+        batch_session,
         blocks
             .block_result
             .field_cids

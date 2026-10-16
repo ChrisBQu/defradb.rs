@@ -64,6 +64,12 @@ impl<S: Store> crate::database::DB<S> {
         Ok(())
     }
 
+    /// [`Self::delete_collection_as`] in [`defra_core::RequestContext::ambient`].
+    pub async fn delete_collection(&self, name: &str) -> Result<()> {
+        self.delete_collection_as(&defra_core::RequestContext::ambient(), name)
+            .await
+    }
+
     /// Delete a collection.
     ///
     /// This creates a new transaction, calls `delete_collection_with_txn`, commits,
@@ -71,8 +77,12 @@ impl<S: Store> crate::database::DB<S> {
     ///
     /// Note: This does NOT delete documents. Use `truncate_collection` first if needed.
     #[instrument(skip(self), fields(collection = %name), name = "db.delete_collection_auto")]
-    pub async fn delete_collection(&self, name: &str) -> Result<()> {
-        self.check_node_access(None, acp::nac::NodePermission::CollectionPatch)
+    pub async fn delete_collection_as(
+        &self,
+        context: &defra_core::RequestContext,
+        name: &str,
+    ) -> Result<()> {
+        self.check_node_access_as(context, acp::nac::NodePermission::CollectionPatch)
             .await?;
         let mut txn = self.new_txn(false).await?;
 
@@ -104,6 +114,12 @@ impl<S: Store> crate::database::DB<S> {
         }
     }
 
+    /// [`Self::delete_collections_as`] in [`defra_core::RequestContext::ambient`].
+    pub async fn delete_collections(&self, names: Vec<String>, active_only: bool) -> Result<()> {
+        self.delete_collections_as(&defra_core::RequestContext::ambient(), names, active_only)
+            .await
+    }
+
     /// Delete one or more collections by name in a single call (Go #4688 parity).
     ///
     /// - If `active_only` is true, only the active head version of each named
@@ -115,8 +131,13 @@ impl<S: Store> crate::database::DB<S> {
     /// is unknown, no deletion is performed. Validation (no documents, no
     /// orphan child versions outside the batch) is delegated to
     /// `delete_collection_versions_batch`.
-    pub async fn delete_collections(&self, names: Vec<String>, active_only: bool) -> Result<()> {
-        self.check_node_access(None, acp::nac::NodePermission::CollectionPatch)
+    pub async fn delete_collections_as(
+        &self,
+        context: &defra_core::RequestContext,
+        names: Vec<String>,
+        active_only: bool,
+    ) -> Result<()> {
+        self.check_node_access_as(context, acp::nac::NodePermission::CollectionPatch)
             .await?;
         if names.is_empty() {
             return Err(Error::InvalidPatch(
@@ -163,7 +184,18 @@ impl<S: Store> crate::database::DB<S> {
             }
         }
 
-        self.delete_collection_versions_batch(version_ids).await
+        self.delete_collection_versions_batch_as(context, version_ids)
+            .await
+    }
+
+    /// [`Self::truncate_collection_as`] for `identity`, or for the identity acting in [`defra_core::RequestContext::ambient`] when there is none.
+    pub async fn truncate_collection(
+        &self,
+        name: &str,
+        identity: Option<&identity::Did>,
+    ) -> Result<()> {
+        self.truncate_collection_as(&crate::access::nac::ambient_as(identity), name)
+            .await
     }
 
     /// Truncate a collection: delete all documents, heads, blocks, and index entries
@@ -171,12 +203,12 @@ impl<S: Store> crate::database::DB<S> {
     ///
     /// Processes deletes in chunks to avoid building a massive uncommitted write set.
     #[instrument(skip(self), fields(collection = %name), name = "db.truncate_collection")]
-    pub async fn truncate_collection(
+    pub async fn truncate_collection_as(
         &self,
+        context: &defra_core::RequestContext,
         name: &str,
-        identity: Option<&identity::Did>,
     ) -> Result<()> {
-        self.check_node_access(identity, acp::nac::NodePermission::CollectionTruncate)
+        self.check_node_access_as(context, acp::nac::NodePermission::CollectionTruncate)
             .await?;
         let collection = self
             .get_collection(name)?

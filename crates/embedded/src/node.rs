@@ -2,6 +2,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use defra_core::RequestContext;
+
 use crate::node_acp::{create_document_acp, create_nac_manager};
 use crate::node_identity::create_node_identity;
 use crate::node_tasks::BackgroundTasks;
@@ -31,16 +33,16 @@ type EmbeddedTxnRegistry<S> = db::DbTransactionRegistry<S>;
 pub(crate) type WireDocumentAcpCallback = Box<dyn FnOnce(Arc<dyn acp::DocumentACP>, bool)>;
 pub(crate) type WireKmsCallback = Box<dyn FnOnce(Arc<dyn kms::KmsService>) + Send>;
 
-/// Resolve the ambient (scoped, then process) identity into a creator DID for
-/// ACP registration. Returns `Ok(None)` when no identity is present (the
+/// Resolve the identity acting in `context` into a creator DID for ACP
+/// registration. Returns `Ok(None)` when no identity is present (the
 /// collection stays public/unregistered, as intended), but fails closed when an
-/// identity string is present yet malformed — never silently degrading a
+/// identity string is present yet malformed, never silently degrading a
 /// permissioned collection to public.
-fn resolve_creator_identity() -> Result<Option<identity::Did>> {
-    match defra_core::current_identity::get_effective_identity() {
+fn resolve_creator_identity(context: &RequestContext) -> Result<Option<identity::Did>> {
+    match context.identity() {
         Some(raw) => {
             Ok(Some(identity::Did::new(raw).map_err(|error| {
-                anyhow!("malformed ambient identity: {error}")
+                anyhow!("malformed acting identity: {error}")
             })?))
         }
         None => Ok(None),
@@ -84,30 +86,49 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
         self.background_tasks.clone()
     }
 
+    /// [`Self::execute_as`] in [`RequestContext::ambient`].
     pub async fn execute(&self, query_str: &str) -> query::QueryResponse {
+        self.execute_as(&RequestContext::ambient(), query_str).await
+    }
+
+    /// Execute a GraphQL query or mutation for the request `context` serves.
+    pub async fn execute_as(
+        &self,
+        context: &RequestContext,
+        query_str: &str,
+    ) -> query::QueryResponse {
         self.query_runner
-            .execute(query::QueryRequest::new(query_str))
+            .execute(query::QueryRequest::new(query_str).with_context(context.clone()))
             .await
     }
 
+    /// The context the node's own operations run in: the node's identity acts
+    /// in it when one is configured, and [`RequestContext::ambient`] otherwise.
+    fn node_context(&self) -> RequestContext {
+        let context = RequestContext::ambient();
+        match &self.node_identity_did {
+            Some(did) => context.with_identity(Some(did.clone())),
+            None => context,
+        }
+    }
+
     pub async fn add_schema(&self, sdl: &str) -> Result<()> {
-        // The node acts as itself unless the caller's request names who acts.
-        let acting = {
-            let _node = defra_core::current_identity::scoped_current_identity(
-                self.node_identity_did.clone(),
-            );
-            defra_core::current_identity::get_effective_identity()
-        };
+        let context = self.node_context();
         let (database, document_acp) = (Arc::clone(&self.database), self.document_acp.clone());
         let sdl = sdl.to_owned();
-        self.on_pool(acting, move || async move {
+        self.on_pool(move || async move {
             let collections =
                 query::parse_sdl(&sdl).map_err(|error| anyhow!("SDL parse error: {error}"))?;
             schema::definition_validation::validate_new_collections(&collections)
                 .map_err(|error| anyhow!("schema validation error: {error}"))?;
-            let creator = resolve_creator_identity()?;
+            let creator = resolve_creator_identity(&context)?;
             database
-                .create_collections_atomic_with_acp_registration(collections, document_acp, creator)
+                .create_collections_atomic_with_acp_registration_as(
+                    &context,
+                    collections,
+                    document_acp,
+                    creator,
+                )
                 .await
                 .map_err(|error| anyhow!("create collection error: {error}"))?;
             Ok(())
@@ -122,23 +143,22 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
     pub async fn add_encrypted_index(&self, collection: &str, field_name: &str) -> Result<()> {
         let database = Arc::clone(&self.database);
         let (collection, field_name) = (collection.to_owned(), field_name.to_owned());
-        let acting = defra_core::current_identity::get_effective_identity();
-        self.on_pool(acting, move || {
+        self.on_pool(move || {
             add_encrypted_index(database, collection, field_name)
         })
         .await
     }
 
     /// Runs the data-path call `make` builds on the database's worker pool (in
-    /// place on a worker, or without a pool), acting there as `identity`.
-    async fn on_pool<F, Fut, T>(&self, identity: Option<String>, make: F) -> Result<T>
+    /// place on a worker, or without a pool). The request context the call
+    /// acts in travels inside it.
+    async fn on_pool<F, Fut, T>(&self, make: F) -> Result<T>
     where
         F: FnOnce() -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<T>> + 'static,
         T: Send + 'static,
     {
-        let pool = self.database.pool();
-        query::pooled::run_as(pool, workers::Target::LeastLoaded, identity, make)
+        workers::run_on(self.database.pool(), workers::Target::LeastLoaded, make)
             .await
             .map_err(|error| anyhow!("the call did not run on the worker pool: {error}"))?
     }

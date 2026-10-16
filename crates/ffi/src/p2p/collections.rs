@@ -32,13 +32,9 @@ pub unsafe extern "C" fn p2p_add_collections(
             NodePermission::P2pCollectionAdd
         ));
 
-        // Bind the caller's identity so the adapter's inner NAC check resolves the
-        // actual caller instead of the wildcard. The body runs on this thread via
-        // `block_on`, so the thread-local is visible throughout; the guard restores
-        // on drop so it never leaks into the next request on this pooled thread.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
-        );
+        // The caller acts in the call's context, so the NAC checks the body
+        // reaches resolve the actual caller instead of the wildcard.
+        let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()));
 
         let collections_str = try_ffi!(require_c_str(collections_json, "collections_json"));
         let collections = match parse_collections_json(&collections_str) {
@@ -55,7 +51,7 @@ pub unsafe extern "C" fn p2p_add_collections(
 
                 crate::helpers::block_on(rt, async {
                     p2p.system
-                        .ops()
+                        .ops_for(&context)
                         .add_collections(collections)
                         .await
                         .map_err(FfiP2PError::from)
@@ -89,13 +85,9 @@ pub unsafe extern "C" fn p2p_delete_collections(
             NodePermission::P2pCollectionDelete
         ));
 
-        // Bind the caller's identity so the adapter's inner NAC check resolves the
-        // actual caller instead of the wildcard. The body runs on this thread via
-        // `block_on`, so the thread-local is visible throughout; the guard restores
-        // on drop so it never leaks into the next request on this pooled thread.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
-        );
+        // The caller acts in the call's context, so the NAC checks the body
+        // reaches resolve the actual caller instead of the wildcard.
+        let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()));
 
         let collections_str = try_ffi!(require_c_str(collections_json, "collections_json"));
         let collections = match parse_collections_json(&collections_str) {
@@ -112,7 +104,7 @@ pub unsafe extern "C" fn p2p_delete_collections(
 
                 crate::helpers::block_on(rt, async {
                     p2p.system
-                        .ops()
+                        .ops_for(&context)
                         .remove_collections(collections)
                         .await
                         .map_err(FfiP2PError::from)
@@ -145,13 +137,9 @@ pub unsafe extern "C" fn p2p_list_collections(
             NodePermission::P2pCollectionList
         ));
 
-        // Bind the caller's identity so the adapter's inner NAC check resolves the
-        // actual caller instead of the wildcard. The body runs on this thread via
-        // `block_on`, so the thread-local is visible throughout; the guard restores
-        // on drop so it never leaks into the next request on this pooled thread.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
-        );
+        // The caller acts in the call's context, so the NAC checks the body
+        // reaches resolve the actual caller instead of the wildcard.
+        let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()));
 
         let result = NODES
             .get(node_ptr, |state| {
@@ -163,7 +151,7 @@ pub unsafe extern "C" fn p2p_list_collections(
                 crate::helpers::block_on(rt, async {
                     let collections = p2p
                         .system
-                        .ops()
+                        .ops_for(&context)
                         .get_collections()
                         .await
                         .map_err(FfiP2PError::from)?;

@@ -14,7 +14,7 @@ pub(crate) async fn write_branchable_collection_block<S: storage::corekv::Store 
     headstore: &NamespaceView,
     doc_cid: Cid,
     _doc_short_id: u64,
-    signing_config: Option<&defra_core::signing::SigningConfig>,
+    context: &RequestContext,
     prepared_inputs: Option<&query::prepared::PreparedInputMemo>,
 ) -> query::error::Result<Option<(Cid, Bytes)>> {
     if !collection.schema().is_branchable {
@@ -27,7 +27,8 @@ pub(crate) async fn write_branchable_collection_block<S: storage::corekv::Store 
         collection.resolved_root_id(),
         collection.version_id(),
         doc_cid,
-        signing_config,
+        context.signing(),
+        context.batch_session(),
         prepared_inputs,
     )
     .await
@@ -129,10 +130,12 @@ pub(crate) async fn load_update_heads(
 
 /// Register the identity of a freshly created document (Go `save()` isAdd):
 /// duplicate-check the derived DocID against the mapping, persist the
-/// short-ID <-> DocID mapping, and record block ownership for the genesis
-/// composite, field, and encryption blocks. Returns the parsed DocID.
+/// short-ID <-> DocID mapping, register `creator` as the document's ACP owner,
+/// and record block ownership for the genesis composite, field, and
+/// encryption blocks. Returns the parsed DocID.
 pub(crate) async fn register_created_doc(
     acp: Option<&Arc<dyn acp::DocumentACP>>,
+    creator: Option<&str>,
     systemstore: &NamespaceView,
     datastore: &NamespaceView,
     collection: &Collection,
@@ -181,12 +184,10 @@ pub(crate) async fn register_created_doc(
     // Registration happens only here, on the create branch. A local provider
     // registers in this transaction; an external one cannot join it, so the
     // registration it is owed is recorded here and settled after the commit.
-    if let (Some(provider), Some(policy), Some(creator)) = (
-        acp,
-        collection.schema().policy.as_ref(),
-        defra_core::signing::get_broadcast_creator_did(),
-    ) {
-        let creator = identity::Did::new(&creator)
+    if let (Some(provider), Some(policy), Some(creator)) =
+        (acp, collection.schema().policy.as_ref(), creator)
+    {
+        let creator = identity::Did::new(creator)
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
         let acpstore = systemstore.sibling(storage::namespace::Namespace::Acpstore);
         match provider.bind_transaction(acpstore.clone()) {

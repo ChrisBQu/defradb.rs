@@ -5,17 +5,27 @@ use rapidhash::HashSetExt;
 use storage::corekv::OnCommit;
 
 impl<S: Store + 'static> DbTransactionRegistry<S> {
+    /// [`Self::get_collections_in_txn_as`] in [`RequestContext::ambient`].
+    pub async fn get_collections_in_txn(
+        &self,
+        txn_id: &str,
+    ) -> Result<Vec<schema::CollectionVersion>> {
+        self.get_collections_in_txn_as(&RequestContext::ambient(), txn_id)
+            .await
+    }
+
     /// Get all collection versions visible within a transaction.
     ///
     /// This reads from the transaction's systemstore, which includes both
     /// committed data and any uncommitted writes made within this transaction
     /// (e.g., placeholders from `set_migration_in_txn`).
-    pub async fn get_collections_in_txn(
+    pub async fn get_collections_in_txn_as(
         &self,
+        context: &RequestContext,
         txn_id: &str,
     ) -> Result<Vec<schema::CollectionVersion>> {
         let db = self.db.clone();
-        self.in_txn(txn_id, move |owned| {
+        self.in_txn(context, txn_id, move |owned| {
             Box::pin(async move {
                 let txn = owned.alone()?;
 
@@ -53,18 +63,35 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         .await
     }
 
+    /// [`Self::set_collection_active_in_txn_as`] in [`RequestContext::ambient`].
     pub async fn set_collection_active_in_txn(
         &self,
         txn_id: &str,
         version_id: &str,
         is_active: bool,
     ) -> Result<schema::CollectionVersion> {
+        self.set_collection_active_in_txn_as(
+            &RequestContext::ambient(),
+            txn_id,
+            version_id,
+            is_active,
+        )
+        .await
+    }
+
+    pub async fn set_collection_active_in_txn_as(
+        &self,
+        context: &RequestContext,
+        txn_id: &str,
+        version_id: &str,
+        is_active: bool,
+    ) -> Result<schema::CollectionVersion> {
         self.db
-            .check_node_access(None, acp::nac::NodePermission::CollectionPatch)
+            .check_node_access_as(context, acp::nac::NodePermission::CollectionPatch)
             .await?;
         let db = self.db.clone();
         let version_id = version_id.to_owned();
-        self.in_txn(txn_id, move |owned| {
+        self.in_txn(context, txn_id, move |owned| {
             Box::pin(async move {
                 let version_id = version_id.as_str();
                 let txn = owned.alone()?;
@@ -212,8 +239,20 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         .await
     }
 
+    /// [`Self::delete_collections_in_txn_as`] in [`RequestContext::ambient`].
     pub async fn delete_collections_in_txn(
         &self,
+        txn_id: &str,
+        targets: Vec<String>,
+        active_only: bool,
+    ) -> Result<()> {
+        self.delete_collections_in_txn_as(&RequestContext::ambient(), txn_id, targets, active_only)
+            .await
+    }
+
+    pub async fn delete_collections_in_txn_as(
+        &self,
+        context: &RequestContext,
         txn_id: &str,
         targets: Vec<String>,
         active_only: bool,
@@ -224,10 +263,10 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
             ));
         }
         self.db
-            .check_node_access(None, acp::nac::NodePermission::CollectionPatch)
+            .check_node_access_as(context, acp::nac::NodePermission::CollectionPatch)
             .await?;
         let db = self.db.clone();
-        self.in_txn(txn_id, move |owned| {
+        self.in_txn(context, txn_id, move |owned| {
             Box::pin(async move {
                 let txn = owned.alone()?;
                 let systemstore = txn.systemstore()?;

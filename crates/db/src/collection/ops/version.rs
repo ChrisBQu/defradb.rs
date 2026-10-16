@@ -2,6 +2,12 @@ use super::*;
 use storage::corekv::OnCommit;
 
 impl<S: Store> crate::database::DB<S> {
+    /// [`Self::set_active_collection_version_as`] in [`defra_core::RequestContext::ambient`].
+    pub async fn set_active_collection_version(&self, version_id: &str) -> Result<()> {
+        self.set_active_collection_version_as(&defra_core::RequestContext::ambient(), version_id)
+            .await
+    }
+
     /// Set the active collection version.
     ///
     /// This activates the collection with the given version ID and deactivates
@@ -15,8 +21,12 @@ impl<S: Store> crate::database::DB<S> {
     ///
     /// - `CollectionVersionNotFound` if no collection with the given version ID exists
     #[instrument(skip(self), fields(version_id = %version_id), name = "db.set_active_version")]
-    pub async fn set_active_collection_version(&self, version_id: &str) -> Result<()> {
-        self.check_node_access(None, acp::nac::NodePermission::CollectionPatch)
+    pub async fn set_active_collection_version_as(
+        &self,
+        context: &defra_core::RequestContext,
+        version_id: &str,
+    ) -> Result<()> {
+        self.check_node_access_as(context, acp::nac::NodePermission::CollectionPatch)
             .await?;
         if version_id.is_empty() {
             return Err(Error::CollectionVersionIDEmpty);
@@ -255,6 +265,20 @@ impl<S: Store> crate::database::DB<S> {
         Ok(versions)
     }
 
+    /// [`Self::delete_collection_version_as`] in [`defra_core::RequestContext::ambient`].
+    pub async fn delete_collection_version(
+        &self,
+        version_id: &str,
+        also_deleting: &[String],
+    ) -> Result<()> {
+        self.delete_collection_version_as(
+            &defra_core::RequestContext::ambient(),
+            version_id,
+            also_deleting,
+        )
+        .await
+    }
+
     /// Delete a specific collection version by version_id.
     ///
     /// This performs true deletion (not deactivation): removes the version from
@@ -267,12 +291,13 @@ impl<S: Store> crate::database::DB<S> {
     /// - No non-deleted child versions may reference this as PreviousVersion
     ///   (unless those children are also in `also_deleting` batch)
     /// - The collection must have no documents
-    pub async fn delete_collection_version(
+    pub async fn delete_collection_version_as(
         &self,
+        context: &defra_core::RequestContext,
         version_id: &str,
         also_deleting: &[String],
     ) -> Result<()> {
-        self.check_node_access(None, acp::nac::NodePermission::CollectionPatch)
+        self.check_node_access_as(context, acp::nac::NodePermission::CollectionPatch)
             .await?;
         // Load the version from KV store
         let txn = self.new_txn(true).await?;
@@ -405,13 +430,26 @@ impl<S: Store> crate::database::DB<S> {
         Ok(())
     }
 
+    /// [`Self::delete_collection_versions_batch_as`] in [`defra_core::RequestContext::ambient`].
+    pub async fn delete_collection_versions_batch(&self, version_ids: Vec<String>) -> Result<()> {
+        self.delete_collection_versions_batch_as(
+            &defra_core::RequestContext::ambient(),
+            version_ids,
+        )
+        .await
+    }
+
     /// Delete multiple collection versions in a single batch.
     ///
     /// Versions are sorted topologically (children before parents based on
     /// PreviousVersion) and deleted in that order. When checking for child
     /// references, other versions in the batch are excluded from validation.
-    pub async fn delete_collection_versions_batch(&self, version_ids: Vec<String>) -> Result<()> {
-        self.check_node_access(None, acp::nac::NodePermission::CollectionPatch)
+    pub async fn delete_collection_versions_batch_as(
+        &self,
+        context: &defra_core::RequestContext,
+        version_ids: Vec<String>,
+    ) -> Result<()> {
+        self.check_node_access_as(context, acp::nac::NodePermission::CollectionPatch)
             .await?;
         if version_ids.is_empty() {
             return Ok(());
@@ -528,7 +566,7 @@ impl<S: Store> crate::database::DB<S> {
 
         // Delete each version in topological order
         for version_id in &sorted {
-            self.delete_collection_version(version_id, &version_ids)
+            self.delete_collection_version_as(context, version_id, &version_ids)
                 .await?;
         }
 

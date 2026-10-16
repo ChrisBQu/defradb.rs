@@ -7,6 +7,7 @@ use super::{map_p2p_bad_request, map_p2p_internal};
 use crate::error::HttpError;
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
+use crate::request_scope::bound;
 use crate::router::{AppState, ExplicitReplayCapabilityInput, NodePermission, ReplicationFilters};
 use crate::validation::{validate_collection_name, validate_multiaddr};
 
@@ -82,7 +83,7 @@ pub async fn list_replicators(
 ) -> Result<Json<Vec<ReplicatorInfoResponse>>, HttpError> {
     require_permission(&state, &identity, NodePermission::P2pReplicatorList).await?;
 
-    let p2p = state.require_p2p()?;
+    let p2p = bound(state.require_p2p()?, &identity.context());
 
     let replicators = p2p.get_replicators().await.map_err(map_p2p_internal)?;
 
@@ -119,7 +120,7 @@ pub async fn add_replicator(
 ) -> Result<Json<()>, HttpError> {
     require_permission(&state, &identity, NodePermission::P2pReplicatorAdd).await?;
 
-    let p2p = state.require_p2p()?;
+    let p2p = bound(state.require_p2p()?, &identity.context());
 
     if request.collections.is_empty() {
         return Err(HttpError::BadRequest(
@@ -169,7 +170,7 @@ pub async fn remove_replicator(
 ) -> Result<(), HttpError> {
     require_permission(&state, &identity, NodePermission::P2pReplicatorDelete).await?;
 
-    let p2p = state.require_p2p()?;
+    let p2p = bound(state.require_p2p()?, &identity.context());
 
     if request.forget {
         if !request.collections.is_empty() {

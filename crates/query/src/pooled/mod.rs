@@ -15,6 +15,9 @@
 //!   transaction, so routing them here would add a hop;
 //! - preparing a request's remote inputs (embeddings, keys) is network
 //!   work: it runs where the caller is, before the request enters the pool.
+//!
+//! A request carries its [`RequestContext`] into the pool, and the
+//! transaction calls that take one pass it through to the inner executor.
 
 mod route;
 
@@ -23,6 +26,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 pub use route::document_key;
+
+use defra_core::RequestContext;
 
 use crate::error::{QueryError, Result, TransactionError};
 use crate::executor::{QueryExecutor, QueryRequest, QueryResponse};
@@ -69,24 +74,12 @@ impl PooledExecutor {
     }
 }
 
-/// Runs the data-path call `make` builds on `pool` ([`workers::run_on`])
-/// acting as `identity` there: the acting identity of the caller crosses into
-/// the pool with its call, the way a caller off the pool would have read it.
-pub async fn run_as<F, Fut>(
-    pool: Option<&workers::Pool>,
-    target: workers::Target,
-    identity: Option<String>,
-    make: F,
-) -> std::result::Result<Fut::Output, workers::Error>
-where
-    F: FnOnce() -> Fut + Send + 'static,
-    Fut: std::future::Future + 'static,
-    Fut::Output: Send + 'static,
-{
-    workers::run_on(pool, target, move || {
-        defra_core::current_identity::with_scoped_identity(identity, make())
-    })
-    .await
+/// `request` as it leaves its caller's thread for the pool: with the context
+/// its caller set up taken along (see [`RequestContext::or_ambient`]; outside
+/// tests this is `request` itself).
+fn leaving_the_caller(mut request: QueryRequest) -> QueryRequest {
+    request.context = std::mem::take(&mut request.context).or_ambient();
+    request
 }
 
 /// A request the pool could not run: it was shutting down, or the task
@@ -110,6 +103,7 @@ impl QueryExecutor for PooledExecutor {
         prepared: Option<Arc<PreparedMutations>>,
     ) -> QueryResponse {
         let target = route::request_target(&request);
+        let request = leaving_the_caller(request);
         self.on_pool(target, move |inner| async move {
             inner.execute_prepared(request, prepared).await
         })
@@ -130,6 +124,7 @@ impl QueryExecutor for PooledExecutor {
 
     async fn execute(&self, request: QueryRequest) -> QueryResponse {
         let target = route::request_target(&request);
+        let request = leaving_the_caller(request);
         self.on_pool(
             target,
             move |inner| async move { inner.execute(request).await },
@@ -153,6 +148,14 @@ impl QueryExecutor for PooledExecutor {
         self.inner.begin_txn(readonly).await
     }
 
+    async fn begin_txn_as(
+        &self,
+        context: &RequestContext,
+        readonly: bool,
+    ) -> std::result::Result<TransactionHandle, TransactionError> {
+        self.inner.begin_txn_as(context, readonly).await
+    }
+
     async fn commit_txn(
         &self,
         handle: &TransactionHandle,
@@ -160,11 +163,27 @@ impl QueryExecutor for PooledExecutor {
         self.inner.commit_txn(handle).await
     }
 
+    async fn commit_txn_as(
+        &self,
+        context: &RequestContext,
+        handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError> {
+        self.inner.commit_txn_as(context, handle).await
+    }
+
     async fn rollback_txn(
         &self,
         handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError> {
         self.inner.rollback_txn(handle).await
+    }
+
+    async fn rollback_txn_as(
+        &self,
+        context: &RequestContext,
+        handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError> {
+        self.inner.rollback_txn_as(context, handle).await
     }
 
     fn abandon_txn(&self, handle: &TransactionHandle) {

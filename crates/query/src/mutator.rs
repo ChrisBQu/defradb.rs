@@ -6,6 +6,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use cid::Cid;
+use defra_core::RequestContext;
 use document::{DocID, Document};
 use identity::Did;
 use rapidhash::RapidHashSet;
@@ -27,6 +28,20 @@ pub trait CollectionTruncator: MaybeSendSync {
         filter: Option<Filter>,
         identity: Option<&Did>,
     ) -> Result<()>;
+
+    /// [`Self::truncate`] for the request `context` serves. The default runs
+    /// `truncate` for the request's creator inside [`RequestContext::mirror`].
+    async fn truncate_as(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        filter: Option<Filter>,
+    ) -> Result<()> {
+        let creator = context.creator().and_then(|did| Did::new(did).ok());
+        context
+            .mirror(self.truncate(collection_name, filter, creator.as_ref()))
+            .await
+    }
 }
 
 /// Status of P2P broadcast after a mutation.
@@ -419,6 +434,17 @@ impl MutationBatch {
 /// which provides read operations. Implementations are expected to be
 /// transaction-scoped, meaning all operations occur within a single transaction.
 ///
+/// Each write comes twice: `*_as` takes the [`RequestContext`] of the request
+/// it serves, and how its blocks are encrypted, signed and attributed comes
+/// from there; the plain form runs in [`RequestContext::ambient`]. A storage
+/// mutator overrides both forms of every write it implements. The defaults of
+/// `create_as`, `update_as`, `delete_as` and the preparation calls run the
+/// plain form inside [`RequestContext::mirror`], so a mutator that implements
+/// only the plain form still serves a request; the defaults of the composite
+/// writes (`create_many_as`, `update_if_unchanged_as`,
+/// `update_if_fields_unchanged_as`) compose the `*_as` writes, as the plain
+/// defaults compose the plain ones.
+///
 /// # Transaction Semantics
 ///
 /// All mutations performed through a `DocMutator` should be atomic within
@@ -433,7 +459,7 @@ impl MutationBatch {
 ///     doc.set("name", name);
 ///     doc.set("age", age);
 ///
-///     let result = mutator.create("Users", doc).await?;
+///     let result = mutator.create_as(&RequestContext::default(), "Users", doc).await?;
 ///     Ok(result.doc_id)
 /// }
 /// ```
@@ -466,6 +492,11 @@ pub trait DocMutator: MaybeSendSync {
         false
     }
 
+    /// [`Self::requires_write_preparation`] for the request `context` serves.
+    fn requires_write_preparation_as(&self, _context: &RequestContext) -> bool {
+        self.requires_write_preparation()
+    }
+
     /// Whether update reads may be projected to the mutation's known field
     /// dependencies. Documents remain fully materialized, but fields outside
     /// that dependency set are not validated. Implementations opting in must
@@ -487,6 +518,25 @@ pub trait DocMutator: MaybeSendSync {
         Ok(doc)
     }
 
+    /// [`Self::prepare_write`] for the request `context` serves, encrypting
+    /// as its context says.
+    async fn prepare_write_as(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        doc: Document,
+        modified_fields: Option<rapidhash::RapidHashSet<String>>,
+    ) -> Result<Document> {
+        context
+            .mirror(self.prepare_write(
+                collection_name,
+                doc,
+                modified_fields,
+                context.encryption().cloned(),
+            ))
+            .await
+    }
+
     /// Resolve one exact external request after a transaction attempt has
     /// ended. Implementations parse the request according to `kind` and return
     /// the provider response bytes for per-request memoization.
@@ -497,6 +547,15 @@ pub trait DocMutator: MaybeSendSync {
         Err(crate::error::QueryError::execution(
             "prepared input resolution is not supported by this mutator",
         ))
+    }
+
+    /// [`Self::resolve_prepared_input`] for the request `context` serves.
+    async fn resolve_prepared_input_as(
+        &self,
+        context: &RequestContext,
+        request: &crate::prepared::PreparedInputRequest,
+    ) -> Result<Arc<[u8]>> {
+        context.mirror(self.resolve_prepared_input(request)).await
     }
 
     /// Resolve a wave of exact external requests at once, one answer per
@@ -511,6 +570,24 @@ pub trait DocMutator: MaybeSendSync {
             requests
                 .iter()
                 .map(|request| self.resolve_prepared_input(request)),
+        )
+        .await
+    }
+
+    /// [`Self::resolve_prepared_inputs`] for the request `context` serves.
+    /// The default resolves each with
+    /// [`resolve_prepared_input_as`](Self::resolve_prepared_input_as),
+    /// concurrently, as the plain default composes the plain one; a mutator
+    /// whose inputs batch overrides both forms.
+    async fn resolve_prepared_inputs_as(
+        &self,
+        context: &RequestContext,
+        requests: Vec<crate::prepared::PreparedInputRequest>,
+    ) -> Result<Vec<Arc<[u8]>>> {
+        futures::future::try_join_all(
+            requests
+                .iter()
+                .map(|request| self.resolve_prepared_input_as(context, request)),
         )
         .await
     }
@@ -580,6 +657,16 @@ pub trait DocMutator: MaybeSendSync {
     /// - A document with the same content already exists
     async fn create(&self, collection_name: &str, doc: Document) -> Result<CreateResult>;
 
+    /// [`Self::create`] for the request `context` serves.
+    async fn create_as(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        doc: Document,
+    ) -> Result<CreateResult> {
+        context.mirror(self.create(collection_name, doc)).await
+    }
+
     /// Create multiple documents in a single transaction.
     ///
     /// The default implementation calls `create()` in a loop. Implementations
@@ -592,6 +679,20 @@ pub trait DocMutator: MaybeSendSync {
         let mut results = Vec::with_capacity(docs.len());
         for doc in docs {
             results.push(self.create(collection_name, doc).await?);
+        }
+        Ok(results)
+    }
+
+    /// [`Self::create_many`] for the request `context` serves.
+    async fn create_many_as(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        docs: Vec<Document>,
+    ) -> Result<Vec<CreateResult>> {
+        let mut results = Vec::with_capacity(docs.len());
+        for doc in docs {
+            results.push(self.create_as(context, collection_name, doc).await?);
         }
         Ok(results)
     }
@@ -625,6 +726,19 @@ pub trait DocMutator: MaybeSendSync {
         modified_fields: RapidHashSet<String>,
     ) -> Result<UpdateResult>;
 
+    /// [`Self::update`] for the request `context` serves.
+    async fn update_as(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        doc: Document,
+        modified_fields: RapidHashSet<String>,
+    ) -> Result<UpdateResult> {
+        context
+            .mirror(self.update(collection_name, doc, modified_fields))
+            .await
+    }
+
     /// Update a document only if its persisted state still matches the
     /// snapshot used to select and materialize the mutation.
     ///
@@ -643,6 +757,20 @@ pub trait DocMutator: MaybeSendSync {
         self.update(collection_name, doc, modified_fields).await
     }
 
+    /// [`Self::update_if_unchanged`] for the request `context` serves.
+    async fn update_if_unchanged_as(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        expected: Document,
+        doc: Document,
+        modified_fields: RapidHashSet<String>,
+    ) -> Result<UpdateResult> {
+        let _ = expected;
+        self.update_as(context, collection_name, doc, modified_fields)
+            .await
+    }
+
     /// Update only if the named fields in the previously selected document
     /// still match. Implementations without projected-write support retain
     /// the conservative full-document check.
@@ -656,6 +784,21 @@ pub trait DocMutator: MaybeSendSync {
     ) -> Result<UpdateResult> {
         let _ = expected_fields;
         self.update_if_unchanged(collection_name, expected, doc, modified_fields)
+            .await
+    }
+
+    /// [`Self::update_if_fields_unchanged`] for the request `context` serves.
+    async fn update_if_fields_unchanged_as(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        expected: Document,
+        expected_fields: RapidHashSet<String>,
+        doc: Document,
+        modified_fields: RapidHashSet<String>,
+    ) -> Result<UpdateResult> {
+        let _ = expected_fields;
+        self.update_if_unchanged_as(context, collection_name, expected, doc, modified_fields)
             .await
     }
 
@@ -676,6 +819,16 @@ pub trait DocMutator: MaybeSendSync {
     /// - The collection does not exist
     /// - A storage error occurs
     async fn delete(&self, collection_name: &str, doc_id: &DocID) -> Result<DeleteResult>;
+
+    /// [`Self::delete`] for the request `context` serves.
+    async fn delete_as(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        doc_id: &DocID,
+    ) -> Result<DeleteResult> {
+        context.mirror(self.delete(collection_name, doc_id)).await
+    }
 
     /// Check if a document exists.
     ///

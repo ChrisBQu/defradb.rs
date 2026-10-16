@@ -97,6 +97,7 @@ cid.workspace = true
 cbindgen = "0.28"
 
 [dev-dependencies]
+defra-core = { path = "../defra-core", features = ["ambient"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tempfile = "3.17"
 

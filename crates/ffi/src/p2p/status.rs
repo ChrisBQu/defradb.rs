@@ -31,9 +31,7 @@ pub unsafe extern "C" fn p2p_sync_status(
             NodePermission::P2pPeerInfo
         ));
 
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
-        );
+        let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()));
 
         let result = NODES
             .get(node_ptr, |state| state.p2p.clone())
@@ -43,7 +41,7 @@ pub unsafe extern "C" fn p2p_sync_status(
                 crate::helpers::block_on(rt, async {
                     let status = p2p
                         .system
-                        .ops()
+                        .ops_for(&context)
                         .sync_status()
                         .await
                         .map_err(FfiP2PError::from)?;

@@ -29,6 +29,9 @@ pub struct VeraDocumentACP {
     decisions: inputs::Service<RemoteDecisions>,
     #[cfg(not(target_arch = "wasm32"))]
     event_subscriber: Option<super::event_subscriber::CosmosEventSubscriber>,
+    /// The request this ACP serves, for one bound to it: the bearer tokens
+    /// its callers write with.
+    context: Option<defra_core::RequestContext>,
 }
 
 /// How long a remote decision may take when the caller sets nothing else.
@@ -50,6 +53,7 @@ impl VeraDocumentACP {
             access_cache,
             #[cfg(not(target_arch = "wasm32"))]
             event_subscriber: None,
+            context: None,
         }
     }
 
@@ -202,8 +206,9 @@ impl VeraDocumentACP {
     }
 
     async fn create_bearer_token(&self, did: &str) -> std::result::Result<String, acp::Error> {
+        let context = defra_core::RequestContext::bound_or_ambient(self.context.as_ref());
         self.provider
-            .create_bearer_token(did)
+            .create_bearer_token_as(&context, did)
             .await
             .map_err(provider_err)
     }
@@ -241,6 +246,21 @@ fn provider_err(e: impl std::fmt::Display) -> acp::Error {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl DocumentACP for VeraDocumentACP {
+    fn bind_request(&self, context: &defra_core::RequestContext) -> Option<Arc<dyn DocumentACP>> {
+        Some(Arc::new(Self {
+            provider: Arc::clone(&self.provider),
+            access_cache: self.access_cache.clone(),
+            decisions: self.decisions.clone(),
+            #[cfg(not(target_arch = "wasm32"))]
+            event_subscriber: None,
+            context: Some(context.clone()),
+        }))
+    }
+
+    fn bearer_token_for(&self, did: &str) -> Option<String> {
+        defra_core::RequestContext::bound_or_ambient(self.context.as_ref()).bearer_token_for(did)
+    }
+
     fn unregistered_documents_are_public(&self) -> bool {
         self.provider.unregistered_documents_are_public()
     }

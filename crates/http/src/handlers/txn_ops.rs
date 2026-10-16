@@ -13,6 +13,7 @@ use serde::Deserialize;
 use crate::error::{http_error_from_backend_message, HttpError};
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
+use crate::request_scope::bound;
 use crate::router::{AppState, NodePermission};
 
 /// Path parameter for transaction-scoped routes.
@@ -45,7 +46,7 @@ pub async fn set_migration_in_txn(
 ) -> Result<Json<serde_json::Value>, HttpError> {
     require_permission(&state, &identity, NodePermission::CollectionPatch).await?;
 
-    let txn_ops = state.require_txn_ops()?;
+    let txn_ops = bound(state.require_txn_ops()?, &identity.context());
 
     let txn_id = params.id.clone();
 
@@ -72,7 +73,7 @@ pub async fn get_collections_in_txn(
 ) -> Result<Json<Vec<schema::CollectionVersion>>, HttpError> {
     require_permission(&state, &identity, NodePermission::CollectionGet).await?;
 
-    let txn_ops = state.require_txn_ops()?;
+    let txn_ops = bound(state.require_txn_ops()?, &identity.context());
 
     let txn_id = params.id.clone();
 
@@ -104,7 +105,7 @@ pub async fn add_schema_in_txn(
 ) -> Result<Json<Vec<schema::CollectionVersion>>, HttpError> {
     require_permission(&state, &identity, NodePermission::CollectionPatch).await?;
 
-    let txn_ops = state.require_txn_ops()?;
+    let txn_ops = bound(state.require_txn_ops()?, &identity.context());
 
     let txn_id = params.id.clone();
 

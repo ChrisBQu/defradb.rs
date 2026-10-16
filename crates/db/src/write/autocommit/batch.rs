@@ -21,8 +21,7 @@ use crate::event::emission::register_update_event_callback;
 use crate::txn::held::Held;
 use crate::txn::{DbTxn, LentTxn};
 use datastore::BasicTxn;
-use defra_core::encryption::get_encryption_config;
-use defra_core::signing::get_signing_config;
+use defra_core::RequestContext;
 
 pub struct BatchMutator<S: Store + 'static> {
     db: Arc<DB<S>>,
@@ -103,16 +102,18 @@ impl<S: Store + 'static> BatchMutator<S> {
 impl<S: Store + 'static> BatchMutator<S> {
     async fn check_attempt_node_access(
         &self,
+        context: &RequestContext,
         permission: acp::nac::NodePermission,
     ) -> query::error::Result<()> {
         let Some(inputs) = &self.prepared_inputs else {
             return self
                 .db
-                .check_node_access(None, permission)
+                .check_node_access_as(context, permission)
                 .await
                 .map_err(|error| query::error::QueryError::permission_denied(error.to_string()));
         };
-        let identity = defra_core::current_identity::get_effective_identity()
+        let identity = context
+            .identity()
             .and_then(|value| identity::Did::new(value).ok())
             .unwrap_or_else(identity::Did::wildcard);
         let exact_request = serde_json::to_vec(&(identity.to_string(), permission.as_str()))
@@ -139,12 +140,13 @@ impl<S: Store + 'static> BatchMutator<S> {
 
     async fn register_created_doc_with_acp(
         &self,
+        context: &RequestContext,
         collection: &crate::collection::Collection,
         doc_id: String,
     ) -> query::error::Result<()> {
         let txn = &*self.shared_txn()?;
         super::AutoCommitMutator::new(Arc::clone(&self.db))
-            .register_created_doc_with_acp(txn, collection, doc_id)
+            .register_created_doc_with_acp_as(context, txn, collection, doc_id)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -328,15 +330,26 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
     async fn create(
         &self,
         collection_name: &str,
+        doc: Document,
+    ) -> query::error::Result<CreateResult> {
+        self.create_as(&RequestContext::ambient(), collection_name, doc)
+            .await
+    }
+
+    async fn create_as(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
         mut doc: Document,
     ) -> query::error::Result<CreateResult> {
-        self.check_attempt_node_access(acp::nac::NodePermission::DocumentUpdate)
+        self.check_attempt_node_access(context, acp::nac::NodePermission::DocumentUpdate)
             .await?;
 
         let (collection, datastore, systemstore, index_manager) =
             get_collection_with_index_manager(&*self.shared_txn()?, collection_name).await?;
         self.db
             .check_node_access_in_txn(
+                context,
                 systemstore.sibling(storage::namespace::Namespace::Acpstore),
                 acp::nac::NodePermission::DocumentUpdate,
             )
@@ -366,8 +379,8 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
 
         let short_id = collection.resolved_root_id();
         let schema_version_id = collection.version_id();
-        let enc_config = get_encryption_config();
-        let sign_config = get_signing_config();
+        let enc_config = context.encryption();
+        let sign_config = context.signing();
 
         let identity = match crate::write::prepare::prepared_identity(&doc) {
             Some(identity) => identity,
@@ -387,7 +400,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 &mut doc,
                 identity,
                 None,
-                enc_config.as_ref(),
+                enc_config,
                 Some((&blockstore, &headstore)),
                 None,
             )
@@ -404,8 +417,9 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 schema_version_id,
                 identity,
                 None,
-                enc_config.as_ref(),
-                sign_config.as_ref(),
+                enc_config,
+                sign_config,
+                context.batch_session(),
                 self.db.kms().as_ref(),
                 self.prepared_inputs.as_ref(),
                 None,
@@ -419,6 +433,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
 
             let doc_id = register_created_doc(
                 self.db.document_acp(),
+                context.creator(),
                 &systemstore,
                 &datastore,
                 &collection,
@@ -426,7 +441,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 &block_result,
             )
             .await?;
-            self.register_created_doc_with_acp(&collection, doc_id.to_string())
+            self.register_created_doc_with_acp(context, &collection, doc_id.to_string())
                 .await?;
             doc.set_id(doc_id.clone());
 
@@ -440,7 +455,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 &headstore,
                 block_result.cid,
                 doc_short_id,
-                sign_config.as_ref(),
+                context,
                 self.prepared_inputs.as_ref(),
             )
             .await?;
@@ -470,16 +485,33 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
     async fn update(
         &self,
         collection_name: &str,
+        doc: Document,
+        modified_fields: RapidHashSet<String>,
+    ) -> query::error::Result<UpdateResult> {
+        self.update_as(
+            &RequestContext::ambient(),
+            collection_name,
+            doc,
+            modified_fields,
+        )
+        .await
+    }
+
+    async fn update_as(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
         mut doc: Document,
         mut modified_fields: RapidHashSet<String>,
     ) -> query::error::Result<UpdateResult> {
-        self.check_attempt_node_access(acp::nac::NodePermission::DocumentUpdate)
+        self.check_attempt_node_access(context, acp::nac::NodePermission::DocumentUpdate)
             .await?;
 
         let (collection, datastore, systemstore, index_manager) =
             get_collection_with_index_manager(&*self.shared_txn()?, collection_name).await?;
         self.db
             .check_node_access_in_txn(
+                context,
                 systemstore.sibling(storage::namespace::Namespace::Acpstore),
                 acp::nac::NodePermission::DocumentUpdate,
             )
@@ -532,8 +564,8 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
 
         let short_id = collection.resolved_root_id();
         let schema_version_id = collection.version_id();
-        let enc_config = get_encryption_config();
-        let sign_config = get_signing_config();
+        let enc_config = context.encryption();
+        let sign_config = context.signing();
 
         {
             let (blockstore, headstore) = self.block_and_head_stores().await?;
@@ -542,7 +574,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 &mut doc,
                 DocStorageIdentity::new(short_id, doc_short_id),
                 Some(&modified_fields),
-                enc_config.as_ref(),
+                enc_config,
                 Some((&blockstore, &headstore)),
                 None,
             )
@@ -559,8 +591,9 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 schema_version_id,
                 DocStorageIdentity::new(short_id, doc_short_id),
                 Some(&modified_fields),
-                enc_config.as_ref(),
-                sign_config.as_ref(),
+                enc_config,
+                sign_config,
+                context.batch_session(),
                 self.db.kms().as_ref(),
                 self.prepared_inputs.as_ref(),
                 Some(heads),
@@ -587,7 +620,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 &headstore,
                 block_result.cid,
                 doc_short_id,
-                sign_config.as_ref(),
+                context,
                 self.prepared_inputs.as_ref(),
             )
             .await?;
@@ -622,13 +655,24 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         collection_name: &str,
         doc_id: &DocID,
     ) -> query::error::Result<DeleteResult> {
-        self.check_attempt_node_access(acp::nac::NodePermission::DocumentDelete)
+        self.delete_as(&RequestContext::ambient(), collection_name, doc_id)
+            .await
+    }
+
+    async fn delete_as(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        doc_id: &DocID,
+    ) -> query::error::Result<DeleteResult> {
+        self.check_attempt_node_access(context, acp::nac::NodePermission::DocumentDelete)
             .await?;
 
         let (collection, datastore, systemstore, index_manager) =
             get_collection_with_index_manager(&*self.shared_txn()?, collection_name).await?;
         self.db
             .check_node_access_in_txn(
+                context,
                 systemstore.sibling(storage::namespace::Namespace::Acpstore),
                 acp::nac::NodePermission::DocumentDelete,
             )
@@ -662,7 +706,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         .await?;
 
         let schema_version_id = collection.version_id();
-        let sign_config = get_signing_config();
+        let sign_config = context.signing();
 
         let (doc_cid, doc_block, col_block_data) = {
             let (blockstore, headstore) = self.block_and_head_stores().await?;
@@ -673,7 +717,8 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 &canonical_doc_id.to_string(),
                 doc_short_id,
                 schema_version_id,
-                sign_config.as_ref(),
+                sign_config,
+                context.batch_session(),
                 self.prepared_inputs.as_ref(),
                 None,
             )
@@ -702,7 +747,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 &headstore,
                 composite_cid,
                 doc_short_id,
-                sign_config.as_ref(),
+                context,
                 self.prepared_inputs.as_ref(),
             )
             .await?;
@@ -712,7 +757,8 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
 
         {
             let txn = &*self.shared_txn()?;
-            super::AutoCommitMutator::new(Arc::clone(&self.db)).register_deleted_doc_with_acp(
+            super::AutoCommitMutator::new(Arc::clone(&self.db)).register_deleted_doc_with_acp_as(
+                context,
                 txn,
                 &collection,
                 canonical_doc_id.to_string(),

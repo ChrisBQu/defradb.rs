@@ -2,6 +2,7 @@
 
 use crate::txn::TransactionHandle;
 use async_trait::async_trait;
+use defra_core::RequestContext;
 use identity::Did;
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
@@ -46,6 +47,13 @@ impl CollectionDocIdsPage {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait RestOperations: MaybeSendSync {
+    /// These operations serving the request `context` carries, so a
+    /// transaction it began and the credentials it presents reach them; `None`
+    /// when they read nothing of a request.
+    fn bind_request(&self, _context: &RequestContext) -> Option<Arc<dyn RestOperations>> {
+        None
+    }
+
     /// Bind subsequent operations to an existing transaction.
     fn with_transaction(&self, _handle: TransactionHandle) -> RestResult<Arc<dyn RestOperations>> {
         Err(RestError::invalid_input(

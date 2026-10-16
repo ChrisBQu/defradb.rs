@@ -5,6 +5,7 @@ use super::types::*;
 use crate::block::builder::decode_priority_varint;
 use crate::error::{Error, Result};
 use chrono::Utc;
+use defra_core::RequestContext;
 use document::{DocID, Document, NormalValue};
 use query::fetcher::CommitsQueryOptions;
 use query::mutator::{DocMutator, MutationBatchController};
@@ -261,11 +262,33 @@ impl<S: Store + 'static> crate::database::DB<S> {
         Ok(modified_fields)
     }
 
+    /// [`Self::persist_window_update_as`] in [`RequestContext::ambient`].
+    #[cfg(test)]
+    async fn persist_window_update(
+        self: &Arc<Self>,
+        plan: &DownsamplePlan,
+        source_doc: &Document,
+        series_doc_id: &str,
+        target_doc_id: Option<&DocID>,
+        aggregate: &WindowAggregate,
+    ) -> Result<DocID> {
+        self.persist_window_update_as(
+            &RequestContext::ambient(),
+            plan,
+            source_doc,
+            series_doc_id,
+            target_doc_id,
+            aggregate,
+        )
+        .await
+    }
+
     /// Upsert one aggregation window into the target doc. Returns the target
     /// DocID so a create in the first window threads its derived identity to
     /// the remaining windows (the DocID only exists after the create).
-    async fn persist_window_update(
+    async fn persist_window_update_as(
         self: &Arc<Self>,
+        context: &RequestContext,
         plan: &DownsamplePlan,
         source_doc: &Document,
         series_doc_id: &str,
@@ -278,7 +301,15 @@ impl<S: Store + 'static> crate::database::DB<S> {
         };
         let created = Arc::new(AtomicBool::new(false));
         match self
-            .persist_window(plan, source_doc, series_doc_id, target, aggregate, &created)
+            .persist_window(
+                context,
+                plan,
+                source_doc,
+                series_doc_id,
+                target,
+                aggregate,
+                &created,
+            )
             .await
         {
             // A create that lost the series to another processor's target
@@ -289,6 +320,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
                     return Err(error);
                 };
                 self.persist_window(
+                    context,
                     plan,
                     source_doc,
                     series_doc_id,
@@ -319,6 +351,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
     /// last attempt took the create branch.
     async fn persist_window(
         self: &Arc<Self>,
+        context: &RequestContext,
         plan: &DownsamplePlan,
         source_doc: &Document,
         series_doc_id: &str,
@@ -328,6 +361,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
     ) -> Result<DocID> {
         let window = Arc::new(WindowWrite {
             db: Arc::clone(self),
+            context: context.clone(),
             plan: plan.clone(),
             source_doc: source_doc.clone(),
             series_doc_id: series_doc_id.to_owned(),
@@ -347,7 +381,9 @@ impl<S: Store + 'static> crate::database::DB<S> {
         let written = loop {
             match controller.run(Arc::clone(&operation), None, None).await {
                 Err(query::error::QueryError::NeedsInput(request)) => inputs
-                    .answer_wave(&request, |wave| mutator.resolve_prepared_inputs(wave))
+                    .answer_wave(&request, |wave| {
+                        mutator.resolve_prepared_inputs_as(context, wave)
+                    })
                     .await
                     .map_err(Error::Query)?,
                 result => break result.map_err(Error::Query)?,
@@ -361,6 +397,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
 
     async fn process_source_doc_for_plan(
         self: &Arc<Self>,
+        context: &RequestContext,
         plan: &DownsamplePlan,
         source_doc: &Document,
         complete_through: chrono::DateTime<chrono::FixedOffset>,
@@ -429,7 +466,8 @@ impl<S: Store + 'static> crate::database::DB<S> {
 
         for aggregate in windows {
             let persisted_id = self
-                .persist_window_update(
+                .persist_window_update_as(
+                    context,
                     plan,
                     source_doc,
                     &series_doc_id,
@@ -443,16 +481,32 @@ impl<S: Store + 'static> crate::database::DB<S> {
         Ok(())
     }
 
-    async fn bootstrap_downsample_plan(self: &Arc<Self>, plan: &DownsamplePlan) -> Result<()> {
+    async fn bootstrap_downsample_plan(
+        self: &Arc<Self>,
+        context: &RequestContext,
+        plan: &DownsamplePlan,
+    ) -> Result<()> {
         let now = Utc::now().fixed_offset();
         for source_doc in self.load_source_documents(&plan.source).await? {
-            self.process_source_doc_for_plan(plan, &source_doc, now)
+            self.process_source_doc_for_plan(context, plan, &source_doc, now)
                 .await?;
         }
         Ok(())
     }
 
+    /// [`Self::bootstrap_downsamples_as`] in [`RequestContext::ambient`].
     pub async fn bootstrap_downsamples(self: &Arc<Self>, names: Option<&[String]>) -> Result<()> {
+        self.bootstrap_downsamples_as(&RequestContext::ambient(), names)
+            .await
+    }
+
+    /// Downsample every source document of the plans `names` selects (all of
+    /// them for `None`), writing the windows in `context`.
+    pub async fn bootstrap_downsamples_as(
+        self: &Arc<Self>,
+        context: &RequestContext,
+        names: Option<&[String]>,
+    ) -> Result<()> {
         let name_set = names.map(|names| names.iter().cloned().collect::<RapidHashSet<_>>());
         let mut plans = self.downsample_plans(name_set.as_ref(), None)?;
 
@@ -464,7 +518,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
         });
 
         for plan in plans {
-            self.bootstrap_downsample_plan(&plan).await?;
+            self.bootstrap_downsample_plan(context, &plan).await?;
         }
 
         Ok(())
@@ -505,9 +559,11 @@ impl<S: Store + 'static> crate::database::DB<S> {
             }
         };
 
+        // A source write downsamples in the background, for no request.
+        let context = RequestContext::default();
         let now = Utc::now().fixed_offset();
         for plan in plans {
-            self.process_source_doc_for_plan(&plan, &source_doc, now)
+            self.process_source_doc_for_plan(&context, &plan, &source_doc, now)
                 .await?;
         }
 
@@ -522,6 +578,7 @@ where
     S: Store,
 {
     db: Arc<crate::database::DB<S>>,
+    context: RequestContext,
     plan: DownsamplePlan,
     source_doc: Document,
     series_doc_id: String,
@@ -556,7 +613,7 @@ where
                     &self.series_doc_id,
                 )
                 .map_err(decide)?;
-            let created = mutator.create(target_name, doc).await?;
+            let created = mutator.create_as(&self.context, target_name, doc).await?;
             return Ok(serde_json::Value::String(created.doc_id.to_string()));
         };
         let id = doc.id().cloned().ok_or_else(|| {
@@ -587,7 +644,9 @@ where
         doc.set_collection(self.plan.target.clone());
         doc.set_schema_version_id(self.plan.target.version_id.clone());
         doc.set_id(id);
-        mutator.update(target_name, doc, modified_fields).await?;
+        mutator
+            .update_as(&self.context, target_name, doc, modified_fields)
+            .await?;
         done
     }
 }

@@ -1,12 +1,10 @@
 //! Block signing configuration for CRDT block signing.
 //!
-//! Provides the SigningConfig type and thread-local storage for passing
-//! signing config from the FFI/query layer to the block builder layer.
-//! Mirrors the pattern used by encryption.rs for EncryptionConfig.
+//! Provides the SigningConfig type, which a request's
+//! [`RequestContext`](crate::RequestContext) carries from the boundary to the
+//! block builder layer.
 
-use std::cell::RefCell;
 use std::fmt;
-use std::future::Future;
 use std::sync::Arc;
 
 use kovan_map::HopscotchMap;
@@ -15,11 +13,18 @@ use crate::thread_bounds::MaybeBoxFuture;
 use rapidhash::fast::RandomState;
 use zeroize::Zeroize;
 
+#[cfg(any(test, feature = "ambient"))]
+pub use crate::ambient::{
+    get_broadcast_creator_did, get_request_bearer_token, get_signing_config,
+    scope_broadcast_creator_did, scope_request_bearer_token, set_broadcast_creator_did,
+    set_signing_config,
+};
+
 /// Remote signing delegate (e.g. Orbis, Secure Enclave host callbacks).
 ///
 /// Implementations call an external service to produce signatures.
-/// `sign_sync` must be callable from synchronous contexts (the block builder
-/// runs inside `spawn_blocking`). [`sign_batch`](Self::sign_batch) is the
+/// `sign_sync` must be callable from synchronous code: the block builder
+/// computes and signs a block without awaiting. [`sign_batch`](Self::sign_batch) is the
 /// completion form the write path uses: one call per wave of signatures,
 /// completing without holding a thread while the service works.
 pub trait RemoteSigner: Send + Sync {
@@ -336,22 +341,6 @@ impl SigningConfig {
     }
 }
 
-thread_local! {
-    static CURRENT_SIGNING_CONFIG: RefCell<Option<SigningConfig>> = const { RefCell::new(None) };
-}
-
-/// Set the signing config for the current thread.
-pub fn set_signing_config(config: Option<SigningConfig>) {
-    CURRENT_SIGNING_CONFIG.with(|c| {
-        *c.borrow_mut() = config;
-    });
-}
-
-/// Get the current signing config for this thread.
-pub fn get_signing_config() -> Option<SigningConfig> {
-    CURRENT_SIGNING_CONFIG.with(|c| c.borrow().clone())
-}
-
 /// Global identity store mapping DID → SigningConfig.
 /// When create_identity() generates a keypair, we store it here so that
 /// exec_request() can look up the signing key from just a DID string.
@@ -442,16 +431,16 @@ pub fn clear_identity_store() {
 
 use std::sync::OnceLock;
 
-/// Legacy fallback for callers outside an explicit bearer scope.
-/// HTTP requests and deferred authorization callbacks use task-scoped tokens
-/// so concurrent requests for the same DID cannot replace each other's JWT.
+/// The bearer tokens bound to DIDs for requests that carry none of their own
+/// (see [`RequestContext::bearer_token_for`](crate::RequestContext::bearer_token_for)).
+/// A request authenticated over HTTP carries its own token, so concurrent
+/// requests for the same DID never replace each other's JWT.
 fn request_token_store() -> &'static HopscotchMap<String, String, RandomState> {
     static STORE: OnceLock<HopscotchMap<String, String, RandomState>> = OnceLock::new();
     STORE.get_or_init(|| HopscotchMap::with_hasher(RandomState::default()))
 }
 
-/// Set a legacy fallback JWT. Concurrent requests should use
-/// [`scope_request_bearer_token`] instead.
+/// Bind `token` to `did` for requests that carry no bearer of their own.
 ///
 /// When a user authenticates via JWT, the node doesn't have their private key
 /// and can't create new bearer tokens for them. Instead, we pass through the
@@ -461,62 +450,9 @@ pub fn set_request_bearer_token(did: &str, token: impl Into<String>) {
     request_token_store().insert(did.to_string(), token.into());
 }
 
-/// Get the stored request bearer token for a specific DID.
-pub fn get_request_bearer_token(did: &str) -> Option<String> {
-    #[cfg(not(target_arch = "wasm32"))]
-    if let Ok(scoped) = TASK_REQUEST_BEARER_TOKEN.try_with(Clone::clone) {
-        return (scoped.0.as_deref() == Some(did))
-            .then_some(scoped.1)
-            .flatten();
-    }
-    #[cfg(target_arch = "wasm32")]
-    if let Some(scoped) = crate::wasm_task_local::try_with(&TASK_REQUEST_BEARER_TOKEN, Clone::clone)
-    {
-        return (scoped.0.as_deref() == Some(did))
-            .then_some(scoped.1)
-            .flatten();
-    }
+/// The bearer token bound to `did` for requests that carry none of their own.
+pub fn stored_bearer_token(did: &str) -> Option<String> {
     request_token_store().get(did)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-tokio::task_local! {
-    static TASK_REQUEST_BEARER_TOKEN: (Option<String>, Option<String>);
-}
-
-#[cfg(target_arch = "wasm32")]
-thread_local! {
-    static TASK_REQUEST_BEARER_TOKEN: RefCell<Option<(Option<String>, Option<String>)>> = const { RefCell::new(None) };
-}
-
-/// Run a future with the request bearer token visible to ACP providers.
-///
-/// A scoped `None` token deliberately suppresses the legacy process-global
-/// fallback for that identity. This keeps concurrent requests for the same
-/// DID from observing or restoring one another's JWT.
-#[cfg(not(target_arch = "wasm32"))]
-pub async fn scope_request_bearer_token<F>(
-    did: Option<String>,
-    token: Option<String>,
-    future: F,
-) -> F::Output
-where
-    F: Future,
-{
-    TASK_REQUEST_BEARER_TOKEN.scope((did, token), future).await
-}
-
-/// Run a future with the request bearer token visible to ACP providers on WASM.
-#[cfg(target_arch = "wasm32")]
-pub async fn scope_request_bearer_token<F>(
-    did: Option<String>,
-    token: Option<String>,
-    future: F,
-) -> F::Output
-where
-    F: Future,
-{
-    crate::wasm_task_local::scope(&TASK_REQUEST_BEARER_TOKEN, (did, token), future).await
 }
 
 /// Remove the stored request bearer token for a specific DID.
@@ -708,71 +644,6 @@ mod tests {
         let error = "invalid".parse::<SigningKeyType>().unwrap_err();
         assert_eq!(error, "unsupported signing key type: invalid");
     }
-}
-
-// ---------------------------------------------------------------------------
-// Broadcast Creator DID — thread-local for P2P ACP propagation
-// ---------------------------------------------------------------------------
-
-thread_local! {
-    static BROADCAST_CREATOR_DID: RefCell<Option<String>> = const { RefCell::new(None) };
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-tokio::task_local! {
-    static TASK_BROADCAST_CREATOR_DID: Option<String>;
-}
-
-/// Scope the broadcast creator DID to one async mutation task.
-///
-/// A thread-local alone is not safe across `.await`: Tokio may resume the
-/// mutation on a different worker, leaving the old worker contaminated and
-/// clearing an unrelated worker on drop. Async query entry points must use
-/// this scope; the thread-local remains only for synchronous lower-level
-/// callers and tests.
-#[cfg(not(target_arch = "wasm32"))]
-pub async fn scope_broadcast_creator_did<F>(did: Option<String>, future: F) -> F::Output
-where
-    F: Future,
-{
-    TASK_BROADCAST_CREATOR_DID.scope(did, future).await
-}
-
-/// Run an async mutation without server-side task-local P2P state on WASM.
-#[cfg(target_arch = "wasm32")]
-pub async fn scope_broadcast_creator_did<F>(_did: Option<String>, future: F) -> F::Output
-where
-    F: Future,
-{
-    future.await
-}
-
-/// Set the broadcast creator DID for the current thread.
-///
-/// When set, P2P broadcasts use this DID as the Creator field instead of
-/// the node's PeerId. This enables ACP registration on the receiving node:
-/// the merge handler registers the document with this DID as owner.
-#[cfg(test)]
-pub fn set_broadcast_creator_did(did: Option<String>) {
-    BROADCAST_CREATOR_DID.with(|c| {
-        *c.borrow_mut() = did;
-    });
-}
-
-/// Get the broadcast creator DID for this thread.
-///
-/// Returns the DID set by `set_broadcast_creator_did`, or None if no
-/// identity override is active (broadcasts will use the node PeerId).
-#[cfg(not(target_arch = "wasm32"))]
-pub fn get_broadcast_creator_did() -> Option<String> {
-    TASK_BROADCAST_CREATOR_DID
-        .try_with(Clone::clone)
-        .unwrap_or_else(|_| BROADCAST_CREATOR_DID.with(|c| c.borrow().clone()))
-}
-
-#[cfg(target_arch = "wasm32")]
-pub fn get_broadcast_creator_did() -> Option<String> {
-    BROADCAST_CREATOR_DID.with(|c| c.borrow().clone())
 }
 
 #[cfg(test)]

@@ -57,6 +57,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // For document-level CIDs, this returns a single document.
         let mut seen_cids = RapidHashSet::new();
         let mut documents = Vec::new();
+        // Read keys are fetched as the identity acting in the request.
+        let reader = self
+            .acting_identity(caller_identity.as_ref())
+            .and_then(|value| Did::new(value).ok());
         for cid in cids {
             if !seen_cids.insert(cid.clone()) {
                 continue;
@@ -67,7 +71,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     collection.resolved_root_id(),
                     cid,
                     expected_doc_id.map(|s| s.as_str()),
-                    caller_identity.as_ref(),
+                    reader.as_ref(),
                 )
                 .await
             {

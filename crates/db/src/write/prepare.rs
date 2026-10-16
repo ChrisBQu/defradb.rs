@@ -184,6 +184,7 @@ pub(crate) async fn prepare_keys_with_stores<S: Store + 'static>(
 /// node permissions.
 pub(crate) async fn resolve_input<S>(
     db: &DB<S>,
+    context: &defra_core::RequestContext,
     request: &query::prepared::PreparedInputRequest,
 ) -> query::error::Result<Arc<[u8]>>
 where
@@ -196,12 +197,14 @@ where
             .ok_or_else(|| {
                 query::error::QueryError::execution("embedding service returned nothing")
             }),
-        query::prepared::PreparedInputKind::Signature => resolve_signatures(db, &[request])
-            .await?
-            .pop()
-            .ok_or_else(|| {
-                query::error::QueryError::execution("remote signer returned no signature")
-            }),
+        query::prepared::PreparedInputKind::Signature => {
+            resolve_signatures(db, context, &[request])
+                .await?
+                .pop()
+                .ok_or_else(|| {
+                    query::error::QueryError::execution("remote signer returned no signature")
+                })
+        }
         query::prepared::PreparedInputKind::KmsKey => {
             let operation: PreparedKmsOperation = serde_json::from_slice(request.exact_request())
                 .map_err(|error| {
@@ -304,9 +307,7 @@ where
         query::prepared::PreparedInputKind::NodePermission => {
             let (identity, permission): (String, String) =
                 serde_json::from_slice(request.exact_request()).map_err(|_| {
-                    query::error::QueryError::execution(
-                        "invalid prepared node permission request",
-                    )
+                    query::error::QueryError::execution("invalid prepared node permission request")
                 })?;
             // An attempt with no acting identity asks for the wildcard actor.
             let identity = if identity == identity::Did::wildcard().as_str() {
@@ -328,7 +329,11 @@ where
                     ))
                 }
             };
-            db.check_node_access(Some(&identity), permission)
+            // The attempt's identity is part of the request, not the
+            // resolving context.
+            let attempt =
+                defra_core::RequestContext::default().with_identity(Some(identity.to_string()));
+            db.check_node_access_as(&attempt, permission)
                 .await
                 .map_err(|error| query::error::QueryError::permission_denied(error.to_string()))?;
             Ok(std::sync::Arc::from(b"true".as_slice()))
@@ -344,6 +349,7 @@ where
 /// every other input concurrently. One answer per request, in order.
 pub(crate) async fn resolve_inputs<S>(
     db: &DB<S>,
+    context: &defra_core::RequestContext,
     requests: Vec<query::prepared::PreparedInputRequest>,
 ) -> query::error::Result<Vec<Arc<[u8]>>>
 where
@@ -374,12 +380,12 @@ where
     };
     let (signature_requests, embedding_requests) = (picked(&signatures), picked(&embeddings));
     let (signed, embedded, fetched) = futures::future::try_join3(
-        resolve_signatures(db, &signature_requests),
+        resolve_signatures(db, context, &signature_requests),
         resolve_embeddings(db, &embedding_requests),
         futures::future::try_join_all(
             others
                 .iter()
-                .map(|index| resolve_input(db, &requests[*index])),
+                .map(|index| resolve_input(db, context, &requests[*index])),
         ),
     )
     .await?;
@@ -441,9 +447,11 @@ where
 }
 
 /// Every remote signature of a wave through the database's signature
-/// service: one `sign_batch` call per signer for the whole wave.
+/// service: one `sign_batch` call per signer for the whole wave, signed by
+/// the signer the request's context names.
 async fn resolve_signatures<S>(
     db: &DB<S>,
+    context: &defra_core::RequestContext,
     requests: &[&query::prepared::PreparedInputRequest],
 ) -> query::error::Result<Vec<Arc<[u8]>>>
 where
@@ -452,7 +460,7 @@ where
     if requests.is_empty() {
         return Ok(Vec::new());
     }
-    let config = defra_core::signing::get_signing_config().ok_or_else(|| {
+    let config = context.signing().ok_or_else(|| {
         query::error::QueryError::execution("remote signature input has no configured signer")
     })?;
     let keys = requests
@@ -492,14 +500,12 @@ pub(crate) fn prepared_identity(doc: &Document) -> Option<DocStorageIdentity> {
 impl<S: Store + 'static> crate::AutoCommitMutator<S> {
     pub(super) async fn prepare_request_write(
         &self,
+        context: &defra_core::RequestContext,
         collection_name: &str,
         mut doc: Document,
         mut modified_fields: Option<RapidHashSet<String>>,
-        config: Option<EncryptionConfig>,
     ) -> query::error::Result<Document> {
         let collection = self.get_collection_or_err(collection_name)?;
-        let effective_encryption_config =
-            config.or_else(defra_core::encryption::get_encryption_config);
         let generated_embeddings = if let Some(fields) = modified_fields.as_mut() {
             let generated = crate::search::embedding::set_embedding_with(
                 self.db.remote_inputs().embeddings(),
@@ -542,7 +548,7 @@ impl<S: Store + 'static> crate::AutoCommitMutator<S> {
                 query::error::QueryError::execution(format!("embedding error: {error}"))
             })?
         };
-        let signing_config = defra_core::signing::get_signing_config();
+        let signing_config = context.signing();
         let prepare_create = modified_fields.is_none()
             && (!generated_embeddings.is_empty() || signing_config.is_some());
         if self.db.kms().is_none() && !prepare_create {
@@ -605,7 +611,7 @@ impl<S: Store + 'static> crate::AutoCommitMutator<S> {
             &mut doc,
             identity,
             modified_fields.as_ref(),
-            effective_encryption_config.as_ref(),
+            context.encryption(),
             None,
             prior.as_deref(),
         )
@@ -623,12 +629,12 @@ impl<S: Store + 'static> crate::AutoCommitMutator<S> {
             }
         };
         if modified_fields.is_none() {
-            if let Some(signing_config) = signing_config.as_ref() {
+            if let Some(signing_config) = signing_config {
                 let blocks = crate::block::builder::compute_document_blocks(
                     &doc,
                     collection.version_id(),
                     identity,
-                    effective_encryption_config.as_ref(),
+                    context.encryption(),
                     Some(signing_config),
                 )
                 .map_err(|error| {

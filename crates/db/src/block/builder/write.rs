@@ -310,6 +310,7 @@ pub async fn write_document_blocks(
         modified_fields,
         encryption_config,
         signing_config,
+        None,
         kms,
         None,
         None,
@@ -331,6 +332,7 @@ pub(crate) async fn write_document_blocks_with_inputs(
     modified_fields: Option<&rapidhash::RapidHashSet<String>>,
     encryption_config: Option<&EncryptionConfig>,
     signing_config: Option<&SigningConfig>,
+    batch_session: Option<&str>,
     kms: Option<&std::sync::Arc<dyn kms::KmsService>>,
     prepared_inputs: Option<&query::prepared::PreparedInputMemo>,
     heads: Option<DocHeadsSnapshot>,
@@ -721,6 +723,7 @@ pub(crate) async fn write_document_blocks_with_inputs(
 
     collect_on_commit(
         blockstore,
+        batch_session,
         initial_field_cids.into_iter().chain([composite_cid]),
     )
     .await?;
@@ -752,6 +755,7 @@ pub async fn write_delete_block(
         signing_config,
         None,
         None,
+        None,
     )
     .await
     .map_err(|error| error.to_string())
@@ -765,6 +769,7 @@ pub(crate) async fn write_delete_block_with_inputs(
     doc_short_id: u64,
     schema_version_id: &str,
     signing_config: Option<&SigningConfig>,
+    batch_session: Option<&str>,
     prepared_inputs: Option<&query::prepared::PreparedInputMemo>,
     heads: Option<DocHeadsSnapshot>,
 ) -> Result<BlockResult, BuildError> {
@@ -843,7 +848,7 @@ pub(crate) async fn write_delete_block_with_inputs(
         "Built delete composite block (status=2)"
     );
 
-    collect_on_commit(blockstore, [composite_cid]).await?;
+    collect_on_commit(blockstore, batch_session, [composite_cid]).await?;
 
     Ok(BlockResult {
         cid: composite_cid,

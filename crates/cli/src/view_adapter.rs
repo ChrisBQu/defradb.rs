@@ -1,8 +1,10 @@
 //! Adapter to bridge database view operations to HTTP's ViewOperations trait.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use defra_core::RequestContext;
 
 use defra_http::router::ViewOperations;
 use identity::Did;
@@ -14,6 +16,8 @@ pub struct ViewAdapter<S: Store> {
     database: Arc<db::DB<S>>,
     query_limits: query::QueryLimits,
     document_acp: Option<Arc<dyn acp::DocumentACP>>,
+    /// The request this adapter serves, for one bound to it.
+    context: Option<RequestContext>,
 }
 
 impl<S: Store + 'static> ViewAdapter<S> {
@@ -23,6 +27,7 @@ impl<S: Store + 'static> ViewAdapter<S> {
             database,
             query_limits,
             document_acp: None,
+            context: None,
         }
     }
 
@@ -36,7 +41,12 @@ impl<S: Store + 'static> ViewAdapter<S> {
             database,
             query_limits,
             document_acp: Some(document_acp),
+            context: None,
         }
+    }
+
+    fn context(&self) -> Cow<'_, RequestContext> {
+        RequestContext::bound_or_ambient(self.context.as_ref())
     }
 
     /// Create an Arc-wrapped adapter.
@@ -59,6 +69,15 @@ impl<S: Store + 'static> ViewAdapter<S> {
 
 #[async_trait]
 impl<S: Store + 'static> ViewOperations for ViewAdapter<S> {
+    fn bind_request(&self, context: &RequestContext) -> Option<Arc<dyn ViewOperations>> {
+        Some(Arc::new(Self {
+            database: Arc::clone(&self.database),
+            query_limits: self.query_limits,
+            document_acp: self.document_acp.clone(),
+            context: Some(context.clone()),
+        }))
+    }
+
     async fn add_view(
         &self,
         gql_query: &str,
@@ -66,7 +85,7 @@ impl<S: Store + 'static> ViewOperations for ViewAdapter<S> {
         transform: Option<&str>,
     ) -> Result<Vec<CollectionVersion>, String> {
         self.database
-            .check_node_access(None, acp::nac::NodePermission::ViewAdd)
+            .check_node_access_as(&self.context(), acp::nac::NodePermission::ViewAdd)
             .await
             .map_err(|e| format!("{}", e))?;
 
@@ -126,17 +145,19 @@ impl<S: Store + 'static> ViewOperations for ViewAdapter<S> {
             }
         }
 
-        // Fail closed: a present-but-malformed ambient identity must error, not
+        // Fail closed: a present-but-malformed acting identity must error, not
         // silently degrade a permissioned collection to public (unregistered).
-        let creator = match defra_core::current_identity::get_effective_identity() {
+        let context = self.context();
+        let creator = match context.identity() {
             Some(raw) => {
-                Some(Did::new(raw).map_err(|e| format!("malformed ambient identity: {}", e))?)
+                Some(Did::new(raw).map_err(|e| format!("malformed acting identity: {}", e))?)
             }
             None => None,
         };
         let created_versions = if let Some(document_acp) = &self.document_acp {
             self.database
-                .create_collections_atomic_with_acp_registration(
+                .create_collections_atomic_with_acp_registration_as(
+                    &context,
                     view_collections,
                     document_acp.clone(),
                     creator,
@@ -144,7 +165,7 @@ impl<S: Store + 'static> ViewOperations for ViewAdapter<S> {
                 .await
         } else {
             self.database
-                .create_collections_atomic(view_collections)
+                .create_collections_atomic_as(&context, view_collections)
                 .await
         }
         .map_err(|e| format!("failed to create view collection: {}", e))?;
@@ -169,7 +190,7 @@ impl<S: Store + 'static> ViewOperations for ViewAdapter<S> {
 
         if !downsample_names.is_empty() {
             self.database
-                .bootstrap_downsamples(Some(&downsample_names))
+                .bootstrap_downsamples_as(&context, Some(&downsample_names))
                 .await
                 .map_err(|e| format!("failed to bootstrap downsample collections: {}", e))?;
         }
@@ -179,7 +200,7 @@ impl<S: Store + 'static> ViewOperations for ViewAdapter<S> {
 
     async fn refresh_views(&self, options: db::CollectionSelector) -> Result<(), String> {
         self.database
-            .check_node_access(None, acp::nac::NodePermission::ViewRefresh)
+            .check_node_access_as(&self.context(), acp::nac::NodePermission::ViewRefresh)
             .await
             .map_err(|e| format!("{}", e))?;
 
@@ -191,13 +212,13 @@ impl<S: Store + 'static> ViewOperations for ViewAdapter<S> {
 
     async fn gc_downsample_histories(&self, names: Option<Vec<String>>) -> Result<(), String> {
         self.database
-            .check_node_access(None, acp::nac::NodePermission::ViewGc)
+            .check_node_access_as(&self.context(), acp::nac::NodePermission::ViewGc)
             .await
             .map_err(|e| format!("{}", e))?;
 
         let options = names.map(db::downsample::GcDownsampleHistoriesOptions::with_names);
         self.database
-            .gc_downsample_histories(options)
+            .gc_downsample_histories_as(&self.context(), options)
             .await
             .map_err(|e| format!("failed to GC downsample histories: {}", e))
     }

@@ -24,6 +24,7 @@ pub async fn write_collection_block(
         doc_composite_cid,
         signing_config,
         None,
+        None,
     )
     .await
     .map_err(|error| error.to_string())
@@ -36,6 +37,7 @@ pub(crate) async fn write_collection_block_with_inputs(
     schema_version_id: &str,
     doc_composite_cid: Cid,
     signing_config: Option<&SigningConfig>,
+    batch_session: Option<&str>,
     prepared_inputs: Option<&query::prepared::PreparedInputMemo>,
 ) -> Result<(Cid, Bytes), BuildError> {
     let set = crate::block::heads::collection_set(headstore, collection_short_id)
@@ -103,7 +105,7 @@ pub(crate) async fn write_collection_block_with_inputs(
         "Built collection block for branchable collection"
     );
 
-    collect_on_commit(blockstore, [collection_cid]).await?;
+    collect_on_commit(blockstore, batch_session, [collection_cid]).await?;
 
     Ok((collection_cid, collection_bytes.into()))
 }

@@ -25,6 +25,7 @@ use serde::Deserialize;
 use crate::error::{http_error_from_backend_message, HttpError};
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
+use crate::request_scope::bound;
 use crate::router::{AppState, ImportResult, NodePermission};
 use crate::validation::validate_collection_name;
 
@@ -91,7 +92,7 @@ pub async fn export(
         ));
     }
 
-    let backup = state.require_backup()?;
+    let backup = bound(state.require_backup()?, &identity.context());
 
     // Log warning if filepath was provided (Go-compatibility note)
     if let Some(ref filepath) = request.filepath {
@@ -176,7 +177,7 @@ pub async fn import(
         ));
     }
 
-    let backup = state.require_backup()?;
+    let backup = bound(state.require_backup()?, &identity.context());
 
     // Convert bytes to UTF-8 string
     let body_str = String::from_utf8(body.to_vec())

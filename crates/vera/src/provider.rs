@@ -68,6 +68,17 @@ pub trait VeraProvider: MaybeSendSync {
 
     async fn create_bearer_token(&self, did: &str) -> Result<String, ProviderError>;
 
+    /// [`Self::create_bearer_token`] for `did` acting in the request
+    /// `context` serves, which may carry the token `did` authenticated with
+    /// ([`RequestContext::bearer_token_for`](defra_core::RequestContext::bearer_token_for)).
+    async fn create_bearer_token_as(
+        &self,
+        _context: &defra_core::RequestContext,
+        did: &str,
+    ) -> Result<String, ProviderError> {
+        self.create_bearer_token(did).await
+    }
+
     fn self_did(&self) -> Option<String>;
 
     async fn create_policy(&self, policy_yaml: &str) -> Result<String, ProviderError>;

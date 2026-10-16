@@ -15,6 +15,7 @@ use serde_json::{Map, Value};
 use crate::error::{http_error_from_backend_message, HttpError};
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
+use crate::request_scope::bound;
 use crate::router::{AppState, NodePermission};
 
 /// Response for node identity endpoint (Go-compatible).
@@ -108,8 +109,7 @@ pub async fn purge(
         ));
     }
 
-    state
-        .require_collection_mgmt()?
+    bound(state.require_collection_mgmt()?, &identity.context())
         .purge()
         .await
         .map_err(http_error_from_backend_message)?;

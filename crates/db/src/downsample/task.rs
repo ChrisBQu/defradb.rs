@@ -49,7 +49,9 @@ impl<S: Store + 'static> crate::database::DB<S> {
 
     /// The job's body, on its worker.
     async fn run_downsamples(self: &Arc<Self>) {
-        if let Err(error) = self.bootstrap_downsamples(None).await {
+        // The node's own background work runs for no request.
+        let context = defra_core::RequestContext::default();
+        if let Err(error) = self.bootstrap_downsamples_as(&context, None).await {
             tracing::warn!(error = %error, "Failed to bootstrap downsample collections");
         }
         let mut subscription = self
@@ -72,7 +74,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
             };
             let message = match wake {
                 Wake::Tick => {
-                    if let Err(error) = self.bootstrap_downsamples(None).await {
+                    if let Err(error) = self.bootstrap_downsamples_as(&context, None).await {
                         tracing::warn!(error = %error, "Failed to refresh downsample collections");
                     }
                     continue;
@@ -92,7 +94,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
                 tracing::warn!(
                     "Downsample event subscription dropped messages; rebuilding all downsample collections"
                 );
-                if let Err(error) = self.bootstrap_downsamples(None).await {
+                if let Err(error) = self.bootstrap_downsamples_as(&context, None).await {
                     tracing::warn!(
                         error = %error,
                         "Failed to rebuild downsample collections after dropped events"

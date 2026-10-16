@@ -18,8 +18,7 @@ use crate::event::emission::register_update_event_callback;
 use crate::txn::held::Held;
 use crate::txn::{DbTxn, LentTxn};
 use crate::write::autocommit::helpers::write_branchable_collection_block;
-use defra_core::encryption::get_encryption_config;
-use defra_core::signing::get_signing_config;
+use defra_core::RequestContext;
 
 fn document_json_value(doc: &Document) -> Option<serde_json::Value> {
     Some(serde_json::Value::Object(
@@ -208,9 +207,9 @@ impl<S: Store + 'static> DbDocMutator<S> {
         doc_block: Bytes,
         document_json: Option<serde_json::Value>,
         collection_block: Option<(Cid, Bytes)>,
+        creator_did: Option<String>,
     ) -> query::error::Result<()> {
         let txn = &*self.shared_txn()?;
-        let creator_did = defra_core::signing::get_broadcast_creator_did();
         register_update_event_callback(
             txn,
             self.db.event_bus(),
@@ -258,14 +257,32 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         &self,
         request: &query::prepared::PreparedInputRequest,
     ) -> query::error::Result<Arc<[u8]>> {
-        crate::write::prepare::resolve_input(&self.db, request).await
+        self.resolve_prepared_input_as(&RequestContext::ambient(), request)
+            .await
+    }
+
+    async fn resolve_prepared_input_as(
+        &self,
+        context: &RequestContext,
+        request: &query::prepared::PreparedInputRequest,
+    ) -> query::error::Result<Arc<[u8]>> {
+        crate::write::prepare::resolve_input(&self.db, context, request).await
     }
 
     async fn resolve_prepared_inputs(
         &self,
         requests: Vec<query::prepared::PreparedInputRequest>,
     ) -> query::error::Result<Vec<Arc<[u8]>>> {
-        crate::write::prepare::resolve_inputs(&self.db, requests).await
+        self.resolve_prepared_inputs_as(&RequestContext::ambient(), requests)
+            .await
+    }
+
+    async fn resolve_prepared_inputs_as(
+        &self,
+        context: &RequestContext,
+        requests: Vec<query::prepared::PreparedInputRequest>,
+    ) -> query::error::Result<Vec<Arc<[u8]>>> {
+        crate::write::prepare::resolve_inputs(&self.db, context, requests).await
     }
 
     fn set_document_acp(&self, provider: Arc<dyn acp::DocumentACP>) {
@@ -284,10 +301,20 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
     async fn create(
         &self,
         collection_name: &str,
+        doc: Document,
+    ) -> query::error::Result<CreateResult> {
+        self.create_as(&RequestContext::ambient(), collection_name, doc)
+            .await
+    }
+
+    async fn create_as(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
         mut doc: Document,
     ) -> query::error::Result<CreateResult> {
         self.db
-            .check_node_access(None, acp::nac::NodePermission::DocumentUpdate)
+            .check_node_access_as(context, acp::nac::NodePermission::DocumentUpdate)
             .await
             .map_err(|e| query::error::QueryError::permission_denied(e.to_string()))?;
 
@@ -295,6 +322,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             get_collection_with_index_manager(&*self.shared_txn()?, collection_name).await?;
         self.db
             .check_node_access_in_txn(
+                context,
                 systemstore.sibling(storage::namespace::Namespace::Acpstore),
                 acp::nac::NodePermission::DocumentUpdate,
             )
@@ -333,8 +361,8 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             })?;
 
             let schema_version_id = collection.version_id();
-            let enc_config = get_encryption_config();
-            let sign_config = get_signing_config();
+            let enc_config = context.encryption();
+            let sign_config = context.signing();
             let kms = self.db.kms();
 
             let block_result = write_document_blocks_with_inputs(
@@ -344,8 +372,9 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 schema_version_id,
                 identity,
                 None,
-                enc_config.as_ref(),
-                sign_config.as_ref(),
+                enc_config,
+                sign_config,
+                context.batch_session(),
                 kms.as_ref(),
                 Some(&self.prepared_inputs),
                 None,
@@ -359,6 +388,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
 
             let doc_id = crate::write::autocommit::helpers::register_created_doc(
                 self.db.document_acp(),
+                context.creator(),
                 &systemstore,
                 &datastore,
                 &collection,
@@ -376,7 +406,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 &headstore,
                 block_result.cid,
                 doc_short_id,
-                sign_config.as_ref(),
+                context,
                 Some(&self.prepared_inputs),
             )
             .await?;
@@ -401,6 +431,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             doc_block,
             document_json_value(&doc),
             col_block_data,
+            context.creator().map(str::to_owned),
         )
         .await?;
 
@@ -410,11 +441,27 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
     async fn update(
         &self,
         collection_name: &str,
+        doc: Document,
+        modified_fields: rapidhash::RapidHashSet<String>,
+    ) -> query::error::Result<UpdateResult> {
+        self.update_as(
+            &RequestContext::ambient(),
+            collection_name,
+            doc,
+            modified_fields,
+        )
+        .await
+    }
+
+    async fn update_as(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
         mut doc: Document,
         mut modified_fields: rapidhash::RapidHashSet<String>,
     ) -> query::error::Result<UpdateResult> {
         self.db
-            .check_node_access(None, acp::nac::NodePermission::DocumentUpdate)
+            .check_node_access_as(context, acp::nac::NodePermission::DocumentUpdate)
             .await
             .map_err(|e| query::error::QueryError::permission_denied(e.to_string()))?;
 
@@ -422,6 +469,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             get_collection_with_index_manager(&*self.shared_txn()?, collection_name).await?;
         self.db
             .check_node_access_in_txn(
+                context,
                 systemstore.sibling(storage::namespace::Namespace::Acpstore),
                 acp::nac::NodePermission::DocumentUpdate,
             )
@@ -482,8 +530,8 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             })?;
 
             let schema_version_id = collection.version_id();
-            let enc_config = get_encryption_config();
-            let sign_config = get_signing_config();
+            let enc_config = context.encryption();
+            let sign_config = context.signing();
             let kms = self.db.kms();
 
             let block_result = write_document_blocks_with_inputs(
@@ -493,8 +541,9 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 schema_version_id,
                 DocStorageIdentity::new(collection.resolved_root_id(), doc_short_id),
                 Some(&modified_fields),
-                enc_config.as_ref(),
-                sign_config.as_ref(),
+                enc_config,
+                sign_config,
+                context.batch_session(),
                 kms.as_ref(),
                 Some(&self.prepared_inputs),
                 Some(heads),
@@ -521,7 +570,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 &headstore,
                 block_result.cid,
                 doc_short_id,
-                sign_config.as_ref(),
+                context,
                 Some(&self.prepared_inputs),
             )
             .await?;
@@ -538,6 +587,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 doc_block,
                 document_json_value(&doc),
                 col_block_data,
+                context.creator().map(str::to_owned),
             )
             .await?;
         }
@@ -551,8 +601,18 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
         collection_name: &str,
         doc_id: &DocID,
     ) -> query::error::Result<DeleteResult> {
+        self.delete_as(&RequestContext::ambient(), collection_name, doc_id)
+            .await
+    }
+
+    async fn delete_as(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        doc_id: &DocID,
+    ) -> query::error::Result<DeleteResult> {
         self.db
-            .check_node_access(None, acp::nac::NodePermission::DocumentDelete)
+            .check_node_access_as(context, acp::nac::NodePermission::DocumentDelete)
             .await
             .map_err(|e| query::error::QueryError::permission_denied(e.to_string()))?;
 
@@ -560,6 +620,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             get_collection_with_index_manager(&*self.shared_txn()?, collection_name).await?;
         self.db
             .check_node_access_in_txn(
+                context,
                 systemstore.sibling(storage::namespace::Namespace::Acpstore),
                 acp::nac::NodePermission::DocumentDelete,
             )
@@ -611,7 +672,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             })?;
 
             let schema_version_id = collection.version_id();
-            let sign_config = get_signing_config();
+            let sign_config = context.signing();
 
             let block_result = write_delete_block_with_inputs(
                 &blockstore,
@@ -619,7 +680,8 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 &canonical_doc_id.to_string(),
                 doc_short_id,
                 schema_version_id,
-                sign_config.as_ref(),
+                sign_config,
+                context.batch_session(),
                 Some(&self.prepared_inputs),
                 None,
             )
@@ -646,7 +708,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
                 &headstore,
                 block_result.cid,
                 doc_short_id,
-                sign_config.as_ref(),
+                context,
                 Some(&self.prepared_inputs),
             )
             .await?;
@@ -662,6 +724,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             doc_block,
             pre_delete_document_json,
             col_block_data,
+            context.creator().map(str::to_owned),
         )
         .await?;
 

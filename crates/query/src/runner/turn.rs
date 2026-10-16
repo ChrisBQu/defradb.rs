@@ -57,7 +57,8 @@ where
 
     /// Runs `request` through `submit` (a registry call that runs a job where
     /// the transaction lives) until it answers, fetching at the edge every
-    /// remote input a run asks for.
+    /// remote input a run asks for, in the context of the request this
+    /// runner serves.
     pub(super) async fn drive<Submit, Fut>(
         &self,
         request: &QueryRequest,
@@ -68,6 +69,7 @@ where
         Fut: std::future::Future<Output = std::result::Result<Turned, TransactionError>>,
     {
         let inputs = PreparedInputMemo::default();
+        let context = self.context();
         loop {
             let runner = self.scoped_runner(self.acp.clone());
             let attempt = request.clone();
@@ -85,7 +87,9 @@ where
                 )));
             };
             if let Err(error) = inputs
-                .answer_wave(&input, |wave| resolver.resolve_prepared_inputs(wave))
+                .answer_wave(&input, |wave| {
+                    resolver.resolve_prepared_inputs_as(&context, wave)
+                })
                 .await
             {
                 return Ok(QueryResponse::error(QueryResponseError::from_query_error(
@@ -148,21 +152,14 @@ where
         inputs: PreparedInputMemo,
     ) -> std::result::Result<Turned, TransactionError> {
         let txn_ctx = turn.context()?;
-        let txn_provider = txn_ctx.collection_provider();
+        // The transaction's own provider, so its uncommitted schemas are visible.
+        let txn_provider = txn_ctx
+            .collection_provider()
+            .unwrap_or_else(|| self.collection_provider.clone());
 
         // Validate that all referenced collections exist before execution.
-        // Use the transaction-scoped provider if available so uncommitted
-        // schemas are visible.
-        {
-            let validation_provider: &dyn crate::fetcher::CollectionProvider =
-                if let Some(ref provider) = txn_provider {
-                    provider.as_ref()
-                } else {
-                    self.collection_provider.as_ref()
-                };
-            if let Err(error) = validate_parsed_operation(&parsed, validation_provider).await {
-                return Ok(Turned::Done(parse_error(error.to_string())));
-            }
+        if let Err(error) = validate_parsed_operation(&parsed, txn_provider.as_ref()).await {
+            return Ok(Turned::Done(parse_error(error.to_string())));
         }
 
         let nac_identity = request.identity.clone().unwrap_or_else(Did::wildcard);
@@ -191,6 +188,7 @@ where
             Err(error) => return Ok(Turned::Done(QueryResponse::error(error.to_string()))),
         };
         let mut scoped_runner = self.scoped_runner(scoped_acp);
+        scoped_runner.collection_provider = txn_provider.clone();
         if !scoped_runner.acp.supports_transactions() {
             // Even transaction-context implementations without an ACP
             // projection must never fall back to mutating an external
@@ -218,13 +216,14 @@ where
                     }
                     let fetcher = txn_ctx.doc_fetcher();
                     if let Some(explain_type) = explain {
-                        self.explain_query_with_identity_and_vars(
-                            &request.query,
-                            identity,
-                            explain_type,
-                            variables.as_ref(),
-                        )
-                        .await
+                        self.with_collection_provider(txn_provider)
+                            .explain_query_with_identity_and_vars(
+                                &request.query,
+                                identity,
+                                explain_type,
+                                variables.as_ref(),
+                            )
+                            .await
                     } else {
                         scoped_runner
                             .execute_selects_internal(
@@ -238,7 +237,8 @@ where
                 }
                 ParsedOperation::Mutation { explain, .. } => {
                     if let Some(explain_type) = explain {
-                        self.explain_mutation_with_identity(&request.query, identity, explain_type)
+                        self.with_collection_provider(txn_provider)
+                            .explain_mutation_with_identity(&request.query, identity, explain_type)
                             .await
                     } else {
                         if txn_ctx.is_readonly() {
@@ -271,17 +271,12 @@ where
                      Send the request with Accept: text/event-stream header.",
                 )),
                 ParsedOperation::Introspection { query } => {
-                    self.execute_introspection(&query).await
+                    scoped_runner.execute_introspection(&query).await
                 }
             }
         };
 
-        // Collection schema reads retain their transaction-scoped provider;
-        // ACP projection is passed explicitly through the scoped runner.
-        let result = match txn_provider {
-            Some(provider) => super::scope_txn_collection_provider(provider, execution).await,
-            None => execution.await,
-        };
+        let result = execution.await;
 
         Ok(Turned::Done(match result {
             Ok(data) => QueryResponse {
