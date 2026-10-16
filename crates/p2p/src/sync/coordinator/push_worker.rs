@@ -150,8 +150,10 @@ async fn report_push_event(
         // reserve() is cancel-safe, so waiting in a loop lets sustained
         // recorder backpressure surface in the logs instead of silently
         // stalling the push pool.
+        // The data path reports from a pool worker, which has no reactor:
+        // the pool's timer serves on a worker and off one alike.
         loop {
-            match n0_future::time::timeout(Duration::from_secs(5), tx.reserve()).await {
+            match workers::timeout(Duration::from_secs(5), tx.reserve()).await {
                 Ok(Ok(permit)) => {
                     permit.send(failure);
                     return durable_rx.await.ok().flatten();
