@@ -28,6 +28,8 @@ pub struct BatchMutator<S: Store + 'static> {
     prepared_inputs: Option<query::prepared::PreparedInputMemo>,
     txn: Held<S>,
     acp_registration_projection: Arc<query::txn::AcpRegistrationProjection>,
+    /// The run of its request this mutator's attempt is.
+    update_run: query::update_parts::Run,
 }
 
 impl<S: Store + 'static> BatchMutator<S> {
@@ -45,6 +47,7 @@ impl<S: Store + 'static> BatchMutator<S> {
             prepared_inputs,
             txn: Held::none(),
             acp_registration_projection: query::txn::AcpRegistrationProjection::detached_shared(),
+            update_run: query::update_parts::Run::First,
         }
     }
 
@@ -59,6 +62,7 @@ impl<S: Store + 'static> BatchMutator<S> {
             txn: Held::new(txn),
             prepared_inputs,
             acp_registration_projection,
+            update_run: query::update_parts::Run::First,
         }
     }
 
@@ -267,6 +271,7 @@ impl<S: Store + 'static> storage::corekv::RetryAttemptFn for BatchRetryAttempt<S
                 txn: Held::new(txn),
                 prepared_inputs: self.prepared_inputs.clone(),
                 acp_registration_projection,
+                update_run: query::update_parts::Run::after(retry.previous_conflict().as_ref()),
             });
             let mutator: Arc<dyn DocMutator> = batch.clone();
             let fetcher_dyn: Arc<dyn query::fetcher::DocFetcher> = fetcher.clone();
@@ -304,6 +309,10 @@ impl<S: Store + 'static> storage::corekv::RetryAttemptFn for BatchRetryAttempt<S
 impl<S: Store + 'static> DocMutator for BatchMutator<S> {
     fn supports_projected_updates(&self) -> bool {
         true
+    }
+
+    fn update_run(&self) -> query::update_parts::Run {
+        self.update_run
     }
 
     fn set_document_acp(&self, provider: Arc<dyn acp::DocumentACP>) {
@@ -557,6 +566,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             &index_manager,
             &mut modified_fields,
             &heads,
+            self.update_run,
             &embedding_config,
             &prepared_inputs,
         )

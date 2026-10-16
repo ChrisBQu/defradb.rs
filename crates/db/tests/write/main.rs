@@ -20,6 +20,7 @@ mod kms_request;
 mod large_batch;
 mod prepare;
 mod request_context;
+mod same_part_reruns;
 mod same_request;
 mod update;
 mod version_key;

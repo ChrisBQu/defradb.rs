@@ -370,7 +370,9 @@ impl UpdateNode {
         }
         let collection = self.collection.as_deref()?;
         let patch: RapidHashSet<String> = self.input.fields.keys().cloned().collect();
-        crate::update_parts::planned(collection, &patch, self.filter.as_ref())
+        self.mutator
+            .update_run()
+            .planned(collection, &patch, self.filter.as_ref())
     }
 }
 

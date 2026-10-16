@@ -165,3 +165,110 @@ fn written_follows_the_write_paths_increments_and_indexes() {
         set(&["count", "note"])
     );
 }
+
+/// A run after a lost race on a part merges the fields it only writes: they
+/// decide nothing, so the run cannot lose that race again.
+#[test]
+fn a_run_after_a_lost_part_merges_the_fields_it_only_writes() {
+    let collection = tally();
+    let run = Run::AfterLostPart;
+    assert_eq!(
+        run.planned(&collection, &set(&["label", "note", "count"]), None),
+        Some(set(&[]))
+    );
+    assert_eq!(
+        run.written(
+            &collection,
+            &[] as &[IndexDescription],
+            &set(&["label", "note"]),
+            |_| false
+        ),
+        set(&[])
+    );
+    assert_eq!(
+        Run::First.planned(&collection, &set(&["label", "note"]), None),
+        Some(set(&["label", "note"]))
+    );
+}
+
+/// A field whose old value a rule reads is decided on every run: an index
+/// component, an embedding source, an immutable field, a compared field, and
+/// every field of a downsampled collection.
+#[test]
+fn a_run_after_a_lost_part_still_decides_what_a_rule_reads() {
+    let run = Run::AfterLostPart;
+    let indexed = tally().with_index(
+        IndexDescription::new("by_label_note")
+            .with_field("label", false)
+            .with_field("note", false),
+    );
+    assert_eq!(
+        run.planned(&indexed, &set(&["label"]), None),
+        Some(set(&["label", "note"]))
+    );
+
+    let mut embedded = tally();
+    embedded.fields.push(FieldDescription::new(
+        "5",
+        "vector",
+        FieldKind::float64_array(),
+    ));
+    embedded.vector_embeddings.push(VectorEmbeddingDescription {
+        field_name: "vector".to_string(),
+        fields: vec!["label".to_string()],
+        model: "model".to_string(),
+        provider: "openai".to_string(),
+        template: String::new(),
+        url: String::new(),
+    });
+    assert_eq!(
+        run.planned(&embedded, &set(&["label"]), None),
+        Some(set(&["label", "vector"]))
+    );
+
+    let mut immutable = tally();
+    for field in &mut immutable.fields {
+        field.immutable = field.name == "label";
+    }
+    assert_eq!(
+        run.planned(&immutable, &set(&["label", "note"]), None),
+        Some(set(&["label"]))
+    );
+
+    let selected = filter(serde_json::json!({"note": {"_eq": "a"}}));
+    assert_eq!(
+        run.planned(&tally(), &set(&["note"]), Some(&selected)),
+        Some(set(&["note"]))
+    );
+
+    let mut downsampled = tally();
+    downsampled.downsample_source = Some(QuerySource::new(serde_json::json!({})));
+    assert_eq!(
+        run.planned(&downsampled, &set(&["label", "count"]), None),
+        Some(set(&["label"]))
+    );
+}
+
+/// Only a race lost on a part makes the next run one after a lost part.
+#[test]
+fn the_run_follows_the_reason_the_previous_attempt_lost() {
+    let lost = |access| storage::corekv::TransactionConflict {
+        access,
+        winning_write: regolith::WriteKind::Merge,
+        observed_seq: 1,
+        latest_seq: 2,
+    };
+    assert_eq!(Run::after(None), Run::First);
+    assert_eq!(
+        Run::after(Some(&lost(regolith::Access::ReadParts))),
+        Run::AfterLostPart
+    );
+    for access in [
+        regolith::Access::Read,
+        regolith::Access::ReadPresence,
+        regolith::Access::Put,
+        regolith::Access::Merge,
+    ] {
+        assert_eq!(Run::after(Some(&lost(access))), Run::First);
+    }
+}

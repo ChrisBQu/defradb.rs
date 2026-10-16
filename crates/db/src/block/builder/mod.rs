@@ -422,7 +422,7 @@ pub(crate) fn priority_index_key(doc_short_id: u64, priority: u64, cid: Cid) -> 
 }
 
 /// A document's live heads, read with one point read of its head set.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct DocHeadsSnapshot {
     max_priority: u64,
     max_priority_by_field: RapidHashMap<String, u64>,

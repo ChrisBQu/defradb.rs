@@ -223,8 +223,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         // to this attempt. A storage conflict therefore repeats the complete
         // decision against the next engine snapshot.
         // The parts this update decides on: those its plan compared and those
-        // its writes decide on.
-        let mut dependencies = query::update_parts::written(
+        // its writes decide on in this run.
+        let run = query::update_parts::Run::after(lost.as_ref());
+        let mut dependencies = run.written(
             collection.schema(),
             collection.write_indexes(),
             &attempt.modified_fields,
@@ -334,10 +335,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     )
                     .await
                     .map_err(|error| query::error::QueryError::execution(error.to_string()))?;
-                let heads = attempt
-                    .heads
-                    .for_attempt(&*retry, &headstore, doc_short_id)
-                    .await?;
+                let heads = attempt.heads.for_attempt(&headstore, doc_short_id).await?;
                 write_local_update(
                     &datastore,
                     &collection,
@@ -346,6 +344,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     &index_manager,
                     &mut modified_fields,
                     &heads,
+                    run,
                     &embedding_config,
                     &inputs,
                 )

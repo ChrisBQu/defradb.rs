@@ -1,19 +1,21 @@
 //! The heads an update or delete builds its blocks on, decided here for
 //! every caller.
 //!
-//! The first attempt builds on heads read once before the transaction: the
-//! block it signs is the block every pass of the request writes, signed once.
-//! A retry after a conflict lost to another write of the document, so it
-//! reads the heads again in its own transaction and builds on the winner,
-//! one priority above it, instead of forking beside it at equal priority.
-//! Only a retry pays the second read.
+//! Every attempt builds on the heads its own transaction reads, one priority
+//! above every write that transaction sees, so a write it saw never ties it.
+//! The heads read once before the transaction stand while they still are the
+//! document's heads: the block a first attempt signs is then the block every
+//! pass of the request writes, signed once. A write that landed between the
+//! early read and the transaction, and the winner a retry lost to, are built
+//! on instead of forked beside at equal priority, where the field's
+//! last-writer-wins order could keep the other write's value while this
+//! write's index entries replaced its entries.
 
 use std::borrow::Cow;
 
 use datastore::NamespaceView;
 use document::DocID;
 use rapidhash::RapidHashMap;
-use storage::corekv::RetryTxn;
 
 use crate::block::builder::DocHeadsSnapshot;
 use crate::collection::Collection;
@@ -116,24 +118,21 @@ impl BaseHeads {
         Ok(read)
     }
 
-    /// The heads `doc_short_id`'s blocks build on in the attempt `retry` is
-    /// running: those read before the transaction, unless this attempt is a
-    /// retry after a conflict or the document was not found then, when they
-    /// are read from the attempt's `headstore`.
+    /// The heads `doc_short_id`'s blocks build on in an attempt whose
+    /// transaction reads `headstore`: the heads read before the transaction
+    /// when they still are the document's heads there, the attempt's own
+    /// otherwise.
     pub(crate) async fn for_attempt<'a>(
         &'a self,
-        retry: &dyn RetryTxn,
         headstore: &NamespaceView,
         doc_short_id: u64,
     ) -> query::error::Result<Cow<'a, DocHeadsSnapshot>> {
-        if retry.previous_conflict().is_none() {
-            if let Some(heads) = self.0.get(&doc_short_id) {
-                return Ok(Cow::Borrowed(heads));
-            }
-        }
-        DocHeadsSnapshot::load(headstore, doc_short_id)
+        let current = DocHeadsSnapshot::load(headstore, doc_short_id)
             .await
-            .map(Cow::Owned)
-            .map_err(|error| failed(&error))
+            .map_err(|error| failed(&error))?;
+        Ok(match self.0.get(&doc_short_id) {
+            Some(early) if *early == current => Cow::Borrowed(early),
+            _ => Cow::Owned(current),
+        })
     }
 }

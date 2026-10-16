@@ -59,6 +59,7 @@ pub(crate) async fn write_local_update(
     index_manager: &IndexManager,
     modified_fields: &mut rapidhash::RapidHashSet<String>,
     heads: &crate::block::builder::DocHeadsSnapshot,
+    run: query::update_parts::Run,
     embedding_config: &crate::search::EmbeddingClientConfig,
     prepared_inputs: &query::prepared::PreparedInputMemo,
 ) -> query::error::Result<()> {
@@ -78,7 +79,7 @@ pub(crate) async fn write_local_update(
             doc,
             doc_short_id,
             index_manager,
-            Some((&*modified_fields, heads)),
+            Some((&*modified_fields, heads, run)),
         )
         .await
         .map_err(|e| match e {

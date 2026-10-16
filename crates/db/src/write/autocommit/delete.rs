@@ -261,10 +261,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             )
             .await?;
             let doc_id_string = canonical_doc_id.to_string();
-            let heads = attempt
-                .heads
-                .for_attempt(&*retry, &headstore, doc_short_id)
-                .await?;
+            let heads = attempt.heads.for_attempt(&headstore, doc_short_id).await?;
             let block_result = write_delete_block_with_inputs(
                 &blockstore,
                 &headstore,
@@ -497,10 +494,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     &canonical_id,
                 )
                 .await?;
-                let heads = attempt
-                    .heads
-                    .for_attempt(&*retry, &headstore, doc_short_id)
-                    .await?;
+                let heads = attempt.heads.for_attempt(&headstore, doc_short_id).await?;
                 let block_result = write_delete_block_with_inputs(
                     &blockstore,
                     &headstore,

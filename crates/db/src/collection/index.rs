@@ -53,8 +53,9 @@ impl Collection {
     }
 
     /// With `update`, a partial update of those fields, written as operands
-    /// ordered by the document heads it builds its blocks from; without, a
-    /// structural rewrite of the whole value.
+    /// ordered by the document heads it builds its blocks from, by the run of
+    /// its write that decides; without, a structural rewrite of the whole
+    /// value.
     pub(crate) async fn update_with_indexes_parts(
         &self,
         datastore: &NamespaceView,
@@ -64,9 +65,10 @@ impl Collection {
         update: Option<(
             &rapidhash::RapidHashSet<String>,
             &crate::block::builder::DocHeadsSnapshot,
+            query::update_parts::Run,
         )>,
     ) -> Result<()> {
-        let modified = update.map(|(fields, _)| fields);
+        let modified = update.map(|(fields, _, _)| fields);
         // Validate document against schema
         self.validate_document(doc)?;
 
@@ -79,14 +81,11 @@ impl Collection {
         }
 
         // Get old document for index update
-        let old_doc = match modified {
-            Some(changed) => {
-                let fields = query::update_parts::written(
-                    &self.def,
-                    index_manager.get_indexes(),
-                    changed,
-                    |name| doc.get_counter_delta(name).is_some(),
-                );
+        let old_doc = match update {
+            Some((changed, _, run)) => {
+                let fields = run.written(&self.def, index_manager.get_indexes(), changed, |name| {
+                    doc.get_counter_delta(name).is_some()
+                });
                 self.get_with_datastore_fields(datastore, doc_short_id, doc_id, &fields)
                     .await?
             }
@@ -142,7 +141,7 @@ impl Collection {
         }
 
         match update {
-            Some((fields, heads)) => {
+            Some((fields, heads, _)) => {
                 self.merge_local_document_value(datastore, doc_short_id, doc, fields, heads)
                     .await?
             }

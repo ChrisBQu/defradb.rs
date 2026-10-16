@@ -514,6 +514,7 @@ impl<S: Store + 'static> DocMutator for DbDocMutator<S> {
             &index_manager,
             &mut modified_fields,
             &heads,
+            query::update_parts::Run::First,
             &self.db.options().embedding_config(),
             &self.prepared_inputs,
         )

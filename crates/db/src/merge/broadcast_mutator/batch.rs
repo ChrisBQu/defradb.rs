@@ -308,6 +308,10 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         self.inner.supports_projected_updates()
     }
 
+    fn update_run(&self) -> query::update_parts::Run {
+        self.inner.update_run()
+    }
+
     async fn prepare_write(
         &self,
         collection_name: &str,

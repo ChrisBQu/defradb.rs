@@ -507,6 +507,14 @@ pub trait DocMutator: MaybeSendSync {
         false
     }
 
+    /// Which run of its request this mutator's updates make
+    /// ([`crate::update_parts::Run`]): a mutator of an attempt that runs
+    /// again after losing a race on a part says so, and the parts its updates
+    /// decide on follow.
+    fn update_run(&self) -> crate::update_parts::Run {
+        crate::update_parts::Run::First
+    }
+
     /// Resolve persistent inputs without staging a document mutation.
     async fn prepare_write(
         &self,
