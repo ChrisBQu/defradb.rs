@@ -32,6 +32,8 @@ pub mod dense_search;
 mod embedded_query_identity_tests;
 mod network;
 mod node_acp;
+#[cfg(test)]
+mod on_pool_tests;
 #[cfg(feature = "p2p")]
 mod p2p_runtime;
 pub mod search_chunks;
@@ -147,6 +149,11 @@ pub struct EmbeddedNode {
     /// Closes the database: its worker pool finishes and stops, then its
     /// store closes. Run once, at shutdown.
     close_database: CloseDatabase,
+    /// The database's worker pool: the node's data-path calls run there.
+    pool: Option<workers::Pool>,
+    /// Document ACP is a remote provider: its calls reach the network, so
+    /// they stay where they are made.
+    remote_acp: bool,
     #[cfg(not(target_arch = "wasm32"))]
     transaction_stats: Option<storage::TransactionStatsHandle>,
     #[cfg(feature = "http")]
@@ -287,6 +294,41 @@ impl EmbeddedNode {
         request
     }
 
+    /// Runs the data-path call `make` builds on the database's worker pool
+    /// (in place on a worker, or without a pool). It acts there as the node
+    /// when `as_node` and the node has an identity ([`Self::as_node_identity`]),
+    /// as the caller otherwise.
+    async fn on_pool<F, Fut, T>(&self, as_node: bool, make: F) -> anyhow::Result<T>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = anyhow::Result<T>> + 'static,
+        T: Send + 'static,
+    {
+        let identity = match (as_node, &self.node_identity_did) {
+            (true, Some(did)) => Some(did.clone()),
+            _ => defra_core::current_identity::get_effective_identity(),
+        };
+        let pool = self.pool.as_ref();
+        query::pooled::run_as(pool, workers::Target::LeastLoaded, identity, make)
+            .await
+            .map_err(|error| anyhow::anyhow!("the call did not run on the worker pool: {error}"))?
+    }
+
+    /// Runs a document ACP call: on the pool when the ACP is the node's own
+    /// store, where it is made when the ACP is a remote provider.
+    async fn on_acp<F, Fut, T>(&self, make: F) -> anyhow::Result<T>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = anyhow::Result<T>> + 'static,
+        T: Send + 'static,
+    {
+        if self.remote_acp {
+            make().await
+        } else {
+            self.on_pool(false, make).await
+        }
+    }
+
     /// Run `op` with the node's own identity installed as the ambient acting
     /// identity for the duration of the future, so DB-layer NAC checks resolve
     /// to the node itself (which holds full access). No-op when no node identity
@@ -315,7 +357,12 @@ impl EmbeddedNode {
     /// canonical DAG-CBOR block bytes, and derives the DID from the verified
     /// public key. Unsigned, malformed, missing, or invalid blocks fail closed.
     pub async fn verified_block_signer_did(&self, cid: &str) -> anyhow::Result<String> {
-        self.block_ops.verified_signer_did(cid).await
+        let (ops, cid) = (Arc::clone(&self.block_ops), cid.to_owned());
+        self.on_pool(
+            false,
+            move || async move { ops.verified_signer_did(&cid).await },
+        )
+        .await
     }
 
     /// Load canonical signed-block material after applying document ACP for
@@ -326,7 +373,12 @@ impl EmbeddedNode {
         cid: &str,
         caller_did: Option<&str>,
     ) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
-        self.block_ops.signed_block_bytes(cid, caller_did).await
+        let (ops, cid) = (Arc::clone(&self.block_ops), cid.to_owned());
+        let caller = caller_did.map(str::to_owned);
+        self.on_pool(false, move || async move {
+            ops.signed_block_bytes(&cid, caller.as_deref()).await
+        })
+        .await
     }
 
     /// Cryptographically verify a block visible inside an active transaction.
@@ -344,8 +396,11 @@ impl EmbeddedNode {
 
     /// Add a schema from a GraphQL SDL type definition.
     pub async fn add_schema(&self, sdl: &str) -> anyhow::Result<()> {
-        self.as_node_identity(async { self.schema_ops.add_schema(sdl).await.map(|_| ()) })
-            .await
+        let (ops, sdl) = (Arc::clone(&self.schema_ops), sdl.to_owned());
+        self.on_pool(true, move || async move {
+            ops.add_schema(&sdl).await.map(|_| ())
+        })
+        .await
     }
 
     /// Create a materialized view from a source query and target SDL.
@@ -354,8 +409,13 @@ impl EmbeddedNode {
     /// `target_sdl` is the SDL for the view collection (may include directives
     /// like `@downsample` that are forward-declared for future defradb.rs support).
     pub async fn add_view(&self, source_query: &str, target_sdl: &str) -> anyhow::Result<()> {
-        self.as_node_identity(self.schema_ops.add_view(source_query, target_sdl))
-            .await
+        let ops = Arc::clone(&self.schema_ops);
+        let (query, sdl) = (source_query.to_owned(), target_sdl.to_owned());
+        self.on_pool(
+            true,
+            move || async move { ops.add_view(&query, &sdl).await },
+        )
+        .await
     }
 
     /// Apply a JSON Patch (RFC 6902) to an existing collection's schema.
@@ -371,8 +431,12 @@ impl EmbeddedNode {
         collection_name: &str,
         patch: &str,
     ) -> anyhow::Result<CollectionVersion> {
-        self.as_node_identity(self.schema_ops.patch_collection(collection_name, patch))
-            .await
+        let ops = Arc::clone(&self.schema_ops);
+        let (name, patch) = (collection_name.to_owned(), patch.to_owned());
+        self.on_pool(true, move || async move {
+            ops.patch_collection(&name, &patch).await
+        })
+        .await
     }
 
     /// Activate a specific collection version by its `version_id`.
@@ -381,8 +445,11 @@ impl EmbeddedNode {
     /// collection-name pointer to resolve to this version. If migrations are
     /// registered, documents are reindexed through them.
     pub async fn set_active_collection_version(&self, version_id: &str) -> anyhow::Result<()> {
-        self.as_node_identity(self.schema_ops.set_active_collection_version(version_id))
-            .await
+        let (ops, version) = (Arc::clone(&self.schema_ops), version_id.to_owned());
+        self.on_pool(true, move || async move {
+            ops.set_active_collection_version(&version).await
+        })
+        .await
     }
 
     /// Register a Lens migration between two collection versions.
@@ -394,7 +461,8 @@ impl EmbeddedNode {
     /// Requires the `wasmtime-runtime` feature (on by default). Without it this
     /// returns an explicit error instead of registering a no-op transform.
     pub async fn set_migration(&self, config: LensConfig) -> anyhow::Result<TransformId> {
-        self.as_node_identity(self.schema_ops.set_migration(config))
+        let ops = Arc::clone(&self.schema_ops);
+        self.on_pool(true, move || async move { ops.set_migration(config).await })
             .await
     }
 
@@ -403,8 +471,11 @@ impl EmbeddedNode {
     /// Returns the number of documents advanced to the active version. This is a
     /// datastore-only operation and does not create or broadcast document commits.
     pub async fn materialize_collection(&self, collection_name: &str) -> anyhow::Result<usize> {
-        self.as_node_identity(self.schema_ops.materialize_collection(collection_name))
-            .await
+        let (ops, name) = (Arc::clone(&self.schema_ops), collection_name.to_owned());
+        self.on_pool(true, move || async move {
+            ops.materialize_collection(&name).await
+        })
+        .await
     }
 
     /// List the names of every active collection known to the node.
@@ -431,14 +502,20 @@ impl EmbeddedNode {
         &self,
         version_id: &str,
     ) -> anyhow::Result<Option<CollectionVersion>> {
-        self.schema_ops
-            .get_collection_by_version_id(version_id)
-            .await
+        let (ops, version) = (Arc::clone(&self.schema_ops), version_id.to_owned());
+        self.on_pool(false, move || async move {
+            ops.get_collection_by_version_id(&version).await
+        })
+        .await
     }
 
     /// Return every collection version known to the node, active and inactive.
     pub async fn get_all_collection_versions(&self) -> anyhow::Result<Vec<CollectionVersion>> {
-        self.schema_ops.get_all_collection_versions().await
+        let ops = Arc::clone(&self.schema_ops);
+        self.on_pool(false, move || async move {
+            ops.get_all_collection_versions().await
+        })
+        .await
     }
 
     /// Subscribe to DefraDB events.
@@ -495,7 +572,10 @@ impl EmbeddedNode {
 
     /// Register a DAC policy (Go: client.Store::AddDACPolicy). Returns the policy ID.
     pub async fn add_dac_policy(&self, identity: &str, policy: &str) -> anyhow::Result<String> {
-        self.acp_ops.add_dac_policy(identity, policy).await
+        let ops = Arc::clone(&self.acp_ops);
+        let (identity, policy) = (identity.to_owned(), policy.to_owned());
+        self.on_acp(move || async move { ops.add_dac_policy(&identity, &policy).await })
+            .await
     }
 
     /// Register a DAC policy under an explicit id-salt counter (local ACP only).
@@ -514,9 +594,13 @@ impl EmbeddedNode {
         policy: &str,
         counter: u64,
     ) -> anyhow::Result<String> {
-        self.acp_ops
-            .add_dac_policy_with_counter(identity, policy, counter)
-            .await
+        let ops = Arc::clone(&self.acp_ops);
+        let (identity, policy) = (identity.to_owned(), policy.to_owned());
+        self.on_acp(move || async move {
+            ops.add_dac_policy_with_counter(&identity, &policy, counter)
+                .await
+        })
+        .await
     }
 
     /// Grant `target` the `relation` on a document (Go: client.Store::AddDACActorRelationship).
@@ -536,9 +620,15 @@ impl EmbeddedNode {
         relation: &str,
         target: &str,
     ) -> anyhow::Result<bool> {
-        self.acp_ops
-            .add_dac_actor_relationship(identity, collection, doc_id, relation, target)
-            .await
+        let ops = Arc::clone(&self.acp_ops);
+        let owned = |value: &str| value.to_owned();
+        let (identity, collection, doc_id) = (owned(identity), owned(collection), owned(doc_id));
+        let (relation, target) = (owned(relation), owned(target));
+        self.on_acp(move || async move {
+            ops.add_dac_actor_relationship(&identity, &collection, &doc_id, &relation, &target)
+                .await
+        })
+        .await
     }
 
     /// Revoke `target`'s `relation` on a document (Go: client.Store::DeleteDACActorRelationship).
@@ -556,9 +646,15 @@ impl EmbeddedNode {
         relation: &str,
         target: &str,
     ) -> anyhow::Result<bool> {
-        self.acp_ops
-            .delete_dac_actor_relationship(identity, collection, doc_id, relation, target)
-            .await
+        let ops = Arc::clone(&self.acp_ops);
+        let owned = |value: &str| value.to_owned();
+        let (identity, collection, doc_id) = (owned(identity), owned(collection), owned(doc_id));
+        let (relation, target) = (owned(relation), owned(target));
+        self.on_acp(move || async move {
+            ops.delete_dac_actor_relationship(&identity, &collection, &doc_id, &relation, &target)
+                .await
+        })
+        .await
     }
 
     /// Access the raw document ACP handle (Go: `node.DB.DocumentACP()`).
@@ -1321,6 +1417,7 @@ impl NodeBuilder {
                 network.edge().clone(),
             )
             .with_event_bus_arc(node.event_bus.clone())
+            .with_pool(node.pool.clone())
             .with_schema_arc(Arc::new(HttpSchemaOps {
                 schema_ops: Arc::clone(&node.schema_ops),
             }))
@@ -1533,9 +1630,10 @@ impl NodeBuilder {
             .await?;
         let document_acp = acp_setup.document_acp.clone();
         #[cfg(feature = "vera")]
-        let _strict_replicated_doc_access = acp_setup.vera_acp.is_some();
+        let remote_acp = acp_setup.vera_acp.is_some();
         #[cfg(not(feature = "vera"))]
-        let _strict_replicated_doc_access = false;
+        let remote_acp = false;
+        let _strict_replicated_doc_access = remote_acp;
 
         // P2P setup (affects mutator choice)
         #[cfg(feature = "p2p")]
@@ -1697,6 +1795,7 @@ impl NodeBuilder {
         // GraphQL requests run on the database's worker pool, routed there
         // once at the boundary.
         let runner = query::pooled::PooledExecutor::wrap(Arc::new(query_runner), database.pool());
+        let pool = database.pool().cloned();
         #[cfg(feature = "vera")]
         let policy_lookup =
             acp_ops::PolicyLookup::new(acp_setup.local_zanzibar_store, acp_setup.vera_acp);
@@ -1745,6 +1844,8 @@ impl NodeBuilder {
             node_query_identity,
             network,
             close_database: closer,
+            pool,
+            remote_acp,
             #[cfg(not(target_arch = "wasm32"))]
             transaction_stats,
             #[cfg(feature = "http")]

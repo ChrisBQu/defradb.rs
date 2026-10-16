@@ -230,6 +230,9 @@ impl Node {
         server = server.with_event_bus_arc(event_bus);
         info!("Subscription event bus enabled");
 
+        // The data-path routes run on the database's worker pool.
+        server = server.with_pool(database.pool().cloned());
+
         info!(
             "HTTP server configured on {} with REST endpoints enabled",
             api_address

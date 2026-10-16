@@ -92,9 +92,12 @@ allow = [
 multiple-versions = "warn"
 allow = []
 # dashmap is banned in this codebase: the concurrent map is
-# kovan_map::HopscotchMap, plain maps are rapidhash's. The one copy in the
-# graph is governor's, pulled by commonware through backbone's
-# acp-light-client, and stays allowed only behind that wrapper.
+# regolith::sync::HopscotchMap (kovan's), plain maps are rapidhash's. No
+# workspace crate names it. The copy in the graph comes in only through
+# third-party crates, each allowed behind its own wrapper and removable only
+# upstream: governor and commonware-parallel, pulled by commonware through
+# vera.rs and backbone's acp-light-client (pinned revs), and iroh-relay, whose
+# server feature (not one this workspace enables by default) uses it.
 # tokio is the network runtime's alone (plan 5.7, R20): the `edge` crate holds
 # it and the network components that take an `edge::Edge` use its types; the
 # data path names no runtime. A crate may depend on tokio directly only when
@@ -103,7 +106,7 @@ allow = []
 # tokio test runtimes. Regenerate the third-party list with
 #   cargo tree -i tokio -e normal,build --depth 1 --workspace --target all
 deny = [
-    { name = "dashmap", wrappers = ["governor"] },
+    { name = "dashmap", wrappers = ["commonware-parallel", "governor", "iroh-relay"] },
     { name = "tokio", wrappers = [
         # The holder and the network components given an Edge.
         "edge", "cli", "defra-http", "defra-node", "defra-p2p-adapter", "embedded",

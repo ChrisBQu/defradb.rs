@@ -62,8 +62,8 @@ pub use merge::{
 };
 pub use peer_state::{PeerStateTracker, PeerStats};
 pub use pending_store::{
-    Admission, PendingDagStorage, PendingDagStore, PersistedPendingDag, PersistedQuarantinedDag,
-    PersistedReplayAuthorization, PersistedView, Registration,
+    pooled_pending_store, Admission, PendingDagStorage, PendingDagStore, PersistedPendingDag,
+    PersistedQuarantinedDag, PersistedReplayAuthorization, PersistedView, Registration,
 };
 pub use push_backlog::{
     EnqueueOutcome, PeerBacklogSnapshot, PushBacklog, PushBacklogSnapshot, PushJobSpec,

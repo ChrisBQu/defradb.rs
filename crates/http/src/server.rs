@@ -92,6 +92,8 @@ pub struct Server {
     executor: Arc<dyn QueryExecutor>,
     /// The network runtime the server's requests run on.
     edge: Edge,
+    /// The worker pool its data-path routes run on.
+    pool: Option<workers::Pool>,
     rest: Option<Arc<dyn RestOperations>>,
     p2p: Option<Arc<dyn P2POperations>>,
     manage: Option<Arc<dyn ManageRequester>>,
@@ -148,6 +150,7 @@ impl Server {
             tls: None,
             executor,
             edge,
+            pool: None,
             rest: None,
             p2p: None,
             manage: None,
@@ -350,6 +353,14 @@ impl Server {
         self
     }
 
+    /// Run the data-path routes (collections, indexes, schema, views, lens,
+    /// backups, blocks, node ACP) on `pool`, the database's worker pool, when
+    /// it has one.
+    pub fn with_pool(mut self, pool: Option<workers::Pool>) -> Self {
+        self.pool = pool;
+        self
+    }
+
     /// Set the effective node configuration exposed by `/node/options`.
     pub fn with_node_options(mut self, options: Map<String, serde_json::Value>) -> Self {
         self.node_options = Some(Arc::new(options));
@@ -473,6 +484,13 @@ impl Server {
             state_for_middleware,
             crate::auth_middleware::auth_middleware,
         ));
+
+        // Outermost route layer: a data-path route runs whole on the worker
+        // pool, its auth middleware included, so what the middleware binds to
+        // the request is there when the handler reads it.
+        if let Some(ref pool) = self.pool {
+            router = router.route_layer(crate::pool_layer::OnPool::new(pool.clone()));
+        }
 
         // Apply global body limit (0 = unlimited)
         if self.config.max_body_size > 0 {

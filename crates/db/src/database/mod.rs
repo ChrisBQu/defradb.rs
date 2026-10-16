@@ -196,6 +196,9 @@ pub struct DB<S: Store> {
     kms: std::sync::OnceLock<std::sync::Arc<dyn kms::KmsService>>,
     /// Remote signatures and embeddings, each behind its own service.
     remote_inputs: crate::remote_inputs::RemoteInputs,
+    /// Where the database's P2P work (pushes, replays, retries) runs its
+    /// network waits: the node's network runtime. Set once at startup.
+    network: std::sync::OnceLock<p2p::network::Network>,
     /// Owning handle to the KMS durable blockstore. The KMS adapter
     /// (`DbEncBlockStore`) references this weakly to avoid the
     /// DB→KMS→`KeyStore`→adapter→blockstore→store Arc cycle that would pin the
@@ -265,6 +268,7 @@ impl<S: Store> DB<S> {
             document_acp: std::sync::OnceLock::new(),
             kms: std::sync::OnceLock::new(),
             remote_inputs: Default::default(),
+            network: std::sync::OnceLock::new(),
             kms_blockstore: std::sync::OnceLock::new(),
             nac_manager: std::sync::OnceLock::new(),
             merge_governance: std::sync::OnceLock::new(),
@@ -332,6 +336,7 @@ impl<S: Store> DB<S> {
             document_acp: std::sync::OnceLock::new(),
             kms: std::sync::OnceLock::new(),
             remote_inputs: Default::default(),
+            network: std::sync::OnceLock::new(),
             kms_blockstore: std::sync::OnceLock::new(),
             nac_manager: std::sync::OnceLock::new(),
             merge_governance: std::sync::OnceLock::new(),
@@ -501,13 +506,25 @@ impl<S: Store> DB<S> {
         self.kms.get().cloned()
     }
 
-    /// Runs the database's remote inputs (signatures, embeddings) on the
-    /// node's network runtime. Set once at startup, before the first write
-    /// that needs one; without it they run on the caller's async runtime.
+    /// Runs the database's remote inputs (signatures, embeddings) and the
+    /// network waits of its P2P work on the node's network runtime. Set once
+    /// at startup, before the first write that needs one; without it they run
+    /// on the caller's async runtime.
     pub fn set_network(&self, edge: edge::Edge) {
-        if !self.remote_inputs.set_runtime(inputs::Runtime::edge(edge)) {
+        let p2p = self
+            .network
+            .set(p2p::network::Network::on(edge.clone()))
+            .is_ok();
+        if !self.remote_inputs.set_runtime(inputs::Runtime::edge(edge)) || !p2p {
             tracing::warn!("the database's network runtime was already set; keeping the first");
         }
+    }
+
+    /// Where the database's P2P work runs its network waits: the runtime
+    /// [`set_network`](Self::set_network) set, or without one the runtime of
+    /// the task that waits.
+    pub fn network(&self) -> p2p::network::Network {
+        self.network.get().cloned().unwrap_or_default()
     }
 
     pub(crate) fn remote_inputs(&self) -> &crate::remote_inputs::RemoteInputs {

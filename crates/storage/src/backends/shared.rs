@@ -40,6 +40,15 @@ pub struct TransactionStatsSnapshot {
     pub engine: std::collections::BTreeMap<&'static str, u64>,
     /// Conflict counts by losing access and winning write, without key data.
     pub conflict_reasons: std::collections::BTreeMap<String, u64>,
+    /// Calls on a store placed on a worker pool that were made off its
+    /// workers: each borrowed a worker's queue for its I/O instead of running
+    /// where its request was routed. Zero when every caller is routed.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub off_pool_calls: u64,
+}
+
+fn is_zero(count: &u64) -> bool {
+    *count == 0
 }
 
 const ACCESS_LABELS: [&str; 10] = [
@@ -59,6 +68,9 @@ const WRITE_LABELS: [&str; 5] = ["put", "delete", "range_delete", "merge", "othe
 struct TransactionMetrics {
     engine: Arc<regolith::Statistics>,
     reasons: [[AtomicU64; 5]; 10],
+    off_pool: AtomicU64,
+    /// The first off-pool call was reported; later ones are only counted.
+    off_pool_reported: std::sync::atomic::AtomicBool,
     /// Held, never read: the engine's tickers stay in the OpenTelemetry
     /// export while this store's diagnostics are reachable.
     _export: telemetry::EngineTickerExport,
@@ -77,6 +89,8 @@ impl TransactionStatsHandle {
                 _export: telemetry::export_engine_tickers(&engine),
                 engine,
                 reasons: std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))),
+                off_pool: AtomicU64::new(0),
+                off_pool_reported: std::sync::atomic::AtomicBool::new(false),
             }),
         }
     }
@@ -106,6 +120,18 @@ impl TransactionStatsHandle {
         telemetry::record_storage_conflict("regolith", ACCESS_LABELS[mine], WRITE_LABELS[theirs]);
     }
 
+    /// A call on a store placed on a worker pool was made off its workers.
+    /// Reported once, counted every time.
+    pub(crate) fn record_off_pool(&self, call: &'static str) {
+        self.metrics.off_pool.fetch_add(1, Ordering::Relaxed);
+        if !self.metrics.off_pool_reported.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                call,
+                "a storage call ran off the worker pool its store is placed on; route it through the pool"
+            );
+        }
+    }
+
     pub fn snapshot(&self) -> TransactionStatsSnapshot {
         let engine = &self.metrics.engine;
         let mut conflict_reasons = std::collections::BTreeMap::new();
@@ -125,6 +151,7 @@ impl TransactionStatsHandle {
                 .map(|ticker| (ticker.name(), engine.get_ticker(ticker)))
                 .collect(),
             conflict_reasons,
+            off_pool_calls: self.metrics.off_pool.load(Ordering::Relaxed),
         }
     }
 }

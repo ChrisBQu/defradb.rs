@@ -22,7 +22,7 @@ mod worker;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub use clock::StdClock;
 pub use clock::{Clock, EnvClock};
-pub use completion::Completion;
+pub use completion::{CancelOnDrop, Completion};
 #[cfg(not(target_family = "wasm"))]
 pub use completion::{block_on, block_on_timeout};
 pub use config::{
@@ -33,7 +33,7 @@ pub use error::Error;
 pub use hook::{Hook, HookFactory, HookProgress};
 pub use os::{ContextSwitches, Outcome};
 pub use pool::{
-    delay, fallback, spawn, spawn_background, spawn_detached, timeout, Background, Driver, Monitor, MonitorDriver, PlacedEnv, Pool, Report, Stats,
+    delay, fallback, run_on, spawn, spawn_background, spawn_detached, timeout, Background, Driver, Monitor, MonitorDriver, PlacedEnv, Pool, Report, Stats,
     Submit, Target, ThreadPlacement, TopologySummary, WorkerReport,
 };
 pub use worker::{
