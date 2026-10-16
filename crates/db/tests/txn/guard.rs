@@ -164,11 +164,15 @@ async fn cancellation_while_finalization_waits_for_an_active_request_releases_th
 struct PausedExecutor {
     inner: Arc<dyn QueryExecutor>,
     at: PauseAt,
+    reached: Option<Arc<regolith::sync::Event>>,
 }
 
 impl PausedExecutor {
     async fn pause(&self, at: PauseAt) {
         if self.at == at {
+            if let Some(reached) = &self.reached {
+                reached.set();
+            }
             std::future::pending::<()>().await;
         }
     }
@@ -227,6 +231,7 @@ async fn cancellation_at_each_guard_boundary_discards_uncommitted_state() {
         let executor = PausedExecutor {
             inner: fixture.runner.clone(),
             at,
+            reached: None,
         };
         if at == PauseAt::Begin {
             let mut begin = Box::pin(TransactionGuard::begin(&executor, false));
@@ -268,22 +273,29 @@ async fn cancellation_at_each_guard_boundary_discards_uncommitted_state() {
 #[tokio::test]
 async fn cancellation_after_durable_commit_cannot_undo_it_or_discard_another_transaction() {
     let fixture = Fixture::new().await;
-    let executor = PausedExecutor {
+    let after_commit = Arc::new(regolith::sync::Event::new());
+    let executor = Arc::new(PausedExecutor {
         inner: fixture.runner.clone(),
         at: PauseAt::AfterCommit,
-    };
-    let guard = TransactionGuard::begin(&executor, false).await.unwrap();
-    let response = guard
-        .execute(QueryRequest::new(
-            r#"mutation { add_Users(input: {name: "committed"}) { _docID } }"#,
-        ))
-        .await;
-    assert!(!response.has_errors(), "{:?}", response.errors);
-    let mut commit = Box::pin(guard.commit());
-    assert!(futures::poll!(&mut commit).is_pending());
+        reached: Some(after_commit.clone()),
+    });
+    let commit = tokio::spawn(async move {
+        let guard = TransactionGuard::begin(executor.as_ref(), false)
+            .await
+            .unwrap();
+        let response = guard
+            .execute(QueryRequest::new(
+                r#"mutation { add_Users(input: {name: "committed"}) { _docID } }"#,
+            ))
+            .await;
+        assert!(!response.has_errors(), "{:?}", response.errors);
+        guard.commit().await
+    });
+    after_commit.wait().await;
     assert_eq!(fixture.registry.active_transaction_count().unwrap(), 0);
     let other = fixture.runner.begin_txn(false).await.unwrap();
-    drop(commit);
+    commit.abort();
+    assert!(commit.await.unwrap_err().is_cancelled());
     assert_eq!(fixture.registry.active_transaction_count().unwrap(), 1);
     fixture.runner.rollback_txn(&other).await.unwrap();
     let response = fixture.runner.execute(read()).await;
