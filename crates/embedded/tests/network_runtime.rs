@@ -1,5 +1,5 @@
-//! A node's transport runs on the network runtime its config names; a node
-//! without networking needs none.
+//! A node's transport runs on the network runtime its config names, or on the
+//! process's own when it names none; a node without networking needs none.
 
 #![cfg(feature = "libp2p")]
 
@@ -25,21 +25,15 @@ fn libp2p() -> TransportConfig {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_transport_without_a_network_runtime_is_refused() -> Result<()> {
+async fn a_transport_without_a_network_runtime_runs_on_the_process_runtime() -> Result<()> {
     let config = EmbeddedNodeConfig {
         transport: libp2p(),
         ..Default::default()
     };
 
-    let error = embedded::build_with_store(Arc::new(memory_store()?), config)
-        .await
-        .err()
-        .expect("a transport without a network runtime must not start");
-
-    assert!(
-        error.to_string().contains("set EmbeddedNodeConfig::edge"),
-        "unexpected error: {error}"
-    );
+    // The build fails when the transport does not start.
+    let node = embedded::build_with_store(Arc::new(memory_store()?), config).await?;
+    node.shutdown().await;
     Ok(())
 }
 

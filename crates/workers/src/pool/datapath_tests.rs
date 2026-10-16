@@ -148,7 +148,12 @@ fn a_monitor_driven_from_outside_finds_a_stuck_worker_and_ends_with_the_pool() {
 #[test]
 fn each_workers_context_switches_are_counted() {
     let pool = pool(1);
-    pool.submit_and_wait(Target::Worker(0), || async {}).unwrap();
+    // An idle worker spins and need not switch at all: a sleep on it makes
+    // one switch the count must show.
+    pool.submit_and_wait(Target::Worker(0), || async {
+        std::thread::sleep(Duration::from_millis(1));
+    })
+    .unwrap();
     let switches = pool.stats().workers[0]
         .switches
         .expect("Linux reports each thread's context switches");
