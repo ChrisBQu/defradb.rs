@@ -6,7 +6,7 @@
 //! Run with:
 //!   cargo test -p integration-test --test p2p_iroh_replication -- --ignored
 
-use std::collections::HashMap;
+use rapidhash::RapidHashMap;
 use std::time::Duration;
 
 use integration_test::{poll_until, TestCluster};
@@ -114,7 +114,7 @@ async fn iroh_batch_replication() {
             if arr.len() != 10 {
                 return false;
             }
-            let mut found: HashMap<String, i64> = HashMap::new();
+            let mut found: RapidHashMap<String, i64> = RapidHashMap::default();
             for u in arr {
                 if let (Some(name), Some(age)) = (u["name"].as_str(), u["age"].as_i64()) {
                     found.insert(name.to_string(), age);
@@ -140,7 +140,7 @@ async fn iroh_update_replication() {
     let node1 = cluster.client(1);
 
     // Create 3 documents
-    let mut doc_ids: HashMap<String, String> = HashMap::new();
+    let mut doc_ids: RapidHashMap<String, String> = RapidHashMap::default();
     for (name, age) in &[("Alice", 30), ("Bob", 25), ("Carol", 35)] {
         let result = node0
             .query(&format!(
@@ -203,7 +203,7 @@ async fn iroh_update_replication() {
     let local_arr = local_updated["User"]
         .as_array()
         .expect("local result not array");
-    let mut local_ages: HashMap<String, i64> = HashMap::new();
+    let mut local_ages: RapidHashMap<String, i64> = RapidHashMap::default();
     for u in local_arr {
         if let (Some(name), Some(age)) = (u["name"].as_str(), u["age"].as_i64()) {
             local_ages.insert(name.to_string(), age);
@@ -223,7 +223,7 @@ async fn iroh_update_replication() {
                 Some(a) => a,
                 None => return false,
             };
-            let mut found: HashMap<String, i64> = HashMap::new();
+            let mut found: RapidHashMap<String, i64> = RapidHashMap::default();
             for u in arr {
                 if let (Some(name), Some(age)) = (u["name"].as_str(), u["age"].as_i64()) {
                     found.insert(name.to_string(), age);
@@ -249,7 +249,7 @@ async fn iroh_delete_replication() {
     let node1 = cluster.client(1);
 
     // Create 3 documents
-    let mut doc_ids: HashMap<String, String> = HashMap::new();
+    let mut doc_ids: RapidHashMap<String, String> = RapidHashMap::default();
     for (name, age) in &[("Alice", 30), ("Bob", 25), ("Carol", 35)] {
         let result = node0
             .query(&format!(
@@ -370,7 +370,7 @@ async fn iroh_replicated_filter_query() {
             if arr.len() != 4 {
                 return false;
             }
-            let mut found: HashMap<String, i64> = HashMap::new();
+            let mut found: RapidHashMap<String, i64> = RapidHashMap::default();
             for u in arr {
                 if let (Some(name), Some(age)) = (u["name"].as_str(), u["age"].as_i64()) {
                     found.insert(name.to_string(), age);

@@ -237,7 +237,7 @@ async fn wait_for_docs(
 ) {
     let deadline = Instant::now() + deadline;
     loop {
-        let present: std::collections::HashSet<String> = client
+        let present: rapidhash::RapidHashSet<String> = client
             .query("query { User { _docID } }")
             .ok()
             .and_then(|result| {

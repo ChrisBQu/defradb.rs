@@ -31,7 +31,7 @@
 //! push-storm.folded`; render them locally with `inferno-flamegraph <
 //! push-storm.folded > push-storm.svg`.
 
-use std::collections::HashSet;
+use rapidhash::RapidHashSet;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -383,7 +383,7 @@ async fn wait_for_backlog_idle(api_url: &str) {
 
 async fn wait_for_stalled_push(
     api_url: &str,
-    stalled_peer_ids: &HashSet<String>,
+    stalled_peer_ids: &RapidHashSet<String>,
 ) -> serde_json::Value {
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
@@ -418,7 +418,10 @@ struct StalledOutcome {
     stalled_peer_failure_observed: bool,
 }
 
-fn stalled_peer_failed(status: &serde_json::Value, stalled_peer_ids: &HashSet<String>) -> bool {
+fn stalled_peer_failed(
+    status: &serde_json::Value,
+    stalled_peer_ids: &RapidHashSet<String>,
+) -> bool {
     status["push_backlog"]["per_peer"]
         .as_array()
         .is_some_and(|peers| {
@@ -433,7 +436,7 @@ fn stalled_peer_failed(status: &serde_json::Value, stalled_peer_ids: &HashSet<St
 
 async fn wait_for_stalled_outcome(
     api_url: &str,
-    stalled_peer_ids: &HashSet<String>,
+    stalled_peer_ids: &RapidHashSet<String>,
     log_cursor: &mut LogCursor,
     baseline_logs: LogCounts,
     baseline_failed_jobs: u64,
@@ -484,7 +487,7 @@ async fn measure_healthy_convergence(
 ) -> usize {
     let expected_lifecycle = format!("lifecycle-{final_update}");
     let expected_status = format!("status-{final_update}");
-    let mut incomplete: HashSet<usize> = healthy_peers.iter().copied().collect();
+    let mut incomplete: RapidHashSet<usize> = healthy_peers.iter().copied().collect();
     let deadline = Instant::now()
         + Duration::from_secs(env_u64(
             "DEFRA_PUSH_STORM_CONVERGENCE_SECS",
@@ -496,7 +499,7 @@ async fn measure_healthy_convergence(
                 .client(*peer)
                 .query("query { StormDoc { _docID lifecycle_state status } }")
                 .ok();
-            let converged: HashSet<&str> = result
+            let converged: RapidHashSet<&str> = result
                 .as_ref()
                 .and_then(|value| value["StormDoc"].as_array())
                 .into_iter()
@@ -607,12 +610,12 @@ async fn outbound_push_storm_matches_fleet_shape() {
         .as_u64()
         .unwrap_or(0);
 
-    let stalled_indices: HashSet<usize> = peers_sorted_for_stall_selection
+    let stalled_indices: RapidHashSet<usize> = peers_sorted_for_stall_selection
         .iter()
         .take(config.stalled_peers)
         .map(|(_, peer)| *peer)
         .collect();
-    let stalled_peer_ids: HashSet<String> = peers_sorted_for_stall_selection
+    let stalled_peer_ids: RapidHashSet<String> = peers_sorted_for_stall_selection
         .iter()
         .take(config.stalled_peers)
         .map(|(peer_id, _)| peer_id.clone())

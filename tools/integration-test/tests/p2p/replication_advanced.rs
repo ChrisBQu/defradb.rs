@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rapidhash::RapidHashMap;
 use std::time::Duration;
 
 use integration_test::{for_each_p2p_topology, poll_until, TestCluster};
@@ -56,7 +56,7 @@ async fn replication_crud_test(cluster: TestCluster) {
         ("Jack", 29),
     ];
 
-    let mut doc_ids: HashMap<String, String> = HashMap::new();
+    let mut doc_ids: RapidHashMap<String, String> = RapidHashMap::default();
     for (name, age) in &users {
         let result = node0
             .query(&format!(
@@ -86,7 +86,7 @@ async fn replication_crud_test(cluster: TestCluster) {
                 return false;
             }
             // Verify every user has correct name and age
-            let mut found: HashMap<String, i64> = HashMap::new();
+            let mut found: RapidHashMap<String, i64> = RapidHashMap::default();
             for u in arr {
                 if let (Some(name), Some(age)) = (u["name"].as_str(), u["age"].as_i64()) {
                     found.insert(name.to_string(), age);
@@ -125,7 +125,7 @@ async fn replication_crud_test(cluster: TestCluster) {
                 Some(a) => a,
                 None => return false,
             };
-            let mut found: HashMap<String, i64> = HashMap::new();
+            let mut found: RapidHashMap<String, i64> = RapidHashMap::default();
             for u in arr {
                 if let (Some(name), Some(age)) = (u["name"].as_str(), u["age"].as_i64()) {
                     found.insert(name.to_string(), age);
@@ -208,7 +208,7 @@ async fn replication_crud_test(cluster: TestCluster) {
     // Final verification: all remaining field values are correct
     let final_result = node1.query("query { User { name age } }").unwrap();
     let final_users = final_result["User"].as_array().unwrap();
-    let mut final_map: HashMap<String, i64> = HashMap::new();
+    let mut final_map: RapidHashMap<String, i64> = RapidHashMap::default();
     for u in final_users {
         if let (Some(name), Some(age)) = (u["name"].as_str(), u["age"].as_i64()) {
             final_map.insert(name.to_string(), age);

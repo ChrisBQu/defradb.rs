@@ -6,9 +6,6 @@ description = "Integration test harness for defradb"
 license = "Apache-2.0 OR MIT"
 autotests = false
 
-[package.metadata.cargo-machete]
-ignored = ["anyhow"]
-
 [[test]]
 name = "basic"
 path = "tests/basic.rs"
@@ -128,7 +125,6 @@ reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls-native-roots",
 ] }
 serde_json = "1.0"
-anyhow = "1.0"
 futures = "0.3"
 paste = "1.0"
 ctor = "0.2"
@@ -136,6 +132,7 @@ chrono = { version = "0.4", features = ["serde"] }
 kovan.workspace = true
 
 [dev-dependencies]
+rapidhash.workspace = true
 keyring = { path = "../../crates/keyring" }
 vera-client = { git = "https://github.com/sourcenetwork/vera.rs", rev = "1dab0c4562da551b1a7f00fcea643b914769891c" }
 vera-domain = { git = "https://github.com/sourcenetwork/vera.rs", rev = "1dab0c4562da551b1a7f00fcea643b914769891c" }
