@@ -434,3 +434,26 @@ fn a_part_no_operand_touches_keeps_its_bytes() {
             .unwrap();
     }
 }
+
+/// A one-part operand written from a borrowed part is the operand of the
+/// stored document holding that one field.
+#[test]
+fn a_borrowed_part_writes_the_operand_of_its_document() {
+    let counter = StoredField::counter(
+        "count".to_owned(),
+        ValueKind::Int64,
+        4,
+        &NormalValue::Int(7),
+    )
+    .unwrap();
+    let part = document::stored::Part {
+        name: &counter.name,
+        kind: counter.kind,
+        priority: counter.priority,
+        value: &counter.value,
+    };
+    let whole = StoredDocument {
+        fields: [(3, counter.clone())].into(),
+    };
+    assert_eq!(crate::merge::document_part(3, part), document_parts(&whole));
+}

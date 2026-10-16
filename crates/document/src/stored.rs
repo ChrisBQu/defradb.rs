@@ -97,27 +97,106 @@ impl StoredField {
     }
 
     pub fn materialize(&self) -> Option<NormalValue> {
-        match self.kind {
-            ValueKind::Lww if self.value.is_empty() => Some(NormalValue::Null),
-            ValueKind::Lww => {
-                let mut reader = self.value.as_slice();
-                let value = ciborium::from_reader(&mut reader).ok()?;
-                if !reader.is_empty() {
-                    return None;
-                }
-                cbor_to_normal_value(value).ok()
-            }
-            ValueKind::Int64 => Some(NormalValue::Int(i64::from_be_bytes(
-                self.value.as_slice().try_into().ok()?,
-            ))),
-            ValueKind::Float32 => Some(NormalValue::Float64(f64::from(f32::from_be_bytes(
-                self.value.as_slice().try_into().ok()?,
-            )))),
-            ValueKind::Float64 => Some(NormalValue::Float64(f64::from_be_bytes(
-                self.value.as_slice().try_into().ok()?,
-            ))),
+        materialize(self.kind, &self.value)
+    }
+
+    fn part(&self) -> Part<'_> {
+        Part {
+            name: &self.name,
+            kind: self.kind,
+            priority: self.priority,
+            value: &self.value,
         }
     }
+}
+
+/// One field as a document value stores it, borrowed: what
+/// [`StoredDocument::encode`] writes for each of its fields.
+#[derive(Debug, Clone, Copy)]
+pub struct Part<'a> {
+    pub name: &'a str,
+    pub kind: ValueKind,
+    pub priority: u64,
+    /// CBOR for LWW values; big-endian numbers for counters.
+    pub value: &'a [u8],
+}
+
+fn materialize(kind: ValueKind, value: &[u8]) -> Option<NormalValue> {
+    match kind {
+        ValueKind::Lww if value.is_empty() => Some(NormalValue::Null),
+        ValueKind::Lww => {
+            let mut reader = value;
+            let value = ciborium::from_reader(&mut reader).ok()?;
+            if !reader.is_empty() {
+                return None;
+            }
+            cbor_to_normal_value(value).ok()
+        }
+        ValueKind::Int64 => Some(NormalValue::Int(i64::from_be_bytes(value.try_into().ok()?))),
+        ValueKind::Float32 => Some(NormalValue::Float64(f64::from(f32::from_be_bytes(
+            value.try_into().ok()?,
+        )))),
+        ValueKind::Float64 => Some(NormalValue::Float64(f64::from_be_bytes(
+            value.try_into().ok()?,
+        ))),
+    }
+}
+
+/// Whether a field of `kind` can store `value`: exactly when [`materialize`]
+/// reads it back, decided for a counter by its width alone.
+fn stores(kind: ValueKind, value: &[u8]) -> bool {
+    match kind {
+        ValueKind::Lww => materialize(kind, value).is_some(),
+        ValueKind::Int64 | ValueKind::Float64 => value.len() == 8,
+        ValueKind::Float32 => value.len() == 4,
+    }
+}
+
+/// `prefix`, then the document value of `parts`: what
+/// [`StoredDocument::encode_after`] writes for a document of those fields,
+/// without building one. `None` where a document of them cannot be stored:
+/// an ID out of ascending order or repeated, an empty or repeated name, or a
+/// value its kind cannot hold.
+pub fn encode_parts<'a>(
+    prefix: &[u8],
+    parts: impl Iterator<Item = (u32, Part<'a>)> + Clone,
+) -> Option<Vec<u8>> {
+    let (count, size) = parts
+        .clone()
+        .fold((0usize, 0usize), |(count, size), (_, part)| {
+            (count + 1, size + 21 + part.name.len() + part.value.len())
+        });
+    let mut bytes = Vec::with_capacity(prefix.len() + MAGIC.len() + 4 + size);
+    bytes.extend_from_slice(prefix);
+    bytes.extend_from_slice(MAGIC);
+    bytes.extend_from_slice(&u32::try_from(count).ok()?.to_be_bytes());
+    // One field cannot repeat a name, so only a document of several sorts them.
+    let mut names = Vec::with_capacity(if count > 1 { count } else { 0 });
+    let mut previous = None;
+    for (id, part) in parts {
+        if previous.is_some_and(|previous| previous >= id)
+            || part.name.is_empty()
+            || !stores(part.kind, part.value)
+        {
+            return None;
+        }
+        previous = Some(id);
+        if count > 1 {
+            names.push(part.name);
+        }
+        bytes.extend_from_slice(&id.to_be_bytes());
+        bytes.push(part.kind as u8);
+        bytes.extend_from_slice(&part.priority.to_be_bytes());
+        for value in [part.name.as_bytes(), part.value] {
+            bytes.extend_from_slice(&u32::try_from(value.len()).ok()?.to_be_bytes());
+            bytes.extend_from_slice(value);
+        }
+    }
+    names.sort_unstable();
+    if names.windows(2).any(|pair| pair[0] == pair[1]) {
+        return None;
+    }
+    Some(bytes)
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -127,27 +206,15 @@ pub struct StoredDocument {
 
 impl StoredDocument {
     pub fn encode(&self) -> Option<Vec<u8>> {
-        let mut bytes = MAGIC.to_vec();
-        bytes.extend_from_slice(&u32::try_from(self.fields.len()).ok()?.to_be_bytes());
-        let mut names = Vec::with_capacity(self.fields.len());
-        for (id, field) in &self.fields {
-            if field.name.is_empty() || field.materialize().is_none() {
-                return None;
-            }
-            names.push(field.name.as_str());
-            bytes.extend_from_slice(&id.to_be_bytes());
-            bytes.push(field.kind as u8);
-            bytes.extend_from_slice(&field.priority.to_be_bytes());
-            for value in [field.name.as_bytes(), field.value.as_slice()] {
-                bytes.extend_from_slice(&u32::try_from(value.len()).ok()?.to_be_bytes());
-                bytes.extend_from_slice(value);
-            }
-        }
-        names.sort_unstable();
-        if names.windows(2).any(|pair| pair[0] == pair[1]) {
-            return None;
-        }
-        Some(bytes)
+        self.encode_after(&[])
+    }
+
+    /// `prefix`, then what [`encode`](Self::encode) writes, in one allocation.
+    pub fn encode_after(&self, prefix: &[u8]) -> Option<Vec<u8>> {
+        encode_parts(
+            prefix,
+            self.fields.iter().map(|(id, field)| (*id, field.part())),
+        )
     }
 
     pub fn decode(bytes: &[u8]) -> Option<Self> {
@@ -190,7 +257,7 @@ impl StoredDocument {
                 value,
             };
             if field.name.is_empty()
-                || (validate_values && field.materialize().is_none())
+                || (validate_values && !stores(field.kind, &field.value))
                 || fields.insert(id, field).is_some()
             {
                 return None;
@@ -433,5 +500,57 @@ mod tests {
             bytes.extend_from_slice(&0_u32.to_be_bytes()); // null value
         }
         assert!(StoredDocument::decode(&bytes).is_none());
+    }
+
+    /// Borrowed parts encode, after any prefix, exactly as a stored document
+    /// of the same fields does, and a document they cannot form is refused.
+    #[test]
+    fn encoded_parts_are_the_stored_document_of_those_fields() {
+        let mut stored = StoredDocument::default();
+        stored.fields.insert(
+            2,
+            StoredField::counter(
+                "count".to_owned(),
+                ValueKind::Int64,
+                7,
+                &NormalValue::Int(-3),
+            )
+            .unwrap(),
+        );
+        stored.fields.insert(
+            5,
+            StoredField::lww("name".to_owned(), 9, &NormalValue::String("Ada".to_owned())).unwrap(),
+        );
+        let parts = || stored.fields.iter().map(|(id, field)| (*id, field.part()));
+        assert_eq!(encode_parts(&[], parts()), stored.encode());
+        assert_eq!(
+            encode_parts(b"pre", parts()).unwrap(),
+            [b"pre".as_slice(), &stored.encode().unwrap()].concat()
+        );
+        let decoded = StoredDocument::decode(&encode_parts(&[], parts()).unwrap()).unwrap();
+        assert_eq!(decoded, stored);
+
+        let field = |id: u32, name: &'static str| {
+            (
+                id,
+                Part {
+                    name,
+                    kind: ValueKind::Int64,
+                    priority: 1,
+                    value: &[0; 8],
+                },
+            )
+        };
+        assert!(encode_parts(&[], [field(2, "a"), field(1, "b")].into_iter()).is_none());
+        assert!(encode_parts(&[], [field(1, "a"), field(1, "b")].into_iter()).is_none());
+        assert!(encode_parts(&[], [field(1, "a"), field(2, "a")].into_iter()).is_none());
+        assert!(encode_parts(&[], [field(1, "")].into_iter()).is_none());
+        let short = Part {
+            name: "a",
+            kind: ValueKind::Int64,
+            priority: 1,
+            value: &[0; 4],
+        };
+        assert!(encode_parts(&[], std::iter::once((1, short))).is_none());
     }
 }

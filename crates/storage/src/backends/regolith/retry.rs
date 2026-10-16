@@ -15,11 +15,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use regolith::sync::ArrayQueue;
-use regolith::{OptimisticTransactionDb, TxnOptions};
+use regolith::OptimisticTransactionDb;
 
 use super::event_order::EventOrder;
 use super::post_commit::PostCommit;
 use super::transaction::RegolithTxn;
+use super::worker_io::readied;
 use crate::corekv::{
     Error, Result, RetryAttempt, RetryAttemptError, RetryAttemptFuture, RetryAttemptIO,
     RetryAttemptValue, RetryOptions, RetryTxn, TxnCallbacks,
@@ -53,8 +54,8 @@ where
 /// attempt fails, or the policy's attempts are spent.
 pub(super) async fn transact(
     db: &Arc<OptimisticTransactionDb>,
+    io: &super::worker_io::StoreIo,
     queue: Option<regolith::QueueId>,
-    isolation: regolith::IsolationLevel,
     event_order: &Arc<EventOrder>,
     options: RetryOptions,
     attempt: RetryAttempt,
@@ -66,30 +67,17 @@ pub(super) async fn transact(
         latest: None,
     });
     let run = attempts({
-        let (baton, db, event_order) =
-            (Arc::clone(&baton), Arc::clone(db), Arc::clone(event_order));
+        let (baton, event_order) = (Arc::clone(&baton), Arc::clone(event_order));
         move |txn, lost| {
             let previous_conflict = lost.map(crate::corekv::TransactionConflict::from);
-            let (baton, db, event_order) = (
-                Arc::clone(&baton),
-                Arc::clone(&db),
-                Arc::clone(&event_order),
-            );
+            let (baton, event_order) = (Arc::clone(&baton), Arc::clone(&event_order));
             Box::pin(async move {
                 let Some(mut held) = baton.pop() else {
                     return Err(RetryAttemptError::Storage(Error::Other(
                         "a retry attempt started while another was running".into(),
                     )));
                 };
-                let value = run_attempt(
-                    &mut held,
-                    txn,
-                    previous_conflict,
-                    db,
-                    isolation,
-                    &event_order,
-                )
-                .await;
+                let value = run_attempt(&mut held, txn, previous_conflict, &event_order).await;
                 // Cannot be full: this attempt took the one baton.
                 let _ = baton.push(held);
                 value
@@ -102,9 +90,11 @@ pub(super) async fn transact(
     let outcome = match queue {
         Some(queue) => db.transact_async(queue, &policy, run).await,
         None => {
-            let mut queue = db.db().io_queue();
+            let mut queue = io.own_queue(db);
             let future = db.transact_async(queue.id(), &policy, run);
-            super::worker_io::drive(&mut queue, future).await
+            let outcome = super::worker_io::drive(&mut queue, future).await;
+            io.keep_queue(queue);
+            outcome
         }
     };
     let committed = outcome.is_ok();
@@ -136,8 +126,6 @@ async fn run_attempt(
     held: &mut Baton,
     txn: &mut regolith::Transaction,
     previous_conflict: Option<crate::corekv::TransactionConflict>,
-    db: Arc<OptimisticTransactionDb>,
-    isolation: regolith::IsolationLevel,
     event_order: &Arc<EventOrder>,
 ) -> std::result::Result<RetryAttemptValue, RetryAttemptError> {
     if previous_conflict.is_some() {
@@ -149,8 +137,6 @@ async fn run_attempt(
     let mut retry_txn = RegolithRetryTxn {
         previous_conflict,
         txn,
-        db,
-        isolation,
         attempt_io_active: false,
         callbacks: TxnCallbacks::default(),
     };
@@ -179,8 +165,6 @@ async fn run_attempt(
 struct RegolithRetryTxn<'a> {
     previous_conflict: Option<crate::corekv::TransactionConflict>,
     txn: &'a mut regolith::Transaction,
-    db: Arc<OptimisticTransactionDb>,
-    isolation: regolith::IsolationLevel,
     attempt_io_active: bool,
     callbacks: TxnCallbacks,
 }
@@ -211,8 +195,7 @@ impl RetryTxn for RegolithRetryTxn<'_> {
             return Err(Error::EmptyKey);
         }
         let txn: &regolith::Transaction = self.txn;
-        regolith::ready(|| txn.get_slice(key))
-            .await
+        readied!(txn.get_slice(key))
             .map(|value| value.map(bytes::Bytes::from_owner))
             .map_err(super::transaction::map_txn_error)
     }
@@ -223,8 +206,7 @@ impl RetryTxn for RegolithRetryTxn<'_> {
             return Err(Error::EmptyKey);
         }
         let txn: &regolith::Transaction = self.txn;
-        regolith::ready(|| txn.get_slice(key))
-            .await
+        readied!(txn.get_slice(key))
             .map(|value| value.is_some())
             .map_err(super::transaction::map_txn_error)
     }
@@ -234,9 +216,8 @@ impl RetryTxn for RegolithRetryTxn<'_> {
         if key.is_empty() {
             return Err(Error::EmptyKey);
         }
-        regolith::ready(|| self.txn.put(key, value))
-            .await
-            .map_err(super::transaction::map_txn_error)?;
+        let txn: &regolith::Transaction = self.txn;
+        readied!(txn.put(key, value)).map_err(super::transaction::map_txn_error)?;
         Ok(())
     }
 
@@ -245,9 +226,8 @@ impl RetryTxn for RegolithRetryTxn<'_> {
         if key.is_empty() {
             return Err(Error::EmptyKey);
         }
-        regolith::ready(|| self.txn.delete(key))
-            .await
-            .map_err(super::transaction::map_txn_error)?;
+        let txn: &regolith::Transaction = self.txn;
+        readied!(txn.delete(key)).map_err(super::transaction::map_txn_error)?;
         Ok(())
     }
 
@@ -255,8 +235,9 @@ impl RetryTxn for RegolithRetryTxn<'_> {
         if self.attempt_io_active {
             return Err(Error::Other("scoped retry IO is already active".into()));
         }
-        let placeholder = self.db.begin(&TxnOptions::new().isolation(self.isolation));
-        let actual = Box::new(std::mem::replace(self.txn, placeholder));
+        // The attempt's transaction moves to the scoped IO; what regolith
+        // holds meanwhile is an empty stand-in that registers nothing.
+        let actual = Box::new(self.txn.take());
         self.attempt_io_active = true;
         Ok(Box::new(RegolithTxn::scoped_attempt(actual)))
     }
@@ -380,6 +361,7 @@ mod retry_read_tests {
     use super::*;
     use crate::backends::RegolithStore;
     use crate::corekv::{OnAbort, OnCommit, Store, TxnCallback};
+    use regolith::TxnOptions;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A compare-and-set whose condition finds nothing to change, while

@@ -26,12 +26,13 @@ const HEAD_SET_STATE: u8 = 9;
 pub mod head_set;
 pub mod vector;
 
+/// What every operand of `kind` starts with.
+const fn header(kind: u8) -> [u8; 4] {
+    [MAGIC[0], MAGIC[1], MAGIC[2], kind]
+}
+
 fn encode(kind: u8, value: &[u8]) -> Vec<u8> {
-    let mut result = Vec::with_capacity(4 + value.len());
-    result.extend_from_slice(MAGIC);
-    result.push(kind);
-    result.extend_from_slice(value);
-    result
+    [&header(kind), value].concat()
 }
 
 fn decode(bytes: &[u8]) -> Option<(u8, &[u8])> {
@@ -61,7 +62,13 @@ pub fn stats_delta(documents: i128, field_length: i128) -> Vec<u8> {
 
 /// Only the named fields are changed. The base must use the local value format.
 pub fn document_parts(parts: &document::stored::StoredDocument) -> Option<Vec<u8>> {
-    Some(encode(DOCUMENT, &parts.encode()?))
+    parts.encode_after(&header(DOCUMENT))
+}
+
+/// [`document_parts`] of a document holding only `part`, at `id`, written
+/// without building that document.
+pub fn document_part(id: u32, part: document::stored::Part<'_>) -> Option<Vec<u8>> {
+    document::stored::encode_parts(&header(DOCUMENT), std::iter::once((id, part)))
 }
 
 pub struct DefraMergeOperator;

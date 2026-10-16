@@ -30,10 +30,10 @@ mod settle;
 
 use std::sync::Arc;
 
-use regolith::{OptimisticTransactionDb, QueueId, ReadMode};
+use regolith::{IoQueue, OptimisticTransactionDb, QueueId, ReadMode};
 
 pub(crate) use drive::drive;
-pub(crate) use settle::{settle, wait_out};
+pub(crate) use settle::{readied, ready_after, settle, settle_after, settled, wait_out};
 
 /// The pool hook that polls this worker's regolith queues. Built on the
 /// worker's own thread by the factory [`with_worker_io`] installs; while it
@@ -104,6 +104,11 @@ pub(super) struct StoreIo {
     /// The queue off-pool callers borrow, opened on first use on the
     /// least-loaded worker, which polls it among its own.
     borrowed: regolith::sync::OnceCell<QueueId>,
+    /// Queues a caller with no worker to poll for it drives itself ([`drive`]),
+    /// kept between its calls: opening one lists it with the engine and
+    /// dropping one takes it off again, which each call would otherwise pay.
+    /// At most one per thread that can run at once stays idle.
+    idle: regolith::sync::ArrayQueue<IoQueue>,
     stats: crate::backends::TransactionStatsHandle,
 }
 
@@ -112,10 +117,26 @@ impl StoreIo {
         pool: Option<workers::Pool>,
         stats: crate::backends::TransactionStatsHandle,
     ) -> Self {
+        let threads = std::thread::available_parallelism().map_or(1, usize::from);
         Self {
             pool,
             borrowed: regolith::sync::OnceCell::new(),
+            idle: regolith::sync::ArrayQueue::new(threads),
             stats,
+        }
+    }
+
+    /// A queue of the caller's own to drive, idle: one kept from an earlier
+    /// call, or a new one on `db`.
+    pub(super) fn own_queue(&self, db: &OptimisticTransactionDb) -> IoQueue {
+        self.idle.pop().unwrap_or_else(|| db.db().io_queue())
+    }
+
+    /// Keeps `queue`, driven to the end of its caller's call, for the next
+    /// caller: unless it still holds a read, or enough are kept already.
+    pub(super) fn keep_queue(&self, queue: IoQueue) {
+        if queue.pending_bytes() == 0 {
+            let _ = self.idle.push(queue);
         }
     }
 

@@ -156,7 +156,28 @@ static FAMILIES: [Family; 14] = [
 
 /// The family `key` belongs to, or `None` for a key of no declared family.
 pub(super) fn family_of(key: &[u8]) -> Option<&'static Family> {
-    FAMILIES.iter().find(|family| key.starts_with(family.start))
+    // Every write is classified, so a key is compared only with the
+    // families up to the last one its first byte can start, and with the
+    // whole start only of one whose first byte matches.
+    let first = key.first()?;
+    FAMILIES[..usize::from(FAMILIES_BY_FIRST_BYTE[usize::from(*first)])]
+        .iter()
+        .find(|family| family.start.first() == Some(first) && key.starts_with(family.start))
+}
+
+/// For each first byte of a key, one past the last family whose start begins
+/// with it, `0` for none.
+static FAMILIES_BY_FIRST_BYTE: [u8; 256] = families_by_first_byte();
+
+const fn families_by_first_byte() -> [u8; 256] {
+    assert!(FAMILIES.len() < u8::MAX as usize);
+    let mut table = [0u8; 256];
+    let mut index = 0;
+    while index < FAMILIES.len() {
+        table[FAMILIES[index].start[0] as usize] = index as u8 + 1;
+        index += 1;
+    }
+    table
 }
 
 /// The length of `key`'s entity prefix, or `None` when its family names no

@@ -2,7 +2,7 @@
 
 use proptest::prelude::*;
 
-use super::{entity_len, family_of, keys, Class};
+use super::{entity_len, family_of, keys, Class, FAMILIES};
 use crate::keys::utils::InstanceType;
 use crate::keys::{
     deleted_doc_key, doc_key, encode_doc_short_id, DataStoreKey, HeadstorePriorityKey,
@@ -133,5 +133,16 @@ proptest! {
                 prop_assert_eq!(entity_len(&key), Some(len));
             }
         }
+    }
+
+    /// A key's family is the first in the table whose start it begins with,
+    /// whatever shortcut the lookup takes.
+    #[test]
+    fn a_key_falls_to_the_first_family_its_start_begins(key in keys()) {
+        let first = FAMILIES.iter().find(|family| key.starts_with(family.start));
+        prop_assert!(std::ptr::eq(
+            family_of(&key).map_or(std::ptr::null(), |family| family),
+            first.map_or(std::ptr::null(), |family| family),
+        ));
     }
 }

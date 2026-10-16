@@ -18,7 +18,7 @@ use crate::traits::{Context, Delta, MergeResult, ReplicatedData, ValueReader};
 use async_trait::async_trait;
 use bytes::Bytes;
 use defra_core::{Error, Result};
-use document::stored::{StoredDocument, StoredField, ValueKind};
+use document::stored::{Part, StoredDocument, ValueKind};
 use document::NormalValue;
 use serde::{Deserialize, Serialize};
 use std::any::Any;
@@ -364,17 +364,18 @@ impl Counter {
     /// The document operand that adds `delta`, after checking it is a delta
     /// this counter accepts.
     fn operand(&self, delta: &CounterDelta) -> Result<Vec<u8>> {
-        let value = delta.checked_value(self.kind, self.allow_decrement)?;
-        let part = StoredField::counter(
-            self.field_name.clone(),
-            self.kind.value_kind(),
-            delta.priority(),
-            &value,
+        delta.checked_value(self.kind, self.allow_decrement)?;
+        // A checked delta's bytes are its increment in the counter's own
+        // big-endian width, exactly what the part stores.
+        storage::merge::document_part(
+            self.part,
+            Part {
+                name: &self.field_name,
+                kind: self.kind.value_kind(),
+                priority: delta.priority(),
+                value: delta.data(),
+            },
         )
-        .map_err(|error| Error::MergeError(error.to_string()))?;
-        storage::merge::document_parts(&StoredDocument {
-            fields: [(self.part, part)].into(),
-        })
         .ok_or_else(|| {
             Error::MergeError(format!("invalid counter delta for '{}'", self.field_name))
         })

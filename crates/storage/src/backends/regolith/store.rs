@@ -76,7 +76,14 @@ impl RegolithStore {
                 })?;
             }
         }
-        let engine_stats = options.engine.get_statistics().cloned().unwrap_or_default();
+        // The store reads tickers only, so statistics of its own keep no
+        // histogram: a timer reads the clock twice per iterator step, read
+        // and log write, and a sample costs atomics on every read and commit.
+        let engine_stats = options.engine.get_statistics().cloned().unwrap_or_else(|| {
+            Arc::new(regolith::Statistics::with_level(
+                regolith::StatsLevel::ExceptHistogramOrTimers,
+            ))
+        });
         let stats = TransactionStatsHandle::from_engine(engine_stats.clone());
         let engine = options
             .engine_for_open()
@@ -261,8 +268,8 @@ impl Store for RegolithStore {
         let queue = self.inner.io.queue(&self.inner.db, "transact").await;
         super::retry::transact(
             &self.inner.db,
+            &self.inner.io,
             queue,
-            self.inner.options.isolation,
             &self.inner.event_order,
             options,
             attempt,
@@ -303,5 +310,47 @@ impl Dropable for RegolithStore {
             .db()
             .drop_all()
             .map_err(|error| Error::Backend(format!("drop_all failed: {error}")))
+    }
+}
+
+#[cfg(test)]
+mod statistics_tests {
+    use super::*;
+    use crate::corekv::{IterOptions, Iterator, Reader, Writer};
+    use regolith::{Histogram, StatsLevel, Ticker};
+
+    /// Statistics the store opens on its own count tickers and keep no
+    /// histogram: the store reports only tickers, a timer reads the clock
+    /// twice per iterator step, read and log write, and a sample costs
+    /// atomics on every read and commit.
+    #[tokio::test]
+    async fn the_stores_own_statistics_count_tickers_only() {
+        let store = RegolithStore::in_memory().unwrap();
+        let mut txn = store.new_txn(false).await.unwrap();
+        txn.set(b"key", b"value").await.unwrap();
+        txn.commit().await.unwrap();
+        let reader = store.new_txn(true).await.unwrap();
+        assert!(reader.get(b"key").await.unwrap().is_some());
+        let mut iter = reader.iterator(IterOptions::new()).await.unwrap();
+        while iter.next().await.unwrap().is_some() {}
+        iter.close().await.unwrap();
+        reader.discard();
+
+        let stats = store.engine().db().statistics().unwrap();
+        assert_eq!(stats.level(), StatsLevel::ExceptHistogramOrTimers);
+        assert!(stats.get_ticker(Ticker::CommitCount) > 0);
+        assert!(stats.get_ticker(Ticker::IterSeekCount) > 0);
+        for histogram in [
+            Histogram::DbIterSeek,
+            Histogram::DbIterNext,
+            Histogram::WalWriteTime,
+            Histogram::BytesPerWrite,
+        ] {
+            assert_eq!(
+                stats.get_histogram_snapshot(histogram).count,
+                0,
+                "{histogram:?}"
+            );
+        }
     }
 }

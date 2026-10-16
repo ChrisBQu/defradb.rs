@@ -23,7 +23,7 @@ use super::handle::Handle;
 use super::iterator::RegolithIterator;
 use super::post_commit::PostCommit;
 use super::slots::TxnSlot;
-use super::worker_io::settle;
+use super::worker_io::{readied, settled};
 use crate::corekv::{
     CallbackMark, Error, IterOptions, Iterator, OnAbort, OnCommit, Reader, Result, Txn,
     TxnCallbacks, Writer,
@@ -125,6 +125,11 @@ impl RegolithTxn {
     /// Ends without a commit, where nothing can await: the abort callbacks
     /// run now, their async ones spawned.
     fn abort_now(&mut self) {
+        // Most transactions register nothing: they skip sorting and dropping
+        // empty ends.
+        if self.callbacks.is_empty() {
+            return;
+        }
         let (_, aborted) = std::mem::take(&mut self.callbacks).into_ends();
         aborted.run_now();
     }
@@ -200,12 +205,9 @@ impl Reader for RegolithTxn {
         // `Bytes::from_owner` adopts that borrow, so a read copies
         // nothing on the way to the caller.
         let slice = match self.handle()?.as_ref() {
-            Handle::ReadOnly(snapshot) => settle(|| snapshot.get_slice(key))
-                .await
+            Handle::ReadOnly(snapshot) => settled!(snapshot.get_slice(key))
                 .map_err(|error| Error::Backend(error.to_string()))?,
-            Handle::Writable(txn) => regolith::ready(|| txn.get_slice(key))
-                .await
-                .map_err(map_txn_error)?,
+            Handle::Writable(txn) => readied!(txn.get_slice(key)).map_err(map_txn_error)?,
         };
         Ok(slice.map(Bytes::from_owner))
     }
@@ -215,12 +217,9 @@ impl Reader for RegolithTxn {
             return Err(Error::EmptyKey);
         }
         let slice = match self.handle()?.as_ref() {
-            Handle::ReadOnly(snapshot) => settle(|| snapshot.get_slice(key))
-                .await
+            Handle::ReadOnly(snapshot) => settled!(snapshot.get_slice(key))
                 .map_err(|error| Error::Backend(error.to_string()))?,
-            Handle::Writable(txn) => regolith::ready(|| txn.get_parts(key, parts))
-                .await
-                .map_err(map_txn_error)?,
+            Handle::Writable(txn) => readied!(txn.get_parts(key, parts)).map_err(map_txn_error)?,
         };
         Ok(slice.map(Bytes::from_owner))
     }
@@ -230,13 +229,12 @@ impl Reader for RegolithTxn {
             return Err(Error::EmptyKey);
         }
         match self.handle()?.as_ref() {
-            Handle::ReadOnly(snapshot) => settle(|| snapshot.has(key))
-                .await
-                .map_err(|error| Error::Backend(error.to_string())),
+            Handle::ReadOnly(snapshot) => {
+                settled!(snapshot.has(key)).map_err(|error| Error::Backend(error.to_string()))
+            }
             // A writing transaction has to consult its own buffer, which
             // `has` on the snapshot underneath would miss.
-            Handle::Writable(txn) => Ok(regolith::ready(|| txn.get_slice(key))
-                .await
+            Handle::Writable(txn) => Ok(readied!(txn.get_slice(key))
                 .map_err(map_txn_error)?
                 .is_some()),
         }
@@ -247,11 +245,10 @@ impl Reader for RegolithTxn {
             return Err(Error::EmptyKey);
         }
         match self.handle()?.as_ref() {
-            Handle::ReadOnly(snapshot) => settle(|| snapshot.get_size(key))
-                .await
-                .map_err(|error| Error::Backend(error.to_string())),
-            Handle::Writable(txn) => Ok(regolith::ready(|| txn.get_slice(key))
-                .await
+            Handle::ReadOnly(snapshot) => {
+                settled!(snapshot.get_size(key)).map_err(|error| Error::Backend(error.to_string()))
+            }
+            Handle::Writable(txn) => Ok(readied!(txn.get_slice(key))
                 .map_err(map_txn_error)?
                 .map(|v| v.len())),
         }
@@ -269,18 +266,25 @@ impl Reader for RegolithTxn {
     }
 }
 
+impl RegolithTxn {
+    /// The transaction a write of `key` goes to: refused for an empty key or
+    /// a read-only transaction. Both forms of each `Writer` method call it
+    /// and then make the write in place, so a write boxes the one future its
+    /// trait method returns and waits only when the engine asks it to.
+    fn write_target(&self, key: &[u8]) -> Result<&Transaction> {
+        if key.is_empty() {
+            return Err(Error::EmptyKey);
+        }
+        self.writable()
+    }
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Writer for RegolithTxn {
     async fn merge_shared(&self, key: &[u8], operand: &[u8]) -> Result<()> {
-        if key.is_empty() {
-            return Err(Error::EmptyKey);
-        }
-        let txn = self.writable()?;
-        regolith::ready(|| txn.merge(key, operand))
-            .await
-            .map_err(map_txn_error)?;
-        Ok(())
+        let txn = self.write_target(key)?;
+        readied!(txn.merge(key, operand)).map_err(map_txn_error)
     }
 
     async fn append_shared(
@@ -291,32 +295,43 @@ impl Writer for RegolithTxn {
     ) -> Result<()> {
         let layout: Arc<dyn regolith::LogLayout> = log.keys().clone();
         let txn = self.writable()?;
-        regolith::ready(|| txn.append(&layout, entry, once_key))
-            .await
-            .map_err(map_txn_error)?;
-        Ok(())
+        readied!(txn.append(&layout, entry, once_key)).map_err(map_txn_error)
     }
 
     async fn set_shared(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        if key.is_empty() {
-            return Err(Error::EmptyKey);
-        }
-        let txn = self.writable()?;
-        regolith::ready(|| txn.put(key, value))
-            .await
-            .map_err(map_txn_error)?;
-        Ok(())
+        let txn = self.write_target(key)?;
+        readied!(txn.put(key, value)).map_err(map_txn_error)
     }
 
     async fn delete_shared(&self, key: &[u8]) -> Result<()> {
-        if key.is_empty() {
-            return Err(Error::EmptyKey);
-        }
+        let txn = self.write_target(key)?;
+        readied!(txn.delete(key)).map_err(map_txn_error)
+    }
+
+    async fn merge(&mut self, key: &[u8], operand: &[u8]) -> Result<()> {
+        let txn = self.write_target(key)?;
+        readied!(txn.merge(key, operand)).map_err(map_txn_error)
+    }
+
+    async fn append(
+        &mut self,
+        log: &crate::corekv::AppendLog,
+        entry: &[u8],
+        once_key: Option<&[u8]>,
+    ) -> Result<()> {
+        let layout: Arc<dyn regolith::LogLayout> = log.keys().clone();
         let txn = self.writable()?;
-        regolith::ready(|| txn.delete(key))
-            .await
-            .map_err(map_txn_error)?;
-        Ok(())
+        readied!(txn.append(&layout, entry, once_key)).map_err(map_txn_error)
+    }
+
+    async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+        let txn = self.write_target(key)?;
+        readied!(txn.put(key, value)).map_err(map_txn_error)
+    }
+
+    async fn delete(&mut self, key: &[u8]) -> Result<()> {
+        let txn = self.write_target(key)?;
+        readied!(txn.delete(key)).map_err(map_txn_error)
     }
 }
 

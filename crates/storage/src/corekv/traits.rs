@@ -490,4 +490,27 @@ impl Writer for Box<dyn Txn> {
     async fn delete_shared(&self, key: &[u8]) -> Result<()> {
         (**self).delete_shared(key).await
     }
+
+    // The plain forms forward as themselves: through the defaults each would
+    // box a future here, another for the shared form, and a third inside.
+    async fn merge(&mut self, key: &[u8], operand: &[u8]) -> Result<()> {
+        (**self).merge(key, operand).await
+    }
+
+    async fn append(
+        &mut self,
+        log: &super::types::AppendLog,
+        entry: &[u8],
+        once_key: Option<&[u8]>,
+    ) -> Result<()> {
+        (**self).append(log, entry, once_key).await
+    }
+
+    async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+        (**self).set(key, value).await
+    }
+
+    async fn delete(&mut self, key: &[u8]) -> Result<()> {
+        (**self).delete(key).await
+    }
 }
