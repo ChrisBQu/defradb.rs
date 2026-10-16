@@ -111,8 +111,8 @@ fn store(engine: &LensEngine, input: ByteReceiver) -> Result<Store<CallData>> {
     Ok(store)
 }
 
-/// Grants a fresh budget: the sandbox's fuel, its ticks, and a deadline one
-/// tick away.
+/// Grants a fresh budget: the sandbox's fuel, its ticks, and the deadline of
+/// a slice that starts now ([`SLICE`]).
 fn refill(mut store: StoreContextMut<'_, CallData>) -> wasmtime::Result<()> {
     let budget = store.data().budget;
     if let Some(fuel) = budget.fuel {
@@ -120,16 +120,21 @@ fn refill(mut store: StoreContextMut<'_, CallData>) -> wasmtime::Result<()> {
     }
     if let Some(ticks) = budget.ticks {
         store.data_mut().ticks_left = ticks;
-        store.set_epoch_deadline(1);
+        store.set_epoch_deadline(SLICE);
     }
     Ok(())
 }
 
+/// The deadline of a slice that starts between ticks, in ticks from now: the
+/// first tick can land at once, so the slice ends at the second and runs at
+/// least one full tick period. A call shorter than a period never yields.
+const SLICE: u64 = 2;
+
 /// Before the module runs again after a wait: the ticks that passed while it
-/// waited were not its own, so its next deadline is one tick away.
+/// waited were not its own, so a new slice starts ([`SLICE`]).
 fn resume(mut store: StoreContextMut<'_, CallData>) {
     if store.data().budget.ticks.is_some() {
-        store.set_epoch_deadline(1);
+        store.set_epoch_deadline(SLICE);
     }
 }
 
