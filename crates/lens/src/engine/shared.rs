@@ -39,17 +39,27 @@ struct Calls {
     max: usize,
 }
 
+/// The settings every wasmtime engine of the process is built with: wasmtime
+/// sets up its trap handlers once per process, from the first engine, and
+/// every later engine must agree with it.
+pub(super) fn base_config() -> Config {
+    // Only macOS has a setting to change.
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    let mut config = Config::new();
+    #[cfg(target_os = "macos")]
+    {
+        // Fork-capable embedders can crash when Wasmtime's Mach-port
+        // exception handler is initialized before spawning child processes.
+        config.macos_use_mach_ports(false);
+    }
+    config
+}
+
 impl LensEngine {
     /// Build an engine whose epoch `ticks` advances. Without a sandbox, calls
     /// run without limits and nothing ticks.
     pub(crate) fn new(sandbox: Option<WasmSandboxConfig>, ticks: &dyn TickSource) -> Result<Self> {
-        let mut config = Config::new();
-        #[cfg(target_os = "macos")]
-        {
-            // Fork-capable embedders can crash when Wasmtime's Mach-port
-            // exception handler is initialized before spawning child processes.
-            config.macos_use_mach_ports(false);
-        }
+        let mut config = base_config();
         if let Some(ref sb) = sandbox {
             sb.validate()?;
             if sb.fuel_budget.is_some() {

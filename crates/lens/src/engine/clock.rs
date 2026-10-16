@@ -148,7 +148,8 @@ mod tests {
 
     #[test]
     fn the_tick_thread_starts_with_the_first_call_and_only_once() {
-        let ticks = TickThread::new(EpochTick(Engine::default()), Duration::from_millis(1));
+        let engine = Engine::new(&super::super::shared::base_config()).unwrap();
+        let ticks = TickThread::new(EpochTick(engine), Duration::from_millis(1));
         assert!(ticks.worker.get().is_none(), "no call, no thread");
         ticks.calling().unwrap();
         let first = ticks.worker.get().map(|worker| worker.thread().id());
