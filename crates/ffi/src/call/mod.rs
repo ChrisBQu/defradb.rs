@@ -50,24 +50,26 @@ where
     Fut: Future<Output = Result<T, String>> + 'static,
     T: Send + 'static,
 {
-    match NODES
+    let pool = NODES
         .get(node_ptr, |state| state.database.pool().cloned())
-        .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())?
-    {
-        Some(pool) => run(&pool, Target::LeastLoaded, make),
-        None => wait(make()),
-    }
+        .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string())?;
+    run(pool.as_ref(), Target::LeastLoaded, make)
 }
 
 /// Runs the future `make` builds on the worker of `pool` that `target`
-/// names, parking the C caller's thread until it completes.
-pub(crate) fn run<M, Fut, T>(pool: &Pool, target: Target, make: M) -> Result<T, String>
+/// names (on the caller's thread without a pool), parking the C caller's
+/// thread until it completes.
+pub(crate) fn run<M, Fut, T>(pool: Option<&Pool>, target: Target, make: M) -> Result<T, String>
 where
     M: FnOnce() -> Fut + Send + 'static,
     Fut: Future<Output = Result<T, String>> + 'static,
     T: Send + 'static,
 {
-    pool.submit_and_wait(target, make).map_err(unavailable)?
+    wait(async move {
+        workers::run_on(pool, target, make)
+            .await
+            .map_err(unavailable)?
+    })
 }
 
 /// Parks the C caller's thread until `future` completes. For a call whose

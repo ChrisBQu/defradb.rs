@@ -58,11 +58,11 @@ unsafe extern "C" fn received(context: usize, result: FfiResult) {
 #[test]
 fn a_synchronous_call_from_a_plain_thread_returns_its_result() {
     let pool = pool(1);
-    let on_worker = run(&pool, Target::LeastLoaded, || async {
+    let on_worker = run(Some(&pool), Target::LeastLoaded, || async {
         Ok::<_, String>(workers::on_worker())
     });
     assert_eq!(on_worker, Ok(true), "the work ran on a worker");
-    let failed = run(&pool, Target::LeastLoaded, || async {
+    let failed = run(Some(&pool), Target::LeastLoaded, || async {
         Err::<(), _>("refused".to_string())
     });
     assert_eq!(failed, Err("refused".to_string()));
@@ -83,7 +83,7 @@ fn a_synchronous_call_parks_only_its_caller() {
         let started = Arc::clone(&started);
         let release = Arc::clone(&release);
         std::thread::spawn(move || {
-            run(&pool, Target::Worker(0), move || async move {
+            run(Some(&pool), Target::Worker(0), move || async move {
                 started.set();
                 release.wait().await;
                 Ok::<_, String>("first")
@@ -91,7 +91,7 @@ fn a_synchronous_call_parks_only_its_caller() {
         })
     };
     workers::block_on(started.wait()).unwrap();
-    let second = run(&pool, Target::Worker(0), move || async move {
+    let second = run(Some(&pool), Target::Worker(0), move || async move {
         release.set();
         Ok::<_, String>("second")
     });
@@ -105,8 +105,8 @@ fn a_synchronous_call_parks_only_its_caller() {
 fn a_synchronous_call_on_a_worker_is_refused() {
     let pool = pool(1);
     let inner = pool.clone();
-    let nested = run(&pool, Target::Worker(0), move || async move {
-        Ok::<_, String>(run(&inner, Target::Worker(0), || async {
+    let nested = run(Some(&pool), Target::Worker(0), move || async move {
+        Ok::<_, String>(run(Some(&inner), Target::Worker(0), || async {
             Ok::<_, String>(())
         }))
     });
@@ -182,7 +182,7 @@ fn an_asynchronous_call_made_on_a_worker_is_admitted_without_blocking_it() {
     let pool = pool(1);
     let chained = Received::leak();
     let inner = pool.clone();
-    let outer = run(&pool, Target::Worker(0), move || async move {
+    let outer = run(Some(&pool), Target::Worker(0), move || async move {
         call_async(&inner, Reply::new(received, chained.context()), || async {
             Ok("chained".to_string())
         });
