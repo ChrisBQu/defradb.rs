@@ -28,6 +28,7 @@ UNIT_NAMES = (
     "provider::tests::trusted_consensus_key_is_required_before_connecting",
     "provider_commands::tests::encodes_register_object_as_vera_rs_policy_cmd",
     "provider_commands::tests::encodes_relationship_subjects_as_vera_rs_policy_cmds",
+    "provider_commands::request_bearer_tests::a_remote_identity_acts_with_the_token_its_request_carries",
     "worker::tests::pending_request_and_identity_survive_reopen",
 )
 UNIT_TESTS = tuple("vera_rs::" + name for name in UNIT_NAMES)
@@ -272,7 +273,7 @@ def main():
     runner = Runner(root, args.vera.resolve(), Path(os.environ["RUNNER_TEMP"]).resolve())
     try:
         qualify(runner)
-        runner.records.append({"phase": "qualification", "exit_code": 0, "passed": 21})
+        runner.records.append({"phase": "qualification", "exit_code": 0, "passed": len(UNIT_TESTS) + len(LIVE_CASES)})
         runner.save()
     except BaseException as error:
         (runner.private / "failure.txt").write_text(repr(error) + "\n")
