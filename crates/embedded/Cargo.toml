@@ -42,6 +42,7 @@ storage = { path = "../storage" }
 
 bytes.workspace = true
 kovan-queue.workspace = true
+regolith.workspace = true
 async-trait.workspace = true
 cid.workspace = true
 hex.workspace = true

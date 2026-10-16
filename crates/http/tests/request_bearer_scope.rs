@@ -12,7 +12,7 @@ use axum::{
 };
 use defra_http::{router::AppStateBuilder, ExtractIdentity, MockQueryExecutor};
 use identity::{new_token, Identity, RawIdentity};
-use tokio::sync::Barrier;
+use regolith::sync::Barrier;
 use tower::ServiceExt;
 
 async fn observe(

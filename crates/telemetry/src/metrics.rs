@@ -1,10 +1,12 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(feature = "otlp")]
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 #[cfg(feature = "otlp")]
 use kovan::Atom;
+#[cfg(feature = "otlp")]
+use regolith::sync::OnceCell;
 #[cfg(feature = "otlp")]
 use opentelemetry::metrics::{Counter, MeterProvider as _};
 #[cfg(feature = "otlp")]
@@ -331,7 +333,7 @@ static NEXT_INSTALLATION: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "otlp")]
 type InstrumentRegistry = Atom<Vec<(u64, Arc<Instruments>)>>;
 #[cfg(feature = "otlp")]
-static INSTRUMENTS: OnceLock<InstrumentRegistry> = OnceLock::new();
+static INSTRUMENTS: OnceCell<InstrumentRegistry> = OnceCell::new();
 
 #[cfg(feature = "otlp")]
 pub(crate) fn install(provider: &opentelemetry_sdk::metrics::SdkMeterProvider) -> u64 {
@@ -374,7 +376,7 @@ pub(crate) fn install(provider: &opentelemetry_sdk::metrics::SdkMeterProvider) -
     crate::engine_tickers::register(&meter);
 
     let installation = NEXT_INSTALLATION.fetch_add(1, Ordering::Relaxed) + 1;
-    let registry = INSTRUMENTS.get_or_init(|| Atom::new(Vec::new()));
+    let registry = INSTRUMENTS.get_or_init_racy(|| Atom::new(Vec::new()));
     registry.rcu(|current| {
         let mut next = current.clone();
         next.push((installation, Arc::clone(&instruments)));

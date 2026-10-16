@@ -72,6 +72,7 @@ tracing-chrome = { version = "0.7", optional = true }
 
 # Error handling
 thiserror = { workspace = true }
+regolith = { workspace = true }
 
 # File system
 dirs = "5.0"
