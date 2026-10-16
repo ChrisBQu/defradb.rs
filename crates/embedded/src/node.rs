@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use crate::error::{Error, Result, ResultExt};
 use crate::node_acp::{create_document_acp, create_nac_manager};
 use crate::node_identity::create_node_identity;
 use crate::node_tasks::BackgroundTasks;
@@ -15,7 +16,6 @@ use crate::{
     EmbeddedNodeConfig, EmbeddedStore, ManagedP2PSystem, Persistence, SigningConfig, SigningKey,
     TransportConfig,
 };
-use anyhow::{anyhow, Context, Result};
 #[cfg(feature = "libp2p")]
 use kovan_queue::seg_queue::SegQueue;
 #[cfg(any(feature = "libp2p", feature = "iroh"))]
@@ -38,11 +38,9 @@ pub(crate) type WireKmsCallback = Box<dyn FnOnce(Arc<dyn kms::KmsService>) + Sen
 /// permissioned collection to public.
 fn resolve_creator_identity() -> Result<Option<identity::Did>> {
     match defra_core::current_identity::get_effective_identity() {
-        Some(raw) => {
-            Ok(Some(identity::Did::new(raw).map_err(|error| {
-                anyhow!("malformed ambient identity: {error}")
-            })?))
-        }
+        Some(raw) => Ok(Some(
+            identity::Did::new(raw).context("malformed ambient identity")?,
+        )),
         None => Ok(None),
     }
 }
@@ -91,10 +89,9 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
     }
 
     pub async fn add_schema(&self, sdl: &str) -> Result<()> {
-        let collections =
-            query::parse_sdl(sdl).map_err(|error| anyhow!("SDL parse error: {error}"))?;
+        let collections = query::parse_sdl(sdl).context("SDL parse error")?;
         schema::definition_validation::validate_new_collections(&collections)
-            .map_err(|error| anyhow!("schema validation error: {error}"))?;
+            .context("schema validation error")?;
 
         let _id_guard =
             defra_core::current_identity::scoped_current_identity(self.node_identity_did.clone());
@@ -106,7 +103,7 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
                 creator,
             )
             .await
-            .map_err(|error| anyhow!("create collection error: {error}"))?;
+            .context("create collection error")?;
 
         Ok(())
     }
@@ -121,30 +118,30 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
         let col = self
             .database
             .get_collection(collection)
-            .map_err(|error| anyhow!("get collection error: {error}"))?
-            .ok_or_else(|| anyhow!("collection '{collection}' not found"))?;
+            .context("get collection error")?
+            .ok_or_else(|| Error::msg(format_args!("collection '{collection}' not found")))?;
         let schema = col.schema();
 
         if !schema.fields.iter().any(|f| f.name == field_name) {
-            return Err(anyhow!(
+            return Err(Error::msg(format_args!(
                 "encrypted index on non-existent field: {field_name}"
-            ));
+            )));
         }
         if schema
             .encrypted_indexes
             .iter()
             .any(|idx| idx.field_name == field_name)
         {
-            return Err(anyhow!(
+            return Err(Error::msg(format_args!(
                 "encrypted index already exists on field: {field_name}"
-            ));
+            )));
         }
 
         let txn = self
             .database
             .new_txn(false)
             .await
-            .map_err(|error| anyhow!("failed to create transaction: {error}"))?;
+            .context("failed to create transaction")?;
         {
             let mut updated_schema = schema.clone();
             updated_schema
@@ -153,28 +150,24 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
 
             let collection_key =
                 storage::keys::systemstore::CollectionKey::new(&updated_schema.version_id);
-            let schema_data = serde_json::to_vec(&updated_schema)
-                .map_err(|error| anyhow!("failed to serialize schema: {error}"))?;
-            let systemstore = txn
-                .systemstore()
-                .map_err(|error| anyhow!("failed to get systemstore: {error}"))?;
+            let schema_data =
+                serde_json::to_vec(&updated_schema).context("failed to serialize schema")?;
+            let systemstore = txn.systemstore().context("failed to get systemstore")?;
             systemstore
                 .set(&collection_key.bytes(), &schema_data)
                 .await
-                .map_err(|error| anyhow!("failed to save schema: {error}"))?;
+                .context("failed to save schema")?;
             let name_key = storage::keys::systemstore::CollectionNameKey::new(collection);
             systemstore
                 .set(&name_key.bytes(), updated_schema.version_id.as_bytes())
                 .await
-                .map_err(|error| anyhow!("failed to save name mapping: {error}"))?;
+                .context("failed to save name mapping")?;
         }
-        txn.commit()
-            .await
-            .map_err(|error| anyhow!("failed to commit: {error}"))?;
+        txn.commit().await.context("failed to commit")?;
         self.database
             .reload_cache()
             .await
-            .map_err(|error| anyhow!("failed to reload cache: {error}"))?;
+            .context("failed to reload cache")?;
         Ok(())
     }
 
@@ -419,8 +412,8 @@ impl NodeBuilder {
 
             // `Options::embedded` sizes the engine for a 1-4 MiB working
             // set, which is what an embedded node has to live inside.
-            let opts = self
-                .with_at_rest_keys(storage::RegolithStoreOptions::embedded().placed_on(&pool))?;
+            let opts =
+                self.with_at_rest_keys(storage::RegolithStoreOptions::embedded().placed_on(&pool))?;
             let store =
                 storage::RegolithStore::open_with_options(&path, opts).with_context(|| {
                     format!("failed to open regolith store at '{}'", path.display())
@@ -542,8 +535,11 @@ pub fn start_node_pool(
     config: Option<workers::Config>,
     edge: Option<&edge::Edge>,
 ) -> Result<workers::Pool> {
-    storage::start_pool(config.unwrap_or_default(), edge.map(edge::Edge::pool_monitor))
-        .map_err(|error| anyhow!("the worker pool did not start: {error}"))
+    storage::start_pool(
+        config.unwrap_or_default(),
+        edge.map(edge::Edge::pool_monitor),
+    )
+    .context("the worker pool did not start")
 }
 
 /// A node over a store the application opened, on a worker pool of the
@@ -581,7 +577,7 @@ fn check_access_hooks(
     hooks: Option<&crate::AccessHooks>,
 ) -> Result<()> {
     if hooks.is_some() && !matches!(config.transport, TransportConfig::Iroh(_)) {
-        return Err(anyhow!("access hooks require the iroh transport"));
+        return Err(Error::msg("access hooks require the iroh transport"));
     }
     Ok(())
 }
@@ -627,7 +623,7 @@ where
 
     let mut database = db::DB::open_from_arc_with_options(store.clone(), db_options)
         .await
-        .map_err(|error| anyhow!("failed to open database: {error}"))?;
+        .context("failed to open database")?;
     database.set_event_bus(event_bus.clone());
     if let Some(edge) = config.edge.as_ref() {
         database.set_network(edge.clone());
@@ -664,14 +660,13 @@ where
         ..Default::default()
     };
 
-    let acp_setup =
-        create_document_acp(
-            store.clone(),
-            config.persistence,
-            &config.document_acp,
-            config.edge.as_ref(),
-        )
-        .await?;
+    let acp_setup = create_document_acp(
+        store.clone(),
+        config.persistence,
+        &config.document_acp,
+        config.edge.as_ref(),
+    )
+    .await?;
     let document_acp = acp_setup.document_acp;
     let local_zanzibar_store = acp_setup.local_zanzibar_store;
     #[cfg(feature = "vera")]
@@ -714,9 +709,7 @@ where
             .await
             .map(Some),
             #[cfg(any(feature = "libp2p", feature = "iroh"))]
-            (_, None) => Err(anyhow!(
-                "a P2P transport needs the network runtime: set EmbeddedNodeConfig::edge"
-            )),
+            (_, None) => Err(Error::msg("a P2P transport needs the network runtime: set EmbeddedNodeConfig::edge")),
         };
     let mut p2p_setup = match p2p_setup {
         Ok(setup) => setup,
@@ -886,8 +879,7 @@ where
 
     // GraphQL requests run on the database's worker pool, routed there once
     // at the boundary.
-    let query_runner =
-        query::pooled::PooledExecutor::wrap(Arc::new(query_runner), database.pool());
+    let query_runner = query::pooled::PooledExecutor::wrap(Arc::new(query_runner), database.pool());
 
     Ok(EmbeddedNode {
         database,

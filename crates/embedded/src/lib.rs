@@ -1,5 +1,6 @@
 #[cfg(feature = "iroh")]
 mod access_hooks;
+mod error;
 mod node;
 mod node_acp;
 mod node_identity;
@@ -14,6 +15,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 pub use defra_p2p_adapter::{ReplicatorPushOptions, ReplicatorPushOptionsState};
+pub use error::{Error, Result};
 
 #[cfg(feature = "iroh")]
 pub use access_hooks::AccessHooks;

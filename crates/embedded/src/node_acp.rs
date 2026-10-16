@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use crate::error::{Result, ResultExt};
 
 use crate::Persistence;
 
@@ -32,7 +32,7 @@ where
                     &vera_config.chain_id,
                     &tuning,
                 )
-                .map_err(|error| anyhow!("failed to create Vera provider: {error}"))?,
+                .context("failed to create Vera provider")?,
             );
             let sh_acp = Arc::new(vera::VeraDocumentACP::tuned(provider, &tuning, network));
             Ok(DocumentAcpSetup {
@@ -56,7 +56,7 @@ where
                     &vera_config.chain_id,
                     &tuning,
                 )
-                .map_err(|error| anyhow!("failed to create Vera provider: {error}"))?,
+                .context("failed to create Vera provider")?,
             );
             let vera_acp = Arc::new(vera::VeraDocumentACP::tuned(provider, &tuning, network));
             Ok(DocumentAcpSetup {
@@ -132,7 +132,7 @@ where
     manager
         .initialize(None)
         .await
-        .map_err(|error| anyhow!("failed to initialize NAC: {error}"))?;
+        .context("failed to initialize NAC")?;
     Ok(manager)
 }
 
@@ -151,9 +151,10 @@ mod tests {
     #[tokio::test]
     async fn local_document_acp_enforces_stored_custom_policy() {
         let store = Arc::new(storage::RegolithStore::in_memory().unwrap());
-        let acp_setup = create_document_acp(store, Persistence::Memory, &DocumentAcpConfig::Local, None)
-            .await
-            .unwrap();
+        let acp_setup =
+            create_document_acp(store, Persistence::Memory, &DocumentAcpConfig::Local, None)
+                .await
+                .unwrap();
 
         #[cfg(feature = "vera")]
         assert!(acp_setup.vera_acp.is_none());

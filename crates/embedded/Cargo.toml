@@ -40,7 +40,6 @@ schema = { path = "../schema" }
 vera = { path = "../vera", optional = true }
 storage = { path = "../storage" }
 
-anyhow.workspace = true
 bytes.workspace = true
 kovan-queue.workspace = true
 async-trait.workspace = true

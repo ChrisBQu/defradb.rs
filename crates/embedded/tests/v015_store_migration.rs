@@ -2,11 +2,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{bail, ensure, Context, Result};
+#[macro_use]
+#[path = "support/outcome.rs"]
+mod outcome;
+
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use cid::Cid;
 use embedded::{EmbeddedNode, EmbeddedStore, NodeBuilder};
+use outcome::{Context, Result};
 use serde_json::{json, Value};
 
 const OLD_TASK_1_ID: &str = "bae-7513a70e-b156-5803-b492-017180bd20b8";

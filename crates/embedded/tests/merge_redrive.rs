@@ -4,17 +4,20 @@
 //! it awaited arrived, reaches this node's own replicators like any composite
 //! that merged on its first attempt.
 
+#[macro_use]
+#[path = "support/outcome.rs"]
+mod outcome;
 mod iroh_peers;
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
 use async_trait::async_trait;
 use cid::Cid;
 use db::merge::governance::{FieldValue, MergeCandidate, MergeValidator, MergeVerdict, MergeView};
 use document::NormalValue;
 use embedded::{AccessHooks, NodeBuilder};
 use iroh_peers::{connect, create, doc_ids, iroh_config, replicate, wait_for_docs, Node};
+use outcome::{Context, Result};
 use tokio::time::{sleep, Duration};
 
 const SDL: &str = "type Grant { label: String } type Note { grant: String }";

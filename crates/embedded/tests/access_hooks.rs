@@ -7,7 +7,10 @@
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail, Context, Result};
+#[macro_use]
+#[path = "support/outcome.rs"]
+mod outcome;
+
 use async_trait::async_trait;
 use cid::Cid;
 use db::merge::governance::{
@@ -15,6 +18,7 @@ use db::merge::governance::{
 };
 use document::NormalValue;
 use embedded::{AccessHooks, EmbeddedNode, EmbeddedStore, IrohConfig, NodeBuilder};
+use outcome::{Context, Result};
 use query::access_hooks::{ReadRequest, ReadValidator, WriteRequest, WriteValidator};
 use serde_json::Value as JsonValue;
 use tokio::time::{sleep, Duration, Instant};
@@ -272,18 +276,10 @@ async fn create(node: &Node, collection: &str, input: &str) -> Result<(String, S
 async fn connect(from: &Node, to: &Node) -> Result<()> {
     let from = from.p2p().context("p2p")?;
     let to = to.p2p().context("p2p")?;
-    let peer = to
-        .ops()
-        .local_peer_id()
-        .await
-        .map_err(|error| anyhow!(error))?;
+    let peer = to.ops().local_peer_id().await?;
     let deadline = Instant::now() + Duration::from_secs(10);
     let addr = loop {
-        let addrs = to
-            .ops()
-            .listen_addresses()
-            .await
-            .map_err(|error| anyhow!(error))?;
+        let addrs = to.ops().listen_addresses().await?;
         if let Some(addr) = addrs
             .into_iter()
             .find(|addr| addr.contains("/p2p/") || addr.starts_with("endpoint"))
@@ -295,16 +291,9 @@ async fn connect(from: &Node, to: &Node) -> Result<()> {
         }
         sleep(Duration::from_millis(100)).await;
     };
-    from.ops()
-        .connect_peer(&addr)
-        .await
-        .map_err(|error| anyhow!(error))?;
+    from.ops().connect_peer(&addr).await?;
     loop {
-        let peers = from
-            .ops()
-            .connected_peers()
-            .await
-            .map_err(|error| anyhow!(error))?;
+        let peers = from.ops().connected_peers().await?;
         if peers.iter().any(|connected| connected.contains(&peer)) {
             return Ok(());
         }
@@ -321,7 +310,7 @@ async fn sync(node: &Node, collection: &str, doc_ids: Vec<String>) -> Result<()>
         .ops()
         .sync_documents(collection, doc_ids, None)
         .await
-        .map_err(|error| anyhow!(error))
+        .map_err(Into::into)
 }
 
 async fn note_ids(node: &Node) -> Result<Vec<String>> {

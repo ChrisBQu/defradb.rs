@@ -3,16 +3,19 @@
 //! but for a `reader` grant to the peer's node identity.
 #![cfg(feature = "iroh")]
 
+#[macro_use]
+#[path = "support/outcome.rs"]
+mod outcome;
 mod support;
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, ensure, Context, Result};
 use blockstore::Blockstore;
 use embedded::{EmbeddedNodeConfig, IrohConfig, SigningConfig, TransportConfig};
 use identity::Did;
+use outcome::{Context, Result};
 use tokio::time::{sleep, Instant};
 
 use support::{
@@ -107,15 +110,13 @@ async fn replicate_encrypted_doc(
         .context("peer has no p2p")?
         .ops()
         .connect_peer(&addr0)
-        .await
-        .map_err(|e| anyhow!(e))?;
+        .await?;
     for node in [node0, peer] {
         node.p2p()
             .context("node has no p2p")?
             .ops()
             .add_collections(vec!["Users".into()])
-            .await
-            .map_err(|e| anyhow!(e))?;
+            .await?;
     }
 
     let response = node0
@@ -138,9 +139,7 @@ async fn replicate_encrypted_doc(
 /// Without the head blocks on the peer, a missing plaintext would only show
 /// that nothing replicated.
 async fn assert_blocks_without_plaintext(pair: &Pair) -> Result<()> {
-    let heads = db::merge::load_document_head_blocks(&pair.node0.database, &pair.doc_id)
-        .await
-        .map_err(|e| anyhow!(e))?;
+    let heads = db::merge::load_document_head_blocks(&pair.node0.database, &pair.doc_id).await?;
     ensure!(!heads.is_empty(), "node 0 has no head for the document");
 
     let peer_blocks =
@@ -149,7 +148,7 @@ async fn assert_blocks_without_plaintext(pair: &Pair) -> Result<()> {
     loop {
         let mut received = true;
         for (cid, _) in &heads {
-            received &= peer_blocks.has(cid).await.map_err(|e| anyhow!("{e}"))?;
+            received &= peer_blocks.has(cid).await.map_err(|e| e.to_string())?;
         }
         if received {
             break;
@@ -193,17 +192,13 @@ async fn build_node(signing: SigningConfig) -> Result<Node> {
         signing,
         ..Default::default()
     };
-    embedded::build_with_store(Arc::new(storage::RegolithStore::in_memory()?), config).await
+    embedded::build_with_store(Arc::new(storage::RegolithStore::in_memory()?), config).await.map_err(Into::into)
 }
 
 async fn connectable_iroh_addr(system: &embedded::ManagedP2PSystem) -> Result<String> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let addrs = system
-            .ops()
-            .listen_addresses()
-            .await
-            .map_err(|e| anyhow!(e))?;
+        let addrs = system.ops().listen_addresses().await?;
         if let Some(addr) = addrs
             .into_iter()
             .find(|addr| addr.contains("/p2p/") || addr.starts_with("endpoint"))

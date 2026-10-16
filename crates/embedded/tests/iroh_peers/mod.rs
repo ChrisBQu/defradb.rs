@@ -5,7 +5,7 @@
 
 use std::net::{IpAddr, Ipv4Addr};
 
-use anyhow::{anyhow, bail, Context, Result};
+use crate::outcome::{Context, Result};
 use embedded::{EmbeddedNode, EmbeddedStore, IrohConfig};
 use serde_json::Value as JsonValue;
 use tokio::time::{sleep, Duration, Instant};
@@ -58,10 +58,7 @@ pub async fn listen_addr(node: &Node) -> Result<String> {
     let ops = node.p2p().context("p2p")?.ops();
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let addrs = ops
-            .listen_addresses()
-            .await
-            .map_err(|error| anyhow!(error))?;
+        let addrs = ops.listen_addresses().await?;
         if let Some(addr) = addrs
             .into_iter()
             .find(|addr| addr.contains("/p2p/") || addr.starts_with("endpoint"))
@@ -78,25 +75,12 @@ pub async fn listen_addr(node: &Node) -> Result<String> {
 /// Connect `from` to `to` and return `to`'s peer ID.
 pub async fn connect(from: &Node, to: &Node) -> Result<String> {
     let from = from.p2p().context("p2p")?;
-    let peer = to
-        .p2p()
-        .context("p2p")?
-        .ops()
-        .local_peer_id()
-        .await
-        .map_err(|error| anyhow!(error))?;
+    let peer = to.p2p().context("p2p")?.ops().local_peer_id().await?;
     let addr = listen_addr(to).await?;
     let deadline = Instant::now() + Duration::from_secs(10);
-    from.ops()
-        .connect_peer(&addr)
-        .await
-        .map_err(|error| anyhow!(error))?;
+    from.ops().connect_peer(&addr).await?;
     loop {
-        let peers = from
-            .ops()
-            .connected_peers()
-            .await
-            .map_err(|error| anyhow!(error))?;
+        let peers = from.ops().connected_peers().await?;
         if peers.iter().any(|connected| connected.contains(&peer)) {
             return Ok(peer);
         }
@@ -113,7 +97,7 @@ pub async fn sync(node: &Node, collection: &str, doc_ids: Vec<String>) -> Result
         .ops()
         .sync_documents(collection, doc_ids, None)
         .await
-        .map_err(|error| anyhow!(error))
+        .map_err(Into::into)
 }
 
 pub async fn doc_ids(node: &Node, collection: &str) -> Result<Vec<String>> {
@@ -145,8 +129,7 @@ pub async fn replicate(from: &Node, to: &Node, collections: &[&str]) -> Result<(
         .context("p2p")?
         .ops()
         .add_collections(collections.clone())
-        .await
-        .map_err(|error| anyhow!(error))?;
+        .await?;
     let addr = listen_addr(to).await?;
     from.p2p()
         .context("p2p")?
@@ -159,7 +142,7 @@ pub async fn replicate(from: &Node, to: &Node, collections: &[&str]) -> Result<(
             None,
         )
         .await
-        .map_err(|error| anyhow!(error))
+        .map_err(Into::into)
 }
 
 pub async fn wait_for_docs(node: &Node, collection: &str, expected: &[&str]) -> Result<()> {

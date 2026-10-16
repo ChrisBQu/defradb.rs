@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use anyhow::{anyhow, Context, Result};
+use crate::error::{Error, Result, ResultExt};
 use storage::stores::Peerstore;
 use zeroize::Zeroizing;
 
@@ -24,24 +24,22 @@ pub(crate) async fn load_with_keyring<S: storage::corekv::Store>(
         return load_or_create(peerstore, legacy_iroh_key).await;
     };
     if peerstore.get_local_peer_key().await?.is_some() {
-        return Err(anyhow!(
-            "plaintext peerstore /p2p/local-peer-key requires explicit keyring migration"
-        ));
+        return Err(Error::msg("plaintext peerstore /p2p/local-peer-key requires explicit keyring migration"));
     }
     if legacy_iroh_seed(legacy_iroh_key).await?.is_some() {
-        return Err(anyhow!(
+        return Err(Error::msg(format_args!(
             "plaintext iroh key file '{}' requires explicit keyring migration",
             legacy_iroh_key.expect("existing key file").display()
-        ));
+        )));
     }
     if peerstore
         .get_replicator(LEGACY_LIBP2P_KEY_ID)
         .await?
         .is_some()
     {
-        return Err(anyhow!(
+        return Err(Error::msg(format_args!(
             "plaintext peerstore {LEGACY_LIBP2P_KEY_ID} requires explicit keyring migration"
-        ));
+        )));
     }
 
     let expected = peerstore.get_local_peer_keyring_identity().await?;
@@ -52,9 +50,7 @@ pub(crate) async fn load_with_keyring<S: storage::corekv::Store>(
         }
         Err(keyring::Error::NotFound(_)) => {
             if expected.is_some() {
-                return Err(anyhow!(
-                    "peer key is missing from the configured keyring; restore the original keyring"
-                ));
+                return Err(Error::msg("peer key is missing from the configured keyring; restore the original keyring"));
             }
             let key = crypto::generate_ed25519().context("failed to generate peer key")?;
             keyring
@@ -68,9 +64,7 @@ pub(crate) async fn load_with_keyring<S: storage::corekv::Store>(
     let public_key = key.public_key();
     match expected {
         Some(expected) if expected.as_ref() != public_key.raw() => {
-            return Err(anyhow!(
-                "keyring peer identity does not match this database"
-            ));
+            return Err(Error::msg("keyring peer identity does not match this database"));
         }
         None => {
             peerstore
@@ -97,9 +91,7 @@ pub(crate) async fn load_or_create<S: storage::corekv::Store>(
     legacy_iroh_key: Option<&Path>,
 ) -> Result<Seed> {
     if peerstore.get_local_peer_keyring_identity().await?.is_some() {
-        return Err(anyhow!(
-            "this database requires its application-owned peer keyring"
-        ));
+        return Err(Error::msg("this database requires its application-owned peer keyring"));
     }
     if let Some(bytes) = peerstore
         .get_local_peer_key()
@@ -153,10 +145,10 @@ async fn legacy_libp2p_seed<S: storage::corekv::Store>(
         return Ok(None);
     };
     let keypair = libp2p::identity::Keypair::from_protobuf_encoding(&bytes)
-        .map_err(|error| anyhow!("legacy libp2p peer key is corrupt: {error}"))?;
+        .context("legacy libp2p peer key is corrupt")?;
     let ed25519 = keypair
         .try_into_ed25519()
-        .map_err(|_| anyhow!("legacy libp2p peer key is not Ed25519"))?;
+        .map_err(|_| Error::msg("legacy libp2p peer key is not Ed25519"))?;
     seed_from_slice(ed25519.secret().as_ref()).map(Some)
 }
 
@@ -187,15 +179,17 @@ async fn remove_legacy_libp2p_key<S: storage::corekv::Store>(
 fn generate() -> Result<Seed> {
     use crypto::Key;
 
-    let key = crypto::generate_ed25519()
-        .map_err(|error| anyhow!("failed to generate peer key: {error}"))?;
+    let key = crypto::generate_ed25519().context("failed to generate peer key")?;
     seed_from_slice(&key.raw()[..32])
 }
 
 fn seed_from_slice(bytes: &[u8]) -> Result<Seed> {
-    let seed: [u8; 32] = bytes
-        .try_into()
-        .map_err(|_| anyhow!("expected a 32-byte Ed25519 seed, got {} bytes", bytes.len()))?;
+    let seed: [u8; 32] = bytes.try_into().map_err(|_| {
+        Error::msg(format_args!(
+            "expected a 32-byte Ed25519 seed, got {} bytes",
+            bytes.len()
+        ))
+    })?;
     Ok(Zeroizing::new(seed))
 }
 

@@ -7,7 +7,10 @@
 //! 4. After `shutdown()`, the database reports `is_closed() == true`
 //! 5. Concurrent `shutdown()` callers block until teardown completes
 
-use anyhow::Result;
+#[macro_use]
+#[path = "support/outcome.rs"]
+mod outcome;
+
 use async_trait::async_trait;
 #[cfg(feature = "iroh")]
 use embedded::IrohConfig;
@@ -16,6 +19,7 @@ use embedded::Libp2pConfig;
 use embedded::{EmbeddedNodeConfig, NodeBuilder};
 #[cfg(any(feature = "libp2p", feature = "iroh"))]
 use embedded::{Persistence, TransportConfig};
+use outcome::Result;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;

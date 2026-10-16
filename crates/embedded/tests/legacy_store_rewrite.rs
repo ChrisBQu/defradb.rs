@@ -10,11 +10,15 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{ensure, Context, Result};
+#[macro_use]
+#[path = "support/outcome.rs"]
+mod outcome;
+
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use document::stored::StoredDocument;
 use embedded::{EmbeddedNode, EmbeddedStore, NodeBuilder};
+use outcome::{Context, Result};
 use serde_json::Value;
 use storage::corekv::{IterOptions, Reader, Store};
 use storage::{RegolithStore, RegolithStoreOptions};
@@ -72,7 +76,7 @@ async fn open(path: &Path, key: Option<[u8; 32]>) -> Result<EmbeddedNode<Embedde
     if let Some(key) = key {
         builder = builder.with_at_rest_encryption_key(key);
     }
-    builder.build().await
+    builder.build().await.map_err(Into::into)
 }
 
 /// Raw store contents, read with the store's own key if it has one.
@@ -243,7 +247,7 @@ async fn a_wrapped_store_opened_without_its_key_is_refused_not_served() -> Resul
         let error = match open(&path, key).await {
             Ok(node) => {
                 node.shutdown().await;
-                anyhow::bail!("a wrapped store opened with {key:?}")
+                bail!("a wrapped store opened with {key:?}")
             }
             Err(error) => format!("{error:#}"),
         };

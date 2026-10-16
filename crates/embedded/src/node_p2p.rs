@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 #[cfg(any(feature = "libp2p", feature = "iroh"))]
-use anyhow::{anyhow, Result};
+use crate::error::{Result, ResultExt};
+#[cfg(feature = "libp2p")]
+use crate::error::Error;
 #[cfg(any(feature = "libp2p", feature = "iroh"))]
 use p2p::sync::SyncConfig;
 #[cfg(feature = "libp2p")]
@@ -94,10 +96,12 @@ where
 
     let max_txn_retries = database.options().max_txn_retries();
 
-    let listen_addr = config
-        .listen_addr
-        .parse()
-        .map_err(|error| anyhow!("invalid multiaddr '{}': {error}", config.listen_addr))?;
+    let listen_addr = config.listen_addr.parse().map_err(|error| {
+        Error::msg(format_args!(
+            "invalid multiaddr '{}': {error}",
+            config.listen_addr
+        ))
+    })?;
     let blockstore = Arc::new(
         EmbeddedBlockstore::new(store.clone(), true).with_max_txn_retries(max_txn_retries),
     );
@@ -109,8 +113,8 @@ where
         peer_keyring,
     )
     .await?;
-    let p2p_keypair = libp2p::identity::Keypair::ed25519_from_bytes(&mut *seed)
-        .map_err(|error| anyhow!("invalid peer key: {error}"))?;
+    let p2p_keypair =
+        libp2p::identity::Keypair::ed25519_from_bytes(&mut *seed).context("invalid peer key")?;
 
     let classifier = defra_p2p_adapter::DbBlockClassifier::new_arc(database.clone());
     let serve_acp = Arc::new(p2p::bitswap::LateBoundServeAcp::new());
@@ -124,14 +128,14 @@ where
             serve_acp.clone(),
         )
         .await
-        .map_err(|error| anyhow!("failed to create P2P host: {error}"))?;
+        .context("failed to create P2P host")?;
     let host_task = tokio::spawn(async move {
         host.run().await;
     });
 
     if let Err(error) = handle.listen(listen_addr).await {
         shutdown_libp2p_host(&handle, host_task).await;
-        return Err(anyhow!("failed to start listening: {error}"));
+        return Err(Error::because("failed to start listening", error));
     }
 
     for topic in [
@@ -167,7 +171,7 @@ where
             Ok(coordinator) => coordinator,
             Err(error) => {
                 shutdown_libp2p_host(&handle, host_task).await;
-                return Err(anyhow!("failed to create sync coordinator: {error}"));
+                return Err(Error::because("failed to create sync coordinator", error));
             }
         };
 
@@ -200,7 +204,7 @@ where
         Err(error) => {
             coordinator.shutdown().await;
             shutdown_libp2p_host(&handle, host_task).await;
-            return Err(anyhow!("failed to create KMS transport: {error}"));
+            return Err(Error::because("failed to create KMS transport", error));
         }
     };
     coordinator.install_kms_transport(kms_transport.clone());
@@ -499,7 +503,7 @@ where
     peer_config.replicator_push_options = Some(replicator_push_options.clone());
     let peer = IrohPeer::start(store.clone(), database, event_bus, peer_config)
         .await
-        .map_err(|error| anyhow!("failed to start iroh peer: {error}"))?;
+        .context("failed to start iroh peer")?;
 
     // The SE key arrives at runtime through set_se_options, so the query
     // transport reads it lazily from a handle that callback fills.

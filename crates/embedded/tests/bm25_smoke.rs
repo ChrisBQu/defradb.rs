@@ -1,5 +1,9 @@
-use anyhow::{bail, Context, Result};
+#[macro_use]
+#[path = "support/outcome.rs"]
+mod outcome;
+
 use embedded::NodeBuilder;
+use outcome::{Context, Result};
 
 const ARTICLE_SDL: &str = r#"
 type Article {
