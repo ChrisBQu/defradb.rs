@@ -233,6 +233,26 @@ pub const PROPERTIES: &[Property] = &[
         tiers: &[Boundary],
     },
     Property {
+        // A second PushLog for a CID already being processed joins that
+        // processing instead of being nacked: it waits, bounded by a deadline,
+        // looks again once the owner lets go, and either acks a block already
+        // merged or registered, or takes the guard and processes its own copy.
+        family: "Sync ownership transfer (head hint / receiver pull)",
+        name: "INV_SuccessImpliesDurable / INV_OneProcessor / LIVE_EveryJoinEnds: same-CID PushLog joins the in-flight owner",
+        axis: Tla,
+        anchor: "crates/p2p/src/sync/manager/process/pushlog.rs process_pushlog_with_provider_evidence, join_in_flight; crates/p2p/src/sync/queue.rs ProcessQueue::try_acquire",
+        model_ref: "MC_PushLogJoin_{Green,Red_NoRecheck,Red_NoGuard,Red_NoDeadline}.cfg",
+        tiers: &[Boundary],
+    },
+    Property {
+        family: "Sync ownership transfer (head hint / receiver pull)",
+        name: "acquire_exclusive / join_acks_only_durable / join_processes_only_unowned: the CID guard is exclusive and a join acks only a safe block",
+        axis: Lean,
+        anchor: "crates/p2p/src/sync/queue.rs ProcessQueue::try_acquire, release_sync; crates/p2p/src/sync/manager/process/pushlog.rs join_in_flight",
+        model_ref: "SingleFlight.Join (lake build)",
+        tiers: &[Boundary],
+    },
+    Property {
         family: "Multi-instance claim",
         name: "INV_EventualUnique — claim CAS converges to a single winner",
         axis: Tla,
