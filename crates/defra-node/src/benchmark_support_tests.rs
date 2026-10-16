@@ -583,7 +583,7 @@ _docID
         .and_then(|session| session.get("_docID"))
         .and_then(JsonValue::as_str)
         .map(ToOwned::to_owned)
-        .ok_or_else(|| crate::err!("missing session _docID for {}", session_id))
+        .ok_or_else(|| Error::MissingSessionDocId(session_id.to_owned()))
 }
 
 async fn run_hybrid_comparison(
@@ -651,9 +651,10 @@ async fn assert_hits_belong_to_session(
     hits: &[crate::CodingHybridSearchHit],
     expected_session_doc_id: &str,
 ) -> crate::Result<()> {
-    if hits.is_empty() {
-        crate::bail!("expected at least one hit to validate session scope");
-    }
+    assert!(
+        !hits.is_empty(),
+        "expected at least one hit to validate session scope"
+    );
 
     let collection_name = match target {
         crate::CodingSearchTarget::Messages => "CodingMessage",
@@ -682,7 +683,7 @@ _sessionID
     let items = data
         .get(collection_name)
         .and_then(JsonValue::as_array)
-        .ok_or_else(|| crate::err!("missing {collection_name} array in {data}"))?;
+        .ok_or_else(|| Error::MissingArray { collection: collection_name.to_string(), within: data.to_string() })?;
 
     assert_eq!(
         items.len(),
@@ -710,9 +711,10 @@ async fn assert_doc_ids_belong_to_session(
     doc_ids: &[String],
     expected_session_doc_id: &str,
 ) -> crate::Result<()> {
-    if doc_ids.is_empty() {
-        crate::bail!("expected at least one hit to validate session scope");
-    }
+    assert!(
+        !doc_ids.is_empty(),
+        "expected at least one hit to validate session scope"
+    );
 
     let rendered_doc_ids = doc_ids
         .iter()
@@ -732,7 +734,7 @@ _sessionID
     let items = data
         .get(collection_name)
         .and_then(JsonValue::as_array)
-        .ok_or_else(|| crate::err!("missing {collection_name} array in {data}"))?;
+        .ok_or_else(|| Error::MissingArray { collection: collection_name.to_string(), within: data.to_string() })?;
 
     assert_eq!(
         items.len(),
@@ -762,7 +764,7 @@ fn parse_ranked_hits(data: &JsonValue, target: SearchTarget) -> crate::Result<Ve
     let items = data
         .get(collection_name)
         .and_then(JsonValue::as_array)
-        .ok_or_else(|| crate::err!("missing {collection_name} array in {data}"))?;
+        .ok_or_else(|| Error::MissingArray { collection: collection_name.to_string(), within: data.to_string() })?;
 
     items
         .iter()
@@ -770,17 +772,17 @@ fn parse_ranked_hits(data: &JsonValue, target: SearchTarget) -> crate::Result<Ve
             let doc_id = item
                 .get("_docID")
                 .and_then(JsonValue::as_str)
-                .ok_or_else(|| crate::err!("missing _docID in {item}"))?
+                .ok_or_else(|| Error::missing("_docID", item))?
                 .to_string();
             let (label, preview) = match target {
                 SearchTarget::Messages => (
                     item.get("message_id")
                         .and_then(JsonValue::as_str)
-                        .ok_or_else(|| crate::err!("missing message_id in {item}"))?
+                        .ok_or_else(|| Error::missing("message_id", item))?
                         .to_string(),
                     item.get("content")
                         .and_then(JsonValue::as_str)
-                        .ok_or_else(|| crate::err!("missing content in {item}"))?
+                        .ok_or_else(|| Error::missing("content", item))?
                         .to_string(),
                 ),
                 SearchTarget::Actions => (
@@ -788,14 +790,14 @@ fn parse_ranked_hits(data: &JsonValue, target: SearchTarget) -> crate::Result<Ve
                         "{} {}",
                         item.get("action_type")
                             .and_then(JsonValue::as_str)
-                            .ok_or_else(|| crate::err!("missing action_type in {item}"))?,
+                            .ok_or_else(|| Error::missing("action_type", item))?,
                         item.get("target")
                             .and_then(JsonValue::as_str)
-                            .ok_or_else(|| crate::err!("missing target in {item}"))?,
+                            .ok_or_else(|| Error::missing("target", item))?,
                     ),
                     item.get("command")
                         .and_then(JsonValue::as_str)
-                        .ok_or_else(|| crate::err!("missing command in {item}"))?
+                        .ok_or_else(|| Error::missing("command", item))?
                         .to_string(),
                 ),
             };
@@ -1715,7 +1717,7 @@ impl RealEmbeddingServer {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
 
-        crate::bail!(
+        panic!(
             "timed out waiting for local embedding server at {}",
             health_url
         );
@@ -1766,16 +1768,16 @@ async fn request_real_embedding(
     let values = body
         .pointer("/data/0/embedding")
         .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| crate::err!("missing data[0].embedding in response: {}", body))?;
+        .unwrap_or_else(|| panic!("missing data[0].embedding in response: {}", body));
 
-    values
+    Ok(values
         .iter()
         .map(|value| {
             value
                 .as_f64()
-                .ok_or_else(|| crate::err!("non-numeric embedding value: {}", value))
+                .unwrap_or_else(|| panic!("non-numeric embedding value: {}", value))
         })
-        .collect()
+        .collect())
 }
 
 fn render_real_message_similarity_query(vector: &[f64]) -> String {

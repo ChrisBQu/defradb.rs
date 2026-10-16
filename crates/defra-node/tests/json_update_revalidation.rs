@@ -1,4 +1,4 @@
-use defra_node::{Context, Result};
+use defra_node::Result;
 use defra_node::{EmbeddedNode, QueryRequest};
 use serde_json::{json, Value};
 
@@ -40,8 +40,8 @@ async fn retained_json_survives_unrelated_updates() -> Result<()> {
         );
         let before = node.execute(&query).await;
         assert!(!before.has_errors(), "read {payload}: {:?}", before.errors);
-        let row = &before.data.as_ref().context("missing data")?["JsonProbe"][0];
-        let id = row["_docID"].as_str().context("missing document ID")?;
+        let row = &before.data.as_ref().expect("missing data")["JsonProbe"][0];
+        let id = row["_docID"].as_str().expect("missing document ID");
         let changed = node
             .execute(&format!(
                 "mutation{{update_JsonProbe(docID:\"{id}\",input:{{sibling:\"after\"}}){{_docID}}}}"
@@ -58,7 +58,7 @@ async fn retained_json_survives_unrelated_updates() -> Result<()> {
             "read updated {payload}: {:?}",
             after.errors
         );
-        let after = &after.data.as_ref().context("missing updated data")?["JsonProbe"][0];
+        let after = &after.data.as_ref().expect("missing updated data")["JsonProbe"][0];
         assert_eq!(
             after["payload"], row["payload"],
             "changed retained JSON {payload}"

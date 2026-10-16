@@ -3,7 +3,7 @@ use std::io;
 use std::sync::Arc;
 
 use defra_node::EmbeddedNode;
-use defra_node::{Context, Result};
+use defra_node::Result;
 use tracing::Level;
 
 const USER_SDL: &str = r#"
@@ -103,7 +103,7 @@ async fn embedded_upsert_does_not_warn_when_discarding_get_for_update_txn() -> R
         .and_then(|rows| rows.first())
         .and_then(|row| row.get("age"))
         .and_then(|age| age.as_i64())
-        .context("upsert result missing age")?;
+        .expect("upsert result missing age");
     assert_eq!(age, 31);
 
     let logs = log_buffer.contents();
@@ -119,6 +119,6 @@ fn ensure_success(response: &query::QueryResponse, context: &str) -> Result<()> 
     if response.errors.is_empty() {
         Ok(())
     } else {
-        defra_node::bail!("{context} failed: {:?}", response.errors);
+        panic!("{context} failed: {:?}", response.errors);
     }
 }

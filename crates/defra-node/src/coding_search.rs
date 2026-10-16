@@ -1,4 +1,4 @@
-use crate::{err, Result};
+use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
 
@@ -204,7 +204,7 @@ async fn lookup_session_doc_id(node: &EmbeddedNode, session_id: &str) -> Result<
         .and_then(|session| session.get("_docID"))
         .and_then(JsonValue::as_str)
         .map(ToOwned::to_owned)
-        .ok_or_else(|| err!("no CodingSession found for session_id={}", session_id))
+        .ok_or_else(|| Error::SessionNotFound(session_id.to_owned()))
 }
 
 fn map_hits(
@@ -249,5 +249,5 @@ fn required_string_field<'a>(
     fields
         .get(field_name)
         .and_then(JsonValue::as_str)
-        .ok_or_else(|| err!("missing {} in {:?}", field_name, fields))
+        .ok_or_else(|| Error::MissingField { field: field_name.to_owned(), within: format!("{fields:?}") })
 }

@@ -7,9 +7,56 @@ mod runner {
     use defra_node::benchmark_support::{
         benchmark_case, seed_coding_session_fixture, CodingSessionFixtureConfig,
     };
-    use defra_node::{bail, Context, Result};
     use defra_node::{EmbeddedNode, StorageBackend};
     use storage::backends::DurabilityMode;
+
+    type Result<T> = std::result::Result<T, BenchError>;
+
+    #[derive(Debug, thiserror::Error)]
+    enum BenchError {
+        #[error(transparent)]
+        Node(#[from] defra_node::Error),
+        #[error(transparent)]
+        Io(#[from] std::io::Error),
+        #[error(transparent)]
+        Json(#[from] serde_json::Error),
+        #[error("data dir already exists: {} (use --reuse or remove it first)", .0.display())]
+        DataDirExists(PathBuf),
+        #[error("failed to resolve data dir")]
+        DataDirUnresolved,
+        #[error("--reuse requires --data-dir")]
+        ReuseNeedsDataDir,
+        #[error("{case} explain failed: {errors}")]
+        ExplainFailed { case: String, errors: String },
+        #[error("missing explain response data")]
+        MissingExplainData,
+        #[error("failed to remove temp data dir {}: {source}", path.display())]
+        RemoveTempDir { path: PathBuf, source: std::io::Error },
+        #[error("failed to stat {}: {source}", path.display())]
+        Stat { path: PathBuf, source: std::io::Error },
+        #[error("failed to read {}: {source}", path.display())]
+        ReadDir { path: PathBuf, source: std::io::Error },
+        #[error(
+            "no matching cases. available cases: hot_messages_cargo, hot_messages_wand, hot_actions_cargo, hot_actions_rg, medium_messages_candidate, medium_actions_bench"
+        )]
+        NoMatchingCases,
+        #[error("unknown argument: {0}")]
+        UnknownArgument(String),
+        #[error("--iterations must be greater than zero")]
+        ZeroIterations,
+        #[error("--limit must be greater than zero")]
+        ZeroLimit,
+        #[error("unknown backend: {0} (expected regolith)")]
+        UnknownBackend(String),
+        #[error("unknown durability: {0} (expected immediate or eventual)")]
+        UnknownDurability(String),
+        #[error("unknown profile: {0} (expected smoke, default, or large)")]
+        UnknownProfile(String),
+        #[error("missing value for {0}")]
+        MissingValue(String),
+        #[error("invalid value for {flag}: {value}: {source}")]
+        InvalidValue { flag: String, value: String, source: std::num::ParseIntError },
+    }
 
     const BENCH_AT_REST_ENCRYPTION_KEY: [u8; 32] = [0x42; 32];
 
@@ -52,7 +99,7 @@ mod runner {
         match try_run().await {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
-                eprintln!("{error:?}");
+                eprintln!("{error}");
                 ExitCode::FAILURE
             }
         }
@@ -64,22 +111,19 @@ mod runner {
         let owned_temp_dir = match (&options.data_dir, options.reuse) {
             (Some(path), false) => {
                 if path.exists() {
-                    bail!(
-                        "data dir already exists: {} (use --reuse or remove it first)",
-                        path.display()
-                    );
+                    return Err(BenchError::DataDirExists(path.clone()));
                 }
                 None
             }
             (Some(_), true) => None,
-            (None, true) => bail!("--reuse requires --data-dir"),
+            (None, true) => return Err(BenchError::ReuseNeedsDataDir),
             (None, false) => Some(make_temp_data_dir()),
         };
 
         let data_dir = owned_temp_dir
             .clone()
             .or_else(|| options.data_dir.clone())
-            .context("failed to resolve data dir")?;
+            .ok_or(BenchError::DataDirUnresolved)?;
 
         let mut builder = EmbeddedNode::builder()
             .data_path(&data_dir)
@@ -164,11 +208,11 @@ mod runner {
                         .map(|error| error.message)
                         .collect::<Vec<_>>()
                         .join("; ");
-                    bail!("{} explain failed: {errors}", case.name);
+                    return Err(BenchError::ExplainFailed { case: case.name.clone(), errors });
                 }
                 let explain_json = explain_response
                     .data
-                    .context("missing explain response data")?;
+                    .ok_or(BenchError::MissingExplainData)?;
                 println!("explain[{}]=", case.name);
                 println!("{}", serde_json::to_string_pretty(&explain_json)?);
             }
@@ -188,9 +232,8 @@ mod runner {
             if options.keep_data {
                 println!("kept temp data dir: {}", path.display());
             } else {
-                std::fs::remove_dir_all(&path).with_context(|| {
-                    format!("failed to remove temp data dir {}", path.display())
-                })?;
+                std::fs::remove_dir_all(&path)
+                    .map_err(|source| BenchError::RemoveTempDir { path, source })?;
             }
         }
 
@@ -233,9 +276,7 @@ mod runner {
         cases.retain(|case| requested.contains(&case.name));
 
         if cases.is_empty() {
-            bail!(
-                "no matching cases. available cases: hot_messages_cargo, hot_messages_wand, hot_actions_cargo, hot_actions_rg, medium_messages_candidate, medium_actions_bench"
-            );
+            return Err(BenchError::NoMatchingCases);
         }
 
         Ok(())
@@ -334,15 +375,15 @@ mod runner {
                     options.fixture.action_command_bytes =
                         parse_usize(next_value(&mut args, "--action-bytes")?, "--action-bytes")?;
                 }
-                other => bail!("unknown argument: {other}"),
+                other => return Err(BenchError::UnknownArgument(other.to_owned())),
             }
         }
 
         if options.iterations == 0 {
-            bail!("--iterations must be greater than zero");
+            return Err(BenchError::ZeroIterations);
         }
         if options.limit == 0 {
-            bail!("--limit must be greater than zero");
+            return Err(BenchError::ZeroLimit);
         }
 
         Ok(options)
@@ -351,7 +392,7 @@ mod runner {
     fn parse_backend(value: String) -> Result<StorageBackend> {
         match value.as_str() {
             "regolith" => Ok(StorageBackend::Regolith),
-            other => bail!("unknown backend: {other} (expected regolith)"),
+            other => Err(BenchError::UnknownBackend(other.to_owned())),
         }
     }
 
@@ -366,7 +407,7 @@ mod runner {
         match value.as_str() {
             "immediate" => Ok(DurabilityMode::Immediate),
             "eventual" => Ok(DurabilityMode::Eventual),
-            other => bail!("unknown durability: {other} (expected immediate or eventual)"),
+            other => Err(BenchError::UnknownDurability(other.to_owned())),
         }
     }
 
@@ -380,13 +421,17 @@ mod runner {
 
     fn next_value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String> {
         args.next()
-            .with_context(|| format!("missing value for {flag}"))
+            .ok_or_else(|| BenchError::MissingValue(flag.to_owned()))
     }
 
     fn parse_usize(value: String, flag: &str) -> Result<usize> {
         value
             .parse::<usize>()
-            .with_context(|| format!("invalid value for {flag}: {value}"))
+            .map_err(|source| BenchError::InvalidValue {
+                flag: flag.to_owned(),
+                value,
+                source,
+            })
     }
 
     fn parse_profile(value: String) -> Result<CodingSessionFixtureConfig> {
@@ -394,7 +439,7 @@ mod runner {
             "default" | "dev" => Ok(CodingSessionFixtureConfig::default()),
             "smoke" => Ok(CodingSessionFixtureConfig::smoke_test()),
             "large" => Ok(CodingSessionFixtureConfig::large()),
-            other => bail!("unknown profile: {other} (expected smoke, default, or large)"),
+            other => Err(BenchError::UnknownProfile(other.to_owned())),
         }
     }
 
@@ -411,16 +456,19 @@ mod runner {
     }
 
     fn dir_size_bytes(path: &std::path::Path) -> Result<u64> {
-        let metadata = std::fs::metadata(path)
-            .with_context(|| format!("failed to stat {}", path.display()))?;
+        let metadata = std::fs::metadata(path).map_err(|source| BenchError::Stat {
+            path: path.to_owned(),
+            source,
+        })?;
         if metadata.is_file() {
             return Ok(metadata.len());
         }
 
         let mut total = 0;
-        for entry in
-            std::fs::read_dir(path).with_context(|| format!("failed to read {}", path.display()))?
-        {
+        for entry in std::fs::read_dir(path).map_err(|source| BenchError::ReadDir {
+            path: path.to_owned(),
+            source,
+        })? {
             let entry = entry?;
             total += dir_size_bytes(&entry.path())?;
         }

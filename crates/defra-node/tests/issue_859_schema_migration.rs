@@ -2,7 +2,7 @@
 //! introspection exposed through [`EmbeddedNode`].
 
 use defra_node::EmbeddedNode;
-use defra_node::{Context, Result};
+use defra_node::Result;
 #[cfg(feature = "wasmtime-runtime")]
 use defra_node::{LensConfig, LensModule};
 
@@ -40,7 +40,7 @@ async fn get_collection_returns_active_schema() -> Result<()> {
 
     let collection = node
         .get_collection("User")?
-        .context("User collection should exist")?;
+        .expect("User collection should exist");
     assert_eq!(collection.name, "User");
     assert!(collection.is_active);
     assert!(collection.fields.iter().any(|f| f.name == "name"));
@@ -57,7 +57,7 @@ async fn patch_collection_adds_field_and_bumps_version() -> Result<()> {
 
     let original = node
         .get_collection("User")?
-        .context("User should exist after add_schema")?;
+        .expect("User should exist after add_schema");
 
     let patch = r#"[
         {"op": "add", "path": "/User/Fields/-", "value": {"Name": "email", "Kind": "String"}}
@@ -69,7 +69,7 @@ async fn patch_collection_adds_field_and_bumps_version() -> Result<()> {
 
     let current = node
         .get_collection("User")?
-        .context("User should still exist after patch")?;
+        .expect("User should still exist after patch");
     assert_eq!(current.version_id, patched.version_id);
     assert!(current.fields.iter().any(|f| f.name == "email"));
 
@@ -83,7 +83,7 @@ async fn patch_collection_chained_evolutions_produce_distinct_versions() -> Resu
 
     let v0 = node
         .get_collection("User")?
-        .context("User should exist")?
+        .expect("User should exist")
         .version_id;
 
     let v1 = node
@@ -115,7 +115,7 @@ async fn get_collection_by_version_id_finds_prior_and_new() -> Result<()> {
 
     let original_version = node
         .get_collection("User")?
-        .context("User should exist")?
+        .expect("User should exist")
         .version_id;
 
     let patch = r#"[
@@ -126,13 +126,13 @@ async fn get_collection_by_version_id_finds_prior_and_new() -> Result<()> {
     let by_new = node
         .get_collection_by_version_id(&patched.version_id)
         .await?
-        .context("new version should be retrievable")?;
+        .expect("new version should be retrievable");
     assert_eq!(by_new.version_id, patched.version_id);
 
     let by_old = node
         .get_collection_by_version_id(&original_version)
         .await?
-        .context("old version should still be retrievable")?;
+        .expect("old version should still be retrievable");
     assert_eq!(by_old.version_id, original_version);
 
     Ok(())
@@ -167,7 +167,7 @@ async fn set_active_collection_version_round_trips_to_original() -> Result<()> {
 
     let original_version = node
         .get_collection("User")?
-        .context("User should exist")?
+        .expect("User should exist")
         .version_id;
 
     let patch = r#"[
@@ -177,7 +177,7 @@ async fn set_active_collection_version_round_trips_to_original() -> Result<()> {
     assert_ne!(patched.version_id, original_version);
     assert_eq!(
         node.get_collection("User")?
-            .context("User should exist")?
+            .expect("User should exist")
             .version_id,
         patched.version_id,
     );
@@ -186,7 +186,7 @@ async fn set_active_collection_version_round_trips_to_original() -> Result<()> {
         .await?;
     assert_eq!(
         node.get_collection("User")?
-            .context("User should exist")?
+            .expect("User should exist")
             .version_id,
         original_version,
     );
@@ -202,7 +202,7 @@ async fn set_migration_registers_lens_between_versions() -> Result<()> {
 
     let original_version = node
         .get_collection("User")?
-        .context("User should exist")?
+        .expect("User should exist")
         .version_id;
 
     let patch = r#"[

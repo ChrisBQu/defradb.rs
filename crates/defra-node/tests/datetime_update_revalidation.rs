@@ -13,7 +13,7 @@
 //! (b) whether @index changes the behavior.
 
 use defra_node::EmbeddedNode;
-use defra_node::{Context, Result};
+use defra_node::Result;
 
 const SDL_NOINDEX: &str = r#"
 type Probe {
@@ -47,7 +47,7 @@ async fn create_get_id(node: &EmbeddedNode, coll: &str) -> Result<String> {
         .and_then(|a| a.first())
         .and_then(|v| v.get("_docID"))
         .and_then(|v| v.as_str())
-        .context("no _docID after create+lookup")?
+        .expect("no _docID after create+lookup")
         .to_string();
     Ok(id)
 }

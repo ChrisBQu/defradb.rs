@@ -56,6 +56,7 @@ storage = { path = "../storage" }
 query = { path = "../query" }
 events = { path = "../events" }
 acp = { path = "../acp" }
+zanzibar = { path = "../zanzibar" }
 vera = { path = "../vera", optional = true }
 identity = { path = "../identity" }
 defra-core = { path = "../defra-core" }

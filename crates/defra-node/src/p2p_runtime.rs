@@ -2,7 +2,7 @@
 //!
 //! Gated behind the `p2p` feature. Not part of the public `defra_node` API.
 
-use crate::Result;
+use crate::{Error, Result};
 use std::sync::Arc;
 
 use crate::P2PConfig;
@@ -82,7 +82,7 @@ pub(super) async fn setup_p2p<S: storage::corekv::Store + 'static>(
 
     let peer = defra_p2p_adapter::IrohPeer::start(store, database, event_bus, peer_config)
         .await
-        .map_err(|error| crate::err!("iroh peer failed to start: {error}"))?;
+        .map_err(Error::IrohStart)?;
     tracing::info!(target: "defra_node", peer_id = %peer.local_peer_id, "P2P started (IROH/QUIC)");
 
     let merge_handler_for_kms = Arc::clone(&peer.replication.merge_handler_inner);

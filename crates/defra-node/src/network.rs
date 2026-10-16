@@ -41,8 +41,7 @@ impl NodeEdge {
                     threads: Some(OWNED_RUNTIME_THREADS),
                     thread_name: "defra-node-edge".to_string(),
                     ..EdgeConfig::default()
-                })
-                .map_err(|error| crate::err!("{error}"))?;
+                })?;
                 let edge = runtime.edge().clone();
                 owned.push(runtime);
                 edge

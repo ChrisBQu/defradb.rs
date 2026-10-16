@@ -1,4 +1,4 @@
-use crate::{err, Result};
+use crate::{Error, Result};
 use std::sync::Arc;
 
 #[cfg(feature = "vera")]
@@ -36,7 +36,7 @@ where
                     &vera_config.chain_id,
                     &tuning,
                 )
-                .map_err(|error| err!("failed to create Vera provider: {error}"))?,
+                .map_err(Error::VeraProvider)?,
             );
             let sh_acp = Arc::new(vera::VeraDocumentACP::tuned(provider, &tuning, network));
             Ok(DocumentAcpSetup {
@@ -60,7 +60,7 @@ where
                     &vera_config.chain_id,
                     &tuning,
                 )
-                .map_err(|error| err!("failed to create Vera provider: {error}"))?,
+                .map_err(Error::VeraProvider)?,
             );
             let vera_acp = Arc::new(vera::VeraDocumentACP::tuned(provider, &tuning, network));
             Ok(DocumentAcpSetup {
