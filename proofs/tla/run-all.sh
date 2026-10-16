@@ -182,8 +182,10 @@ for row in "${RUNS[@]}"; do
   read -r cfg mod want <<<"$row"
   n=$((n+1))
   out=$(./tools/tlc -metadir "states/run$n" -config "$cfg" "$mod" 2>&1)
-  if echo "$out" | grep -q "No error has been found"; then got=GREEN
-  elif echo "$out" | grep -qE "is violated|was violated|properties were violated|Deadlock reached|Deadlock"; then got=RED
+  # Here-strings, not pipes: `grep -q` stops at the first match, and under
+  # pipefail the writer's broken pipe would turn a long trace into ERROR.
+  if grep -q "No error has been found" <<<"$out"; then got=GREEN
+  elif grep -qE "is violated|was violated|properties were violated|Deadlock reached|Deadlock" <<<"$out"; then got=RED
   else got=ERROR; fi
   rm -rf "states/run$n"
   if [ "$got" = "$want" ]; then printf "  ok   %-6s %-34s %s\n" "$got" "$cfg" "$mod"
