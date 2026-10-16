@@ -102,6 +102,11 @@ impl Timers {
     }
 
     #[cfg(test)]
+    pub(crate) fn pending(&self) -> usize {
+        self.wakers.len()
+    }
+
+    #[cfg(test)]
     pub(crate) fn heap_len(&self) -> usize {
         self.heap.len()
     }

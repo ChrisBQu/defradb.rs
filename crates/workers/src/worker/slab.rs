@@ -108,6 +108,11 @@ impl<T> Slab<T> {
         self.len == 0
     }
 
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+
     /// Takes every value out, leaving the slab empty.
     pub(crate) fn drain(&mut self) -> Vec<T> {
         let taken: Vec<T> = self

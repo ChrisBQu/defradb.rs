@@ -62,6 +62,12 @@ fn current() -> Option<Rc<Local>> {
     CURRENT.with(|current| current.borrow().clone())
 }
 
+/// The timers pending on the calling worker.
+#[cfg(test)]
+pub(crate) fn pending_timers() -> usize {
+    current().map_or(0, |local| local.timers.borrow().pending())
+}
+
 /// Whether the calling thread is a worker, or drives one.
 pub fn on_worker() -> bool {
     CURRENT.with(|current| current.borrow().is_some())

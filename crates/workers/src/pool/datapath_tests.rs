@@ -84,6 +84,45 @@ fn a_timeout_ends_a_wait_that_runs_past_it_and_passes_one_that_does_not() {
 }
 
 #[test]
+fn a_met_deadline_leaves_no_timer_behind() {
+    let pool = pool(1);
+    let cleared = pool
+        .submit_and_wait(Target::Worker(0), || async {
+            // The worker's own timers, such as its periodic recheck.
+            let own = crate::worker::pending_timers();
+            for _ in 0..1_000 {
+                assert_eq!(crate::timeout(DEADLINE, async { 7 }).await, Ok(7));
+            }
+            // Yielding lets every timer task run: one that outlived its
+            // deadline sets its timer then, one that ended does not.
+            for _ in 0..100 {
+                crate::yield_now().await;
+            }
+            crate::worker::pending_timers() <= own
+        })
+        .unwrap();
+    assert!(cleared, "met deadlines still hold their timers");
+    pool.shutdown_blocking().unwrap();
+}
+
+#[test]
+fn met_deadlines_off_the_pool_never_fill_the_fallback_pool() {
+    // More than the fallback pool admits at once: a timer that outlived its
+    // deadline would hold the next one up until it fired.
+    let started = Instant::now();
+    for _ in 0..2 * Config::default().inbox_items + 1 {
+        assert_eq!(
+            crate::block_on(crate::timeout(DEADLINE, async { 7 })).unwrap(),
+            Ok(7)
+        );
+    }
+    assert!(
+        started.elapsed() < DEADLINE / 2,
+        "a met deadline waited for room"
+    );
+}
+
+#[test]
 fn background_work_stops_when_aborted_and_does_not_hold_up_shutdown() {
     let pool = pool(1);
     let ticks = Arc::new(SegQueue::new());

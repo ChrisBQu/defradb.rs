@@ -4,35 +4,75 @@
 //!
 //! On a worker the timer is a task of that worker, so it fires on the core
 //! that waits for it. Anywhere else (a test, a one-shot tool) it is a task of
-//! the fallback pool.
+//! the fallback pool. A timer whose waiter is gone ends at once, so a
+//! deadline that was met holds no task until it would have fired.
 
 use std::future::{poll_fn, Future};
-use std::pin::pin;
-use std::task::Poll;
+use std::pin::{pin, Pin};
+use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
+
+use regolith::sync::Event;
 
 use super::detached::{fallback, submit_now};
 use super::{Submit, Target};
 use crate::{Completion, Error};
 
-/// Completes once `duration` has passed on the pool's clock. The completion
+/// Completes once `duration` has passed on the pool's clock. The [`Delay`]
 /// is `Send`, so a future that must be `Send` can await it.
-pub fn delay(duration: Duration) -> Result<Completion<()>, Error> {
+pub fn delay(duration: Duration) -> Result<Delay, Error> {
+    let dropped = Arc::new(Event::new());
+    let waiter_gone = Arc::clone(&dropped);
     let tick = move || async move {
-        if let Ok(sleep) = crate::worker::sleep(duration) {
-            sleep.await;
-        }
+        let Ok(sleep) = crate::worker::sleep(duration) else {
+            return;
+        };
+        let mut sleep = pin!(sleep);
+        let mut gone = pin!(waiter_gone.wait());
+        poll_fn(|cx| {
+            if sleep.as_mut().poll(cx).is_ready() || gone.as_mut().poll(cx).is_ready() {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
     };
     // A timer has no work to finish: shutdown does not wait for one whose
     // waiter already moved on.
-    if crate::worker::on_worker() {
-        return crate::worker::spawn_daemon_named("workers::delay", tick());
-    }
-    let options = Submit {
-        name: Some("workers::delay"),
-        bytes: None,
+    let fired = if crate::worker::on_worker() {
+        crate::worker::spawn_daemon_named("workers::delay", tick())?
+    } else {
+        let options = Submit {
+            name: Some("workers::delay"),
+            bytes: None,
+        };
+        submit_now(fallback()?, Target::LeastLoaded, options, tick)?
     };
-    submit_now(fallback()?, Target::LeastLoaded, options, tick)
+    Ok(Delay { fired, dropped })
+}
+
+/// The timer [`delay`] sets: completes when it fires, and ends it when
+/// dropped first.
+#[must_use = "a delay does nothing unless awaited"]
+pub struct Delay {
+    fired: Completion<()>,
+    dropped: Arc<Event>,
+}
+
+impl Future for Delay {
+    type Output = Result<(), Error>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.get_mut().fired).poll(cx)
+    }
+}
+
+impl Drop for Delay {
+    fn drop(&mut self) {
+        self.dropped.set();
+    }
 }
 
 /// `future`'s output, or [`Error::TimedOut`] once `limit` passes first; the
