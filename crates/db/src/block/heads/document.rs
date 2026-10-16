@@ -78,6 +78,22 @@ pub fn publication_key(head: &HeadstoreDocKey) -> Vec<u8> {
     [PUBLISHED, &head.bytes()[HEADS.len()..]].concat()
 }
 
+/// Add `cid` to `write` as a head of `field` at `priority`, and return the key
+/// of its publication guard ([`publication_key`]): the CID is formatted once
+/// for both, the name being the bytes the head key has after its document.
+pub fn add_head(
+    write: &mut Write,
+    doc_short_id: u64,
+    field: &str,
+    cid: &Cid,
+    priority: u64,
+) -> Vec<u8> {
+    let name = name(field, cid);
+    write.add(&name, priority);
+    let document = HeadstoreDocKey::document_prefix(doc_short_id);
+    [PUBLISHED, &document[HEADS.len()..], &name].concat()
+}
+
 /// Publish a replicated head once, into `write`: it becomes a head at
 /// `priority` and each of `parents` stops being one. `set` is the document's
 /// set as the caller read it. A parent live in `set` or with a publication
@@ -284,6 +300,34 @@ impl Iterator for LiveHeads {
         match &self.source {
             Source::One(..) => true,
             Source::Many(sets) => sets.is_valid(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// [`add_head`] adds the head [`name`] names, and hands back the guard
+    /// [`publication_key`] gives its head key, for short IDs whose encoding
+    /// spans one byte, a `/` byte and several bytes.
+    #[test]
+    fn add_head_adds_the_named_head_and_returns_its_publication_key() {
+        let cid: Cid = "bafyreih7c4pdkyvosses56rmyomakxvicn4cehjrw3w3mmk57iagt6f4sq"
+            .parse()
+            .unwrap();
+        for doc_short_id in [0, 1, 0x2f, 127, 128, 300, u64::MAX] {
+            for field in ["C", "name", "field_15"] {
+                let mut write = Write::default();
+                let guard = add_head(&mut write, doc_short_id, field, &cid, 7);
+                assert_eq!(
+                    guard,
+                    publication_key(&HeadstoreDocKey::new(doc_short_id, field, cid))
+                );
+                let mut expected = Write::default();
+                expected.add(&name(field, &cid), 7);
+                assert_eq!(write.operand(), expected.operand());
+            }
         }
     }
 }

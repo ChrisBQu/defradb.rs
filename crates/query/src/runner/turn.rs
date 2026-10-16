@@ -61,10 +61,12 @@ where
     /// Runs `request` through `submit` (a registry call that runs a job where
     /// the transaction lives) until it answers, fetching at the edge every
     /// remote input a run asks for, in the context of the request this
-    /// runner serves.
+    /// runner serves. `parsed`, the request already parsed, serves the first
+    /// run; a run after an input parses the request again.
     pub(super) async fn drive<Submit, Fut>(
         &self,
         request: &QueryRequest,
+        mut parsed: Option<ParsedOperation>,
         submit: Submit,
     ) -> std::result::Result<QueryResponse, TransactionError>
     where
@@ -77,8 +79,9 @@ where
             let runner = self.scoped_runner(self.acp.clone());
             let attempt = request.clone();
             let memo = inputs.clone();
+            let parsed = parsed.take();
             let job = txn_job(move |turn| {
-                Box::pin(async move { runner.run_turn(turn, attempt, memo).await })
+                Box::pin(async move { runner.run_turn(turn, attempt, memo, parsed).await })
             });
             let (input, txn_mutator) = match submit(job).await? {
                 Turned::Done(response) => return Ok(response),
@@ -102,23 +105,28 @@ where
         }
     }
 
-    /// One run of `request` on `turn`: parse, open the statement when it
-    /// writes, run with the transaction lent, close the statement.
+    /// One run of `request` on `turn`: parse (unless `parsed` already holds
+    /// the parse), open the statement when it writes, run with the
+    /// transaction lent, close the statement.
     pub(super) async fn run_turn(
         &self,
         turn: &mut dyn TxnTurn,
         request: QueryRequest,
         inputs: PreparedInputMemo,
+        parsed: Option<ParsedOperation>,
     ) -> Turned {
         let variables = convert_variables(&request.variables);
-        let parsed = match parse_request_with_limits(
-            &request.query,
-            variables.as_ref(),
-            request.operation_name.as_deref(),
-            self.query_limits,
-        ) {
-            Ok(parsed) => parsed,
-            Err(error) => return Turned::Done(parse_error(error.to_string())),
+        let parsed = match parsed {
+            Some(parsed) => parsed,
+            None => match parse_request_with_limits(
+                &request.query,
+                variables.as_ref(),
+                request.operation_name.as_deref(),
+                self.query_limits,
+            ) {
+                Ok(parsed) => parsed,
+                Err(error) => return Turned::Done(parse_error(error.to_string())),
+            },
         };
         let statement = !turn.is_readonly()
             && matches!(&parsed, ParsedOperation::Mutation { explain: None, .. });

@@ -115,7 +115,9 @@ pub(crate) fn same_schema(left: &CollectionVersion, right: &CollectionVersion) -
 /// snapshot. Index definitions are allowed to have changed since preparation,
 /// because index creation currently preserves the collection version ID; the
 /// collection fields and other schema content must still match. The active
-/// mapping, definition, and action statuses are all read through this snapshot.
+/// mapping, definition, and action statuses are all read through this snapshot:
+/// the reads of the name and the definition are what a definition change
+/// committed by another transaction conflicts with.
 pub(crate) async fn load_collection_for_write_attempt(
     systemstore: &NamespaceView,
     name: &str,
@@ -136,12 +138,6 @@ pub(crate) async fn load_collection_for_write_attempt(
             collection.name()
         )));
     }
-    collection
-        .validate_write_definition(
-            &systemstore.sibling(storage::namespace::Namespace::Datastore),
-            true,
-        )
-        .await?;
     Ok(collection)
 }
 
@@ -220,9 +216,9 @@ async fn load_collection_from_systemstore_impl(
                     .await
                     .map_err(|error| query::error::QueryError::execution(error.to_string()))?;
                     if exact_schema_wire_matches(expected, &version_id, &data, root_id) {
-                        let statuses = crate::collection::IndexStatuses::load(
+                        let statuses = crate::collection::IndexStatuses::load_for(
                             systemstore,
-                            &expected.schema().collection_id,
+                            expected.schema(),
                         )
                         .await
                         .map_err(|e| {
@@ -260,15 +256,14 @@ async fn load_collection_from_systemstore_impl(
                     ))
                 })?;
 
-            let statuses =
-                crate::collection::IndexStatuses::load(systemstore, &schema.collection_id)
-                    .await
-                    .map_err(|e| {
-                        query::error::QueryError::execution(format!(
-                            "failed to load index actions for collection '{}': {}",
-                            name, e
-                        ))
-                    })?;
+            let statuses = crate::collection::IndexStatuses::load_for(systemstore, &schema)
+                .await
+                .map_err(|e| {
+                    query::error::QueryError::execution(format!(
+                        "failed to load index actions for collection '{}': {}",
+                        name, e
+                    ))
+                })?;
 
             Ok(Some(Collection::with_index_actions(schema, &statuses)))
         }
@@ -284,7 +279,7 @@ async fn load_collection_from_systemstore_impl(
     }
 }
 
-fn exact_schema_wire_matches(
+pub(crate) fn exact_schema_wire_matches(
     expected: &Collection,
     version_id: &str,
     persisted_wire: &[u8],

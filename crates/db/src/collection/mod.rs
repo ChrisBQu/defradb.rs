@@ -199,7 +199,7 @@ impl Collection {
         def: CollectionVersion,
         systemstore: &datastore::NamespaceView,
     ) -> crate::error::Result<Self> {
-        let statuses = IndexStatuses::load(systemstore, &def.collection_id).await?;
+        let statuses = IndexStatuses::load_for(systemstore, &def).await?;
         Ok(Self::with_index_actions(def, &statuses))
     }
 
@@ -224,6 +224,15 @@ impl Collection {
         let def = Arc::new(def);
         let definition_wire = serialize_definition_hint(&def);
         Self::with_index_actions_and_wire(def, definition_wire, Arc::default(), statuses)
+    }
+
+    /// `def` with `statuses`, keeping no serialized definition: for a handle
+    /// that is only compared, never loaded through.
+    pub(crate) fn with_index_actions_unwired(
+        def: CollectionVersion,
+        statuses: &IndexStatuses,
+    ) -> Self {
+        Self::with_index_actions_and_wire(Arc::new(def), None, Arc::default(), statuses)
     }
 
     /// `expected`'s definition with fresh index statuses. The definition is

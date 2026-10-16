@@ -138,6 +138,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                             context.metadata.collection_id,
                             context.doc_id_str,
                             context.doc_short_id,
+                            &mut state.reads,
                         )
                         .await?;
                     state.field_priorities.insert(
@@ -171,6 +172,8 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                             context.doc_short_id,
                         )
                         .await?;
+                    // A counter's increment is an operand on the stored value.
+                    state.reads.wrote_document();
                     if result.applied {
                         state.any_field_applied = true;
                     }

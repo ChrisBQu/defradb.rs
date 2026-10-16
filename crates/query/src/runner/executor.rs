@@ -196,7 +196,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         let runner = self.for_query(&request);
         let (context, deadline) = (runner.context(), runner.deadline());
         let outcome = runner
-            .drive(&request, |job| {
+            .drive(&request, None, |job| {
                 runner.registry.run_as(&context, handle, deadline, job)
             })
             .await;
@@ -277,35 +277,43 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         // Convert variables from JSON to RapidHashMap format for the parser
         let variables = convert_variables(&request.variables);
 
-        // First, parse the request to determine if it's a query or mutation
-        let parsed = match parse_request_with_limits(
-            &request.query,
-            variables.as_ref(),
-            request.operation_name.as_deref(),
-            self.query_limits,
-        ) {
-            Ok(p) => p,
-            Err(e) => {
-                return QueryResponse {
-                    data: None,
-                    errors: vec![QueryResponseError {
-                        message: e.to_string(),
-                        path: None,
-                        locations: None,
+        // A prepared request was parsed when it was prepared: a copy runs.
+        let parsed = match prepared
+            .as_ref()
+            .and_then(|prepared| prepared.parsed.as_deref())
+        {
+            Some(parsed) => parsed.clone(),
+            None => match parse_request_with_limits(
+                &request.query,
+                variables.as_ref(),
+                request.operation_name.as_deref(),
+                self.query_limits,
+            ) {
+                Ok(p) => p,
+                Err(e) => {
+                    return QueryResponse {
+                        data: None,
+                        errors: vec![QueryResponseError {
+                            message: e.to_string(),
+                            path: None,
+                            locations: None,
+                            extensions: None,
+                            retry_input: None,
+                        }],
                         extensions: None,
-                        retry_input: None,
-                    }],
-                    extensions: None,
-                };
-            }
+                    };
+                }
+            },
         };
 
         if matches!(&parsed, ParsedOperation::Query { .. }) {
             // A standalone query reads a snapshot of its own on a worker,
-            // which nothing registers.
+            // which nothing registers. Its first run takes a copy of this
+            // parse; a registry that runs none leaves the query to the path
+            // below, which still holds it.
             let (context, deadline) = (self.context(), self.deadline());
             match self
-                .drive(&request, |job| {
+                .drive(&request, Some(parsed.clone()), |job| {
                     self.registry.read_as(&context, deadline, job)
                 })
                 .await

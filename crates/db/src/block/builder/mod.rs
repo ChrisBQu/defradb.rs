@@ -41,7 +41,7 @@ use defra_core::signing::SigningConfig;
 use document::{DocID, Document, NormalValue};
 use storage::corekv::Key;
 use storage::keys::doc_id_index::DocRef;
-use storage::keys::headstore::{HeadstoreDocKey, HeadstorePriorityKey};
+use storage::keys::headstore::HeadstorePriorityKey;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {

@@ -10,7 +10,7 @@
 use datastore::NamespaceView;
 use defra_core::ActionStatus;
 use rapidhash::RapidHashMap;
-use schema::IndexDescription;
+use schema::{CollectionVersion, IndexDescription};
 
 use crate::error::Result;
 
@@ -29,6 +29,31 @@ impl IndexStatuses {
                 .await?,
             ..Self::load_actions(systemstore, collection_id).await?
         })
+    }
+
+    /// [`Self::load`] for `def`. Statuses only decide which of the indexes a
+    /// definition declares take writes and answer queries, so one that
+    /// declares none reads nothing.
+    pub(crate) async fn load_for(
+        systemstore: &NamespaceView,
+        def: &CollectionVersion,
+    ) -> Result<Self> {
+        if def.indexes.is_empty() {
+            return Ok(Self::default());
+        }
+        Self::load(systemstore, &def.collection_id).await
+    }
+
+    /// [`Self::load_actions`] for `def`, reading nothing when it declares no
+    /// index, as [`Self::load_for`].
+    pub(crate) async fn load_actions_for(
+        systemstore: &NamespaceView,
+        def: &CollectionVersion,
+    ) -> Result<Self> {
+        if def.indexes.is_empty() {
+            return Ok(Self::default());
+        }
+        Self::load_actions(systemstore, &def.collection_id).await
     }
 
     /// The index actions alone, for a check that compares which indexes take

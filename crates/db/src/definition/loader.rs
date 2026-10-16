@@ -205,6 +205,18 @@ pub async fn get_collections_by_collection_id(
     systemstore: &NamespaceView,
     collection_id: &str,
 ) -> Result<Vec<CollectionVersion>> {
+    get_collections_by_collection_id_known(systemstore, collection_id, None).await
+}
+
+/// [`get_collections_by_collection_id`], reusing `known`'s decoded
+/// definition for its version when the stored one is byte-equal to it and
+/// the root ID stored apart is the same, as the collection loader does,
+/// instead of parsing it again.
+pub(crate) async fn get_collections_by_collection_id_known(
+    systemstore: &NamespaceView,
+    collection_id: &str,
+    known: Option<&crate::collection::Collection>,
+) -> Result<Vec<CollectionVersion>> {
     // Get all version IDs for this collection
     let version_ids = get_collection_version_ids(systemstore, collection_id).await?;
 
@@ -221,15 +233,46 @@ pub async fn get_collections_by_collection_id(
         let collection_key = CollectionKey::new(version_id);
         match systemstore.get(&collection_key.bytes()).await {
             Ok(Some(json)) => {
-                let mut collection: CollectionVersion =
-                    serde_json::from_slice(&json).map_err(|e| {
-                        Error::collection_schema_json(
-                            format!("failed to deserialize collection version '{}'", version_id),
-                            e,
+                let known = match known.filter(|known| {
+                    known.version_id() == version_id && known.definition_wire() == Some(&json[..])
+                }) {
+                    Some(known) => crate::collection::load_persisted_collection_short_id(
+                        systemstore,
+                        collection_id,
+                    )
+                    .await?
+                    .and_then(|root_id| {
+                        crate::collection::loader::exact_schema_wire_matches(
+                            known,
+                            version_id,
+                            &json,
+                            Some(root_id),
                         )
-                    })?;
-                crate::collection::populate_collection_root_id(systemstore, &mut collection)
-                    .await?;
+                        .then(|| known.schema().clone())
+                    }),
+                    None => None,
+                };
+                let collection = match known {
+                    Some(collection) => collection,
+                    None => {
+                        let mut collection: CollectionVersion = serde_json::from_slice(&json)
+                            .map_err(|e| {
+                                Error::collection_schema_json(
+                                    format!(
+                                        "failed to deserialize collection version '{}'",
+                                        version_id
+                                    ),
+                                    e,
+                                )
+                            })?;
+                        crate::collection::populate_collection_root_id(
+                            systemstore,
+                            &mut collection,
+                        )
+                        .await?;
+                        collection
+                    }
+                };
 
                 // Log the version with transform information
                 tracing::debug!(

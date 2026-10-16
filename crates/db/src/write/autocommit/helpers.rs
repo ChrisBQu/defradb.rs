@@ -46,7 +46,10 @@ pub(crate) async fn write_branchable_collection_block<S: storage::corekv::Store 
 /// [`query::error::QueryError::NeedsInput`] before anything is written, and
 /// the caller fetches it outside the transaction and runs the update again.
 /// `heads` is the snapshot the update also builds its blocks from, so the
-/// document is scanned for its heads once.
+/// document is scanned for its heads once. The caller has read the
+/// collection's definition in this transaction (an attempt's
+/// `load_collection_for_write_attempt`, or `validate_collection_for_write`),
+/// which is what a definition change conflicts with.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn write_local_update(
     datastore: &NamespaceView,
@@ -59,11 +62,6 @@ pub(crate) async fn write_local_update(
     embedding_config: &crate::search::EmbeddingClientConfig,
     prepared_inputs: &query::prepared::PreparedInputMemo,
 ) -> query::error::Result<()> {
-    collection
-        .validate_write_definition(datastore, true)
-        .await
-        .map_err(crate::error::commit_query_error)?;
-
     set_incremented_counters(datastore, collection, doc, doc_short_id).await?;
     let generated = crate::search::embedding::set_embedding_from_inputs(
         &collection.schema().vector_embeddings,
@@ -92,7 +90,8 @@ pub(crate) async fn write_local_update(
 }
 
 /// Persist a local CREATE: write the document + maintain indexes. A counter's
-/// initial value is its part of the document value.
+/// initial value is its part of the document value. The caller has read the
+/// collection's definition in this transaction, as for [`write_local_update`].
 pub(crate) async fn write_local_create(
     datastore: &NamespaceView,
     collection: &Collection,
@@ -100,11 +99,6 @@ pub(crate) async fn write_local_create(
     doc_short_id: u64,
     index_manager: &IndexManager,
 ) -> query::error::Result<()> {
-    collection
-        .validate_write_definition(datastore, true)
-        .await
-        .map_err(crate::error::commit_query_error)?;
-
     collection
         .create_with_indexes(datastore, doc, doc_short_id, index_manager)
         .await

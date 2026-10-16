@@ -8,17 +8,19 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         &self,
         headstore: &NamespaceView,
         context: &CompositeMergeContext<'_, '_>,
-        state: &CompositeMergeState,
+        state: &mut CompositeMergeState,
     ) -> std::result::Result<(), MergeError> {
         let storage_error = |e: storage::corekv::Error| MergeError::Storage(e.to_string());
-        let set = crate::block::heads::document::load(headstore, context.doc_short_id)
+        let set = state
+            .reads
+            .heads(headstore, context.doc_short_id)
             .await
             .map_err(storage_error)?;
         let mut write = storage::merge::head_set::Write::default();
         let head = HeadstoreDocKey::new(context.doc_short_id, "C", *context.cid);
         crate::block::heads::document::publish(
             headstore,
-            &set,
+            set,
             &mut write,
             &head,
             context.payload.priority,
@@ -48,7 +50,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                 let head = HeadstoreDocKey::new(context.doc_short_id, &link.name, link.link);
                 crate::block::heads::document::publish(
                     headstore,
-                    &set,
+                    set,
                     &mut write,
                     &head,
                     priority,
@@ -72,6 +74,8 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         }
         crate::block::heads::document::commit(headstore, context.doc_short_id, &write)
             .await
-            .map_err(storage_error)
+            .map_err(storage_error)?;
+        state.reads.wrote_heads();
+        Ok(())
     }
 }

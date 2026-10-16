@@ -11,7 +11,7 @@ use storage::corekv::Store;
 use tracing::debug;
 
 use crate::collection::Collection;
-use crate::definition::loader::get_collections_by_collection_id;
+use crate::definition::loader::get_collections_by_collection_id_known;
 use crate::definition::migration::helpers::{
     cache_migrated_document_with_indexes, lens_doc_to_document,
 };
@@ -137,14 +137,15 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
             }
         }
 
-        let versions = get_collections_by_collection_id(&systemstore, collection_id)
-            .await
-            .map_err(|e| {
-                query::error::QueryError::execution(format!(
-                    "failed to load collection versions: {}",
-                    e
-                ))
-            })?;
+        let versions =
+            get_collections_by_collection_id_known(&systemstore, collection_id, Some(collection))
+                .await
+                .map_err(|e| {
+                    query::error::QueryError::execution(format!(
+                        "failed to load collection versions: {}",
+                        e
+                    ))
+                })?;
 
         let has_migrations = Self::versions_have_migrations(&versions);
         let facts = (Arc::from(versions), has_migrations);

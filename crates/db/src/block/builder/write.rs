@@ -590,14 +590,15 @@ pub(crate) async fn write_document_blocks_with_inputs(
             for old_head in &field_head_entries {
                 head_write.supersede(&doc_heads::name(field_name, old_head));
             }
-            head_write.add(&doc_heads::name(field_name, &field_cid), field_priority);
-
-            let head_key = HeadstoreDocKey::new(identity.doc_short_id, field_name, field_cid);
+            let guard = doc_heads::add_head(
+                &mut head_write,
+                identity.doc_short_id,
+                field_name,
+                &field_cid,
+                field_priority,
+            );
             headstore
-                .set(
-                    &crate::block::heads::document::publication_key(&head_key),
-                    &[],
-                )
+                .set(&guard, &[])
                 .await
                 .map_err(|e| e.to_string())?;
             headstore
@@ -684,14 +685,15 @@ pub(crate) async fn write_document_blocks_with_inputs(
     for old_head in &composite_heads {
         head_write.supersede(&doc_heads::name("C", old_head));
     }
-    head_write.add(&doc_heads::name("C", &composite_cid), composite_priority);
-
-    let composite_head_key = HeadstoreDocKey::new(identity.doc_short_id, "C", composite_cid);
+    let guard = doc_heads::add_head(
+        &mut head_write,
+        identity.doc_short_id,
+        "C",
+        &composite_cid,
+        composite_priority,
+    );
     headstore
-        .set(
-            &crate::block::heads::document::publication_key(&composite_head_key),
-            &[],
-        )
+        .set(&guard, &[])
         .await
         .map_err(|e| e.to_string())?;
     headstore
@@ -820,14 +822,9 @@ pub(crate) async fn write_delete_block_with_inputs(
     for old_head in &composite_heads {
         head_write.supersede(&doc_heads::name("C", old_head));
     }
-    head_write.add(&doc_heads::name("C", &composite_cid), priority);
-
-    let composite_head_key = HeadstoreDocKey::new(doc_short_id, "C", composite_cid);
+    let guard = doc_heads::add_head(&mut head_write, doc_short_id, "C", &composite_cid, priority);
     headstore
-        .set(
-            &crate::block::heads::document::publication_key(&composite_head_key),
-            &[],
-        )
+        .set(&guard, &[])
         .await
         .map_err(|e| e.to_string())?;
     headstore

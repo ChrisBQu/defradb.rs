@@ -1,38 +1,6 @@
 use super::*;
-use crate::block::builder::decode_priority_varint;
 
 impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
-    async fn current_field_priority(
-        &self,
-        headstore: &NamespaceView,
-        doc_short_id: u64,
-        field_name: &str,
-    ) -> std::result::Result<u64, MergeError> {
-        let mut iter = crate::block::heads::document::iterator(
-            headstore,
-            storage::corekv::IterOptions::new().with_prefix(
-                storage::keys::headstore::HeadstoreDocKey::field_prefix(doc_short_id, field_name),
-            ),
-        )
-        .await
-        .map_err(|e| MergeError::Storage(e.to_string()))?;
-
-        let mut max_priority = 0_u64;
-        while let Some(pair) = iter
-            .next()
-            .await
-            .map_err(|e| MergeError::Storage(e.to_string()))?
-        {
-            max_priority = max_priority.max(decode_priority_varint(&pair.value));
-        }
-
-        iter.close()
-            .await
-            .map_err(|e| MergeError::Storage(e.to_string()))?;
-
-        Ok(max_priority)
-    }
-
     #[allow(clippy::too_many_arguments)]
     async fn seed_lww_from_existing_doc(
         &self,
@@ -43,6 +11,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         lww: &Lww,
         doc_id_str: &str,
         doc_short_id: u64,
+        reads: &mut super::block_reads::BlockReads,
     ) -> std::result::Result<bool, MergeError> {
         let Some(collection) = self
             .block_collection(&payload.schema_version_id, fallback_collection_id)
@@ -60,9 +29,10 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         // headstore priority, so the merge resolves against the true current
         // state instead of the stale CRDT entry (otherwise a re-walked ancestor
         // delta clobbers a concurrent local write — replicas diverge).
-        let hs_priority = self
-            .current_field_priority(headstore, doc_short_id, &payload.field_name)
-            .await?;
+        let hs_priority = reads
+            .field_priority(headstore, doc_short_id, &payload.field_name)
+            .await
+            .map_err(|e| MergeError::Storage(e.to_string()))?;
         let stored_priority = crdt::traits::PriorityReader::priority(lww, datastore)
             .await
             .map_err(|e| MergeError::MergeFailed(e.to_string()))?;
@@ -79,8 +49,8 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             Err(_) => return Ok(false),
         };
 
-        let Some(existing_doc) = collection
-            .get_with_datastore(datastore, doc_short_id, &doc_id)
+        let Some(existing_doc) = reads
+            .document(&collection, datastore, doc_short_id, &doc_id)
             .await?
         else {
             return Ok(false);
@@ -148,6 +118,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         fallback_collection_id: Option<&str>,
         doc_id_str: &str,
         doc_short_id: u64,
+        reads: &mut super::block_reads::BlockReads,
     ) -> std::result::Result<LwwMergeResult, MergeError> {
         tracing::debug!(
             cid = %cid,
@@ -183,6 +154,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                 &lww,
                 doc_id_str,
                 doc_short_id,
+                reads,
             )
             .await?;
         let ctx = Context {

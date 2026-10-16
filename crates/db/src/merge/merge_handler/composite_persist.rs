@@ -60,8 +60,9 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         let doc_id = DocID::from_string(context.doc_id_str)
             .map_err(|e| MergeError::MergeFailed(format!("Invalid doc_id: {}", e)))?;
 
-        let (mut doc, old_doc) = match collection
-            .get_with_datastore(datastore, context.doc_short_id, &doc_id)
+        let (mut doc, old_doc) = match state
+            .reads
+            .document(collection, datastore, context.doc_short_id, &doc_id)
             .await
         {
             Ok(Some(existing)) => {
@@ -108,6 +109,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
             )
             .await
             .map_err(MergeError::Database)?;
+        state.reads.wrote_document();
 
         // A merged write onto a logically-deleted document must not touch the
         // indexes: the document is dead, and indexing it re-mints exactly the

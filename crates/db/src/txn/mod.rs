@@ -719,35 +719,62 @@ impl<S: Store> DbTxn<S> {
             .await
             .map_err(Error::Storage)?
             .ok_or_else(|| Error::CollectionNotFound(collection.name().to_string()))?;
-        let mut persisted_schema: CollectionVersion = serde_json::from_slice(&schema_bytes)
-            .map_err(|error| {
-                Error::collection_schema_json(
-                    format!(
-                        "failed to deserialize schema for collection '{}'",
-                        collection.name()
-                    ),
-                    error,
+        // The definition this handle was serialized from, byte for byte, with
+        // the root ID stored apart the same, is the handle's definition: it is
+        // not parsed again, as the loader does not parse it. Its indexes are
+        // already normalized, so the comparison below would find them equal.
+        let exact = collection.definition_wire() == Some(schema_bytes.as_ref())
+            && collection
+                .schema()
+                .indexes
+                .iter()
+                .all(|index| index.clone().normalized() == *index)
+            && crate::collection::loader::exact_schema_wire_matches(
+                collection,
+                collection.version_id(),
+                &schema_bytes,
+                crate::collection::load_persisted_collection_short_id(
+                    &systemstore,
+                    collection.collection_id(),
                 )
-            })?;
-        populate_collection_root_id(&systemstore, &mut persisted_schema).await?;
-        let mut cached_schema = collection.schema().clone();
-        cached_schema.indexes = cached_schema
-            .indexes
-            .into_iter()
-            .map(schema::IndexDescription::normalized)
-            .collect();
-        if persisted_schema != cached_schema {
-            return Err(Error::Other(format!(
-                "cached schema differs from persisted version '{}'",
-                collection.version_id()
-            )));
-        }
-        let statuses = crate::collection::IndexStatuses::load_actions(
-            &systemstore,
-            collection.collection_id(),
-        )
-        .await?;
-        let persisted = Collection::with_index_actions(persisted_schema, &statuses);
+                .await?,
+            );
+        let persisted = if exact {
+            let statuses = crate::collection::IndexStatuses::load_actions_for(
+                &systemstore,
+                collection.schema(),
+            )
+            .await?;
+            Collection::with_index_actions_reusing_schema(collection, &statuses)
+        } else {
+            let mut persisted_schema: CollectionVersion = serde_json::from_slice(&schema_bytes)
+                .map_err(|error| {
+                    Error::collection_schema_json(
+                        format!(
+                            "failed to deserialize schema for collection '{}'",
+                            collection.name()
+                        ),
+                        error,
+                    )
+                })?;
+            populate_collection_root_id(&systemstore, &mut persisted_schema).await?;
+            let mut cached_schema = collection.schema().clone();
+            cached_schema.indexes = cached_schema
+                .indexes
+                .into_iter()
+                .map(schema::IndexDescription::normalized)
+                .collect();
+            if persisted_schema != cached_schema {
+                return Err(Error::Other(format!(
+                    "cached schema differs from persisted version '{}'",
+                    collection.version_id()
+                )));
+            }
+            let statuses =
+                crate::collection::IndexStatuses::load_actions_for(&systemstore, &persisted_schema)
+                    .await?;
+            Collection::with_index_actions_unwired(persisted_schema, &statuses)
+        };
         if !persisted.same_index_statuses(collection) {
             return Err(Error::Other(format!(
                 "cached index actions differ for collection '{}'",

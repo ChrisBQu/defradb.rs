@@ -5,6 +5,7 @@
 
 mod authorization;
 mod batch;
+mod block_reads;
 mod collection;
 pub mod composite;
 mod composite_fields;

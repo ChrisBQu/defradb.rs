@@ -146,9 +146,13 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
         let (_collection_guard, collection) = self.guarded_collection(collection_name).await?;
 
-        let heads =
-            super::base_heads::BaseHeads::read(&self.db, &collection, std::slice::from_ref(doc_id))
-                .await?;
+        let heads = super::base_heads::BaseHeads::read_if_signed(
+            &self.db,
+            &collection,
+            std::slice::from_ref(doc_id),
+            context,
+        )
+        .await?;
         let attempt = DeleteRetryAttempt {
             db: Arc::clone(&self.db),
             collection_name: collection_name.to_string(),
@@ -382,7 +386,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         }
 
         let (_collection_guard, collection) = self.guarded_collection(collection_name).await?;
-        let heads = super::base_heads::BaseHeads::read(&self.db, &collection, doc_ids).await?;
+        let heads =
+            super::base_heads::BaseHeads::read_if_signed(&self.db, &collection, doc_ids, context)
+                .await?;
         let attempt = DeleteManyRetryAttempt {
             db: Arc::clone(&self.db),
             collection_name: collection_name.to_string(),

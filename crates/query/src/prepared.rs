@@ -274,6 +274,9 @@ pub struct PreparedMutations {
     pub inputs: PreparedInputMemo,
     /// The selected implicit batch controller owns commit-conflict retries.
     pub engine_managed_retry: bool,
+    /// The request this capsule was prepared from, parsed once: each
+    /// execution of the request uses a copy instead of parsing it again.
+    pub parsed: Option<Arc<crate::query_parse::ParsedOperation>>,
 }
 
 impl Default for PreparedMutations {
@@ -283,6 +286,7 @@ impl Default for PreparedMutations {
             mutations: RapidHashMap::default(),
             inputs: PreparedInputMemo::default(),
             engine_managed_retry: false,
+            parsed: None,
         }
     }
 }

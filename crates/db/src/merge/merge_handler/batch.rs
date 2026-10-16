@@ -623,6 +623,7 @@ impl<S: Store + 'static, B: blockstore::Blockstore + 'static> DbMergeHandler<S, 
                         metadata.collection_id,
                         &doc_id_str,
                         doc_short_id,
+                        &mut super::block_reads::BlockReads::default(),
                     )
                     .await;
                 match result {

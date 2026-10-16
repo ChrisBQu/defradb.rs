@@ -60,6 +60,62 @@ impl BaseHeads {
         Ok(Self(heads))
     }
 
+    /// [`Self::read`] when `context` signs its blocks. An unsigned block
+    /// need not be the same in every pass, so nothing is read here and each
+    /// attempt reads the heads in its own transaction.
+    pub(crate) async fn read_if_signed<S>(
+        db: &crate::database::DB<S>,
+        collection: &Collection,
+        doc_ids: &[DocID],
+        context: &defra_core::RequestContext,
+    ) -> query::error::Result<Self>
+    where
+        S: storage::corekv::Store + 'static,
+    {
+        if context.signing().is_none() {
+            return Ok(Self(RapidHashMap::default()));
+        }
+        Self::read(db, collection, doc_ids).await
+    }
+
+    /// The canonical ID of `doc_id`'s document and the heads its update
+    /// builds on, read at one snapshot. A document that is not there is
+    /// [`query::error::QueryError::document_not_found`].
+    pub(crate) async fn read_identified<S>(
+        db: &crate::database::DB<S>,
+        collection: &Collection,
+        doc_id: &DocID,
+    ) -> query::error::Result<(DocID, Self)>
+    where
+        S: storage::corekv::Store + 'static,
+    {
+        let txn = db.new_txn(true).await.map_err(|error| failed(&error))?;
+        let read: query::error::Result<(DocID, Self)> = async {
+            let systemstore = txn.systemstore().map_err(|error| failed(&error))?;
+            let headstore = txn.headstore().map_err(|error| failed(&error))?;
+            let (doc_short_id, canonical) = collection
+                .require_doc_identity(&systemstore, doc_id)
+                .await
+                .map_err(|error| match error {
+                    crate::error::Error::DocumentNotFound(id) => {
+                        query::error::QueryError::document_not_found(id)
+                    }
+                    other => query::error::QueryError::execution(other.to_string()),
+                })?;
+            let snapshot = DocHeadsSnapshot::load(&headstore, doc_short_id)
+                .await
+                .map_err(|error| failed(&error))?;
+            let mut heads = RapidHashMap::default();
+            heads.insert(doc_short_id, snapshot);
+            Ok((canonical, Self(heads)))
+        }
+        .await;
+        let discarded = txn.discard();
+        let read = read?;
+        discarded.map_err(|error| failed(&error))?;
+        Ok(read)
+    }
+
     /// The heads `doc_short_id`'s blocks build on in the attempt `retry` is
     /// running: those read before the transaction, unless this attempt is a
     /// retry after a conflict or the document was not found then, when they

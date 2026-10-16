@@ -21,6 +21,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let Some(mutator) = self.mutator.as_ref() else {
             return Ok(None);
         };
+        // Only an operation spelled with the `mutation` keyword is a mutation,
+        // so a request without it is left to execution to parse, once.
+        if !request.query.contains("mutation") {
+            return Ok(None);
+        }
         let variables = super::executor::convert_variables(&request.variables);
         let parsed = parse_request_with_limits(
             &request.query,
@@ -80,6 +85,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 .iter()
                 .any(|mutation| mutation.mutation_type == MutationType::Truncate)
                 && mutator.engine_retries_batches(),
+            parsed: None,
         };
         if prepared.engine_managed_retry {
             // The identity the mutation's attempts act as.
@@ -341,6 +347,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             }
             prepared.mutations.insert(mutation.output_name(), entry);
         }
+        prepared.parsed = Some(Arc::new(parsed));
         Ok(Some(Arc::new(prepared)))
     }
 }

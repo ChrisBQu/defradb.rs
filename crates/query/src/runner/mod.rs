@@ -39,6 +39,8 @@ mod plan_formatting;
 mod plan_validation;
 mod prepare;
 mod prepare_fetcher;
+#[cfg(test)]
+mod prepare_parse_tests;
 mod query;
 mod se_transport;
 mod turn;

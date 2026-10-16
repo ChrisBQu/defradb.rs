@@ -63,6 +63,8 @@ pub struct CompositeMergeState {
     pub(crate) linked_field_cids: Vec<Cid>,
     pub(crate) linked_encryption_cids: Vec<Cid>,
     pub(crate) is_branchable: bool,
+    /// The document's head set and stored value, read once for the block.
+    pub(crate) reads: super::block_reads::BlockReads,
 }
 
 enum CompositeMergePreparation {
@@ -500,7 +502,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                 {
                     Ok(Some(outcome)) => Ok(Some(outcome)),
                     Ok(None) => self
-                        .update_heads(&headstore, &context, &state)
+                        .update_heads(&headstore, &context, &mut state)
                         .await
                         .map(|()| None),
                     Err(MergeError::UniqueConstraintViolation(reason)) => {
@@ -923,7 +925,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                 Ok(outcome)
             }
             Ok(None) => {
-                self.update_heads(headstore, &context, &state).await?;
+                self.update_heads(headstore, &context, &mut state).await?;
                 self.record_block_ownership(
                     systemstore,
                     doc_id_str,

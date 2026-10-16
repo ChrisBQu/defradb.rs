@@ -86,8 +86,12 @@ impl Collection {
             .part_ids_of(datastore, fields.iter().map(String::as_str))
             .await?;
         let key = self.doc_key(doc_short_id);
+        let whole = |data: Option<bytes::Bytes>| {
+            data.map(|data| Document::from_storage_cbor(&data))
+                .transpose()
+        };
         // No fields is a read no decision rests on, never validated.
-        let data = match (version.as_deref() == Some(self.version_id()), parts) {
+        let doc = match (version.as_deref() == Some(self.version_id()), parts) {
             (true, Some(parts)) => {
                 let projected = datastore
                     .get_parts(&key, &parts)
@@ -95,16 +99,21 @@ impl Collection {
                     .map_err(Error::Storage)?;
                 // A legacy or structural whole-value write is not a part map.
                 // Keep its full dependency and let the caller rebase every field.
+                // A part map is decoded once: every field of one that decodes
+                // materializes.
                 match projected {
-                    Some(bytes) if StoredDocument::decode(&bytes).is_some() => Some(bytes),
-                    Some(_) => datastore.get(&key).await.map_err(Error::Storage)?,
+                    Some(bytes) => match StoredDocument::decode(&bytes)
+                        .and_then(|stored| stored.materialize())
+                    {
+                        Some(doc) => Some(doc),
+                        None => whole(datastore.get(&key).await.map_err(Error::Storage)?)?,
+                    },
                     None => None,
                 }
             }
-            _ => datastore.get(&key).await.map_err(Error::Storage)?,
+            _ => whole(datastore.get(&key).await.map_err(Error::Storage)?)?,
         };
-        let Some(data) = data else { return Ok(None) };
-        let mut doc = Document::from_storage_cbor(&data)?;
+        let Some(mut doc) = doc else { return Ok(None) };
         doc.set_id(doc_id.clone());
         if let Some(version) = version {
             doc.set_schema_version_id(version);
