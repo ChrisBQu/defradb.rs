@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use super::*;
 use crate::sync::car::{decode_car, decode_car_oversized, encode_car_response, CAR_MAX_BYTES};
 
@@ -5,31 +7,30 @@ use crate::sync::car::{decode_car, decode_car_oversized, encode_car_response, CA
 /// was made without one.
 struct ReadCountingBlockstore {
     inner: Arc<DefraBlockstore<RegolithStore>>,
-    reads: std::sync::Mutex<Vec<Cid>>,
+    reads: regolith::sync::HopscotchMap<Cid, Arc<AtomicUsize>, rapidhash::fast::RandomState>,
 }
 
 impl ReadCountingBlockstore {
     fn new(inner: Arc<DefraBlockstore<RegolithStore>>) -> Arc<Self> {
         Arc::new(Self {
             inner,
-            reads: std::sync::Mutex::new(Vec::new()),
+            reads: regolith::sync::HopscotchMap::with_hasher(
+                rapidhash::fast::RandomState::default(),
+            ),
         })
     }
 
     fn payload_read_count(&self, cid: &Cid) -> usize {
-        self.reads
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|read| read == &cid)
-            .count()
+        self.reads.get(cid).map_or(0, |n| n.load(Ordering::Relaxed))
     }
 }
 
 #[async_trait::async_trait]
 impl Blockstore for ReadCountingBlockstore {
     async fn get(&self, cid: &Cid) -> blockstore::Result<Option<bytes::Bytes>> {
-        self.reads.lock().unwrap().push(*cid);
+        self.reads
+            .get_or_insert(*cid, Arc::new(AtomicUsize::new(0)))
+            .fetch_add(1, Ordering::Relaxed);
         self.inner.get(cid).await
     }
 

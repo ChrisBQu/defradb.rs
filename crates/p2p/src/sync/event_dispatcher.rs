@@ -331,7 +331,8 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use tokio::sync::{mpsc, Mutex, Semaphore};
+    use regolith::sync::SegQueue;
+    use tokio::sync::{mpsc, Semaphore};
 
     use super::*;
 
@@ -376,7 +377,7 @@ mod tests {
     #[tokio::test]
     async fn saturation_rejects_work_and_still_drains_completion() {
         let (tx, rx) = mpsc::channel(64);
-        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed = Arc::new(SegQueue::new());
         let started = Arc::new(Semaphore::new(0));
         let release = Arc::new(Semaphore::new(0));
 
@@ -392,7 +393,7 @@ mod tests {
                     let started = Arc::clone(&started);
                     let release = Arc::clone(&release);
                     async move {
-                        observed.lock().await.push((event, admission));
+                        observed.push((event, admission));
                         if matches!(event, TestEvent::Request(index) if index < MAX_ACTIVE_REQUESTS)
                             && admission == DispatchAdmission::Admitted
                         {
@@ -422,15 +423,17 @@ mod tests {
         .forget();
 
         n0_future::time::timeout(std::time::Duration::from_secs(1), async {
+            let mut events = Vec::new();
             loop {
-                let events = observed.lock().await;
+                while let Some(event) = observed.pop() {
+                    events.push(event);
+                }
                 let rejected = events.contains(&(
                     TestEvent::Request(MAX_ACTIVE_REQUESTS),
                     DispatchAdmission::Saturated,
                 ));
                 let completed =
                     events.contains(&(TestEvent::Completion, DispatchAdmission::Admitted));
-                drop(events);
                 if rejected && completed {
                     break;
                 }

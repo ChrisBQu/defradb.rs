@@ -12,12 +12,14 @@
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use cid::Cid;
 use iroh_bitswap::{Block, Store};
 
 use blockstore::Blockstore;
+
+use crate::Error;
 
 /// Adapter that implements iroh_bitswap::Store for any `Blockstore`.
 ///
@@ -57,11 +59,12 @@ impl<B: Blockstore> BitswapStoreAdapter<B> {
 impl<B: Blockstore + Debug + 'static> Store for BitswapStoreAdapter<B> {
     /// Get the size of a block by CID.
     async fn get_size(&self, cid: &Cid) -> Result<usize> {
-        self.blockstore
+        Ok(self
+            .blockstore
             .get_size(cid)
             .await
-            .map_err(|e| anyhow!("blockstore error: {}", e))?
-            .ok_or_else(|| anyhow!("block not found: {}", cid))
+            .map_err(|e| Error::BlockstoreError(e.to_string()))?
+            .ok_or_else(|| Error::BlockNotFound(cid.to_string()))?)
     }
 
     /// Get block data by CID.
@@ -70,16 +73,17 @@ impl<B: Blockstore + Debug + 'static> Store for BitswapStoreAdapter<B> {
             .blockstore
             .get(cid)
             .await
-            .map_err(|e| anyhow!("blockstore error: {}", e))?
-            .ok_or_else(|| anyhow!("block not found: {}", cid))?;
+            .map_err(|e| Error::BlockstoreError(e.to_string()))?
+            .ok_or_else(|| Error::BlockNotFound(cid.to_string()))?;
         Ok(Block::new(data, *cid))
     }
 
     /// Check if the blockstore contains a block with the given CID.
     async fn has(&self, cid: &Cid) -> Result<bool> {
-        self.blockstore
+        Ok(self
+            .blockstore
             .has(cid)
             .await
-            .map_err(|e| anyhow!("blockstore error: {}", e))
+            .map_err(|e| Error::BlockstoreError(e.to_string()))?)
     }
 }

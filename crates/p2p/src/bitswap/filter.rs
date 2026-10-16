@@ -196,14 +196,14 @@ mod tests {
             self.inner
                 .get(cid)
                 .map(|b| b.len())
-                .ok_or_else(|| anyhow::anyhow!("not found"))
+                .ok_or_else(|| crate::Error::BlockNotFound(cid.to_string()))
         }
 
         async fn get(&self, cid: &Cid) -> anyhow::Result<Block> {
             let data = self
                 .inner
                 .get(cid)
-                .ok_or_else(|| anyhow::anyhow!("not found"))?;
+                .ok_or_else(|| crate::Error::BlockNotFound(cid.to_string()))?;
             Ok(Block::new(data, *cid))
         }
 
