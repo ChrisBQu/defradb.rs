@@ -179,6 +179,48 @@ mod post_commit_tests {
         assert_eq!(out.get(), vec![1, 2]);
     }
 
+    #[tokio::test]
+    async fn a_late_native_outcome_wakes_publication_after_its_owner_was_cancelled() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Wakes(AtomicUsize);
+        impl futures::task::ArcWake for Wakes {
+            fn wake_by_ref(wakes: &Arc<Self>) {
+                wakes.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let db = regolith::OptimisticTransactionDb::open(
+            "cancelled-publication",
+            regolith::Options::memory(),
+        )
+        .unwrap();
+        let order = Arc::new(super::EventOrder::default());
+        let out = Out::default();
+        let mut detached = db.begin(&regolith::TxnOptions::new());
+        detached.put(b"detached", b"v").unwrap();
+        let cancelled = order.bind(&mut detached, vec![out.event(2)], false);
+        drop(cancelled);
+
+        let mut later = db.begin(&regolith::TxnOptions::new());
+        later.put(b"later", b"v").unwrap();
+        let mut callbacks = TxnCallbacks::default();
+        callbacks
+            .on_commit(OnCommit::Ordered(out.event(1)))
+            .unwrap();
+        let work = super::PostCommit::bind(&order, &mut later, callbacks);
+        later.commit().unwrap();
+        let mut completion = std::pin::pin!(work.committed());
+        let wakes = Arc::new(Wakes(AtomicUsize::new(0)));
+        let waker = futures::task::waker(Arc::clone(&wakes));
+        let mut context = std::task::Context::from_waker(&waker);
+        assert!(std::future::Future::poll(completion.as_mut(), &mut context).is_pending());
+        let before = wakes.0.load(Ordering::SeqCst);
+        detached.commit().unwrap();
+        assert!(wakes.0.load(Ordering::SeqCst) > before);
+        completion.await;
+        assert_eq!(out.get(), vec![1, 2]);
+    }
+
     async fn read(store: &RegolithStore, key: &[u8]) -> Option<Vec<u8>> {
         let txn = store.new_txn(true).await.unwrap();
         let value = txn.get(key).await.unwrap().map(|value| value.to_vec());
