@@ -13,8 +13,8 @@
 //! sides of the lock-free change, so the same file measures both.
 
 use std::hint::black_box;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Barrier};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
@@ -65,25 +65,30 @@ fn populated_db() -> Arc<DB<RegolithStore>> {
 ///
 /// Wall time rather than a criterion iteration count: what matters here is
 /// aggregate throughput as threads are added, and criterion times one
-/// iteration on one thread. Every thread waits on a barrier so none of them
+/// iteration on one thread. Every thread waits for a start gate so none of them
 /// measures another's startup.
 fn throughput<W>(threads: usize, duration: std::time::Duration, work: W) -> f64
 where
     W: Fn(usize) -> u64 + Send + Sync + 'static,
 {
     let work = Arc::new(work);
-    let barrier = Arc::new(Barrier::new(threads + 1));
+    let ready = Arc::new(AtomicUsize::new(0));
+    let go = Arc::new(AtomicBool::new(false));
     let stop = Arc::new(AtomicBool::new(false));
     let total = Arc::new(AtomicU64::new(0));
 
     let handles: Vec<_> = (0..threads)
         .map(|id| {
             let work = Arc::clone(&work);
-            let barrier = Arc::clone(&barrier);
+            let ready = Arc::clone(&ready);
+            let go = Arc::clone(&go);
             let stop = Arc::clone(&stop);
             let total = Arc::clone(&total);
             std::thread::spawn(move || {
-                barrier.wait();
+                ready.fetch_add(1, Ordering::AcqRel);
+                while !go.load(Ordering::Acquire) {
+                    std::thread::yield_now();
+                }
                 let mut done = 0u64;
                 while !stop.load(Ordering::Relaxed) {
                     // A batch between stop checks, so the flag read does not
@@ -97,7 +102,10 @@ where
         })
         .collect();
 
-    barrier.wait();
+    while ready.load(Ordering::Acquire) < threads {
+        std::thread::yield_now();
+    }
+    go.store(true, Ordering::Release);
     let start = Instant::now();
     std::thread::sleep(duration);
     stop.store(true, Ordering::Relaxed);
