@@ -7,6 +7,7 @@ use rapidhash::{HashMapExt, RapidHashMap, RapidHashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use defra_core::RequestContext;
 use document::{DocID, Document, NormalValue};
 use schema::{CType, CollectionVersion};
 use serde_json::Value as JsonValue;
@@ -191,6 +192,9 @@ pub struct UpdateNode {
     collection_name: String,
     /// Document mutator for storage operations
     mutator: Arc<dyn DocMutator>,
+    /// The context of the request the updates serve: [`RequestContext::ambient`]
+    /// until [`UpdateNode::with_context`] sets it
+    context: RequestContext,
     /// Document fetcher for resolving filters and getting all documents
     fetcher: Arc<dyn DocFetcher>,
     /// Document mapping for field positions
@@ -241,6 +245,7 @@ impl UpdateNode {
         Self {
             collection_name: collection_name.into(),
             mutator,
+            context: RequestContext::ambient(),
             fetcher,
             document_mapping,
             collection: None,
@@ -259,6 +264,12 @@ impl UpdateNode {
             did_update: false,
             initialized: false,
         }
+    }
+
+    /// Serve the request `context` belongs to.
+    pub fn with_context(mut self, context: RequestContext) -> Self {
+        self.context = context;
+        self
     }
 
     /// Set specific document IDs to update.
@@ -560,7 +571,8 @@ impl PlanNode for UpdateNode {
                     // Persist update with modified field tracking
                     let result = if let Some(expected_fields) = projected_fields {
                         self.mutator
-                            .update_if_fields_unchanged(
+                            .update_if_fields_unchanged_as(
+                                &self.context,
                                 &self.collection_name,
                                 expected,
                                 expected_fields,
@@ -570,7 +582,8 @@ impl PlanNode for UpdateNode {
                             .await?
                     } else {
                         self.mutator
-                            .update_if_unchanged(
+                            .update_if_unchanged_as(
+                                &self.context,
                                 &self.collection_name,
                                 expected,
                                 doc,

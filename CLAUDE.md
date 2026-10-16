@@ -226,7 +226,8 @@ Disjoint parts of one document never conflict. A read that validates more than i
 ### Synchronization: regolith sync, lock-free first
 
 - Synchronization comes from `regolith::sync`. Never `std::sync::{Mutex, RwLock, Condvar, Barrier, OnceLock, LazyLock}`,
-  `parking_lot`, `tokio::sync` or `async_lock`.
+  `parking_lot`, `tokio::sync` or `async_lock`. This holds for every line of the workspace, tests and tools included:
+  the final code has no `std::sync::Mutex` and no `std::sync::RwLock` anywhere.
 - Lock-free wherever it applies. Reach for these first:
   - a shared value: `regolith::sync::Atom`, swapped as a whole immutable snapshot, so readers never wait;
   - a shared map: `regolith::sync::HopscotchMap`, with the rapidhash fast hasher (below);
@@ -242,11 +243,15 @@ Disjoint parts of one document never conflict. A read that validates more than i
 
 ### Hash maps: rapidhash, fast
 
-- Every hash map and hash set is `rapidhash::fast::RapidHashMap` or `rapidhash::fast::RapidHashSet`, built with
-  `default()` or `with_capacity` (`rapidhash::HashMapExt`, `HashSetExt`). Never `std::collections::HashMap` or
-  `HashSet` with the standard hasher, and never the `rapidhash::quality` variant.
-- A map shared between threads is `regolith::sync::HopscotchMap` built with `rapidhash::fast::RandomState`
-  (`HopscotchMap::with_hasher`), not with its default hasher.
+- Every hash map and hash set is `rapidhash::RapidHashMap` or `rapidhash::RapidHashSet`, the fast hasher
+  (`rapidhash::fast::RandomState`; the `rapidhash::fast::RapidHashMap` path is a deprecated alias of the same type),
+  built with `new()`, `default()` or `with_capacity` (`rapidhash::HashMapExt`, `HashSetExt`). Never
+  `std::collections::HashMap` or `HashSet` with the standard hasher, and never the `rapidhash::quality` variant.
+- A map shared between threads is kovan's `HopscotchMap` (re-exported as `regolith::sync::HopscotchMap`) built with
+  `rapidhash::fast::RandomState` (`HopscotchMap::with_hasher`), not with its default hasher.
+- This holds for every line of the workspace, tests and tools included: the final code has no
+  `std::collections::HashMap` or `HashSet`. A type that needs `std`'s map at an API boundary (a deserializer, a third-party
+  signature) takes it as `HashMap<K, V, rapidhash::fast::RandomState>`, which is `RapidHashMap`.
 
 ### Thread-per-core
 

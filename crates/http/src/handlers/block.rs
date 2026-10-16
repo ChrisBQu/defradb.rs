@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{http_error_from_backend_message, HttpError};
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
+use crate::request_scope::bound;
 use crate::router::{AppState, NodePermission};
 
 /// Query parameters for block verify-signature (Go-compatible).
@@ -39,7 +40,7 @@ pub async fn signed_block(
     Query(params): Query<SignedBlockParams>,
 ) -> Result<Json<SignedBlockResponse>, HttpError> {
     require_permission(&state, &identity, NodePermission::SignatureVerify).await?;
-    let block = state.require_block()?;
+    let block = bound(state.require_block()?, &identity.context());
     let caller_did = identity.did().map(|did| did.to_string());
     let (block_bytes, signature_bytes) = block
         .signed_block_bytes(&params.cid, caller_did.as_deref())
@@ -65,7 +66,7 @@ pub async fn verify_signature(
 ) -> Result<StatusCode, HttpError> {
     require_permission(&state, &identity, NodePermission::SignatureVerify).await?;
 
-    let block = state.require_block()?;
+    let block = bound(state.require_block()?, &identity.context());
     let caller_did = identity.did().map(|d| d.to_string());
     block
         .verify_signature(

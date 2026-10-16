@@ -20,6 +20,7 @@
 //! registry is the workers' own tables, nothing shared besides.
 
 use defra_core::thread_bounds::MaybeSend;
+use defra_core::RequestContext;
 use futures::future::LocalBoxFuture;
 use query::error::TransactionError;
 use std::sync::Arc;
@@ -163,8 +164,9 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
     }
 
     /// Runs `work` on transaction `txn_id`, on the worker that owns it, after
-    /// every request for it that arrived earlier, as the caller.
-    async fn in_txn<T, W>(&self, txn_id: &str, work: W) -> Result<T>
+    /// every request for it that arrived earlier, for the request `context`
+    /// serves.
+    async fn in_txn<T, W>(&self, context: &RequestContext, txn_id: &str, work: W) -> Result<T>
     where
         T: MaybeSend + 'static,
         W: for<'t> FnOnce(&'t mut OwnedTxn<S>) -> LocalBoxFuture<'t, Result<T>>
@@ -173,16 +175,12 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
     {
         let not_found = || Error::TransactionNotFound(txn_id.to_string());
         let id = TxnId::parse(txn_id).ok_or_else(not_found)?;
-        let caller = caller();
-        let scope = caller.clone();
+        let scope = context.clone();
         let ran = self
             .owners()
             .map_err(|error| Error::Other(error.to_string()))?
-            .run(id, &caller, move |owned| {
-                Box::pin(defra_core::current_identity::with_scoped_identity(
-                    scope,
-                    work(owned),
-                ))
+            .run(id, &caller(context), move |owned| {
+                Box::pin(async move { scope.mirror(work(owned)).await })
             })
             .await;
         match ran {
@@ -196,10 +194,9 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
 /// Who began a transaction, and so may use it: the request's identity.
 type Caller = Option<String>;
 
-/// The identity of the request calling, read where the request runs (its
-/// own task), before anything moves to a worker.
-fn caller() -> Caller {
-    defra_core::current_identity::get_effective_identity()
+/// The identity acting in `context`, the request calling.
+fn caller(context: &RequestContext) -> Caller {
+    context.identity().map(str::to_owned)
 }
 
 /// A registry error, as the query layer reports it.
@@ -226,7 +223,7 @@ fn owners_on<T, K>(
     pool: std::result::Result<workers::Pool, workers::Error>,
 ) -> std::result::Result<Owners<T, K>, workers::Error>
 where
-    T: 'static,
+    T: defra_core::thread_bounds::MaybeSend + 'static,
     K: Clone + PartialEq + Send + Sync + 'static,
 {
     if let Err(error) = &pool {

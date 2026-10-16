@@ -7,6 +7,23 @@ use storage::corekv::Store;
 use super::classify_schema_fields;
 use crate::DB;
 
+/// [`export_database_as`] in [`defra_core::RequestContext::ambient`].
+pub async fn export_database<S: Store>(
+    database: &Arc<DB<S>>,
+    runner: &Arc<dyn query::QueryExecutor>,
+    collections: &[String],
+    pretty: bool,
+) -> Result<String, String> {
+    export_database_as(
+        &defra_core::RequestContext::ambient(),
+        database,
+        runner,
+        collections,
+        pretty,
+    )
+    .await
+}
+
 /// Export database contents to a JSON string.
 ///
 /// Three-phase export:
@@ -15,8 +32,10 @@ use crate::DB;
 /// - Phase 3: Build export output
 ///
 /// If `collections` is empty, all collections are exported.
-/// Returns the JSON string (not written to file — caller handles I/O).
-pub async fn export_database<S: Store>(
+/// Returns the JSON string (not written to file: the caller handles I/O). The
+/// documents are read as the identity acting in `context`.
+pub async fn export_database_as<S: Store>(
+    context: &defra_core::RequestContext,
     database: &Arc<DB<S>>,
     runner: &Arc<dyn query::QueryExecutor>,
     collections: &[String],
@@ -106,7 +125,7 @@ pub async fn export_database<S: Store>(
 
         let query = format!("{{ {} {{ {} }} }}", name, query_parts.join(" "));
 
-        let request = query::QueryRequest::new(query);
+        let request = query::QueryRequest::new(query).with_context(context.clone());
         let response = runner.execute(request).await;
 
         if !response.errors.is_empty() {

@@ -12,6 +12,7 @@ use serde::Deserialize;
 use crate::error::{http_error_from_backend_message, HttpError};
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
+use crate::request_scope::bound;
 use crate::router::{AppState, EncryptedIndexInfo, NodePermission};
 use crate::validation::validate_identifier;
 
@@ -34,7 +35,7 @@ pub async fn go_add_encrypted_index(
 ) -> Result<Json<EncryptedIndexInfo>, HttpError> {
     require_permission(&state, &identity, NodePermission::EncryptedIndexAdd).await?;
 
-    let ops = state.require_encrypted_index()?;
+    let ops = bound(state.require_encrypted_index()?, &identity.context());
 
     validate_identifier(&collection).map_err(|_| {
         HttpError::BadRequest(format!(
@@ -66,7 +67,7 @@ pub async fn go_list_encrypted_indexes(
 ) -> Result<Json<Vec<EncryptedIndexInfo>>, HttpError> {
     require_permission(&state, &identity, NodePermission::EncryptedIndexList).await?;
 
-    let ops = state.require_encrypted_index()?;
+    let ops = bound(state.require_encrypted_index()?, &identity.context());
 
     validate_identifier(&collection).map_err(|_| {
         HttpError::BadRequest(format!(
@@ -92,7 +93,7 @@ pub async fn go_list_all_encrypted_indexes(
 ) -> Result<Json<Vec<EncryptedIndexInfo>>, HttpError> {
     require_permission(&state, &identity, NodePermission::EncryptedIndexListAll).await?;
 
-    let ops = state.require_encrypted_index()?;
+    let ops = bound(state.require_encrypted_index()?, &identity.context());
 
     let indexes = ops
         .list_encrypted_indexes(None)
@@ -112,7 +113,7 @@ pub async fn go_delete_encrypted_index(
 ) -> Result<StatusCode, HttpError> {
     require_permission(&state, &identity, NodePermission::EncryptedIndexDelete).await?;
 
-    let ops = state.require_encrypted_index()?;
+    let ops = bound(state.require_encrypted_index()?, &identity.context());
 
     validate_identifier(&collection).map_err(|_| {
         HttpError::BadRequest(format!(

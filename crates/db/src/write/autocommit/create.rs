@@ -26,7 +26,7 @@ struct CreateRetryAttempt<S: Store> {
     doc: Arc<Document>,
     computed_blocks: ComputedBlocks,
     doc_short_id: u64,
-    sign_config: Option<defra_core::signing::SigningConfig>,
+    context: RequestContext,
     acp_registration: Option<AcpRegistration>,
     prepared_inputs: Option<query::prepared::PreparedInputMemo>,
 }
@@ -56,7 +56,7 @@ struct CreateManyRetryAttempt<S: Store> {
     docs: Vec<Document>,
     identities: Vec<DocStorageIdentity>,
     computed: Vec<ComputedBlocks>,
-    signing_config: Option<defra_core::signing::SigningConfig>,
+    context: RequestContext,
     acp_registration: Option<AcpRegistration>,
     prepared_inputs: Option<query::prepared::PreparedInputMemo>,
 }
@@ -70,15 +70,19 @@ pub(super) fn acp_registration_retry_callback(
     bearer_token: Option<String>,
 ) -> storage::corekv::CommitHook {
     Box::new(move || {
-        Box::pin(defra_core::signing::scope_request_bearer_token(
-            Some(creator.to_string()),
-            bearer_token,
-            async move {
-                acp.redrive_registration(&policy_id, &resource_name, &doc_id)
-                    .await
-                    .map_err(|error| error.to_string())
-            },
-        ))
+        Box::pin(async move {
+            acp::with_request_bearer(
+                &acp,
+                Some(creator.to_string()),
+                bearer_token,
+                |acp| async move {
+                    acp.redrive_registration(&policy_id, &resource_name, &doc_id)
+                        .await
+                        .map_err(|error| error.to_string())
+                },
+            )
+            .await
+        })
     })
 }
 
@@ -102,13 +106,45 @@ impl<S: Store + 'static> storage::corekv::RetryAttemptFn for CreateManyRetryAtte
 
 #[allow(clippy::type_complexity)]
 impl<S: Store + 'static> AutoCommitMutator<S> {
+    /// The registration an external ACP is owed for a create by the request's
+    /// creator, settled once the create commits.
+    fn owed_acp_registration(
+        &self,
+        context: &RequestContext,
+        collection: &Collection,
+    ) -> query::error::Result<Option<AcpRegistration>> {
+        match (
+            collection.schema().policy.as_ref(),
+            context.creator(),
+            self.db.document_acp().cloned(),
+        ) {
+            (Some(policy), Some(creator), Some(acp)) if !acp.supports_transactions() => {
+                let creator = identity::Did::new(creator).map_err(|error| {
+                    query::error::QueryError::execution(format!(
+                        "invalid mutation creator DID: {error}"
+                    ))
+                })?;
+                let request_bearer_token = context.bearer_token_for(creator.as_str());
+                Ok(Some(AcpRegistration {
+                    acp,
+                    creator,
+                    policy_id: policy.id.clone(),
+                    resource_name: policy.resource_name.clone(),
+                    bearer_token: request_bearer_token,
+                }))
+            }
+            _ => Ok(None),
+        }
+    }
+
     pub(super) async fn create_with_resolved_inputs(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         doc: Document,
     ) -> query::error::Result<CreateResult> {
         if self.prepared_inputs.is_some() {
-            return self.create_impl(collection_name, doc).await;
+            return self.create_impl(context, collection_name, doc).await;
         }
         let inputs = query::prepared::PreparedInputMemo::default();
         let mutator = Self {
@@ -120,10 +156,15 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .seed_create_identity(collection_name, &mut doc)
             .await?;
         loop {
-            match mutator.create_impl(collection_name, doc.clone()).await {
+            match mutator
+                .create_impl(context, collection_name, doc.clone())
+                .await
+            {
                 Err(query::error::QueryError::NeedsInput(request)) => {
                     inputs
-                        .answer_wave(&request, |wave| self.resolve_prepared_inputs(wave))
+                        .answer_wave(&request, |wave| {
+                            self.resolve_prepared_inputs_as(context, wave)
+                        })
                         .await?;
                 }
                 result => return result,
@@ -133,11 +174,12 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
     pub(super) async fn create_many_with_resolved_inputs(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         docs: Vec<Document>,
     ) -> query::error::Result<Vec<CreateResult>> {
         if self.prepared_inputs.is_some() {
-            return self.create_many_impl(collection_name, docs).await;
+            return self.create_many_impl(context, collection_name, docs).await;
         }
         let inputs = query::prepared::PreparedInputMemo::default();
         let mutator = Self {
@@ -150,12 +192,14 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         }
         loop {
             match mutator
-                .create_many_impl(collection_name, docs.clone())
+                .create_many_impl(context, collection_name, docs.clone())
                 .await
             {
                 Err(query::error::QueryError::NeedsInput(request)) => {
                     inputs
-                        .answer_wave(&request, |wave| self.resolve_prepared_inputs(wave))
+                        .answer_wave(&request, |wave| {
+                            self.resolve_prepared_inputs_as(context, wave)
+                        })
                         .await?;
                 }
                 result => return result,
@@ -191,11 +235,12 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
     pub(super) async fn create_impl(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         mut doc: Document,
     ) -> query::error::Result<CreateResult> {
         self.db
-            .check_node_access(None, acp::nac::NodePermission::DocumentUpdate)
+            .check_node_access_as(context, acp::nac::NodePermission::DocumentUpdate)
             .await
             .map_err(|e| query::error::QueryError::permission_denied(e.to_string()))?;
 
@@ -213,7 +258,8 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 inputs,
             )?;
         } else {
-            crate::search::set_embedding(
+            crate::search::embedding::set_embedding_with(
+                self.db.remote_inputs().embeddings(),
                 &collection.schema().vector_embeddings,
                 &mut doc,
                 true,
@@ -241,37 +287,13 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 &mut doc,
                 identity,
                 None,
-                get_encryption_config().as_ref(),
+                context.encryption(),
             )
             .await?;
         }
 
         let schema_version_id = collection.version_id().to_string();
-        let enc_config = get_encryption_config();
-        let sign_config = get_signing_config();
-        let acp_registration = match (
-            collection.schema().policy.as_ref(),
-            defra_core::signing::get_broadcast_creator_did(),
-            self.db.document_acp().cloned(),
-        ) {
-            (Some(policy), Some(creator), Some(acp)) if !acp.supports_transactions() => {
-                let creator = identity::Did::new(&creator).map_err(|error| {
-                    query::error::QueryError::execution(format!(
-                        "invalid mutation creator DID: {error}"
-                    ))
-                })?;
-                let request_bearer_token =
-                    defra_core::signing::get_request_bearer_token(creator.as_str());
-                Some(AcpRegistration {
-                    acp,
-                    creator,
-                    policy_id: policy.id.clone(),
-                    resource_name: policy.resource_name.clone(),
-                    bearer_token: request_bearer_token,
-                })
-            }
-            _ => None,
-        };
+        let acp_registration = self.owed_acp_registration(context, &collection)?;
         let computed_blocks = doc
             .write_preparation()
             .and_then(|write| write.payload::<PreparedCreateBlocks>())
@@ -283,8 +305,8 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     &doc,
                     &schema_version_id,
                     identity,
-                    enc_config.as_ref(),
-                    sign_config.as_ref(),
+                    context.encryption(),
+                    context.signing(),
                     self.prepared_inputs.as_ref(),
                 )
             })
@@ -302,7 +324,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             doc: Arc::clone(&doc),
             computed_blocks,
             doc_short_id,
-            sign_config,
+            context: context.clone(),
             acp_registration,
             prepared_inputs: Some(self.prepared_inputs.clone().unwrap_or_default()),
         };
@@ -352,6 +374,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .map_err(crate::error::commit_query_error)?;
         self.db
             .check_node_access_in_txn(
+                &attempt.context,
                 txn.acpstore().map_err(crate::error::commit_query_error)?,
                 acp::nac::NodePermission::DocumentUpdate,
             )
@@ -390,17 +413,23 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 .await
                 .map_err(|error| query::error::QueryError::execution(error.to_string()))?;
 
-            insert_computed_blocks(&blockstore, &headstore, &attempt.computed_blocks)
-                .await
-                .map_err(|error| {
-                    query::error::QueryError::execution(format!(
-                        "failed to write document blocks for create on collection {}: {error}",
-                        attempt.collection_name
-                    ))
-                })?;
+            insert_computed_blocks(
+                &blockstore,
+                &headstore,
+                &attempt.computed_blocks,
+                attempt.context.batch_session(),
+            )
+            .await
+            .map_err(|error| {
+                query::error::QueryError::execution(format!(
+                    "failed to write document blocks for create on collection {}: {error}",
+                    attempt.collection_name
+                ))
+            })?;
             let block_result = &attempt.computed_blocks.block_result;
             let doc_id = register_created_doc(
                 self.db.document_acp(),
+                attempt.context.creator(),
                 &systemstore,
                 &datastore,
                 &collection,
@@ -430,7 +459,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 &headstore,
                 block_result.cid,
                 attempt.doc_short_id,
-                attempt.sign_config.as_ref(),
+                &attempt.context,
                 attempt.prepared_inputs.as_ref(),
             )
             .await?;
@@ -508,6 +537,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
     pub(super) async fn create_many_impl(
         &self,
+        context: &RequestContext,
         collection_name: &str,
         docs: Vec<Document>,
     ) -> query::error::Result<Vec<CreateResult>> {
@@ -519,13 +549,13 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         if docs.len() == 1 {
             let doc = docs.into_iter().next().expect("length checked above");
             return self
-                .create_impl(collection_name, doc)
+                .create_impl(context, collection_name, doc)
                 .await
                 .map(|r| vec![r]);
         }
 
         self.db
-            .check_node_access(None, acp::nac::NodePermission::DocumentUpdate)
+            .check_node_access_as(context, acp::nac::NodePermission::DocumentUpdate)
             .await
             .map_err(|e| query::error::QueryError::permission_denied(e.to_string()))?;
 
@@ -533,8 +563,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
         let short_id = collection.resolved_root_id();
         let schema_version_id = collection.version_id().to_string();
-        let sign_config = get_signing_config();
-        let enc_config = get_encryption_config();
 
         // === Phase 1: Prepare documents (sequential — embeddings are async/external) ===
         let mut prepared_docs: Vec<Document> = Vec::with_capacity(docs.len());
@@ -558,7 +586,8 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     Err(error) => return Err(error),
                 }
             } else {
-                crate::search::set_embedding(
+                crate::search::embedding::set_embedding_with(
+                    self.db.remote_inputs().embeddings(),
                     &collection.schema().vector_embeddings,
                     &mut doc,
                     true,
@@ -600,7 +629,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     doc,
                     identity,
                     None,
-                    enc_config.as_ref(),
+                    context.encryption(),
                 )
                 .await?;
             }
@@ -622,16 +651,15 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     let doc_clone = doc.clone();
                     let schema = schema_version_id.clone();
                     let identity = *identity;
-                    let enc = enc_config.clone();
-                    let sign = sign_config.clone();
+                    let context = context.clone();
                     let memo = self.prepared_inputs.clone();
                     let compute = move || async move {
                         compute_document_blocks_with_inputs(
                             &doc_clone,
                             &schema,
                             identity,
-                            enc.as_ref(),
-                            sign.as_ref(),
+                            context.encryption(),
+                            context.signing(),
                             memo.as_ref(),
                         )
                     };
@@ -693,8 +721,8 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     doc,
                     &schema_version_id,
                     *identity,
-                    enc_config.as_ref(),
-                    sign_config.as_ref(),
+                    context.encryption(),
+                    context.signing(),
                     self.prepared_inputs.as_ref(),
                 ) {
                     Ok(blocks) => computed.push(blocks),
@@ -712,29 +740,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             computed
         };
 
-        let acp_registration = match (
-            collection.schema().policy.as_ref(),
-            defra_core::signing::get_broadcast_creator_did(),
-            self.db.document_acp().cloned(),
-        ) {
-            (Some(policy), Some(creator), Some(acp)) if !acp.supports_transactions() => {
-                let creator = identity::Did::new(&creator).map_err(|error| {
-                    query::error::QueryError::execution(format!(
-                        "invalid mutation creator DID: {error}"
-                    ))
-                })?;
-                let request_bearer_token =
-                    defra_core::signing::get_request_bearer_token(creator.as_str());
-                Some(AcpRegistration {
-                    acp,
-                    creator,
-                    policy_id: policy.id.clone(),
-                    resource_name: policy.resource_name.clone(),
-                    bearer_token: request_bearer_token,
-                })
-            }
-            _ => None,
-        };
+        let acp_registration = self.owed_acp_registration(context, &collection)?;
         let attempt = CreateManyRetryAttempt {
             db: Arc::clone(&self.db),
             collection_name: collection_name.to_string(),
@@ -742,7 +748,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             docs: prepared_docs,
             identities,
             computed: computed_blocks,
-            signing_config: sign_config,
+            context: context.clone(),
             acp_registration,
             prepared_inputs: Some(self.prepared_inputs.clone().unwrap_or_default()),
         };
@@ -795,6 +801,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .map_err(crate::error::commit_query_error)?;
         self.db
             .check_node_access_in_txn(
+                &attempt.context,
                 txn.acpstore().map_err(crate::error::commit_query_error)?,
                 acp::nac::NodePermission::DocumentUpdate,
             )
@@ -842,15 +849,21 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                         )
                         .await
                         .map_err(|error| query::error::QueryError::execution(error.to_string()))?;
-                    insert_computed_blocks(&blockstore, &headstore, computed)
-                        .await
-                        .map_err(|error| {
-                            query::error::QueryError::execution(format!(
-                                "failed to insert precomputed blocks: {error}"
-                            ))
-                        })?;
+                    insert_computed_blocks(
+                        &blockstore,
+                        &headstore,
+                        computed,
+                        attempt.context.batch_session(),
+                    )
+                    .await
+                    .map_err(|error| {
+                        query::error::QueryError::execution(format!(
+                            "failed to insert precomputed blocks: {error}"
+                        ))
+                    })?;
                     let doc_id = register_created_doc(
                         self.db.document_acp(),
+                        attempt.context.creator(),
                         &systemstore,
                         &datastore,
                         &collection,
@@ -875,7 +888,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                         &headstore,
                         computed.block_result.cid,
                         identity.doc_short_id,
-                        attempt.signing_config.as_ref(),
+                        &attempt.context,
                         attempt.prepared_inputs.as_ref(),
                     )
                     .await?;

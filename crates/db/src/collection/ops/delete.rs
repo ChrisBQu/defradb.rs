@@ -64,6 +64,12 @@ impl<S: Store> crate::database::DB<S> {
         Ok(())
     }
 
+    /// [`Self::delete_collection_as`] in [`defra_core::RequestContext::ambient`].
+    pub async fn delete_collection(&self, name: &str) -> Result<()> {
+        self.delete_collection_as(&defra_core::RequestContext::ambient(), name)
+            .await
+    }
+
     /// Delete a collection.
     ///
     /// This creates a new transaction, calls `delete_collection_with_txn`, commits,
@@ -71,8 +77,12 @@ impl<S: Store> crate::database::DB<S> {
     ///
     /// Note: This does NOT delete documents. Use `truncate_collection` first if needed.
     #[instrument(skip(self), fields(collection = %name), name = "db.delete_collection_auto")]
-    pub async fn delete_collection(&self, name: &str) -> Result<()> {
-        self.check_node_access(None, acp::nac::NodePermission::CollectionPatch)
+    pub async fn delete_collection_as(
+        &self,
+        context: &defra_core::RequestContext,
+        name: &str,
+    ) -> Result<()> {
+        self.check_node_access_as(context, acp::nac::NodePermission::CollectionPatch)
             .await?;
         let mut txn = self.new_txn(false).await?;
 
@@ -104,6 +114,12 @@ impl<S: Store> crate::database::DB<S> {
         }
     }
 
+    /// [`Self::delete_collections_as`] in [`defra_core::RequestContext::ambient`].
+    pub async fn delete_collections(&self, names: Vec<String>, active_only: bool) -> Result<()> {
+        self.delete_collections_as(&defra_core::RequestContext::ambient(), names, active_only)
+            .await
+    }
+
     /// Delete one or more collections by name in a single call (Go #4688 parity).
     ///
     /// - If `active_only` is true, only the active head version of each named
@@ -115,8 +131,13 @@ impl<S: Store> crate::database::DB<S> {
     /// is unknown, no deletion is performed. Validation (no documents, no
     /// orphan child versions outside the batch) is delegated to
     /// `delete_collection_versions_batch`.
-    pub async fn delete_collections(&self, names: Vec<String>, active_only: bool) -> Result<()> {
-        self.check_node_access(None, acp::nac::NodePermission::CollectionPatch)
+    pub async fn delete_collections_as(
+        &self,
+        context: &defra_core::RequestContext,
+        names: Vec<String>,
+        active_only: bool,
+    ) -> Result<()> {
+        self.check_node_access_as(context, acp::nac::NodePermission::CollectionPatch)
             .await?;
         if names.is_empty() {
             return Err(Error::InvalidPatch(
@@ -163,7 +184,18 @@ impl<S: Store> crate::database::DB<S> {
             }
         }
 
-        self.delete_collection_versions_batch(version_ids).await
+        self.delete_collection_versions_batch_as(context, version_ids)
+            .await
+    }
+
+    /// [`Self::truncate_collection_as`] for `identity`, or for the identity acting in [`defra_core::RequestContext::ambient`] when there is none.
+    pub async fn truncate_collection(
+        &self,
+        name: &str,
+        identity: Option<&identity::Did>,
+    ) -> Result<()> {
+        self.truncate_collection_as(&crate::access::nac::ambient_as(identity), name)
+            .await
     }
 
     /// Truncate a collection: delete all documents, heads, blocks, and index entries
@@ -171,12 +203,12 @@ impl<S: Store> crate::database::DB<S> {
     ///
     /// Processes deletes in chunks to avoid building a massive uncommitted write set.
     #[instrument(skip(self), fields(collection = %name), name = "db.truncate_collection")]
-    pub async fn truncate_collection(
+    pub async fn truncate_collection_as(
         &self,
+        context: &defra_core::RequestContext,
         name: &str,
-        identity: Option<&identity::Did>,
     ) -> Result<()> {
-        self.check_node_access(identity, acp::nac::NodePermission::CollectionTruncate)
+        self.check_node_access_as(context, acp::nac::NodePermission::CollectionTruncate)
             .await?;
         let collection = self
             .get_collection(name)?
@@ -258,7 +290,7 @@ impl<S: Store> crate::database::DB<S> {
 
     /// Delete data for a chunk of doc short IDs within a single write transaction.
     async fn truncate_chunk(&self, collection: &Collection, doc_short_ids: &[u64]) -> Result<()> {
-        use storage::keys::{HeadstoreDocKey, HeadstorePriorityKey};
+        use storage::keys::HeadstorePriorityKey;
 
         let txn = self.new_txn(false).await?;
         let datastore = txn.datastore()?;
@@ -281,31 +313,19 @@ impl<S: Store> crate::database::DB<S> {
                     .await
                     .map_err(Error::Storage)?;
 
-                let head_prefix = HeadstoreDocKey::document_prefix(doc_short_id);
-                let mut block_cids = Vec::new();
-                {
-                    let opts = IterOptions::new().with_prefix(head_prefix.clone());
-                    let mut iter = headstore.iterator(opts).await.map_err(Error::Storage)?;
-                    while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
-                        if let Some(cid_str) = extract_last_path_segment_str(&pair.key) {
-                            if let Ok(cid) = cid::Cid::try_from(cid_str.as_str()) {
-                                block_cids.push(cid);
-                            }
-                        }
-                    }
-                    iter.close().await.map_err(Error::Storage)?;
-                }
-                delete_prefix(
-                    &headstore,
-                    crate::block::heads::document::document_markers(doc_short_id),
-                )
-                .await?;
+                let heads = crate::block::heads::document::load(&headstore, doc_short_id)
+                    .await
+                    .map_err(Error::Storage)?;
+                let block_cids = crate::block::heads::document::live_cids(&heads);
+                headstore
+                    .delete(&crate::block::heads::document::set_key(doc_short_id))
+                    .await
+                    .map_err(Error::Storage)?;
                 delete_prefix(
                     &headstore,
                     crate::block::heads::document::document_publications(doc_short_id),
                 )
                 .await?;
-                delete_prefix(&headstore, head_prefix).await?;
                 delete_prefix(
                     &headstore,
                     HeadstorePriorityKey::document_prefix(doc_short_id),
@@ -361,8 +381,7 @@ impl<S: Store> crate::database::DB<S> {
 
     /// Delete collection-level metadata: index entries and collection heads.
     async fn truncate_collection_metadata(&self, collection_id: &str, short_id: u32) -> Result<()> {
-        use storage::keys::headstore::HeadstoreColSuperseded;
-        use storage::keys::{HeadstoreColKey, IndexDataStoreKey};
+        use storage::keys::{HeadstoreColPublishedKey, HeadstoreColSetKey, IndexDataStoreKey};
 
         let txn = self.new_txn(false).await?;
         let datastore = txn.datastore()?;
@@ -375,30 +394,18 @@ impl<S: Store> crate::database::DB<S> {
             let idx_prefix = IndexDataStoreKey::collection_prefix(short_id);
             delete_prefix(&datastore, idx_prefix).await?;
 
-            // Collect block CIDs from collection heads, then delete
-            let col_head_prefix = HeadstoreColKey::collection_prefix(short_id);
-            let mut block_cids = Vec::new();
-            {
-                let opts = IterOptions::new().with_prefix(col_head_prefix.clone());
-                let mut iter = headstore.iterator(opts).await.map_err(Error::Storage)?;
-                while let Some(pair) = iter.next().await.map_err(Error::Storage)? {
-                    if let Some(cid_str) = extract_last_path_segment_str(&pair.key) {
-                        if let Ok(cid) = cid::Cid::try_from(cid_str.as_str()) {
-                            block_cids.push(cid);
-                        }
-                    }
-                }
-                iter.close().await.map_err(Error::Storage)?;
-            }
-            delete_prefix(&headstore, col_head_prefix).await?;
-            // Supersede markers must go with the heads they name. A marker
-            // left behind would supersede a block that a later write recreates
-            // under the same content-addressed CID.
-            delete_prefix(
-                &headstore,
-                HeadstoreColSuperseded::collection_prefix(short_id),
-            )
-            .await?;
+            // Collect block CIDs from the collection's heads, then delete them
+            // with the guards that record their publication.
+            let block_cids = crate::block::heads::live_collection_heads(&headstore, short_id)
+                .await
+                .map_err(Error::Storage)?
+                .live;
+            headstore
+                .delete(&HeadstoreColSetKey::new(short_id).bytes())
+                .await
+                .map_err(Error::Storage)?;
+            delete_prefix(&headstore, HeadstoreColPublishedKey::collection_prefix(short_id))
+                .await?;
 
             crate::block::cleanup::delete_owned_dag(&blockstore, &systemstore, &block_cids, "")
                 .await?;

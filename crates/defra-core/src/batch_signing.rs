@@ -1,10 +1,10 @@
 //! Batch CID collection and Merkle root computation for batch signing.
 //!
-//! During block creation, individual CIDs are collected into a session.
-//! After all documents in a batch are created, the collected CIDs are
-//! used to compute a Merkle root which is then signed as a single batch.
+//! During block creation, individual CIDs are collected into a session, the
+//! one a request's [`RequestContext`](crate::RequestContext) names. After all
+//! documents in a batch are created, the collected CIDs are used to compute a
+//! Merkle root which is then signed as a single batch.
 
-use std::cell::RefCell;
 use std::sync::{Arc, OnceLock};
 
 use cid::Cid;
@@ -12,6 +12,9 @@ use kovan_map::HopscotchMap;
 use kovan_queue::seg_queue::SegQueue;
 use rapidhash::fast::RandomState;
 use sha2::{Digest, Sha256};
+
+#[cfg(any(test, feature = "ambient"))]
+pub use crate::ambient::{get_batch_session_key, set_batch_session_key};
 
 // ---------------------------------------------------------------------------
 // Merkle root computation
@@ -93,26 +96,6 @@ pub fn batch_take_cids(session_key: &str) -> Option<Vec<Cid>> {
         cids.push(cid);
     }
     Some(cids)
-}
-
-// ---------------------------------------------------------------------------
-// Thread-local session key  (same pattern as CURRENT_SIGNING_CONFIG)
-// ---------------------------------------------------------------------------
-
-thread_local! {
-    static BATCH_SESSION_KEY: RefCell<Option<String>> = const { RefCell::new(None) };
-}
-
-/// Set the batch session key for the current thread.
-pub fn set_batch_session_key(key: Option<String>) {
-    BATCH_SESSION_KEY.with(|k| {
-        *k.borrow_mut() = key;
-    });
-}
-
-/// Get the batch session key for the current thread.
-pub fn get_batch_session_key() -> Option<String> {
-    BATCH_SESSION_KEY.with(|k| k.borrow().clone())
 }
 
 // ---------------------------------------------------------------------------

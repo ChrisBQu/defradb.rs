@@ -40,6 +40,9 @@ struct StoreInner {
     options: RegolithStoreOptions,
     slots: Arc<TxnSlots>,
     stats: TransactionStatsHandle,
+    /// Where calls do their I/O: the calling worker's queue, a borrowed one
+    /// off the pool, or blocking without a pool.
+    io: super::worker_io::StoreIo,
     event_order: Arc<EventOrder>,
     path: PathBuf,
     /// The mounted OPFS environment, kept so `persist` can reach it.
@@ -91,6 +94,7 @@ impl RegolithStore {
         Ok(Self {
             inner: Arc::new(StoreInner {
                 db: Arc::new(db),
+                io: super::worker_io::StoreIo::new(options.pool.clone(), stats.clone()),
                 options,
                 slots: TxnSlots::new(),
                 stats,
@@ -221,9 +225,9 @@ impl Store for RegolithStore {
     async fn allocate(&self, key: &[u8], count: u64) -> Result<std::ops::Range<u64>> {
         self.ensure_open()?;
         let db = self.inner.db.db();
-        // On a worker the reservation never reads the device on the thread:
-        // what it waits for is recorded on the worker's queue.
-        match super::worker_io::queue_for(&self.inner.db) {
+        // On a pool the reservation never reads the device on the thread:
+        // what it waits for is recorded on a worker's queue.
+        match self.inner.io.queue(&self.inner.db, "allocate").await {
             Some(queue) => super::worker_io::settle(|| db.allocate_nowait(queue, key, count)).await,
             None => db.allocate(key, count),
         }
@@ -236,12 +240,14 @@ impl Store for RegolithStore {
 
     async fn new_txn(&self, readonly: bool) -> Result<Box<dyn Txn>> {
         let slot = self.inner.slots.enter()?;
+        let mode = self.inner.io.read_mode(&self.inner.db, "transaction").await;
         let txn = RegolithTxn::new(
             &self.inner.db,
             readonly,
             self.inner.options.isolation,
             slot,
             Arc::clone(&self.inner.event_order),
+            mode,
         )?;
         Ok(Box::new(txn))
     }
@@ -252,8 +258,10 @@ impl Store for RegolithStore {
         attempt: RetryAttempt,
     ) -> std::result::Result<RetryAttemptValue, RetryAttemptError> {
         let _slot = self.inner.slots.enter()?;
+        let queue = self.inner.io.queue(&self.inner.db, "transact").await;
         super::retry::transact(
             &self.inner.db,
+            queue,
             self.inner.options.isolation,
             &self.inner.event_order,
             options,

@@ -126,6 +126,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let acp_filter = collection.policy.as_ref().map(|policy| plan::AcpFilter {
             acp: self.acp.clone(),
             identity: Identity::from(identity),
+            dac_bypass: self.context().dac_bypass(),
             policy_id: policy.id.clone(),
             resource_name: policy.resource_name.clone(),
             retry_inputs: self.retry_inputs.clone(),

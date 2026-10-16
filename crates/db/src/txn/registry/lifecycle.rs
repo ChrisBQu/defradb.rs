@@ -30,12 +30,20 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
         &self,
         readonly: bool,
     ) -> std::result::Result<TransactionHandle, TransactionError> {
+        self.begin_as(&RequestContext::ambient(), readonly).await
+    }
+
+    async fn begin_as(
+        &self,
+        context: &RequestContext,
+        readonly: bool,
+    ) -> std::result::Result<TransactionHandle, TransactionError> {
         let db = self.db.clone();
         let broadcaster = self.broadcaster.clone();
         let opened = self
             .owners()
             .map_err(|error| TransactionError::execution(error.to_string()))?
-            .begin(caller(), move |id| async move {
+            .begin(caller(context), move |id| async move {
                 let mut txn = db.new_txn(readonly).await?;
                 txn.make_explicit();
                 OwnedTxn::new(id, txn, db, broadcaster)
@@ -56,22 +64,32 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
     where
         T: MaybeSend + 'static,
     {
+        self.run_as(&RequestContext::ambient(), handle, timeout, job)
+            .await
+    }
+
+    async fn run_as<T>(
+        &self,
+        context: &RequestContext,
+        handle: &TransactionHandle,
+        timeout: Option<Duration>,
+        job: TxnJob<T>,
+    ) -> std::result::Result<T, TransactionError>
+    where
+        T: MaybeSend + 'static,
+    {
         let id = TxnId::parse(handle).ok_or_else(|| {
             TransactionError::not_found(format!("transaction '{handle}' not found"))
         })?;
-        let caller = caller();
-        let scope = caller.clone();
+        let scope = context.clone();
         self.owners()
             .map_err(|error| unavailable(error, handle))?
-            .run(id, &caller, move |owned| {
-                Box::pin(defra_core::current_identity::with_scoped_identity(
-                    scope,
-                    async move {
-                        let ran = within(timeout, job(owned)).await;
-                        owned.after_request();
-                        ran
-                    },
-                ))
+            .run(id, &caller(context), move |owned| {
+                Box::pin(async move {
+                    let ran = scope.mirror(within(timeout, job(owned))).await;
+                    owned.after_request();
+                    ran
+                })
             })
             .await
             .map_err(|error| unavailable(error, handle))?
@@ -85,20 +103,34 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
     where
         T: MaybeSend + 'static,
     {
+        self.read_as(&RequestContext::ambient(), timeout, job).await
+    }
+
+    async fn read_as<T>(
+        &self,
+        context: &RequestContext,
+        timeout: Option<Duration>,
+        job: TxnJob<T>,
+    ) -> std::result::Result<T, TransactionError>
+    where
+        T: MaybeSend + 'static,
+    {
         let db = self.db.clone();
-        let scope = caller();
+        let scope = context.clone();
         self.owners()
             .map_err(|error| TransactionError::execution(error.to_string()))?
-            .run_anywhere("txn.read", move || {
-                defra_core::current_identity::with_scoped_identity(scope, async move {
-                    let txn = db.new_txn(true).await.map_err(|error| {
-                        TransactionError::execution(format!("storage error: {}", error))
-                    })?;
-                    // A snapshot of its own, never registered: no ID names it.
-                    let mut owned = OwnedTxn::new(TxnId::unnamed(), txn, db, None)
-                        .map_err(|error| TransactionError::execution(error.to_string()))?;
-                    within(timeout, job(&mut owned)).await
-                })
+            .run_anywhere("txn.read", move || async move {
+                scope
+                    .mirror(async move {
+                        let txn = db.new_txn(true).await.map_err(|error| {
+                            TransactionError::execution(format!("storage error: {}", error))
+                        })?;
+                        // A snapshot of its own, never registered: no ID names it.
+                        let mut owned = OwnedTxn::new(TxnId::unnamed(), txn, db, None)
+                            .map_err(|error| TransactionError::execution(error.to_string()))?;
+                        within(timeout, job(&mut owned)).await
+                    })
+                    .await
             })
             .await
             .map_err(|error| TransactionError::execution(error.to_string()))?
@@ -108,13 +140,21 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
         &self,
         handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError> {
+        self.commit_as(&RequestContext::ambient(), handle).await
+    }
+
+    async fn commit_as(
+        &self,
+        context: &RequestContext,
+        handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError> {
         let id = TxnId::parse(handle).ok_or_else(|| {
             TransactionError::not_found(format!("transaction '{handle}' not found"))
         })?;
         let label = handle.to_string();
         self.owners()
             .map_err(|error| unavailable(error, handle))?
-            .finish(id, &caller(), move |owned| {
+            .finish(id, &caller(context), move |owned| {
                 Box::pin(async move {
                     owned.commit().await.map_err(|error| {
                         TransactionError::execution(format!(
@@ -131,13 +171,21 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
         &self,
         handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError> {
+        self.rollback_as(&RequestContext::ambient(), handle).await
+    }
+
+    async fn rollback_as(
+        &self,
+        context: &RequestContext,
+        handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError> {
         let id = TxnId::parse(handle).ok_or_else(|| {
             TransactionError::not_found(format!("transaction '{handle}' not found"))
         })?;
         let label = handle.to_string();
         self.owners()
             .map_err(|error| unavailable(error, handle))?
-            .finish(id, &caller(), move |owned| {
+            .finish(id, &caller(context), move |owned| {
                 Box::pin(async move {
                     owned.rollback().map_err(|error| {
                         TransactionError::execution(format!(

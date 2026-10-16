@@ -399,12 +399,10 @@ pub extern "C" fn defra_mobile_ensure_schema(
             None => None,
         };
 
-        // Bind the node's own identity into the ambient context so the DB-layer
-        // NAC gate on create_collection resolves the node (the NAC owner) instead
-        // of the wildcard. The body runs on this thread via `block_on`, so the
-        // thread-local is visible throughout it; the guard restores on drop.
-        let _identity_guard =
-            defra_core::current_identity::scoped_current_identity(node_identity_did);
+        // The node acts in the call's context, so the NAC gate on
+        // create_collection resolves the node (the NAC owner) instead of the
+        // wildcard.
+        let context = defra_core::RequestContext::default().with_identity(node_identity_did);
 
         ffi_async!(rt, {
             let existing_collections: RapidHashSet<String> =
@@ -436,11 +434,7 @@ pub extern "C" fn defra_mobile_ensure_schema(
                 .map(|collection| collection.name.clone())
                 .collect::<Vec<_>>();
             database
-                .create_collections_atomic_with_acp_registration(
-                    to_create,
-                    document_acp.clone(),
-                    creator,
-                )
+                .create_collections_atomic_with_acp_registration_as(&context, to_create, document_acp.clone(), creator)
                 .await
                 .map_err(|error| format!("failed to create collection: {}", error))?;
 

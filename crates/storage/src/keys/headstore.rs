@@ -147,93 +147,128 @@ impl Key for HeadstorePriorityKey {
     }
 }
 
-/// HeadstoreColKey: Stores current collection head CID
+/// HeadstoreDocSetKey: the one key that holds a document's head set.
 ///
-/// Structure: /c/[CollectionShortID]/[CID]
-/// Example: /c/1/bafyreih7c4pdkyvosses56rmyomakxvicn4cehjrw3w3mmk57iagt6f4sq
+/// Structure: `/hd/[DocShortID uvarint]`
+///
+/// The value is a head set (`merge::head_set`): every field's heads and the
+/// composite's together, written only by blind merges, so one point read
+/// returns them all. Its names are the bytes a [`HeadstoreDocKey`] has after
+/// its document prefix, which is how a head key is rebuilt from the set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeadstoreDocSetKey {
+    /// Document short ID
+    pub doc_short_id: u64,
+}
+
+impl HeadstoreDocSetKey {
+    /// Create the key of one document's head set.
+    pub fn new(doc_short_id: u64) -> Self {
+        Self { doc_short_id }
+    }
+
+    /// The prefix every document's head set key starts with.
+    pub fn family_prefix() -> Vec<u8> {
+        b"/hd/".to_vec()
+    }
+
+    /// The document short ID a head set key names.
+    pub fn parse(bytes: &[u8]) -> Option<Self> {
+        let rest = bytes.strip_prefix(b"/hd/".as_slice())?;
+        let (rest, doc_short_id) = decode_doc_short_id_prefix(rest).ok()?;
+        rest.is_empty().then_some(Self { doc_short_id })
+    }
+}
+
+impl Key for HeadstoreDocSetKey {
+    fn bytes(&self) -> Vec<u8> {
+        let mut buf = Self::family_prefix();
+        buf.extend_from_slice(&encode_doc_short_id(self.doc_short_id));
+        buf
+    }
+
+    fn to_string(&self) -> String {
+        format!("/hd/{}", self.doc_short_id)
+    }
+}
+
+/// HeadstoreColSetKey: the one key that holds a collection's head set.
+///
+/// Structure: `/hc/[CollectionID]` (decimal)
+///
+/// The value is a head set (`merge::head_set`) whose names are the tips'
+/// CID text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeadstoreColSetKey {
+    /// Collection short ID (decimal format)
+    pub collection_id: u32,
+}
+
+impl HeadstoreColSetKey {
+    /// Create the key of one collection's head set.
+    pub fn new(collection_id: u32) -> Self {
+        Self { collection_id }
+    }
+
+    /// The prefix every collection's head set key starts with.
+    pub fn family_prefix() -> Vec<u8> {
+        b"/hc/".to_vec()
+    }
+
+    /// The collection a head set key names.
+    pub fn parse(bytes: &[u8]) -> Option<Self> {
+        let digits = std::str::from_utf8(bytes.strip_prefix(b"/hc/".as_slice())?).ok()?;
+        Some(Self {
+            collection_id: digits.parse().ok()?,
+        })
+    }
+}
+
+impl Key for HeadstoreColSetKey {
+    fn bytes(&self) -> Vec<u8> {
+        format!("/hc/{}", self.collection_id).into_bytes()
+    }
+
+    fn to_string(&self) -> String {
+        format!("/hc/{}", self.collection_id)
+    }
+}
+
+/// HeadstoreColPublishedKey: records that a collection block was published,
+/// the collection's counterpart of a document head's publication guard.
+///
+/// Structure: `/rc/[CollectionID]/[CID]`
+///
+/// A parent that was published and has since been superseded is told from one
+/// whose block has not arrived by this key: the first is superseded, the
+/// second is held ahead.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HeadstoreColKey {
+pub struct HeadstoreColPublishedKey {
     /// Collection short ID (decimal format)
     pub collection_id: u32,
     /// IPFS Content Identifier
     pub cid: Cid,
 }
 
-impl HeadstoreColKey {
-    /// Create a new HeadstoreColKey
+impl HeadstoreColPublishedKey {
+    /// Create the guard key of one collection block.
     pub fn new(collection_id: u32, cid: Cid) -> Self {
         Self { collection_id, cid }
     }
 
-    /// Create a prefix for all heads in a collection
+    /// The prefix of every guard of one collection.
     pub fn collection_prefix(collection_id: u32) -> Vec<u8> {
-        format!("/c/{}/", collection_id).into_bytes()
+        format!("/rc/{collection_id}/").into_bytes()
     }
 }
 
-impl Key for HeadstoreColKey {
+impl Key for HeadstoreColPublishedKey {
     fn bytes(&self) -> Vec<u8> {
-        format!("/c/{}/{}", self.collection_id, self.cid).into_bytes()
+        format!("/rc/{}/{}", self.collection_id, self.cid).into_bytes()
     }
 
     fn to_string(&self) -> String {
-        format!("/c/{}/{}", self.collection_id, self.cid)
-    }
-}
-
-/// HeadstoreColSuperseded: records that one collection head superseded another.
-///
-/// Structure: `/cs/[CollectionID]/[ParentCID]/[ChildCID]`
-///
-/// A collection head stops being a head when a later block names it as a
-/// parent. Recording that as a key the *child* owns, rather than deleting the
-/// parent's head key, is what lets two concurrent appends both commit: every
-/// key a writer writes ends in its own CID, so two writers can never write the
-/// same key and the storage engine has nothing to reject.
-///
-/// The head set is then a query rather than a maintained value: a head key is
-/// live exactly when no `/cs/{collection}/{cid}/` entry exists for it. See
-/// `proofs/tla/HeadSet.tla` and `proofs/lean/HeadSet/Core.lean`, where this is
-/// `Key.superseded` and the query is `derivedHeads`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HeadstoreColSuperseded {
-    /// Collection short id.
-    pub collection_id: u32,
-    /// The head being superseded.
-    pub parent: Cid,
-    /// The block that superseded it, which is also the writer of this key.
-    pub child: Cid,
-}
-
-impl HeadstoreColSuperseded {
-    /// Record that `child` supersedes `parent`.
-    pub fn new(collection_id: u32, parent: Cid, child: Cid) -> Self {
-        Self {
-            collection_id,
-            parent,
-            child,
-        }
-    }
-
-    /// Prefix matching every marker against one head. Non-empty means the head
-    /// has been superseded and is no longer a tip.
-    pub fn parent_prefix(collection_id: u32, parent: Cid) -> Vec<u8> {
-        format!("/cs/{}/{}/", collection_id, parent).into_bytes()
-    }
-
-    /// Prefix matching every marker in a collection, for pruning.
-    pub fn collection_prefix(collection_id: u32) -> Vec<u8> {
-        format!("/cs/{}/", collection_id).into_bytes()
-    }
-}
-
-impl Key for HeadstoreColSuperseded {
-    fn bytes(&self) -> Vec<u8> {
-        format!("/cs/{}/{}/{}", self.collection_id, self.parent, self.child).into_bytes()
-    }
-
-    fn to_string(&self) -> String {
-        format!("/cs/{}/{}/{}", self.collection_id, self.parent, self.child)
+        format!("/rc/{}/{}", self.collection_id, self.cid)
     }
 }
 
@@ -470,15 +505,28 @@ mod tests {
     }
 
     #[test]
-    fn test_headstore_col_key() {
+    fn test_headstore_set_keys() {
         let cid = test_cid();
-        let key = HeadstoreColKey::new(1, cid);
+        for id in [1u64, 47, 240, u64::MAX] {
+            let key = HeadstoreDocSetKey::new(id);
+            assert_eq!(
+                key.bytes(),
+                [b"/hd/".as_slice(), &encode_doc_short_id(id)].concat()
+            );
+            assert_eq!(HeadstoreDocSetKey::parse(&key.bytes()), Some(key));
+        }
+        assert_eq!(HeadstoreDocSetKey::parse(b"/hd/"), None);
+        assert_eq!(HeadstoreDocSetKey::parse(b"/hd/\x01/"), None);
+        assert_eq!(HeadstoreDocSetKey::parse(b"/d/\x01"), None);
 
-        let string = key.to_string();
-        assert_eq!(string, format!("/c/1/{}", cid));
+        let key = HeadstoreColSetKey::new(12);
+        assert_eq!(key.bytes(), b"/hc/12");
+        assert_eq!(HeadstoreColSetKey::parse(&key.bytes()), Some(key));
+        assert_eq!(HeadstoreColSetKey::parse(b"/hc/"), None);
+        assert_eq!(HeadstoreColSetKey::parse(b"/hc/1x"), None);
 
-        let bytes = key.bytes();
-        assert_eq!(bytes, string.as_bytes());
+        let published = HeadstoreColPublishedKey::new(3, cid);
+        assert_eq!(published.bytes(), format!("/rc/3/{cid}").into_bytes());
     }
 
     #[test]
@@ -555,9 +603,6 @@ mod tests {
             prefix,
             [b"/p/".as_slice(), &[0x2a], b"/0000000000000042/"].concat()
         );
-
-        let prefix = HeadstoreColKey::collection_prefix(1);
-        assert_eq!(prefix, b"/c/1/");
 
         let prefix = HeadstoreFieldDefinition::field_definition_prefix();
         assert_eq!(prefix, b"/f/");

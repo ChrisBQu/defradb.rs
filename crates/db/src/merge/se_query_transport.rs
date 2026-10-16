@@ -35,6 +35,9 @@ pub struct DbMergeSeQueryTransport<T: P2PTransport> {
     /// receive the key at runtime via `set_se_options` (#976). `None` at query
     /// time means "no SE key" → empty result (Go semantics, no local fallback).
     key_handle: SeKeyHandle,
+    /// Where a query's round trip runs: a query runs on a pool worker, its
+    /// request and the wait for the reply on the network edge.
+    network: p2p::network::Network,
 }
 
 impl<T: P2PTransport> DbMergeSeQueryTransport<T> {
@@ -46,12 +49,14 @@ impl<T: P2PTransport> DbMergeSeQueryTransport<T> {
         correlator: SeQueryCorrelator,
         replicators: Arc<ReplicatorRegistry>,
         key_handle: SeKeyHandle,
+        network: p2p::network::Network,
     ) -> Self {
         Self {
             transport,
             correlator,
             replicators,
             key_handle,
+            network,
         }
     }
 
@@ -102,22 +107,28 @@ impl<T: P2PTransport> DbMergeSeQueryTransport<T> {
         let message_id = request.message_id.clone();
         let mut pending = self.correlator.register(message_id.clone());
 
-        self.transport
-            .send_se_query_request(&peer_id, request)
-            .await
-            .map_err(|e| format!("failed to send SE query request: {e}"))?;
-
-        match n0_future::time::timeout(SE_QUERY_TIMEOUT, pending.recv()).await {
-            Ok(Ok(reply)) => {
-                if let Some(err) = reply.err_message {
-                    Err(format!("replicator returned SE query error: {err}"))
-                } else {
-                    Ok(reply.doc_ids)
+        let (transport, network) = (self.transport.clone(), self.network.clone());
+        let exchange = move || async move {
+            transport
+                .send_se_query_request(&peer_id, request)
+                .await
+                .map_err(|e| format!("failed to send SE query request: {e}"))?;
+            match network.timeout(SE_QUERY_TIMEOUT, pending.recv()).await {
+                Ok(Ok(reply)) => {
+                    if let Some(err) = reply.err_message {
+                        Err(format!("replicator returned SE query error: {err}"))
+                    } else {
+                        Ok(reply.doc_ids)
+                    }
                 }
+                Ok(Err(_)) => Err("SE query reply channel closed".to_string()),
+                Err(_) => Err("SE query timed out waiting for replicator".to_string()),
             }
-            Ok(Err(_)) => Err("SE query reply channel closed".to_string()),
-            Err(_) => Err("SE query timed out waiting for replicator".to_string()),
-        }
+        };
+        self.network
+            .hand_off(exchange)
+            .await
+            .unwrap_or_else(|| Err("the node is shutting down; SE query not sent".to_string()))
     }
 }
 

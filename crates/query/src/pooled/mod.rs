@@ -19,6 +19,9 @@
 //!   the C FFI's asynchronous calls) is admitted and left running: its
 //!   response goes to the callback on the worker that ran it, so it crosses
 //!   back no thread at all.
+//!
+//! A request carries its [`RequestContext`] into the pool, and the
+//! transaction calls that take one pass it through to the inner executor.
 
 mod route;
 
@@ -29,6 +32,7 @@ use async_trait::async_trait;
 pub use route::document_key;
 
 use defra_core::thread_bounds::MaybeBoxFuture;
+use defra_core::RequestContext;
 
 use crate::error::{QueryError, Result, TransactionError};
 use crate::executor::{QueryExecutor, QueryRequest, QueryResponse, ResponseCallback};
@@ -49,15 +53,19 @@ impl PooledExecutor {
 
     /// `inner` as the boundary holds it: on `pool` when the database has one,
     /// as it is otherwise (a test, a one-shot tool).
-    pub fn wrap(inner: Arc<dyn QueryExecutor>, pool: Option<&workers::Pool>) -> Arc<dyn QueryExecutor> {
+    pub fn wrap(
+        inner: Arc<dyn QueryExecutor>,
+        pool: Option<&workers::Pool>,
+    ) -> Arc<dyn QueryExecutor> {
         match pool {
             Some(pool) => Arc::new(Self::new(inner, pool.clone())),
             None => inner,
         }
     }
 
-    /// Runs `call` on `inner` on the worker `target` names, and hands its
-    /// output back; why it has none when the pool could not run it.
+    /// Runs `call` on `inner` on the worker `target` names (in place when
+    /// already on a worker), and hands its output back; why it has none when
+    /// the pool could not run it.
     async fn on_pool<T, F, Fut>(&self, target: workers::Target, call: F) -> Result<T>
     where
         F: FnOnce(Arc<dyn QueryExecutor>) -> Fut + Send + 'static,
@@ -65,13 +73,18 @@ impl PooledExecutor {
         T: Send + 'static,
     {
         let inner = Arc::clone(&self.inner);
-        let done = self
-            .pool
-            .submit(target, move || call(inner))
+        workers::run_on(Some(&self.pool), target, move || call(inner))
             .await
-            .map_err(unavailable)?;
-        done.await.map_err(unavailable)
+            .map_err(unavailable)
     }
+}
+
+/// `request` as it leaves its caller's thread for the pool: with the context
+/// its caller set up taken along (see [`RequestContext::or_ambient`]; outside
+/// tests this is `request` itself).
+fn leaving_the_caller(mut request: QueryRequest) -> QueryRequest {
+    request.context = std::mem::take(&mut request.context).or_ambient();
+    request
 }
 
 /// A request the pool could not run: it was shutting down, or the task
@@ -95,6 +108,7 @@ impl QueryExecutor for PooledExecutor {
         prepared: Option<Arc<PreparedMutations>>,
     ) -> QueryResponse {
         let target = route::request_target(&request);
+        let request = leaving_the_caller(request);
         self.on_pool(target, move |inner| async move {
             inner.execute_prepared(request, prepared).await
         })
@@ -115,9 +129,13 @@ impl QueryExecutor for PooledExecutor {
 
     async fn execute(&self, request: QueryRequest) -> QueryResponse {
         let target = route::request_target(&request);
-        self.on_pool(target, move |inner| async move { inner.execute(request).await })
-            .await
-            .unwrap_or_else(|error| QueryResponse::error(error.to_string()))
+        let request = leaving_the_caller(request);
+        self.on_pool(
+            target,
+            move |inner| async move { inner.execute(request).await },
+        )
+        .await
+        .unwrap_or_else(|error| QueryResponse::error(error.to_string()))
     }
 
     async fn execute_in_txn(
@@ -135,6 +153,14 @@ impl QueryExecutor for PooledExecutor {
         self.inner.begin_txn(readonly).await
     }
 
+    async fn begin_txn_as(
+        &self,
+        context: &RequestContext,
+        readonly: bool,
+    ) -> std::result::Result<TransactionHandle, TransactionError> {
+        self.inner.begin_txn_as(context, readonly).await
+    }
+
     async fn commit_txn(
         &self,
         handle: &TransactionHandle,
@@ -142,11 +168,27 @@ impl QueryExecutor for PooledExecutor {
         self.inner.commit_txn(handle).await
     }
 
+    async fn commit_txn_as(
+        &self,
+        context: &RequestContext,
+        handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError> {
+        self.inner.commit_txn_as(context, handle).await
+    }
+
     async fn rollback_txn(
         &self,
         handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError> {
         self.inner.rollback_txn(handle).await
+    }
+
+    async fn rollback_txn_as(
+        &self,
+        context: &RequestContext,
+        handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError> {
+        self.inner.rollback_txn_as(context, handle).await
     }
 
     fn abandon_txn(&self, handle: &TransactionHandle) {

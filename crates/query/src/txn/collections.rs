@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use defra_core::thread_bounds::MaybeBoxFuture;
+use defra_core::RequestContext;
 use schema::CollectionVersion;
 use storage::corekv::MaybeSend;
 
@@ -17,10 +18,12 @@ use crate::error::{QueryError, Result};
 
 use super::{txn_job, TransactionHandle, TransactionRegistry};
 
-/// The collections transaction `handle` sees, falling back to `fallback`
-/// where the transaction has no provider of its own.
+/// The collections transaction `handle` sees, for the request `context`
+/// serves, falling back to `fallback` where the transaction has no provider
+/// of its own.
 pub struct TxnCollections<R> {
     registry: Arc<R>,
+    context: RequestContext,
     handle: TransactionHandle,
     fallback: Arc<dyn CollectionProvider>,
 }
@@ -31,11 +34,13 @@ where
 {
     pub fn new(
         registry: Arc<R>,
+        context: RequestContext,
         handle: TransactionHandle,
         fallback: Arc<dyn CollectionProvider>,
     ) -> Self {
         Self {
             registry,
+            context,
             handle,
             fallback,
         }
@@ -62,7 +67,7 @@ where
             })
         });
         self.registry
-            .run(&self.handle, None, job)
+            .run_as(&self.context, &self.handle, None, job)
             .await
             .map_err(|error| QueryError::execution(error.to_string()))?
     }

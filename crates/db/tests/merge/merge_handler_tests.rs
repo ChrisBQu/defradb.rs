@@ -4003,17 +4003,17 @@ async fn remote_field_tombstone_clears_materialized_value_and_keeps_its_priority
         .values()
         .find(|field| field.name == "body")
         .unwrap();
-    let field_key = storage::keys::headstore::HeadstoreDocKey::new(short_id, "body", field_cid);
-    let priority = txn
-        .headstore()
-        .unwrap()
-        .get(&storage::corekv::Key::bytes(&field_key))
+    let set = db::block::heads::document::load(&txn.headstore().unwrap(), short_id)
         .await
-        .unwrap()
+        .unwrap();
+    let field_name = db::block::heads::document::name("body", &field_cid);
+    let priority = set
+        .live()
+        .find(|(name, _)| *name == field_name.as_slice())
+        .map(|(_, priority)| priority)
         .unwrap();
     assert_eq!(
-        db::block::builder::decode_priority_varint(&priority),
-        2,
+        priority, 2,
         "field heads retain their own priority, independent of the composite"
     );
     assert_eq!(body.priority, 2);

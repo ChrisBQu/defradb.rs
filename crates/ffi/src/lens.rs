@@ -50,14 +50,9 @@ pub unsafe extern "C" fn lens_add(
             NodePermission::LensCreate
         ));
 
-        // Bind the caller's identity so the NAC-gated DB ops (set_migration /
-        // add_lens) resolve the actual caller instead of the wildcard. The body
-        // runs on this thread via `block_on`, so the thread-local is visible
-        // throughout; the guard restores on drop. set_migration(.., None) falls
-        // back to this ambient identity.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
-        );
+        // The caller acts in the call's context, so the NAC checks the body
+        // reaches resolve the actual caller instead of the wildcard.
+        let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()));
 
         let lens_str = try_ffi!(require_c_str(lens_json, "lens_json"));
 
@@ -74,7 +69,7 @@ pub unsafe extern "C" fn lens_add(
 
                 let result = crate::helpers::block_on(rt, async {
                     let transform_id = database
-                        .set_migration(full_config, None)
+                        .set_migration_as(&context, full_config)
                         .await
                         .map_err(|e| format!("failed to set migration: {}", e))?;
                     Ok::<String, String>(transform_id.to_string())
@@ -167,13 +162,9 @@ pub unsafe extern "C" fn lens_add_in_txn(
             None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
         };
 
-        // Bind the caller's identity so the registry-layer NAC gate on
-        // add_lens_in_txn resolves the actual caller instead of the wildcard. The
-        // body runs on this thread via `block_on`, so the thread-local is visible
-        // throughout; the guard restores on drop.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
-        );
+        // The caller acts in the call's context, so the NAC checks the body
+        // reaches resolve the actual caller instead of the wildcard.
+        let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()));
 
         let result = crate::helpers::block_on(rt, async {
             let modules: Vec<LensModule> =
@@ -199,7 +190,7 @@ pub unsafe extern "C" fn lens_add_in_txn(
             for lens_module in &modules {
                 let config = LensConfig::new("", "", lens_module.clone());
                 let transform_id = registry
-                    .add_lens_in_txn(&txn_str, config)
+                    .add_lens_in_txn_as(&context, &txn_str, config)
                     .await
                     .map_err(|e| format!("failed to add lens in txn: {}", e))?;
                 all_ids.push(transform_id.to_string());
@@ -237,12 +228,6 @@ pub unsafe extern "C" fn lens_list(node_ptr: usize, identity_did: *const c_char)
             Some(store) => store,
             None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
         };
-
-        // Bind the caller's identity so any DB-layer NAC gate reached by the body
-        // resolves the actual caller instead of the wildcard.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
-        );
 
         ffi_async!(rt, {
             let lenses = lens_store
@@ -284,15 +269,13 @@ pub unsafe extern "C" fn lens_list_in_txn(
             None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
         };
 
-        // Bind the caller's identity so any registry-layer NAC gate reached by the
-        // body resolves the actual caller instead of the wildcard.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()),
-        );
+        // The caller acts in the call's context, so the NAC checks the body
+        // reaches resolve the actual caller instead of the wildcard.
+        let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()));
 
         ffi_async!(rt, {
             let lenses = registry
-                .list_lenses_in_txn(&txn_str)
+                .list_lenses_in_txn_as(&context, &txn_str)
                 .await
                 .map_err(|e| format!("failed to list lenses in txn: {}", e))?;
 

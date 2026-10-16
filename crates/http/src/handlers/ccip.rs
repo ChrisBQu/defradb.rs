@@ -86,6 +86,7 @@ async fn execute(
             operation_name: request.operation_name,
             variables: request.variables,
             identity: identity.did().cloned(),
+            context: Default::default(),
         },
     )
     .await;

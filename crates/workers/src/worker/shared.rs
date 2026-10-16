@@ -58,7 +58,13 @@ impl Job {
     {
         let (sender, completion) = completion::channel();
         let fail: Arc<dyn Fail + Send + Sync> = sender.shared();
-        let start: Start = Box::new(move || Box::pin(async move { sender.send(make().await) }));
+        let start: Start = Box::new(move || {
+            // Its waiter gave up before it started: it never runs.
+            if sender.is_cancelled() {
+                return Box::pin(std::future::ready(()));
+            }
+            Box::pin(async move { sender.send(make().await) })
+        });
         (
             Job {
                 start,
@@ -249,10 +255,18 @@ impl WorkerShared {
     /// Queues an admitted job and wakes the worker if it parks. The job's
     /// admission reserved its room, so the push finds space.
     pub(crate) fn push(&self, job: Job) {
-        let inbox = if job.bound { &self.bound } else { &self.free };
-        if let Err(Message::Job(job)) = inbox.push(Message::Job(job)) {
-            // Unreachable while admission holds; failing the job beats losing it.
-            job.fail.fail(crate::Error::ShutDown);
+        self.push_all(std::iter::once(job));
+    }
+
+    /// Queues admitted jobs, then wakes the worker if it parks: once for all
+    /// of them, which it finds together.
+    pub(crate) fn push_all(&self, jobs: impl IntoIterator<Item = Job>) {
+        for job in jobs {
+            let inbox = if job.bound { &self.bound } else { &self.free };
+            if let Err(Message::Job(job)) = inbox.push(Message::Job(job)) {
+                // Unreachable while admission holds; failing the job beats losing it.
+                job.fail.fail(crate::Error::ShutDown);
+            }
         }
         self.signal.notify();
         // Pairs with `exit`: either the worker's last drain sees this job, or

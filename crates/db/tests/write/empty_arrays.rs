@@ -91,8 +91,9 @@ fn an_empty_array_read_from_storage_is_valid_for_every_array_kind() {
     }
 }
 
-/// A document whose immutable `tags` holds an empty array, and a copy of it
-/// read for update with `tags` set to `tags`.
+/// A document whose immutable JSON `tags` holds an empty array (only scalar
+/// kinds can be immutable, and JSON is one), and a copy of it read for update
+/// with `tags` set to `tags`.
 async fn immutable_tags_update(
     tags: NormalValue,
 ) -> (AutoCommitMutator<RegolithStore>, document::DocID, Document) {
@@ -104,7 +105,7 @@ async fn immutable_tags_update(
         vec![
             FieldDescription::new("1", "_docID", FieldKind::doc_id()),
             FieldDescription::new("2", "title", FieldKind::string()),
-            FieldDescription::new("3", "tags", FieldKind::nillable_string_array()).as_immutable(),
+            FieldDescription::new("3", "tags", FieldKind::json()).as_immutable(),
         ],
     ))
     .await
@@ -112,7 +113,7 @@ async fn immutable_tags_update(
     let mutator = AutoCommitMutator::new(Arc::clone(&db));
     let mut doc = Document::new();
     doc.set("title", NormalValue::String("first".to_string()));
-    doc.set("tags", NormalValue::NillableStringArray(Some(Vec::new())));
+    doc.set("tags", NormalValue::JsonArray(Vec::new()));
     let created = mutator.create("Post", doc).await.unwrap();
     let mut doc = mutator
         .get_for_update("Post", &created.doc_id)
@@ -126,8 +127,7 @@ async fn immutable_tags_update(
 
 #[tokio::test]
 async fn setting_an_immutable_empty_array_to_an_empty_array_is_not_a_change() {
-    let (mutator, doc_id, doc) =
-        immutable_tags_update(NormalValue::NillableStringArray(Some(Vec::new()))).await;
+    let (mutator, doc_id, doc) = immutable_tags_update(NormalValue::JsonArray(Vec::new())).await;
 
     mutator
         .update(
@@ -156,10 +156,7 @@ async fn setting_an_immutable_empty_array_to_an_empty_array_is_not_a_change() {
 #[tokio::test]
 async fn changing_an_immutable_empty_array_is_refused() {
     let (mutator, doc_id, doc) =
-        immutable_tags_update(NormalValue::NillableStringArray(Some(vec![
-            "new".to_string()
-        ])))
-        .await;
+        immutable_tags_update(NormalValue::JsonArray(vec![serde_json::json!("new")])).await;
 
     let error = mutator
         .update(

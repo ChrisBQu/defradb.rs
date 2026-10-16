@@ -151,6 +151,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             mutator.clone(),
                             mapping.clone(),
                         )
+                        .with_context(self.context().into_owned())
                         .with_collection(collection.clone())
                         .with_request_time(request_time)
                         .with_inputs(inputs),
@@ -165,6 +166,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         fetcher,
                         mapping.clone(),
                     )
+                    .with_context(self.context().into_owned())
                     .with_collection(collection.clone())
                     .with_request_time(request_time)
                     .with_input(input);
@@ -188,7 +190,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         mutator.clone(),
                         fetcher,
                         mapping.clone(),
-                    );
+                    )
+                    .with_context(self.context().into_owned());
 
                     if let Some(ref doc_ids) = resolved_doc_ids {
                         node = node.with_doc_ids(doc_ids.clone());
@@ -209,6 +212,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         mutator.clone(),
                         mapping.clone(),
                     )
+                    .with_context(self.context().into_owned())
                     .with_collection(collection.clone())
                     .with_request_time(request_time);
 

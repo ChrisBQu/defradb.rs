@@ -31,7 +31,7 @@ use std::time::Duration;
 
 use defra_core::thread_bounds::MaybeSend;
 use futures::future::LocalBoxFuture;
-use regolith::sync::unbounded;
+use regolith::sync::{unbounded, ArrayQueue};
 use workers::Target;
 #[cfg(not(target_family = "wasm"))]
 use workers::{Pool, Submit};
@@ -89,7 +89,7 @@ where
 /// there, so the work runs in place, and nothing needs to be `Send`.
 pub(crate) struct Owners<T, K>
 where
-    T: 'static,
+    T: MaybeSend + 'static,
     K: Clone + PartialEq + Send + Sync + 'static,
 {
     #[cfg(not(target_family = "wasm"))]
@@ -99,7 +99,7 @@ where
 
 impl<T, K> Owners<T, K>
 where
-    T: 'static,
+    T: MaybeSend + 'static,
     K: Clone + PartialEq + Send + Sync + 'static,
 {
     /// The transactions of a registry on the workers of `pool`.
@@ -208,13 +208,23 @@ where
                 Err(error) => return Ok(Err(error)),
             };
             let (mailbox, inbox) = unbounded();
+            let idle = Arc::new(ArrayQueue::new(1));
+            // The slot is new and holds one: the push cannot find it full.
+            let _ = idle.push(txn);
             match shared.upgrade() {
-                Some(tables) => tables.tables[worker].insert(id, Entry { mailbox, key }),
+                Some(tables) => tables.tables[worker].insert(
+                    id,
+                    Entry {
+                        mailbox,
+                        idle: Arc::clone(&idle),
+                        key,
+                    },
+                ),
                 None => return Err(Unavailable::NotFound),
             }
-            if let Err(error) = start(actor::own(txn, id, worker, inbox, shared.clone())) {
+            if let Err(error) = start(actor::own(idle, id, worker, inbox, shared.clone())) {
                 if let Some(tables) = shared.upgrade() {
-                    tables.tables[worker].remove(id);
+                    tables.tables[worker].take(id);
                 }
                 return Err(Unavailable::Pool(error));
             }
@@ -246,36 +256,40 @@ where
     }
 
     /// Ends transaction `id` with `last`, which gets it by value, after every
-    /// request for it that arrived earlier; requests that arrive later find
-    /// no transaction. A caller whose `key` does not own it is told it does
-    /// not exist, and the transaction stays. A caller that stops waiting
-    /// before the end begins abandons the transaction instead: it ends
-    /// unfinished.
+    /// request for it that arrived earlier. The transaction leaves the table
+    /// before this first waits, so requests that arrive later, and a racing
+    /// end, find no transaction. A caller whose `key` does not own it is told
+    /// it does not exist, and the transaction stays. A caller that stops
+    /// waiting before the end begins abandons the transaction instead: it
+    /// ends unfinished.
     pub(crate) async fn finish<R, L>(&self, id: TxnId, key: &K, last: L) -> Result<R, Unavailable>
     where
         R: MaybeSend + 'static,
         L: FnOnce(T) -> LocalBoxFuture<'static, R> + MaybeSend + 'static,
     {
-        if !self.table(id).admits(id, key) {
+        let table = self.table(id);
+        if !table.admits(id, key) {
             return Err(Unavailable::NotFound);
         }
+        let entry = table.take(id).ok_or(Unavailable::NotFound)?;
         let cancelled = Arc::new(AtomicBool::new(false));
         let abandon_on_drop = AbandonOnDrop {
-            table: Arc::downgrade(&self.shared),
-            owner: id.owner(self.workers()),
-            id,
+            idle: Arc::clone(&entry.idle),
             cancelled: Some(Arc::clone(&cancelled)),
         };
-        let ended = self
-            .send(id, "txn.finish", move |reply| Message::Finish {
-                last: Box::new(move |txn| {
-                    Box::pin(async move {
-                        let _ = reply.try_send(last(txn).await);
-                    })
-                }),
-                cancelled,
-            })
-            .await;
+        let (reply, answer) = unbounded();
+        let queued = entry.mailbox.try_send(Message::Finish {
+            last: Box::new(move |txn| {
+                Box::pin(async move {
+                    let _ = reply.try_send(last(txn).await);
+                })
+            }),
+            cancelled,
+        });
+        let ended = match queued {
+            Ok(()) => answer.recv_async().await.ok_or(Unavailable::NotFound),
+            Err(_) => Err(Unavailable::NotFound),
+        };
         abandon_on_drop.disarm();
         ended
     }
@@ -358,7 +372,7 @@ where
 
 impl<T, K> Drop for Owners<T, K>
 where
-    T: 'static,
+    T: MaybeSend + 'static,
     K: Clone + PartialEq + Send + Sync + 'static,
 {
     /// A registry that goes ends every transaction it owns.
@@ -368,22 +382,18 @@ where
 }
 
 /// While a finish waits: if its caller stops waiting, the transaction is
-/// abandoned instead of finished, and leaves its owner's table at once.
-struct AbandonOnDrop<T, K>
+/// abandoned instead of finished, and dropped at once while still idle.
+struct AbandonOnDrop<T>
 where
     T: 'static,
-    K: Clone + PartialEq + 'static,
 {
-    table: std::sync::Weak<Shared<T, K>>,
-    owner: usize,
-    id: TxnId,
+    idle: Arc<ArrayQueue<T>>,
     cancelled: Option<Arc<AtomicBool>>,
 }
 
-impl<T, K> AbandonOnDrop<T, K>
+impl<T> AbandonOnDrop<T>
 where
     T: 'static,
-    K: Clone + PartialEq + 'static,
 {
     /// The finish got its answer: nothing to abandon.
     fn disarm(mut self) {
@@ -391,19 +401,16 @@ where
     }
 }
 
-impl<T, K> Drop for AbandonOnDrop<T, K>
+impl<T> Drop for AbandonOnDrop<T>
 where
     T: 'static,
-    K: Clone + PartialEq + 'static,
 {
     fn drop(&mut self) {
         let Some(cancelled) = self.cancelled.take() else {
             return;
         };
         cancelled.store(true, Ordering::Release);
-        if let Some(shared) = self.table.upgrade() {
-            shared.tables[self.owner].abandon(self.id);
-        }
+        drop(self.idle.pop());
     }
 }
 

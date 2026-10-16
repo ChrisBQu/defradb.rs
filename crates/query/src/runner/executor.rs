@@ -7,6 +7,7 @@ use std::future::Future;
 use tracing::instrument;
 
 use acp::nac::NodePermission;
+use defra_core::RequestContext;
 use identity::Did;
 
 use crate::error::{Result, TransactionError};
@@ -119,7 +120,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         &self,
         request: &QueryRequest,
     ) -> Result<Option<std::sync::Arc<crate::prepared::PreparedMutations>>> {
-        await_with_timeout(self.prepare_mutations(request), self.deadline()).await
+        let runner = self.for_query(request);
+        await_with_timeout(runner.prepare_mutations(request), self.deadline()).await
     }
 
     async fn execute_prepared(
@@ -127,206 +129,18 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         request: QueryRequest,
         prepared: Option<std::sync::Arc<crate::prepared::PreparedMutations>>,
     ) -> QueryResponse {
-        // Convert variables from JSON to RapidHashMap format for the parser
-        let variables = convert_variables(&request.variables);
-
-        // First, parse the request to determine if it's a query or mutation
-        let parsed = match parse_request_with_limits(
-            &request.query,
-            variables.as_ref(),
-            request.operation_name.as_deref(),
-            self.query_limits,
-        ) {
-            Ok(p) => p,
-            Err(e) => {
-                return QueryResponse {
-                    data: None,
-                    errors: vec![QueryResponseError {
-                        message: e.to_string(),
-                        path: None,
-                        locations: None,
-                        extensions: None,
-                        retry_input: None,
-                    }],
-                    extensions: None,
-                };
-            }
-        };
-
-        if matches!(&parsed, ParsedOperation::Query { .. }) {
-            // A standalone query reads a snapshot of its own on a worker,
-            // which nothing registers.
-            let deadline = self.deadline();
-            match self
-                .drive(&request, |job| self.registry.read(deadline, job))
-                .await
-            {
-                Err(TransactionError::NotSupported(_)) => {}
-                Err(error @ TransactionError::Execution(_)) => return answered(None, Err(error)),
-                Err(error) => {
-                    return QueryResponse::error(format!(
-                        "failed to create implicit read-only transaction: {}",
-                        error
-                    ));
-                }
-                outcome => return answered(None, outcome),
-            }
-        }
-
-        // Validate that all referenced collections exist before execution
-        if let Err(e) = validate_parsed_operation(&parsed, self.effective_provider().as_ref()).await
-        {
-            return QueryResponse {
-                data: None,
-                errors: vec![QueryResponseError {
-                    message: e.to_string(),
-                    path: None,
-                    locations: None,
-                    extensions: None,
-                    retry_input: None,
-                }],
-                extensions: None,
-            };
-        }
-
-        // NAC check uses the raw request identity (not default fallback).
-        // The default_identity is for document ACP, not node access control.
-        if let Some(denial) = check_nac(self, &request.identity, &parsed).await {
-            return denial;
-        }
-
-        // Resolve effective identity: request identity takes precedence over default
-        let identity = self.resolve_identity(request.identity);
-        let creator_did = identity.as_ref().map(ToString::to_string);
-        let acting_identity = creator_did
-            .clone()
-            .or_else(defra_core::current_identity::get_effective_identity);
-
-        let mut warnings: Vec<GqlWarning> = Vec::new();
-        let scoped_runner = self.scoped_runner(self.acp.clone());
-
-        // Route to appropriate handler based on operation type
-        // Pass identity and variables through for ACP permission checks and variable substitution
-        let execution = Box::pin(async {
-            match parsed {
-                ParsedOperation::Query {
-                    mut selects,
-                    explain,
-                    exhaustive,
-                } => {
-                    if exhaustive {
-                        for s in &mut selects {
-                            s.exhaustive = true;
-                        }
-                    }
-                    if let Some(explain_type) = explain {
-                        self.explain_query_with_identity_and_vars(
-                            &request.query,
-                            identity,
-                            explain_type,
-                            variables.as_ref(),
-                        )
-                        .await
-                    } else {
-                        self.execute_selects_internal(
-                            selects,
-                            self.fetcher.as_ref(),
-                            identity,
-                            &mut warnings,
-                        )
-                        .await
-                    }
-                }
-                ParsedOperation::Mutation {
-                    mutations, explain, ..
-                } => {
-                    if let Some(explain_type) = explain {
-                        // Return mutation plan instead of executing
-                        self.explain_mutation_with_identity(&request.query, identity, explain_type)
-                            .await
-                    } else {
-                        // Use pre-parsed mutations to avoid redundant re-parsing
-                        match self.mutator.as_ref() {
-                            Some(mutator) => {
-                                let mutator = prepared
-                                    .as_ref()
-                                    .and_then(|prepared| {
-                                        mutator.with_prepared_inputs(prepared.inputs.clone())
-                                    })
-                                    .unwrap_or_else(|| mutator.clone());
-                                scoped_runner
-                                    .execute_parsed_mutations(
-                                        mutations,
-                                        mutator,
-                                        identity,
-                                        None,
-                                        prepared.as_deref(),
-                                    )
-                                    .await
-                            }
-                            None => Err(crate::error::QueryError::execution(
-                                "mutations require a mutator; call with_mutator() first",
-                            )),
-                        }
-                    }
-                }
-                ParsedOperation::Subscription { .. } => {
-                    // Subscriptions require SSE transport - they cannot be executed via regular request/response
-                    Err(crate::error::QueryError::parse(
-                        "Subscriptions must be executed via Server-Sent Events (SSE). \
-                         Send the request with Accept: text/event-stream header.",
-                    ))
-                }
-                ParsedOperation::Introspection { query } => {
-                    // Introspection queries are executed against the GraphQL schema
-                    self.execute_introspection(&query).await
-                }
-            }
-        });
-
-        // The primary QueryExecutor path parses mutations once and therefore
-        // does not pass through execute_mutation_internal_with_vars. Scope the
-        // resolved request identity here as well so HTTP/CLI auto-commit and
-        // transactional broadcasts carry the same Creator DID as direct
-        // mutation entry points.
-        let result = defra_core::current_identity::with_scoped_identity(
-            acting_identity,
-            defra_core::signing::scope_broadcast_creator_did(
-                creator_did,
-                await_with_timeout(execution, self.deadline()),
-            ),
-        )
-        .await;
-
-        match result {
-            Ok(data) => QueryResponse {
-                data: Some(data),
-                errors: vec![],
-                extensions: None,
-            }
-            .with_warnings(warnings),
-            Err(e) => {
-                tracing::error!(
-                    query = %request.query,
-                    error = %e,
-                    "Query execution failed"
-                );
-                QueryResponse {
-                    data: None,
-                    errors: vec![QueryResponseError::from_query_error(e)],
-                    extensions: None,
-                }
-                .with_warnings(warnings)
-            }
-        }
+        self.for_query(&request)
+            .run_prepared(request, prepared)
+            .await
     }
 
     async fn resolve_retry_input(
         &self,
-        _request: &QueryRequest,
+        request: &QueryRequest,
         prepared: Option<std::sync::Arc<crate::prepared::PreparedMutations>>,
         input: &crate::prepared::PreparedInputRequest,
     ) -> Result<Option<std::sync::Arc<crate::prepared::PreparedMutations>>> {
+        let runner = self.for_query(request);
         let Some(prepared) = prepared else {
             return Err(crate::error::QueryError::execution(
                 "retry input has no request preparation capsule",
@@ -334,7 +148,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         };
         prepared
             .inputs
-            .answer_wave(input, |wave| self.resolve_wave(wave))
+            .answer_wave(input, |wave| runner.resolve_wave(wave))
             .await?;
         Ok(Some(prepared))
     }
@@ -379,9 +193,12 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         request: QueryRequest,
         handle: &TransactionHandle,
     ) -> QueryResponse {
-        let deadline = self.deadline();
-        let outcome = self
-            .drive(&request, |job| self.registry.run(handle, deadline, job))
+        let runner = self.for_query(&request);
+        let (context, deadline) = (runner.context(), runner.deadline());
+        let outcome = runner
+            .drive(&request, |job| {
+                runner.registry.run_as(&context, handle, deadline, job)
+            })
             .await;
         answered(Some(handle), outcome)
     }
@@ -393,6 +210,14 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         self.registry.begin(readonly).await
     }
 
+    async fn begin_txn_as(
+        &self,
+        context: &RequestContext,
+        readonly: bool,
+    ) -> std::result::Result<TransactionHandle, TransactionError> {
+        self.registry.begin_as(context, readonly).await
+    }
+
     async fn commit_txn(
         &self,
         handle: &TransactionHandle,
@@ -400,11 +225,27 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
         self.registry.commit(handle).await
     }
 
+    async fn commit_txn_as(
+        &self,
+        context: &RequestContext,
+        handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError> {
+        self.registry.commit_as(context, handle).await
+    }
+
     async fn rollback_txn(
         &self,
         handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError> {
         self.registry.rollback(handle).await
+    }
+
+    async fn rollback_txn_as(
+        &self,
+        context: &RequestContext,
+        handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError> {
+        self.registry.rollback_as(context, handle).await
     }
 
     fn abandon_txn(&self, handle: &TransactionHandle) {
@@ -427,8 +268,199 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryExecutor for QueryRun
 }
 
 impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
+    /// [`QueryExecutor::execute_prepared`] on a runner bound to the request.
+    async fn run_prepared(
+        &self,
+        request: QueryRequest,
+        prepared: Option<std::sync::Arc<crate::prepared::PreparedMutations>>,
+    ) -> QueryResponse {
+        // Convert variables from JSON to RapidHashMap format for the parser
+        let variables = convert_variables(&request.variables);
+
+        // First, parse the request to determine if it's a query or mutation
+        let parsed = match parse_request_with_limits(
+            &request.query,
+            variables.as_ref(),
+            request.operation_name.as_deref(),
+            self.query_limits,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                return QueryResponse {
+                    data: None,
+                    errors: vec![QueryResponseError {
+                        message: e.to_string(),
+                        path: None,
+                        locations: None,
+                        extensions: None,
+                        retry_input: None,
+                    }],
+                    extensions: None,
+                };
+            }
+        };
+
+        if matches!(&parsed, ParsedOperation::Query { .. }) {
+            // A standalone query reads a snapshot of its own on a worker,
+            // which nothing registers.
+            let (context, deadline) = (self.context(), self.deadline());
+            match self
+                .drive(&request, |job| {
+                    self.registry.read_as(&context, deadline, job)
+                })
+                .await
+            {
+                Err(TransactionError::NotSupported(_)) => {}
+                Err(error @ TransactionError::Execution(_)) => return answered(None, Err(error)),
+                Err(error) => {
+                    return QueryResponse::error(format!(
+                        "failed to create implicit read-only transaction: {}",
+                        error
+                    ));
+                }
+                outcome => return answered(None, outcome),
+            }
+        }
+
+        // Validate that all referenced collections exist before execution
+        if let Err(e) = validate_parsed_operation(&parsed, self.effective_provider().as_ref()).await
+        {
+            return QueryResponse {
+                data: None,
+                errors: vec![QueryResponseError {
+                    message: e.to_string(),
+                    path: None,
+                    locations: None,
+                    extensions: None,
+                    retry_input: None,
+                }],
+                extensions: None,
+            };
+        }
+
+        // NAC check uses the raw request identity (not default fallback).
+        // The default_identity is for document ACP, not node access control.
+        if let Some(denial) = check_nac(self, &request.identity, &parsed).await {
+            return denial;
+        }
+
+        // Resolve effective identity: request identity takes precedence over default
+        let identity = self.resolve_identity(request.identity);
+        // What this request writes is created by its caller.
+        let runner = self.for_caller(identity.as_ref());
+
+        let mut warnings: Vec<GqlWarning> = Vec::new();
+
+        // Route to appropriate handler based on operation type
+        // Pass identity and variables through for ACP permission checks and variable substitution
+        let execution = Box::pin(async {
+            match parsed {
+                ParsedOperation::Query {
+                    mut selects,
+                    explain,
+                    exhaustive,
+                } => {
+                    if exhaustive {
+                        for s in &mut selects {
+                            s.exhaustive = true;
+                        }
+                    }
+                    if let Some(explain_type) = explain {
+                        runner
+                            .explain_query_with_identity_and_vars(
+                                &request.query,
+                                identity,
+                                explain_type,
+                                variables.as_ref(),
+                            )
+                            .await
+                    } else {
+                        runner
+                            .execute_selects_internal(
+                                selects,
+                                runner.fetcher.as_ref(),
+                                identity,
+                                &mut warnings,
+                            )
+                            .await
+                    }
+                }
+                ParsedOperation::Mutation {
+                    mutations, explain, ..
+                } => {
+                    if let Some(explain_type) = explain {
+                        // Return mutation plan instead of executing
+                        runner
+                            .explain_mutation_with_identity(&request.query, identity, explain_type)
+                            .await
+                    } else {
+                        // Use pre-parsed mutations to avoid redundant re-parsing
+                        match runner.mutator.as_ref() {
+                            Some(mutator) => {
+                                let mutator = prepared
+                                    .as_ref()
+                                    .and_then(|prepared| {
+                                        mutator.with_prepared_inputs(prepared.inputs.clone())
+                                    })
+                                    .unwrap_or_else(|| mutator.clone());
+                                runner
+                                    .execute_parsed_mutations(
+                                        mutations,
+                                        mutator,
+                                        identity,
+                                        None,
+                                        prepared.as_deref(),
+                                    )
+                                    .await
+                            }
+                            None => Err(crate::error::QueryError::execution(
+                                "mutations require a mutator; call with_mutator() first",
+                            )),
+                        }
+                    }
+                }
+                ParsedOperation::Subscription { .. } => {
+                    // Subscriptions require SSE transport - they cannot be executed via regular request/response
+                    Err(crate::error::QueryError::parse(
+                        "Subscriptions must be executed via Server-Sent Events (SSE). \
+                         Send the request with Accept: text/event-stream header.",
+                    ))
+                }
+                ParsedOperation::Introspection { query } => {
+                    // Introspection queries are executed against the GraphQL schema
+                    runner.execute_introspection(&query).await
+                }
+            }
+        });
+
+        let result = await_with_timeout(execution, self.deadline()).await;
+
+        match result {
+            Ok(data) => QueryResponse {
+                data: Some(data),
+                errors: vec![],
+                extensions: None,
+            }
+            .with_warnings(warnings),
+            Err(e) => {
+                tracing::error!(
+                    query = %request.query,
+                    error = %e,
+                    "Query execution failed"
+                );
+                QueryResponse {
+                    data: None,
+                    errors: vec![QueryResponseError::from_query_error(e)],
+                    extensions: None,
+                }
+                .with_warnings(warnings)
+            }
+        }
+    }
+
     /// One wave of a request's external inputs, each by the resolver of its
-    /// kind: the runner's own concurrently, the mutator's as one batch.
+    /// kind: the runner's own concurrently, the mutator's as one batch, all
+    /// in the context of the request this runner serves.
     async fn resolve_wave(
         &self,
         wave: Vec<crate::prepared::PreparedInputRequest>,
@@ -466,7 +498,8 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 crate::error::QueryError::execution("retry input has no document mutator")
             })?;
             mutator
-                .resolve_prepared_inputs(
+                .resolve_prepared_inputs_as(
+                    &self.context(),
                     delegated
                         .iter()
                         .map(|(_, request)| (*request).clone())
@@ -559,17 +592,15 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         let bearer = fields.get(5).and_then(Value::as_str).map(str::to_owned);
         let bearer_did = did.as_ref().map(ToString::to_string);
         let acp_identity = did.map(Identity::from).unwrap_or(Identity::Anonymous);
-        let response = defra_core::signing::scope_request_bearer_token(bearer_did, bearer, async {
+        let response = acp::with_request_bearer(&self.acp, bearer_did, bearer, |acp| async move {
             let response = if field(1)? == "registered" {
-                let registered = self
-                    .acp
+                let registered = acp
                     .is_doc_registered(field(2)?, field(3)?, field(4)?)
                     .await
                     .map_err(|error| crate::error::QueryError::execution(error.to_string()))?;
                 serde_json::to_vec(&registered)
             } else if field(4)? == "writer" {
-                let decision = self
-                    .acp
+                let decision = acp
                     .create_access_decision(
                         &acp_identity,
                         field(1)?,
@@ -595,8 +626,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                         ))
                     }
                 };
-                let allowed = self
-                    .acp
+                let allowed = acp
                     .check_doc_access(&acp_identity, permission, field(2)?, field(3)?, field(4)?)
                     .await
                     .map_err(|error| crate::error::QueryError::execution(error.to_string()))?;

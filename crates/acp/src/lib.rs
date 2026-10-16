@@ -48,7 +48,7 @@ mod validation;
 pub mod zanzibar;
 
 pub use auth_error::normalize_auth_error;
-pub use dac::DocumentACP;
+pub use dac::{bound_to_request, with_request_bearer, DocumentACP};
 pub use error::{Error, Result};
 pub use external::{ExternalDocumentAcp, RedriveReport};
 pub use identity::Identity;

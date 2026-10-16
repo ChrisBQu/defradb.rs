@@ -106,18 +106,14 @@ pub unsafe extern "C" fn exec_request_in_txn_with_signing(
             signing_enabled,
         );
         let session_key = batch_session.or_else(|| signing.as_ref().map(|s| s.public_key_hex.clone()));
-        defra_core::batch_signing::set_batch_session_key(session_key);
-        defra_core::signing::set_signing_config(signing);
 
-        // Set the ambient acting identity so DB-layer NAC checks can resolve
-        // the caller. The guard clears it on scope exit so it never leaks into
-        // the next request on this pooled thread.
-        let _identity_guard = defra_core::current_identity::scoped_current_identity(
-            identity_str.as_ref().filter(|s| !s.is_empty()).cloned(),
-        );
-
-        // Check if identity has DAC bypass (NAC admin/owner can read all documents)
-        crate::query::check_and_set_dac_bypass(rt, node_ptr, identity_did);
+        // The caller acts in the request's context, so DB-layer NAC checks
+        // resolve it; a NAC admin/owner can read all documents.
+        let context = defra_core::RequestContext::default()
+            .with_identity(identity_str.as_ref().filter(|s| !s.is_empty()).cloned())
+            .with_dac_bypass(crate::query::resolve_dac_bypass(rt, node_ptr, identity_did))
+            .with_signing(signing)
+            .with_batch_session(session_key);
 
         let runner = try_ffi!(get_node_runner(node_ptr));
 
@@ -127,7 +123,7 @@ pub unsafe extern "C" fn exec_request_in_txn_with_signing(
                 .map_err(|e| format!("invalid transaction ID: {}", e))?;
 
             // Build request
-            let mut request = query::QueryRequest::new(query_str);
+            let mut request = query::QueryRequest::new(query_str).with_context(context);
             if did.is_some() {
                 request = request.with_identity(did);
             }

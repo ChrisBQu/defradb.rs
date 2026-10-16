@@ -9,6 +9,9 @@ use bytes::Bytes;
 pub struct ComputedBlocks {
     pub blockstore_entries: Vec<(Vec<u8>, Bytes)>,
     pub headstore_entries: Vec<(Vec<u8>, Vec<u8>)>,
+    /// The document's new heads, merged into its head set once.
+    pub head_write: storage::merge::head_set::Write,
+    pub doc_short_id: u64,
     pub block_result: BlockResult,
 }
 
@@ -60,6 +63,7 @@ pub(crate) fn compute_document_blocks_with_inputs(
         Vec::with_capacity(document_and_field_count);
     let mut headstore_entries: Vec<(Vec<u8>, Vec<u8>)> =
         Vec::with_capacity(document_and_field_count.saturating_mul(3));
+    let mut head_write = storage::merge::head_set::Write::default();
     let mut field_links: Vec<DAGLink> = Vec::with_capacity(field_count);
     let mut field_cids: Vec<Cid> = Vec::with_capacity(field_count);
     let mut encryption_cids: Vec<Cid> = Vec::new();
@@ -234,14 +238,15 @@ pub(crate) fn compute_document_blocks_with_inputs(
 
         blockstore_entries.push((field_cid.to_bytes(), field_block_bytes.into()));
 
-        // Head entry: /d/{doc_short_id}/{field_name}/{cid} -> priority
         let head_key = HeadstoreDocKey::new(identity.doc_short_id, field_name, field_cid);
-        let priority_bytes = encode_priority_varint(priority);
+        head_write.add(
+            &crate::block::heads::document::name(field_name, &field_cid),
+            priority,
+        );
         headstore_entries.push((
             crate::block::heads::document::publication_key(&head_key),
             vec![],
         ));
-        headstore_entries.push((head_key.bytes(), priority_bytes));
         headstore_entries.push((
             priority_index_key(identity.doc_short_id, priority, field_cid),
             vec![],
@@ -311,12 +316,14 @@ pub(crate) fn compute_document_blocks_with_inputs(
     blockstore_entries.push((composite_cid.to_bytes(), composite_bytes.clone().into()));
 
     let composite_head_key = HeadstoreDocKey::new(identity.doc_short_id, "C", composite_cid);
-    let priority_bytes = encode_priority_varint(priority);
+    head_write.add(
+        &crate::block::heads::document::name("C", &composite_cid),
+        priority,
+    );
     headstore_entries.push((
         crate::block::heads::document::publication_key(&composite_head_key),
         vec![],
     ));
-    headstore_entries.push((composite_head_key.bytes(), priority_bytes));
     headstore_entries.push((
         priority_index_key(identity.doc_short_id, priority, composite_cid),
         vec![],
@@ -325,6 +332,8 @@ pub(crate) fn compute_document_blocks_with_inputs(
     Ok(ComputedBlocks {
         blockstore_entries,
         headstore_entries,
+        head_write,
+        doc_short_id: identity.doc_short_id,
         block_result: BlockResult {
             cid: composite_cid,
             block: composite_bytes.into(),
@@ -335,11 +344,13 @@ pub(crate) fn compute_document_blocks_with_inputs(
     })
 }
 
-/// Batch-insert pre-computed blocks into blockstore and headstore.
+/// Batch-insert pre-computed blocks into blockstore and headstore, their CIDs
+/// collected into `batch_session` once they commit.
 pub async fn insert_computed_blocks(
     blockstore: &NamespaceView,
     headstore: &NamespaceView,
     blocks: &ComputedBlocks,
+    batch_session: Option<&str>,
 ) -> Result<(), String> {
     for (key, value) in &blocks.blockstore_entries {
         blockstore
@@ -353,8 +364,12 @@ pub async fn insert_computed_blocks(
             .await
             .map_err(|e| format!("Failed to write head: {}", e))?;
     }
+    crate::block::heads::document::commit(headstore, blocks.doc_short_id, &blocks.head_write)
+        .await
+        .map_err(|e| format!("Failed to write heads: {}", e))?;
     collect_on_commit(
         blockstore,
+        batch_session,
         blocks
             .block_result
             .field_cids

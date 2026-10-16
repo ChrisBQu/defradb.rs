@@ -29,6 +29,7 @@ pub unsafe extern "C" fn get_collection_by_name(
         node = node_ptr,
         identity = identity_did,
         database = database,
+        context = _context,
         permission = NodePermission::CollectionGet,
         name => name_str: "name";
         {
@@ -72,6 +73,7 @@ pub unsafe extern "C" fn has_collection(
         node = node_ptr,
         identity = identity_did,
         database = database,
+        context = _context,
         permission = NodePermission::CollectionGet,
         name => name_str: "name";
         {
@@ -112,6 +114,7 @@ pub unsafe extern "C" fn find_collection_by_id(
         node = node_ptr,
         identity = identity_did,
         database = database,
+        context = _context,
         permission = NodePermission::CollectionGet,
         collection_id => id_str: "collection_id";
         {
@@ -157,6 +160,7 @@ pub unsafe extern "C" fn get_collection_by_version_id(
         node = node_ptr,
         identity = identity_did,
         database = database,
+        context = _context,
         permission = NodePermission::CollectionGet,
         version_id => version_str: "version_id";
         {

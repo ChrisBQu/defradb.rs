@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use chrono::{FixedOffset, Utc};
-use defra_core::encryption::EncryptionConfig;
 use identity::Did;
 use rapidhash::{HashMapExt, RapidHashMap, RapidHashSet};
 
@@ -37,7 +36,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
         else {
             return Ok(None);
         };
-        let schema_has_embeddings = if mutator.requires_write_preparation() {
+        let schema_has_embeddings = if mutator.requires_write_preparation_as(&self.context()) {
             false
         } else {
             let provider = self.effective_provider();
@@ -58,7 +57,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             .any(|mutation| mutation.mutation_type == MutationType::Truncate);
         let request_batch =
             mutations.len() > 1 || self.acp.supports_transactions() || !contains_truncate;
-        if !mutator.requires_write_preparation() && !schema_has_embeddings && !request_batch {
+        if !mutator.requires_write_preparation_as(&self.context())
+            && !schema_has_embeddings
+            && !request_batch
+        {
             return Ok(None);
         }
         validate_parsed_operation(&parsed, self.effective_provider().as_ref()).await?;
@@ -80,14 +82,10 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 && mutator.engine_retries_batches(),
         };
         if prepared.engine_managed_retry {
-            // Match the acting identity that execute_prepared scopes around
-            // the mutation callback, including an explicit request identity.
-            let effective_identity = identity
-                .clone()
-                .or_else(|| {
-                    defra_core::current_identity::get_effective_identity()
-                        .and_then(|value| Did::new(value).ok())
-                })
+            // The identity the mutation's attempts act as.
+            let effective_identity = self
+                .acting_identity(identity.as_ref())
+                .and_then(|value| Did::new(value).ok())
                 .unwrap_or_else(Did::wildcard);
             let mut permissions = rapidhash::RapidHashSet::default();
             for mutation in mutations {
@@ -171,19 +169,17 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 prepared.mutations.insert(mutation.output_name(), entry);
                 continue;
             }
-            let config = (mutation.encrypt_doc || !mutation.encrypt_fields.is_empty()).then(|| {
-                EncryptionConfig {
-                    encrypt_doc: mutation.encrypt_doc,
-                    encrypt_fields: mutation.encrypt_fields.clone(),
-                }
-            });
+            let context = self
+                .context()
+                .into_owned()
+                .or_encryption(mutation.encryption());
             if mutation.mutation_type == MutationType::Create {
                 for input in self.build_create_inputs(mutation, collection)? {
                     let doc =
                         input.to_document_with_schema_and_time(collection, Some(request_time))?;
                     entry.creates.push(
                         mutator
-                            .prepare_write(&mutation.collection_name, doc, None, config.clone())
+                            .prepare_write_as(&context, &mutation.collection_name, doc, None)
                             .await?,
                     );
                 }
@@ -210,7 +206,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                     && mutation.filter.is_none()
                     && mutation.encrypt_fields.is_empty()
                     && !mutation.encrypt_doc
-                    && !mutator.requires_write_preparation()
+                    && !mutator.requires_write_preparation_as(&self.context())
                     && collection.vector_embeddings.is_empty()
                     && mutator.supports_projected_updates()
                 {
@@ -240,7 +236,7 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             .to_document_with_schema_and_time(collection, Some(request_time))?;
                         entry.creates.push(
                             mutator
-                                .prepare_write(&mutation.collection_name, doc, None, config.clone())
+                                .prepare_write_as(&context, &mutation.collection_name, doc, None)
                                 .await?,
                         );
                     }
@@ -271,11 +267,11 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                             input.fields.keys().cloned().collect()
                         };
                         let doc = mutator
-                            .prepare_write(
+                            .prepare_write_as(
+                                &context,
                                 &mutation.collection_name,
                                 doc.clone(),
                                 Some(modified.clone()),
-                                config.clone(),
                             )
                             .await?;
                         if let (Some(id), Some(write)) = (doc.id(), doc.write_preparation()) {

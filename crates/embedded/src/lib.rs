@@ -271,6 +271,17 @@ impl ManagedP2PSystem {
         &self.ops
     }
 
+    /// The P2P operations serving the request `context` serves: their node
+    /// access checks check the identity acting in it.
+    pub fn ops_for(
+        &self,
+        context: &defra_core::RequestContext,
+    ) -> Arc<dyn defra_http::P2POperations> {
+        self.ops
+            .bind_request(context)
+            .unwrap_or_else(|| Arc::clone(&self.ops))
+    }
+
     pub fn set_replicator_push_options(
         &self,
         options: ReplicatorPushOptions,

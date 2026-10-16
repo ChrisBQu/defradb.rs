@@ -49,25 +49,26 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
             })
             .await?;
         let identity = acp::Identity::from(caller);
-        let checker = crate::txn::OverlayChecker {
-            acp: self.acp.as_ref(),
-            projection: self.acp_registration_projection.as_deref(),
-            identity: &identity,
-        };
+        let context = self.context();
         let mut entries = Vec::new();
         for entry in page.entries {
             let allowed = match &collection.policy {
                 None => true,
-                Some(policy) => acp::read_access::check_doc_read_access(
-                    &checker,
-                    &policy.id,
-                    &policy.resource_name,
-                    &collection.collection_id,
-                    collection.is_branchable,
-                    &entry.doc_id,
-                )
-                .await
-                .map_err(|e| QueryError::execution(e.to_string()))?,
+                Some(policy) => {
+                    crate::txn::check_doc_read_access_as(
+                        &context,
+                        self.acp.as_ref(),
+                        self.acp_registration_projection.as_deref(),
+                        &identity,
+                        &policy.id,
+                        &policy.resource_name,
+                        &collection.collection_id,
+                        collection.is_branchable,
+                        &entry.doc_id,
+                        None,
+                    )
+                    .await?
+                }
             };
             if allowed {
                 entries.push(json!({"cursor": entry.cursor.to_string(), "docID": entry.doc_id}));

@@ -35,8 +35,7 @@ use crate::txn::DbTxn;
 /// Captured per-mutation commit data: the document block (cid + bytes) plus,
 /// for branchable collections, the collection block (cid + bytes).
 pub(super) type CommitArtifacts = (Cid, Bytes, Option<(Cid, Bytes)>);
-use defra_core::encryption::get_encryption_config;
-use defra_core::signing::get_signing_config;
+use defra_core::RequestContext;
 
 pub use batch::BatchMutator;
 
@@ -92,16 +91,28 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         })
     }
 
+    /// [`Self::register_created_doc_with_acp_as`] in [`RequestContext::ambient`].
+    #[cfg(test)]
     pub(super) fn register_created_doc_with_acp(
         &self,
         txn: &crate::txn::DbTxn<S>,
         collection: &Collection,
         doc_id: String,
     ) -> query::error::Result<()> {
+        self.register_created_doc_with_acp_as(&RequestContext::ambient(), txn, collection, doc_id)
+    }
+
+    pub(super) fn register_created_doc_with_acp_as(
+        &self,
+        context: &RequestContext,
+        txn: &crate::txn::DbTxn<S>,
+        collection: &Collection,
+        doc_id: String,
+    ) -> query::error::Result<()> {
         let Some(policy) = collection.schema().policy.as_ref() else {
             return Ok(());
         };
-        let Some(creator_did) = defra_core::signing::get_broadcast_creator_did() else {
+        let Some(creator_did) = context.creator() else {
             return Ok(());
         };
         let Some(acp) = self.db.document_acp().cloned() else {
@@ -110,37 +121,47 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         if acp.supports_transactions() {
             return Ok(());
         }
-        let creator = identity::Did::new(&creator_did).map_err(|error| {
+        let creator = identity::Did::new(creator_did).map_err(|error| {
             query::error::QueryError::execution(format!("invalid mutation creator DID: {error}"))
         })?;
 
         let policy_id = policy.id.clone();
         let resource_name = policy.resource_name.clone();
-        let request_bearer_token = defra_core::signing::get_request_bearer_token(creator.as_str());
+        let request_bearer_token = context.bearer_token_for(creator.as_str());
         let registration = txn.on_commit(OnCommit::OrderedAsync(Box::new(move || {
-            let acp = Arc::clone(&acp);
-            let policy_id = policy_id.clone();
-            let resource_name = resource_name.clone();
-            let doc_id = doc_id.clone();
-            let creator = creator.clone();
-            let request_bearer_token = request_bearer_token.clone();
-            Box::pin(defra_core::signing::scope_request_bearer_token(
-                Some(creator.to_string()),
-                request_bearer_token,
-                async move {
-                    acp.redrive_registration(&policy_id, &resource_name, &doc_id)
-                        .await
-                        .map_err(|error| {
-                            format!("failed to register document with ACP before publishing update: {error}")
-                        })
-                },
-            ))
+            Box::pin(async move {
+                acp::with_request_bearer(
+                    &acp,
+                    Some(creator.to_string()),
+                    request_bearer_token,
+                    |acp| async move {
+                        acp.redrive_registration(&policy_id, &resource_name, &doc_id)
+                            .await
+                            .map_err(|error| {
+                                format!("failed to register document with ACP before publishing update: {error}")
+                            })
+                    },
+                )
+                .await
+            })
         })));
         registration.map_err(|error| query::error::QueryError::execution(error.to_string()))
     }
 
+    /// [`Self::register_deleted_doc_with_acp_as`] in [`RequestContext::ambient`].
+    #[cfg(test)]
     pub(super) fn register_deleted_doc_with_acp(
         &self,
+        txn: &crate::txn::DbTxn<S>,
+        collection: &Collection,
+        doc_id: String,
+    ) -> query::error::Result<()> {
+        self.register_deleted_doc_with_acp_as(&RequestContext::ambient(), txn, collection, doc_id)
+    }
+
+    pub(super) fn register_deleted_doc_with_acp_as(
+        &self,
+        context: &RequestContext,
         txn: &crate::txn::DbTxn<S>,
         collection: &Collection,
         doc_id: String,
@@ -157,28 +178,21 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
         let policy_id = policy.id.clone();
         let resource_name = policy.resource_name.clone();
-        let creator = defra_core::signing::get_broadcast_creator_did();
+        let creator = context.creator().map(str::to_owned);
         let request_bearer_token = creator
             .as_deref()
-            .and_then(defra_core::signing::get_request_bearer_token);
+            .and_then(|creator| context.bearer_token_for(creator));
         txn.on_commit(OnCommit::OrderedAsync(Box::new(move || {
-            let acp = Arc::clone(&acp);
-            let policy_id = policy_id.clone();
-            let resource_name = resource_name.clone();
-            let doc_id = doc_id.clone();
-            let creator = creator.clone();
-            let request_bearer_token = request_bearer_token.clone();
-            Box::pin(defra_core::signing::scope_request_bearer_token(
-                creator,
-                request_bearer_token,
-                async move {
+            Box::pin(async move {
+                acp::with_request_bearer(&acp, creator, request_bearer_token, |acp| async move {
                     acp.unregister_doc_object(&policy_id, &resource_name, &doc_id)
                         .await
                         .map_err(|error| {
                             format!("failed to unregister ACP document {doc_id}: {error}")
                         })
-                },
-            ))
+                })
+                .await
+            })
         })))
         .map_err(|error| query::error::QueryError::execution(error.to_string()))
     }
@@ -233,25 +247,47 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
     }
 
     fn requires_write_preparation(&self) -> bool {
+        self.requires_write_preparation_as(&RequestContext::ambient())
+    }
+
+    fn requires_write_preparation_as(&self, context: &RequestContext) -> bool {
         let embedding = self.db.options().embedding_config();
         self.db.kms().is_some()
             || !embedding.url.is_empty()
             || !embedding.model.is_empty()
-            || get_signing_config().is_some()
+            || context.signing().is_some()
     }
 
     async fn resolve_prepared_input(
         &self,
         request: &query::prepared::PreparedInputRequest,
     ) -> query::error::Result<std::sync::Arc<[u8]>> {
-        crate::write::prepare::resolve_input(&self.db, request).await
+        self.resolve_prepared_input_as(&RequestContext::ambient(), request)
+            .await
+    }
+
+    async fn resolve_prepared_input_as(
+        &self,
+        context: &RequestContext,
+        request: &query::prepared::PreparedInputRequest,
+    ) -> query::error::Result<std::sync::Arc<[u8]>> {
+        crate::write::prepare::resolve_input(&self.db, context, request).await
     }
 
     async fn resolve_prepared_inputs(
         &self,
         requests: Vec<query::prepared::PreparedInputRequest>,
     ) -> query::error::Result<Vec<std::sync::Arc<[u8]>>> {
-        crate::write::prepare::resolve_inputs(&self.db, requests).await
+        self.resolve_prepared_inputs_as(&RequestContext::ambient(), requests)
+            .await
+    }
+
+    async fn resolve_prepared_inputs_as(
+        &self,
+        context: &RequestContext,
+        requests: Vec<query::prepared::PreparedInputRequest>,
+    ) -> query::error::Result<Vec<std::sync::Arc<[u8]>>> {
+        crate::write::prepare::resolve_inputs(&self.db, context, requests).await
     }
 
     async fn prepared_embedding_request(
@@ -285,7 +321,23 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
         modified_fields: Option<rapidhash::RapidHashSet<String>>,
         encryption: Option<defra_core::encryption::EncryptionConfig>,
     ) -> query::error::Result<Document> {
-        self.prepare_request_write(collection_name, doc, modified_fields, encryption)
+        self.prepare_write_as(
+            &RequestContext::ambient().or_encryption(encryption),
+            collection_name,
+            doc,
+            modified_fields,
+        )
+        .await
+    }
+
+    async fn prepare_write_as(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        doc: Document,
+        modified_fields: Option<rapidhash::RapidHashSet<String>>,
+    ) -> query::error::Result<Document> {
+        self.prepare_request_write(context, collection_name, doc, modified_fields)
             .await
     }
 
@@ -308,7 +360,18 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
         collection_name: &str,
         doc: Document,
     ) -> query::error::Result<CreateResult> {
-        self.create_with_resolved_inputs(collection_name, doc).await
+        self.create_as(&RequestContext::ambient(), collection_name, doc)
+            .await
+    }
+
+    async fn create_as(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        doc: Document,
+    ) -> query::error::Result<CreateResult> {
+        self.create_with_resolved_inputs(context, collection_name, doc)
+            .await
     }
 
     async fn create_many(
@@ -316,7 +379,17 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
         collection_name: &str,
         docs: Vec<Document>,
     ) -> query::error::Result<Vec<CreateResult>> {
-        self.create_many_with_resolved_inputs(collection_name, docs)
+        self.create_many_as(&RequestContext::ambient(), collection_name, docs)
+            .await
+    }
+
+    async fn create_many_as(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        docs: Vec<Document>,
+    ) -> query::error::Result<Vec<CreateResult>> {
+        self.create_many_with_resolved_inputs(context, collection_name, docs)
             .await
     }
 
@@ -326,7 +399,23 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
         doc: Document,
         modified_fields: rapidhash::RapidHashSet<String>,
     ) -> query::error::Result<UpdateResult> {
-        self.update_with_resolved_inputs(collection_name, None, doc, modified_fields)
+        self.update_as(
+            &RequestContext::ambient(),
+            collection_name,
+            doc,
+            modified_fields,
+        )
+        .await
+    }
+
+    async fn update_as(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        doc: Document,
+        modified_fields: rapidhash::RapidHashSet<String>,
+    ) -> query::error::Result<UpdateResult> {
+        self.update_with_resolved_inputs(context, collection_name, None, doc, modified_fields)
             .await
     }
 
@@ -337,8 +426,32 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
         doc: Document,
         modified_fields: rapidhash::RapidHashSet<String>,
     ) -> query::error::Result<UpdateResult> {
-        self.update_with_resolved_inputs(collection_name, Some(expected), doc, modified_fields)
-            .await
+        self.update_if_unchanged_as(
+            &RequestContext::ambient(),
+            collection_name,
+            expected,
+            doc,
+            modified_fields,
+        )
+        .await
+    }
+
+    async fn update_if_unchanged_as(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        expected: Document,
+        doc: Document,
+        modified_fields: rapidhash::RapidHashSet<String>,
+    ) -> query::error::Result<UpdateResult> {
+        self.update_with_resolved_inputs(
+            context,
+            collection_name,
+            Some(expected),
+            doc,
+            modified_fields,
+        )
+        .await
     }
 
     async fn update_if_fields_unchanged(
@@ -349,7 +462,28 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
         doc: Document,
         modified_fields: rapidhash::RapidHashSet<String>,
     ) -> query::error::Result<UpdateResult> {
+        self.update_if_fields_unchanged_as(
+            &RequestContext::ambient(),
+            collection_name,
+            expected,
+            expected_fields,
+            doc,
+            modified_fields,
+        )
+        .await
+    }
+
+    async fn update_if_fields_unchanged_as(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        expected: Document,
+        expected_fields: rapidhash::RapidHashSet<String>,
+        doc: Document,
+        modified_fields: rapidhash::RapidHashSet<String>,
+    ) -> query::error::Result<UpdateResult> {
         self.update_with_projected_resolved_inputs(
+            context,
             collection_name,
             Some(expected),
             Some(expected_fields),
@@ -364,7 +498,17 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
         collection_name: &str,
         doc_id: &DocID,
     ) -> query::error::Result<DeleteResult> {
-        self.delete_with_resolved_inputs(collection_name, doc_id)
+        self.delete_as(&RequestContext::ambient(), collection_name, doc_id)
+            .await
+    }
+
+    async fn delete_as(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        doc_id: &DocID,
+    ) -> query::error::Result<DeleteResult> {
+        self.delete_with_resolved_inputs(context, collection_name, doc_id)
             .await
     }
 

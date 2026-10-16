@@ -20,7 +20,7 @@ type WasmRunner =
 use crate::bindings::{from_js, to_js, ClientConfig, CollectionInfo, FieldInfo};
 use crate::document_changes::DocumentChanges;
 use crate::error::{Result, WasmError};
-use crate::identity::{ClientIdentity, SigningGuard};
+use crate::identity::ClientIdentity;
 use crate::p2p::P2PRuntime;
 
 /// DefraDB client for browser applications.
@@ -62,7 +62,6 @@ pub struct DefraClient {
     pub(crate) document_acp: Arc<dyn acp::DocumentACP>,
     pub(crate) p2p: Option<P2PRuntime>,
     pub(crate) identity: Option<ClientIdentity>,
-    mutate_lock: futures::lock::Mutex<()>,
     closed: bool,
 }
 
@@ -295,7 +294,6 @@ impl DefraClient {
             document_acp,
             p2p: None,
             identity,
-            mutate_lock: futures::lock::Mutex::new(()),
             closed: false,
         })
     }
@@ -390,15 +388,15 @@ impl DefraClient {
             return Err(WasmError::Query("Empty mutation string".to_string()));
         }
 
-        // One mutation at a time. The signing config is a thread-local, so a
-        // second mutation starting mid-flight would take it away from the
-        // first, which would go on to write unsigned blocks.
-        let _writing = self.mutate_lock.lock().await;
-        let _signing = SigningGuard::install(self.identity.as_ref());
+        // Local writes are signed with the client's key; blocks arriving
+        // from peers never are.
+        let context = defra_core::RequestContext::default()
+            .with_signing(self.identity.as_ref().map(ClientIdentity::signing_config));
         let result = self
             .runner
             .as_ref()
             .ok_or(WasmError::NotInitialized)?
+            .for_request(context)
             .execute_mutation_with_identity(graphql, self.caller())
             .await;
 

@@ -27,6 +27,9 @@ pub struct RegolithStoreOptions {
     /// previous release encrypted value by value is first looked at without
     /// them, and decrypted once with them (`super::rewrite`).
     at_rest: Option<Arc<AtRestKeys>>,
+    /// The worker pool the store was placed on ([`Self::placed_on`]): callers
+    /// off its workers do their I/O through one of its queues.
+    pub(super) pool: Option<workers::Pool>,
 }
 
 impl RegolithStoreOptions {
@@ -90,6 +93,7 @@ impl RegolithStoreOptions {
             isolation: IsolationLevel::DefraLevel,
             close_timeout: Duration::from_secs(30),
             at_rest: None,
+            pool: None,
         }
     }
 
@@ -144,6 +148,7 @@ impl RegolithStoreOptions {
     pub fn placed_on(mut self, pool: &workers::Pool) -> Self {
         let env = pool.env(self.engine.get_env().clone());
         self.engine = self.engine.env(env);
+        self.pool = Some(pool.clone());
         self
     }
 
@@ -177,6 +182,7 @@ impl std::fmt::Debug for RegolithStoreOptions {
             .field("isolation", &self.isolation)
             .field("durability", &self.engine.get_durability())
             .field("close_timeout", &self.close_timeout)
+            .field("pool", &self.pool.is_some())
             .finish_non_exhaustive()
     }
 }

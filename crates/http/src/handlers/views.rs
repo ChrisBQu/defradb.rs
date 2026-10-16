@@ -6,6 +6,7 @@ use crate::error::{http_error_from_backend_message, HttpError};
 use crate::handlers::collection_selector::CollectionSelectorQuery;
 use crate::identity_extractor::ExtractIdentity;
 use crate::nac_guard::require_permission;
+use crate::request_scope::bound;
 use crate::router::{AppState, NodePermission};
 use schema::CollectionVersion;
 
@@ -44,7 +45,7 @@ pub async fn add_view(
 
     let body: AddViewRequest = required_body(&body)?;
 
-    let view_ops = state.require_view()?;
+    let view_ops = bound(state.require_view()?, &identity.context());
 
     let result = view_ops
         .add_view(&body.query, &body.sdl, body.transform.as_deref())
@@ -90,7 +91,7 @@ pub async fn refresh_views(
 ) -> Result<Json<serde_json::Value>, HttpError> {
     require_permission(&state, &identity, NodePermission::ViewRefresh).await?;
 
-    let view_ops = state.require_view()?;
+    let view_ops = bound(state.require_view()?, &identity.context());
 
     view_ops
         .refresh_views(query.into_selector_with(view_names_from_body(&body)?))
@@ -114,7 +115,7 @@ pub async fn gc_downsample_histories(
 
     let names = view_names_from_body(&body)?;
 
-    let view_ops = state.require_view()?;
+    let view_ops = bound(state.require_view()?, &identity.context());
 
     view_ops
         .gc_downsample_histories(names)

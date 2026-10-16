@@ -1,6 +1,6 @@
 //! An update reads what it needs once: its collection version's part-ID map is
-//! decoded once and shared, and the document's heads are scanned once for both
-//! its value operands and its blocks.
+//! decoded once and shared, and the document's head set is read by one point read
+//! for both its value operands and its blocks, with no head prefix scanned.
 
 use std::sync::Arc;
 
@@ -9,7 +9,8 @@ use document::{DocID, Document, NormalValue};
 use query::mutator::DocMutator;
 use rapidhash::RapidHashSet;
 use schema::{CollectionVersion, FieldDescription, FieldKind};
-use storage::keys::HeadstoreDocKey;
+use storage::keys::HeadstoreDocSetKey;
+use storage::corekv::Key;
 use storage::namespace::Namespace;
 use storage::RegolithStore;
 
@@ -87,7 +88,7 @@ async fn an_update_reads_its_part_id_map_at_most_once() {
 }
 
 #[tokio::test]
-async fn an_update_scans_the_document_heads_once() {
+async fn an_update_reads_the_document_heads_with_one_point_read() {
     let (db, doc_id) = seeded().await;
     let collection = db.get_collection("Parted").unwrap().unwrap();
     let txn = db.new_txn(true).await.unwrap();
@@ -97,19 +98,28 @@ async fn an_update_scans_the_document_heads_once() {
         .unwrap()
         .unwrap();
     txn.discard().unwrap();
-    let mut heads_prefix = vec![Namespace::Headstore.prefix()];
-    heads_prefix.extend_from_slice(&HeadstoreDocKey::document_prefix(short_id));
+    let mut set_key = vec![Namespace::Headstore.prefix()];
+    set_key.extend_from_slice(&HeadstoreDocSetKey::new(short_id).bytes());
+    let heads_prefix = [Namespace::Headstore.prefix(), b'/', b'd', b'/'];
 
+    db.store().take_point_keys();
     db.store().take_scan_prefixes();
     update_in_explicit_txn(&db, &doc_id, "left", 1).await;
+    let reads = db
+        .store()
+        .take_point_keys()
+        .iter()
+        .filter(|key| **key == set_key)
+        .count();
+    assert_eq!(
+        reads, 1,
+        "an update read its document's head set {reads} times"
+    );
     let scans = db
         .store()
         .take_scan_prefixes()
         .iter()
-        .filter(|prefix| **prefix == heads_prefix)
+        .filter(|prefix| prefix.starts_with(&heads_prefix))
         .count();
-    assert_eq!(
-        scans, 1,
-        "an update scanned its document's heads {scans} times"
-    );
+    assert_eq!(scans, 0, "an update scanned a head prefix {scans} times");
 }

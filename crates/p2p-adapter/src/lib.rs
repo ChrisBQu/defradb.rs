@@ -17,6 +17,8 @@ mod iroh_restore;
 #[cfg(feature = "libp2p")]
 mod libp2p;
 pub mod manage;
+#[cfg(any(feature = "iroh", feature = "libp2p"))]
+mod pooled_doc_pusher;
 mod read_gate;
 mod replication_events;
 mod replicator_status;
@@ -42,6 +44,8 @@ pub use iroh_peer::{
 pub use iroh_restore::restore_iroh_p2p_state;
 #[cfg(feature = "libp2p")]
 pub use libp2p::{CollectionLookup, P2PAdapter, VersionSyncer};
+#[cfg(any(feature = "iroh", feature = "libp2p"))]
+pub use pooled_doc_pusher::pooled;
 pub use read_gate::{DbBlockClassifier, DbBlockReadGate};
 pub use replication_events::publish_replication_result;
 pub use replicator_status::{

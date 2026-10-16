@@ -19,13 +19,17 @@
 //! replacing it replaces this crate alone. Natively it is one tokio
 //! runtime; on wasm32 it is the browser's event loop, behind the same
 //! handle (without the blocking calls a browser cannot make). A build
-//! that starts no networking starts no runtime.
+//! that starts no networking starts no runtime; a component given no
+//! `Edge` that needs one reaches the process's [`on_demand`] runtime,
+//! started the first time it is needed.
 
 mod config;
 mod contain;
 mod error;
 mod gate;
 mod handle;
+#[cfg(not(target_arch = "wasm32"))]
+mod on_demand;
 mod platform;
 mod pool;
 mod runtime;
@@ -39,6 +43,8 @@ mod timer;
 pub use config::{EdgeConfig, ThreadStart};
 pub use error::EdgeError;
 pub use handle::{Drained, Edge, Scope};
+#[cfg(not(target_arch = "wasm32"))]
+pub use on_demand::on_demand;
 pub use runtime::EdgeRuntime;
 pub use stats::EdgeStats;
 #[cfg(target_arch = "wasm32")]

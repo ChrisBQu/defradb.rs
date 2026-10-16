@@ -5,6 +5,7 @@
 
 use async_trait::async_trait;
 use defra_core::thread_bounds::{MaybeBoxFuture, MaybeSend};
+use defra_core::RequestContext;
 use identity::Did;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -64,6 +65,10 @@ pub struct QueryRequest {
     /// This is set by the HTTP layer from the Authorization header.
     #[serde(skip)]
     pub identity: Option<Did>,
+
+    /// The request's context, built by the boundary that received it.
+    #[serde(skip)]
+    pub context: RequestContext,
 }
 
 impl QueryRequest {
@@ -74,6 +79,7 @@ impl QueryRequest {
             operation_name: None,
             variables: None,
             identity: None,
+            context: RequestContext::default(),
         }
     }
 
@@ -92,6 +98,12 @@ impl QueryRequest {
     /// Set the identity for ACP permission checks.
     pub fn with_identity(mut self, identity: Option<Did>) -> Self {
         self.identity = identity;
+        self
+    }
+
+    /// Set the request's context.
+    pub fn with_context(mut self, context: RequestContext) -> Self {
+        self.context = context;
         self
     }
 }
@@ -367,19 +379,20 @@ pub struct ErrorLocation {
 ///     executor: &E,
 ///     queries: Vec<QueryRequest>,
 /// ) -> Result<Vec<QueryResponse>, TransactionError> {
-///     let handle = executor.begin_txn(false).await?;
+///     let context = RequestContext::default();
+///     let handle = executor.begin_txn_as(&context, false).await?;
 ///     let mut responses = Vec::new();
 ///
 ///     for query in queries {
 ///         let resp = executor.execute_in_txn(query, &handle).await;
 ///         if resp.has_errors() {
-///             executor.rollback_txn(&handle).await.ok();
+///             executor.rollback_txn_as(&context, &handle).await.ok();
 ///             return Err(TransactionError::execution("query failed"));
 ///         }
 ///         responses.push(resp);
 ///     }
 ///
-///     executor.commit_txn(&handle).await?;
+///     executor.commit_txn_as(&context, &handle).await?;
 ///     Ok(responses)
 /// }
 /// ```
@@ -452,6 +465,17 @@ pub trait QueryExecutor: MaybeSendSync {
         readonly: bool,
     ) -> std::result::Result<TransactionHandle, TransactionError>;
 
+    /// [`Self::begin_txn`] for the request `context` serves: the transaction
+    /// belongs to its identity. The default runs `begin_txn` inside
+    /// [`RequestContext::mirror`].
+    async fn begin_txn_as(
+        &self,
+        context: &RequestContext,
+        readonly: bool,
+    ) -> std::result::Result<TransactionHandle, TransactionError> {
+        context.mirror(self.begin_txn(readonly)).await
+    }
+
     /// Commit a transaction.
     ///
     /// All operations performed within the transaction become permanent.
@@ -461,6 +485,16 @@ pub trait QueryExecutor: MaybeSendSync {
         handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError>;
 
+    /// [`Self::commit_txn`] for the request `context` serves. The default runs
+    /// `commit_txn` inside [`RequestContext::mirror`].
+    async fn commit_txn_as(
+        &self,
+        context: &RequestContext,
+        handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError> {
+        context.mirror(self.commit_txn(handle)).await
+    }
+
     /// Rollback a transaction.
     ///
     /// All operations performed within the transaction are discarded.
@@ -469,6 +503,16 @@ pub trait QueryExecutor: MaybeSendSync {
         &self,
         handle: &TransactionHandle,
     ) -> std::result::Result<(), TransactionError>;
+
+    /// [`Self::rollback_txn`] for the request `context` serves. The default
+    /// runs `rollback_txn` inside [`RequestContext::mirror`].
+    async fn rollback_txn_as(
+        &self,
+        context: &RequestContext,
+        handle: &TransactionHandle,
+    ) -> std::result::Result<(), TransactionError> {
+        context.mirror(self.rollback_txn(handle)).await
+    }
 
     /// Remove an abandoned transaction without committing or spawning cleanup.
     ///
