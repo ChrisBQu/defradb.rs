@@ -3,8 +3,8 @@
 
 use std::time::Duration;
 
-use crate::corekv::{Reader, Store, Writer};
-use crate::{with_worker_io, RegolithStore, RegolithStoreOptions};
+use crate::corekv::{OnCommit, Reader, Store, Writer};
+use crate::{RegolithStore, RegolithStoreOptions, with_worker_io};
 
 /// Every wait in these tests carries a deadline, so a regression fails
 /// instead of hanging the suite.
@@ -100,6 +100,125 @@ fn cold_reads_on_a_worker_complete_through_its_queue() {
     .unwrap()
     .unwrap();
     assert_eq!(done.wait_timeout(DEADLINE).unwrap(), (24, 24));
+    pool.shutdown_blocking().unwrap();
+}
+
+/// Commit validation on a worker must be able to finish when a concurrent
+/// commit advances its snapshot. The transaction's blind put targets a key in
+/// a flushed table whose data block has not been read into the cache.
+#[test]
+fn explicit_commits_complete_after_validation_cache_misses() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    const SEED_COUNT: usize = 24;
+    const VALUE_SIZE: usize = 16 * 1024;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = RegolithStore::open(dir.path()).unwrap();
+    workers::block_on(async {
+        let mut seed = store.new_txn(false).await.unwrap();
+        let mut state = 0x9e37_79b9u32;
+        for n in 0..SEED_COUNT {
+            let mut value = vec![0; VALUE_SIZE];
+            for byte in &mut value {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                *byte = state as u8;
+            }
+            seed.set(format!("cold/{n:04}").as_bytes(), &value)
+                .await
+                .unwrap();
+        }
+        seed.commit().await.unwrap();
+        store.engine().db().flush().unwrap();
+        store.close().await.unwrap();
+    })
+    .unwrap();
+    drop(store);
+
+    let pool = pool(2);
+    let mut options = RegolithStoreOptions::default();
+    // No table blocks are admitted; the test reaches validation with the
+    // seeded SST data cold in the cache.
+    options.engine = options.engine.block_cache_size(0);
+    let options = options.placed_on(&pool);
+    let store = RegolithStore::open_with_options(dir.path(), options).unwrap();
+    let committed_callbacks = Arc::new(AtomicUsize::new(0));
+    let on_worker = store.clone();
+    let callbacks = Arc::clone(&committed_callbacks);
+    let done = workers::block_on(
+        pool.submit(workers::Target::LeastLoaded, move || async move {
+            let mut warm = on_worker.new_txn(false).await.unwrap();
+            warm.set(b"warm", &u32::MAX.to_be_bytes()).await.unwrap();
+            warm.commit().await.unwrap();
+
+            for n in 0..SEED_COUNT {
+                let key = format!("cold/{n:04}");
+                let mut stale = on_worker.new_txn(false).await.unwrap();
+                stale
+                    .set(key.as_bytes(), &vec![n as u8; VALUE_SIZE])
+                    .await
+                    .unwrap();
+
+                // This key stays in the memtable, so B commits without I/O.
+                // Its commit advances the horizon after A's blind put.
+                let mut winner = on_worker.new_txn(false).await.unwrap();
+                let winner_key = b"warm";
+                winner.set(winner_key, &n.to_be_bytes()).await.unwrap();
+                let winner_callbacks = Arc::clone(&callbacks);
+                winner
+                    .on_commit(OnCommit::Sync(Box::new(move || {
+                        winner_callbacks.fetch_add(1, Ordering::SeqCst);
+                    })))
+                    .unwrap();
+                winner.commit().await.unwrap();
+
+                // A now validates its cold flushed write key against the
+                // table before entering the commit pipeline.
+                let stale_callbacks = Arc::clone(&callbacks);
+                stale
+                    .on_commit(OnCommit::Sync(Box::new(move || {
+                        stale_callbacks.fetch_add(1, Ordering::SeqCst);
+                    })))
+                    .unwrap();
+                stale.commit().await.unwrap();
+            }
+        }),
+    )
+    .unwrap()
+    .unwrap();
+    done.wait_timeout(DEADLINE).unwrap();
+    assert_eq!(committed_callbacks.load(Ordering::SeqCst), SEED_COUNT * 2);
+
+    workers::block_on(store.close()).unwrap().unwrap();
+    drop(store);
+    let reopened = RegolithStore::open(dir.path()).unwrap();
+    let reader = workers::block_on(reopened.new_txn(true)).unwrap().unwrap();
+    for n in 0..SEED_COUNT {
+        let key = format!("cold/{n:04}");
+        assert_eq!(
+            workers::block_on(reader.get(key.as_bytes()))
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .as_ref(),
+            vec![n as u8; VALUE_SIZE].as_slice()
+        );
+    }
+    assert_eq!(
+        workers::block_on(reader.get(b"warm"))
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .as_ref(),
+        (SEED_COUNT - 1).to_be_bytes().as_slice()
+    );
+    reader.discard();
+    workers::block_on(reopened.close()).unwrap().unwrap();
     pool.shutdown_blocking().unwrap();
 }
 

@@ -6,8 +6,9 @@
 //! of them between tasks ([`WorkerIo`], the pool's hook). A transaction that
 //! starts on such a worker reads in `ReadMode::CacheOnly` on that queue, so a
 //! block the cache does not hold suspends the task on its `IoWait` instead of
-//! the thread on the device, and commits with `commit_nowait`, whose ticket
-//! the same queue completes. Nothing is shared with another thread: the
+//! the thread on the device. Native stores placed on a pool commit on its
+//! blocking threads, because cache-only commit validation cannot resume
+//! after consuming a transaction. The
 //! queues live in the worker's thread-local registry ([`registry`]) and only
 //! that worker polls them.
 //!
@@ -128,6 +129,11 @@ impl StoreIo {
             idle: regolith::sync::ArrayQueue::new(threads),
             stats,
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn blocking_pool(&self) -> Option<workers::Pool> {
+        self.pool.clone()
     }
 
     /// A queue of the caller's own to drive, idle: one kept from an earlier

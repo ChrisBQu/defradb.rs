@@ -41,6 +41,8 @@ pub struct RegolithTxn {
     event_order: Arc<EventOrder>,
     savepoints: Vec<CallbackMark>,
     scoped_attempt: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    blocking_pool: Option<workers::Pool>,
 }
 
 impl RegolithTxn {
@@ -64,6 +66,8 @@ impl RegolithTxn {
             savepoints: Vec::new(),
             event_order: Arc::new(EventOrder::default()),
             scoped_attempt: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            blocking_pool: None,
         })
     }
 
@@ -74,6 +78,7 @@ impl RegolithTxn {
         slot: TxnSlot,
         event_order: Arc<EventOrder>,
         mode: regolith::ReadMode,
+        #[cfg(not(target_arch = "wasm32"))] blocking_pool: Option<workers::Pool>,
     ) -> Result<Self> {
         // On a pool the handle reads on a worker's queue, so a cache miss
         // suspends the task instead of the thread.
@@ -91,6 +96,8 @@ impl RegolithTxn {
             savepoints: Vec::new(),
             event_order,
             scoped_attempt: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            blocking_pool,
         })
     }
 
@@ -103,6 +110,8 @@ impl RegolithTxn {
             event_order: Arc::new(EventOrder::default()),
             savepoints: Vec::new(),
             scoped_attempt: true,
+            #[cfg(not(target_arch = "wasm32"))]
+            blocking_pool: None,
         }
     }
 
@@ -370,15 +379,34 @@ impl Txn for RegolithTxn {
             return Ok(());
         };
         let work = PostCommit::bind(&self.event_order, &mut txn, callbacks);
-        // A transaction on a worker's queue commits without waiting: the
-        // task awaits the ticket the worker's own queue completes. Anywhere
-        // else the commit syncs on the calling thread.
+        // Cache-only validation consumes the transaction on an I/O miss.
+        // Blocking validation must run off the data worker; post-commit
+        // work remains with this transaction's owner.
         let outcome = if txn.io_queue().is_some() {
-            txn.commit_nowait().await
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(pool) = self.blocking_pool.take() {
+                match pool.spawn_blocking(move || txn.commit()).await {
+                    Ok(completion) => match completion.await {
+                        Ok(outcome) => outcome.map_err(map_txn_error),
+                        Err(error) => Err(Error::Backend(format!(
+                            "blocking transaction commit failed: {error}"
+                        ))),
+                    },
+                    Err(error) => Err(Error::Backend(format!(
+                        "could not schedule blocking transaction commit: {error}"
+                    ))),
+                }
+            } else {
+                txn.commit_nowait().await.map_err(map_txn_error)
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                txn.commit_nowait().await.map_err(map_txn_error)
+            }
         } else {
-            txn.commit()
+            txn.commit().map_err(map_txn_error)
         };
-        match outcome.map_err(map_txn_error) {
+        match outcome {
             // Durable from here on: what follows can be reported, never
             // turned into a failed write.
             Ok(_) => {
