@@ -28,14 +28,13 @@ pub use build::BuildReport;
 pub use params::{IvfFlatParams, DEFAULT_NPROBE, DEFAULT_SAMPLE_BYTES, MAX_NLIST, TRAIN_PER_LIST};
 
 use crate::index::error::{Error, Result};
-use crate::index::vector::engine::trained_cache::TrainedCache;
 use crate::index::vector::engine::ann::{Admit, EngineKind, Neighbor, VectorIndexEngine};
 use crate::index::vector::engine::flat::Flat;
 use crate::index::vector::engine::ivf::{self, TrainedState};
+use crate::index::vector::engine::trained_cache::TrainedCache;
 use crate::index::vector::quantize::Centroids;
 use crate::index::vector::store::{NodeId, VectorNodeStore};
 use defra_core::vector::{Element, Metric};
-
 
 /// A coarse-partitioned index whose lists hold full-precision vectors.
 #[derive(Debug, Clone)]

@@ -1,7 +1,7 @@
+use regolith::sync::OnceCell;
 use std::ffi::c_char;
 use std::fs::File;
 use std::sync::atomic::{AtomicBool, Ordering};
-use regolith::sync::OnceCell;
 
 use kovan_queue::seg_queue::SegQueue;
 use tracing_chrome::{ChromeLayerBuilder, FlushGuard};

@@ -48,16 +48,15 @@ pub use params::{
     MAX_R, MERGE_MIN_BATCH, SLACK_PERCENT, TRAIN_THRESHOLD,
 };
 
-
 use std::sync::Arc;
 
 use codec::{GraphState, Trained};
 
 use crate::index::error::{Error, Result};
-use crate::index::vector::engine::trained_cache::TrainedCache;
 use crate::index::vector::engine::ann::{Admit, EngineKind, Neighbor, VectorIndexEngine};
 use crate::index::vector::engine::flat::Flat;
 use crate::index::vector::engine::ivf;
+use crate::index::vector::engine::trained_cache::TrainedCache;
 use crate::index::vector::quantize::{ProductQuantizer, Quantizer};
 use crate::index::vector::store::{NodeId, VectorNodeStore};
 use defra_core::vector::{Element, Metric};

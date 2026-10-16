@@ -11,9 +11,7 @@
 
 use std::{
     collections::VecDeque,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use kovan::Atom;

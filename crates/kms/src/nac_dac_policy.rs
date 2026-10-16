@@ -15,8 +15,8 @@
 
 use async_trait::async_trait;
 use identity::Did;
-use std::sync::Arc;
 use regolith::sync::OnceCell;
+use std::sync::Arc;
 
 use crate::error::{Error, Result};
 use crate::policy::{AccessPolicy, DocCollectionLookup, NodeAcpRead};

@@ -22,8 +22,8 @@
 //! subscriber mid-event. Plain stderr is re-entrancy-safe and matches the
 //! crate's existing operator-warning style (see `handle.rs`).
 
-use std::fmt;
 use regolith::sync::OnceCell;
+use std::fmt;
 
 use tracing::field::{Field, Visit};
 use tracing::{Event, Metadata, Subscriber};

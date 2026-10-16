@@ -13,8 +13,8 @@
 
 use kovan_map::HopscotchMap;
 use rapidhash::fast::RandomState;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use regolith::sync::OnceCell;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 const GUARD_TARGET: &str = "db::collection::locks";

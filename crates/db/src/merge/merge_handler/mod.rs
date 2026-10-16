@@ -147,7 +147,8 @@ pub struct DbMergeHandler<S: Store, B: blockstore::Blockstore> {
     pub(crate) rejected_governed: Arc<CidSet>,
     /// Where composites merged by re-drive are reported, so they take the
     /// same post-merge path as a first-attempt merge.
-    redriven_sink: Arc<regolith::sync::OnceCell<Arc<dyn crate::merge::governance::RedrivenMergeSink>>>,
+    redriven_sink:
+        Arc<regolith::sync::OnceCell<Arc<dyn crate::merge::governance::RedrivenMergeSink>>>,
 }
 
 impl<S: Store, B: blockstore::Blockstore> Clone for DbMergeHandler<S, B> {

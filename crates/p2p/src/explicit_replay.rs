@@ -22,8 +22,8 @@ use crypto::{did::parse_did_key, public_key_from_bytes, sha256, Sha256Hash};
 use identity::FullIdentity;
 use kovan_map::HopscotchMap;
 use rapidhash::fast::RandomState;
-use serde::{Deserialize, Serialize};
 use regolith::sync::Lazy;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 

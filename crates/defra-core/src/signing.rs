@@ -345,8 +345,7 @@ impl SigningConfig {
 /// Global identity store mapping DID → SigningConfig.
 /// When create_identity() generates a keypair, we store it here so that
 /// exec_request() can look up the signing key from just a DID string.
-static IDENTITY_STORE: OnceCell<HopscotchMap<String, SigningConfig, RandomState>> =
-    OnceCell::new();
+static IDENTITY_STORE: OnceCell<HopscotchMap<String, SigningConfig, RandomState>> = OnceCell::new();
 
 fn identity_store() -> &'static HopscotchMap<String, SigningConfig, RandomState> {
     IDENTITY_STORE.get_or_init_racy(|| HopscotchMap::with_hasher(RandomState::default()))

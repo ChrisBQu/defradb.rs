@@ -6,11 +6,11 @@ use std::sync::Arc;
 #[cfg(feature = "otlp")]
 use kovan::Atom;
 #[cfg(feature = "otlp")]
-use regolith::sync::OnceCell;
-#[cfg(feature = "otlp")]
 use opentelemetry::metrics::{Counter, MeterProvider as _};
 #[cfg(feature = "otlp")]
 use opentelemetry::KeyValue;
+#[cfg(feature = "otlp")]
+use regolith::sync::OnceCell;
 
 /// A retry loop that absorbs transaction conflicts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
