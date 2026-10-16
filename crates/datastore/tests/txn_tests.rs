@@ -3,9 +3,9 @@
 use bytes::Bytes;
 use datastore::{BasicTxn, OnAbort, OnCommit};
 use futures::FutureExt;
+use regolith::sync::SegQueue;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
-use std::sync::Mutex;
 use storage::RegolithStore;
 
 #[tokio::test]
@@ -323,32 +323,32 @@ async fn test_basic_txn_mixed_success_callbacks_preserve_execution_order() {
     let store = RegolithStore::in_memory().unwrap();
     let mut txn = BasicTxn::new(&store, 1, false).await.unwrap();
 
-    let execution_order = Arc::new(Mutex::new(Vec::new()));
+    let execution_order = Arc::new(SegQueue::new());
 
     let order = execution_order.clone();
     txn.on_commit(OnCommit::Sync(Box::new(move || {
-        order.lock().unwrap().push("sync-1");
+        order.push("sync-1");
     })))
     .unwrap();
 
     let order = execution_order.clone();
     txn.on_commit(OnCommit::Async(Box::new(move || {
         Box::pin(async move {
-            order.lock().unwrap().push("async-1");
+            order.push("async-1");
         })
     })))
     .unwrap();
 
     let order = execution_order.clone();
     txn.on_commit(OnCommit::Sync(Box::new(move || {
-        order.lock().unwrap().push("sync-2");
+        order.push("sync-2");
     })))
     .unwrap();
 
     let order = execution_order.clone();
     txn.on_commit(OnCommit::Async(Box::new(move || {
         Box::pin(async move {
-            order.lock().unwrap().push("async-2");
+            order.push("async-2");
         })
     })))
     .unwrap();
@@ -356,7 +356,7 @@ async fn test_basic_txn_mixed_success_callbacks_preserve_execution_order() {
     txn.commit().await.unwrap();
 
     assert_eq!(
-        *execution_order.lock().unwrap(),
+        std::iter::from_fn(|| execution_order.pop()).collect::<Vec<_>>(),
         vec!["async-1", "async-2", "sync-1", "sync-2"]
     );
 }
@@ -510,24 +510,24 @@ async fn test_basic_txn_abort_callbacks_run_once_on_a_failed_commit() {
     seed.datastore().set(b"key", b"one").await.unwrap();
     seed.commit().await.unwrap();
 
-    let order = Arc::new(Mutex::new(Vec::new()));
+    let order = Arc::new(SegQueue::new());
     let mut loser = BasicTxn::new(&store, 2, false).await.unwrap();
     assert!(loser.datastore().get(b"key").await.unwrap().is_some());
     loser.datastore().set(b"key", b"loser").await.unwrap();
     let seen = order.clone();
     loser
         .on_commit(OnCommit::Sync(Box::new(move || {
-            seen.lock().unwrap().push("commit");
+            seen.push("commit");
         })))
         .unwrap();
     let seen = order.clone();
     loser.on_abort(OnAbort::Sync(Box::new(move || {
-        seen.lock().unwrap().push("abort");
+        seen.push("abort");
     })));
     let seen = order.clone();
     loser.on_abort(OnAbort::Async(Box::new(move || {
         Box::pin(async move {
-            seen.lock().unwrap().push("abort-async");
+            seen.push("abort-async");
         })
     })));
 
@@ -536,5 +536,8 @@ async fn test_basic_txn_abort_callbacks_run_once_on_a_failed_commit() {
     winner.commit().await.unwrap();
 
     assert!(loser.commit().await.is_err());
-    assert_eq!(*order.lock().unwrap(), vec!["abort-async", "abort"]);
+    assert_eq!(
+        std::iter::from_fn(|| order.pop()).collect::<Vec<_>>(),
+        vec!["abort-async", "abort"]
+    );
 }

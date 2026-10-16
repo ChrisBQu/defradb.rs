@@ -5,14 +5,13 @@
 //!
 //! All endpoints enforce NAC permissions when NAC is enabled.
 
-use std::collections::HashMap;
-
 use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     Json,
 };
 use query::rest::{CollectionDocIdsPage, CollectionDocIdsPagination};
+use rapidhash::RapidHashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{http_error_from_backend_message, HttpError};
@@ -48,7 +47,7 @@ impl From<CollectionDocIdsPage> for CollectionDocIdsResponse {
 }
 
 fn parse_collection_doc_ids_pagination(
-    params: &HashMap<String, String>,
+    params: &RapidHashMap<String, String>,
 ) -> Result<CollectionDocIdsPagination, HttpError> {
     let limit = match params.get("limit") {
         Some(raw) => {
@@ -163,7 +162,7 @@ pub async fn get_collection_doc_ids(
     identity: ExtractIdentity,
     headers: HeaderMap,
     Path(name): Path<String>,
-    Query(params): Query<HashMap<String, String>>,
+    Query(params): Query<RapidHashMap<String, String>>,
 ) -> Result<Json<CollectionDocIdsResponse>, HttpError> {
     require_permission(&state, &identity, NodePermission::CollectionGet).await?;
 
@@ -511,7 +510,7 @@ pub async fn get_all_collections(
 pub async fn delete_collections_by_names(
     State(state): State<AppState>,
     identity: ExtractIdentity,
-    Query(params): Query<HashMap<String, String>>,
+    Query(params): Query<RapidHashMap<String, String>>,
 ) -> Result<StatusCode, HttpError> {
     require_permission(&state, &identity, NodePermission::CollectionPatch).await?;
 

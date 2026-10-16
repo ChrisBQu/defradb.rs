@@ -402,7 +402,7 @@ mod tests {
     #[derive(Default)]
     struct DacBypassRecorder {
         observed: std::sync::atomic::AtomicBool,
-        bearer: std::sync::Mutex<Option<String>>,
+        bearer: kovan::Atom<Option<String>>,
     }
 
     #[async_trait]
@@ -412,7 +412,8 @@ mod tests {
         async fn execute(&self, _request: QueryRequest) -> QueryResponse {
             self.observed
                 .store(defra_core::dac_bypass::get_dac_bypass(), Ordering::SeqCst);
-            *self.bearer.lock().unwrap() = defra_core::signing::get_request_bearer_token(OWNER_DID);
+            self.bearer
+                .store(defra_core::signing::get_request_bearer_token(OWNER_DID));
             QueryResponse::success(serde_json::json!({}))
         }
 
@@ -423,7 +424,8 @@ mod tests {
         ) -> QueryResponse {
             self.observed
                 .store(defra_core::dac_bypass::get_dac_bypass(), Ordering::SeqCst);
-            *self.bearer.lock().unwrap() = defra_core::signing::get_request_bearer_token(OWNER_DID);
+            self.bearer
+                .store(defra_core::signing::get_request_bearer_token(OWNER_DID));
             QueryResponse::success(serde_json::json!({}))
         }
 
@@ -502,7 +504,7 @@ mod tests {
             .with_nac(Arc::new(crate::MockNodeAcpOperations::new()))
             .build();
         for path in 0..3 {
-            *executor.bearer.lock().unwrap() = None;
+            executor.bearer.store(None);
             defra_core::signing::scope_request_bearer_token(
                 Some(OWNER_DID.to_string()),
                 Some("request-token".to_string()),
@@ -535,7 +537,7 @@ mod tests {
             )
             .await;
             assert_eq!(
-                executor.bearer.lock().unwrap().as_deref(),
+                executor.bearer.load_clone().as_deref(),
                 Some("request-token")
             );
         }

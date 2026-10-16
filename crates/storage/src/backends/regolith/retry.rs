@@ -65,11 +65,8 @@ pub(super) async fn transact(
         latest: None,
     });
     let run = attempts({
-        let (baton, db, event_order) = (
-            Arc::clone(&baton),
-            Arc::clone(db),
-            Arc::clone(event_order),
-        );
+        let (baton, db, event_order) =
+            (Arc::clone(&baton), Arc::clone(db), Arc::clone(event_order));
         move |txn, lost| {
             let previous_conflict = lost.map(crate::corekv::TransactionConflict::from);
             let (baton, db, event_order) = (
@@ -83,8 +80,15 @@ pub(super) async fn transact(
                         "a retry attempt started while another was running".into(),
                     )));
                 };
-                let value = run_attempt(&mut held, txn, previous_conflict, db, isolation, &event_order)
-                    .await;
+                let value = run_attempt(
+                    &mut held,
+                    txn,
+                    previous_conflict,
+                    db,
+                    isolation,
+                    &event_order,
+                )
+                .await;
                 // Cannot be full: this attempt took the one baton.
                 let _ = baton.push(held);
                 value
@@ -488,11 +492,11 @@ mod retry_order_tests {
     use super::*;
     use crate::backends::RegolithStore;
     use crate::corekv::{OnCommit, Store};
-    use std::sync::Mutex;
+    use regolith::sync::SegQueue;
     use tokio::sync::Notify;
 
     struct OrderedAttempt {
-        events: Arc<Mutex<Vec<u8>>>,
+        events: Arc<SegQueue<u8>>,
         entered: Arc<Notify>,
         release: Arc<Notify>,
     }
@@ -515,9 +519,7 @@ mod retry_order_tests {
                     })
                 })))?;
                 let events = self.events.clone();
-                callbacks.on_commit(OnCommit::Ordered(Box::new(move || {
-                    events.lock().unwrap().push(1)
-                })))?;
+                callbacks.on_commit(OnCommit::Ordered(Box::new(move || events.push(1))))?;
                 retry.finish_attempt_io(io, callbacks)?;
                 Ok(Box::new(()) as RetryAttemptValue)
             })
@@ -527,7 +529,7 @@ mod retry_order_tests {
     #[tokio::test]
     async fn regular_commit_waits_for_earlier_retry_postcommit_hook() {
         let store = RegolithStore::in_memory().unwrap();
-        let events = Arc::new(Mutex::new(Vec::new()));
+        let events = Arc::new(SegQueue::new());
         let entered = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
         let attempt = OrderedAttempt {
@@ -549,14 +551,15 @@ mod retry_order_tests {
         regular.set(b"ordered-regular", b"durable").await.unwrap();
         let out = events.clone();
         regular
-            .on_commit(OnCommit::Ordered(Box::new(move || {
-                out.lock().unwrap().push(2)
-            })))
+            .on_commit(OnCommit::Ordered(Box::new(move || out.push(2))))
             .unwrap();
         regular.commit().await.unwrap();
-        assert!(events.lock().unwrap().is_empty());
+        assert!(events.is_empty());
         release.notify_one();
         retry_task.await.unwrap();
-        assert_eq!(*events.lock().unwrap(), vec![1, 2]);
+        assert_eq!(
+            std::iter::from_fn(|| events.pop()).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
     }
 }
