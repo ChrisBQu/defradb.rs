@@ -165,7 +165,7 @@ pub(crate) fn compute_document_blocks_with_inputs(
                             .map_err(|e| format!("Failed to encode encryption block: {}", e))?;
                         let enc_cid = generate_cid_from_bytes(&enc_bytes)
                             .map_err(|e| format!("Failed to generate encryption CID: {}", e))?;
-                        blockstore_entries.push((enc_cid.to_bytes(), enc_bytes.into()));
+                        blockstore_entries.push((cid_bytes(&enc_cid), enc_bytes.into()));
 
                         (encrypted, enc_cid)
                     }
@@ -216,7 +216,7 @@ pub(crate) fn compute_document_blocks_with_inputs(
         if let Some(signer) = signing_config {
             match compute_signature_prepared(&field_block, signer, prepared_inputs) {
                 Ok(Some((sig_cid, sig_cbor))) => {
-                    blockstore_entries.push((sig_cid.to_bytes(), sig_cbor));
+                    blockstore_entries.push((cid_bytes(&sig_cid), sig_cbor));
                     field_block.signature = Some(sig_cid);
                 }
                 Ok(None) => {}
@@ -236,7 +236,7 @@ pub(crate) fn compute_document_blocks_with_inputs(
         let field_cid = generate_cid_from_bytes(&field_block_bytes)
             .map_err(|e| format!("Failed to generate field CID: {}", e))?;
 
-        blockstore_entries.push((field_cid.to_bytes(), field_block_bytes.into()));
+        blockstore_entries.push((cid_bytes(&field_cid), field_block_bytes.into()));
 
         head_write.add(
             &crate::block::heads::document::name(field_name, &field_cid),
@@ -266,7 +266,7 @@ pub(crate) fn compute_document_blocks_with_inputs(
                 .map_err(|e| format!("Failed to encode composite encryption block: {}", e))?;
             let enc_cid = generate_cid_from_bytes(&enc_bytes)
                 .map_err(|e| format!("Failed to generate composite encryption CID: {}", e))?;
-            blockstore_entries.push((enc_cid.to_bytes(), enc_bytes.into()));
+            blockstore_entries.push((cid_bytes(&enc_cid), enc_bytes.into()));
             Some(enc_cid)
         } else {
             None
@@ -297,7 +297,7 @@ pub(crate) fn compute_document_blocks_with_inputs(
         if let Some((sig_cid, sig_cbor)) =
             compute_signature_prepared(&composite_block, signer, prepared_inputs)?
         {
-            blockstore_entries.push((sig_cid.to_bytes(), sig_cbor));
+            blockstore_entries.push((cid_bytes(&sig_cid), sig_cbor));
             composite_block.signature = Some(sig_cid);
         }
     }
@@ -308,7 +308,8 @@ pub(crate) fn compute_document_blocks_with_inputs(
     let composite_cid = generate_cid_from_bytes(&composite_bytes)
         .map_err(|e| format!("Failed to generate composite CID: {}", e))?;
 
-    blockstore_entries.push((composite_cid.to_bytes(), composite_bytes.clone().into()));
+    let composite_bytes = Bytes::from(composite_bytes);
+    blockstore_entries.push((cid_bytes(&composite_cid), composite_bytes.clone()));
 
     head_write.add(
         &crate::block::heads::document::name("C", &composite_cid),
@@ -326,7 +327,7 @@ pub(crate) fn compute_document_blocks_with_inputs(
         doc_short_id: identity.doc_short_id,
         block_result: BlockResult {
             cid: composite_cid,
-            block: composite_bytes.into(),
+            block: composite_bytes,
             doc_id: derive_doc_id(&composite_cid),
             field_cids,
             encryption_cids,

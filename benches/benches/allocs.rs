@@ -30,8 +30,10 @@ use query::DocFetcher;
 use schema::{CollectionVersion, FieldDescription, FieldKind};
 use storage::RegolithStore;
 
+/// Counts on top of the allocator every other bench runs on
+/// (`common/allocator.rs`).
 #[global_allocator]
-static ALLOC: CountingAllocator = CountingAllocator;
+static ALLOC: CountingAllocator<mimalloc::MiMalloc> = CountingAllocator(mimalloc::MiMalloc);
 
 const COLLECTION: &str = "Users";
 const FIELDS: usize = 16;

@@ -17,6 +17,8 @@ use std::hint::black_box;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use events::{Bus, ChannelBus, EventName, Message};
 
+mod common;
+
 const SUBSCRIBERS: [usize; 5] = [0, 1, 8, 64, 512];
 
 fn publish_fanout(c: &mut Criterion) {

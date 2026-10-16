@@ -343,7 +343,7 @@ pub async fn set_block_doc_id_mapping(
         return Ok(());
     }
     systemstore
-        .set(&BlockCIDToDocIDKey::new(block_cid, doc_id).bytes(), &[])
+        .set(&BlockCIDToDocIDKey::bytes_for(block_cid, doc_id), &[])
         .await
         .map_err(Error::Storage)
 }
@@ -424,7 +424,7 @@ pub async fn delete_block_doc_id_mapping(
         return Ok(());
     }
     systemstore
-        .delete(&BlockCIDToDocIDKey::new(block_cid, doc_id).bytes())
+        .delete(&BlockCIDToDocIDKey::bytes_for(block_cid, doc_id))
         .await
         .map_err(Error::Storage)
 }

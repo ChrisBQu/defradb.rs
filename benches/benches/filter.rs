@@ -3,6 +3,8 @@ use query::{DocumentMapping, Filter};
 use serde_json::{json, Value as JsonValue};
 use std::hint::black_box;
 
+mod common;
+
 fn make_mapping() -> DocumentMapping {
     let mut mapping = DocumentMapping::new();
     mapping.add(0, "_docID");

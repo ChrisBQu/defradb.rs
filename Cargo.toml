@@ -185,6 +185,12 @@ tonic-prost-build = "0.14"
 # Bytes
 bytes = "1.5"
 
+# The process allocator of the defra binaries and the benches (never set by a
+# library): a heap per thread, and a block freed on another thread returns to
+# its heap without a lock, which thread-per-core hand-offs do all the time.
+# Native targets only.
+mimalloc = { version = "0.1.52", default-features = false }
+
 # Logging
 tracing = "0.1"
 

@@ -36,6 +36,7 @@ use defra_core::block::{
     CounterDeltaPayload, CrdtDelta, DAGLink, Encryption, LwwDeltaPayload, Signature,
     SignatureHeader,
 };
+use defra_core::cid_encoding::cid_bytes;
 use defra_core::encryption::EncryptionConfig;
 use defra_core::signing::SigningConfig;
 use document::{DocID, Document, NormalValue};
@@ -357,7 +358,7 @@ pub(crate) async fn sign_block(
     };
 
     blockstore
-        .set(&sig_cid.to_bytes(), &sig_cbor)
+        .set(&cid_bytes(&sig_cid), &sig_cbor)
         .await
         .map_err(|e| BuildError::Message(format!("Failed to store signature block: {}", e)))?;
 
@@ -382,7 +383,7 @@ pub struct BlockResult {
 
 /// Encode a NormalValue as CBOR bytes.
 pub fn encode_value_as_cbor(value: &NormalValue) -> Result<Vec<u8>, String> {
-    let mut bytes = Vec::new();
+    let mut bytes = Vec::with_capacity(value.cbor_size_hint());
     ciborium::into_writer(value, &mut bytes)
         .map_err(|e| format!("Failed to encode value as CBOR: {}", e))?;
     Ok(bytes)

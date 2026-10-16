@@ -93,6 +93,11 @@ defra-p2p-adapter = { workspace = true, optional = true, default-features = fals
 # Optional — OpenTelemetry exporter (see the `otel` feature)
 telemetry = { path = "../telemetry", default-features = false }
 
+# The process allocator of the `coding-session-bench` binary; the library sets
+# none.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+mimalloc.workspace = true
+
 [dev-dependencies]
 defra-core = { path = "../defra-core", features = ["ambient"] }
 edge = { path = "../edge", features = ["testing"] }

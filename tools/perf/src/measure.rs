@@ -7,7 +7,7 @@
 
 #![allow(dead_code)]
 
-use std::alloc::{GlobalAlloc, Layout, System};
+use std::alloc::{GlobalAlloc, Layout};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
@@ -80,32 +80,35 @@ pub fn ops_per_s<F: FnMut()>(ops: u64, mut f: F) -> f64 {
 }
 
 /// A global allocator that counts allocations, for the per-operation
-/// allocation budgets.
+/// allocation budgets, and leaves each one to the allocator it wraps.
 ///
 /// One `#[global_allocator]` exists per binary, so this is installed by the
 /// bench target that measures allocations and by nothing else.
-pub struct CountingAllocator;
+pub struct CountingAllocator<A>(pub A);
 
 static ALLOCS: AtomicU64 = AtomicU64::new(0);
 static BYTES: AtomicU64 = AtomicU64::new(0);
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 static PEAK_LIVE: AtomicUsize = AtomicUsize::new(0);
 
-// SAFETY: every method forwards to the system allocator with the same layout
-// it was given, so the allocation contract is the system allocator's. The
-// counters are plain atomics and touch no allocator state.
-unsafe impl GlobalAlloc for CountingAllocator {
+// SAFETY: every method forwards to the wrapped allocator with the same layout
+// it was given, so the allocation contract is that allocator's. The counters
+// are plain atomics and touch no allocator state.
+unsafe impl<A> GlobalAlloc for CountingAllocator<A>
+where
+    A: GlobalAlloc,
+{
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         ALLOCS.fetch_add(1, Ordering::Relaxed);
         BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
         let live = LIVE.fetch_add(layout.size(), Ordering::Relaxed) + layout.size();
         PEAK_LIVE.fetch_max(live, Ordering::Relaxed);
-        unsafe { System.alloc(layout) }
+        unsafe { self.0.alloc(layout) }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
-        unsafe { System.dealloc(ptr, layout) }
+        unsafe { self.0.dealloc(ptr, layout) }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
@@ -118,7 +121,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
         } else {
             LIVE.fetch_sub(layout.size() - new_size, Ordering::Relaxed);
         }
-        unsafe { System.realloc(ptr, layout, new_size) }
+        unsafe { self.0.realloc(ptr, layout, new_size) }
     }
 }
 

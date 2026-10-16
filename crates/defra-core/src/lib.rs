@@ -9,8 +9,10 @@ pub mod ambient;
 pub mod batch_signing;
 pub mod block;
 pub mod block_delta;
+mod block_encode;
 pub mod block_signature;
 pub mod cbor;
+pub mod cid_encoding;
 pub mod collection;
 /// The acting identity tests set the old way (see [`ambient`]).
 #[cfg(any(test, feature = "ambient"))]

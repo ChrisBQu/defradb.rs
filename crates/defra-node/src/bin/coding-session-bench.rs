@@ -536,6 +536,12 @@ mod runner {
     }
 }
 
+/// The allocator the `defra` binary ships with, so this measures the node as
+/// it runs.
+#[cfg(not(target_arch = "wasm32"))]
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     runner::run().await

@@ -6,6 +6,8 @@ use schema::{
 };
 use std::hint::black_box;
 
+mod common;
+
 fn map<const N: usize>(
     entries: [(String, serde_json::Value); N],
 ) -> serde_json::Map<String, serde_json::Value> {

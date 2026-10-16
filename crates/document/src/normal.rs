@@ -263,6 +263,17 @@ impl NormalValue {
         }
     }
 
+    /// The CBOR length of a scalar or a text string, what a field mostly
+    /// holds: a head of at most nine bytes and the text. A buffer sized by it
+    /// takes one allocation for those; any other value grows it from there.
+    pub fn cbor_size_hint(&self) -> usize {
+        const HEAD: usize = 9;
+        match self {
+            NormalValue::String(text) => HEAD + text.len(),
+            _ => HEAD,
+        }
+    }
+
     /// Returns true if this value is nil/null.
     pub fn is_nil(&self) -> bool {
         self.classification().is_nil

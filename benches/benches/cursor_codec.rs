@@ -14,6 +14,8 @@ use std::hint::black_box;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use cursor::Cursor;
 
+mod common;
+
 const KEY_COUNTS: [usize; 4] = [0, 1, 4, 16];
 
 fn sample(keys: usize) -> Cursor {

@@ -20,10 +20,16 @@ const BLOCK_CID_TO_DOC_ID: &str = "b";
 /// Returns an empty vector for 0: short IDs start at 1 and 0 marks
 /// "unset" (Go parity).
 pub fn encode_doc_short_id(doc_short_id: u64) -> Vec<u8> {
-    if doc_short_id == 0 {
-        return Vec::new();
+    let mut buf = Vec::new();
+    push_doc_short_id(&mut buf, doc_short_id);
+    buf
+}
+
+/// Appends [`encode_doc_short_id`]'s bytes to `buf`.
+pub fn push_doc_short_id(buf: &mut Vec<u8>, doc_short_id: u64) {
+    if doc_short_id != 0 {
+        *buf = encode_uvarint_ascending(std::mem::take(buf), doc_short_id);
     }
-    encode_uvarint_ascending(Vec::new(), doc_short_id)
 }
 
 /// Decode a document short ID, requiring the buffer to be fully consumed.
@@ -256,6 +262,15 @@ impl BlockCIDToDocIDKey {
         }
     }
 
+    /// The key's bytes for `block_cid` and `doc_id`, without building the key.
+    pub fn bytes_for(block_cid: &str, doc_id: &str) -> Vec<u8> {
+        doc_id_index_key(&[
+            BLOCK_CID_TO_DOC_ID.as_bytes(),
+            block_cid.as_bytes(),
+            doc_id.as_bytes(),
+        ])
+    }
+
     /// Prefix covering every DocID owning a block (trailing '/').
     pub fn block_prefix(block_cid: &str) -> Vec<u8> {
         let mut prefix = doc_id_index_key(&[BLOCK_CID_TO_DOC_ID.as_bytes(), block_cid.as_bytes()]);
@@ -266,11 +281,7 @@ impl BlockCIDToDocIDKey {
 
 impl Key for BlockCIDToDocIDKey {
     fn bytes(&self) -> Vec<u8> {
-        doc_id_index_key(&[
-            BLOCK_CID_TO_DOC_ID.as_bytes(),
-            self.block_cid.as_bytes(),
-            self.doc_id.as_bytes(),
-        ])
+        Self::bytes_for(&self.block_cid, &self.doc_id)
     }
 
     fn to_string(&self) -> String {

@@ -18,6 +18,8 @@ use db::block::builder::{write_document_blocks, DocStorageIdentity};
 use document::{DocID, Document, NormalValue};
 use storage::{backends::RegolithStore, Store};
 
+mod common;
+
 const SCHEMA_VERSION_ID: &str = "bafyreihsneodeja4lfer5puptim3lkwvketyckrmkhfpgxm67ch5wenjwq";
 const FIELD_COUNTS: [usize; 3] = [2, 8, 32];
 const VALUE_SIZES: [usize; 2] = [16, 1024];

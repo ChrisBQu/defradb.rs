@@ -12,6 +12,13 @@ use cli::cli::{Cli, Command};
 use cli::config::Config;
 use cli::error::Result;
 
+/// The process allocator: a heap per thread, and a block freed on another
+/// thread goes back to its own heap without a lock, which the node's workers
+/// do whenever a value crosses cores.
+#[cfg(not(target_arch = "wasm32"))]
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// The process's one network runtime is started here and every command runs
 /// on it. Once the command returns, this thread waits while it shuts down in
 /// order, its owner thread dropping it outside any async context.

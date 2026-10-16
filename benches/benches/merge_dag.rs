@@ -30,6 +30,8 @@ use schema::{CollectionVersion, FieldDescription, FieldKind};
 use storage::RegolithStore;
 use storage::Store;
 
+mod common;
+
 const SCHEMA_VERSION_ID: &str = "v1";
 const COLLECTION_ID: &str = "col-users";
 const CREATOR: &str = "did:key:z6MkrMergeDagBench";

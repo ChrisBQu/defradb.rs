@@ -81,7 +81,7 @@ pub(crate) async fn write_collection_block_with_inputs(
 
     // Store the collection block in blockstore
     blockstore
-        .set(&collection_cid.to_bytes(), &collection_bytes)
+        .set(&cid_bytes(&collection_cid), &collection_bytes)
         .await
         .map_err(|e| format!("Failed to store collection block: {}", e))?;
 

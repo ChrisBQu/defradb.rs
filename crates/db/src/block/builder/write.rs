@@ -23,7 +23,7 @@ async fn inherited_encryption_cid(
 ) -> Result<Option<Cid>, String> {
     for head in heads {
         let block_bytes = blockstore
-            .get(&head.to_bytes())
+            .get(&cid_bytes(head))
             .await
             .map_err(|e| format!("Failed to read previous block {}: {}", head, e))?
             .ok_or_else(|| format!("Previous block {} not found", head))?;
@@ -111,7 +111,7 @@ async fn inherited_encryption(
     // encstore while locally-written ones go to the blockstore. Mirrors the
     // merge decrypt path (`db-merge/src/merge_handler/encryption.rs`) and
     // `versioned_fetcher`.
-    let enc_key = enc_cid.to_bytes();
+    let enc_key = cid_bytes(&enc_cid);
     let enc_bytes = match blockstore
         .sibling(storage::namespace::Namespace::Encstore)
         .get(&enc_key)
@@ -260,7 +260,7 @@ async fn encrypt_with_new_key(
     let enc_cid = generate_cid_from_bytes(&enc_bytes)
         .map_err(|e| format!("Failed to generate encryption CID: {}", e))?;
     blockstore
-        .set(&enc_cid.to_bytes(), &enc_bytes)
+        .set(&cid_bytes(&enc_cid), &enc_bytes)
         .await
         .map_err(|e| format!("Failed to store encryption block: {}", e))?;
 
@@ -583,7 +583,7 @@ pub(crate) async fn write_document_blocks_with_inputs(
             }
 
             blockstore
-                .set(&field_cid.to_bytes(), &field_block_bytes)
+                .set(&cid_bytes(&field_cid), &field_block_bytes)
                 .await
                 .map_err(|e| format!("Failed to store field block: {}", e))?;
 
@@ -635,7 +635,7 @@ pub(crate) async fn write_document_blocks_with_inputs(
         let enc_cid = generate_cid_from_bytes(&enc_bytes)
             .map_err(|e| format!("Failed to generate composite encryption CID: {}", e))?;
         blockstore
-            .set(&enc_cid.to_bytes(), &enc_bytes)
+            .set(&cid_bytes(&enc_cid), &enc_bytes)
             .await
             .map_err(|e| format!("Failed to store composite encryption block: {}", e))?;
         encryption_cids.push(enc_cid);
@@ -669,7 +669,7 @@ pub(crate) async fn write_document_blocks_with_inputs(
         .map_err(|e| format!("Failed to generate composite CID: {}", e))?;
 
     blockstore
-        .set(&composite_cid.to_bytes(), &composite_bytes)
+        .set(&cid_bytes(&composite_cid), &composite_bytes)
         .await
         .map_err(|e| format!("Failed to store composite block: {}", e))?;
 
@@ -797,7 +797,7 @@ pub(crate) async fn write_delete_block_with_inputs(
         .map_err(|e| format!("Failed to generate delete composite CID: {}", e))?;
 
     blockstore
-        .set(&composite_cid.to_bytes(), &composite_bytes)
+        .set(&cid_bytes(&composite_cid), &composite_bytes)
         .await
         .map_err(|e| format!("Failed to store delete composite block: {}", e))?;
 

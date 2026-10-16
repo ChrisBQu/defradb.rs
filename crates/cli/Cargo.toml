@@ -120,6 +120,10 @@ optional = true
 version = "0.9"
 optional = true
 
+# The `defra` binary's process allocator (src/main.rs).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+mimalloc.workspace = true
+
 # Raises the open-file soft limit at `start` (commands::start::fd_limit).
 [target.'cfg(unix)'.dependencies]
 rlimit = "0.9"

@@ -17,6 +17,7 @@
 use async_trait::async_trait;
 use cid::Cid;
 use defra_core::block::Block;
+use defra_core::cid_encoding::{cid_bytes, CidText};
 use std::collections::VecDeque;
 use storage::corekv::{Error, IterOptions, Iterator, Key, KvPair, Reader, Result};
 use storage::keys::doc_id_index::decode_doc_short_id_prefix;
@@ -41,7 +42,12 @@ pub const APPLIED: &[u8] = b"a";
 
 /// The name of a head in its document's set.
 pub fn name(field: &str, cid: &Cid) -> Vec<u8> {
-    format!("{field}/{cid}").into_bytes()
+    let cid = CidText::new(cid);
+    let mut name = Vec::with_capacity(field.len() + 1 + cid.len());
+    name.extend_from_slice(field.as_bytes());
+    name.push(b'/');
+    name.extend_from_slice(cid.as_bytes());
+    name
 }
 
 /// The field and CID a head's name holds.
@@ -140,7 +146,7 @@ async fn was_published(
 ) -> Result<bool> {
     let Some(bytes) = writer
         .sibling(Namespace::Blockstore)
-        .get(&cid.to_bytes())
+        .get(&cid_bytes(cid))
         .await?
     else {
         return Ok(false);
@@ -327,6 +333,22 @@ impl Iterator for LiveHeads {
         match &self.source {
             Source::One(..) => true,
             Source::Many(sets) => sets.is_valid(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_name_is_the_field_and_the_cid_text() {
+        let v1 = defra_core::block::generate_cid_from_bytes(b"a field block").expect("a CID");
+        let v0 = Cid::try_from("QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG").expect("a CIDv0");
+        for cid in [v1, v0] {
+            let name = name("field/with/slashes", &cid);
+            assert_eq!(name, format!("field/with/slashes/{cid}").into_bytes());
+            assert_eq!(parse_name(&name), Some(("field/with/slashes", cid)));
         }
     }
 }

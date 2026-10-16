@@ -1,6 +1,7 @@
-use super::doc_id_index::{decode_doc_short_id_prefix, encode_doc_short_id};
+use super::doc_id_index::{decode_doc_short_id_prefix, encode_doc_short_id, push_doc_short_id};
 use crate::corekv::Key;
 use cid::Cid;
+use defra_core::cid_encoding::push_cid_bytes;
 use std::str::FromStr;
 
 const PRIORITY_HEX_WIDTH: usize = 16;
@@ -108,18 +109,15 @@ impl HeadstorePriorityKey {
 
     /// Create a prefix for all priority-indexed commits in a document.
     pub fn document_prefix(doc_short_id: u64) -> Vec<u8> {
-        let mut buf = b"/p/".to_vec();
-        buf.extend_from_slice(&encode_doc_short_id(doc_short_id));
-        buf.push(b'/');
+        let mut buf = Vec::with_capacity(PRIORITY_PREFIX_MAX);
+        push_document_prefix(&mut buf, doc_short_id);
         buf
     }
 
     /// Create a prefix for a specific priority in a document.
     pub fn priority_prefix(doc_short_id: u64, priority: u64) -> Vec<u8> {
-        let mut buf = Self::document_prefix(doc_short_id);
-        buf.extend_from_slice(
-            format!("{:0width$x}/", priority, width = PRIORITY_HEX_WIDTH).as_bytes(),
-        );
+        let mut buf = Vec::with_capacity(PRIORITY_PREFIX_MAX);
+        push_priority_prefix(&mut buf, doc_short_id, priority);
         buf
     }
 
@@ -129,10 +127,31 @@ impl HeadstorePriorityKey {
     }
 }
 
+/// The longest priority prefix: `/p/`, a short ID of up to nine bytes, `/`,
+/// the hex priority and `/`.
+const PRIORITY_PREFIX_MAX: usize = 3 + 9 + 1 + PRIORITY_HEX_WIDTH + 1;
+
+fn push_document_prefix(buf: &mut Vec<u8>, doc_short_id: u64) {
+    buf.extend_from_slice(b"/p/");
+    push_doc_short_id(buf, doc_short_id);
+    buf.push(b'/');
+}
+
+fn push_priority_prefix(buf: &mut Vec<u8>, doc_short_id: u64, priority: u64) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    push_document_prefix(buf, doc_short_id);
+    let digits: [u8; PRIORITY_HEX_WIDTH] = std::array::from_fn(|at| {
+        HEX[((priority >> ((PRIORITY_HEX_WIDTH - 1 - at) * 4)) & 0xf) as usize]
+    });
+    buf.extend_from_slice(&digits);
+    buf.push(b'/');
+}
+
 impl Key for HeadstorePriorityKey {
     fn bytes(&self) -> Vec<u8> {
-        let mut bytes = Self::priority_prefix(self.doc_short_id, self.priority);
-        bytes.extend_from_slice(&self.cid.to_bytes());
+        let mut bytes = Vec::with_capacity(PRIORITY_PREFIX_MAX + self.cid.encoded_len());
+        push_priority_prefix(&mut bytes, self.doc_short_id, self.priority);
+        push_cid_bytes(&mut bytes, &self.cid);
         bytes
     }
 
@@ -612,5 +631,41 @@ mod tests {
 
         let prefix = HeadstoreCollectionSetDefinition::set_definition_prefix();
         assert_eq!(prefix, b"/s/");
+    }
+
+    /// The priority key as it was built before it was written into one
+    /// buffer: the doc prefix, the formatted hex priority, `Cid::to_bytes`.
+    fn formatted_priority_key(doc_short_id: u64, priority: u64, cid: &Cid) -> Vec<u8> {
+        let mut bytes = b"/p/".to_vec();
+        bytes.extend_from_slice(&encode_doc_short_id(doc_short_id));
+        bytes.push(b'/');
+        bytes.extend_from_slice(format!("{priority:016x}/").as_bytes());
+        bytes.extend_from_slice(&cid.to_bytes());
+        bytes
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn priority_keys_keep_their_bytes(
+            doc_short_id in proptest::prop_oneof![
+                proptest::prelude::Just(0u64),
+                0..3000u64,
+                proptest::prelude::any::<u64>(),
+            ],
+            priority in proptest::prelude::any::<u64>(),
+        ) {
+            let cid = test_cid();
+            let key = HeadstorePriorityKey::new(doc_short_id, priority, cid);
+            let expected = formatted_priority_key(doc_short_id, priority, &cid);
+            proptest::prop_assert_eq!(key.bytes(), expected.clone());
+            proptest::prop_assert_eq!(
+                HeadstorePriorityKey::priority_prefix(doc_short_id, priority),
+                expected[..expected.len() - cid.encoded_len()].to_vec()
+            );
+            proptest::prop_assert_eq!(
+                HeadstorePriorityKey::cid_offset(doc_short_id),
+                expected.len() - cid.encoded_len()
+            );
+        }
     }
 }

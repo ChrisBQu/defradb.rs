@@ -1,4 +1,5 @@
-//! Helpers shared by more than one benchmark target.
+//! Helpers shared by more than one benchmark target, and the process
+//! allocator every target runs on ([`allocator`]).
 //!
 //! Only helpers that are byte-identical at every call site live here. A helper
 //! that differs between targets stays with its target: for tokio runtimes in
@@ -8,6 +9,7 @@
 
 #![allow(dead_code)]
 
+mod allocator;
 pub mod sift;
 pub mod vector;
 

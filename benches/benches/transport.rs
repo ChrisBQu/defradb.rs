@@ -39,6 +39,8 @@ use query::executor::{QueryExecutor, QueryRequest, QueryResponse};
 use query::txn::TransactionHandle;
 use query::TransactionError;
 
+mod common;
+
 /// The GraphQL endpoint under the v1 API prefix.
 const GRAPHQL_URI: &str = "/api/v1/graphql";
 

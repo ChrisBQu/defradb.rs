@@ -1,5 +1,6 @@
 use super::*;
 use bytes::Bytes;
+use defra_core::cid_encoding::CidText;
 
 use crate::block::builder::BlockResult;
 use crate::collection::Collection;
@@ -223,7 +224,7 @@ pub(crate) async fn register_block_doc_id_mappings(
     cids.extend(block_result.field_cids.iter().copied());
     cids.extend(block_result.encryption_cids.iter().copied());
     for cid in cids {
-        crate::docid::map::set_block_doc_id_mapping(systemstore, &cid.to_string(), doc_id)
+        crate::docid::map::set_block_doc_id_mapping(systemstore, &CidText::new(&cid), doc_id)
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
     }

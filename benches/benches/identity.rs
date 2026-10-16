@@ -15,6 +15,8 @@ use std::time::Duration;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use identity::RawIdentity;
 
+mod common;
+
 const AUDIENCE: &str = "defradb-bench";
 const TTL: Duration = Duration::from_secs(3600);
 

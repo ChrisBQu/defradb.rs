@@ -20,6 +20,8 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Through
 use p2p::message::{PushLogBroadcast, PushLogRequest};
 use p2p::{codec, sign_message, verify_message};
 
+mod common;
+
 const BLOCK_SIZES: [usize; 4] = [256, 4 * 1024, 64 * 1024, 512 * 1024];
 const CID_BYTES: [u8; 36] = [0x01; 36];
 

@@ -19,6 +19,8 @@ use crypto::{
     decrypt_aes, decrypt_ecies, encrypt_aes, encrypt_ecies, EciesOptionsBuilder, PrivateKey,
 };
 
+mod common;
+
 const SIZES: [usize; 4] = [64, 1024, 16 * 1024, 256 * 1024];
 const KEY: [u8; 32] = [0x5a; 32];
 

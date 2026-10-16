@@ -46,11 +46,15 @@ pub fn stores_same_lww(left: Option<&NormalValue>, right: Option<&NormalValue>) 
 
 impl StoredField {
     pub fn lww(name: String, priority: u64, value: &NormalValue) -> Result<Self> {
-        let mut bytes = Vec::new();
-        if let Some(cbor) = lww_cbor(value)? {
-            ciborium::into_writer(&cbor, &mut bytes)
-                .map_err(|error| Error::CborEncode(error.to_string()))?;
-        }
+        let bytes = match lww_cbor(value)? {
+            Some(cbor) => {
+                let mut bytes = Vec::with_capacity(value.cbor_size_hint());
+                ciborium::into_writer(&cbor, &mut bytes)
+                    .map_err(|error| Error::CborEncode(error.to_string()))?;
+                bytes
+            }
+            None => Vec::new(),
+        };
         Ok(Self {
             name,
             kind: ValueKind::Lww,

@@ -20,6 +20,8 @@ use std::hint::black_box;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use schema::{CollectionVersion, FieldDescription, FieldKind};
 
+mod common;
+
 const WIDTHS: [usize; 4] = [4, 16, 64, 256];
 const COUNTS: [usize; 4] = [1, 10, 100, 500];
 
