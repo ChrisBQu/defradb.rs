@@ -102,7 +102,9 @@ enum PeerstoreRetryAttempt {
     CompleteMarker {
         peer_id: String,
         key: Vec<u8>,
-        expected_generation: u64,
+        /// The marker generation this completion is for; `None` when no
+        /// marker tracks the scope (a live push that registered none).
+        expected_generation: Option<u64>,
         acked_key: Vec<u8>,
         acked: Vec<u8>,
     },
@@ -277,16 +279,18 @@ impl RetryAttemptFn for PeerstoreRetryAttempt {
                         txn.finish_attempt_io(io, crate::corekv::TxnCallbacks::default())?;
                         return Ok(Box::new(false) as crate::corekv::RetryAttemptValue);
                     }
-                    let Some(bytes) = io.get(key).await? else {
-                        txn.finish_attempt_io(io, crate::corekv::TxnCallbacks::default())?;
-                        return Ok(Box::new(false) as crate::corekv::RetryAttemptValue);
-                    };
-                    let current = decode_retry_marker_generation(&bytes).unwrap_or(0);
-                    if current != *expected_generation {
-                        txn.finish_attempt_io(io, crate::corekv::TxnCallbacks::default())?;
-                        return Ok(Box::new(false) as crate::corekv::RetryAttemptValue);
+                    if let Some(expected_generation) = *expected_generation {
+                        let Some(bytes) = io.get(key).await? else {
+                            txn.finish_attempt_io(io, crate::corekv::TxnCallbacks::default())?;
+                            return Ok(Box::new(false) as crate::corekv::RetryAttemptValue);
+                        };
+                        let current = decode_retry_marker_generation(&bytes).unwrap_or(0);
+                        if current != expected_generation {
+                            txn.finish_attempt_io(io, crate::corekv::TxnCallbacks::default())?;
+                            return Ok(Box::new(false) as crate::corekv::RetryAttemptValue);
+                        }
+                        io.delete(key).await?;
                     }
-                    io.delete(key).await?;
                     if acked.is_empty() {
                         io.delete(acked_key).await?;
                     } else {
@@ -1311,6 +1315,48 @@ impl<S: Store> Peerstore<S> {
         collection_id: &str,
         is_collection: bool,
         expected_generation: u64,
+        acked_heads: &[String],
+    ) -> Result<bool> {
+        self.complete_scope(
+            peer_id,
+            doc_id,
+            collection_id,
+            is_collection,
+            Some(expected_generation),
+            acked_heads,
+        )
+        .await
+    }
+
+    /// Record the heads `peer_id` acknowledged for a scope no retry marker
+    /// tracks (a live push that registered none), in the same transaction
+    /// [`Self::complete_retry_scope`] uses. `false` once the peer is gone.
+    pub async fn record_acknowledged_heads(
+        &self,
+        peer_id: &str,
+        doc_id: &str,
+        collection_id: &str,
+        is_collection: bool,
+        acked_heads: &[String],
+    ) -> Result<bool> {
+        self.complete_scope(
+            peer_id,
+            doc_id,
+            collection_id,
+            is_collection,
+            None,
+            acked_heads,
+        )
+        .await
+    }
+
+    async fn complete_scope(
+        &self,
+        peer_id: &str,
+        doc_id: &str,
+        collection_id: &str,
+        is_collection: bool,
+        expected_generation: Option<u64>,
         acked_heads: &[String],
     ) -> Result<bool> {
         let scope_id = if is_collection { collection_id } else { doc_id };

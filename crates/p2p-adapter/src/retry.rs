@@ -117,21 +117,33 @@ async fn record_failure<S: storage::corekv::Store>(
     }
 
     let result: storage::corekv::Result<Option<u64>> = if failure.acknowledged {
-        let Some(generation) = failure.marker_generation else {
-            let _ = durable_tx.map(|tx| tx.send(None));
-            return;
-        };
-        peerstore
-            .complete_retry_scope(
-                &failure.peer_id,
-                &failure.doc_id,
-                &failure.collection_id,
-                failure.doc_id.is_empty(),
-                generation,
-                std::slice::from_ref(&failure.cid),
-            )
-            .await
-            .map(|cleared| cleared.then_some(generation))
+        let acked = std::slice::from_ref(&failure.cid);
+        let is_collection = failure.doc_id.is_empty();
+        match failure.marker_generation {
+            Some(generation) => peerstore
+                .complete_retry_scope(
+                    &failure.peer_id,
+                    &failure.doc_id,
+                    &failure.collection_id,
+                    is_collection,
+                    generation,
+                    acked,
+                )
+                .await
+                .map(|cleared| cleared.then_some(generation)),
+            // A live push that registered no marker still records what the
+            // peer acknowledged, as main does.
+            None => peerstore
+                .record_acknowledged_heads(
+                    &failure.peer_id,
+                    &failure.doc_id,
+                    &failure.collection_id,
+                    is_collection,
+                    acked,
+                )
+                .await
+                .map(|_| None),
+        }
     } else if failure.create_retry {
         let mut info = storage::stores::RetryInfo::new_initial();
         if let Some(delay) = failure.retry_after {
