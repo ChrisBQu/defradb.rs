@@ -385,11 +385,8 @@ impl EmbeddedNode {
     /// public key. Unsigned, malformed, missing, or invalid blocks fail closed.
     pub async fn verified_block_signer_did(&self, cid: &str) -> anyhow::Result<String> {
         let (ops, cid) = (Arc::clone(&self.block_ops), cid.to_owned());
-        self.on_pool(
-            false,
-            move || async move { ops.verified_signer_did(&cid).await },
-        )
-        .await
+        self.on_pool(move || async move { ops.verified_signer_did(&cid).await })
+            .await
     }
 
     /// Load canonical signed-block material after applying document ACP for
