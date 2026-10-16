@@ -492,7 +492,9 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
         context: &RequestContext,
         requests: Vec<query::prepared::PreparedInputRequest>,
     ) -> query::error::Result<Vec<Arc<[u8]>>> {
-        self.inner.resolve_prepared_inputs_as(context, requests).await
+        self.inner
+            .resolve_prepared_inputs_as(context, requests)
+            .await
     }
 
     async fn prepared_embedding_request(
@@ -543,6 +545,17 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
     ) -> query::error::Result<Document> {
         self.inner
             .prepare_write_as(context, collection_name, doc, modified_fields)
+            .await
+    }
+
+    async fn prepare_creates_as(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        docs: Vec<Document>,
+    ) -> query::error::Result<Vec<Document>> {
+        self.inner
+            .prepare_creates_as(context, collection_name, docs)
             .await
     }
 

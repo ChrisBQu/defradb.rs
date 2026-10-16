@@ -33,7 +33,7 @@ profiling = ["dep:tracing-chrome", "dep:tracing-subscriber"]
 
 [dependencies]
 rapidhash.workspace = true
-# The network runtime every call blocks its C caller's thread on.
+# The network runtime network calls block their C caller's thread on.
 edge = { path = "../edge" }
 # The worker pool the node's data path runs on.
 workers = { path = "../workers" }
@@ -57,9 +57,6 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-chrome = { version = "0.7", optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"], optional = true }
-
-# Synchronization
-parking_lot.workspace = true
 
 # Lock-free shared state
 regolith.workspace = true

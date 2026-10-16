@@ -1,5 +1,5 @@
 use crate::ffi_node_db_async_body;
-use crate::helpers::{get_rt, require_c_str};
+use crate::helpers::require_c_str;
 use crate::nac_check::check_nac_for_node;
 use crate::state::NODES;
 use crate::{ffi_async, ffi_entry, try_ffi, ERR_INVALID_NODE_HANDLE};
@@ -97,9 +97,7 @@ pub unsafe extern "C" fn delete_collections_in_txn(
     active_only: bool,
 ) -> crate::types::FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::CollectionPatch
@@ -112,7 +110,7 @@ pub unsafe extern "C" fn delete_collections_in_txn(
         };
         let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|value| !value.is_empty()));
 
-        ffi_async!(rt, {
+        ffi_async!(caller, {
             let targets: Vec<String> = serde_json::from_str(&targets_json)
                 .map_err(|error| format!("failed to parse collection targets JSON: {}", error))?;
             registry
@@ -180,9 +178,7 @@ pub unsafe extern "C" fn set_collection_active_in_txn(
     is_active: bool,
 ) -> crate::types::FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::CollectionPatch
@@ -195,7 +191,7 @@ pub unsafe extern "C" fn set_collection_active_in_txn(
         };
         let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|value| !value.is_empty()));
 
-        ffi_async!(rt, {
+        ffi_async!(caller, {
             let version = registry
                 .set_collection_active_in_txn_as(&context, &txn_id, &version_id, is_active)
                 .await

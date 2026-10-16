@@ -174,15 +174,18 @@ impl<F: DocFetcher + 'static, R: TransactionRegistry> QueryRunner<F, R> {
                 .into_owned()
                 .or_encryption(mutation.encryption());
             if mutation.mutation_type == MutationType::Create {
-                for input in self.build_create_inputs(mutation, collection)? {
-                    let doc =
-                        input.to_document_with_schema_and_time(collection, Some(request_time))?;
-                    entry.creates.push(
-                        mutator
-                            .prepare_write_as(&context, &mutation.collection_name, doc, None)
-                            .await?,
-                    );
-                }
+                let docs = self
+                    .build_create_inputs(mutation, collection)?
+                    .into_iter()
+                    .map(|input| {
+                        input.to_document_with_schema_and_time(collection, Some(request_time))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                entry.creates.extend(
+                    mutator
+                        .prepare_creates_as(&context, &mutation.collection_name, docs)
+                        .await?,
+                );
             } else {
                 let ids = match entry.doc_ids.as_ref() {
                     Some(ids) => ids.clone(),

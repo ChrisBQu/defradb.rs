@@ -651,10 +651,8 @@ mod tests {
     }
 
     /// `mutate` takes `&self`, so a page can start a second one before the
-    /// first resolves, and the signing config they share is a thread-local.
-    /// The mutation lock is what keeps one from taking it away from the other;
-    /// this pins the outcome, since each mutation runs to completion without
-    /// yielding here and the interleaving cannot be provoked from a test.
+    /// first resolves. Each carries the signing config in its own request
+    /// context, with no lock between them; this pins the outcome.
     #[wasm_bindgen_test]
     async fn concurrent_mutations_are_each_signed() {
         let (mut client, _) = client_with_identity("signing_concurrent").await;
@@ -677,6 +675,45 @@ mod tests {
             "an interleaved mutation must not lose its signature"
         );
         client.close().await.unwrap();
+    }
+
+    /// Two clients on one page sign with their own keys, even when their
+    /// mutations run at once on the page's one thread: each request carries
+    /// its client's key, where a key shared through the thread would let one
+    /// mutation sign with the other's, or with none.
+    #[wasm_bindgen_test]
+    async fn mutations_of_two_clients_at_once_each_sign_with_their_own_key() {
+        let (mut first, first_key) = client_with_identity("signing_two_first").await;
+        let (mut second, second_key) = client_with_identity("signing_two_second").await;
+        for client in [&mut first, &mut second] {
+            client
+                .add_schema("type User { name: String }")
+                .await
+                .unwrap();
+        }
+
+        let (alice, bob) = futures::join!(
+            first.mutate(r#"mutation { create_User(input: {name: "Alice"}) { _docID } }"#),
+            second.mutate(r#"mutation { create_User(input: {name: "Bob"}) { _docID } }"#),
+        );
+        alice.unwrap();
+        bob.unwrap();
+
+        for (client, private_key_hex) in [(&first, first_key), (&second, second_key)] {
+            let public_key_hex =
+                crypto::private_key_from_string(crypto::KeyType::Ed25519, &private_key_hex)
+                    .unwrap()
+                    .public_key()
+                    .to_hex_string();
+            let keys = signing_keys(client).await;
+            assert!(!keys.is_empty(), "every document must carry a signature");
+            assert!(
+                keys.iter().all(|key| *key == public_key_hex),
+                "each client signs with its own key"
+            );
+        }
+        first.close().await.unwrap();
+        second.close().await.unwrap();
     }
 
     /// A browser generating its key with WebCrypto exports a JWK whose `d` is

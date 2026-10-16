@@ -2,7 +2,7 @@ use std::ffi::c_char;
 
 use acp::nac::NodePermission;
 
-use crate::helpers::{get_node_database, get_rt, require_c_str};
+use crate::helpers::{get_node_database, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::types::{c_str_to_string, FfiResult};
 use crate::{ffi_async, ffi_entry, try_ffi};
@@ -38,9 +38,7 @@ pub unsafe extern "C" fn delete_documents(
     doc_ids_json: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::DocumentDelete
@@ -58,7 +56,7 @@ pub unsafe extern "C" fn delete_documents(
         let doc_id_strings: Vec<String> = try_ffi!(serde_json::from_str(&ids_json)
             .map_err(|e| FfiResult::error(format!("invalid doc_ids_json: {}", e))));
 
-        ffi_async!(rt, {
+        ffi_async!(node_ptr, {
             let mutator = AutoCommitMutator::new(database.clone());
 
             let doc_ids: Vec<DocID> = doc_id_strings

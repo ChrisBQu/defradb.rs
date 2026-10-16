@@ -56,6 +56,38 @@ pub(crate) async fn set_embedding_with(
     modified_fields: Option<&RapidHashSet<String>>,
     embedding_config: &EmbeddingClientConfig,
 ) -> Result<Vec<String>, EmbeddingError> {
+    let wanted = embedding_keys(
+        embeddings,
+        doc,
+        is_create,
+        modified_fields,
+        embedding_config,
+    );
+    if wanted.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Every field's text goes out at once.
+    let (fields, keys): (Vec<_>, Vec<_>) = wanted.into_iter().unzip();
+    let vectors = service.get_many(keys).await;
+    let mut generated = Vec::with_capacity(fields.len());
+    for (field, vector) in fields.into_iter().zip(vectors) {
+        let vector = vector.map_err(crate::remote_inputs::embedding_error)?;
+        doc.set(&field, NormalValue::Float64Array(vector.to_vec()));
+        generated.push(field);
+    }
+    Ok(generated)
+}
+
+/// The embeddings `doc` needs generated, each as its field and the key the
+/// embedding service answers it by.
+fn embedding_keys(
+    embeddings: &[VectorEmbeddingDescription],
+    doc: &Document,
+    is_create: bool,
+    modified_fields: Option<&RapidHashSet<String>>,
+    embedding_config: &EmbeddingClientConfig,
+) -> Vec<(String, crate::remote_inputs::Embedding)> {
     let mut wanted = Vec::new();
     for embedding in embeddings {
         // Skip if user explicitly provided the embedding vector
@@ -113,20 +145,27 @@ pub(crate) async fn set_embedding_with(
             crate::remote_inputs::Embedding::new(input),
         ));
     }
-    if wanted.is_empty() {
-        return Ok(Vec::new());
-    }
+    wanted
+}
 
-    // Every field's text goes out at once.
-    let (fields, keys): (Vec<_>, Vec<_>) = wanted.into_iter().unzip();
-    let vectors = service.get_many(keys).await;
-    let mut generated = Vec::with_capacity(fields.len());
-    for (field, vector) in fields.into_iter().zip(vectors) {
-        let vector = vector.map_err(crate::remote_inputs::embedding_error)?;
-        doc.set(&field, NormalValue::Float64Array(vector.to_vec()));
-        generated.push(field);
+/// Asks `service` at once for the embeddings every document of `docs` needs
+/// on create, so their answers wait in its cache when each document is
+/// prepared: one round trip per batch of texts, not one per document. A
+/// failure is left for the document's own request to report.
+pub(crate) async fn prefetch_embeddings(
+    service: &inputs::Service<crate::remote_inputs::Embeddings>,
+    embeddings: &[VectorEmbeddingDescription],
+    docs: &[Document],
+    embedding_config: &EmbeddingClientConfig,
+) {
+    let keys: Vec<_> = docs
+        .iter()
+        .flat_map(|doc| embedding_keys(embeddings, doc, true, None, embedding_config))
+        .map(|(_, key)| key)
+        .collect();
+    if keys.len() > 1 {
+        service.get_many(keys).await;
     }
-    Ok(generated)
 }
 
 /// The text an embedding embeds: each source field's value, one per line.

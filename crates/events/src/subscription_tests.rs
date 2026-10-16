@@ -38,3 +38,37 @@ fn test_subscription_try_recv() {
     let received = sub.try_recv();
     assert!(received.is_ok());
 }
+
+#[test]
+fn try_take_through_a_shared_reference_delivers_each_message_once() {
+    const MESSAGES: usize = 1000;
+    let (tx, rx) = async_channel::bounded(MESSAGES);
+    let sub = std::sync::Arc::new(Subscription::new(1, rx));
+    for _ in 0..MESSAGES {
+        tx.send_blocking(Message::merge()).unwrap();
+    }
+    drop(tx);
+
+    let pollers: Vec<_> = (0..4)
+        .map(|_| {
+            let sub = std::sync::Arc::clone(&sub);
+            std::thread::spawn(move || {
+                let mut taken = 0usize;
+                loop {
+                    match sub.try_take() {
+                        Ok(_) => taken += 1,
+                        Err(TryRecvError::Empty) => std::thread::yield_now(),
+                        Err(TryRecvError::Disconnected) => return taken,
+                    }
+                }
+            })
+        })
+        .collect();
+    let taken: usize = pollers
+        .into_iter()
+        .map(|poller| poller.join().unwrap())
+        .sum();
+
+    assert_eq!(taken, MESSAGES);
+    assert_eq!(sub.try_take().err(), Some(TryRecvError::Disconnected));
+}

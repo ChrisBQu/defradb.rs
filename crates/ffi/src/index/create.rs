@@ -2,7 +2,7 @@ use std::ffi::c_char;
 
 use acp::nac::NodePermission;
 
-use crate::helpers::{get_node_database, get_rt, require_c_str};
+use crate::helpers::{get_node_database, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::types::FfiResult;
 use crate::{ffi_async, ffi_entry, try_ffi};
@@ -45,9 +45,7 @@ pub unsafe extern "C" fn create_index(
     index_json: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::IndexCreate
@@ -63,7 +61,7 @@ pub unsafe extern "C" fn create_index(
 
         let database = try_ffi!(get_node_database(node_ptr));
 
-        ffi_async!(rt, {
+        ffi_async!(node_ptr, {
             let fields: Vec<schema::IndexedFieldDescription> = index_input
                 .fields
                 .into_iter()

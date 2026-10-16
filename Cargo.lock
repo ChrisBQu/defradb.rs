@@ -5066,7 +5066,6 @@ dependencies = [
  "kovan-queue",
  "lens",
  "p2p",
- "parking_lot 0.12.5",
  "query",
  "rapidhash",
  "regolith",

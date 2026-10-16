@@ -6,7 +6,7 @@ use std::ffi::c_char;
 
 use acp::nac::NodePermission;
 
-use crate::helpers::{get_rt, require_c_str};
+use crate::helpers::require_c_str;
 use crate::nac_check::check_nac_for_node;
 use crate::state::NODES;
 use crate::types::{c_str_to_string, FfiResult};
@@ -39,9 +39,7 @@ pub unsafe extern "C" fn block_verify_signature(
     identity_did: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::SignatureVerify
@@ -79,7 +77,7 @@ pub unsafe extern "C" fn block_verify_signature(
             .and_then(|d| identity::Did::try_from(d.clone()).ok())
             .into();
 
-        let result = crate::helpers::block_on(rt, async {
+        let result = crate::call::on_node(node_ptr, move || async move {
             db::block::verify::verify_block_signature_as(
                 &context,
                 &database,
@@ -117,9 +115,7 @@ pub unsafe extern "C" fn block_verify_signature_in_txn(
     identity_did: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::SignatureVerify
@@ -158,7 +154,7 @@ pub unsafe extern "C" fn block_verify_signature_in_txn(
             .and_then(|d| identity::Did::try_from(d.clone()).ok())
             .into();
 
-        ffi_async!(rt, {
+        ffi_async!(caller, {
             registry
                 .verify_block_signature_in_txn_as(
                     &context,

@@ -10,7 +10,7 @@ use acp::nac::NodePermission;
 use identity::Did;
 
 use crate::ffi_entry;
-use crate::helpers::{get_node_database, get_rt, require_c_str};
+use crate::helpers::{get_node_database, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::policy_yaml;
 use crate::state::{PolicyStore, NODES};
@@ -58,9 +58,7 @@ pub unsafe extern "C" fn add_schema(
     schema_sdl: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::CollectionPatch
@@ -83,7 +81,7 @@ pub unsafe extern "C" fn add_schema(
         // reaches resolve the actual caller instead of the wildcard.
         let context = defra_core::RequestContext::default().with_identity(identity_str);
 
-        ffi_async!(rt, {
+        ffi_async!(node_ptr, {
             // Get existing collection names so the SDL parser can resolve external type references
             // (e.g., relations to already-created collections)
             let known_types: rapidhash::RapidHashSet<String> = database
@@ -136,9 +134,7 @@ pub unsafe extern "C" fn add_schema_in_txn(
     schema_sdl: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::CollectionPatch
@@ -162,7 +158,7 @@ pub unsafe extern "C" fn add_schema_in_txn(
         // reaches resolve the actual caller instead of the wildcard.
         let context = defra_core::RequestContext::default().with_identity(identity_str);
 
-        ffi_async!(rt, {
+        ffi_async!(caller, {
             let known_types: rapidhash::RapidHashSet<String> = registry
                 .get_collections_in_txn_as(&context, &txn_str)
                 .await
@@ -209,16 +205,14 @@ pub unsafe extern "C" fn get_collections(
     identity_did: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::CollectionGet
         ));
         let database = try_ffi!(get_node_database(node_ptr));
 
-        ffi_async!(rt, {
+        ffi_async!(node_ptr, {
             // Return all collection versions from the system store (active + inactive + placeholders).
             // The Go wrapper handles GetInactive filtering on its side.
             let collections = database
@@ -250,9 +244,7 @@ pub unsafe extern "C" fn get_collections_in_txn(
     identity_did: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::CollectionGet
@@ -268,7 +260,7 @@ pub unsafe extern "C" fn get_collections_in_txn(
         // reaches resolve the actual caller instead of the wildcard.
         let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()));
 
-        ffi_async!(rt, {
+        ffi_async!(caller, {
             let collections = registry
                 .get_collections_in_txn_as(&context, &txn_str)
                 .await

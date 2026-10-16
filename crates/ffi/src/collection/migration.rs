@@ -3,7 +3,7 @@ use std::ffi::c_char;
 use acp::nac::NodePermission;
 
 use crate::ffi_node_db_async_body;
-use crate::helpers::{get_node_database, get_rt, require_c_str};
+use crate::helpers::{get_node_database, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::state::NODES;
 use crate::types::FfiResult;
@@ -81,9 +81,7 @@ pub unsafe extern "C" fn set_migration(
     config: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::MigrationSet
@@ -95,7 +93,7 @@ pub unsafe extern "C" fn set_migration(
         // reaches resolve the actual caller instead of the wildcard.
         let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()));
 
-        ffi_async!(rt, {
+        ffi_async!(node_ptr, {
             // Parse the LensConfig from JSON
             let lens_config: lens::LensConfig = serde_json::from_str(&config_str)
                 .map_err(|e| format!("failed to parse lens config: {}", e))?;
@@ -139,9 +137,7 @@ pub unsafe extern "C" fn set_migration_in_txn(
     config: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::MigrationSet
@@ -159,7 +155,7 @@ pub unsafe extern "C" fn set_migration_in_txn(
         // reaches resolve the actual caller instead of the wildcard.
         let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()));
 
-        ffi_async!(rt, {
+        ffi_async!(caller, {
             // Parse the LensConfig from JSON
             let lens_config: lens::LensConfig = serde_json::from_str(&config_str)
                 .map_err(|e| format!("failed to parse lens config: {}", e))?;
@@ -200,9 +196,7 @@ pub unsafe extern "C" fn delete_collection_versions(
     version_ids_json: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::CollectionPatch
@@ -214,7 +208,7 @@ pub unsafe extern "C" fn delete_collection_versions(
         // reaches resolve the actual caller instead of the wildcard.
         let context = defra_core::RequestContext::default().with_identity(crate::types::c_str_to_string(identity_did).filter(|s| !s.is_empty()));
 
-        ffi_async!(rt, {
+        ffi_async!(node_ptr, {
             let version_ids: Vec<String> = serde_json::from_str(&ids_str)
                 .map_err(|e| format!("failed to parse version IDs JSON: {}", e))?;
 

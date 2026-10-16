@@ -3,7 +3,7 @@ use std::ffi::c_char;
 use acp::nac::NodePermission;
 use serde_json::Value as JsonValue;
 
-use crate::helpers::{get_node_runner, get_rt, require_c_str};
+use crate::helpers::{get_node_runner, require_c_str};
 use crate::nac_check::check_nac_for_node;
 use crate::state::NODES;
 use crate::types::{c_str_to_string, FfiResult};
@@ -77,9 +77,7 @@ pub unsafe extern "C" fn collection_create(
     batch_session_id: *const c_char,
 ) -> FfiResult {
     ffi_entry! {
-        let rt = try_ffi!(get_rt());
         try_ffi!(check_nac_for_node(
-            rt,
             node_ptr,
             identity_did,
             NodePermission::DocumentUpdate
@@ -130,7 +128,7 @@ pub unsafe extern "C" fn collection_create(
 
         let runner = try_ffi!(get_node_runner(node_ptr));
 
-        ffi_async!(rt, {
+        ffi_async!(caller, {
             let request = query::QueryRequest::new(mutation).with_context(context);
             let response = runner.execute(request).await;
 

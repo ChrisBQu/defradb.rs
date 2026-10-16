@@ -170,6 +170,12 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
         }
     }
 
+    /// Lets go of this handle's hold on the transaction: operations through it
+    /// find none from then on.
+    pub(super) fn release_txn(&mut self) {
+        self.txn = Held::none();
+    }
+
     /// Take the transaction out of the fetcher (for commit/rollback). `None`
     /// once it was taken, or while another handle (a stream it opened) still
     /// holds it.

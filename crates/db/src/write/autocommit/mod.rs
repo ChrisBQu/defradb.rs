@@ -341,6 +341,23 @@ impl<S: Store + 'static> DocMutator for AutoCommitMutator<S> {
             .await
     }
 
+    async fn prepare_creates_as(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        docs: Vec<Document>,
+    ) -> query::error::Result<Vec<Document>> {
+        let collection = self.get_collection_or_err(collection_name)?;
+        crate::search::embedding::prefetch_embeddings(
+            self.db.remote_inputs().embeddings(),
+            &collection.schema().vector_embeddings,
+            &docs,
+            &self.db.options().embedding_config(),
+        )
+        .await;
+        query::mutator::prepare_each(self, context, collection_name, docs).await
+    }
+
     fn set_document_acp(&self, acp: Arc<dyn acp::DocumentACP>) {
         AutoCommitMutator::set_document_acp(self, acp);
     }
