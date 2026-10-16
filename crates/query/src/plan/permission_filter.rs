@@ -351,7 +351,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    use async_lock::Barrier;
+    use regolith::sync::Barrier;
 
     use super::*;
 
