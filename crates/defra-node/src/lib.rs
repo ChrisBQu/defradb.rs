@@ -895,63 +895,6 @@ impl EmbeddedNode {
     }
 }
 
-#[cfg(test)]
-async fn execute_autocommit_request(
-    executor: &dyn QueryExecutor,
-    request: QueryRequest,
-) -> QueryResponse {
-    // Remote preparation is resolved outside mutation attempts. Storage and
-    // business conflicts are returned after one attempt.
-    let prepared = match executor.prepare_request(&request).await {
-        Ok(prepared) => prepared,
-        Err(error) => {
-            return QueryResponse {
-                data: None,
-                errors: vec![query::QueryResponseError::from_query_error(error)],
-                extensions: None,
-            }
-        }
-    };
-    execute_prepared_request_resolving_inputs(executor, request, prepared).await
-}
-
-#[cfg(test)]
-async fn execute_prepared_request_resolving_inputs(
-    executor: &dyn QueryExecutor,
-    request: QueryRequest,
-    mut prepared: Option<std::sync::Arc<query::prepared::PreparedMutations>>,
-) -> QueryResponse {
-    loop {
-        let response = executor
-            .execute_prepared(request.clone(), prepared.clone())
-            .await;
-        if let Some(input) = response.retry_input() {
-            match executor
-                .resolve_retry_input(&request, prepared.clone(), input)
-                .await
-            {
-                Ok(Some(updated)) => {
-                    prepared = Some(updated);
-                    continue;
-                }
-                Ok(None) => {
-                    return QueryResponse::error(
-                        "retry input resolution returned no preparation capsule",
-                    )
-                }
-                Err(error) => {
-                    return QueryResponse::error(query::QueryResponseError::from_query_error(error))
-                }
-            }
-        }
-        return response;
-    }
-}
-
-#[cfg(test)]
-#[path = "request_preparation_tests.rs"]
-mod request_preparation_tests;
-
 fn resolve_registered_node_identity(did: &str) -> Result<SigningConfig> {
     let config = defra_core::signing::get_identity(did)
         .ok_or_else(|| Error::NodeIdentityUnregistered(did.to_owned()))?;

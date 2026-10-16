@@ -1178,15 +1178,14 @@ async fn coding_session_embedding_fixture_supports_hybrid_rank_comparison() {
 }
 
 #[tokio::test]
-async fn query_preparation_uses_its_node_pool_after_the_default_node_stops() {
+async fn query_preparation_runs_on_the_node_pool_not_the_default_pool() {
     let node = crate::EmbeddedNode::builder().build().await.unwrap();
     let default_node = crate::EmbeddedNode::builder().build().await.unwrap();
     let pool = node.pool.as_ref().expect("embedded node pool");
 
-    // The second node replaces `node` as the process default. After it
-    // shuts down, a query on `node` must still prepare on `node`'s pool.
-    default_node.shutdown().await;
-
+    // The second node owns the process default pool. Invalid syntax fails
+    // during preparation, before the executor would submit an execution task
+    // to `node`'s pool if preparation accidentally ran off-pool.
     let before: u64 = pool.stats().workers.iter().map(|worker| worker.tasks).sum();
     let response = node.execute("{ invalid").await;
     assert!(
@@ -1199,6 +1198,7 @@ async fn query_preparation_uses_its_node_pool_after_the_default_node_stops() {
         after > before,
         "query preparation did not run on the node's worker pool"
     );
+    default_node.shutdown().await;
     node.shutdown().await;
 }
 
