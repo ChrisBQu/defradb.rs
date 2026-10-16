@@ -30,6 +30,9 @@ pub struct RegolithStoreOptions {
     /// The worker pool the store was placed on ([`Self::placed_on`]): callers
     /// off its workers do their I/O through one of its queues.
     pub(super) pool: Option<workers::Pool>,
+    /// The environment the store's files live in, beneath the pool's
+    /// placement wrapper ([`Self::files_env`]).
+    files_env: Option<Arc<dyn regolith::Env>>,
 }
 
 impl RegolithStoreOptions {
@@ -67,6 +70,14 @@ impl RegolithStoreOptions {
 
     /// [`Self::engine`] with the at-rest keys installed: what every open of
     /// the store uses.
+    /// The environment the store's files live in: the engine's, or, once
+    /// the store is placed on a pool, the one the pool's wrapper places.
+    pub(super) fn files_env(&self) -> Arc<dyn regolith::Env> {
+        self.files_env
+            .clone()
+            .unwrap_or_else(|| self.engine.get_env().clone())
+    }
+
     pub(super) fn engine_with_keys(&self) -> Options {
         match &self.at_rest {
             Some(keys) => self.engine.clone().key_provider(keys.clone()),
@@ -94,6 +105,7 @@ impl RegolithStoreOptions {
             close_timeout: Duration::from_secs(30),
             at_rest: None,
             pool: None,
+            files_env: None,
         }
     }
 
@@ -146,7 +158,9 @@ impl RegolithStoreOptions {
     /// `pool` places its background threads, at their priority. Pair it with
     /// a pool started with [`with_worker_io`](super::with_worker_io).
     pub fn placed_on(mut self, pool: &workers::Pool) -> Self {
-        let env = pool.env(self.engine.get_env().clone());
+        let files = self.files_env();
+        self.files_env = Some(Arc::clone(&files));
+        let env = pool.env(files);
         self.engine = self.engine.env(env);
         self.pool = Some(pool.clone());
         self

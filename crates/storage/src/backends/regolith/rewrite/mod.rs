@@ -75,7 +75,7 @@ fn open_with_steps(
     options: &RegolithStoreOptions,
     step: &mut dyn FnMut(Step),
 ) -> Result<OptimisticTransactionDb> {
-    let env = engine.get_env().clone();
+    let env = options.files_env();
     // A store kept in memory or in a browser was never written by the wrapper,
     // and its folders are not on this file system.
     if !Arc::ptr_eq(&env, &regolith::env::std_env()) {
