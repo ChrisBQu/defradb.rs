@@ -226,7 +226,7 @@ fn owners_on<T, K>(
     pool: std::result::Result<workers::Pool, workers::Error>,
 ) -> std::result::Result<Owners<T, K>, workers::Error>
 where
-    T: 'static,
+    T: defra_core::thread_bounds::MaybeSend + 'static,
     K: Clone + PartialEq + Send + Sync + 'static,
 {
     if let Err(error) = &pool {

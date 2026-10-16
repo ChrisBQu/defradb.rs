@@ -10,9 +10,10 @@
 //! message.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use rapidhash::fast::RandomState;
-use regolith::sync::{HopscotchMap, UnboundedSender};
+use regolith::sync::{ArrayQueue, HopscotchMap, UnboundedSender};
 
 use super::actor::Message;
 use super::TxnId;
@@ -23,6 +24,9 @@ where
     T: 'static,
 {
     pub(super) mailbox: UnboundedSender<Message<T>>,
+    /// The transaction while no request is using it, so an abandon drops it
+    /// at once.
+    pub(super) idle: Arc<ArrayQueue<T>>,
     /// Who may use the transaction.
     pub(super) key: K,
 }
@@ -35,6 +39,7 @@ where
     fn clone(&self) -> Self {
         Self {
             mailbox: self.mailbox.clone(),
+            idle: Arc::clone(&self.idle),
             key: self.key.clone(),
         }
     }
@@ -94,14 +99,18 @@ where
             .count()
     }
 
-    pub(super) fn remove(&self, id: TxnId) {
-        self.entries.remove(&id.get());
+    /// Takes transaction `id` out of the table. The first to take it ends
+    /// it; every later request, and a racing end, finds none.
+    pub(super) fn take(&self, id: TxnId) -> Option<Entry<T, K>> {
+        self.entries.remove(&id.get())
     }
 
-    /// Takes transaction `id` out of the table and tells its task, behind
-    /// the requests already queued, that it was let go.
+    /// Takes transaction `id` out of the table and lets it go: an idle
+    /// transaction is dropped here and now, one a request is using is dropped
+    /// by its task once that request is done.
     pub(super) fn abandon(&self, id: TxnId) {
-        if let Some(entry) = self.entries.remove(&id.get()) {
+        if let Some(entry) = self.take(id) {
+            drop(entry.idle.pop());
             let _ = entry.mailbox.try_send(Message::Abandon);
         }
     }
