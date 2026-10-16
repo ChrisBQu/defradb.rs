@@ -375,17 +375,20 @@ pub const PROPERTIES: &[Property] = &[
         tiers: &[Behavioral, Boundary],
     },
     Property {
-        // A commit handed to its transaction's owner still lands after its
-        // caller stops waiting. The caller raises the database's fence count
+        // A commit begins when it is handed to its transaction's owner, or,
+        // if a request is running the transaction then, when the owner takes
+        // it; a caller that stops waiting before that abandons it. One that
+        // began still lands after its caller stops waiting. The caller raises
+        // the database's fence count
         // and swaps the commit's state word; the owner swaps it once it is
         // finished, and whichever swap loses lowers the count. Every new
         // transaction and read waits in DB::new_txn while the count is above
         // zero, so it sees the commit.
         family: "Transaction & merge-queue concurrency",
-        name: "INV_ReaderSeesCancelledCommit / INV_NeverNegative / INV_UncancelledUntouched / INV_SettledExact / INV_CancelNeverUndoes / LIVE_NoFenceLeak / LIVE_ReaderProceeds: a cancelled commit still lands, fenced until it does",
+        name: "INV_ReaderSeesCancelledCommit / INV_NeverNegative / INV_UncancelledUntouched / INV_SettledExact / INV_BegunEndRuns / INV_AbandonedEndDiscarded / LIVE_NoFenceLeak / LIVE_ReaderProceeds: a cancelled commit that began is fenced until it lands; one that had not begun is abandoned",
         axis: Tla,
-        anchor: "crates/db/src/txn/fence.rs CommitFences, Fence::abandon, Fence::finish; crates/db/src/txn/owner/mod.rs Owners::finish, FenceOnDrop; crates/db/src/txn/owner/actor.rs own; crates/db/src/database/mod.rs DB::new_txn",
-        model_ref: "MC_CommitFence_{Green,Red_RaiseAfterSwap,Red_OwnerNoSwap,Red_ReaderNoWait,Red_ForgetFailed,Red_UndoNoWake,Red_SkipCancelled}.cfg",
+        anchor: "crates/db/src/txn/fence.rs CommitFences, Fence::abandon, Fence::finish; crates/db/src/txn/owner/mod.rs Owners::run, Owners::finish, FenceOnDrop; crates/db/src/txn/owner/actor.rs own; crates/db/src/database/mod.rs DB::new_txn",
+        model_ref: "MC_CommitFence_{Green,Red_RaiseAfterSwap,Red_OwnerNoSwap,Red_ReaderNoWait,Red_ForgetFailed,Red_UndoNoWake,Red_SkipBegun,Red_RunAbandoned}.cfg",
         tiers: &[Boundary],
     },
     Property {
