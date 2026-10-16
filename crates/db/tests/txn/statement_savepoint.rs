@@ -6,7 +6,7 @@ use db::{DbCollectionProvider, DbTransactionRegistry, LensedAutoCommitFetcher, D
 use events::{Bus, ChannelBus, EventName};
 use kovan::Atom;
 use query::{QueryExecutor, QueryRequest};
-use rapidhash::{HashSetExt, RapidHashSet};
+use rapidhash::RapidHashSet;
 use storage::corekv::{
     private::Sealed, AppendLog, IterOptions, Iterator, Reader, Result as StorageResult, Store, Txn,
     Writer,
