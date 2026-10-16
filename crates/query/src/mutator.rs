@@ -537,6 +537,18 @@ pub trait DocMutator: MaybeSendSync {
             .await
     }
 
+    /// [`Self::prepare_write_as`] for every document one request creates in
+    /// `collection_name`, in order. A mutator whose inputs batch across
+    /// documents overrides it.
+    async fn prepare_creates_as(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        docs: Vec<Document>,
+    ) -> Result<Vec<Document>> {
+        prepare_each(self, context, collection_name, docs).await
+    }
+
     /// Resolve one exact external request after a transaction attempt has
     /// ended. Implementations parse the request according to `kind` and return
     /// the provider response bytes for per-request memoization.
@@ -860,4 +872,25 @@ pub trait DocMutator: MaybeSendSync {
         collection_name: &str,
         doc_id: &DocID,
     ) -> Result<Option<Document>>;
+}
+
+/// Prepares each of `docs` for creation with `mutator`, one after another.
+pub async fn prepare_each<M>(
+    mutator: &M,
+    context: &RequestContext,
+    collection_name: &str,
+    docs: Vec<Document>,
+) -> Result<Vec<Document>>
+where
+    M: DocMutator + ?Sized,
+{
+    let mut prepared = Vec::with_capacity(docs.len());
+    for doc in docs {
+        prepared.push(
+            mutator
+                .prepare_write_as(context, collection_name, doc, None)
+                .await?,
+        );
+    }
+    Ok(prepared)
 }

@@ -336,6 +336,17 @@ impl<S: Store + 'static, B: Blockstore + 'static, T: P2PTransport> DocMutator
             .await
     }
 
+    async fn prepare_creates_as(
+        &self,
+        context: &RequestContext,
+        collection_name: &str,
+        docs: Vec<Document>,
+    ) -> query::error::Result<Vec<Document>> {
+        self.inner
+            .prepare_creates_as(context, collection_name, docs)
+            .await
+    }
+
     async fn resolve_prepared_input(
         &self,
         request: &query::prepared::PreparedInputRequest,
