@@ -168,6 +168,9 @@ pub struct DB<S: Store> {
     migration_generation: AtomicU64,
     /// Whether the database has been closed.
     closed: AtomicBool,
+    /// Commits whose caller stopped waiting, fenced until they land: every
+    /// new transaction waits for them.
+    commit_fences: Arc<crate::txn::fence::CommitFences>,
     /// In-memory collection cache (name -> Collection).
     pub(crate) collections: Arc<crate::collection::epoch::EpochedCollections>,
     /// PQ codes of resident-codes DiskANN indexes, shared by every search.
@@ -256,6 +259,7 @@ impl<S: Store> DB<S> {
             txn_id_counter: AtomicU64::new(0),
             migration_generation: AtomicU64::new(0),
             closed: AtomicBool::new(false),
+            commit_fences: Arc::default(),
             collections: Arc::new(crate::collection::epoch::EpochedCollections::new(
                 crate::collection::CollectionMap::default(),
             )),
@@ -324,6 +328,7 @@ impl<S: Store> DB<S> {
             txn_id_counter: AtomicU64::new(0),
             migration_generation: AtomicU64::new(0),
             closed: AtomicBool::new(false),
+            commit_fences: Arc::default(),
             collections: Arc::new(crate::collection::epoch::EpochedCollections::new(
                 crate::collection::CollectionMap::default(),
             )),
@@ -586,6 +591,11 @@ impl<S: Store> DB<S> {
             .clone()
     }
 
+    /// Where commits whose caller stopped waiting are fenced until they land.
+    pub(crate) fn commit_fences(&self) -> &Arc<crate::txn::fence::CommitFences> {
+        &self.commit_fences
+    }
+
     /// Get the next transaction ID.
     fn next_txn_id(&self) -> u64 {
         self.txn_id_counter.fetch_add(1, Ordering::SeqCst) + 1
@@ -598,6 +608,11 @@ impl<S: Store> DB<S> {
     pub async fn new_txn(&self, readonly: bool) -> Result<DbTxn<S>> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(Error::DatabaseClosed);
+        }
+        // A commit whose caller stopped waiting may still be landing; what
+        // begins now must see it.
+        if self.commit_fences.any() {
+            self.commit_fences.cleared().await;
         }
         let id = self.next_txn_id();
         let basic_txn = BasicTxn::new(&*self.store, id, readonly)

@@ -375,6 +375,28 @@ pub const PROPERTIES: &[Property] = &[
         tiers: &[Behavioral, Boundary],
     },
     Property {
+        // A commit handed to its transaction's owner still lands after its
+        // caller stops waiting. The caller raises the database's fence count
+        // and swaps the commit's state word; the owner swaps it once it is
+        // finished, and whichever swap loses lowers the count. Every new
+        // transaction and read waits in DB::new_txn while the count is above
+        // zero, so it sees the commit.
+        family: "Transaction & merge-queue concurrency",
+        name: "INV_ReaderSeesCancelledCommit / INV_NeverNegative / INV_UncancelledUntouched / INV_SettledExact / LIVE_NoFenceLeak / LIVE_ReaderProceeds: a cancelled commit is fenced until it lands",
+        axis: Tla,
+        anchor: "crates/db/src/txn/fence.rs CommitFences, Fence::abandon, Fence::finish; crates/db/src/txn/owner/mod.rs Owners::finish, AbandonOnDrop; crates/db/src/txn/owner/actor.rs own; crates/db/src/database/mod.rs DB::new_txn",
+        model_ref: "MC_CommitFence_{Green,Red_RaiseAfterSwap,Red_OwnerNoSwap,Red_ReaderNoWait,Red_ForgetFailed,Red_UndoNoWake}.cfg",
+        tiers: &[Boundary],
+    },
+    Property {
+        family: "Transaction & merge-queue concurrency",
+        name: "exactly_one_wins / one_lowering_per_raise / caller_win_means_owner_lowers / uncancelled_owner_wins: the two swaps settle each fence once",
+        axis: Lean,
+        anchor: "crates/db/src/txn/fence.rs Fence::abandon, Fence::finish",
+        model_ref: "CommitFence.Swap (lake build)",
+        tiers: &[Boundary],
+    },
+    Property {
         // `partition::convergence_delete_update_race_preserves_tombstone`
         // partitions a replicated doc, deletes on one side, updates a mutable field
         // on the other, then heals and asserts the merged materialized view stays
