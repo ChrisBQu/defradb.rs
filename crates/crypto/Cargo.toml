@@ -52,6 +52,7 @@ thiserror.workspace = true
 blst = "0.3"
 
 [dev-dependencies]
+rapidhash.workspace = true
 serde_json.workspace = true
 serial_test = "3.0"
 multihash-codetable.workspace = true

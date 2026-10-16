@@ -527,7 +527,7 @@ pub fn clear_request_bearer_token(did: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use regolith::sync::{Mutex, MutexGuard};
 
     #[tokio::test]
     async fn request_bearer_scope_isolated_across_same_did_and_restores_global_fallback() {
@@ -595,20 +595,16 @@ mod tests {
 
     /// `IDENTITY_STORE` is process-global, so the tests that clear and refill it
     /// cannot run concurrently: one test's `store_identity` lands between
-    /// another's `clear_identity_store` and its assertion. Poisoning is
-    /// recovered from rather than propagated, so one failure does not cascade
-    /// into the others.
+    /// another's `clear_identity_store` and its assertion.
     static IDENTITY_STORE_GUARD: Mutex<()> = Mutex::new(());
 
-    fn lock_identity_store() -> std::sync::MutexGuard<'static, ()> {
-        IDENTITY_STORE_GUARD
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    async fn lock_identity_store() -> MutexGuard<'static, ()> {
+        IDENTITY_STORE_GUARD.lock().await
     }
 
-    #[test]
-    fn resolve_signing_config_uses_request_identity_when_registered() {
-        let _guard = lock_identity_store();
+    #[tokio::test]
+    async fn resolve_signing_config_uses_request_identity_when_registered() {
+        let _guard = lock_identity_store().await;
         clear_identity_store();
         store_identity("did:key:request", make_config("request"));
         store_identity("did:key:node", make_config("node"));
@@ -624,9 +620,9 @@ mod tests {
         clear_identity_store();
     }
 
-    #[test]
-    fn resolve_signing_config_falls_back_to_node_identity_when_request_identity_missing() {
-        let _guard = lock_identity_store();
+    #[tokio::test]
+    async fn resolve_signing_config_falls_back_to_node_identity_when_request_identity_missing() {
+        let _guard = lock_identity_store().await;
         clear_identity_store();
         store_identity("did:key:node", make_config("node"));
 
@@ -637,9 +633,9 @@ mod tests {
         clear_identity_store();
     }
 
-    #[test]
-    fn find_remote_signer_did_returns_registered_remote_signer() {
-        let _guard = lock_identity_store();
+    #[tokio::test]
+    async fn find_remote_signer_did_returns_registered_remote_signer() {
+        let _guard = lock_identity_store().await;
         struct NoopRemoteSigner;
 
         impl RemoteSigner for NoopRemoteSigner {
