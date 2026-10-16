@@ -75,6 +75,7 @@ serde_ipld_dagcbor = { workspace = true }
 
 # Errors
 thiserror = { workspace = true }
+# The bitswap Store trait of iroh-bitswap is declared over anyhow::Result; no other use.
 anyhow = { workspace = true }
 tracing = { workspace = true }
 rlimit = { version = "0.9", optional = true }

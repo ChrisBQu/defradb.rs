@@ -2580,7 +2580,6 @@ name = "cli"
 version = "0.5.0"
 dependencies = [
  "acp 0.5.0",
- "anyhow",
  "async-trait",
  "axum",
  "base64 0.22.1",
@@ -3094,11 +3093,11 @@ dependencies = [
 name = "conformance"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "defra-harness",
  "serde",
  "serde_json",
  "serial_test",
+ "thiserror 2.0.18",
  "tokio",
 ]
 
@@ -3616,6 +3615,7 @@ dependencies = [
  "multihash-codetable",
  "p256 0.13.2",
  "rand 0.8.8",
+ "rapidhash",
  "serde",
  "serde_bytes",
  "serde_ipld_dagcbor",
@@ -3950,7 +3950,6 @@ name = "db"
 version = "0.5.0"
 dependencies = [
  "acp 0.5.0",
- "anyhow",
  "async-trait",
  "axum",
  "base64 0.22.1",
@@ -4059,6 +4058,7 @@ dependencies = [
  "multihash-codetable",
  "rand 0.8.8",
  "rapidhash",
+ "regolith",
  "serde",
  "serde_bytes",
  "serde_ipld_dagcbor",
@@ -4140,7 +4140,6 @@ name = "defra-node"
 version = "0.5.0"
 dependencies = [
  "acp 0.5.0",
- "anyhow",
  "async-trait",
  "axum",
  "blockstore",
@@ -4160,6 +4159,7 @@ dependencies = [
  "p2p",
  "query",
  "rapidhash",
+ "regolith",
  "reqwest 0.12.28",
  "schema",
  "serde",
@@ -4173,6 +4173,7 @@ dependencies = [
  "tracing-subscriber 0.3.23",
  "vera",
  "workers",
+ "zanzibar 0.5.0",
 ]
 
 [[package]]
@@ -4727,7 +4728,6 @@ name = "embedded"
 version = "0.5.0"
 dependencies = [
  "acp 0.5.0",
- "anyhow",
  "async-trait",
  "base64 0.22.1",
  "blockstore",
@@ -4765,6 +4765,7 @@ dependencies = [
  "tracing",
  "vera",
  "workers",
+ "zanzibar 0.5.0",
  "zeroize",
  "zstd",
 ]
@@ -6554,7 +6555,6 @@ version = "0.1.0"
 dependencies = [
  "acp 0.5.0",
  "alloy-sol-types",
- "anyhow",
  "base64 0.22.1",
  "chrono",
  "ciborium",
@@ -6574,6 +6574,7 @@ dependencies = [
  "mach2 0.4.3",
  "p2p",
  "paste",
+ "rapidhash",
  "reqwest 0.12.28",
  "serde_json",
  "serial_test",
@@ -9411,6 +9412,8 @@ dependencies = [
  "hex",
  "identity 0.5.0",
  "prost 0.14.3",
+ "rapidhash",
+ "regolith",
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.18",
@@ -10616,7 +10619,6 @@ version = "0.5.0"
 dependencies = [
  "acp 0.5.0",
  "async-graphql",
- "async-lock",
  "async-trait",
  "base64 0.22.1",
  "bm25",
@@ -14269,6 +14271,7 @@ dependencies = [
  "kovan-queue",
  "prost 0.14.3",
  "rapidhash",
+ "regolith",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

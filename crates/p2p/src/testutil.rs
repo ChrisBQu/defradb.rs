@@ -2,7 +2,7 @@
 //!
 //! This module provides common test helpers and mocks used across unit and integration tests.
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
 use cid::Cid;
@@ -64,17 +64,18 @@ impl Default for MockBitswapStore {
 #[async_trait]
 impl Store for MockBitswapStore {
     async fn get_size(&self, cid: &Cid) -> Result<usize> {
-        self.blocks
+        Ok(self
+            .blocks
             .get(cid)
             .map(|data| data.len())
-            .ok_or_else(|| anyhow!("block not found: {}", cid))
+            .ok_or_else(|| crate::Error::BlockNotFound(cid.to_string()))?)
     }
 
     async fn get(&self, cid: &Cid) -> Result<Block> {
         let data = self
             .blocks
             .get(cid)
-            .ok_or_else(|| anyhow!("block not found: {}", cid))?;
+            .ok_or_else(|| crate::Error::BlockNotFound(cid.to_string()))?;
         Ok(Block::new(data, *cid))
     }
 

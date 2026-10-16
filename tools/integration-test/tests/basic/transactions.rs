@@ -468,7 +468,7 @@ async fn txn_commit_publishes_update_events(cluster: TestCluster) {
         "expected exactly 3 update events after commit; got {}",
         new_events.len()
     );
-    let observed_doc_ids: std::collections::HashSet<String> = new_events
+    let observed_doc_ids: rapidhash::RapidHashSet<String> = new_events
         .iter()
         .filter_map(|e| e.pointer("/data/doc_id").and_then(|v| v.as_str()))
         .map(String::from)

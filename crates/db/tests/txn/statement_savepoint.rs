@@ -1,11 +1,12 @@
-use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use db::{DbCollectionProvider, DbTransactionRegistry, LensedAutoCommitFetcher, DB};
 use events::{Bus, ChannelBus, EventName};
+use kovan::Atom;
 use query::{QueryExecutor, QueryRequest};
+use rapidhash::RapidHashSet;
 use storage::corekv::{
     private::Sealed, AppendLog, IterOptions, Iterator, Reader, Result as StorageResult, Store, Txn,
     Writer,
@@ -16,7 +17,7 @@ use storage::RegolithStore;
 struct WriteGate {
     armed: AtomicBool,
     entered: tokio::sync::Notify,
-    block_keys: Mutex<Vec<Vec<u8>>>,
+    block_keys: Atom<Vec<Vec<u8>>>,
 }
 
 struct PauseAfterSetStore {
@@ -103,7 +104,11 @@ impl Writer for PauseAfterSetTxn {
         if key.first() == Some(&storage::namespace::Namespace::Blockstore.prefix())
             && cid::Cid::try_from(&key[1..]).is_ok()
         {
-            self.gate.block_keys.lock().unwrap().push(key.to_vec());
+            self.gate.block_keys.rcu(|keys| {
+                let mut next = keys.clone();
+                next.push(key.to_vec());
+                next
+            });
         }
         if self.gate.armed.swap(false, Ordering::SeqCst) {
             self.gate.entered.notify_one();
@@ -315,7 +320,7 @@ async fn failed_partial_batch_keeps_prior_statements_and_discards_its_own_writes
     for schema in query::parse_sdl("type Users { email: String @index(unique: true) }").unwrap() {
         db.create_collection(schema).await.unwrap();
     }
-    let after_schema = gate.block_keys.lock().unwrap().len();
+    let after_schema = gate.block_keys.load().len();
     let registry = Arc::new(DbTransactionRegistry::new(Arc::clone(&db)));
     let runner = Arc::new(query::QueryRunner::with_arc_registry_and_provider(
         LensedAutoCommitFetcher::new(Arc::clone(&db)),
@@ -332,13 +337,13 @@ async fn failed_partial_batch_keeps_prior_statements_and_discards_its_own_writes
         )
         .await;
     assert!(!prior.has_errors(), "{:?}", prior.errors);
-    let prior_block_keys = gate.block_keys.lock().unwrap()[after_schema..].to_vec();
+    let prior_block_keys = gate.block_keys.load()[after_schema..].to_vec();
     assert!(
         !prior_block_keys.is_empty(),
         "the prior successful statement must write blobstore blocks"
     );
 
-    let failed_statement_start = gate.block_keys.lock().unwrap().len();
+    let failed_statement_start = gate.block_keys.load().len();
     let failed = runner
         .execute_in_txn(
             QueryRequest::new(
@@ -354,9 +359,9 @@ async fn failed_partial_batch_keeps_prior_statements_and_discards_its_own_writes
         failed.has_errors(),
         "expected the second unique insert to fail"
     );
-    let prior_key_set: HashSet<_> = prior_block_keys.iter().cloned().collect();
-    let failed_block_keys: HashSet<_> = {
-        let recorded = gate.block_keys.lock().unwrap();
+    let prior_key_set: RapidHashSet<_> = prior_block_keys.iter().cloned().collect();
+    let failed_block_keys: RapidHashSet<_> = {
+        let recorded = gate.block_keys.load();
         recorded[failed_statement_start..]
             .iter()
             .filter(|key| !prior_key_set.contains(*key))

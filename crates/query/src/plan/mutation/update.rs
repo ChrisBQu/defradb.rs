@@ -702,11 +702,11 @@ mod prepared_target_tests {
     };
     use async_trait::async_trait;
     use document::DocID;
-    use std::sync::Mutex;
+    use kovan::Atom;
 
     #[derive(Default)]
     struct RecordingMutator {
-        updates: Mutex<Vec<(String, bool)>>,
+        updates: Atom<Vec<(String, bool)>>,
     }
 
     #[async_trait]
@@ -721,10 +721,15 @@ mod prepared_target_tests {
             doc: Document,
             fields: RapidHashSet<String>,
         ) -> Result<UpdateResult> {
-            self.updates.lock().unwrap().push((
+            let recorded = (
                 doc.id().unwrap().to_string(),
                 doc.write_preparation().is_some(),
-            ));
+            );
+            self.updates.rcu(|updates| {
+                let mut next = updates.clone();
+                next.push(recorded.clone());
+                next
+            });
             Ok(UpdateResult::new(doc, fields.len()))
         }
 
@@ -794,7 +799,7 @@ mod prepared_target_tests {
             node.init().await.unwrap();
             assert!(node.next().await.unwrap());
             assert_eq!(node.updated_count(), 2);
-            let updates = mutator.updates.lock().unwrap().clone();
+            let updates = mutator.updates.load_clone();
             assert!(updates.contains(&(keyed.to_string(), true)));
             assert!(updates.contains(&(plain.to_string(), false)));
         });
@@ -830,7 +835,7 @@ mod prepared_target_tests {
             assert!(error
                 .to_string()
                 .contains("mutation target changed after key preparation"));
-            let updates = mutator.updates.lock().unwrap().clone();
+            let updates = mutator.updates.load_clone();
             assert_eq!(updates.len(), 2);
             assert!(!updates.iter().any(|(id, _)| id == &appeared.to_string()));
         });

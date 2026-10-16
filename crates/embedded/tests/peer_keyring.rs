@@ -2,9 +2,12 @@
 
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+#[path = "support/outcome.rs"]
+mod outcome;
+
 use embedded::NodeBuilder;
 use keyring::Keyring;
+use outcome::Result;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[cfg(feature = "libp2p")]
@@ -27,8 +30,7 @@ async fn application_keyring_preserves_peer_identity_across_node_restarts() -> R
             .expect("libp2p node")
             .ops()
             .local_peer_id()
-            .await
-            .map_err(|error| anyhow!(error))?;
+            .await?;
         let key = keyring.get(keyring::PEER_KEY)?;
         let mut seed: [u8; 32] = key[..32].try_into()?;
         let expected = libp2p::identity::Keypair::ed25519_from_bytes(&mut seed)?;
@@ -72,13 +74,7 @@ async fn iroh_uses_the_application_keyring_identity_after_restart() -> Result<()
             })
             .build()
             .await?;
-        let identity = node
-            .p2p()
-            .expect("iroh node")
-            .ops()
-            .local_peer_id()
-            .await
-            .map_err(|error| anyhow!(error))?;
+        let identity = node.p2p().expect("iroh node").ops().local_peer_id().await?;
         assert_eq!(identity, expected);
         node.shutdown().await;
     }

@@ -1,7 +1,7 @@
 //! Protocol-specific event handlers (Identify, PushLog, GossipSub, Bitswap, Kademlia).
 
 use iroh_bitswap::{BitswapEvent, Store};
-use libp2p::{gossipsub, kad, kad::store::RecordStore, request_response, PeerId};
+use libp2p::{gossipsub, kad, kad::store::RecordStore, request_response};
 use tracing::{debug, error, warn};
 
 use crate::behaviour::{DefraKademliaEvent, KademliaNetwork};
@@ -319,10 +319,10 @@ impl<S: Store> P2PHost<S> {
                 // DefraDB network, any connected peer may have the requested block.
                 // This complements session.add_provider() which may not take effect
                 // if processed before get_blocks() adds CIDs to the want list.
-                let providers: std::collections::HashSet<PeerId> =
-                    self.peer_addrs.keys().copied().collect();
-                debug!(cid = %key, count = providers.len(), "Returning connected peers as Bitswap providers");
-                let _ = response.send(Ok(providers)).await;
+                debug!(cid = %key, count = self.peer_addrs.len(), "Returning connected peers as Bitswap providers");
+                let _ = response
+                    .send(Ok(self.peer_addrs.keys().copied().collect()))
+                    .await;
             }
             BitswapEvent::Ping { peer, response } => {
                 debug!(peer_id = %peer, "Bitswap ping request");

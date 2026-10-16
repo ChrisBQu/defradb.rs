@@ -4,17 +4,19 @@
 //! it awaited arrived, reaches this node's own replicators like any composite
 //! that merged on its first attempt.
 
+#[path = "support/outcome.rs"]
+mod outcome;
 mod iroh_peers;
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
 use async_trait::async_trait;
 use cid::Cid;
 use db::merge::governance::{FieldValue, MergeCandidate, MergeValidator, MergeVerdict, MergeView};
 use document::NormalValue;
 use embedded::{AccessHooks, NodeBuilder};
 use iroh_peers::{connect, create, doc_ids, iroh_config, replicate, wait_for_docs, Node};
+use outcome::Result;
 use tokio::time::{sleep, Duration};
 
 const SDL: &str = "type Grant { label: String } type Note { grant: String }";
@@ -94,7 +96,7 @@ async fn a_composite_merged_by_redrive_reaches_this_nodes_replicators() -> Resul
 
     wait_for_docs(&tail, "Note", &[&note_doc])
         .await
-        .context("the re-driven composite never reached the tail node")?;
+        .expect("the re-driven composite never reached the tail node");
 
     for node in [author, middle, tail] {
         node.shutdown().await;

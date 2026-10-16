@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use rapidhash::RapidHashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -137,7 +137,7 @@ async fn rust_regolith_survives_sigkill_and_reopen_after_acknowledged_writes() {
     let docs = data["CrashDoc"]
         .as_array()
         .expect("CrashDoc result should be an array");
-    let found: HashSet<i64> = docs.iter().filter_map(|doc| doc["seq"].as_i64()).collect();
+    let found: RapidHashSet<i64> = docs.iter().filter_map(|doc| doc["seq"].as_i64()).collect();
 
     for seq in &acknowledged {
         assert!(

@@ -19,7 +19,7 @@ use super::handler::{PendingResponses, TwoStreamHandler};
 pub struct TwoStreamRunner {
     /// Pending responses for lock-free response processing.
     /// Stored separately from the handler to avoid holding the handler's
-    /// tokio::sync::Mutex during network I/O in response stream reads.
+    /// lock during network I/O in response stream reads.
     pending: Arc<PendingResponses>,
     /// Incoming request streams.
     request_streams: futures::stream::BoxStream<'static, (libp2p::PeerId, libp2p::Stream, bool)>,

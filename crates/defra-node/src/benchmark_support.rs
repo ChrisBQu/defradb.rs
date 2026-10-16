@@ -1,8 +1,8 @@
+use crate::{Error, Result};
 use rapidhash::{HashMapExt, RapidHashMap, RapidHashSet};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
-use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
@@ -812,7 +812,7 @@ pub async fn build_context1_style_coding_tasks(
     }
 
     if tasks.is_empty() {
-        bail!("failed to build any context-1-style coding retrieval tasks");
+        return Err(Error::NoRetrievalTasks);
     }
 
     Ok(tasks)
@@ -927,7 +927,7 @@ async fn fetch_message_records(
         .and_then(|sessions| sessions.first())
         .and_then(|session| session.get("messages"))
         .and_then(JsonValue::as_array)
-        .ok_or_else(|| anyhow!("missing messages array for {}", session.session_id))?;
+        .ok_or_else(|| Error::MissingArrayFor { field: "messages", owner: session.session_id.clone() })?;
 
     messages
         .iter()
@@ -936,17 +936,17 @@ async fn fetch_message_records(
                 doc_id: message
                     .get("_docID")
                     .and_then(JsonValue::as_str)
-                    .ok_or_else(|| anyhow!("missing message _docID in {}", message))?
+                    .ok_or_else(|| Error::missing("message _docID", message))?
                     .to_string(),
                 label: message
                     .get("message_id")
                     .and_then(JsonValue::as_str)
-                    .ok_or_else(|| anyhow!("missing message_id in {}", message))?
+                    .ok_or_else(|| Error::missing("message_id", message))?
                     .to_string(),
                 content: message
                     .get("content")
                     .and_then(JsonValue::as_str)
-                    .ok_or_else(|| anyhow!("missing content in {}", message))?
+                    .ok_or_else(|| Error::missing("content", message))?
                     .to_string(),
             })
         })
@@ -978,7 +978,7 @@ async fn fetch_action_records(
         .and_then(|sessions| sessions.first())
         .and_then(|session| session.get("actions"))
         .and_then(JsonValue::as_array)
-        .ok_or_else(|| anyhow!("missing actions array for {}", session.session_id))?;
+        .ok_or_else(|| Error::MissingArrayFor { field: "actions", owner: session.session_id.clone() })?;
 
     actions
         .iter()
@@ -986,23 +986,23 @@ async fn fetch_action_records(
             let action_type = action
                 .get("action_type")
                 .and_then(JsonValue::as_str)
-                .ok_or_else(|| anyhow!("missing action_type in {}", action))?;
+                .ok_or_else(|| Error::missing("action_type", action))?;
             let target = action
                 .get("target")
                 .and_then(JsonValue::as_str)
-                .ok_or_else(|| anyhow!("missing target in {}", action))?;
+                .ok_or_else(|| Error::missing("target", action))?;
 
             Ok(CodingCorpusRecord {
                 doc_id: action
                     .get("_docID")
                     .and_then(JsonValue::as_str)
-                    .ok_or_else(|| anyhow!("missing action _docID in {}", action))?
+                    .ok_or_else(|| Error::missing("action _docID", action))?
                     .to_string(),
                 label: format!("{action_type} {target}"),
                 content: action
                     .get("command")
                     .and_then(JsonValue::as_str)
-                    .ok_or_else(|| anyhow!("missing command in {}", action))?
+                    .ok_or_else(|| Error::missing("command", action))?
                     .to_string(),
             })
         })
@@ -1025,7 +1025,7 @@ async fn lookup_session_doc_id(node: &EmbeddedNode, session_id: &str) -> Result<
         .and_then(|session| session.get("_docID"))
         .and_then(JsonValue::as_str)
         .map(ToOwned::to_owned)
-        .ok_or_else(|| anyhow!("missing session _docID for {}", session_id))
+        .ok_or_else(|| Error::MissingSessionDocId(session_id.to_owned()))
 }
 
 fn build_task_from_records(
@@ -1156,7 +1156,7 @@ fn parse_ranked_results(data: &JsonValue, target: SearchTarget) -> Result<Vec<Co
     let items = data
         .get(collection_name)
         .and_then(JsonValue::as_array)
-        .ok_or_else(|| anyhow!("missing {collection_name} array in {data}"))?;
+        .ok_or_else(|| Error::MissingArray { collection: collection_name.to_string(), within: data.to_string() })?;
 
     items
         .iter()
@@ -1165,11 +1165,11 @@ fn parse_ranked_results(data: &JsonValue, target: SearchTarget) -> Result<Vec<Co
                 SearchTarget::Messages => (
                     item.get("message_id")
                         .and_then(JsonValue::as_str)
-                        .ok_or_else(|| anyhow!("missing message_id in {}", item))?
+                        .ok_or_else(|| Error::missing("message_id", item))?
                         .to_string(),
                     item.get("content")
                         .and_then(JsonValue::as_str)
-                        .ok_or_else(|| anyhow!("missing content in {}", item))?
+                        .ok_or_else(|| Error::missing("content", item))?
                         .to_string(),
                 ),
                 SearchTarget::Actions => (
@@ -1177,14 +1177,14 @@ fn parse_ranked_results(data: &JsonValue, target: SearchTarget) -> Result<Vec<Co
                         "{} {}",
                         item.get("action_type")
                             .and_then(JsonValue::as_str)
-                            .ok_or_else(|| anyhow!("missing action_type in {}", item))?,
+                            .ok_or_else(|| Error::missing("action_type", item))?,
                         item.get("target")
                             .and_then(JsonValue::as_str)
-                            .ok_or_else(|| anyhow!("missing target in {}", item))?,
+                            .ok_or_else(|| Error::missing("target", item))?,
                     ),
                     item.get("command")
                         .and_then(JsonValue::as_str)
-                        .ok_or_else(|| anyhow!("missing command in {}", item))?
+                        .ok_or_else(|| Error::missing("command", item))?
                         .to_string(),
                 ),
             };
@@ -1193,7 +1193,7 @@ fn parse_ranked_results(data: &JsonValue, target: SearchTarget) -> Result<Vec<Co
                 id: item
                     .get("_docID")
                     .and_then(JsonValue::as_str)
-                    .ok_or_else(|| anyhow!("missing _docID in {}", item))?
+                    .ok_or_else(|| Error::missing("_docID", item))?
                     .to_string(),
                 label,
                 content,
@@ -1374,7 +1374,7 @@ pub async fn benchmark_case(
     iterations: usize,
 ) -> Result<BenchmarkSummary> {
     if iterations == 0 {
-        bail!("iterations must be greater than zero");
+        return Err(Error::ZeroIterations);
     }
 
     let query = case.render_query(false);

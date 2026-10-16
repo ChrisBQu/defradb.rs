@@ -1,7 +1,8 @@
 //! App merge governance: a validator's verdicts, re-drive of deferred
 //! composites when what they await merges, and recovery.
 
-use std::sync::{Arc, Mutex};
+use kovan::Atom;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use blockstore::Blockstore as _;
@@ -45,18 +46,25 @@ fn signer() -> Signer {
     Signer { key, did }
 }
 
+fn push<T: Clone + Send + Sync + 'static>(log: &Atom<Vec<T>>, item: T) {
+    log.rcu(|entries| {
+        let mut next = entries.clone();
+        next.push(item.clone());
+        next
+    });
+}
+
 /// A note is accepted when the grant it names is held and names the note's
 /// verified signer as writer; its absence defers on the grant's CID.
 #[derive(Default)]
 struct GrantValidator {
-    seen: Mutex<Vec<(Cid, SignatureStatus)>>,
+    seen: Atom<Vec<(Cid, SignatureStatus)>>,
 }
 
 impl GrantValidator {
     fn seen(&self, cid: &Cid) -> Vec<SignatureStatus> {
         self.seen
-            .lock()
-            .unwrap()
+            .load()
             .iter()
             .filter(|(seen, _)| seen == cid)
             .map(|(_, status)| status.clone())
@@ -71,10 +79,7 @@ impl MergeValidator for GrantValidator {
         candidate: &MergeCandidate<'_>,
         view: &dyn MergeView,
     ) -> Result<MergeVerdict, String> {
-        self.seen
-            .lock()
-            .unwrap()
-            .push((*candidate.cid, candidate.signature.clone()));
+        push(&self.seen, (*candidate.cid, candidate.signature.clone()));
         let signer = match &candidate.signature {
             SignatureStatus::Verified(did) => did.clone(),
             SignatureStatus::NotHeld(signature) => {
@@ -113,16 +118,13 @@ impl MergeValidator for GrantValidator {
 /// merged by re-drive never reaches through `handle_block`'s return value.
 #[derive(Default)]
 struct RecordingSink {
-    forwarded: Mutex<Vec<(Cid, String)>>,
+    forwarded: Atom<Vec<(Cid, String)>>,
 }
 
 #[async_trait]
 impl RedrivenMergeSink for RecordingSink {
     async fn forward(&self, merged: RedrivenMerge) {
-        self.forwarded
-            .lock()
-            .unwrap()
-            .push((merged.cid, merged.collection_id));
+        push(&self.forwarded, (merged.cid, merged.collection_id));
     }
 }
 
@@ -224,7 +226,7 @@ impl Node {
 
     /// What was forwarded, with the collection id each was forwarded under.
     fn forwarded_with_ids(&self) -> Vec<(Cid, String)> {
-        self.sink.forwarded.lock().unwrap().clone()
+        self.sink.forwarded.load_clone()
     }
 
     /// Grants as in `open`, and Notes whose version id differs from its
@@ -611,7 +613,7 @@ async fn deferred_forgery_stays_unmerged_after_restart() {
 /// held; defers an update on the genesis it names otherwise.
 #[derive(Default)]
 struct GenesisFirst {
-    seen: Mutex<Vec<(Cid, SignatureStatus)>>,
+    seen: Atom<Vec<(Cid, SignatureStatus)>>,
 }
 
 #[async_trait]
@@ -621,10 +623,7 @@ impl MergeValidator for GenesisFirst {
         candidate: &MergeCandidate<'_>,
         view: &dyn MergeView,
     ) -> Result<MergeVerdict, String> {
-        self.seen
-            .lock()
-            .unwrap()
-            .push((*candidate.cid, candidate.signature.clone()));
+        push(&self.seen, (*candidate.cid, candidate.signature.clone()));
         match &candidate.signature {
             SignatureStatus::Verified(_) => {}
             SignatureStatus::NotHeld(signature) => {
@@ -973,8 +972,8 @@ type ImmutableRead = Option<Vec<(String, NormalValue)>>;
 /// `collection` can be read; records what was read.
 struct ReadImmutable {
     collection: &'static str,
-    doc_id: Mutex<String>,
-    read: Mutex<Option<ImmutableRead>>,
+    doc_id: Atom<String>,
+    read: Atom<Option<ImmutableRead>>,
 }
 
 #[async_trait]
@@ -984,9 +983,9 @@ impl MergeValidator for ReadImmutable {
         _candidate: &MergeCandidate<'_>,
         view: &dyn MergeView,
     ) -> Result<MergeVerdict, String> {
-        let doc_id = self.doc_id.lock().unwrap().clone();
+        let doc_id = self.doc_id.load_clone();
         let fields = view.immutable_fields(self.collection, &doc_id).await?;
-        *self.read.lock().unwrap() = Some(fields);
+        self.read.store(Some(fields));
         Ok(MergeVerdict::Accept)
     }
 }
@@ -995,8 +994,8 @@ impl MergeValidator for ReadImmutable {
 async fn immutable_fields_reads_only_immutable_scalar_fields_of_a_merged_document() {
     let validator = Arc::new(ReadImmutable {
         collection: "Grants",
-        doc_id: Mutex::new(String::new()),
-        read: Mutex::new(None),
+        doc_id: Atom::new(String::new()),
+        read: Atom::new(None),
     });
     let node = Node::with_immutable_grants(validator.clone()).await;
     let writer = signer();
@@ -1008,11 +1007,11 @@ async fn immutable_fields_reads_only_immutable_scalar_fields_of_a_merged_documen
         MergeOutcome::Merged
     );
     // `label` is set but mutable, so the read leaves it out.
-    *validator.doc_id.lock().unwrap() = grant.doc_id.clone();
+    validator.doc_id.store(grant.doc_id.clone());
     let note = genesis("col-notes", "grant", "anything", &writer);
     assert_eq!(note.merge(&node, &writer.did).await, MergeOutcome::Merged);
     assert_eq!(
-        validator.read.lock().unwrap().clone().unwrap(),
+        validator.read.load_clone().unwrap(),
         Some(vec![(
             "writer".to_string(),
             NormalValue::String(writer.did.clone())
@@ -1020,10 +1019,10 @@ async fn immutable_fields_reads_only_immutable_scalar_fields_of_a_merged_documen
     );
 
     // An unmerged document reads as `None`.
-    *validator.doc_id.lock().unwrap() = "bae-missing".to_string();
+    validator.doc_id.store("bae-missing".to_string());
     let other = genesis("col-notes", "grant", "other", &writer);
     assert_eq!(other.merge(&node, &writer.did).await, MergeOutcome::Merged);
-    assert_eq!(validator.read.lock().unwrap().clone().unwrap(), None);
+    assert_eq!(validator.read.load_clone().unwrap(), None);
 }
 
 #[tokio::test]
@@ -1215,8 +1214,8 @@ async fn a_recovered_deferred_composite_is_not_forwarded_under_the_schema_versio
 async fn immutable_fields_of_a_deleted_document_are_still_read() {
     let validator = Arc::new(ReadImmutable {
         collection: "Grants",
-        doc_id: Mutex::new(String::new()),
-        read: Mutex::new(None),
+        doc_id: Atom::new(String::new()),
+        read: Atom::new(None),
     });
     let node = Node::with_immutable_grants(validator.clone()).await;
     let writer = signer();
@@ -1228,11 +1227,11 @@ async fn immutable_fields_of_a_deleted_document_are_still_read() {
     // A replica that merged the delete first must read what a replica that
     // judged before the delete read; otherwise one accepts and the other
     // defers forever.
-    *validator.doc_id.lock().unwrap() = grant.doc_id.clone();
+    validator.doc_id.store(grant.doc_id.clone());
     let note = genesis("col-notes", "grant", "anything", &writer);
     assert_eq!(note.merge(&node, &writer.did).await, MergeOutcome::Merged);
     assert_eq!(
-        validator.read.lock().unwrap().clone().unwrap(),
+        validator.read.load_clone().unwrap(),
         Some(vec![(
             "writer".to_string(),
             NormalValue::String(writer.did.clone())

@@ -12,7 +12,7 @@ use crypto::Key;
 use defra_core::signing::{SigningConfig, SigningKeyType};
 use defra_node::EmbeddedNode;
 use identity::{Identity as _, RawIdentity};
-use tokio::sync::Mutex;
+use regolith::sync::Mutex;
 
 /// Both tests mutate the process-global signing identity store, so they must
 /// not run concurrently (cargo runs tests in a binary in parallel). Without

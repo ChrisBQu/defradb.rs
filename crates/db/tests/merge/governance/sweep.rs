@@ -8,7 +8,7 @@ use super::*;
 
 /// Defers until the composite `0` is held, naming it, like `AwaitComposite`
 /// but reading the awaited CID at verdict time so a test can set it later.
-struct AwaitNamed(Mutex<Cid>);
+struct AwaitNamed(Atom<Cid>);
 
 #[async_trait]
 impl MergeValidator for AwaitNamed {
@@ -17,7 +17,7 @@ impl MergeValidator for AwaitNamed {
         _candidate: &MergeCandidate<'_>,
         view: &dyn MergeView,
     ) -> Result<MergeVerdict, String> {
-        let awaited = *self.0.lock().unwrap();
+        let awaited = *self.0.load();
         Ok(if view.composite_fields(&awaited).await?.is_some() {
             MergeVerdict::Accept
         } else {
@@ -37,7 +37,7 @@ async fn a_deferred_composite_merges_after_a_restart() {
     let note = genesis("col-notes", "grant", "anything", &writer);
 
     {
-        let validator = Arc::new(AwaitNamed(Mutex::new(grant.cid)));
+        let validator = Arc::new(AwaitNamed(Atom::new(grant.cid)));
         let node = Node::open(
             RegolithStore::open(&path).unwrap(),
             MergeGovernance::new(["Notes"]).with_validator(validator),
@@ -52,7 +52,7 @@ async fn a_deferred_composite_merges_after_a_restart() {
         node.db.close().await.unwrap();
     }
 
-    let validator = Arc::new(AwaitNamed(Mutex::new(grant.cid)));
+    let validator = Arc::new(AwaitNamed(Atom::new(grant.cid)));
     let node = Node::open(
         RegolithStore::open(&path).unwrap(),
         MergeGovernance::new(["Notes"]).with_validator(validator),
@@ -76,7 +76,7 @@ async fn a_deferred_composite_merges_after_a_restart() {
 async fn a_composite_deferred_beyond_the_index_capacity_merges() {
     let writer = signer();
     let grant = genesis("col-grants", "writer", &writer.did, &writer);
-    let validator = Arc::new(AwaitNamed(Mutex::new(grant.cid)));
+    let validator = Arc::new(AwaitNamed(Atom::new(grant.cid)));
     let node = Node::open(
         RegolithStore::in_memory().unwrap(),
         MergeGovernance::new(["Notes"]).with_validator(validator),
@@ -180,7 +180,7 @@ async fn a_composite_awaiting_a_field_block_merges_once_it_is_held() {
     let field_cid = grant.blocks[0].0;
     let node = Node::open(
         RegolithStore::in_memory().unwrap(),
-        MergeGovernance::new(["Notes"]).with_validator(Arc::new(AwaitNamed(Mutex::new(field_cid)))),
+        MergeGovernance::new(["Notes"]).with_validator(Arc::new(AwaitNamed(Atom::new(field_cid)))),
         true,
     )
     .await;
@@ -211,7 +211,7 @@ async fn a_sweep_and_an_arrival_do_not_double_merge() {
     let grant = genesis("col-grants", "writer", &writer.did, &writer);
     let node = Node::open(
         RegolithStore::in_memory().unwrap(),
-        MergeGovernance::new(["Notes"]).with_validator(Arc::new(AwaitNamed(Mutex::new(grant.cid)))),
+        MergeGovernance::new(["Notes"]).with_validator(Arc::new(AwaitNamed(Atom::new(grant.cid)))),
         true,
     )
     .await;
@@ -241,7 +241,7 @@ async fn the_sweep_leaves_ungoverned_composites_alone() {
     let node = Node::open(
         RegolithStore::in_memory().unwrap(),
         MergeGovernance::new(["Notes"])
-            .with_validator(Arc::new(AwaitNamed(Mutex::new(Cid::default())))),
+            .with_validator(Arc::new(AwaitNamed(Atom::new(Cid::default())))),
         true,
     )
     .await;

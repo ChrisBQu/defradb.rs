@@ -263,6 +263,14 @@ pub enum Error {
     #[error("storage error: {0}")]
     Storage(String),
 
+    /// A block is not held by the local store.
+    #[error("block not found: {0}")]
+    BlockNotFound(String),
+
+    /// The iroh secret key could not be read, written or parsed.
+    #[error("{0}")]
+    SecretKey(String),
+
     /// Failed to open a P2P stream.
     #[error("failed to open {protocol} stream to {peer_id}: {reason}")]
     StreamOpen {

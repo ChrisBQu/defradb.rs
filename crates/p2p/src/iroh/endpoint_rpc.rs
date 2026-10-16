@@ -20,7 +20,7 @@ use super::protocols;
 /// multiplexed over [`protocols::ALPN_MUX`], so identity is the whole key.
 pub(super) struct ConnectionCacheState {
     connections: HopscotchMap<iroh::EndpointId, iroh::endpoint::Connection, RandomState>,
-    dial_guards: HopscotchMap<iroh::EndpointId, Arc<tokio::sync::Mutex<()>>, RandomState>,
+    dial_guards: HopscotchMap<iroh::EndpointId, Arc<regolith::sync::Mutex<()>>, RandomState>,
 }
 
 pub(super) type ConnectionCache = Arc<ConnectionCacheState>;
@@ -274,10 +274,10 @@ fn retire_timed_out_connection(
 fn dial_guard(
     cache: &ConnectionCache,
     endpoint_id: iroh::EndpointId,
-) -> Arc<tokio::sync::Mutex<()>> {
+) -> Arc<regolith::sync::Mutex<()>> {
     cache
         .dial_guards
-        .get_or_insert(endpoint_id, Arc::new(tokio::sync::Mutex::new(())))
+        .get_or_insert(endpoint_id, Arc::new(regolith::sync::Mutex::new(())))
 }
 
 /// QUIC application error code used when locally closing a connection in

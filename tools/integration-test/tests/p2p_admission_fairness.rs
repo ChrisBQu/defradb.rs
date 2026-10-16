@@ -157,7 +157,7 @@ async fn per_peer_quota_prevents_noisy_pusher_starvation() {
 
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
-        let present: std::collections::HashSet<String> = hub
+        let present: rapidhash::RapidHashSet<String> = hub
             .query("query { User { _docID } }")
             .ok()
             .and_then(|result| {

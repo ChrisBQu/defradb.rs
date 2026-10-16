@@ -10,7 +10,7 @@ use crdt::composite::{CompositeDAG, CompositeDelta, FieldDelta};
 use crdt::counter::NumericKind;
 use crdt::traits::{Context, MergeResult, ReplicatedData};
 use defra_core::types::DocId;
-use std::collections::HashMap;
+use rapidhash::{HashMapExt, RapidHashMap};
 use storage::{RegolithStore, Store};
 
 /// A composite stores each counter field as a one-part document value.
@@ -38,7 +38,7 @@ async fn test_composite_multiple_fields() {
     };
 
     // Create composite delta with multiple fields
-    let mut field_deltas = HashMap::new();
+    let mut field_deltas = RapidHashMap::new();
     field_deltas.insert(
         "name".to_string(),
         FieldDelta::Lww {

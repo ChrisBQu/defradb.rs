@@ -10,11 +10,14 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{ensure, Context, Result};
+#[path = "support/outcome.rs"]
+mod outcome;
+
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use document::stored::StoredDocument;
 use embedded::{EmbeddedNode, EmbeddedStore, NodeBuilder};
+use outcome::Result;
 use serde_json::Value;
 use storage::corekv::{IterOptions, Reader, Store};
 use storage::{RegolithStore, RegolithStoreOptions};
@@ -28,13 +31,13 @@ fn materialize(directory: &Path, fixture: &str) -> Result<PathBuf> {
         _ => include_str!("fixtures/legacy_plain.regolith.tar.zst.b64"),
     };
     let encoded: String = encoded.split_whitespace().collect();
-    let compressed = BASE64_STANDARD.decode(encoded).context("decode fixture")?;
-    let archive = zstd::stream::decode_all(compressed.as_slice()).context("decompress fixture")?;
+    let compressed = BASE64_STANDARD.decode(encoded).expect("decode fixture");
+    let archive = zstd::stream::decode_all(compressed.as_slice()).expect("decompress fixture");
     let path = directory.join(fixture);
-    fs::create_dir(&path).context("create fixture directory")?;
+    fs::create_dir(&path).expect("create fixture directory");
     tar::Archive::new(archive.as_slice())
         .unpack(&path)
-        .context("unpack fixture")?;
+        .expect("unpack fixture");
     Ok(path)
 }
 
@@ -43,11 +46,11 @@ fn expected() -> Result<Vec<(String, Value)>> {
     let answers: Value = serde_json::from_str(include_str!("fixtures/legacy_expected.json"))?;
     answers
         .as_array()
-        .context("expected answers")?
+        .expect("expected answers")
         .iter()
         .map(|answer| {
             Ok((
-                answer["query"].as_str().context("query")?.to_owned(),
+                answer["query"].as_str().expect("query").to_owned(),
                 answer["data"].clone(),
             ))
         })
@@ -57,8 +60,8 @@ fn expected() -> Result<Vec<(String, Value)>> {
 async fn assert_reads_as_main_read(node: &EmbeddedNode<EmbeddedStore>) -> Result<()> {
     for (query, data) in expected()? {
         let response = node.execute(&query).await;
-        ensure!(response.errors.is_empty(), "{query}: {:?}", response.errors);
-        ensure!(
+        assert!(response.errors.is_empty(), "{query}: {:?}", response.errors);
+        assert!(
             response.data.as_ref() == Some(&data),
             "{query} answered {:?}, main answered {data}",
             response.data
@@ -72,7 +75,7 @@ async fn open(path: &Path, key: Option<[u8; 32]>) -> Result<EmbeddedNode<Embedde
     if let Some(key) = key {
         builder = builder.with_at_rest_encryption_key(key);
     }
-    builder.build().await
+    builder.build().await.map_err(Into::into)
 }
 
 /// Raw store contents, read with the store's own key if it has one.
@@ -101,8 +104,8 @@ fn assert_field_format(entries: &[(Vec<u8>, Vec<u8>)]) -> Result<()> {
         .iter()
         .filter(|(key, _)| key.starts_with(b"d/d/"))
         .collect();
-    ensure!(documents.len() == 6, "found {} documents", documents.len());
-    ensure!(
+    assert!(documents.len() == 6, "found {} documents", documents.len());
+    assert!(
         documents
             .iter()
             .all(|(_, value)| StoredDocument::is_field_format(value)),
@@ -116,7 +119,7 @@ fn assert_field_format(entries: &[(Vec<u8>, Vec<u8>)]) -> Result<()> {
         .iter()
         .filter(|(key, _)| key.starts_with(b"s/parts/"))
         .count();
-    ensure!(
+    assert!(
         versions == 2 && parts == versions,
         "{parts} part maps for {versions} versions"
     );
@@ -150,12 +153,12 @@ async fn a_wrapped_store_of_the_previous_release_is_rewritten_and_reads_the_same
     let created = node
         .execute(r#"mutation { add_Book(input: {title: "Rust", pages: 560}) { title } }"#)
         .await;
-    ensure!(created.errors.is_empty(), "{:?}", created.errors);
+    assert!(created.errors.is_empty(), "{:?}", created.errors);
     let updated = node
         .execute(r#"mutation { update_Author(filter: {name: {_eq: "Grace"}}, input: {age: 86, points: 4}) { name age points } }"#)
         .await;
-    ensure!(updated.errors.is_empty(), "{:?}", updated.errors);
-    ensure!(
+    assert!(updated.errors.is_empty(), "{:?}", updated.errors);
+    assert!(
         updated
             .data
             .as_ref()
@@ -171,15 +174,15 @@ async fn a_wrapped_store_of_the_previous_release_is_rewritten_and_reads_the_same
     let names: Vec<_> = fs::read_dir(directory.path())?
         .map(|entry| entry.map(|entry| entry.file_name()))
         .collect::<std::io::Result<_>>()?;
-    ensure!(names.len() == 1, "left beside the store: {names:?}");
-    ensure!(!files_contain(&path, b"Grace")?, "plaintext on disk");
+    assert!(names.len() == 1, "left beside the store: {names:?}");
+    assert!(!files_contain(&path, b"Grace")?, "plaintext on disk");
 
     // A second open rewrites nothing and still reads the same.
     let node = open(&path, Some(KEY)).await?;
     let book = node
         .execute(r#"query { Book(filter: {title: {_eq: "Rust"}}) { pages } }"#)
         .await;
-    ensure!(
+    assert!(
         book.data.as_ref().map(|data| &data["Book"][0]["pages"]) == Some(&Value::from(560)),
         "{:?}",
         book.data
@@ -188,7 +191,7 @@ async fn a_wrapped_store_of_the_previous_release_is_rewritten_and_reads_the_same
     drop(node);
 
     let entries = raw_entries(&path, Some(KEY)).await?;
-    ensure!(
+    assert!(
         entries
             .iter()
             .any(|(key, _)| key == b"s/system/at_rest_rewrite"),
@@ -198,7 +201,7 @@ async fn a_wrapped_store_of_the_previous_release_is_rewritten_and_reads_the_same
         .iter()
         .filter(|(key, _)| key.starts_with(b"d/d/"))
         .count();
-    ensure!(documents == 7, "found {documents} documents");
+    assert!(documents == 7, "found {documents} documents");
     Ok(())
 }
 
@@ -213,7 +216,7 @@ async fn previous_release_documents_get_part_ids_and_field_operands() -> Result<
         drop(node);
         let entries = raw_entries(&path, key).await?;
         assert_field_format(&entries)?;
-        ensure!(
+        assert!(
             entries
                 .iter()
                 .any(|(key, _)| key == b"s/system/document_format"),
@@ -224,7 +227,7 @@ async fn previous_release_documents_get_part_ids_and_field_operands() -> Result<
         assert_reads_as_main_read(&node).await?;
         node.shutdown().await;
         drop(node);
-        ensure!(
+        assert!(
             raw_entries(&path, key).await? == entries,
             "{fixture}: a second open changed the store"
         );
@@ -243,11 +246,11 @@ async fn a_wrapped_store_opened_without_its_key_is_refused_not_served() -> Resul
         let error = match open(&path, key).await {
             Ok(node) => {
                 node.shutdown().await;
-                anyhow::bail!("a wrapped store opened with {key:?}")
+                panic!("a wrapped store opened with {key:?}")
             }
             Err(error) => format!("{error:#}"),
         };
-        ensure!(error.contains(message), "unexpected refusal: {error}");
+        assert!(error.contains(message), "unexpected refusal: {error}");
     }
     // The refusals left the store as it was: its own key still opens it.
     let node = open(&path, Some(KEY)).await?;

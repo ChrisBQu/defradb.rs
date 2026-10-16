@@ -305,7 +305,7 @@ async fn hub_restart_recovers_success_acked_pending_dags() {
         // surfaces even though the protocol conserved it exactly.
         let (sender_markers_before, sender_jobs_before) = sender_retry_snapshot(&cluster).await;
         let hub_status_before = sync_status(&cluster, 0).await;
-        let present: std::collections::HashSet<String> = hub
+        let present: rapidhash::RapidHashSet<String> = hub
             .query("query { User { _docID } }")
             .ok()
             .and_then(|result| {

@@ -8,7 +8,7 @@ use lens::{LensConfig, TransformId};
 use schema::CollectionVersion;
 
 use crate::acp_ops::PolicyLookup;
-use crate::{BlockOps, SchemaOps};
+use crate::{BlockOps, Error, Result, SchemaOps};
 
 #[cfg(feature = "http")]
 pub(crate) struct DbCollectionVersionOps<S: storage::corekv::Store + 'static> {
@@ -65,7 +65,7 @@ impl<S: storage::corekv::Store + 'static> BlockOps for DbBlockOps<S> {
         &self,
         cid: &str,
         caller_did: Option<&str>,
-    ) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+    ) -> Result<(Vec<u8>, Vec<u8>)> {
         let caller_did = caller_did
             .map(|did| Did::try_from(did.to_string()))
             .transpose()?;
@@ -77,10 +77,10 @@ impl<S: storage::corekv::Store + 'static> BlockOps for DbBlockOps<S> {
             &caller_identity,
         )
         .await
-        .map_err(anyhow::Error::msg)
+        .map_err(Error::BlockAccess)
     }
 
-    async fn verified_signer_did(&self, cid: &str) -> anyhow::Result<String> {
+    async fn verified_signer_did(&self, cid: &str) -> Result<String> {
         db::block::verify::verified_block_signer_did(
             &self.database,
             self.document_acp.as_ref(),
@@ -88,7 +88,7 @@ impl<S: storage::corekv::Store + 'static> BlockOps for DbBlockOps<S> {
             &self.caller_identity,
         )
         .await
-        .map_err(anyhow::Error::msg)
+        .map_err(Error::BlockAccess)
     }
 
     async fn verified_signer_did_in_txn(
@@ -96,7 +96,7 @@ impl<S: storage::corekv::Store + 'static> BlockOps for DbBlockOps<S> {
         context: &RequestContext,
         cid: &str,
         transaction: &query::TransactionHandle,
-    ) -> anyhow::Result<String> {
+    ) -> Result<String> {
         self.transaction_registry
             .verified_block_signer_did_in_txn_as(
                 context,
@@ -106,7 +106,7 @@ impl<S: storage::corekv::Store + 'static> BlockOps for DbBlockOps<S> {
                 &self.caller_identity,
             )
             .await
-            .map_err(anyhow::Error::new)
+            .map_err(Error::from)
     }
 }
 
@@ -135,14 +135,14 @@ impl<S: storage::corekv::Store + 'static> DbSchemaOps<S> {
     /// Reject any `@policy` directive that does not resolve to a usable resource
     /// in the policy store, so a permissioned collection is never created public.
     /// Collections without a policy never touch the store.
-    async fn validate_policies(&self, collections: &[CollectionVersion]) -> anyhow::Result<()> {
+    async fn validate_policies(&self, collections: &[CollectionVersion]) -> Result<()> {
         for collection in collections {
             let Some(policy) = &collection.policy else {
                 continue;
             };
             let stored = self.policy_lookup.get_policy(&policy.id).await?;
             acp::validate_resource_interface(&policy.id, &policy.resource_name, stored.as_ref())
-                .map_err(|e| anyhow::anyhow!("schema policy validation error: {}", e))?;
+                .map_err(Error::PolicyValidation)?;
         }
         Ok(())
     }
@@ -151,12 +151,10 @@ impl<S: storage::corekv::Store + 'static> DbSchemaOps<S> {
     /// `Ok(None)` when no identity is present (collection stays public), but
     /// fails closed when an identity string is present yet malformed, so a
     /// permissioned collection is never silently created unregistered.
-    fn creator(context: &RequestContext) -> anyhow::Result<Option<Did>> {
+    fn creator(context: &RequestContext) -> Result<Option<Did>> {
         match context.identity() {
             Some(raw) => {
-                Ok(Some(Did::new(raw).map_err(|e| {
-                    anyhow::anyhow!("malformed acting identity: {}", e)
-                })?))
+                Ok(Some(Did::new(raw).map_err(Error::InvalidActingIdentity)?))
             }
             None => Ok(None),
         }
@@ -169,18 +167,18 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
         &self,
         context: &RequestContext,
         sdl: &str,
-    ) -> anyhow::Result<Vec<CollectionVersion>> {
+    ) -> Result<Vec<CollectionVersion>> {
         let creator = Self::creator(context)?;
         self.database
             .check_node_access_as(context, acp::nac::NodePermission::CollectionPatch)
             .await
-            .map_err(anyhow::Error::new)?;
+            .map_err(Error::from)?;
 
         let collections =
-            query::parse_sdl(sdl).map_err(|e| anyhow::anyhow!("SDL parse error: {}", e))?;
+            query::parse_sdl(sdl).map_err(Error::SchemaParse)?;
 
         schema::definition_validation::validate_new_collections(&collections)
-            .map_err(|e| anyhow::anyhow!("schema validation error: {}", e))?;
+            .map_err(Error::SchemaValidation)?;
 
         self.validate_policies(&collections).await?;
 
@@ -193,7 +191,7 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
                 creator,
             )
             .await
-            .map_err(|e| anyhow::anyhow!("create collection error: {}", e))?;
+            .map_err(Error::CollectionCreate)?;
         Ok(created)
     }
 
@@ -202,11 +200,11 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
         context: &RequestContext,
         source_query: &str,
         target_sdl: &str,
-    ) -> anyhow::Result<()> {
+    ) -> Result<()> {
         self.database
             .check_node_access_as(context, acp::nac::NodePermission::ViewAdd)
             .await
-            .map_err(anyhow::Error::new)?;
+            .map_err(Error::from)?;
 
         let known_types: rapidhash::RapidHashSet<String> = db::DB::list_collections(&self.database)
             .unwrap_or_default()
@@ -214,15 +212,15 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
             .collect();
 
         let mut collections = query::parse_sdl_with_known_types(target_sdl, known_types)
-            .map_err(|e| anyhow::anyhow!("view SDL parse error: {}", e))?;
+            .map_err(Error::ViewSchemaParse)?;
 
         let wrapped_query = format!("query {{ {} }}", source_query.trim());
         let selects = query::parse_query_with_limits(&wrapped_query, None, self.query_limits)
-            .map_err(|e| anyhow::anyhow!("view query parse error: {}", e))?;
+            .map_err(Error::ViewQueryParse)?;
         let select = selects
             .into_iter()
             .next()
-            .ok_or_else(|| anyhow::anyhow!("invalid view query: no selections found"))?;
+            .ok_or(Error::ViewQueryEmpty)?;
         let query_source = schema::QuerySource::new(query::select_to_go_json(&select));
 
         let mut materialized_names = Vec::new();
@@ -233,7 +231,7 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
                 collection.downsample_source = Some(query_source.clone());
                 self.database
                     .validate_downsample_collection(collection)
-                    .map_err(|e| anyhow::anyhow!("invalid downsample definition: {}", e))?;
+                    .map_err(Error::InvalidDownsample)?;
             } else {
                 collection.query = Some(query_source.clone());
             }
@@ -261,20 +259,20 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
                 creator,
             )
             .await
-            .map_err(|e| anyhow::anyhow!("create view collection error: {}", e))?;
+            .map_err(Error::ViewCollectionCreate)?;
 
         if !materialized_names.is_empty() {
             self.database
                 .refresh_views(db::CollectionSelector::with_names(materialized_names))
                 .await
-                .map_err(|e| anyhow::anyhow!("refresh materialized views error: {}", e))?;
+                .map_err(Error::MaterializedViewRefresh)?;
         }
 
         if !downsample_names.is_empty() {
             self.database
                 .bootstrap_downsamples_as(context, Some(&downsample_names))
                 .await
-                .map_err(|e| anyhow::anyhow!("bootstrap downsample collections error: {}", e))?;
+                .map_err(Error::DownsampleBootstrap)?;
         }
 
         Ok(())
@@ -285,72 +283,72 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
         context: &RequestContext,
         collection_name: &str,
         patch: &str,
-    ) -> anyhow::Result<CollectionVersion> {
+    ) -> Result<CollectionVersion> {
         db::DB::patch_collection_as(&self.database, context, collection_name, patch)
             .await
-            .map_err(anyhow::Error::new)
+            .map_err(Error::from)
     }
 
     async fn set_active_collection_version(
         &self,
         context: &RequestContext,
         version_id: &str,
-    ) -> anyhow::Result<()> {
+    ) -> Result<()> {
         self.database
             .check_node_access_as(context, acp::nac::NodePermission::CollectionPatch)
             .await
-            .map_err(anyhow::Error::new)?;
+            .map_err(Error::from)?;
 
         db::DB::set_active_collection_version_as(&self.database, context, version_id)
             .await
-            .map_err(anyhow::Error::new)
+            .map_err(Error::from)
     }
 
     async fn set_migration(
         &self,
         context: &RequestContext,
         config: LensConfig,
-    ) -> anyhow::Result<TransformId> {
+    ) -> Result<TransformId> {
         db::DB::set_migration_as(&self.database, context, config)
             .await
-            .map_err(anyhow::Error::new)
+            .map_err(Error::from)
     }
 
     async fn materialize_collection(
         &self,
         context: &RequestContext,
         collection_name: &str,
-    ) -> anyhow::Result<usize> {
+    ) -> Result<usize> {
         db::DB::materialize_collection_as(&self.database, context, collection_name)
             .await
-            .map_err(anyhow::Error::new)
+            .map_err(Error::from)
     }
 
-    fn list_collections(&self) -> anyhow::Result<Vec<String>> {
-        db::DB::list_collections(&self.database).map_err(anyhow::Error::new)
+    fn list_collections(&self) -> Result<Vec<String>> {
+        db::DB::list_collections(&self.database).map_err(Error::from)
     }
 
-    fn get_collection(&self, name: &str) -> anyhow::Result<Option<CollectionVersion>> {
+    fn get_collection(&self, name: &str) -> Result<Option<CollectionVersion>> {
         Ok(db::DB::get_collection(&self.database, name)
-            .map_err(anyhow::Error::new)?
+            .map_err(Error::from)?
             .map(|collection| collection.schema().clone()))
     }
 
     async fn get_collection_by_version_id(
         &self,
         version_id: &str,
-    ) -> anyhow::Result<Option<CollectionVersion>> {
+    ) -> Result<Option<CollectionVersion>> {
         Ok(
             db::DB::get_collection_by_version_id_full(&self.database, version_id)
                 .await
-                .map_err(anyhow::Error::new)?
+                .map_err(Error::from)?
                 .map(|collection| collection.schema().clone()),
         )
     }
 
-    async fn get_all_collection_versions(&self) -> anyhow::Result<Vec<CollectionVersion>> {
+    async fn get_all_collection_versions(&self) -> Result<Vec<CollectionVersion>> {
         db::DB::get_all_collection_versions(&self.database)
             .await
-            .map_err(anyhow::Error::new)
+            .map_err(Error::from)
     }
 }

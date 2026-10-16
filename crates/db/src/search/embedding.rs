@@ -1,5 +1,5 @@
 use crate::search::EmbeddingClientConfig;
-use anyhow::Result as AnyhowResult;
+use crate::error::{Error, Result as DbResult};
 use document::{Document, NormalValue};
 use rapidhash::RapidHashSet;
 use schema::VectorEmbeddingDescription;
@@ -316,7 +316,7 @@ pub async fn embed_text(
     embedding_config: &EmbeddingClientConfig,
     text: &str,
     model: Option<&str>,
-) -> AnyhowResult<Vec<f64>> {
+) -> DbResult<Vec<f64>> {
     embed_text_with_provider(embedding_config, "openai", text, model).await
 }
 
@@ -326,8 +326,8 @@ pub async fn embed_text_with_provider(
     provider: &str,
     text: &str,
     model: Option<&str>,
-) -> AnyhowResult<Vec<f64>> {
-    let input = query_input(embedding_config, provider, text, model).map_err(anyhow::Error::msg)?;
+) -> DbResult<Vec<f64>> {
+    let input = query_input(embedding_config, provider, text, model).map_err(Error::other)?;
     call_embedding(
         &input.provider,
         &input.url,
@@ -336,7 +336,7 @@ pub async fn embed_text_with_provider(
         &input.text,
     )
     .await
-    .map_err(|err| anyhow::Error::msg(err.to_string()))
+    .map_err(Error::from)
 }
 
 /// A query text's embedding, through the process's embedding service on
@@ -470,6 +470,12 @@ impl std::fmt::Display for EmbeddingCallError {
 }
 
 impl std::error::Error for EmbeddingCallError {}
+
+impl From<EmbeddingCallError> for Error {
+    fn from(error: EmbeddingCallError) -> Self {
+        Error::other(error.to_string())
+    }
+}
 
 /// Ollama's `prompt` form embeds one text per request: this many at once.
 const SINGLE_TEXT_CONCURRENCY: usize = 16;

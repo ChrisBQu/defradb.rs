@@ -9,7 +9,7 @@ repository.workspace = true
 description = "DefraDB database and collection management"
 
 [package.metadata.cargo-machete]
-ignored = ["anyhow", "bytes", "libp2p", "multihash", "p2p", "rand", "serde", "serde_bytes", "serde_cbor", "zeroize"]
+ignored = ["bytes", "libp2p", "multihash", "p2p", "rand", "serde", "serde_bytes", "serde_cbor", "zeroize"]
 
 [features]
 default = ["p2p", "native", "wasmtime-runtime"]
@@ -41,7 +41,6 @@ bytes.workspace = true
 zeroize = "1"
 
 # Error handling
-anyhow.workspace = true
 thiserror.workspace = true
 
 # Logging

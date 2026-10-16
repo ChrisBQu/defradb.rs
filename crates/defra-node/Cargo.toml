@@ -5,9 +5,6 @@ edition.workspace = true
 license.workspace = true
 description = "Reusable embedded DefraDB node builder"
 
-[package.metadata.cargo-machete]
-ignored = ["thiserror"]
-
 [[bin]]
 name = "coding-session-bench"
 path = "src/bin/coding-session-bench.rs"
@@ -59,6 +56,7 @@ storage = { path = "../storage" }
 query = { path = "../query" }
 events = { path = "../events" }
 acp = { path = "../acp" }
+zanzibar = { path = "../zanzibar" }
 vera = { path = "../vera", optional = true }
 identity = { path = "../identity" }
 defra-core = { path = "../defra-core" }
@@ -68,7 +66,6 @@ workers = { path = "../workers" }
 schema = { path = "../schema" }
 lens = { path = "../lens", default-features = false }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "net", "sync", "time"] }
-anyhow.workspace = true
 tracing.workspace = true
 async-trait = "0.1"
 serde.workspace = true
@@ -103,6 +100,7 @@ axum.workspace = true
 kovan.workspace = true
 crypto = { path = "../crypto" }
 hex.workspace = true
+regolith.workspace = true
 tempfile = "3"
 
 [lints]

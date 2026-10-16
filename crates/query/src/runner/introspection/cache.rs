@@ -85,7 +85,6 @@ mod tests {
     use async_trait::async_trait;
     use schema::CollectionVersion;
     use std::sync::Arc;
-    use std::sync::Mutex;
 
     fn users_collection(version: &str) -> CollectionVersion {
         CollectionVersion::new("Users", version, "users", vec![])
@@ -175,18 +174,19 @@ mod tests {
     /// A provider that cannot prove an epoch, like a transaction's. Content
     /// is swappable to model an uncommitted schema change.
     struct EpochlessProvider {
-        collections: Mutex<Vec<Arc<CollectionVersion>>>,
+        collections: Atom<Vec<Arc<CollectionVersion>>>,
     }
 
     impl EpochlessProvider {
         fn new(collections: Vec<CollectionVersion>) -> Self {
             Self {
-                collections: Mutex::new(collections.into_iter().map(Arc::new).collect()),
+                collections: Atom::new(collections.into_iter().map(Arc::new).collect()),
             }
         }
 
         fn set(&self, collections: Vec<CollectionVersion>) {
-            *self.collections.lock().unwrap() = collections.into_iter().map(Arc::new).collect();
+            self.collections
+                .store(collections.into_iter().map(Arc::new).collect());
         }
     }
 
@@ -196,8 +196,7 @@ mod tests {
         async fn get_collection(&self, name: &str) -> Result<Option<Arc<CollectionVersion>>> {
             Ok(self
                 .collections
-                .lock()
-                .unwrap()
+                .load()
                 .iter()
                 .find(|c| c.name == name)
                 .cloned())
@@ -206,8 +205,7 @@ mod tests {
         async fn list_collections(&self) -> Result<Vec<String>> {
             Ok(self
                 .collections
-                .lock()
-                .unwrap()
+                .load()
                 .iter()
                 .map(|c| c.name.clone())
                 .collect())

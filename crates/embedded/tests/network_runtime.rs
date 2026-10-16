@@ -5,8 +5,11 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
+#[path = "support/outcome.rs"]
+mod outcome;
+
 use embedded::{EmbeddedNodeConfig, Libp2pConfig, TransportConfig};
+use outcome::Result;
 
 fn memory_store() -> Result<storage::RegolithStore> {
     Ok(storage::RegolithStore::open_with_options(

@@ -64,7 +64,7 @@
 //! `logs/stdout.log` per node under `target/e2e/`) for post-mortem when a run
 //! fails — the harness normally cleans them up on success.
 
-use std::collections::HashSet;
+use rapidhash::RapidHashSet;
 use std::time::{Duration, Instant};
 
 use integration_test::{extract_doc_id, extract_p2p_addr, poll_until, TestCluster};
@@ -113,7 +113,7 @@ async fn fetch_sync_status(cluster: &TestCluster, node: usize) -> SyncStatusSnap
 /// fail the test loudly, not silently masquerade as "no documents present"
 /// and let a retention assertion downstream pass vacuously against an
 /// empty snapshot (review finding, #1128 task 8).
-fn doc_ids_present(client: &integration_test::DefraClient) -> HashSet<String> {
+fn doc_ids_present(client: &integration_test::DefraClient) -> RapidHashSet<String> {
     let result = client
         .query("query { Session { _docID } }")
         .expect("Session _docID query failed");

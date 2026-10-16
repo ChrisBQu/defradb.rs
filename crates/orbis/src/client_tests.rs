@@ -3,8 +3,7 @@ use crate::proto::{
     sign_service_server::{SignService, SignServiceServer},
     StartSignResponse,
 };
-use std::collections::HashSet;
-use std::sync::Mutex;
+use regolith::sync::HopscotchMap;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
 
@@ -27,10 +26,12 @@ fn identity() -> Arc<identity::RawIdentity> {
     )
 }
 
+type Tokens = HopscotchMap<String, (), rapidhash::fast::RandomState>;
+
 struct Service {
     identity: Arc<identity::RawIdentity>,
     response: Option<String>,
-    tokens: Arc<Mutex<HashSet<String>>>,
+    tokens: Arc<Tokens>,
 }
 
 #[tonic::async_trait]
@@ -66,9 +67,8 @@ impl SignService for Service {
         );
         assert!(self
             .tokens
-            .lock()
-            .unwrap()
-            .insert(claims["jti"].as_str().unwrap().to_owned()));
+            .insert_if_absent(claims["jti"].as_str().unwrap().to_owned(), ())
+            .is_none());
         let request = request.into_inner();
         assert_eq!(request.derivation_id, DERIVATION);
         assert_eq!(claims["derivation_id"], DERIVATION);
@@ -93,13 +93,9 @@ impl SignService for Service {
 
 async fn client(
     response: Option<String>,
-) -> (
-    OrbisClient,
-    tokio::task::JoinHandle<()>,
-    Arc<Mutex<HashSet<String>>>,
-) {
+) -> (OrbisClient, tokio::task::JoinHandle<()>, Arc<Tokens>) {
     let identity = identity();
-    let tokens = Arc::new(Mutex::new(HashSet::new()));
+    let tokens = Arc::new(Tokens::with_hasher(rapidhash::fast::RandomState::default()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let service = Service {
@@ -133,7 +129,7 @@ async fn current_protocol_signs_with_distinct_message_bound_tokens() {
         let signature = client.sign_sync(message, None).unwrap();
         assert!(client.public_key.verify(message, &signature).unwrap());
     }
-    assert_eq!(tokens.lock().unwrap().len(), 2);
+    assert_eq!(tokens.len(), 2);
     let authorization = SigningAuthorization::Decision {
         decision_id: "decision".into(),
     };
@@ -145,7 +141,7 @@ async fn current_protocol_signs_with_distinct_message_bound_tokens() {
         .sign_sync(&vec![0; 1024 * 1024 + 1], None)
         .unwrap_err()
         .contains("1 MiB"));
-    assert_eq!(tokens.lock().unwrap().len(), 2);
+    assert_eq!(tokens.len(), 2);
     drop(client);
     task.abort();
 }
@@ -229,6 +225,6 @@ async fn signs_from_a_thread_outside_any_runtime() {
         .public_key
         .verify(b"plain thread", &signature)
         .unwrap());
-    assert_eq!(tokens.lock().unwrap().len(), 1);
+    assert_eq!(tokens.len(), 1);
     task.abort();
 }

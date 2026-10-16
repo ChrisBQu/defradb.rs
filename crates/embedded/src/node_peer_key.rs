@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use anyhow::{anyhow, Context, Result};
+use crate::error::{Error, Result, SeedLength};
 use storage::stores::Peerstore;
 use zeroize::Zeroizing;
 
@@ -24,53 +24,42 @@ pub(crate) async fn load_with_keyring<S: storage::corekv::Store>(
         return load_or_create(peerstore, legacy_iroh_key).await;
     };
     if peerstore.get_local_peer_key().await?.is_some() {
-        return Err(anyhow!(
-            "plaintext peerstore /p2p/local-peer-key requires explicit keyring migration"
-        ));
+        return Err(Error::PlaintextPeerKey);
     }
     if legacy_iroh_seed(legacy_iroh_key).await?.is_some() {
-        return Err(anyhow!(
-            "plaintext iroh key file '{}' requires explicit keyring migration",
-            legacy_iroh_key.expect("existing key file").display()
-        ));
+        return Err(Error::PlaintextIrohKeyFile(legacy_iroh_key.expect("existing key file").to_path_buf()));
     }
     if peerstore
         .get_replicator(LEGACY_LIBP2P_KEY_ID)
         .await?
         .is_some()
     {
-        return Err(anyhow!(
-            "plaintext peerstore {LEGACY_LIBP2P_KEY_ID} requires explicit keyring migration"
-        ));
+        return Err(Error::PlaintextLegacyKey(LEGACY_LIBP2P_KEY_ID));
     }
 
     let expected = peerstore.get_local_peer_keyring_identity().await?;
     use crypto::{Key, PrivateKey};
     let key = match keyring.0.get(keyring::PEER_KEY) {
         Ok(bytes) => {
-            crypto::Ed25519PrivateKey::from_bytes(&bytes).context("keyring peer key is corrupt")?
+            crypto::Ed25519PrivateKey::from_bytes(&bytes).map_err(Error::KeyringKeyCorrupt)?
         }
         Err(keyring::Error::NotFound(_)) => {
             if expected.is_some() {
-                return Err(anyhow!(
-                    "peer key is missing from the configured keyring; restore the original keyring"
-                ));
+                return Err(Error::KeyringKeyMissing);
             }
-            let key = crypto::generate_ed25519().context("failed to generate peer key")?;
+            let key = crypto::generate_ed25519().map_err(Error::PeerKeyGenerate)?;
             keyring
                 .0
                 .set(keyring::PEER_KEY, key.raw())
-                .context("failed to persist peer key in keyring")?;
+                .map_err(Error::KeyringPersist)?;
             key
         }
-        Err(error) => return Err(error).context("failed to read peer key from keyring"),
+        Err(error) => return Err(Error::KeyringRead(error)),
     };
     let public_key = key.public_key();
     match expected {
         Some(expected) if expected.as_ref() != public_key.raw() => {
-            return Err(anyhow!(
-                "keyring peer identity does not match this database"
-            ));
+            return Err(Error::KeyringIdentityMismatch);
         }
         None => {
             peerstore
@@ -79,7 +68,7 @@ pub(crate) async fn load_with_keyring<S: storage::corekv::Store>(
         }
         Some(_) => {}
     }
-    seed_from_slice(&key.raw()[..32])
+    Ok(seed_from_slice(&key.raw()[..32])?)
 }
 
 /// Load the node's peer key seed, creating it on first start.
@@ -97,16 +86,14 @@ pub(crate) async fn load_or_create<S: storage::corekv::Store>(
     legacy_iroh_key: Option<&Path>,
 ) -> Result<Seed> {
     if peerstore.get_local_peer_keyring_identity().await?.is_some() {
-        return Err(anyhow!(
-            "this database requires its application-owned peer keyring"
-        ));
+        return Err(Error::PeerKeyringRequired);
     }
     if let Some(bytes) = peerstore
         .get_local_peer_key()
         .await
-        .context("failed to read peer key")?
+        .map_err(Error::PeerKeyRead)?
     {
-        return seed_from_slice(&bytes).context("stored peer key is corrupt");
+        return seed_from_slice(&bytes).map_err(Error::StoredPeerKeyCorrupt);
     }
 
     let (seed, from_legacy_libp2p) = match legacy_iroh_seed(legacy_iroh_key).await? {
@@ -119,7 +106,7 @@ pub(crate) async fn load_or_create<S: storage::corekv::Store>(
     peerstore
         .set_local_peer_key(seed.as_slice())
         .await
-        .context("failed to store peer key")?;
+        .map_err(Error::PeerKeyStore)?;
     if from_legacy_libp2p {
         remove_legacy_libp2p_key(peerstore).await?;
     }
@@ -132,11 +119,17 @@ async fn legacy_iroh_seed(path: Option<&Path>) -> Result<Option<Seed>> {
     };
     match tokio::fs::read(path).await {
         Ok(bytes) => seed_from_slice(&Zeroizing::new(bytes))
-            .with_context(|| format!("iroh key file '{}' is corrupt", path.display()))
+            .map_err(|source| Error::IrohKeyFileCorrupt {
+                path: path.to_path_buf(),
+                source,
+            })
             .map(Some),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => {
-            Err(error).with_context(|| format!("failed to read iroh key file '{}'", path.display()))
+            Err(Error::IrohKeyFileRead {
+            path: path.to_path_buf(),
+            source: error,
+        })
         }
     }
 }
@@ -148,16 +141,16 @@ async fn legacy_libp2p_seed<S: storage::corekv::Store>(
     let Some(bytes) = peerstore
         .get_replicator(LEGACY_LIBP2P_KEY_ID)
         .await
-        .context("failed to read legacy libp2p peer key")?
+        .map_err(Error::LegacyKeyRead)?
     else {
         return Ok(None);
     };
     let keypair = libp2p::identity::Keypair::from_protobuf_encoding(&bytes)
-        .map_err(|error| anyhow!("legacy libp2p peer key is corrupt: {error}"))?;
+        .map_err(Error::LegacyKeyCorrupt)?;
     let ed25519 = keypair
         .try_into_ed25519()
-        .map_err(|_| anyhow!("legacy libp2p peer key is not Ed25519"))?;
-    seed_from_slice(ed25519.secret().as_ref()).map(Some)
+        .map_err(|_| Error::LegacyKeyNotEd25519)?;
+    Ok(Some(seed_from_slice(ed25519.secret().as_ref())?))
 }
 
 #[cfg(not(feature = "libp2p"))]
@@ -174,7 +167,7 @@ async fn remove_legacy_libp2p_key<S: storage::corekv::Store>(
     peerstore
         .delete_replicator(LEGACY_LIBP2P_KEY_ID)
         .await
-        .context("failed to remove legacy libp2p peer key")
+        .map_err(Error::LegacyKeyRemove)
 }
 
 #[cfg(not(feature = "libp2p"))]
@@ -187,15 +180,12 @@ async fn remove_legacy_libp2p_key<S: storage::corekv::Store>(
 fn generate() -> Result<Seed> {
     use crypto::Key;
 
-    let key = crypto::generate_ed25519()
-        .map_err(|error| anyhow!("failed to generate peer key: {error}"))?;
-    seed_from_slice(&key.raw()[..32])
+    let key = crypto::generate_ed25519().map_err(Error::PeerKeyGenerate)?;
+    Ok(seed_from_slice(&key.raw()[..32])?)
 }
 
-fn seed_from_slice(bytes: &[u8]) -> Result<Seed> {
-    let seed: [u8; 32] = bytes
-        .try_into()
-        .map_err(|_| anyhow!("expected a 32-byte Ed25519 seed, got {} bytes", bytes.len()))?;
+fn seed_from_slice(bytes: &[u8]) -> Result<Seed, SeedLength> {
+    let seed: [u8; 32] = bytes.try_into().map_err(|_| SeedLength(bytes.len()))?;
     Ok(Zeroizing::new(seed))
 }
 

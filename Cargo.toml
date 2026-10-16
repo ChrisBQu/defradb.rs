@@ -60,7 +60,7 @@ repository = "https://github.com/sourcenetwork/defradb.rs"
 # entire duration of the future and can deadlock a multi-threaded
 # runtime. The audit in #673 confirmed no current site triggers this,
 # but the lint enforces the discipline going forward so future
-# contributors can't accidentally introduce it. Use `tokio::sync::Mutex`
+# contributors can't accidentally introduce it. Use `regolith::sync::Mutex`
 # (or restructure to drop the guard before awaiting) in any flagged
 # site.
 [workspace.lints.clippy]
@@ -91,7 +91,6 @@ rustls = { version = "0.23", default-features = false }
 # Async runtime
 tokio = { version = "1.35" }
 async-trait = "0.1.92"
-async-lock = "3"
 futures = "0.3"
 
 # Serialization

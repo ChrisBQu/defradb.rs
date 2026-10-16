@@ -12,18 +12,18 @@ use db::NacManager;
 use db::DB;
 use identity::Did;
 use query::txn::TransactionRegistry;
+use regolith::sync::Mutex;
 use schema::CollectionVersion;
 use schema::FieldDescription;
 use schema::FieldKind;
 use std::sync::Arc;
 use storage::RegolithStore;
-use tokio::sync::Mutex;
 
 /// Tests that drive the ambient thread-local identity must not run concurrently:
 /// `scoped_current_identity` mutates process-global state, and parallel mutation
-/// would let one test observe another's identity. A tokio mutex is used (held
+/// would let one test observe another's identity. A regolith mutex is used (held
 /// across `.await`) to avoid `await_holding_lock`.
-static AMBIENT_GUARD: Mutex<()> = Mutex::const_new(());
+static AMBIENT_GUARD: Mutex<()> = Mutex::new(());
 
 const OWNER_DID: &str = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
 const STRANGER_DID: &str = "did:key:z6MkfXG2FkNy3u7Eg3jm8e2YQpGz7Z1JqWgHDAP1hLk9r2bR";

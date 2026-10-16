@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [package.metadata.cargo-machete]
-ignored = ["anyhow", "bytes", "futures", "getrandom", "rand", "serde_bytes", "serde_ipld_dagcbor"]
+ignored = ["bytes", "futures", "getrandom", "rand", "serde_bytes", "serde_ipld_dagcbor"]
 
 [lib]
 bench = false
@@ -72,7 +72,6 @@ tracing-chrome = { version = "0.7", optional = true }
 
 # Error handling
 thiserror = { workspace = true }
-anyhow = { workspace = true }
 
 # File system
 dirs = "5.0"

@@ -240,19 +240,22 @@ mod tests {
     use crate::types::NodeInitOptions;
     use crypto::{keys::Key, keys::PublicKey, PrivateKey};
     use std::ffi::{CStr, CString};
-    use std::sync::{Mutex, OnceLock};
 
     use kovan::Atom;
+    use regolith::sync::{Lazy, Mutex, MutexGuard};
     use std::time::Duration;
 
     fn remote_key_store() -> &'static Atom<Vec<u8>> {
-        static STORE: OnceLock<Atom<Vec<u8>>> = OnceLock::new();
-        STORE.get_or_init(|| Atom::new(Vec::new()))
+        static STORE: Lazy<Atom<Vec<u8>>> = Lazy::new(|| Atom::new(Vec::new()));
+        &STORE
     }
 
-    fn remote_test_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+    fn remote_test_lock() -> MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("lock runtime builds")
+            .block_on(LOCK.lock())
     }
 
     unsafe extern "C" fn test_remote_sign_callback(
@@ -350,7 +353,7 @@ mod tests {
 
     #[test]
     fn test_register_remote_identity() {
-        let _guard = remote_test_lock().lock().unwrap();
+        let _guard = remote_test_lock();
 
         let private_key = crypto::generate_secp256r1().unwrap();
         remote_key_store().store(private_key.raw().to_vec());
@@ -400,7 +403,7 @@ mod tests {
 
     #[test]
     fn test_register_remote_identity_bytes() {
-        let _guard = remote_test_lock().lock().unwrap();
+        let _guard = remote_test_lock();
 
         let private_key = crypto::generate_secp256r1().unwrap();
         remote_key_store().store(private_key.raw().to_vec());
@@ -489,7 +492,7 @@ mod tests {
 
     #[test]
     fn test_node_set_default_identity_uses_registered_remote_identity() {
-        let _guard = remote_test_lock().lock().unwrap();
+        let _guard = remote_test_lock();
 
         assert!(crate::runtime::init_runtime());
 

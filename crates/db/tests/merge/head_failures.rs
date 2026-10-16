@@ -6,7 +6,8 @@ use defra_core::block::{
     generate_cid_from_bytes, Block, CompositeDeltaPayload, CrdtDelta, DAGLink, LwwDeltaPayload,
 };
 use defra_core::merge::{BlockMetadata, MergeBlock, MergeHandler};
-use std::sync::{Arc, Mutex};
+use kovan::Atom;
+use std::sync::Arc;
 use storage::corekv::{
     intercept_retry_writes, private::Sealed, IterOptions, Iterator, Reader, Result, RetryAttempt,
     RetryAttemptError, RetryAttemptValue, RetryOptions, RetryWriteInterceptor, Store, Txn, Writer,
@@ -57,7 +58,7 @@ impl FailPoint {
     }
 }
 
-type FailSwitch = Arc<Mutex<Vec<FailPoint>>>;
+type FailSwitch = Arc<Atom<Vec<FailPoint>>>;
 
 struct FailingHeadStore {
     inner: Arc<RegolithStore>,
@@ -86,8 +87,7 @@ impl Store for FailingHeadStore {
         let fail = self.fail.clone();
         let interceptor: RetryWriteInterceptor = Arc::new(move |key, value| {
             match fail
-                .lock()
-                .unwrap()
+                .load()
                 .iter()
                 .find(|point| point.refuses(key, value))
             {
@@ -116,8 +116,7 @@ impl FailingHeadTxn {
     fn check(&self, key: &[u8], value: Option<&[u8]>) -> Result<()> {
         match self
             .fail
-            .lock()
-            .unwrap()
+            .load()
             .iter()
             .find(|point| point.refuses(key, value))
         {
@@ -240,7 +239,7 @@ async fn fixture() -> Fixture {
 
 impl Fixture {
     fn fail_at(&self, points: &[FailPoint]) {
-        *self.fail.lock().unwrap() = points.to_vec();
+        self.fail.store(points.to_vec());
     }
 
     async fn merge(&self, block: &MergeBlock) -> std::result::Result<(), String> {

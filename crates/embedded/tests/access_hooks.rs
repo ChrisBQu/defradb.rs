@@ -7,7 +7,9 @@
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail, Context, Result};
+#[path = "support/outcome.rs"]
+mod outcome;
+
 use async_trait::async_trait;
 use cid::Cid;
 use db::merge::governance::{
@@ -15,6 +17,7 @@ use db::merge::governance::{
 };
 use document::NormalValue;
 use embedded::{AccessHooks, EmbeddedNode, EmbeddedStore, IrohConfig, NodeBuilder};
+use outcome::Result;
 use query::access_hooks::{ReadRequest, ReadValidator, WriteRequest, WriteValidator};
 use serde_json::Value as JsonValue;
 use tokio::time::{sleep, Duration, Instant};
@@ -111,7 +114,7 @@ async fn merge_validator_accepts_rejects_and_defers_replicated_notes() -> Result
     let writer = author
         .node_identity_did
         .clone()
-        .context("author has a signing identity")?;
+        .expect("author has a signing identity");
     defra_core::signing::set_signing_config(defra_core::signing::get_identity(&writer));
 
     let (held_grant, held_grant_cid) = create(
@@ -205,7 +208,7 @@ async fn read_and_write_validators_narrow_local_clients() -> Result<()> {
         .as_ref()
         .and_then(|data| data.get("_commits"))
         .and_then(JsonValue::as_array)
-        .context("commits result")?;
+        .expect("commits result");
     assert!(visible
         .iter()
         .all(
@@ -246,7 +249,7 @@ async fn create(node: &Node, collection: &str, input: &str) -> Result<(String, S
         ))
         .await;
     if response.has_errors() {
-        bail!("add_{collection} failed: {:?}", response.errors);
+        panic!("add_{collection} failed: {:?}", response.errors);
     }
     let created = response
         .data
@@ -254,36 +257,28 @@ async fn create(node: &Node, collection: &str, input: &str) -> Result<(String, S
         .and_then(|data| data.get(format!("add_{collection}")))
         .and_then(JsonValue::as_array)
         .and_then(|items| items.first())
-        .context("created document")?;
+        .expect("created document");
     let doc_id = created
         .get("_docID")
         .and_then(JsonValue::as_str)
-        .context("_docID")?;
+        .expect("_docID");
     let cid = created
         .get("_version")
         .and_then(JsonValue::as_array)
         .and_then(|versions| versions.first())
         .and_then(|version| version.get("cid"))
         .and_then(JsonValue::as_str)
-        .context("_version cid")?;
+        .expect("_version cid");
     Ok((doc_id.to_string(), cid.to_string()))
 }
 
 async fn connect(from: &Node, to: &Node) -> Result<()> {
-    let from = from.p2p().context("p2p")?;
-    let to = to.p2p().context("p2p")?;
-    let peer = to
-        .ops()
-        .local_peer_id()
-        .await
-        .map_err(|error| anyhow!(error))?;
+    let from = from.p2p().expect("p2p");
+    let to = to.p2p().expect("p2p");
+    let peer = to.ops().local_peer_id().await?;
     let deadline = Instant::now() + Duration::from_secs(10);
     let addr = loop {
-        let addrs = to
-            .ops()
-            .listen_addresses()
-            .await
-            .map_err(|error| anyhow!(error))?;
+        let addrs = to.ops().listen_addresses().await?;
         if let Some(addr) = addrs
             .into_iter()
             .find(|addr| addr.contains("/p2p/") || addr.starts_with("endpoint"))
@@ -291,25 +286,18 @@ async fn connect(from: &Node, to: &Node) -> Result<()> {
             break addr;
         }
         if Instant::now() >= deadline {
-            bail!("no iroh listen address");
+            panic!("no iroh listen address");
         }
         sleep(Duration::from_millis(100)).await;
     };
-    from.ops()
-        .connect_peer(&addr)
-        .await
-        .map_err(|error| anyhow!(error))?;
+    from.ops().connect_peer(&addr).await?;
     loop {
-        let peers = from
-            .ops()
-            .connected_peers()
-            .await
-            .map_err(|error| anyhow!(error))?;
+        let peers = from.ops().connected_peers().await?;
         if peers.iter().any(|connected| connected.contains(&peer)) {
             return Ok(());
         }
         if Instant::now() >= deadline {
-            bail!("peer {peer} never connected");
+            panic!("peer {peer} never connected");
         }
         sleep(Duration::from_millis(100)).await;
     }
@@ -317,17 +305,17 @@ async fn connect(from: &Node, to: &Node) -> Result<()> {
 
 async fn sync(node: &Node, collection: &str, doc_ids: Vec<String>) -> Result<()> {
     node.p2p()
-        .context("p2p")?
+        .expect("p2p")
         .ops()
         .sync_documents(collection, doc_ids, None)
         .await
-        .map_err(|error| anyhow!(error))
+        .map_err(Into::into)
 }
 
 async fn note_ids(node: &Node) -> Result<Vec<String>> {
     let response = node.execute("query { Note { _docID } }").await;
     if response.has_errors() {
-        bail!("Note query failed: {:?}", response.errors);
+        panic!("Note query failed: {:?}", response.errors);
     }
     let mut ids: Vec<String> = response
         .data
@@ -353,7 +341,7 @@ async fn wait_for_notes(node: &Node, expected: &[&str]) -> Result<()> {
             return Ok(());
         }
         if Instant::now() >= deadline {
-            bail!("notes {ids:?}, expected {expected:?}");
+            panic!("notes {ids:?}, expected {expected:?}");
         }
         sleep(Duration::from_millis(200)).await;
     }
