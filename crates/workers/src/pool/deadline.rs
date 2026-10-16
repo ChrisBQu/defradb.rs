@@ -23,8 +23,10 @@ pub fn delay(duration: Duration) -> Result<Completion<()>, Error> {
             sleep.await;
         }
     };
+    // A timer has no work to finish: shutdown does not wait for one whose
+    // waiter already moved on.
     if crate::worker::on_worker() {
-        return crate::worker::spawn_named("workers::delay", tick());
+        return crate::worker::spawn_daemon_named("workers::delay", tick());
     }
     let options = Submit {
         name: Some("workers::delay"),

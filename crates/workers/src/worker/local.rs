@@ -38,6 +38,17 @@ struct Task {
     reported: bool,
 }
 
+impl Drop for Task {
+    /// A task that ends without its future sending a result (dropped at
+    /// shutdown or cancelled) fails its completion; one that sent or
+    /// panicked has settled it already, and this changes nothing.
+    fn drop(&mut self) {
+        if let Some(fail) = &self.fail {
+            fail.fail(Error::ShutDown);
+        }
+    }
+}
+
 /// A worker's state, owned by its thread and shared there by `Rc` with the
 /// futures (timers) that need it.
 pub(crate) struct Local {
@@ -99,7 +110,8 @@ impl Local {
         }
         let (sender, completion) = completion::channel();
         let fail: Arc<dyn Fail> = sender.shared();
-        let future: LocalFuture = Box::pin(async move { sender.send(future.await) });
+        let slot = sender.into_slot();
+        let future: LocalFuture = Box::pin(async move { slot.send(future.await) });
         self.insert(
             name,
             future,

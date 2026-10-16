@@ -63,7 +63,8 @@ impl Job {
             if sender.is_cancelled() {
                 return Box::pin(std::future::ready(()));
             }
-            Box::pin(async move { sender.send(make().await) })
+            let slot = sender.into_slot();
+            Box::pin(async move { slot.send(make().await) })
         });
         (
             Job {

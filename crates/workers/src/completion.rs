@@ -110,6 +110,26 @@ impl<T> Sender<T> {
     pub(crate) fn is_cancelled(&self) -> bool {
         self.shared.state.load(Ordering::Acquire) == CANCELLED
     }
+
+    /// The sender's slot, without the sender's drop. A task's future holds
+    /// the slot and the task itself settles what the future never sent (its
+    /// panic, or `ShutDown` when dropped unfinished), so a panic unwinding
+    /// through the future cannot settle the slot before the panic is
+    /// reported.
+    pub(crate) fn into_slot(self) -> Slot<T> {
+        let this = std::mem::ManuallyDrop::new(self);
+        // SAFETY: `this` is never dropped, so its one Arc is moved out once.
+        Slot(unsafe { std::ptr::read(&this.shared) })
+    }
+}
+
+/// Where a task's future puts its output ([`Sender::into_slot`]).
+pub(crate) struct Slot<T>(Arc<Shared<T>>);
+
+impl<T> Slot<T> {
+    pub(crate) fn send(self, value: T) {
+        self.0.put(Ok(value));
+    }
 }
 
 impl<T> Drop for Sender<T> {
