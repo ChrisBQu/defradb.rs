@@ -1329,7 +1329,7 @@ mod tests {
         let peer_id = PeerId::new(accept_ep.id().to_string());
         let cache = new_connection_cache();
         let admission = Arc::new(PeerAdmission::new(AllowlistState::AcceptAll));
-        let barrier = Arc::new(tokio::sync::Barrier::new(CALLERS));
+        let barrier = Arc::new(regolith::sync::Barrier::new(CALLERS));
         let (accepted_tx, mut accepted_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let accept_task = n0_future::task::spawn({

@@ -2,14 +2,15 @@
 //!
 //! This module provides common test helpers and mocks used across unit and integration tests.
 
-use anyhow::Result;
-use async_trait::async_trait;
 use bytes::Bytes;
 use cid::Cid;
-use iroh_bitswap::{Block, Store};
+use iroh_bitswap::Block;
 use kovan_map::HopscotchMap;
 use std::fmt::Debug;
 use std::sync::Arc;
+
+use crate::bitswap::store_trait::impl_bitswap_store;
+use crate::{Error, Result};
 
 /// Mock BitswapStore for testing.
 ///
@@ -61,28 +62,28 @@ impl Default for MockBitswapStore {
     }
 }
 
-#[async_trait]
-impl Store for MockBitswapStore {
-    async fn get_size(&self, cid: &Cid) -> Result<usize> {
-        Ok(self
-            .blocks
+impl MockBitswapStore {
+    async fn block_size(&self, cid: &Cid) -> Result<usize> {
+        self.blocks
             .get(cid)
             .map(|data| data.len())
-            .ok_or_else(|| crate::Error::BlockNotFound(cid.to_string()))?)
+            .ok_or_else(|| Error::BlockNotFound(cid.to_string()))
     }
 
-    async fn get(&self, cid: &Cid) -> Result<Block> {
+    async fn block(&self, cid: &Cid) -> Result<Block> {
         let data = self
             .blocks
             .get(cid)
-            .ok_or_else(|| crate::Error::BlockNotFound(cid.to_string()))?;
+            .ok_or_else(|| Error::BlockNotFound(cid.to_string()))?;
         Ok(Block::new(data, *cid))
     }
 
-    async fn has(&self, cid: &Cid) -> Result<bool> {
+    async fn contains(&self, cid: &Cid) -> Result<bool> {
         Ok(self.blocks.contains_key(cid))
     }
 }
+
+impl_bitswap_store!([] MockBitswapStore);
 
 /// Milliseconds to stall between spawning a Bitswap fetch task and registering
 /// its query. Tests set this to force the fetch to finish first, which is the
@@ -117,6 +118,7 @@ pub fn block_started_fetch() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use iroh_bitswap::Store;
 
     #[tokio::test]
     async fn test_mock_store_basic_operations() {
