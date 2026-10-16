@@ -833,7 +833,8 @@ where
         // and avoid the lock-pinning cycle (#976) while sharing the block cache.
         let kms_blockstore = database.set_kms_blockstore(Arc::new(
             blockstore::DefraBlockstore::new(store.clone(), true)
-                .with_max_txn_retries(database.options().max_txn_retries()),
+                .with_max_txn_retries(database.options().max_txn_retries())
+                .placed_on(database.pool()),
         ));
         let enc_block_store: Arc<dyn kms::EncBlockStore> =
             Arc::new(db::DbEncBlockStore::new(database.clone(), kms_blockstore));

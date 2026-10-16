@@ -76,6 +76,9 @@ pub struct DefraBlockstore<S: Store> {
     rehash: AtomicBool,
     /// The engine retry policy every block write runs under.
     retry: RetryOptions,
+    /// The worker pool its reads and writes run on, for a caller off it (the
+    /// P2P layer on the network edge).
+    pool: Option<workers::Pool>,
 }
 
 impl<S: Store> fmt::Debug for DefraBlockstore<S> {
@@ -100,7 +103,54 @@ impl<S: Store + 'static> DefraBlockstore<S> {
             store: InternalBlockstore::new(store, is_p2p),
             rehash: AtomicBool::new(false),
             retry: storage::corekv::engine_retry_options(storage::corekv::DEFAULT_MAX_TXN_RETRIES),
+            pool: None,
         }
+    }
+
+    /// Runs its reads and writes on `pool`: a caller off the pool hands each
+    /// to a worker, a worker makes it in place.
+    pub fn placed_on(mut self, pool: Option<&workers::Pool>) -> Self {
+        self.pool = pool.cloned();
+        self
+    }
+
+    /// Runs `call` with the store on the pool the blockstore is placed on: in
+    /// place on a worker, or without a pool.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn on_pool<T, F, Fut>(&self, call: F) -> Result<T>
+    where
+        F: FnOnce(InternalBlockstore<S>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<T>> + 'static,
+        T: Send + 'static,
+    {
+        let store = self.store.clone();
+        workers::run_on(
+            self.pool.as_ref(),
+            workers::Target::LeastLoaded,
+            move || call(store),
+        )
+        .await
+        .map_err(|error| Error::Internal(format!("the block store call did not run: {error}")))?
+    }
+
+    /// A browser's one worker is the page's thread: the call runs in place.
+    #[cfg(target_arch = "wasm32")]
+    async fn on_pool<T, F, Fut>(&self, call: F) -> Result<T>
+    where
+        F: FnOnce(InternalBlockstore<S>) -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        call(self.store.clone()).await
+    }
+
+    /// Writes `writes` in one engine transaction, on the pool.
+    async fn write(&self, writes: Vec<BlockWrite>) -> Result<()> {
+        let retry = self.retry;
+        self.on_pool(move |store| async move {
+            store.write_blocks(retry, writes).await?;
+            Ok(())
+        })
+        .await
     }
 
     /// Re-run a conflicting block write up to `max_txn_retries` times, the
@@ -169,12 +219,13 @@ impl<S: Store + 'static> DefraBlockstore<S> {
 impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
     #[instrument(level = "trace", skip(self))]
     async fn get(&self, cid: &Cid) -> Result<Option<Bytes>> {
-        let txn = self.store.new_txn(true).await?;
-        let bs_txn = txn
-            .as_any()
-            .downcast_ref::<BlockstoreTxn>()
-            .ok_or_else(|| Error::Internal("Failed to downcast transaction".to_string()))?;
-        let result = bs_txn.get_block(cid).await?;
+        let at = *cid;
+        let result = self
+            .on_pool(move |store| async move {
+                let txn = store.new_txn(true).await?;
+                Ok(block_txn(&*txn)?.get_block(&at).await?)
+            })
+            .await?;
 
         if self.rehash.load(Ordering::Acquire) {
             if let Some(ref data) = result {
@@ -187,16 +238,11 @@ impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
 
     #[instrument(level = "trace", skip(self))]
     async fn put(&self, cid: &Cid, data: &[u8]) -> Result<()> {
-        self.store
-            .write_blocks(
-                self.retry,
-                vec![BlockWrite::Put {
-                    cid: *cid,
-                    data: Bytes::copy_from_slice(data),
-                }],
-            )
-            .await?;
-        Ok(())
+        self.write(vec![BlockWrite::Put {
+            cid: *cid,
+            data: Bytes::copy_from_slice(data),
+        }])
+        .await
     }
 
     async fn put_many(&self, blocks: &[(&Cid, &[u8])]) -> Result<()> {
@@ -210,63 +256,34 @@ impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
                 data: Bytes::copy_from_slice(data),
             })
             .collect();
-        self.store.write_blocks(self.retry, writes).await?;
-        Ok(())
+        self.write(writes).await
     }
 
     async fn has(&self, cid: &Cid) -> Result<bool> {
-        let txn = self.store.new_txn(true).await?;
-        let bs_txn = txn
-            .as_any()
-            .downcast_ref::<BlockstoreTxn>()
-            .ok_or_else(|| Error::Internal("Failed to downcast transaction".to_string()))?;
-        let result = bs_txn.has_block(cid).await?;
-        Ok(result)
+        let at = *cid;
+        self.on_pool(move |store| async move {
+            let txn = store.new_txn(true).await?;
+            Ok(block_txn(&*txn)?.has_block(&at).await?)
+        })
+        .await
     }
 
     async fn delete(&self, cid: &Cid) -> Result<()> {
-        self.store
-            .write_blocks(self.retry, vec![BlockWrite::Delete(*cid)])
-            .await?;
-        Ok(())
+        self.write(vec![BlockWrite::Delete(*cid)]).await
     }
 
     async fn get_size(&self, cid: &Cid) -> Result<Option<usize>> {
-        let txn = self.store.new_txn(true).await?;
         let block_key = BlockstoreKey::new(*cid);
-        let result = txn.get_size(&block_key.bytes()).await?;
-        Ok(result)
+        self.on_pool(move |store| async move {
+            let txn = store.new_txn(true).await?;
+            Ok(txn.get_size(&block_key.bytes()).await?)
+        })
+        .await
     }
 
     async fn all_cids(&self) -> Result<Vec<Cid>> {
-        let txn = self.store.new_txn(true).await?;
-
-        // Iterate all keys that don't start with merge prefix
-        // Block keys are raw CID bytes, merge keys start with 'm'
-        let opts = IterOptions::new().with_keys_only(true);
-        let mut iter = txn.iterator(opts).await?;
-
-        let mut cids = Vec::new();
-        while let Some(pair) = iter.next().await? {
-            // Skip merge marker keys (start with 'm')
-            if ToMergeIndexKey::is_merge_key(&pair.key) {
-                continue;
-            }
-
-            // Parse the key as a CID
-            match BlockstoreKey::from_bytes(&pair.key) {
-                Ok(key) => cids.push(key.cid),
-                Err(e) => {
-                    tracing::warn!(
-                        key_bytes = ?pair.key,
-                        error = %e,
-                        "Skipping key that could not be parsed as CID"
-                    );
-                }
-            }
-        }
-
-        Ok(cids)
+        self.on_pool(|store| async move { all_cids(&store).await })
+            .await
     }
 
     fn hash_on_read(&self, enabled: bool) {
@@ -274,43 +291,78 @@ impl<S: Store + 'static> Blockstore for DefraBlockstore<S> {
     }
 
     async fn is_merged(&self, cid: &Cid) -> Result<bool> {
-        let txn = self.store.new_txn(true).await?;
-        let bs_txn = txn
-            .as_any()
-            .downcast_ref::<BlockstoreTxn>()
-            .ok_or_else(|| Error::Internal("Failed to downcast transaction".to_string()))?;
-
-        let has_block = bs_txn.has_block(cid).await?;
-        if !has_block {
-            return Ok(false);
-        }
-
-        Ok(bs_txn.is_merged(cid).await?)
+        let at = *cid;
+        self.on_pool(move |store| async move {
+            let txn = store.new_txn(true).await?;
+            let bs_txn = block_txn(&*txn)?;
+            if !bs_txn.has_block(&at).await? {
+                return Ok(false);
+            }
+            Ok(bs_txn.is_merged(&at).await?)
+        })
+        .await
     }
 
     async fn mark_as_merged(&self, cid: &Cid) -> Result<()> {
-        self.store
-            .write_blocks(self.retry, vec![BlockWrite::MarkMerged(*cid)])
-            .await?;
-        Ok(())
+        self.write(vec![BlockWrite::MarkMerged(*cid)]).await
     }
 
     async fn mark_batch_as_merged(&self, cids: &[Cid]) -> Result<()> {
         if cids.is_empty() {
             return Ok(());
         }
-        let writes = cids.iter().copied().map(BlockWrite::MarkMerged).collect();
-        self.store.write_blocks(self.retry, writes).await?;
-        Ok(())
+        self.write(cids.iter().copied().map(BlockWrite::MarkMerged).collect())
+            .await
     }
 
     async fn get_unmerged(&self) -> Result<Vec<Cid>> {
-        let txn = self.store.new_txn(true).await?;
-        let bs_txn = txn
-            .as_any()
-            .downcast_ref::<BlockstoreTxn>()
-            .ok_or_else(|| Error::Internal("Failed to downcast transaction".to_string()))?;
-        let result = bs_txn.get_unmerged_cids().await?;
-        Ok(result)
+        self.on_pool(|store| async move {
+            let txn = store.new_txn(true).await?;
+            Ok(block_txn(&*txn)?.get_unmerged_cids().await?)
+        })
+        .await
     }
 }
+
+/// The blockstore view of a transaction `InternalBlockstore::new_txn` opened.
+fn block_txn(txn: &dyn storage::corekv::Txn) -> Result<&BlockstoreTxn> {
+    txn.as_any()
+        .downcast_ref::<BlockstoreTxn>()
+        .ok_or_else(|| Error::Internal("Failed to downcast transaction".to_string()))
+}
+
+/// Every block's CID, skipping the merge markers.
+async fn all_cids<S: Store>(store: &InternalBlockstore<S>) -> Result<Vec<Cid>> {
+    let txn = store.new_txn(true).await?;
+
+    // Iterate all keys that don't start with merge prefix
+    // Block keys are raw CID bytes, merge keys start with 'm'
+    let opts = IterOptions::new().with_keys_only(true);
+    let mut iter = txn.iterator(opts).await?;
+
+    let mut cids = Vec::new();
+    while let Some(pair) = iter.next().await? {
+        // Skip merge marker keys (start with 'm')
+        if ToMergeIndexKey::is_merge_key(&pair.key) {
+            continue;
+        }
+
+        // Parse the key as a CID
+        match BlockstoreKey::from_bytes(&pair.key) {
+            Ok(key) => cids.push(key.cid),
+            Err(e) => {
+                tracing::warn!(
+                    key_bytes = ?pair.key,
+                    error = %e,
+                    "Skipping key that could not be parsed as CID"
+                );
+            }
+        }
+    }
+
+    Ok(cids)
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "placed_tests.rs"]
+mod placed_tests;

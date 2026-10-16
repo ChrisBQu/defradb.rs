@@ -77,7 +77,8 @@ impl<S: Store + 'static> IrohPeer<S> {
 
         let blockstore = Arc::new(
             IrohBlockstore::new(Arc::clone(&store), true)
-                .with_max_txn_retries(database.options().max_txn_retries()),
+                .with_max_txn_retries(database.options().max_txn_retries())
+                .placed_on(database.pool()),
         );
         let serve_acp = Arc::new(LateBoundServeAcp::new());
         let (mut coordinator, sync_events) =

@@ -26,7 +26,8 @@ impl Node {
 
         let blockstore = Arc::new(
             blockstore::DefraBlockstore::new(store.clone(), true)
-                .with_max_txn_retries(max_txn_retries),
+                .with_max_txn_retries(max_txn_retries)
+                .placed_on(database.pool()),
         );
         let bitswap_store = p2p::BitswapStoreAdapter::new(blockstore);
         let classifier = defra_p2p_adapter::DbBlockClassifier::new_arc(database.clone());
@@ -59,7 +60,8 @@ impl Node {
 
         let sync_blockstore = Arc::new(
             blockstore::DefraBlockstore::new(store.clone(), true)
-                .with_max_txn_retries(max_txn_retries),
+                .with_max_txn_retries(max_txn_retries)
+                .placed_on(database.pool()),
         );
         let merge_blockstore = sync_blockstore.clone();
         let collection_store: Arc<dyn p2p::sync::P2PCollectionStorage> = Arc::new(

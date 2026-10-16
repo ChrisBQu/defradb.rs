@@ -99,7 +99,9 @@ where
         .parse()
         .map_err(|error| anyhow!("invalid multiaddr '{}': {error}", config.listen_addr))?;
     let blockstore = Arc::new(
-        EmbeddedBlockstore::new(store.clone(), true).with_max_txn_retries(max_txn_retries),
+        EmbeddedBlockstore::new(store.clone(), true)
+            .with_max_txn_retries(max_txn_retries)
+            .placed_on(database.pool()),
     );
     let bitswap_store = BitswapStoreAdapter::new(blockstore.clone());
 
