@@ -321,6 +321,12 @@ that is correct but slower is not done.
 
 ### Proofs
 
+- No logic change without its models. A change to what the code does ships with its TLA+ model and its Lean proof
+  in the same change, and both pass before the code is written or merged. That covers behavior, an ordering, a
+  protocol, retries, recovery, conflict rules, an encoding, and a data structure's invariants. A model that does
+  not pass means the design is broken: it is not implemented until the design is fixed and TLC and Lean pass. A
+  change that keeps behavior identical (a refactor, a speedup with identical results, tests, docs) still updates
+  the correspondence of every model whose code it moves.
 - Anything temporal or concurrent (an ordering, a protocol between tasks or cores, retries, recovery, a race,
   progress) has a TLA+ model. Every data structure (its invariants, encodings and round-trips, merge and operator
   laws) has a Lean proof. This is the bare minimum, and the model is written before its code: the spec is the
