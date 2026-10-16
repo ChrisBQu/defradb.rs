@@ -111,6 +111,12 @@ where
     H: MergeHandler + 'static,
     H::Error: From<workers::Error> + Send,
 {
+    /// The pool to hand a merge to: none on a worker, where it runs in place
+    /// with nothing copied, or without a pool.
+    fn off_the_pool(&self) -> Option<&workers::Pool> {
+        self.pool.as_ref().filter(|_| !workers::on_worker())
+    }
+
     /// Runs `merge` on `inner` on the worker `target` names.
     async fn on_pool<T, F, Fut>(
         &self,
@@ -146,7 +152,7 @@ where
         block_data: &[u8],
         metadata: BlockMetadata<'_>,
     ) -> Result<MergeOutcome, Self::Error> {
-        let Some(pool) = &self.pool else {
+        let Some(pool) = self.off_the_pool() else {
             return self.inner.handle_block(cid, block_data, metadata).await;
         };
         let target = document_target(metadata.collection_id, metadata.doc_id);
@@ -166,7 +172,7 @@ where
         authorization: Option<&ExplicitReplayAuthorization>,
         block: &MergeBlock,
     ) -> Result<(), Self::Error> {
-        let Some(pool) = &self.pool else {
+        let Some(pool) = self.off_the_pool() else {
             return self.inner.validate_authorization(authorization, block).await;
         };
         let target = document_target(Some(&block.collection_id), Some(&block.doc_id));
@@ -184,7 +190,7 @@ where
         cid: &Cid,
         block_data: &[u8],
     ) -> Result<Option<RecoveredBlockMetadata>, Self::Error> {
-        let Some(pool) = &self.pool else {
+        let Some(pool) = self.off_the_pool() else {
             return self.inner.recover_block_metadata(cid, block_data).await;
         };
         let (cid, data) = (*cid, Bytes::copy_from_slice(block_data));
@@ -198,11 +204,11 @@ where
         &self,
         blocks: &[MergeBlock],
     ) -> Vec<Result<MergeOutcome, Self::Error>> {
-        let Some(pool) = &self.pool else {
+        let Some(pool) = self.off_the_pool() else {
             return self.inner.handle_block_batch(blocks).await;
         };
         let documents = by_document(blocks);
-        if documents.len() < 2 || workers::on_worker() {
+        if documents.len() < 2 {
             let (count, blocks) = (blocks.len(), blocks.to_vec());
             let inner = Arc::clone(&self.inner);
             let ran = workers::run_on(Some(pool), batch_target(&blocks), move || async move {
