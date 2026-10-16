@@ -78,7 +78,7 @@ async fn issue1194_concurrent_distinct_doc_updates() {
     }
 
     let rounds = 10;
-    let barrier = Arc::new(tokio::sync::Barrier::new(doc_ids.len()));
+    let barrier = Arc::new(regolith::sync::Barrier::new(doc_ids.len()));
     let mut handles = Vec::new();
     for (worker, doc_id) in doc_ids.iter().enumerate() {
         let http = http.clone();

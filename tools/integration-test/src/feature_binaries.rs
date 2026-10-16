@@ -1,16 +1,18 @@
+use regolith::sync::OnceCell;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::OnceLock;
 
 static SNAPSHOT_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 
 /// Resolve a CLI snapshot with the Vera providers enabled.
 pub fn vera_cli_binary() -> PathBuf {
-    static BINARY: OnceLock<PathBuf> = OnceLock::new();
+    static BINARY: OnceCell<PathBuf> = OnceCell::new();
+    // Racing first callers serialize on the build lock in `build_cli_variant`, and a repeat
+    // build is a cargo no-op, so the racy init costs a second snapshot copy at worst.
     BINARY
-        .get_or_init(|| {
+        .get_or_init_racy(|| {
             std::env::var_os("DEFRA_RUST_BINARY")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| {

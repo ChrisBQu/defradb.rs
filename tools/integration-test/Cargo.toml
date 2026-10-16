@@ -130,6 +130,7 @@ paste = "1.0"
 ctor = "0.2"
 chrono = { version = "0.4", features = ["serde"] }
 kovan.workspace = true
+regolith.workspace = true
 
 [dev-dependencies]
 rapidhash.workspace = true

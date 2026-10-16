@@ -86,7 +86,7 @@ async fn concurrent_distinct_branchable_doc_updates_do_not_conflict() {
         );
     }
 
-    let barrier = Arc::new(tokio::sync::Barrier::new(WRITERS));
+    let barrier = Arc::new(regolith::sync::Barrier::new(WRITERS));
     let mut tasks = Vec::with_capacity(WRITERS);
     for (writer, doc_id) in doc_ids.iter().cloned().enumerate() {
         let http = http.clone();
