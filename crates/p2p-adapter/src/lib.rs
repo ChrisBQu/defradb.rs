@@ -55,7 +55,9 @@ pub use replicator_status::{
     set_persisted_replicator_status_for_scope_generation,
 };
 #[cfg(any(feature = "iroh", feature = "libp2p"))]
-pub use retry::{activate_retry_peer, run_retry_pass, spawn_failure_recorder, spawn_retry_loop};
+pub use retry::{
+    activate_retry_peer, run_retry_pass, spawn_failure_recorder, spawn_retry_loop, FailureRecorder,
+};
 #[cfg(any(feature = "iroh", feature = "libp2p"))]
 pub use transport_doc_pusher::{DbTransportDocPusher, TransportDocPusher};
 #[cfg(feature = "iroh")]

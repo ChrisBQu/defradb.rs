@@ -174,8 +174,13 @@ impl Node {
             set_acp(acp_setup.document_acp.clone());
         }
 
-        let nac_adapter =
-            Self::setup_nac_manager(config, user_did.as_ref(), database.store().clone()).await?;
+        let nac_adapter = Self::setup_nac_manager(
+            config,
+            user_did.as_ref(),
+            database.store().clone(),
+            database.pool(),
+        )
+        .await?;
 
         // Wire the NAC manager into the DB so DB-layer `check_node_access` calls
         // go live (first-call-wins via the DB's OnceLock). Without this the CLI
@@ -219,7 +224,8 @@ impl Node {
             // Weak and avoid the lock-pinning cycle (#976) while sharing the cache.
             let kms_blockstore = database.set_kms_blockstore(Arc::new(
                 blockstore::DefraBlockstore::new(store.clone(), true)
-                    .with_max_txn_retries(database.options().max_txn_retries()),
+                    .with_max_txn_retries(database.options().max_txn_retries())
+                    .placed_on(database.pool()),
             ));
             let enc_block_store: Arc<dyn kms::EncBlockStore> =
                 Arc::new(db::DbEncBlockStore::new(database.clone(), kms_blockstore));

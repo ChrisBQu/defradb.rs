@@ -44,21 +44,26 @@ impl Drop for BackgroundTasks {
 
 #[cfg(feature = "libp2p")]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn spawn_libp2p_event_handler<B: blockstore::Blockstore + 'static>(
+pub(crate) fn spawn_libp2p_event_handler<B, S>(
     events: tokio::sync::mpsc::Receiver<p2p::HostEvent>,
     coordinator: Arc<p2p::sync::Libp2pSyncCoordinator<B>>,
-    store: Arc<impl storage::corekv::Store + 'static>,
-    max_txn_retries: u32,
+    store: Arc<S>,
+    retry_peers: storage::stores::Peerstore<S>,
     event_bus: Arc<dyn events::Bus>,
     handle: p2p::P2PHostHandle,
     se_correlator: p2p::SeQueryCorrelator,
     manage_hooks: defra_p2p_adapter::manage::hooks::ManageHooksCell,
-) -> tokio::task::JoinHandle<()> {
+) -> tokio::task::JoinHandle<()>
+where
+    B: blockstore::Blockstore + 'static,
+    S: storage::corekv::Store + 'static,
+{
     tokio::spawn(async move {
         let handler_coordinator = coordinator.clone();
         coordinator.run_event_dispatcher(events, move |event, admission| {
             let coordinator = handler_coordinator.clone();
             let store = store.clone();
+            let retry_peers = retry_peers.clone();
             let event_bus = event_bus.clone();
             let handle = handle.clone();
             let se_correlator = se_correlator.clone();
@@ -67,8 +72,7 @@ pub(crate) fn spawn_libp2p_event_handler<B: blockstore::Blockstore + 'static>(
             match &event {
                 p2p::HostEvent::PeerConnected(peer_id) => {
                     defra_p2p_adapter::activate_retry_peer(
-                        store.clone(),
-                        max_txn_retries,
+                        &retry_peers,
                         &p2p::transport::PeerId::from(*peer_id),
                     )
                     .await;

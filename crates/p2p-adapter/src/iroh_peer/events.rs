@@ -20,7 +20,7 @@ pub(super) fn spawn_event_handler<S, B>(
     events: Events,
     coordinator: Arc<IrohSyncCoordinator<B>>,
     store: Arc<S>,
-    max_txn_retries: u32,
+    retry_peers: storage::stores::Peerstore<S>,
     event_bus: Arc<dyn events::Bus>,
     transport: IrohTransport,
     manage_hooks: ManageHooksCell,
@@ -36,14 +36,14 @@ where
             .run_event_dispatcher(events, move |event, admission| {
                 let coordinator = Arc::clone(&coordinator);
                 let store = Arc::clone(&store);
+                let retry_peers = retry_peers.clone();
                 let event_bus = Arc::clone(&event_bus);
                 let transport = transport.clone();
                 let manage_hooks = manage_hooks.clone();
                 #[cfg(not(target_arch = "wasm32"))]
                 let se_correlator = se_correlator.clone();
                 async move {
-                    publish_peer_lifecycle(&event, event_bus.as_ref(), &store, max_txn_retries)
-                        .await;
+                    publish_peer_lifecycle(&event, event_bus.as_ref(), &retry_peers).await;
 
                     if admission == DispatchAdmission::Saturated {
                         if let Err(error) = coordinator
@@ -144,16 +144,15 @@ where
     })
 }
 
-async fn publish_peer_lifecycle<T, S: Store>(
+async fn publish_peer_lifecycle<T, S: Store + 'static>(
     event: &TransportEvent<T>,
     event_bus: &dyn events::Bus,
-    store: &Arc<S>,
-    max_txn_retries: u32,
+    retry_peers: &storage::stores::Peerstore<S>,
 ) {
     match event {
         TransportEvent::PeerConnected(peer_id) => {
             tracing::info!("Peer connected (iroh): {peer_id}");
-            crate::activate_retry_peer(Arc::clone(store), max_txn_retries, peer_id).await;
+            crate::activate_retry_peer(retry_peers, peer_id).await;
         }
         TransportEvent::PeerDisconnected(peer_id) => {
             tracing::info!("Peer disconnected (iroh): {peer_id}");

@@ -124,6 +124,12 @@ impl<S: Store> NamespacedStore<S> {
     }
 }
 
+impl<S: Store> Clone for NamespacedStore<S> {
+    fn clone(&self) -> Self {
+        Self::new(Arc::clone(&self.store), self.namespace)
+    }
+}
+
 impl<S: Store> crate::corekv::private::Sealed for NamespacedStore<S> {}
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]

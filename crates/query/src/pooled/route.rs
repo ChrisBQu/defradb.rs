@@ -21,8 +21,9 @@ use crate::executor::QueryRequest;
 /// The mutation fields that act on documents already written, by prefix.
 const ONE_DOCUMENT_FIELDS: [&str; 3] = ["update_", "delete_", "upsert_"];
 
-/// The worker a request runs on.
-pub(super) fn request_target(request: &QueryRequest) -> workers::Target {
+/// The worker a request runs on: its document's when it writes one it
+/// names, the least-loaded otherwise.
+pub fn request_target(request: &QueryRequest) -> workers::Target {
     one_document(request).map_or(workers::Target::LeastLoaded, |(collection, doc_id)| {
         workers::Target::Key(document_key(&collection, &doc_id))
     })

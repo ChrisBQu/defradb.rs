@@ -231,6 +231,11 @@ impl Node {
 
         // The data-path routes run on the database's worker pool.
         server = server.with_pool(database.pool().cloned());
+        // A local document ACP is the node's own store: its routes run on the
+        // pool; a remote one is reached through the network.
+        if config.acp.document_type == AcpDocumentType::Local {
+            server = server.with_local_acp();
+        }
 
         info!(
             "HTTP server configured on {} with REST endpoints enabled",

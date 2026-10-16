@@ -20,6 +20,15 @@ pub struct Blockstore<S: Store> {
     is_p2p: bool,
 }
 
+impl<S: Store> Clone for Blockstore<S> {
+    fn clone(&self) -> Self {
+        Self {
+            store: self.store.clone(),
+            is_p2p: self.is_p2p,
+        }
+    }
+}
+
 impl<S: Store> Blockstore<S> {
     /// Create a new Blockstore with specified namespace
     pub fn new_with_namespace(store: Arc<S>, is_p2p: bool, namespace: Namespace) -> Self {

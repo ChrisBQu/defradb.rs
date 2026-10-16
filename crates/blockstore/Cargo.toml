@@ -17,6 +17,7 @@ bench = false
 [dependencies]
 # Internal dependencies
 storage = { path = "../storage" }
+workers = { path = "../workers" }
 crypto = { path = "../crypto" }
 defra-core = { path = "../defra-core" }
 

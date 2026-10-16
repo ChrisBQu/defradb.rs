@@ -51,147 +51,179 @@ fn is_peer_level_failure(error: &str) -> bool {
     error.starts_with(p2p::error::TRANSPORT_UNAVAILABLE_PREFIX)
 }
 
+/// The running failure recorder: background work of the worker pool, or in
+/// a browser a task of the page's event loop.
+#[cfg(not(target_arch = "wasm32"))]
+pub type FailureRecorder = workers::Background;
+/// The running failure recorder: background work of the worker pool, or in
+/// a browser a task of the page's event loop.
+#[cfg(target_arch = "wasm32")]
+pub type FailureRecorder = n0_future::task::JoinHandle<()>;
+
 /// Record head announcements and compare-delete only the exact durable marker
-/// generation returned to the sender before its PushLog attempt.
+/// generation returned to the sender before its PushLog attempt. Every write
+/// it makes is storage work: it runs as background work of the pool the
+/// peerstore is placed on (the fallback pool without one), until its
+/// channel closes or it is aborted.
 pub fn spawn_failure_recorder<S: storage::corekv::Store + 'static>(
     peerstore: storage::stores::Peerstore<S>,
     mut failures: tokio::sync::mpsc::Receiver<p2p::sync::PushFailure>,
-) -> n0_future::task::JoinHandle<()> {
-    n0_future::task::spawn(async move {
-        while let Some(mut failure) = failures.recv().await {
-            let durable_tx = failure.durable_tx.take();
-
-            if failure.admission_only {
-                let generation = match failure.marker_generation {
-                    Some(expected_generation) => match peerstore
-                        .admit_push_scope(
-                            &failure.peer_id,
-                            &failure.doc_id,
-                            &failure.collection_id,
-                            expected_generation,
-                        )
-                        .await
-                    {
-                        Ok(true) => Some(expected_generation),
-                        Ok(false) => None,
-                        Err(error) => {
-                            tracing::warn!(%error, "failed to validate live push admission marker");
-                            None
-                        }
-                    },
-                    None => None,
-                };
-                let _ = durable_tx.map(|tx| tx.send(generation));
-                continue;
-            }
-
-            let result: storage::corekv::Result<Option<u64>> = if failure.acknowledged {
-                let Some(generation) = failure.marker_generation else {
-                    let _ = durable_tx.map(|tx| tx.send(None));
-                    continue;
-                };
-                peerstore
-                    .complete_retry_scope(
-                        &failure.peer_id,
-                        &failure.doc_id,
-                        &failure.collection_id,
-                        failure.doc_id.is_empty(),
-                        generation,
-                    )
-                    .await
-                    .map(|cleared| cleared.then_some(generation))
-            } else if failure.create_retry {
-                let mut info = storage::stores::RetryInfo::new_initial();
-                if let Some(delay) = failure.retry_after {
-                    info.defer_for_hint(delay);
-                    tracing::debug!(target: "p2p::retry_after", peer_id = %failure.peer_id,
-                        retry_after_ms = delay.as_millis() as u64,
-                        retry_not_before_unix = info.not_before_unix,
-                        "Persisting negotiated PushLog retry-after");
-                }
-                let info_bytes = match info.to_bytes() {
-                    Ok(bytes) => bytes,
-                    Err(error) => {
-                        tracing::warn!(%error, "failed to serialize retry info");
-                        let _ = durable_tx.map(|tx| tx.send(None));
-                        continue;
-                    }
-                };
-                match failure.marker_generation {
-                    Some(expected_generation) => {
-                        peerstore
-                            .refresh_push_failure_with_generation(
-                                &failure.peer_id,
-                                &failure.doc_id,
-                                &failure.collection_id,
-                                expected_generation,
-                                &info_bytes,
-                            )
-                            .await
-                    }
-                    // SE-artifact failures have no admitted PushJob or head
-                    // marker. They intentionally create the initial retry
-                    // obligation; terminal PushJob failures always carry the
-                    // generation returned by the admission handshake.
-                    None if failure.initial_registration => {
-                        peerstore
-                            .record_push_failure_with_generation(
-                                &failure.peer_id,
-                                &failure.doc_id,
-                                &failure.collection_id,
-                                &info_bytes,
-                            )
-                            .await
-                    }
-                    None => Ok(None),
-                }
-            } else {
-                peerstore
-                    .observe_push_head_with_generation(
-                        &failure.peer_id,
-                        &failure.doc_id,
-                        &failure.collection_id,
-                    )
-                    .await
-            };
-            let marker_generation = match result {
-                Ok(generation) => generation,
-                Err(error) => {
-                    tracing::warn!(%error, "failed to record push failure");
-                    let _ = durable_tx.map(|tx| tx.send(None));
-                    continue;
-                }
-            };
-
-            let _ = durable_tx.map(|tx| tx.send(marker_generation));
-            if !failure.acknowledged && failure.create_retry {
-                if let Some(generation) = marker_generation {
-                    if let Err(error) = crate::set_persisted_replicator_status_for_scope_generation(
-                        &peerstore,
-                        &failure.peer_id,
-                        &failure.doc_id,
-                        &failure.collection_id,
-                        generation,
-                        p2p::ReplicatorStatus::Inactive,
-                    )
-                    .await
-                    {
-                        tracing::warn!(%error, "failed to mark replicator inactive");
-                    }
-                }
-            }
+) -> FailureRecorder {
+    #[cfg(not(target_arch = "wasm32"))]
+    let pool = peerstore.pool().cloned();
+    let record = async move {
+        while let Some(failure) = failures.recv().await {
+            record_failure(&peerstore, failure).await;
         }
-    })
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    return workers::spawn_background(pool.as_ref(), "push failure recorder", move || record);
+    // The page's thread is a browser's only one, and its event loop the
+    // only runtime.
+    #[cfg(target_arch = "wasm32")]
+    n0_future::task::spawn(record)
 }
 
-/// Activate a dormant durable peer schedule after either transport reconnects.
-/// Its transaction re-runs a conflict up to `max_txn_retries` times.
-pub async fn activate_retry_peer<S>(store: Arc<S>, max_txn_retries: u32, peer_id: &PeerId)
+/// Records one push failure on the peerstore: its marker, the generation its
+/// sender waits for, and the replicator's status.
+async fn record_failure<S: storage::corekv::Store>(
+    peerstore: &storage::stores::Peerstore<S>,
+    mut failure: p2p::sync::PushFailure,
+) {
+    let durable_tx = failure.durable_tx.take();
+
+    if failure.admission_only {
+        let generation = match failure.marker_generation {
+            Some(expected_generation) => match peerstore
+                .admit_push_scope(
+                    &failure.peer_id,
+                    &failure.doc_id,
+                    &failure.collection_id,
+                    expected_generation,
+                )
+                .await
+            {
+                Ok(true) => Some(expected_generation),
+                Ok(false) => None,
+                Err(error) => {
+                    tracing::warn!(%error, "failed to validate live push admission marker");
+                    None
+                }
+            },
+            None => None,
+        };
+        let _ = durable_tx.map(|tx| tx.send(generation));
+        return;
+    }
+
+    let result: storage::corekv::Result<Option<u64>> = if failure.acknowledged {
+        let Some(generation) = failure.marker_generation else {
+            let _ = durable_tx.map(|tx| tx.send(None));
+            return;
+        };
+        peerstore
+            .complete_retry_scope(
+                &failure.peer_id,
+                &failure.doc_id,
+                &failure.collection_id,
+                failure.doc_id.is_empty(),
+                generation,
+            )
+            .await
+            .map(|cleared| cleared.then_some(generation))
+    } else if failure.create_retry {
+        let mut info = storage::stores::RetryInfo::new_initial();
+        if let Some(delay) = failure.retry_after {
+            info.defer_for_hint(delay);
+            tracing::debug!(target: "p2p::retry_after", peer_id = %failure.peer_id,
+                retry_after_ms = delay.as_millis() as u64,
+                retry_not_before_unix = info.not_before_unix,
+                "Persisting negotiated PushLog retry-after");
+        }
+        let info_bytes = match info.to_bytes() {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::warn!(%error, "failed to serialize retry info");
+                let _ = durable_tx.map(|tx| tx.send(None));
+                return;
+            }
+        };
+        match failure.marker_generation {
+            Some(expected_generation) => {
+                peerstore
+                    .refresh_push_failure_with_generation(
+                        &failure.peer_id,
+                        &failure.doc_id,
+                        &failure.collection_id,
+                        expected_generation,
+                        &info_bytes,
+                    )
+                    .await
+            }
+            // SE-artifact failures have no admitted PushJob or head
+            // marker. They intentionally create the initial retry
+            // obligation; terminal PushJob failures always carry the
+            // generation returned by the admission handshake.
+            None if failure.initial_registration => {
+                peerstore
+                    .record_push_failure_with_generation(
+                        &failure.peer_id,
+                        &failure.doc_id,
+                        &failure.collection_id,
+                        &info_bytes,
+                    )
+                    .await
+            }
+            None => Ok(None),
+        }
+    } else {
+        peerstore
+            .observe_push_head_with_generation(
+                &failure.peer_id,
+                &failure.doc_id,
+                &failure.collection_id,
+            )
+            .await
+    };
+    let marker_generation = match result {
+        Ok(generation) => generation,
+        Err(error) => {
+            tracing::warn!(%error, "failed to record push failure");
+            let _ = durable_tx.map(|tx| tx.send(None));
+            return;
+        }
+    };
+
+    let _ = durable_tx.map(|tx| tx.send(marker_generation));
+    if !failure.acknowledged && failure.create_retry {
+        if let Some(generation) = marker_generation {
+            if let Err(error) = crate::set_persisted_replicator_status_for_scope_generation(
+                peerstore,
+                &failure.peer_id,
+                &failure.doc_id,
+                &failure.collection_id,
+                generation,
+                p2p::ReplicatorStatus::Inactive,
+            )
+            .await
+            {
+                tracing::warn!(%error, "failed to mark replicator inactive");
+            }
+        }
+    }
+}
+
+/// Activate a dormant durable peer schedule after either transport reconnects,
+/// on the pool `peerstore` is placed on.
+pub async fn activate_retry_peer<S>(peerstore: &storage::stores::Peerstore<S>, peer_id: &PeerId)
 where
-    S: storage::corekv::Store,
+    S: storage::corekv::Store + 'static,
 {
-    let peerstore = storage::stores::Peerstore::new(store).with_max_txn_retries(max_txn_retries);
-    match peerstore.activate_retry_peer(peer_id.as_str()).await {
+    let peer = peer_id.as_str().to_owned();
+    let activated = peerstore
+        .run(move |peerstore| async move { peerstore.activate_retry_peer(&peer).await })
+        .await;
+    match activated {
         Ok(true) => {
             tracing::debug!(%peer_id, "Activated durable push markers after peer reconnect")
         }
@@ -207,10 +239,14 @@ async fn redial_replicator<S, T>(
     transport: &T,
     peer_id: &PeerId,
 ) where
-    S: storage::corekv::Store,
+    S: storage::corekv::Store + 'static,
     T: P2PTransport,
 {
-    let Ok(Some(bytes)) = peerstore.get_replicator(peer_id.as_str()).await else {
+    let peer = peer_id.as_str().to_owned();
+    let replicator = peerstore
+        .run(move |peerstore| async move { peerstore.get_replicator(&peer).await })
+        .await;
+    let Ok(Some(bytes)) = replicator else {
         return;
     };
     let Ok(info) = p2p::ReplicatorInfo::from_bytes(&bytes) else {
@@ -280,10 +316,10 @@ async fn run_reconnect_pass<S, T>(
     transport: &T,
     probes: &mut RapidHashMap<String, ReconnectProbe>,
 ) where
-    S: storage::corekv::Store,
+    S: storage::corekv::Store + 'static,
     T: P2PTransport,
 {
-    let Ok(peers) = peerstore.get_replicator_retry_peers().await else {
+    let Ok(peers) = retry_peers(peerstore).await else {
         return;
     };
     let connected = match transport.connected_peers().await {
@@ -332,7 +368,7 @@ pub async fn run_retry_pass<S, T>(
     S: storage::corekv::Store + 'static,
     T: P2PTransport,
 {
-    let peers = match peerstore.get_replicator_retry_peers().await {
+    let peers = match retry_peers(peerstore).await {
         Ok(peers) => peers,
         Err(error) => {
             tracing::debug!(%error, "failed to load retry peers");
@@ -345,7 +381,11 @@ pub async fn run_retry_pass<S, T>(
             tracing::warn!(peer_id = %peer_id_str, %error, "invalid retry info");
             continue;
         }
-        let incarnation = match peerstore.get_replicator_incarnation(&peer_id_str).await {
+        let peer = peer_id_str.clone();
+        let incarnation = peerstore
+            .run(move |peerstore| async move { peerstore.get_replicator_incarnation(&peer).await })
+            .await;
+        let incarnation = match incarnation {
             Ok(Some(incarnation)) => incarnation,
             Ok(None) => continue,
             Err(error) => {
@@ -355,7 +395,7 @@ pub async fn run_retry_pass<S, T>(
         };
         let peer_id = PeerId::new(peer_id_str.clone());
 
-        let markers = match peerstore.get_retry_documents(&peer_id_str).await {
+        let markers = match retry_documents(peerstore, &peer_id_str).await {
             Ok(markers) => markers,
             Err(error) => {
                 tracing::debug!(peer_id = %peer_id, %error, "failed to load retry markers");
@@ -382,9 +422,7 @@ pub async fn run_retry_pass<S, T>(
                 // second two-second redial clock for markers whose ladder has not
                 // elapsed yet. `run_reconnect_pass` owns the off-ladder probing.
                 redial_replicator(peerstore, transport, &peer_id).await;
-                let _ = peerstore
-                    .reschedule_retry_peer_for_incarnation(&peer_id_str, incarnation, None, 1)
-                    .await;
+                let _ = reschedule(peerstore, &peer_id_str, incarnation, None, 1).await;
                 finish_peer(peerstore, &peer_id_str, incarnation, false).await;
                 continue;
             }
@@ -405,7 +443,7 @@ pub async fn run_retry_pass<S, T>(
         for marker in &markers {
             // A live push can install a newer peer deadline while this pass
             // awaits another document. The original marker snapshot is stale.
-            let current = match peerstore.get_retry_info(&peer_id_str).await {
+            let current = match retry_info(peerstore, &peer_id_str).await {
                 Ok(Some(bytes)) => storage::stores::RetryInfo::from_bytes(&bytes).ok(),
                 _ => None,
             };
@@ -467,22 +505,17 @@ pub async fn run_retry_pass<S, T>(
                     if let Some(delay) = capacity_retry_delay(&error) {
                         // Replay persists typed metadata before returning its legacy
                         // error. Preserve that deadline rather than applying the fallback.
-                        let hinted = peerstore
-                            .get_retry_info(&peer_id_str)
+                        let hinted = retry_info(peerstore, &peer_id_str)
                             .await
                             .ok()
                             .flatten()
                             .and_then(|bytes| storage::stores::RetryInfo::from_bytes(&bytes).ok())
                             .is_some_and(|info| !info.is_backpressure_elapsed());
                         let delay = if hinted { Duration::ZERO } else { delay };
-                        let _ = peerstore
-                            .reschedule_retry_peer_for_incarnation(
-                                &peer_id_str,
-                                incarnation,
-                                Some(delay),
-                                attempted as u64,
-                            )
-                            .await;
+                        let attempts = attempted as u64;
+                        let _ =
+                            reschedule(peerstore, &peer_id_str, incarnation, Some(delay), attempts)
+                                .await;
                         // Receiver saturation applies to the peer, not just
                         // this scope.  Rotate the durable cursor and wait for
                         // the paced sweep rather than hammering adjacent docs.
@@ -510,23 +543,21 @@ pub async fn run_retry_pass<S, T>(
             // come back at the first interval, not the rung earned while it
             // was unreachable.
             let _ = if progressed {
+                let peer = peer_id_str.clone();
+                let attempts = attempted as u64;
                 peerstore
-                    .restart_retry_peer_for_incarnation(&peer_id_str, incarnation, attempted as u64)
+                    .run(move |peerstore| async move {
+                        peerstore
+                            .restart_retry_peer_for_incarnation(&peer, incarnation, attempts)
+                            .await
+                    })
                     .await
             } else {
-                peerstore
-                    .reschedule_retry_peer_for_incarnation(
-                        &peer_id_str,
-                        incarnation,
-                        None,
-                        attempted as u64,
-                    )
-                    .await
+                reschedule(peerstore, &peer_id_str, incarnation, None, attempted as u64).await
             };
         }
 
-        let complete = peerstore
-            .get_retry_documents(&peer_id_str)
+        let complete = retry_documents(peerstore, &peer_id_str)
             .await
             .is_ok_and(|markers| markers.is_empty());
         finish_peer(peerstore, &peer_id_str, incarnation, complete).await;
@@ -569,7 +600,73 @@ impl PassReport {
     }
 }
 
-async fn finish_peer<S: storage::corekv::Store>(
+/// The peers with a durable retry schedule.
+async fn retry_peers<S: storage::corekv::Store + 'static>(
+    peerstore: &storage::stores::Peerstore<S>,
+) -> storage::corekv::Result<Vec<(String, bytes::Bytes)>> {
+    peerstore
+        .run(|peerstore| async move { peerstore.get_replicator_retry_peers().await })
+        .await
+}
+
+/// `peer`'s retry markers.
+async fn retry_documents<S: storage::corekv::Store + 'static>(
+    peerstore: &storage::stores::Peerstore<S>,
+    peer: &str,
+) -> storage::corekv::Result<Vec<storage::stores::PushRetryMarker>> {
+    let peer = peer.to_owned();
+    peerstore
+        .run(move |peerstore| async move { peerstore.get_retry_documents(&peer).await })
+        .await
+}
+
+/// `peer`'s retry schedule.
+async fn retry_info<S: storage::corekv::Store + 'static>(
+    peerstore: &storage::stores::Peerstore<S>,
+    peer: &str,
+) -> storage::corekv::Result<Option<bytes::Bytes>> {
+    let peer = peer.to_owned();
+    peerstore
+        .run(move |peerstore| async move { peerstore.get_retry_info(&peer).await })
+        .await
+}
+
+/// Moves `peer`'s schedule on by `attempts` rungs, or to `delay`.
+async fn reschedule<S: storage::corekv::Store + 'static>(
+    peerstore: &storage::stores::Peerstore<S>,
+    peer: &str,
+    incarnation: u64,
+    delay: Option<Duration>,
+    attempts: u64,
+) -> storage::corekv::Result<bool> {
+    let peer = peer.to_owned();
+    peerstore
+        .run(move |peerstore| async move {
+            peerstore
+                .reschedule_retry_peer_for_incarnation(&peer, incarnation, delay, attempts)
+                .await
+        })
+        .await
+}
+
+/// Ends `peer`'s pass: clears its schedule when it is complete, and records
+/// its status.
+async fn finish_peer<S: storage::corekv::Store + 'static>(
+    peerstore: &storage::stores::Peerstore<S>,
+    peer_id: &str,
+    incarnation: u64,
+    complete: bool,
+) {
+    let peer = peer_id.to_owned();
+    let _ = peerstore
+        .run(move |peerstore| async move {
+            record_peer_finished(&peerstore, &peer, incarnation, complete).await;
+            Ok(())
+        })
+        .await;
+}
+
+async fn record_peer_finished<S: storage::corekv::Store>(
     peerstore: &storage::stores::Peerstore<S>,
     peer_id: &str,
     incarnation: u64,
@@ -593,21 +690,25 @@ async fn finish_peer<S: storage::corekv::Store>(
     .await;
 }
 
-/// Run the one durable retry clock used by CLI, embedded, and defra-node.
+/// Run the one durable retry clock used by CLI, embedded, and defra-node, on
+/// the network edge `edge`: its timers and transport waits run there, its
+/// storage calls on the pool the peerstore is placed on.
 pub fn spawn_retry_loop<S, T>(
     peerstore: storage::stores::Peerstore<S>,
     transport: T,
     doc_pusher: Arc<dyn TransportDocPusher>,
     se_repusher: Option<Arc<dyn db::merge::SeArtifactRepusher>>,
-) -> n0_future::task::JoinHandle<()>
+    edge: &edge::Edge,
+) -> edge::Task<()>
 where
     S: storage::corekv::Store + 'static,
     T: P2PTransport,
 {
-    n0_future::task::spawn(async move {
+    let clock = edge.clone();
+    let sweeps = async move {
         let replay = async {
             loop {
-                n0_future::time::sleep(p2p::sync::PERSISTED_RETRY_SWEEP_INTERVAL).await;
+                clock.sleep(p2p::sync::PERSISTED_RETRY_SWEEP_INTERVAL).await;
                 run_retry_pass(
                     &peerstore,
                     &transport,
@@ -624,17 +725,29 @@ where
         let reconnect = async {
             let mut probes = RapidHashMap::new();
             loop {
-                n0_future::time::sleep(p2p::sync::PERSISTED_RETRY_SWEEP_INTERVAL).await;
+                clock.sleep(p2p::sync::PERSISTED_RETRY_SWEEP_INTERVAL).await;
                 run_reconnect_pass(&peerstore, &transport, &mut probes).await;
             }
         };
         tokio::join!(replay, reconnect);
+    };
+    // A stopping edge ends its sleeps early: the sweeps stop with it.
+    let closing = edge.closing();
+    edge.spawn(async move {
+        tokio::select! {
+            () = sweeps => {}
+            () = closing => {}
+        }
     })
 }
 
 #[cfg(test)]
 #[path = "retry_sweep_tests.rs"]
 mod sweep_tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "retry_pool_tests.rs"]
+mod pool_tests;
 
 #[cfg(test)]
 #[path = "../tests/unit/retry_hints.rs"]

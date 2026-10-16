@@ -149,6 +149,9 @@ otel = ["telemetry/otlp"]
 
 [dev-dependencies]
 edge = { path = "../edge", features = ["testing"] }
+axum.workspace = true
+tower = { workspace = true, features = ["util"] }
+defra-http = { path = "../http", features = ["test-utils"] }
 kovan.workspace = true
 cid.workspace = true
 tokio = { workspace = true, features = ["process"] }

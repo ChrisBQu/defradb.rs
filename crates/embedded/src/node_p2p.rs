@@ -99,7 +99,9 @@ where
         .parse()
         .map_err(|error| anyhow!("invalid multiaddr '{}': {error}", config.listen_addr))?;
     let blockstore = Arc::new(
-        EmbeddedBlockstore::new(store.clone(), true).with_max_txn_retries(max_txn_retries),
+        EmbeddedBlockstore::new(store.clone(), true)
+            .with_max_txn_retries(max_txn_retries)
+            .placed_on(database.pool()),
     );
     let bitswap_store = BitswapStoreAdapter::new(blockstore.clone());
 
@@ -269,11 +271,15 @@ where
     let manage_correlator = p2p::ManageCorrelator::new();
     let manage_query_correlator = p2p::ManageQueryCorrelator::new();
     let manage_hooks = defra_p2p_adapter::manage::hooks::new_manage_hooks_cell();
+    // The sender's retry state: its calls from the edge run on the pool.
+    let retry_peers = Peerstore::new(store.clone())
+        .with_max_txn_retries(max_txn_retries)
+        .placed_on(database.pool());
     let host_event_task = spawn_libp2p_event_handler(
         event_rx,
         coordinator.clone(),
         store.clone(),
-        max_txn_retries,
+        retry_peers.clone(),
         event_bus.clone(),
         handle.clone(),
         se_correlator,
@@ -285,10 +291,8 @@ where
         replication.merge_handler_on_pool(),
         event_bus.clone(),
     );
-    let failure_recorder_task = defra_p2p_adapter::spawn_failure_recorder(
-        Peerstore::new(store.clone()).with_max_txn_retries(max_txn_retries),
-        failure_rx,
-    );
+    let failure_recorder_task =
+        defra_p2p_adapter::spawn_failure_recorder(retry_peers.clone(), failure_rx);
 
     let doc_pusher_impl = Arc::new(DbTransportDocPusher::new(
         database.clone(),
@@ -308,15 +312,15 @@ where
     replication
         .merge_handler_inner
         .set_se_repusher(se_repusher.clone());
-    let retry_store = store.clone();
     let retry_transport = p2p::Libp2pTransport::new(handle.clone());
     let retry_doc_pusher = doc_pusher.clone();
     let retry_se_repusher = se_repusher.clone();
     let retry_loop_task = defra_p2p_adapter::spawn_retry_loop(
-        Peerstore::new(store.clone()).with_max_txn_retries(max_txn_retries),
+        retry_peers.clone(),
         p2p::Libp2pTransport::new(handle.clone()),
         doc_pusher.clone(),
         Some(se_repusher),
+        edge,
     );
 
     let restore_peerstore = Peerstore::new(store.clone()).with_max_txn_retries(max_txn_retries);
@@ -370,24 +374,24 @@ where
                 host_task,
                 host_event_task,
                 replication_task,
-                failure_recorder_task,
-                retry_loop_task,
                 pending_dag_resync_task,
                 pending_dag_retry_task,
                 governance_sweep_task,
             ],
+            retry_loop_task,
+            failure_recorder_task,
         ),
         replicator_push_options,
         Some(se_options_callback),
     ));
     system.set_retry_replicators(Arc::new(move || {
-        let store = retry_store.clone();
+        let peerstore = retry_peers.clone();
         let transport = retry_transport.clone();
         let doc_pusher = retry_doc_pusher.clone();
         let se_repusher = retry_se_repusher.clone();
         Box::pin(async move {
             defra_p2p_adapter::run_retry_pass(
-                &Peerstore::new(store).with_max_txn_retries(max_txn_retries),
+                &peerstore,
                 &transport,
                 &doc_pusher,
                 Some(&se_repusher),
@@ -536,14 +540,17 @@ where
     let retry_doc_pusher: Arc<dyn TransportDocPusher> = Arc::clone(&peer.doc_pusher);
     let retry_se_repusher: Arc<dyn db::merge::SeArtifactRepusher> =
         peer.replication.broadcast_mutator.clone();
+    let retry_peers = Peerstore::new(store.clone())
+        .with_max_txn_retries(max_txn_retries)
+        .placed_on(database.pool());
     system.set_retry_replicators(Arc::new(move || {
-        let store = store.clone();
+        let peerstore = retry_peers.clone();
         let transport = retry_transport.clone();
         let doc_pusher = retry_doc_pusher.clone();
         let se_repusher = retry_se_repusher.clone();
         Box::pin(async move {
             defra_p2p_adapter::run_retry_pass(
-                &Peerstore::new(store).with_max_txn_retries(max_txn_retries),
+                &peerstore,
                 &transport,
                 &doc_pusher,
                 Some(&se_repusher),

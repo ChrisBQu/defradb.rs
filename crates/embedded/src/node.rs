@@ -521,6 +521,10 @@ enum ShutdownKind {
         handle: Box<p2p::P2PHostHandle>,
         coordinator: p2p::sync::SyncShutdownHandle,
         tasks: Box<SegQueue<tokio::task::JoinHandle<()>>>,
+        /// The retry sweep, on the network edge.
+        retry_loop: Box<SegQueue<edge::Task<()>>>,
+        /// The push failure recorder, on the worker pool.
+        recorder: Box<SegQueue<workers::Background>>,
     },
     #[cfg(feature = "iroh")]
     Iroh(defra_p2p_adapter::IrohPeerShutdown),
@@ -532,16 +536,16 @@ impl ShutdownHandle {
         handle: p2p::P2PHostHandle,
         coordinator: p2p::sync::SyncShutdownHandle,
         tasks: Vec<tokio::task::JoinHandle<()>>,
+        retry_loop: edge::Task<()>,
+        recorder: workers::Background,
     ) -> Self {
-        let pending = SegQueue::new();
-        for task in tasks {
-            pending.push(task);
-        }
         Self {
             inner: ShutdownKind::Libp2p {
                 handle: Box::new(handle),
                 coordinator,
-                tasks: Box::new(pending),
+                tasks: queued(tasks),
+                retry_loop: queued([retry_loop]),
+                recorder: queued([recorder]),
             },
         }
     }
@@ -561,9 +565,13 @@ impl ShutdownHandle {
                 handle,
                 coordinator,
                 tasks,
+                retry_loop,
+                recorder,
             } => {
                 coordinator.shutdown().await;
-                abort_and_join(tasks).await;
+                abort_and_join(retry_loop, edge::Task::abort).await;
+                abort_and_join(recorder, workers::Background::abort).await;
+                abort_and_join(tasks, tokio::task::JoinHandle::abort).await;
                 let _ = handle.shutdown().await;
             }
             #[cfg(feature = "iroh")]
@@ -574,11 +582,19 @@ impl ShutdownHandle {
     }
 }
 
+/// `tasks` in a queue a shutdown through `&self` can take them from.
 #[cfg(feature = "libp2p")]
-async fn abort_and_join(tasks: &SegQueue<tokio::task::JoinHandle<()>>) {
+fn queued<T: 'static>(tasks: impl IntoIterator<Item = T>) -> Box<SegQueue<T>> {
+    let pending = SegQueue::new();
+    tasks.into_iter().for_each(|task| pending.push(task));
+    Box::new(pending)
+}
+
+#[cfg(feature = "libp2p")]
+async fn abort_and_join<T: std::future::Future + 'static>(tasks: &SegQueue<T>, abort: impl Fn(&T)) {
     let mut aborted = Vec::with_capacity(tasks.len());
     while let Some(task) = tasks.pop() {
-        task.abort();
+        abort(&task);
         aborted.push(task);
     }
     for task in aborted {
@@ -824,7 +840,8 @@ where
         // and avoid the lock-pinning cycle (#976) while sharing the block cache.
         let kms_blockstore = database.set_kms_blockstore(Arc::new(
             blockstore::DefraBlockstore::new(store.clone(), true)
-                .with_max_txn_retries(database.options().max_txn_retries()),
+                .with_max_txn_retries(database.options().max_txn_retries())
+                .placed_on(database.pool()),
         ));
         let enc_block_store: Arc<dyn kms::EncBlockStore> =
             Arc::new(db::DbEncBlockStore::new(database.clone(), kms_blockstore));

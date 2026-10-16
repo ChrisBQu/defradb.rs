@@ -77,7 +77,8 @@ impl<S: Store + 'static> IrohPeer<S> {
 
         let blockstore = Arc::new(
             IrohBlockstore::new(Arc::clone(&store), true)
-                .with_max_txn_retries(database.options().max_txn_retries()),
+                .with_max_txn_retries(database.options().max_txn_retries())
+                .placed_on(database.pool()),
         );
         let serve_acp = Arc::new(LateBoundServeAcp::new());
         let (mut coordinator, sync_events) =
@@ -128,7 +129,7 @@ impl<S: Store + 'static> IrohPeer<S> {
         let kms_transport = match p2p::kms::PubsubKeyTransport::new(
             transport.clone(),
             Arc::new(p2p::IrohPeerIdentityResolver::new(transport.clone())),
-            edge,
+            edge.clone(),
         )
         .await
         {
@@ -279,7 +280,7 @@ impl<S: Store + 'static> IrohPeer<S> {
             events,
             Arc::clone(&coordinator),
             Arc::clone(&store),
-            database.options().max_txn_retries(),
+            database.peerstore(),
             Arc::clone(&event_bus),
             transport.clone(),
             manage_hooks.clone(),
@@ -304,6 +305,7 @@ impl<S: Store + 'static> IrohPeer<S> {
             transport.clone(),
             Arc::clone(&doc_pusher),
             Some(se_repusher),
+            &edge,
         );
 
         let version_syncer = DbTransportVersionSyncer::new_arc(
@@ -345,7 +347,8 @@ impl<S: Store + 'static> IrohPeer<S> {
                 coordinator.shutdown_handle(),
                 endpoint_task,
                 retry_loop_task,
-                vec![event_handler_task, replication_task, failure_recorder_task],
+                vec![event_handler_task, replication_task],
+                failure_recorder_task,
             ),
             transport,
             coordinator,

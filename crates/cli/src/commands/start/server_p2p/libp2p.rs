@@ -26,7 +26,8 @@ impl Node {
 
         let blockstore = Arc::new(
             blockstore::DefraBlockstore::new(store.clone(), true)
-                .with_max_txn_retries(max_txn_retries),
+                .with_max_txn_retries(max_txn_retries)
+                .placed_on(database.pool()),
         );
         let bitswap_store = p2p::BitswapStoreAdapter::new(blockstore);
         let classifier = defra_p2p_adapter::DbBlockClassifier::new_arc(database.clone());
@@ -59,7 +60,8 @@ impl Node {
 
         let sync_blockstore = Arc::new(
             blockstore::DefraBlockstore::new(store.clone(), true)
-                .with_max_txn_retries(max_txn_retries),
+                .with_max_txn_retries(max_txn_retries)
+                .placed_on(database.pool()),
         );
         let merge_blockstore = sync_blockstore.clone();
         let collection_store: Arc<dyn p2p::sync::P2PCollectionStorage> = Arc::new(
@@ -228,6 +230,9 @@ impl Node {
 
         let coordinator_for_events = coordinator.clone();
         let se_store = store.clone();
+        let retry_peers = storage::stores::Peerstore::new(store.clone())
+            .with_max_txn_retries(max_txn_retries)
+            .placed_on(database.pool());
         let se_handle = handle.clone();
         let se_transport_serve = p2p::Libp2pTransport::new(handle.clone());
         let se_correlator_for_events = se_correlator.clone();
@@ -237,6 +242,7 @@ impl Node {
             coordinator_for_events.run_event_dispatcher(events, move |event, admission| {
                 let coordinator_for_events = handler_coordinator.clone();
                 let se_store = se_store.clone();
+                let retry_peers = retry_peers.clone();
                 let se_handle = se_handle.clone();
                 let se_transport_serve = se_transport_serve.clone();
                 let se_correlator_for_events = se_correlator_for_events.clone();
@@ -247,8 +253,7 @@ impl Node {
                     p2p::HostEvent::PeerConnected(peer) => {
                         info!("Peer connected: {}", peer);
                         defra_p2p_adapter::activate_retry_peer(
-                            se_store.clone(),
-                            max_txn_retries,
+                            &retry_peers,
                             &p2p::transport::PeerId::from(*peer),
                         )
                         .await;
@@ -425,6 +430,7 @@ impl Node {
             p2p::Libp2pTransport::new(handle.clone()),
             doc_pusher.clone(),
             Some(se_repusher),
+            &edge,
         );
 
         let restore_peerstore = database.peerstore();
