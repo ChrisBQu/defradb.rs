@@ -143,10 +143,8 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
     pub async fn add_encrypted_index(&self, collection: &str, field_name: &str) -> Result<()> {
         let database = Arc::clone(&self.database);
         let (collection, field_name) = (collection.to_owned(), field_name.to_owned());
-        self.on_pool(move || {
-            add_encrypted_index(database, collection, field_name)
-        })
-        .await
+        self.on_pool(move || add_encrypted_index(database, collection, field_name))
+            .await
     }
 
     /// Runs the data-path call `make` builds on the database's worker pool (in
@@ -472,8 +470,8 @@ impl NodeBuilder {
 
             // `Options::embedded` sizes the engine for a 1-4 MiB working
             // set, which is what an embedded node has to live inside.
-            let opts = self
-                .with_at_rest_keys(storage::RegolithStoreOptions::embedded().placed_on(&pool))?;
+            let opts =
+                self.with_at_rest_keys(storage::RegolithStoreOptions::embedded().placed_on(&pool))?;
             let store =
                 storage::RegolithStore::open_with_options(&path, opts).with_context(|| {
                     format!("failed to open regolith store at '{}'", path.display())
@@ -595,8 +593,11 @@ pub fn start_node_pool(
     config: Option<workers::Config>,
     edge: Option<&edge::Edge>,
 ) -> Result<workers::Pool> {
-    storage::start_pool(config.unwrap_or_default(), edge.map(edge::Edge::pool_monitor))
-        .map_err(|error| anyhow!("the worker pool did not start: {error}"))
+    storage::start_pool(
+        config.unwrap_or_default(),
+        edge.map(edge::Edge::pool_monitor),
+    )
+    .map_err(|error| anyhow!("the worker pool did not start: {error}"))
 }
 
 /// A node over a store the application opened, on a worker pool of the
@@ -717,14 +718,13 @@ where
         ..Default::default()
     };
 
-    let acp_setup =
-        create_document_acp(
-            store.clone(),
-            config.persistence,
-            &config.document_acp,
-            config.edge.as_ref(),
-        )
-        .await?;
+    let acp_setup = create_document_acp(
+        store.clone(),
+        config.persistence,
+        &config.document_acp,
+        config.edge.as_ref(),
+    )
+    .await?;
     let document_acp = acp_setup.document_acp;
     let local_zanzibar_store = acp_setup.local_zanzibar_store;
     #[cfg(feature = "vera")]
@@ -734,11 +734,20 @@ where
     #[cfg(all(not(feature = "vera"), any(feature = "libp2p", feature = "iroh")))]
     let strict_replicated_doc_access = false;
 
-    // A transport runs on the network runtime the config names; a node
+    // A transport runs on the network runtime the config names, or on the
+    // process's own, started on first use, when it names none; a node
     // without networking needs none.
+    let edge = match (&config.transport, &config.edge) {
+        (TransportConfig::None, _) => None,
+        (_, Some(edge)) => Some(edge.clone()),
+        (_, None) => Some(
+            edge::on_demand()
+                .map_err(|error| anyhow!("the network runtime did not start: {error}"))?
+                .clone(),
+        ),
+    };
     let p2p_setup: Result<Option<crate::node_p2p::P2PSetup>> =
-        match (&config.transport, config.edge.as_ref()) {
-            (TransportConfig::None, _) => Ok(None),
+        match (&config.transport, edge.as_ref()) {
             #[cfg(feature = "libp2p")]
             (TransportConfig::Libp2p(libp2p), Some(edge)) => crate::node_p2p::setup_libp2p(
                 store.clone(),
@@ -766,10 +775,8 @@ where
             )
             .await
             .map(Some),
-            #[cfg(any(feature = "libp2p", feature = "iroh"))]
-            (_, None) => Err(anyhow!(
-                "a P2P transport needs the network runtime: set EmbeddedNodeConfig::edge"
-            )),
+            // A node without a transport, the only one with no runtime here.
+            (TransportConfig::None, _) | (_, None) => Ok(None),
         };
     let mut p2p_setup = match p2p_setup {
         Ok(setup) => setup,
@@ -939,8 +946,7 @@ where
 
     // GraphQL requests run on the database's worker pool, routed there once
     // at the boundary.
-    let query_runner =
-        query::pooled::PooledExecutor::wrap(Arc::new(query_runner), database.pool());
+    let query_runner = query::pooled::PooledExecutor::wrap(Arc::new(query_runner), database.pool());
 
     Ok(EmbeddedNode {
         database,

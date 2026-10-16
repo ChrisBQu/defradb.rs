@@ -15,7 +15,7 @@ pub(crate) async fn create_document_acp<S>(
     store: Arc<S>,
     _persistence: Persistence,
     config: &crate::DocumentAcpConfig,
-    network: Option<&edge::Edge>,
+    #[cfg_attr(not(feature = "vera"), allow(unused_variables))] network: Option<&edge::Edge>,
 ) -> Result<DocumentAcpSetup>
 where
     S: storage::corekv::Store + 'static,
@@ -151,9 +151,10 @@ mod tests {
     #[tokio::test]
     async fn local_document_acp_enforces_stored_custom_policy() {
         let store = Arc::new(storage::RegolithStore::in_memory().unwrap());
-        let acp_setup = create_document_acp(store, Persistence::Memory, &DocumentAcpConfig::Local, None)
-            .await
-            .unwrap();
+        let acp_setup =
+            create_document_acp(store, Persistence::Memory, &DocumentAcpConfig::Local, None)
+                .await
+                .unwrap();
 
         #[cfg(feature = "vera")]
         assert!(acp_setup.vera_acp.is_none());
