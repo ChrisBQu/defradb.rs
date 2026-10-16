@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use crate::corekv::{OnCommit, Reader, Store, Writer};
-use crate::{RegolithStore, RegolithStoreOptions, with_worker_io};
+use crate::{with_worker_io, RegolithStore, RegolithStoreOptions};
 
 /// Every wait in these tests carries a deadline, so a regression fails
 /// instead of hanging the suite.
@@ -109,8 +109,8 @@ fn cold_reads_on_a_worker_complete_through_its_queue() {
 #[test]
 fn explicit_commits_complete_after_validation_cache_misses() {
     use std::sync::{
-        Arc,
         atomic::{AtomicUsize, Ordering},
+        Arc,
     };
 
     const SEED_COUNT: usize = 24;
