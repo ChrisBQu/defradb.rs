@@ -508,8 +508,9 @@ impl<S: Store> DB<S> {
 
     /// Runs the database's remote inputs (signatures, embeddings) and the
     /// network waits of its P2P work on the node's network runtime. Set once
-    /// at startup, before the first write that needs one; without it they run
-    /// on the caller's async runtime.
+    /// at startup, before the first write that needs one; without it
+    /// signatures run in the caller's task and embeddings on the process's
+    /// on-demand network runtime.
     pub fn set_network(&self, edge: edge::Edge) {
         let p2p = self
             .network

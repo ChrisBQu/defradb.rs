@@ -5,15 +5,15 @@
 //! The services run their round trips on the network runtime the node gives
 //! the database ([`DB::set_network`](crate::DB::set_network)). Without one,
 //! signatures run in the requesting task (a signer brings its own runtime,
-//! or none), and embeddings, which are HTTP requests, run there only in a
-//! browser: natively they need the network runtime and report its absence.
-//! The services are built on first use, so the runtime is set before the
-//! first write that needs one.
+//! or none), and embeddings, which are HTTP requests, go through the
+//! process's shared embedding service on its on-demand network runtime
+//! ([`embeddings::shared`]). The services are built on first use, so the
+//! runtime is set before the first write that needs one.
 
 mod embeddings;
 mod signatures;
 
-pub(crate) use embeddings::{Embedding, Embeddings};
+pub(crate) use embeddings::{embedding_error, shared as shared_embeddings, Embedding, Embeddings};
 pub(crate) use signatures::{RemoteSignatures, Signature, Signer};
 
 use regolith::sync::OnceCell;
@@ -49,18 +49,14 @@ impl RemoteInputs {
     }
 
     /// Embeddings, single-flighted and cached by text: on the network
-    /// runtime, or inline in a browser, where an HTTP request needs no
-    /// runtime of its own. `None` natively without a network runtime.
-    pub(crate) fn embeddings(&self) -> Option<&inputs::Service<Embeddings>> {
-        let runtime = self
-            .runtime
-            .get()
-            .cloned()
-            .or_else(|| cfg!(target_arch = "wasm32").then(inputs::Runtime::inline))?;
-        Some(
-            self.embeddings.get_or_init_racy(|| {
-                inputs::Service::new(Embeddings, embeddings::config(), runtime)
-            }),
-        )
+    /// runtime the node gave, else through the process's shared service.
+    pub(crate) fn embeddings(&self) -> &inputs::Service<Embeddings> {
+        self.embeddings
+            .get_or_init_racy(|| match self.runtime.get() {
+                Some(runtime) => {
+                    inputs::Service::new(Embeddings, embeddings::config(), runtime.clone())
+                }
+                None => embeddings::shared(),
+            })
     }
 }

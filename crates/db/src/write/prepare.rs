@@ -424,14 +424,8 @@ where
                 })
         })
         .collect::<query::error::Result<Vec<_>>>()?;
-    // Natively an embedding is a request on the network runtime, which a
-    // database built without one does not have.
-    let embeddings = db.remote_inputs().embeddings().ok_or_else(|| {
-        query::error::QueryError::execution(
-            "embedding error: no network runtime to reach the embedding provider; run the node with its network runtime",
-        )
-    })?;
-    embeddings
+    db.remote_inputs()
+        .embeddings()
         .get_many(keys)
         .await
         .into_iter()
@@ -507,7 +501,8 @@ impl<S: Store + 'static> crate::AutoCommitMutator<S> {
         let effective_encryption_config =
             config.or_else(defra_core::encryption::get_encryption_config);
         let generated_embeddings = if let Some(fields) = modified_fields.as_mut() {
-            let generated = crate::search::set_embedding(
+            let generated = crate::search::embedding::set_embedding_with(
+                self.db.remote_inputs().embeddings(),
                 &collection.schema().vector_embeddings,
                 &mut doc,
                 false,
@@ -534,7 +529,8 @@ impl<S: Store + 'static> crate::AutoCommitMutator<S> {
             }
             generated
         } else {
-            crate::search::set_embedding(
+            crate::search::embedding::set_embedding_with(
+                self.db.remote_inputs().embeddings(),
                 &collection.schema().vector_embeddings,
                 &mut doc,
                 true,
