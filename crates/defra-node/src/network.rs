@@ -9,6 +9,7 @@
 //! the node down stops accepting and drains the node's work alone, then
 //! stops a runtime the node started.
 
+use crate::Result;
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
@@ -31,7 +32,7 @@ impl NodeEdge {
     /// The node's network handle, a scope of `given` or of a runtime the
     /// node starts, or `None` when the node has no network work and was
     /// given no runtime.
-    pub(crate) fn start(given: Option<Edge>, needed: bool) -> anyhow::Result<Option<Self>> {
+    pub(crate) fn start(given: Option<Edge>, needed: bool) -> Result<Option<Self>> {
         let owned = SegQueue::new();
         let edge = match given {
             Some(edge) => edge,
@@ -41,7 +42,7 @@ impl NodeEdge {
                     thread_name: "defra-node-edge".to_string(),
                     ..EdgeConfig::default()
                 })
-                .map_err(|error| anyhow::anyhow!("{error}"))?;
+                .map_err(|error| crate::err!("{error}"))?;
                 let edge = runtime.edge().clone();
                 owned.push(runtime);
                 edge

@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use defra_node::{Context, Result};
 use defra_node::{EmbeddedNode, QueryRequest};
 use serde_json::{json, Value};
 

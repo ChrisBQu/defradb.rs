@@ -1,8 +1,8 @@
 //! Data generation helpers for benchmark fixtures.
 
+use crate::{bail, err, Context, Result};
 use std::fmt::Write as _;
 
-use anyhow::{anyhow, bail, Context, Result};
 use serde_json::Value as JsonValue;
 
 use crate::benchmark_queries::escape_graphql;
@@ -423,13 +423,13 @@ async fn execute_batched_add_collect_doc_ids(
         let ids = data
             .get(format!("add_{collection_name}").as_str())
             .and_then(JsonValue::as_array)
-            .ok_or_else(|| anyhow!("missing add_{collection_name} array in {data}"))?
+            .ok_or_else(|| err!("missing add_{collection_name} array in {data}"))?
             .iter()
             .map(|item| {
                 item.get("_docID")
                     .and_then(JsonValue::as_str)
                     .map(ToOwned::to_owned)
-                    .ok_or_else(|| anyhow!("missing _docID in {item}"))
+                    .ok_or_else(|| err!("missing _docID in {item}"))
             })
             .collect::<Result<Vec<_>>>()?;
         doc_ids.extend(ids);
@@ -451,7 +451,7 @@ pub(crate) fn ensure_success(response: crate::QueryResponse, context: &str) -> R
 
     response
         .data
-        .ok_or_else(|| anyhow!("missing response data for {context}"))
+        .ok_or_else(|| err!("missing response data for {context}"))
 }
 
 fn extract_doc_id_value(value: &JsonValue) -> Option<&JsonValue> {

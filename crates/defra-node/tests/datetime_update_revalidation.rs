@@ -12,8 +12,8 @@
 //! These tests prove (a) the bug reproduces at the embedded-node layer, and
 //! (b) whether @index changes the behavior.
 
-use anyhow::{Context, Result};
 use defra_node::EmbeddedNode;
+use defra_node::{Context, Result};
 
 const SDL_NOINDEX: &str = r#"
 type Probe {

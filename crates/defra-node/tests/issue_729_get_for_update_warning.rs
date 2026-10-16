@@ -2,8 +2,8 @@ use kovan::Atom;
 use std::io;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
 use defra_node::EmbeddedNode;
+use defra_node::{Context, Result};
 use tracing::Level;
 
 const USER_SDL: &str = r#"
@@ -119,6 +119,6 @@ fn ensure_success(response: &query::QueryResponse, context: &str) -> Result<()> 
     if response.errors.is_empty() {
         Ok(())
     } else {
-        anyhow::bail!("{context} failed: {:?}", response.errors);
+        defra_node::bail!("{context} failed: {:?}", response.errors);
     }
 }

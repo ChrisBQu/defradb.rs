@@ -4,10 +4,10 @@ mod runner {
     use std::process::ExitCode;
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-    use anyhow::{bail, Context, Result};
     use defra_node::benchmark_support::{
         benchmark_case, seed_coding_session_fixture, CodingSessionFixtureConfig,
     };
+    use defra_node::{bail, Context, Result};
     use defra_node::{EmbeddedNode, StorageBackend};
     use storage::backends::DurabilityMode;
 

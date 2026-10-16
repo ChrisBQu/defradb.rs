@@ -1,19 +1,19 @@
 //! Type-erased document-ACP operations bridging DB to EmbeddedNode's public DAC API.
 
+use crate::{bail, err, Result};
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail};
 use identity::Did;
 
 #[async_trait::async_trait]
 pub(crate) trait AcpOps: Send + Sync {
-    async fn add_dac_policy(&self, identity: &str, policy: &str) -> anyhow::Result<String>;
+    async fn add_dac_policy(&self, identity: &str, policy: &str) -> Result<String>;
     async fn add_dac_policy_with_counter(
         &self,
         identity: &str,
         policy: &str,
         counter: u64,
-    ) -> anyhow::Result<String>;
+    ) -> Result<String>;
     async fn add_dac_actor_relationship(
         &self,
         identity: &str,
@@ -21,7 +21,7 @@ pub(crate) trait AcpOps: Send + Sync {
         doc_id: &str,
         relation: &str,
         target: &str,
-    ) -> anyhow::Result<bool>;
+    ) -> Result<bool>;
     async fn delete_dac_actor_relationship(
         &self,
         identity: &str,
@@ -29,7 +29,7 @@ pub(crate) trait AcpOps: Send + Sync {
         doc_id: &str,
         relation: &str,
         target: &str,
-    ) -> anyhow::Result<bool>;
+    ) -> Result<bool>;
 }
 
 /// The ACP backends a node was built with, shared by every caller that needs to
@@ -57,19 +57,19 @@ impl PolicyLookup {
     }
 
     /// Load a policy from whichever ACP backend this node was built with.
-    pub(crate) async fn get_policy(&self, policy_id: &str) -> anyhow::Result<Option<acp::Policy>> {
+    pub(crate) async fn get_policy(&self, policy_id: &str) -> Result<Option<acp::Policy>> {
         if let Some(store) = &self.local {
             return store
                 .get_policy(policy_id)
                 .await
-                .map_err(|error| anyhow!("failed to get policy: {error}"));
+                .map_err(|error| err!("failed to get policy: {error}"));
         }
         #[cfg(feature = "vera")]
         if let Some(vera) = &self.vera {
             return vera
                 .get_policy(policy_id)
                 .await
-                .map_err(|error| anyhow!("failed to get policy: {error}"));
+                .map_err(|error| err!("failed to get policy: {error}"));
         }
         bail!("operation requires ACP, but ACP not available");
     }
@@ -107,16 +107,12 @@ impl<S: storage::corekv::Store + 'static> DbAcpOps<S> {
     }
 
     /// Resolve the caller's DID and check the node-level permission it needs.
-    async fn authorize(
-        &self,
-        identity: &str,
-        permission: acp::nac::NodePermission,
-    ) -> anyhow::Result<Did> {
-        let did = Did::new(identity).map_err(|error| anyhow!("invalid identity DID: {error}"))?;
+    async fn authorize(&self, identity: &str, permission: acp::nac::NodePermission) -> Result<Did> {
+        let did = Did::new(identity).map_err(|error| err!("invalid identity DID: {error}"))?;
         self.database
             .check_node_access(Some(&did), permission)
             .await
-            .map_err(|error| anyhow!("{error}"))?;
+            .map_err(|error| err!("{error}"))?;
         Ok(did)
     }
 
@@ -125,29 +121,29 @@ impl<S: storage::corekv::Store + 'static> DbAcpOps<S> {
         collection: &str,
         relation: &str,
         target: &str,
-    ) -> anyhow::Result<RelationshipTarget> {
+    ) -> Result<RelationshipTarget> {
         let collection_version = self
             .database
             .get_collection(collection)
-            .map_err(|error| anyhow!("failed to get collection '{collection}': {error}"))?
-            .ok_or_else(|| anyhow!("collection '{collection}' does not exist"))?;
+            .map_err(|error| err!("failed to get collection '{collection}': {error}"))?
+            .ok_or_else(|| err!("collection '{collection}' does not exist"))?;
         let Some(policy) = collection_version.schema().policy.clone() else {
             bail!("operation requires ACP, but collection has no policy");
         };
 
         // Parse the target into a structured subject once, at the edge: an actor
         // DID, all-actors `*`, a cross-object edge, or a userset.
-        let target = acp::parse_target_subject(target)
-            .map_err(|error| anyhow!("invalid target: {error}"))?;
+        let target =
+            acp::parse_target_subject(target).map_err(|error| err!("invalid target: {error}"))?;
 
         let loaded = self
             .policy_lookup
             .get_policy(&policy.id)
             .await?
-            .ok_or_else(|| anyhow!("policy '{}' not found", policy.id))?;
+            .ok_or_else(|| err!("policy '{}' not found", policy.id))?;
         let resource = loaded
             .get_resource(&policy.resource_name)
-            .ok_or_else(|| anyhow!("resource '{}' not found in policy", policy.resource_name))?;
+            .ok_or_else(|| err!("resource '{}' not found in policy", policy.resource_name))?;
         if resource.get_relation(relation).is_none() {
             bail!(
                 "relation '{relation}' not found in policy resource '{}'",
@@ -208,18 +204,18 @@ impl<S: storage::corekv::Store + 'static> DbAcpOps<S> {
         identity: &str,
         policy: &str,
         counter_override: Option<u64>,
-    ) -> anyhow::Result<String> {
+    ) -> Result<String> {
         // Go gates on node access before rejecting an empty creator
         // (`internal/db/db_dac.go:64-67`), so a NAC denial wins. An empty
         // identity is Go's `immutable.None`, not a DID to parse.
         let requestor = match identity {
             "" => None,
-            did => Some(Did::new(did).map_err(|error| anyhow!("invalid identity DID: {error}"))?),
+            did => Some(Did::new(did).map_err(|error| err!("invalid identity DID: {error}"))?),
         };
         self.database
             .check_node_access(requestor.as_ref(), acp::nac::NodePermission::DacPolicyAdd)
             .await
-            .map_err(|error| anyhow!("{error}"))?;
+            .map_err(|error| err!("{error}"))?;
 
         if identity.is_empty() {
             bail!("policy creator can not be empty");
@@ -229,12 +225,13 @@ impl<S: storage::corekv::Store + 'static> DbAcpOps<S> {
             bail!("policy data can not be empty");
         }
 
-        acp::policy_yaml::check_duplicate_yaml_keys(policy).map_err(|error| anyhow!(error))?;
-        let parsed = acp::policy_yaml::parse_policy_yaml(policy).map_err(|error| anyhow!(error))?;
+        acp::policy_yaml::check_duplicate_yaml_keys(policy).map_err(|error| err!("{error}"))?;
+        let parsed =
+            acp::policy_yaml::parse_policy_yaml(policy).map_err(|error| err!("{error}"))?;
         if parsed.name.is_empty() {
             bail!("name required");
         }
-        acp::policy_yaml::validate_policy_expressions(&parsed).map_err(|error| anyhow!(error))?;
+        acp::policy_yaml::validate_policy_expressions(&parsed).map_err(|error| err!("{error}"))?;
 
         #[cfg(feature = "vera")]
         if let Some(vera_acp) = &self.policy_lookup.vera {
@@ -244,7 +241,7 @@ impl<S: storage::corekv::Store + 'static> DbAcpOps<S> {
             return vera_acp
                 .add_policy(identity, policy)
                 .await
-                .map_err(|error| anyhow!("Vera create policy failed: {error}"));
+                .map_err(|error| err!("Vera create policy failed: {error}"));
         }
 
         let Some(store) = &self.policy_lookup.local else {
@@ -255,17 +252,17 @@ impl<S: storage::corekv::Store + 'static> DbAcpOps<S> {
             None => store
                 .next_policy_counter()
                 .await
-                .map_err(|error| anyhow!("failed to allocate policy ID: {error}"))?,
+                .map_err(|error| err!("failed to allocate policy ID: {error}"))?,
         };
         let built = acp::policy_yaml::build_policy(&parsed, counter)
-            .map_err(|error| anyhow!("invalid policy: {error}"))?;
+            .map_err(|error| err!("invalid policy: {error}"))?;
         let options = acp::StorePolicyOptions::new()
             .with_validation()
             .with_dpi_enforcement();
         store
             .store_policy_with_options(&built, &options)
             .await
-            .map_err(|error| anyhow!("failed to store policy: {error}"))?;
+            .map_err(|error| err!("failed to store policy: {error}"))?;
 
         Ok(built.id)
     }
@@ -273,7 +270,7 @@ impl<S: storage::corekv::Store + 'static> DbAcpOps<S> {
 
 #[async_trait::async_trait]
 impl<S: storage::corekv::Store + 'static> AcpOps for DbAcpOps<S> {
-    async fn add_dac_policy(&self, identity: &str, policy: &str) -> anyhow::Result<String> {
+    async fn add_dac_policy(&self, identity: &str, policy: &str) -> Result<String> {
         self.add_dac_policy_inner(identity, policy, None).await
     }
 
@@ -282,7 +279,7 @@ impl<S: storage::corekv::Store + 'static> AcpOps for DbAcpOps<S> {
         identity: &str,
         policy: &str,
         counter: u64,
-    ) -> anyhow::Result<String> {
+    ) -> Result<String> {
         self.add_dac_policy_inner(identity, policy, Some(counter))
             .await
     }
@@ -294,7 +291,7 @@ impl<S: storage::corekv::Store + 'static> AcpOps for DbAcpOps<S> {
         doc_id: &str,
         relation: &str,
         target: &str,
-    ) -> anyhow::Result<bool> {
+    ) -> Result<bool> {
         let requestor = self
             .authorize(identity, acp::nac::NodePermission::DacRelationAdd)
             .await?;
@@ -317,7 +314,7 @@ impl<S: storage::corekv::Store + 'static> AcpOps for DbAcpOps<S> {
                 &resolved.managing_relations,
             )
             .await
-            .map_err(|error| anyhow!("{error}"))?;
+            .map_err(|error| err!("{error}"))?;
 
         // Local ACP relationships are node-local (matches Go): a grant is not
         // propagated to peers. Cross-node access control is Vera's role.
@@ -337,7 +334,7 @@ impl<S: storage::corekv::Store + 'static> AcpOps for DbAcpOps<S> {
         doc_id: &str,
         relation: &str,
         target: &str,
-    ) -> anyhow::Result<bool> {
+    ) -> Result<bool> {
         let requestor = self
             .authorize(identity, acp::nac::NodePermission::DacRelationDelete)
             .await?;
@@ -361,6 +358,6 @@ impl<S: storage::corekv::Store + 'static> AcpOps for DbAcpOps<S> {
                 &resolved.managing_relations,
             )
             .await
-            .map_err(|error| anyhow!("{error}"))
+            .map_err(|error| err!("{error}"))
     }
 }

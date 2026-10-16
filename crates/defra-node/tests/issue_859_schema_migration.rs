@@ -1,8 +1,8 @@
 //! Tests for issue #859: collection patching, schema migration, and
 //! introspection exposed through [`EmbeddedNode`].
 
-use anyhow::{Context, Result};
 use defra_node::EmbeddedNode;
+use defra_node::{Context, Result};
 #[cfg(feature = "wasmtime-runtime")]
 use defra_node::{LensConfig, LensModule};
 
