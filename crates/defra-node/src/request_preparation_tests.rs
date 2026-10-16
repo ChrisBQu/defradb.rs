@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use query::error::{Result, TransactionError};
 use query::{QueryExecutor, QueryRequest, QueryResponse, TransactionHandle};
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
 };
 
@@ -11,6 +11,8 @@ struct ConflictExecutor {
     preparations: AtomicUsize,
     auto_commit_attempts: AtomicUsize,
     explicit_txn_attempts: AtomicUsize,
+    preparation_on_worker: AtomicBool,
+    execution_on_worker: AtomicBool,
 }
 
 #[async_trait]
@@ -20,6 +22,8 @@ impl QueryExecutor for ConflictExecutor {
         _request: &QueryRequest,
     ) -> Result<Option<Arc<query::prepared::PreparedMutations>>> {
         self.preparations.fetch_add(1, Ordering::SeqCst);
+        self.preparation_on_worker
+            .store(workers::on_worker(), Ordering::SeqCst);
         Ok(None)
     }
 
@@ -35,6 +39,8 @@ impl QueryExecutor for ConflictExecutor {
         _prepared: Option<Arc<query::prepared::PreparedMutations>>,
     ) -> QueryResponse {
         assert_eq!(self.preparations.load(Ordering::SeqCst), 1);
+        self.execution_on_worker
+            .store(workers::on_worker(), Ordering::SeqCst);
         if self.auto_commit_attempts.fetch_add(1, Ordering::SeqCst) < 2 {
             QueryResponse::transaction_conflict("transaction conflict")
         } else {
@@ -85,4 +91,27 @@ async fn embedded_returns_conflict_after_one_prepared_attempt() {
     assert!(response.is_transaction_conflict());
     assert_eq!(executor.preparations.load(Ordering::SeqCst), 1);
     assert_eq!(executor.auto_commit_attempts.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn autocommit_prepares_on_caller_and_routes_execution_to_node_worker() {
+    let executor = Arc::new(ConflictExecutor::default());
+    let pool = workers::Pool::start(workers::Config::unplaced(1)).unwrap();
+    let pooled = query::pooled::PooledExecutor::new(executor.clone(), pool.clone());
+
+    let response = super::execute_autocommit_request(&pooled, QueryRequest::new("{ probe }")).await;
+
+    assert!(response.is_transaction_conflict());
+    assert_eq!(executor.preparations.load(Ordering::SeqCst), 1);
+    assert_eq!(executor.auto_commit_attempts.load(Ordering::SeqCst), 1);
+    assert!(
+        !executor.preparation_on_worker.load(Ordering::SeqCst),
+        "remote preparation stays on the caller, outside worker execution"
+    );
+    assert!(
+        executor.execution_on_worker.load(Ordering::SeqCst),
+        "the prepared autocommit attempt runs on the configured worker pool"
+    );
+
+    pool.stop().await.unwrap();
 }
