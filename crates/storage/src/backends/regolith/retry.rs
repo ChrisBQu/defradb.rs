@@ -536,10 +536,12 @@ mod retry_order_tests {
         regular
             .on_commit(OnCommit::Ordered(Box::new(move || out.push(2))))
             .unwrap();
-        regular.commit().await.unwrap();
+        let mut commit = std::pin::pin!(regular.commit());
+        assert!(futures::poll!(&mut commit).is_pending());
         assert!(events.is_empty());
         release.notify_one();
         retry_task.await.unwrap();
+        commit.await.unwrap();
         assert_eq!(
             std::iter::from_fn(|| events.pop()).collect::<Vec<_>>(),
             vec![1, 2]

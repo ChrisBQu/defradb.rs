@@ -58,12 +58,16 @@ impl PostCommit {
     /// returned), its events go out in receipt order, and its other commit
     /// callbacks run.
     pub(super) async fn committed(self) {
+        let publication = self.binding.as_ref().map(Binding::publication);
         let running = self.binding.and_then(|binding| binding.hand_over(true));
         if let Some(running) = running {
             for hook in self.hooks {
                 run_hook(hook()).await;
             }
             running.done();
+        }
+        if let Some(publication) = publication {
+            publication.wait().await;
         }
         self.committed.run().await;
     }
@@ -145,6 +149,34 @@ mod post_commit_tests {
 
     fn failing_hook() -> CommitHook {
         Box::new(|| Box::pin(async { Err("the registration was refused".to_string()) }))
+    }
+
+    #[tokio::test]
+    async fn commit_completion_waits_until_its_ordered_events_are_visible() {
+        let db =
+            regolith::OptimisticTransactionDb::open("commit-events", regolith::Options::memory())
+                .unwrap();
+        let order = Arc::new(super::EventOrder::default());
+        let out = Out::default();
+        let mut earlier = db.begin(&regolith::TxnOptions::new());
+        earlier.put(b"earlier", b"v").unwrap();
+        let held = order.bind(&mut earlier, vec![out.event(1)], false);
+        earlier.commit().unwrap();
+
+        let mut later = db.begin(&regolith::TxnOptions::new());
+        later.put(b"later", b"v").unwrap();
+        let mut callbacks = TxnCallbacks::default();
+        callbacks
+            .on_commit(OnCommit::Ordered(out.event(2)))
+            .unwrap();
+        let work = super::PostCommit::bind(&order, &mut later, callbacks);
+        later.commit().unwrap();
+        let mut completion = std::pin::pin!(work.committed());
+        assert!(futures::poll!(&mut completion).is_pending());
+        assert!(out.get().is_empty());
+        held.hand_over(true);
+        completion.await;
+        assert_eq!(out.get(), vec![1, 2]);
     }
 
     async fn read(store: &RegolithStore, key: &[u8]) -> Option<Vec<u8>> {
@@ -317,10 +349,10 @@ mod post_commit_tests {
             panic!("a subscriber panicked")
         })))
         .unwrap();
-        txn.commit().await.unwrap();
-
+        let later = tokio::spawn(async move { txn.commit().await });
         release.set();
         held.await.unwrap().unwrap();
+        later.await.unwrap().unwrap();
         assert!(telemetry::storage_event_count(StorageEvent::PostCommitEventPanicked) > before);
     }
 }
