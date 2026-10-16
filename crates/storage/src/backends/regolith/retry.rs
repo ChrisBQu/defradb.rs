@@ -100,7 +100,12 @@ pub(super) async fn transact(
     let committed = outcome.is_ok();
     if let Some(latest) = baton.pop().and_then(|held| held.latest) {
         if committed {
-            latest.committed().await;
+            #[cfg(not(target_arch = "wasm32"))]
+            let post_commit_pool = io.blocking_pool();
+            #[cfg(not(target_arch = "wasm32"))]
+            latest.committed(post_commit_pool.as_ref()).await;
+            #[cfg(target_arch = "wasm32")]
+            latest.committed(None).await;
         } else {
             latest.failed().await;
         }

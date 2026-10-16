@@ -204,6 +204,33 @@ impl RegolithStore {
         &self.inner.path
     }
 
+    /// Copy this store's visible snapshot into a fresh Regolith store.
+    ///
+    /// This is an offline migration primitive. The caller must ensure no
+    /// writes can race the snapshot and retain the source until accepting the
+    /// verified target. Existing ordered-log records are copied as assigned
+    /// state; new runtime writes continue to use the normal classifier and
+    /// append protocol.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn copy_snapshot_to<P: AsRef<Path>>(
+        &self,
+        target: P,
+        target_options: &RegolithStoreOptions,
+        progress: &mut dyn FnMut(),
+    ) -> Result<()> {
+        self.ensure_open()?;
+        let source_permissions = std::fs::metadata(&self.inner.path)
+            .map_err(|error| Error::Backend(format!("could not inspect source store: {error}")))?
+            .permissions();
+        super::snapshot_copy::copy(
+            self.inner.db.db(),
+            target.as_ref(),
+            &source_permissions,
+            &target_options.engine_for_open(),
+            progress,
+        )
+    }
+
     /// The engine, for tests that reach under the adapter.
     #[cfg(test)]
     pub(super) fn engine(&self) -> &OptimisticTransactionDb {

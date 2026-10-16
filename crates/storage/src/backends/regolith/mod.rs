@@ -45,6 +45,8 @@ mod retry;
 #[cfg(not(target_arch = "wasm32"))]
 mod rewrite;
 mod slots;
+#[cfg(not(target_arch = "wasm32"))]
+mod snapshot_copy;
 mod store;
 mod transaction;
 mod worker_io;

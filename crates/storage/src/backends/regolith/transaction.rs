@@ -379,6 +379,8 @@ impl Txn for RegolithTxn {
             return Ok(());
         };
         let work = PostCommit::bind(&self.event_order, &mut txn, callbacks);
+        #[cfg(not(target_arch = "wasm32"))]
+        let post_commit_pool = self.blocking_pool.clone();
         // Cache-only validation consumes the transaction on an I/O miss.
         // Blocking validation must run off the data worker; post-commit
         // work remains with this transaction's owner.
@@ -410,7 +412,10 @@ impl Txn for RegolithTxn {
             // Durable from here on: what follows can be reported, never
             // turned into a failed write.
             Ok(_) => {
-                work.committed().await;
+                #[cfg(not(target_arch = "wasm32"))]
+                work.committed(post_commit_pool.as_ref()).await;
+                #[cfg(target_arch = "wasm32")]
+                work.committed(None).await;
                 Ok(())
             }
             Err(error) => {
