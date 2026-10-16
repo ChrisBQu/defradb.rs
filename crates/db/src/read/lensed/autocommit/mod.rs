@@ -63,12 +63,12 @@ impl<S: Store + 'static> DocFetcher for LensedAutoCommitFetcher<S> {
         &self,
         options: &query::fetcher::DocumentArrivalOptions,
     ) -> query::error::Result<query::fetcher::DocumentArrivalPage> {
-        let mut txn = self
+        let txn = self
             .db
             .new_txn(true)
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
-        let result = crate::event::arrivals::read(&mut txn, options)
+        let result = crate::event::arrivals::read(&txn, options)
             .await
             .map_err(|e| query::error::QueryError::execution(e.to_string()));
         let _ = txn.discard();

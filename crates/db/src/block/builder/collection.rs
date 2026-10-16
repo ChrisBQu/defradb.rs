@@ -30,6 +30,7 @@ pub async fn write_collection_block(
     .map_err(|error| error.to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn write_collection_block_with_inputs(
     blockstore: &NamespaceView,
     headstore: &NamespaceView,

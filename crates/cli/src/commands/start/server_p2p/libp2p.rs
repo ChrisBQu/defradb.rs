@@ -430,7 +430,7 @@ impl Node {
             p2p::Libp2pTransport::new(handle.clone()),
             doc_pusher.clone(),
             Some(se_repusher),
-            &edge,
+            edge,
         );
 
         let restore_peerstore = database.peerstore();

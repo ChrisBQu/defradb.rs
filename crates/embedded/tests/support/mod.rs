@@ -129,8 +129,7 @@ pub async fn wait_for_fred(node: &Node, reader: &Did) -> Result<()> {
         if Instant::now() >= deadline {
             panic!(
                 "peer never returned Fred as the reader; last response: data={:?} errors={:?}",
-                response.data,
-                response.errors
+                response.data, response.errors
             );
         }
         sleep(Duration::from_millis(250)).await;

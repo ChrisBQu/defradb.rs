@@ -289,8 +289,7 @@ mod tests {
         let pool = workers::Pool::start(workers::Config::unplaced(1)).unwrap();
         let notify = || Arc::new(Notify::new());
         let (started, gate, done) = (notify(), notify(), notify());
-        let response = app(&pool, &started, &gate, &done).oneshot(request());
-        tokio::pin!(response);
+        let mut response = Box::pin(app(&pool, &started, &gate, &done).oneshot(request()));
         tokio::select! {
             _ = &mut response => panic!("the request ended before its gate opened"),
             _ = started.notified() => {}

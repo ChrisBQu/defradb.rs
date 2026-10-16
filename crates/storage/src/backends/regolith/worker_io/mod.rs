@@ -35,7 +35,6 @@ use regolith::{OptimisticTransactionDb, QueueId, ReadMode};
 pub(crate) use drive::drive;
 pub(crate) use settle::{settle, wait_out};
 
-
 /// The pool hook that polls this worker's regolith queues. Built on the
 /// worker's own thread by the factory [`with_worker_io`] installs; while it
 /// lives, transactions on the thread use the thread's queues.

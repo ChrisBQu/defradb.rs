@@ -56,10 +56,13 @@ fn one_document(request: &QueryRequest) -> Option<(String, String)> {
         return None;
     }
     let document = graphql_parser::parse_query::<String>(&request.query).ok()?;
-    let mut operations = document.definitions.iter().filter_map(|definition| match definition {
-        Definition::Operation(OperationDefinition::Mutation(mutation)) => Some(mutation),
-        _ => None,
-    });
+    let mut operations = document
+        .definitions
+        .iter()
+        .filter_map(|definition| match definition {
+            Definition::Operation(OperationDefinition::Mutation(mutation)) => Some(mutation),
+            _ => None,
+        });
     let mutation = match request.operation_name.as_deref() {
         Some(name) => operations.find(|mutation| mutation.name.as_deref() == Some(name))?,
         None => {
@@ -105,8 +108,14 @@ mod tests {
     #[test]
     fn a_write_naming_one_document_goes_to_that_documents_worker() {
         let key = workers::Target::Key(document_key("User", "bae-1"));
-        assert_eq!(target(r#"mutation { update_User(docID: "bae-1", input: {age: 3}) { _docID } }"#), key);
-        assert_eq!(target(r#"mutation { delete_User(docID: "bae-1") { _docID } }"#), key);
+        assert_eq!(
+            target(r#"mutation { update_User(docID: "bae-1", input: {age: 3}) { _docID } }"#),
+            key
+        );
+        assert_eq!(
+            target(r#"mutation { delete_User(docID: "bae-1") { _docID } }"#),
+            key
+        );
         let by_variable = QueryRequest::new(
             r#"mutation ($id: ID) { update_User(docID: $id, input: {age: 3}) { _docID } }"#,
         )
@@ -124,9 +133,18 @@ mod tests {
     fn reads_creates_and_writes_to_many_documents_are_unbound() {
         let unbound = workers::Target::LeastLoaded;
         assert_eq!(target(r#"{ User(docID: "bae-1") { name } }"#), unbound);
-        assert_eq!(target(r#"mutation { create_User(input: {name: "a"}) { _docID } }"#), unbound);
-        assert_eq!(target(r#"mutation { delete_User(docID: ["bae-1", "bae-2"]) { _docID } }"#), unbound);
-        assert_eq!(target(r#"mutation { delete_User(filter: {age: {_gt: 3}}) { _docID } }"#), unbound);
+        assert_eq!(
+            target(r#"mutation { create_User(input: {name: "a"}) { _docID } }"#),
+            unbound
+        );
+        assert_eq!(
+            target(r#"mutation { delete_User(docID: ["bae-1", "bae-2"]) { _docID } }"#),
+            unbound
+        );
+        assert_eq!(
+            target(r#"mutation { delete_User(filter: {age: {_gt: 3}}) { _docID } }"#),
+            unbound
+        );
         assert_eq!(
             target(
                 r#"mutation { a: delete_User(docID: "bae-1") { _docID } b: delete_User(docID: "bae-2") { _docID } }"#

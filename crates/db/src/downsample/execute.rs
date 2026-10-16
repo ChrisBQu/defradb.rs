@@ -349,6 +349,7 @@ impl<S: Store + 'static> crate::database::DB<S> {
     /// whose conflicts the engine re-runs: each re-run reads the target a
     /// competing processor left and decides again. `created` says whether the
     /// last attempt took the create branch.
+    #[allow(clippy::too_many_arguments)]
     async fn persist_window(
         self: &Arc<Self>,
         context: &RequestContext,

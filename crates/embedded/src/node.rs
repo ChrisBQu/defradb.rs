@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use defra_core::RequestContext;
 
+use crate::error::{Error, Result};
 use crate::node_acp::{create_document_acp, create_nac_manager};
 use crate::node_identity::create_node_identity;
 use crate::node_tasks::BackgroundTasks;
@@ -17,7 +18,6 @@ use crate::{
     EmbeddedNodeConfig, EmbeddedStore, ManagedP2PSystem, Persistence, SigningConfig, SigningKey,
     TransportConfig,
 };
-use crate::error::{Error, Result};
 #[cfg(feature = "libp2p")]
 use kovan_queue::seg_queue::SegQueue;
 #[cfg(any(feature = "libp2p", feature = "iroh"))]
@@ -40,9 +40,9 @@ pub(crate) type WireKmsCallback = Box<dyn FnOnce(Arc<dyn kms::KmsService>) + Sen
 /// permissioned collection to public.
 fn resolve_creator_identity(context: &RequestContext) -> Result<Option<identity::Did>> {
     match context.identity() {
-        Some(raw) => {
-            Ok(Some(identity::Did::new(raw).map_err(Error::InvalidActingIdentity)?))
-        }
+        Some(raw) => Ok(Some(
+            identity::Did::new(raw).map_err(Error::InvalidActingIdentity)?,
+        )),
         None => Ok(None),
     }
 }
@@ -115,8 +115,7 @@ impl<S: storage::corekv::Store + 'static> EmbeddedNode<S> {
         let (database, document_acp) = (Arc::clone(&self.database), self.document_acp.clone());
         let sdl = sdl.to_owned();
         self.on_pool(move || async move {
-            let collections =
-                query::parse_sdl(&sdl).map_err(Error::SchemaParse)?;
+            let collections = query::parse_sdl(&sdl).map_err(Error::SchemaParse)?;
             schema::definition_validation::validate_new_collections(&collections)
                 .map_err(Error::SchemaValidation)?;
             let creator = resolve_creator_identity(&context)?;
@@ -267,10 +266,7 @@ async fn add_encrypted_index<S: storage::corekv::Store + 'static>(
         return Err(Error::EncryptedIndexExists(field_name.to_owned()));
     }
 
-    let txn = database
-        .new_txn(false)
-        .await
-        .map_err(Error::TxnCreate)?;
+    let txn = database.new_txn(false).await.map_err(Error::TxnCreate)?;
     {
         let mut updated_schema = schema.clone();
         updated_schema
@@ -279,11 +275,8 @@ async fn add_encrypted_index<S: storage::corekv::Store + 'static>(
 
         let collection_key =
             storage::keys::systemstore::CollectionKey::new(&updated_schema.version_id);
-        let schema_data = serde_json::to_vec(&updated_schema)
-            .map_err(Error::SchemaSerialize)?;
-        let systemstore = txn
-            .systemstore()
-            .map_err(Error::SystemstoreOpen)?;
+        let schema_data = serde_json::to_vec(&updated_schema).map_err(Error::SchemaSerialize)?;
+        let systemstore = txn.systemstore().map_err(Error::SystemstoreOpen)?;
         systemstore
             .set(&collection_key.bytes(), &schema_data)
             .await
@@ -294,13 +287,8 @@ async fn add_encrypted_index<S: storage::corekv::Store + 'static>(
             .await
             .map_err(Error::NameMappingSave)?;
     }
-    txn.commit()
-        .await
-        .map_err(Error::Commit)?;
-    database
-        .reload_cache()
-        .await
-        .map_err(Error::CacheReload)?;
+    txn.commit().await.map_err(Error::Commit)?;
+    database.reload_cache().await.map_err(Error::CacheReload)?;
     Ok(())
 }
 
@@ -470,9 +458,11 @@ impl NodeBuilder {
             let opts =
                 self.with_at_rest_keys(storage::RegolithStoreOptions::embedded().placed_on(&pool))?;
             let store =
-                storage::RegolithStore::open_with_options(&path, opts).map_err(|source| Error::StoreOpen {
-                    path: path.clone(),
-                    source,
+                storage::RegolithStore::open_with_options(&path, opts).map_err(|source| {
+                    Error::StoreOpen {
+                        path: path.clone(),
+                        source,
+                    }
                 })?;
 
             (EmbeddedStore::Regolith(store), Persistence::Persistent)
@@ -607,8 +597,11 @@ pub fn start_node_pool(
     config: Option<workers::Config>,
     edge: Option<&edge::Edge>,
 ) -> Result<workers::Pool> {
-    storage::start_pool(config.unwrap_or_default(), edge.map(edge::Edge::pool_monitor))
-        .map_err(Error::PoolStart)
+    storage::start_pool(
+        config.unwrap_or_default(),
+        edge.map(edge::Edge::pool_monitor),
+    )
+    .map_err(Error::PoolStart)
 }
 
 /// A node over a store the application opened, on a worker pool of the
@@ -751,11 +744,7 @@ where
     let edge = match (&config.transport, &config.edge) {
         (TransportConfig::None, _) => None,
         (_, Some(edge)) => Some(edge.clone()),
-        (_, None) => Some(
-            edge::on_demand()
-                .map_err(Error::NetworkStart)?
-                .clone(),
-        ),
+        (_, None) => Some(edge::on_demand().map_err(Error::NetworkStart)?.clone()),
     };
     let p2p_setup: Result<Option<crate::node_p2p::P2PSetup>> =
         match (&config.transport, edge.as_ref()) {

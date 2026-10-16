@@ -4,9 +4,9 @@
 //! it awaited arrived, reaches this node's own replicators like any composite
 //! that merged on its first attempt.
 
+mod iroh_peers;
 #[path = "support/outcome.rs"]
 mod outcome;
-mod iroh_peers;
 
 use std::sync::Arc;
 

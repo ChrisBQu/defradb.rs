@@ -27,10 +27,10 @@ pub mod config;
 #[cfg(test)]
 mod dac_api_tests;
 mod db_impls;
-mod error;
 pub mod dense_search;
 #[cfg(test)]
 mod embedded_query_identity_tests;
+mod error;
 mod network;
 mod node_acp;
 #[cfg(test)]
@@ -401,10 +401,8 @@ impl EmbeddedNode {
     ) -> Result<(Vec<u8>, Vec<u8>)> {
         let (ops, cid) = (Arc::clone(&self.block_ops), cid.to_owned());
         let caller = caller_did.map(str::to_owned);
-        self.on_pool(move || async move {
-            ops.signed_block_bytes(&cid, caller.as_deref()).await
-        })
-        .await
+        self.on_pool(move || async move { ops.signed_block_bytes(&cid, caller.as_deref()).await })
+            .await
     }
 
     /// Cryptographically verify a block visible inside an active transaction.
@@ -423,11 +421,13 @@ impl EmbeddedNode {
 
     /// Add a schema from a GraphQL SDL type definition.
     pub async fn add_schema(&self, sdl: &str) -> Result<()> {
-        let (ops, sdl, context) = (Arc::clone(&self.schema_ops), sdl.to_owned(), self.node_context());
-        self.on_pool(move || async move {
-            ops.add_schema(&context, &sdl).await.map(|_| ())
-        })
-        .await
+        let (ops, sdl, context) = (
+            Arc::clone(&self.schema_ops),
+            sdl.to_owned(),
+            self.node_context(),
+        );
+        self.on_pool(move || async move { ops.add_schema(&context, &sdl).await.map(|_| ()) })
+            .await
     }
 
     /// Create a materialized view from a source query and target SDL.
@@ -457,10 +457,8 @@ impl EmbeddedNode {
     ) -> Result<CollectionVersion> {
         let (ops, context) = (Arc::clone(&self.schema_ops), self.node_context());
         let (name, patch) = (collection_name.to_owned(), patch.to_owned());
-        self.on_pool(move || async move {
-            ops.patch_collection(&context, &name, &patch).await
-        })
-        .await
+        self.on_pool(move || async move { ops.patch_collection(&context, &name, &patch).await })
+            .await
     }
 
     /// Activate a specific collection version by its `version_id`.
@@ -471,9 +469,9 @@ impl EmbeddedNode {
     pub async fn set_active_collection_version(&self, version_id: &str) -> Result<()> {
         let (ops, context) = (Arc::clone(&self.schema_ops), self.node_context());
         let version = version_id.to_owned();
-        self.on_pool(move || async move {
-            ops.set_active_collection_version(&context, &version).await
-        })
+        self.on_pool(
+            move || async move { ops.set_active_collection_version(&context, &version).await },
+        )
         .await
     }
 
@@ -498,10 +496,8 @@ impl EmbeddedNode {
     pub async fn materialize_collection(&self, collection_name: &str) -> Result<usize> {
         let (ops, context) = (Arc::clone(&self.schema_ops), self.node_context());
         let name = collection_name.to_owned();
-        self.on_pool(move || async move {
-            ops.materialize_collection(&context, &name).await
-        })
-        .await
+        self.on_pool(move || async move { ops.materialize_collection(&context, &name).await })
+            .await
     }
 
     /// List the names of every active collection known to the node.
@@ -529,19 +525,15 @@ impl EmbeddedNode {
         version_id: &str,
     ) -> Result<Option<CollectionVersion>> {
         let (ops, version) = (Arc::clone(&self.schema_ops), version_id.to_owned());
-        self.on_pool(move || async move {
-            ops.get_collection_by_version_id(&version).await
-        })
-        .await
+        self.on_pool(move || async move { ops.get_collection_by_version_id(&version).await })
+            .await
     }
 
     /// Return every collection version known to the node, active and inactive.
     pub async fn get_all_collection_versions(&self) -> Result<Vec<CollectionVersion>> {
         let ops = Arc::clone(&self.schema_ops);
-        self.on_pool(move || async move {
-            ops.get_all_collection_versions().await
-        })
-        .await
+        self.on_pool(move || async move { ops.get_all_collection_versions().await })
+            .await
     }
 
     /// Subscribe to DefraDB events.
@@ -738,15 +730,9 @@ impl EmbeddedNode {
     /// allowlist.
     #[cfg(feature = "p2p")]
     pub async fn allow_p2p_peer(&self, peer_id: &str) -> Result<()> {
-        let ops = self
-            .p2p_ops
-            .as_ref()
-            .ok_or(Error::P2pDisabled)?;
-        let peer_id = defra_http::TransportPeerId::new(peer_id)
-            .map_err(Error::InvalidPeerId)?;
-        ops.allow_peer(&peer_id)
-            .await
-            .map_err(Error::PeerAuthorize)
+        let ops = self.p2p_ops.as_ref().ok_or(Error::P2pDisabled)?;
+        let peer_id = defra_http::TransportPeerId::new(peer_id).map_err(Error::InvalidPeerId)?;
+        ops.allow_peer(&peer_id).await.map_err(Error::PeerAuthorize)
     }
 
     /// Bar a peer from this node in both directions, while it is running and
@@ -773,15 +759,9 @@ impl EmbeddedNode {
     /// no concept of peer admission.
     #[cfg(feature = "p2p")]
     pub async fn deny_p2p_peer(&self, peer_id: &str) -> Result<()> {
-        let ops = self
-            .p2p_ops
-            .as_ref()
-            .ok_or(Error::P2pDisabled)?;
-        let peer_id = defra_http::TransportPeerId::new(peer_id)
-            .map_err(Error::InvalidPeerId)?;
-        ops.deny_peer(&peer_id)
-            .await
-            .map_err(Error::PeerRevoke)
+        let ops = self.p2p_ops.as_ref().ok_or(Error::P2pDisabled)?;
+        let peer_id = defra_http::TransportPeerId::new(peer_id).map_err(Error::InvalidPeerId)?;
+        ops.deny_peer(&peer_id).await.map_err(Error::PeerRevoke)
     }
 
     /// Gracefully stop background services owned by this embedded node.
@@ -892,9 +872,8 @@ async fn execute_prepared_request_resolving_inputs(
 mod request_preparation_tests;
 
 fn resolve_registered_node_identity(did: &str) -> Result<SigningConfig> {
-    let config = defra_core::signing::get_identity(did).ok_or_else(|| {
-        Error::NodeIdentityUnregistered(did.to_owned())
-    })?;
+    let config = defra_core::signing::get_identity(did)
+        .ok_or_else(|| Error::NodeIdentityUnregistered(did.to_owned()))?;
     if !config.has_local_private_key() && !config.has_remote_signer() {
         return Err(Error::NodeIdentityUnusable(did.to_owned()));
     }
@@ -911,8 +890,9 @@ fn local_raw_identity_from_registered_config(
 
     let key_type = identity_key_type_from_signing_key_type(config.key_type)?;
     let identity = RawIdentity::from_identity_key_type(key_type, &config.private_key_bytes)
-        .map_err(|error| {
-            Error::NodeIdentityLoad { did: did.to_owned(), source: error }
+        .map_err(|error| Error::NodeIdentityLoad {
+            did: did.to_owned(),
+            source: error,
         })?;
     let derived_did = identity
         .did()
@@ -1334,7 +1314,9 @@ impl NodeBuilder {
         // timer, when the node has one, runs the pool's stuck-poll monitor.
         let pool = storage::start_pool(
             self.workers.clone().unwrap_or_default(),
-            network.as_ref().map(|network| network.edge().pool_monitor()),
+            network
+                .as_ref()
+                .map(|network| network.edge().pool_monitor()),
         )
         .map_err(Error::WorkerPoolStart)?;
         let db_options = db_options.with_pool(pool.clone());
@@ -1374,8 +1356,8 @@ impl NodeBuilder {
                 self.at_rest_encryption_key,
                 &self.previous_at_rest_encryption_keys,
             )?;
-            let store = storage::RegolithStore::open_with_options(&path, opts)
-                .map_err(Error::StoreOpen)?;
+            let store =
+                storage::RegolithStore::open_with_options(&path, opts).map_err(Error::StoreOpen)?;
 
             Self::build_with_persistent_store_arc(Arc::new(store), persistent_args).await?
         } else {
@@ -1424,10 +1406,7 @@ impl NodeBuilder {
         // 4. Spawn HTTP server if configured
         #[cfg(feature = "http")]
         if let Some(http_cfg) = http_config {
-            let network = node
-                .network
-                .as_ref()
-                .ok_or(Error::HttpNeedsNetwork)?;
+            let network = node.network.as_ref().ok_or(Error::HttpNeedsNetwork)?;
             let server_config = defra_http::ServerConfig {
                 address: http_cfg.address,
                 request_timeout: timeout_secs(http_cfg.request_timeout),
@@ -1486,9 +1465,7 @@ impl NodeBuilder {
                             .map_err(|source| Error::ListenerBind { addr, source })?,
                     };
 
-                    axum::serve(listener, router)
-                        .await
-                        .map_err(Error::Serve)?;
+                    axum::serve(listener, router).await.map_err(Error::Serve)?;
                     Ok::<(), Error>(())
                 }
                 .await;
@@ -1609,10 +1586,7 @@ impl NodeBuilder {
             let owner = node_identity_did
                 .as_deref()
                 .ok_or(Error::NodeAcpNeedsIdentity)
-                .and_then(|did| {
-                    identity::Did::new(did)
-                        .map_err(Error::InvalidNodeAcpIdentity)
-                })?;
+                .and_then(|did| identity::Did::new(did).map_err(Error::InvalidNodeAcpIdentity))?;
             if database.node_did().as_ref() != Some(&owner) {
                 return Err(Error::NodeAcpNeedsLocalKey);
             }
@@ -1626,14 +1600,13 @@ impl NodeBuilder {
             database.set_nac_manager(nac_manager);
         }
 
-        let acp_setup =
-            node_acp::create_document_acp(
-                store.clone(),
-                persistence,
-                &document_acp_config,
-                network.as_ref().map(NodeEdge::edge),
-            )
-            .await?;
+        let acp_setup = node_acp::create_document_acp(
+            store.clone(),
+            persistence,
+            &document_acp_config,
+            network.as_ref().map(NodeEdge::edge),
+        )
+        .await?;
         let document_acp = acp_setup.document_acp.clone();
         #[cfg(feature = "vera")]
         let remote_acp = acp_setup.vera_acp.is_some();
@@ -1644,9 +1617,7 @@ impl NodeBuilder {
         // P2P setup (affects mutator choice)
         #[cfg(feature = "p2p")]
         let mut p2p_result = if let Some(p2p_cfg) = p2p_config {
-            let network = network
-                .as_ref()
-                .ok_or(Error::P2pNeedsNetwork)?;
+            let network = network.as_ref().ok_or(Error::P2pNeedsNetwork)?;
             Some(
                 p2p_runtime::setup_p2p(
                     store.clone(),

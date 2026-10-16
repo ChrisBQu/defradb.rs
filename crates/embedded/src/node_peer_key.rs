@@ -27,7 +27,9 @@ pub(crate) async fn load_with_keyring<S: storage::corekv::Store>(
         return Err(Error::PlaintextPeerKey);
     }
     if legacy_iroh_seed(legacy_iroh_key).await?.is_some() {
-        return Err(Error::PlaintextIrohKeyFile(legacy_iroh_key.expect("existing key file").to_path_buf()));
+        return Err(Error::PlaintextIrohKeyFile(
+            legacy_iroh_key.expect("existing key file").to_path_buf(),
+        ));
     }
     if peerstore
         .get_replicator(LEGACY_LIBP2P_KEY_ID)
@@ -125,12 +127,10 @@ async fn legacy_iroh_seed(path: Option<&Path>) -> Result<Option<Seed>> {
             })
             .map(Some),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => {
-            Err(Error::IrohKeyFileRead {
+        Err(error) => Err(Error::IrohKeyFileRead {
             path: path.to_path_buf(),
             source: error,
-        })
-        }
+        }),
     }
 }
 

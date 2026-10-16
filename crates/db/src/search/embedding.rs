@@ -1,5 +1,5 @@
-use crate::search::EmbeddingClientConfig;
 use crate::error::{Error, Result as DbResult};
+use crate::search::EmbeddingClientConfig;
 use document::{Document, NormalValue};
 use rapidhash::RapidHashSet;
 use schema::VectorEmbeddingDescription;

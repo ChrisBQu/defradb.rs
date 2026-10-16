@@ -104,7 +104,9 @@ async fn build_node(signing: SigningConfig) -> Result<Node> {
         signing,
         ..Default::default()
     };
-    embedded::build_with_store(Arc::new(storage::RegolithStore::in_memory()?), config).await.map_err(Into::into)
+    embedded::build_with_store(Arc::new(storage::RegolithStore::in_memory()?), config)
+        .await
+        .map_err(Into::into)
 }
 
 async fn wait_for_listen_addr(system: &embedded::ManagedP2PSystem) -> Result<String> {

@@ -77,7 +77,10 @@ pub(super) fn parse_switches(status: &str) -> io::Result<ContextSwitches> {
             .find_map(|line| line.strip_prefix(name))
             .and_then(|rest| rest.trim().parse::<u64>().ok())
             .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, format!("no {name} in the thread status"))
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("no {name} in the thread status"),
+                )
             })
     };
     Ok(ContextSwitches {
@@ -92,7 +95,9 @@ impl Os for System {
     }
 
     fn context_switches(&self, tid: u64) -> io::Result<ContextSwitches> {
-        parse_switches(&std::fs::read_to_string(format!("/proc/self/task/{tid}/status"))?)
+        parse_switches(&std::fs::read_to_string(format!(
+            "/proc/self/task/{tid}/status"
+        ))?)
     }
 
     fn thread_affinity(&self) -> io::Result<CpuSet> {
@@ -281,6 +286,8 @@ impl Os for System {
 
     fn memlock_limit(&self) -> Option<u64> {
         let limit = rlimit(Resource(libc::RLIMIT_MEMLOCK))?;
+        // `rlim_t` is narrower than u64 on some 32-bit targets.
+        #[allow(clippy::unnecessary_cast)]
         (limit.rlim_cur != libc::RLIM_INFINITY).then_some(limit.rlim_cur as u64)
     }
 }

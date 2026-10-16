@@ -73,7 +73,11 @@ fn a_timeout_ends_a_wait_that_runs_past_it_and_passes_one_that_does_not() {
     assert_eq!(early, Ok(7));
     // Off every worker the timer is the fallback pool's.
     assert_eq!(
-        crate::block_on(crate::timeout(Duration::from_millis(5), std::future::pending::<()>())).unwrap(),
+        crate::block_on(crate::timeout(
+            Duration::from_millis(5),
+            std::future::pending::<()>()
+        ))
+        .unwrap(),
         Err(Error::TimedOut)
     );
     pool.shutdown_blocking().unwrap();
@@ -93,13 +97,16 @@ fn background_work_stops_when_aborted_and_does_not_hold_up_shutdown() {
     });
     let started = Instant::now();
     while ticks.is_empty() {
-        assert!(started.elapsed() < DEADLINE, "the background work never ran");
+        assert!(
+            started.elapsed() < DEADLINE,
+            "the background work never ran"
+        );
         std::thread::yield_now();
     }
     work.abort();
     assert_eq!(crate::block_on_timeout(work, DEADLINE).unwrap(), Ok(()));
 
-    let forever = crate::spawn_background(Some(&pool), "forever", || std::future::pending());
+    let forever = crate::spawn_background(Some(&pool), "forever", std::future::pending);
     pool.shutdown_blocking().unwrap();
     assert!(crate::block_on_timeout(forever, DEADLINE).unwrap().is_err());
 
@@ -118,7 +125,9 @@ fn a_monitor_driven_from_outside_finds_a_stuck_worker_and_ends_with_the_pool() {
         ..Config::unplaced(2)
     })
     .unwrap();
-    let monitor = monitors.pop().expect("the driver is handed the monitor at start");
+    let monitor = monitors
+        .pop()
+        .expect("the driver is handed the monitor at start");
     assert_eq!(monitor.scan(), Some(0));
 
     let release = Arc::new(AtomicBool::new(false));
@@ -133,7 +142,10 @@ fn a_monitor_driven_from_outside_finds_a_stuck_worker_and_ends_with_the_pool() {
     .unwrap();
     let started = Instant::now();
     while monitor.scan() != Some(1) {
-        assert!(started.elapsed() < DEADLINE, "the stuck worker was never found");
+        assert!(
+            started.elapsed() < DEADLINE,
+            "the stuck worker was never found"
+        );
         std::thread::yield_now();
     }
     release.store(true, Ordering::Release);
@@ -141,7 +153,11 @@ fn a_monitor_driven_from_outside_finds_a_stuck_worker_and_ends_with_the_pool() {
     assert!(pool.stats().workers[0].long_polls >= 1);
 
     pool.shutdown_blocking().unwrap();
-    assert_eq!(monitor.scan(), None, "the driver stops once the pool has stopped");
+    assert_eq!(
+        monitor.scan(),
+        None,
+        "the driver stops once the pool has stopped"
+    );
 }
 
 #[cfg(target_os = "linux")]

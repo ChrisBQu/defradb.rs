@@ -50,6 +50,8 @@ pub(crate) mod dag_fetcher;
 pub(crate) mod dag_retry;
 mod event_handler;
 mod merge_state;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod network_tests;
 #[cfg(feature = "libp2p-transport")]
 mod pubsub_client;
 #[cfg(feature = "libp2p-transport")]
@@ -57,8 +59,6 @@ mod pubsub_services;
 mod push_worker;
 mod replicators;
 mod result_types;
-#[cfg(all(test, not(target_arch = "wasm32")))]
-mod network_tests;
 mod selective_car_access;
 mod subscriptions;
 

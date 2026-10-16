@@ -84,11 +84,7 @@ impl Store for FailingHeadStore {
     ) -> std::result::Result<RetryAttemptValue, RetryAttemptError> {
         let fail = self.fail.clone();
         let interceptor: RetryWriteInterceptor = Arc::new(move |key, value| {
-            match fail
-                .load()
-                .iter()
-                .find(|point| point.refuses(key, value))
-            {
+            match fail.load().iter().find(|point| point.refuses(key, value)) {
                 Some(point) => Err(storage::Error::Other(format!(
                     "injected head write failure at {point:?}"
                 ))),

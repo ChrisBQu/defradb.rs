@@ -7,8 +7,10 @@ use crate::feed::tests::{doc, next_from};
 use crate::LensFeed;
 
 fn identity_config() -> LensConfig {
-    let mut module = LensModule::default();
-    module.module = Some(IDENTITY_PASSTHROUGH_WASM.to_vec());
+    let module = LensModule {
+        module: Some(IDENTITY_PASSTHROUGH_WASM.to_vec()),
+        ..Default::default()
+    };
     LensConfig::new("v1", "v2", module)
 }
 

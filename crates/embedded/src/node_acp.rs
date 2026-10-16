@@ -129,10 +129,7 @@ where
         nac_store,
         db::NacConfig::new().with_dev_mode(),
     ));
-    manager
-        .initialize(None)
-        .await
-        .map_err(Error::NacInit)?;
+    manager.initialize(None).await.map_err(Error::NacInit)?;
     Ok(manager)
 }
 

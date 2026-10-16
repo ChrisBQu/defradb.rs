@@ -25,6 +25,9 @@ use crate::txn::lenses::TxnLensStore;
 use crate::txn::owner::TxnId;
 use crate::txn::{DbTxn, LentTxn};
 
+// One per transaction, held by value: boxing the held transaction would
+// allocate once per transaction for nothing.
+#[allow(clippy::large_enum_variant)]
 enum Lending<S>
 where
     S: Store,

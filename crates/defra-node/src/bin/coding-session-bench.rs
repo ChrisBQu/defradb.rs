@@ -31,11 +31,20 @@ mod runner {
         #[error("missing explain response data")]
         MissingExplainData,
         #[error("failed to remove temp data dir {}: {source}", path.display())]
-        RemoveTempDir { path: PathBuf, source: std::io::Error },
+        RemoveTempDir {
+            path: PathBuf,
+            source: std::io::Error,
+        },
         #[error("failed to stat {}: {source}", path.display())]
-        Stat { path: PathBuf, source: std::io::Error },
+        Stat {
+            path: PathBuf,
+            source: std::io::Error,
+        },
         #[error("failed to read {}: {source}", path.display())]
-        ReadDir { path: PathBuf, source: std::io::Error },
+        ReadDir {
+            path: PathBuf,
+            source: std::io::Error,
+        },
         #[error(
             "no matching cases. available cases: hot_messages_cargo, hot_messages_wand, hot_actions_cargo, hot_actions_rg, medium_messages_candidate, medium_actions_bench"
         )]
@@ -55,7 +64,11 @@ mod runner {
         #[error("missing value for {0}")]
         MissingValue(String),
         #[error("invalid value for {flag}: {value}: {source}")]
-        InvalidValue { flag: String, value: String, source: std::num::ParseIntError },
+        InvalidValue {
+            flag: String,
+            value: String,
+            source: std::num::ParseIntError,
+        },
     }
 
     const BENCH_AT_REST_ENCRYPTION_KEY: [u8; 32] = [0x42; 32];
@@ -208,7 +221,10 @@ mod runner {
                         .map(|error| error.message)
                         .collect::<Vec<_>>()
                         .join("; ");
-                    return Err(BenchError::ExplainFailed { case: case.name.clone(), errors });
+                    return Err(BenchError::ExplainFailed {
+                        case: case.name.clone(),
+                        errors,
+                    });
                 }
                 let explain_json = explain_response
                     .data

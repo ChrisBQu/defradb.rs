@@ -421,7 +421,10 @@ async fn execute_batched_add_collect_doc_ids(
         let ids = data
             .get(format!("add_{collection_name}").as_str())
             .and_then(JsonValue::as_array)
-            .ok_or_else(|| Error::MissingArray { collection: format!("add_{collection_name}"), within: data.to_string() })?
+            .ok_or_else(|| Error::MissingArray {
+                collection: format!("add_{collection_name}"),
+                within: data.to_string(),
+            })?
             .iter()
             .map(|item| {
                 item.get("_docID")
@@ -444,7 +447,10 @@ pub(crate) fn ensure_success(response: crate::QueryResponse, context: &str) -> R
             .map(|error| error.message)
             .collect::<Vec<_>>()
             .join("; ");
-        return Err(Error::QueryFailed { context: context.to_owned(), messages });
+        return Err(Error::QueryFailed {
+            context: context.to_owned(),
+            messages,
+        });
     }
 
     response

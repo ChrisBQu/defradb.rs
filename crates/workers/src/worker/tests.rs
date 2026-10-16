@@ -245,8 +245,8 @@ fn shutdown_finishes_admitted_work_but_not_daemons() {
 #[test]
 fn stopping_fails_unfinished_work_and_gives_admission_back() {
     let (mut worker, shared) = worker();
-    let mut pending = job(&shared, None, || std::future::pending::<()>());
-    let mut keyed = job(&shared, Some(1), || std::future::pending::<()>());
+    let mut pending = job(&shared, None, std::future::pending::<()>);
+    let mut keyed = job(&shared, Some(1), std::future::pending::<()>);
     let mut behind = job(&shared, Some(1), || async {});
     settle(&mut worker);
     assert_eq!(shared.load(), 3);
@@ -267,7 +267,7 @@ fn stopping_fails_unfinished_work_and_gives_admission_back() {
 #[test]
 fn abandon_stops_at_once() {
     let (mut worker, shared) = worker();
-    let _pending = job(&shared, None, || std::future::pending::<()>());
+    let _pending = job(&shared, None, std::future::pending::<()>);
     settle(&mut worker);
     assert!(!worker.finished());
     shared.abandon();

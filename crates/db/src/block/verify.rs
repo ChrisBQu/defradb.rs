@@ -293,6 +293,7 @@ pub async fn verify_block_signature_in_txn<S: Store>(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn verify_block_signature_in_txn_as<S: Store>(
     context: &RequestContext,
     database: &Arc<DB<S>>,

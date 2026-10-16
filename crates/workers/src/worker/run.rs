@@ -209,7 +209,7 @@ impl Worker {
                     return;
                 }
                 round = round.wrapping_add(1);
-                if round % 64 == 0 {
+                if round.is_multiple_of(64) {
                     if self.hook.poll(&self.local) > 0 {
                         return;
                     }

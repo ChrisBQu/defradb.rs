@@ -18,6 +18,7 @@ pub(super) struct DocumentAcpSetup {
 
 impl Node {
     #[cfg_attr(not(feature = "vera"), allow(unused_variables))]
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn setup_document_acp(
         config: &Config,
         identity_key_bytes: Option<&[u8]>,

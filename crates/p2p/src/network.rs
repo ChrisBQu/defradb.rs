@@ -141,12 +141,14 @@ mod tests {
         let on_worker = network.clone();
         let ran_on_worker = pool
             .submit_and_wait(workers::Target::Worker(0), move || async move {
-                on_worker
-                    .hand_off(|| async { workers::on_worker() })
-                    .await
+                on_worker.hand_off(|| async { workers::on_worker() }).await
             })
             .unwrap();
-        assert_eq!(ran_on_worker, Some(false), "the network part left the worker");
+        assert_eq!(
+            ran_on_worker,
+            Some(false),
+            "the network part left the worker"
+        );
         // Off the pool it runs in place.
         assert_eq!(
             edge.block_on(network.hand_off(|| async { 7 })).unwrap(),

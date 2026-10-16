@@ -64,37 +64,39 @@ fn cold_reads_on_a_worker_complete_through_its_queue() {
     let pool = pool(2);
     let store = cold_store(dir.path(), 24, &pool);
     let on_worker = store.clone();
-    let done = workers::block_on(pool.submit(workers::Target::LeastLoaded, move || async move {
-        let reader = on_worker.new_txn(true).await.unwrap();
-        assert_eq!(reader.get(b"cold/00").await.unwrap().unwrap().len(), 16384);
-        assert!(reader.has(b"cold/01").await.unwrap());
-        assert_eq!(reader.get_size(b"cold/02").await.unwrap(), Some(16384));
-        let mut scan = reader
-            .iterator(crate::corekv::IterOptions::new().with_prefix(b"cold/".to_vec()))
-            .await
-            .unwrap();
-        let mut seen = 0;
-        while let Some(pair) = scan.next().await.unwrap() {
-            assert_eq!(pair.value.len(), 16384);
-            seen += 1;
-        }
-        drop(scan);
-        reader.discard();
+    let done = workers::block_on(
+        pool.submit(workers::Target::LeastLoaded, move || async move {
+            let reader = on_worker.new_txn(true).await.unwrap();
+            assert_eq!(reader.get(b"cold/00").await.unwrap().unwrap().len(), 16384);
+            assert!(reader.has(b"cold/01").await.unwrap());
+            assert_eq!(reader.get_size(b"cold/02").await.unwrap(), Some(16384));
+            let mut scan = reader
+                .iterator(crate::corekv::IterOptions::new().with_prefix(b"cold/".to_vec()))
+                .await
+                .unwrap();
+            let mut seen = 0;
+            while let Some(pair) = scan.next().await.unwrap() {
+                assert_eq!(pair.value.len(), 16384);
+                seen += 1;
+            }
+            drop(scan);
+            reader.discard();
 
-        let mut writer = on_worker.new_txn(false).await.unwrap();
-        let mut scan = writer
-            .iterator(crate::corekv::IterOptions::new().with_prefix(b"cold/".to_vec()))
-            .await
-            .unwrap();
-        let mut seen_writing = 0;
-        while scan.next().await.unwrap().is_some() {
-            seen_writing += 1;
-        }
-        drop(scan);
-        writer.set(b"result", b"done").await.unwrap();
-        writer.commit().await.unwrap();
-        (seen, seen_writing)
-    }))
+            let mut writer = on_worker.new_txn(false).await.unwrap();
+            let mut scan = writer
+                .iterator(crate::corekv::IterOptions::new().with_prefix(b"cold/".to_vec()))
+                .await
+                .unwrap();
+            let mut seen_writing = 0;
+            while scan.next().await.unwrap().is_some() {
+                seen_writing += 1;
+            }
+            drop(scan);
+            writer.set(b"result", b"done").await.unwrap();
+            writer.commit().await.unwrap();
+            (seen, seen_writing)
+        }),
+    )
     .unwrap()
     .unwrap();
     assert_eq!(done.wait_timeout(DEADLINE).unwrap(), (24, 24));
@@ -138,7 +140,9 @@ fn durable_commits_on_one_worker_complete_through_tickets() {
     assert_eq!(done.wait_timeout(DEADLINE).unwrap(), 3);
     let reader = workers::block_on(store.new_txn(true)).unwrap().unwrap();
     for n in 0..32u32 {
-        let value = workers::block_on(reader.get(&n.to_be_bytes())).unwrap().unwrap();
+        let value = workers::block_on(reader.get(&n.to_be_bytes()))
+            .unwrap()
+            .unwrap();
         assert_eq!(value.as_deref(), Some(&b"v"[..]));
     }
     pool.shutdown_blocking().unwrap();

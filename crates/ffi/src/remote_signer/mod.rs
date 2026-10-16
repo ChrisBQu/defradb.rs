@@ -111,7 +111,9 @@ impl Host {
     }
 
     /// Starts every payload with the asynchronous `callback`; completes once
-    /// the host reported each, in payload order.
+    /// the host reported each, in payload order. The `Send + 'static` bound is
+    /// part of what callers rely on, so it is spelled out.
+    #[allow(clippy::manual_async_fn)]
     fn start(
         self: Arc<Self>,
         callback: DefraRemoteSignAsyncCallback,

@@ -153,9 +153,7 @@ impl<S: storage::corekv::Store + 'static> DbSchemaOps<S> {
     /// permissioned collection is never silently created unregistered.
     fn creator(context: &RequestContext) -> Result<Option<Did>> {
         match context.identity() {
-            Some(raw) => {
-                Ok(Some(Did::new(raw).map_err(Error::InvalidActingIdentity)?))
-            }
+            Some(raw) => Ok(Some(Did::new(raw).map_err(Error::InvalidActingIdentity)?)),
             None => Ok(None),
         }
     }
@@ -174,8 +172,7 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
             .await
             .map_err(Error::from)?;
 
-        let collections =
-            query::parse_sdl(sdl).map_err(Error::SchemaParse)?;
+        let collections = query::parse_sdl(sdl).map_err(Error::SchemaParse)?;
 
         schema::definition_validation::validate_new_collections(&collections)
             .map_err(Error::SchemaValidation)?;
@@ -217,10 +214,7 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
         let wrapped_query = format!("query {{ {} }}", source_query.trim());
         let selects = query::parse_query_with_limits(&wrapped_query, None, self.query_limits)
             .map_err(Error::ViewQueryParse)?;
-        let select = selects
-            .into_iter()
-            .next()
-            .ok_or(Error::ViewQueryEmpty)?;
+        let select = selects.into_iter().next().ok_or(Error::ViewQueryEmpty)?;
         let query_source = schema::QuerySource::new(query::select_to_go_json(&select));
 
         let mut materialized_names = Vec::new();

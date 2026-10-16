@@ -249,5 +249,8 @@ fn required_string_field<'a>(
     fields
         .get(field_name)
         .and_then(JsonValue::as_str)
-        .ok_or_else(|| Error::MissingField { field: field_name.to_owned(), within: format!("{fields:?}") })
+        .ok_or_else(|| Error::MissingField {
+            field: field_name.to_owned(),
+            within: format!("{fields:?}"),
+        })
 }

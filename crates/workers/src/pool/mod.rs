@@ -8,22 +8,22 @@
 //! granted. [`Pool::driven`] is the same pool with one worker that the
 //! caller's thread drives (wasm, single-core embedded).
 
+mod background;
+mod batch;
 #[cfg(not(target_family = "wasm"))]
 mod blocking;
+#[cfg(all(test, not(target_family = "wasm")))]
+mod datapath_tests;
 mod deadline;
 mod detached;
 mod driven;
 mod env;
-mod background;
-mod batch;
 mod monitor;
 mod placer;
 mod report;
 mod routing;
 #[cfg(not(target_family = "wasm"))]
 mod start;
-#[cfg(all(test, not(target_family = "wasm")))]
-mod datapath_tests;
 #[cfg(all(test, not(target_family = "wasm")))]
 mod tests;
 
@@ -34,11 +34,11 @@ use std::time::Duration;
 
 use regolith::sync::{Latch, LatchWait};
 
+pub use background::{spawn_background, Background};
 pub use deadline::{delay, timeout};
 pub use detached::{fallback, run_on, spawn, spawn_detached};
 pub use driven::Driver;
 pub use env::PlacedEnv;
-pub use background::{spawn_background, Background};
 pub use monitor::{Monitor, MonitorDriver};
 pub use placer::ThreadPlacement;
 pub use report::{Report, TopologySummary, WorkerReport};

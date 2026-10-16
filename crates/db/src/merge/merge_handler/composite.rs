@@ -414,7 +414,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         doc_id_str: &str,
         collection_lookup: Option<Collection>,
     ) -> std::result::Result<MergeOutcome, MergeError> {
-        let mut txn = self.db.new_txn(false).await?;
+        let txn = self.db.new_txn(false).await?;
         if let Some(collection) = collection_lookup.as_ref() {
             txn.validate_collection_schema_for_write(collection)
                 .await
@@ -586,7 +586,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                     }));
                 }
                 crate::event::emission::register_ordered_events(
-                    &mut txn,
+                    &txn,
                     self.db.event_bus(),
                     committed_events,
                 )

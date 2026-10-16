@@ -409,7 +409,7 @@ fn shutdown_past_its_deadline_abandons_what_is_left() {
         ..small(1)
     })
     .unwrap();
-    let never = block_on(pool.submit(Target::Worker(0), || std::future::pending::<()>()))
+    let never = block_on(pool.submit(Target::Worker(0), std::future::pending::<()>))
         .unwrap()
         .unwrap();
     assert_eq!(pool.shutdown_blocking(), Err(Error::TimedOut));

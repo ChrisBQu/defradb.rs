@@ -37,6 +37,7 @@ pub fn check_nac_permission(
 ///
 /// Returns `Ok(())` if authorized, `Err(FfiResult)` if the node handle
 /// is invalid or the caller is not authorized.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn check_nac_for_node(
     node_ptr: usize,
     identity_did: *const c_char,

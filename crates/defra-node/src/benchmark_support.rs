@@ -927,7 +927,10 @@ async fn fetch_message_records(
         .and_then(|sessions| sessions.first())
         .and_then(|session| session.get("messages"))
         .and_then(JsonValue::as_array)
-        .ok_or_else(|| Error::MissingArrayFor { field: "messages", owner: session.session_id.clone() })?;
+        .ok_or_else(|| Error::MissingArrayFor {
+            field: "messages",
+            owner: session.session_id.clone(),
+        })?;
 
     messages
         .iter()
@@ -978,7 +981,10 @@ async fn fetch_action_records(
         .and_then(|sessions| sessions.first())
         .and_then(|session| session.get("actions"))
         .and_then(JsonValue::as_array)
-        .ok_or_else(|| Error::MissingArrayFor { field: "actions", owner: session.session_id.clone() })?;
+        .ok_or_else(|| Error::MissingArrayFor {
+            field: "actions",
+            owner: session.session_id.clone(),
+        })?;
 
     actions
         .iter()
@@ -1156,7 +1162,10 @@ fn parse_ranked_results(data: &JsonValue, target: SearchTarget) -> Result<Vec<Co
     let items = data
         .get(collection_name)
         .and_then(JsonValue::as_array)
-        .ok_or_else(|| Error::MissingArray { collection: collection_name.to_string(), within: data.to_string() })?;
+        .ok_or_else(|| Error::MissingArray {
+            collection: collection_name.to_string(),
+            within: data.to_string(),
+        })?;
 
     items
         .iter()

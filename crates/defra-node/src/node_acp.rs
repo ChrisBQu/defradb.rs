@@ -1,8 +1,6 @@
 use crate::{Error, Result};
 use std::sync::Arc;
 
-#[cfg(feature = "vera")]
-
 pub(crate) enum Persistence {
     Persistent,
     Memory,

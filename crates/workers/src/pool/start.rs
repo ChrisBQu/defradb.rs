@@ -80,7 +80,11 @@ impl Pool {
         });
         let driven_monitor = config.monitor.clone();
         let tuning = PoolShared::tuning(&config, count > 1 || driven_monitor.is_some());
-        let watchers = if driven_monitor.is_some() { 0 } else { monitor::WATCHERS };
+        let watchers = if driven_monitor.is_some() {
+            0
+        } else {
+            monitor::WATCHERS
+        };
         let mut threads = Vec::with_capacity(count);
         for index in 0..count {
             let thread = {

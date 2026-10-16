@@ -26,6 +26,7 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
     }
 
     /// Verify a block signature using the existing transaction's blockstore view.
+    #[allow(clippy::too_many_arguments)]
     pub async fn verify_block_signature_in_txn_as(
         &self,
         context: &RequestContext,

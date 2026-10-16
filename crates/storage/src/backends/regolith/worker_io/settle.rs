@@ -6,7 +6,9 @@ use regolith::{Error, WouldBlock};
 /// awaits what the error carries (a read's `IoWait`, a stall's `StallWait`,
 /// a key lock's `LockWait`) and calls again; any other outcome is returned.
 /// The [`regolith::Error`] counterpart of `regolith::ready`.
-pub(crate) async fn settle<T>(mut call: impl FnMut() -> regolith::Result<T>) -> regolith::Result<T> {
+pub(crate) async fn settle<T>(
+    mut call: impl FnMut() -> regolith::Result<T>,
+) -> regolith::Result<T> {
     loop {
         match call() {
             Err(Error::WouldBlock(would_block)) => wait_out(would_block).await?,

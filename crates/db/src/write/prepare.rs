@@ -469,7 +469,7 @@ where
             let input = defra_core::signing::RemoteSignatureInput::decode(request.exact_request())
                 .map_err(query::error::QueryError::execution)?;
             let remote = input
-                .remote_signer(&config)
+                .remote_signer(config)
                 .map_err(query::error::QueryError::execution)?;
             Ok(crate::remote_inputs::Signature {
                 signer: crate::remote_inputs::Signer {

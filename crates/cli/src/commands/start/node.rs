@@ -193,6 +193,7 @@ impl Node {
     }
 
     /// Build ACP and database services over the same engine-encrypted store.
+    #[allow(clippy::too_many_arguments)]
     async fn init_persistent_store_and_server(
         store: Arc<storage::DynStore>,
         config: &Config,

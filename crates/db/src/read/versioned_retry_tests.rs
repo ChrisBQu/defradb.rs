@@ -53,9 +53,9 @@ async fn historical_read_key_miss_exits_attempt_and_is_scoped_to_caller() {
     let cid = defra_core::block::generate_cid_from_bytes(b"encryption metadata").unwrap();
     let (ciphertext, _) =
         crypto::encryption::aes::encrypt_aes(b"secret", &[7; 32], &[], true).unwrap();
-    let mut txn = db.new_txn(false).await.unwrap();
+    let txn = db.new_txn(false).await.unwrap();
     let error = fetcher
-        .decrypt_block_data(&mut txn, &ciphertext, &cid)
+        .decrypt_block_data(&txn, &ciphertext, &cid)
         .await
         .unwrap_err();
     let Error::Query(query::error::QueryError::NeedsInput(request)) = error else {
@@ -68,10 +68,10 @@ async fn historical_read_key_miss_exits_attempt_and_is_scoped_to_caller() {
     let response = resolver.resolve_prepared_input(&request).await.unwrap();
     memo.insert(request, response);
     assert_eq!(kms.0.load(Ordering::SeqCst), 1);
-    let mut txn = db.new_txn(false).await.unwrap();
+    let txn = db.new_txn(false).await.unwrap();
     assert_eq!(
         fetcher
-            .decrypt_block_data(&mut txn, &ciphertext, &cid)
+            .decrypt_block_data(&txn, &ciphertext, &cid)
             .await
             .unwrap(),
         b"secret"
@@ -85,7 +85,7 @@ async fn historical_read_key_miss_exits_attempt_and_is_scoped_to_caller() {
     )
     .with_prepared_inputs(Some(memo));
     assert!(matches!(
-        other.decrypt_block_data(&mut txn, &ciphertext, &cid).await,
+        other.decrypt_block_data(&txn, &ciphertext, &cid).await,
         Err(Error::Query(query::error::QueryError::NeedsInput(_)))
     ));
     assert_eq!(kms.0.load(Ordering::SeqCst), 1);

@@ -44,7 +44,9 @@ where
 {
     /// The merge handler the replication loop calls: each merge runs on the
     /// database's worker pool, on its document's worker.
-    pub fn merge_handler_on_pool(&self) -> Arc<crate::merge::PooledMergeHandler<AcpMergeHandler<S, B>>> {
+    pub fn merge_handler_on_pool(
+        &self,
+    ) -> Arc<crate::merge::PooledMergeHandler<AcpMergeHandler<S, B>>> {
         Arc::new(crate::merge::PooledMergeHandler::new(
             Arc::clone(&self.merge_handler),
             self.merge_handler_inner.db.pool().cloned(),

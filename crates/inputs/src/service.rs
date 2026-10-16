@@ -31,6 +31,11 @@ use crate::stats::Stats;
 type ResultOf<S> = Result<<S as Source>::Value, Error<<S as Source>::Error>>;
 type FlightOf<S> = Arc<Flight<<S as Source>::Value, <S as Source>::Error>>;
 type LaneOf<S> = Arc<Lane<<S as Source>::Key>>;
+/// What one round trip came back with: an answer per key, or why none came.
+type OutcomeOf<S> =
+    Result<Vec<Result<<S as Source>::Value, <S as Source>::Error>>, Error<<S as Source>::Error>>;
+/// One inline call's keys by group, each with its place in the call.
+type GroupsOf<S> = Vec<(<S as Source>::Group, Vec<(usize, <S as Source>::Key)>)>;
 
 /// One input kind's service. Cloning shares it.
 pub struct Service<S>
@@ -349,22 +354,13 @@ where
     /// Settles a round trip's keys in two passes: every answer is recorded
     /// (and cached) first, then every flight is released, so a waiter woken
     /// by any release of the batch finds the whole batch answered.
-    fn deliver(
-        &self,
-        keys: Vec<S::Key>,
-        outcome: Result<Vec<Result<S::Value, S::Error>>, Error<S::Error>>,
-        trip: u64,
-    ) {
+    fn deliver(&self, keys: Vec<S::Key>, outcome: OutcomeOf<S>, trip: u64) {
         let answers = self.answers(keys.len(), outcome);
         self.settle_all(keys, answers, trip);
     }
 
     /// One answer per key of a round trip that ended with `outcome`.
-    fn answers(
-        &self,
-        count: usize,
-        outcome: Result<Vec<Result<S::Value, S::Error>>, Error<S::Error>>,
-    ) -> Vec<ResultOf<S>> {
+    fn answers(&self, count: usize, outcome: OutcomeOf<S>) -> Vec<ResultOf<S>> {
         match outcome {
             Ok(answers) => answers
                 .into_iter()
@@ -416,7 +412,7 @@ where
                 flights: Vec::new(),
             };
             let mut joined = Vec::new();
-            let mut groups: Vec<(S::Group, Vec<(usize, S::Key)>)> = Vec::new();
+            let mut groups: GroupsOf<S> = Vec::new();
             for (index, key) in pending.drain(..) {
                 if let Some(value) = self.cache.get(&key, start) {
                     Stats::add(&self.stats.cache_hits, 1);

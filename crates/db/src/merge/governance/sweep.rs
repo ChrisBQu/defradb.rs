@@ -1,9 +1,9 @@
 use cid::Cid;
 use defra_core::block::{Block, CrdtDelta};
 use defra_core::merge::MergeBlock;
-use std::future::Future;
 #[cfg(not(target_arch = "wasm32"))]
 use defra_core::thread_bounds::MaybeSendSync;
+use std::future::Future;
 use storage::corekv::Store;
 
 use crate::merge::merge_handler::{DbMergeHandler, MergeError};

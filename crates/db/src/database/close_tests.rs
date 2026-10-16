@@ -17,8 +17,7 @@ const DEADLINE: Duration = Duration::from_secs(60);
 /// that commit, or close with the transaction still in flight.
 #[test]
 fn close_stops_the_pool_before_it_closes_the_store() {
-    let pool =
-        workers::Pool::start(storage::with_worker_io(workers::Config::unplaced(1))).unwrap();
+    let pool = workers::Pool::start(storage::with_worker_io(workers::Config::unplaced(1))).unwrap();
     let store = RegolithStore::open_with_options(
         "close-order",
         RegolithStoreOptions::memory().placed_on(&pool),
@@ -46,7 +45,10 @@ fn close_stops_the_pool_before_it_closes_the_store() {
     release.set();
 
     assert!(close.join().unwrap().is_ok(), "the store closed cleanly");
-    assert!(write.wait_timeout(DEADLINE).unwrap().is_ok(), "the write committed");
+    assert!(
+        write.wait_timeout(DEADLINE).unwrap().is_ok(),
+        "the write committed"
+    );
     assert!(
         workers::block_on_timeout(pool.stopped(), DEADLINE).is_ok(),
         "the pool stopped"

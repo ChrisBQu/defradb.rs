@@ -683,7 +683,10 @@ _sessionID
     let items = data
         .get(collection_name)
         .and_then(JsonValue::as_array)
-        .ok_or_else(|| Error::MissingArray { collection: collection_name.to_string(), within: data.to_string() })?;
+        .ok_or_else(|| Error::MissingArray {
+            collection: collection_name.to_string(),
+            within: data.to_string(),
+        })?;
 
     assert_eq!(
         items.len(),
@@ -734,7 +737,10 @@ _sessionID
     let items = data
         .get(collection_name)
         .and_then(JsonValue::as_array)
-        .ok_or_else(|| Error::MissingArray { collection: collection_name.to_string(), within: data.to_string() })?;
+        .ok_or_else(|| Error::MissingArray {
+            collection: collection_name.to_string(),
+            within: data.to_string(),
+        })?;
 
     assert_eq!(
         items.len(),
@@ -764,7 +770,10 @@ fn parse_ranked_hits(data: &JsonValue, target: SearchTarget) -> crate::Result<Ve
     let items = data
         .get(collection_name)
         .and_then(JsonValue::as_array)
-        .ok_or_else(|| Error::MissingArray { collection: collection_name.to_string(), within: data.to_string() })?;
+        .ok_or_else(|| Error::MissingArray {
+            collection: collection_name.to_string(),
+            within: data.to_string(),
+        })?;
 
     items
         .iter()

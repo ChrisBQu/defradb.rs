@@ -173,7 +173,10 @@ where
         block: &MergeBlock,
     ) -> Result<(), Self::Error> {
         let Some(pool) = self.off_the_pool() else {
-            return self.inner.validate_authorization(authorization, block).await;
+            return self
+                .inner
+                .validate_authorization(authorization, block)
+                .await;
         };
         let target = document_target(Some(&block.collection_id), Some(&block.doc_id));
         let (authorization, block) = (authorization.cloned(), block.clone());
@@ -194,9 +197,11 @@ where
             return self.inner.recover_block_metadata(cid, block_data).await;
         };
         let (cid, data) = (*cid, Bytes::copy_from_slice(block_data));
-        self.on_pool(pool, workers::Target::LeastLoaded, move |inner| async move {
-            inner.recover_block_metadata(&cid, &data).await
-        })
+        self.on_pool(
+            pool,
+            workers::Target::LeastLoaded,
+            move |inner| async move { inner.recover_block_metadata(&cid, &data).await },
+        )
         .await
     }
 
@@ -286,8 +291,14 @@ mod tests {
     fn a_merge_goes_to_its_documents_worker_and_a_mixed_batch_anywhere() {
         let key = workers::Target::Key(query::pooled::document_key("c1", "bae-1"));
         assert_eq!(document_target(Some("c1"), Some("bae-1")), key);
-        assert_eq!(document_target(None, Some("bae-1")), workers::Target::LeastLoaded);
-        assert_eq!(batch_target(&[block("c1", "bae-1"), block("c1", "bae-1")]), key);
+        assert_eq!(
+            document_target(None, Some("bae-1")),
+            workers::Target::LeastLoaded
+        );
+        assert_eq!(
+            batch_target(&[block("c1", "bae-1"), block("c1", "bae-1")]),
+            key
+        );
         assert_eq!(
             batch_target(&[block("c1", "bae-1"), block("c1", "bae-2")]),
             workers::Target::LeastLoaded

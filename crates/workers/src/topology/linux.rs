@@ -264,7 +264,8 @@ mod tests {
         let sys = two_node_machine();
         let nodes = read(&sys.0, &CpuSet::parse("0-7").unwrap()).unwrap();
         assert_eq!(nodes.len(), 2);
-        let summary: Vec<(usize, Vec<String>, Vec<usize>, Vec<usize>)> = nodes
+        type Summary = (usize, Vec<String>, Vec<usize>, Vec<usize>);
+        let summary: Vec<Summary> = nodes
             .iter()
             .map(|n| {
                 (

@@ -124,7 +124,10 @@ impl<S: storage::corekv::Store + 'static> DbAcpOps<S> {
         let collection_version = self
             .database
             .get_collection(collection)
-            .map_err(|error| Error::CollectionLookup { collection: collection.to_owned(), source: error })?
+            .map_err(|error| Error::CollectionLookup {
+                collection: collection.to_owned(),
+                source: error,
+            })?
             .ok_or_else(|| Error::CollectionMissing(collection.to_owned()))?;
         let Some(policy) = collection_version.schema().policy.clone() else {
             return Err(Error::CollectionWithoutPolicy);
@@ -132,8 +135,7 @@ impl<S: storage::corekv::Store + 'static> DbAcpOps<S> {
 
         // Parse the target into a structured subject once, at the edge: an actor
         // DID, all-actors `*`, a cross-object edge, or a userset.
-        let target =
-            acp::parse_target_subject(target).map_err(Error::InvalidTarget)?;
+        let target = acp::parse_target_subject(target).map_err(Error::InvalidTarget)?;
 
         let loaded = self
             .policy_lookup
@@ -224,8 +226,7 @@ impl<S: storage::corekv::Store + 'static> DbAcpOps<S> {
         }
 
         acp::policy_yaml::check_duplicate_yaml_keys(policy).map_err(Error::PolicyYaml)?;
-        let parsed =
-            acp::policy_yaml::parse_policy_yaml(policy).map_err(Error::PolicyYaml)?;
+        let parsed = acp::policy_yaml::parse_policy_yaml(policy).map_err(Error::PolicyYaml)?;
         if parsed.name.is_empty() {
             return Err(Error::PolicyNameRequired);
         }
@@ -252,8 +253,8 @@ impl<S: storage::corekv::Store + 'static> DbAcpOps<S> {
                 .await
                 .map_err(Error::PolicyIdAllocation)?,
         };
-        let built = acp::policy_yaml::build_policy(&parsed, counter)
-            .map_err(Error::InvalidPolicy)?;
+        let built =
+            acp::policy_yaml::build_policy(&parsed, counter).map_err(Error::InvalidPolicy)?;
         let options = acp::StorePolicyOptions::new()
             .with_validation()
             .with_dpi_enforcement();

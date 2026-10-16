@@ -79,8 +79,7 @@ impl WorkersConfig {
             workers: parsed(&self.count)?.unwrap_or(defaults.workers.clone()),
             placement: parsed(&self.placement)?.unwrap_or(defaults.placement.clone()),
             smt: parsed(&self.smt)?.unwrap_or(defaults.smt),
-            memory_policy: parsed(&self.memory_policy)?
-                .unwrap_or(defaults.memory_policy.clone()),
+            memory_policy: parsed(&self.memory_policy)?.unwrap_or(defaults.memory_policy.clone()),
             memory_lock: parsed(&self.memory_lock)?.unwrap_or(defaults.memory_lock.clone()),
             priorities,
             inbox_items: self.inbox_items.unwrap_or(defaults.inbox_items),

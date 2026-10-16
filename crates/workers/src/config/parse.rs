@@ -13,7 +13,9 @@
 
 use std::str::FromStr;
 
-use super::{MemoryLock, MemoryPolicy, Placement, Priority, QosClass, RealTimePolicy, Smt, Workers};
+use super::{
+    MemoryLock, MemoryPolicy, Placement, Priority, QosClass, RealTimePolicy, Smt, Workers,
+};
 use crate::topology::CpuSet;
 use crate::Error;
 
@@ -184,7 +186,10 @@ mod tests {
         assert_eq!("all".parse::<Smt>(), Ok(Smt::All));
         assert!("half".parse::<Smt>().is_err());
 
-        assert_eq!("bind:0,1".parse::<MemoryPolicy>(), Ok(MemoryPolicy::Bind(vec![0, 1])));
+        assert_eq!(
+            "bind:0,1".parse::<MemoryPolicy>(),
+            Ok(MemoryPolicy::Bind(vec![0, 1]))
+        );
         assert_eq!("local".parse::<MemoryPolicy>(), Ok(MemoryPolicy::Local));
         assert!("bind:".parse::<MemoryPolicy>().is_err());
 

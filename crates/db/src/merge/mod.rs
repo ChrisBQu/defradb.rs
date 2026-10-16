@@ -24,8 +24,6 @@ pub mod se_query_transport;
 pub mod txn_broadcaster;
 
 pub use acp_merge_handler::{AcpMergeError, AcpMergeHandler};
-#[cfg(not(target_arch = "wasm32"))]
-pub use pooled::PooledMergeHandler;
 pub use broadcast_mutator::{BroadcastMutator, BroadcastSeOptions, SeArtifactRepusher};
 pub use head_provider::DbHeadProvider;
 pub use merge_handler::{DbMergeHandler, MergeError, DEFAULT_MAX_MERGE_DEPTH};
@@ -33,6 +31,8 @@ pub use merge_handler::{DbMergeHandler, MergeError, DEFAULT_MAX_MERGE_DEPTH};
 pub use peer_identity::{
     create_peer_to_did_mapper, peer_id_to_did, public_key_to_did, PeerIdentityError,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use pooled::PooledMergeHandler;
 pub use push_docs::{
     push_existing_docs, push_existing_docs_by_id, push_existing_docs_with_config,
     retry_collection_commit, retry_doc, PushExistingDocsSeOptions,
