@@ -508,3 +508,30 @@ fn an_inline_prefetch_leaves_the_fetch_to_the_call() {
     assert_eq!(n0_future::future::block_on(service.get(5)), Ok(10));
     assert_eq!(service.source().round_trips(), 1);
 }
+
+#[test]
+fn a_round_trip_handed_off_from_a_worker_runs_on_the_network() {
+    let pool = workers::Pool::start(workers::Config::unplaced(1)).unwrap();
+    let (network, inline) = (Runtime::on_demand(), Runtime::inline());
+    let on_worker = network.clone();
+    let ran_on_worker = pool
+        .submit_and_wait(workers::Target::Worker(0), move || async move {
+            (
+                on_worker.hand_off(|| async { workers::on_worker() }).await,
+                inline.hand_off(|| async { workers::on_worker() }).await,
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        ran_on_worker,
+        (Some(false), Some(true)),
+        "the round trip left the worker, the inline one stayed"
+    );
+    // Off the pool it runs in place.
+    let edge = edge::on_demand().unwrap();
+    assert_eq!(
+        edge.block_on(network.hand_off(|| async { 7 })).unwrap(),
+        Some(7)
+    );
+    pool.shutdown_blocking().unwrap();
+}

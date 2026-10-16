@@ -4,10 +4,12 @@
 //! for all on-chain communication. The provider abstraction allows swapping
 //! between Cosmos SDK and EVM backends.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use defra_core::thread_bounds::MaybeSend;
 use identity::Did;
 
 use acp::{DocumentACP, DocumentPermission, Identity, Result, Subject};
@@ -141,14 +143,20 @@ impl VeraDocumentACP {
         _creator_did: &str,
         policy_yaml: &str,
     ) -> std::result::Result<String, ProviderError> {
-        self.provider.create_policy(policy_yaml).await
+        let yaml = policy_yaml.to_owned();
+        self.remote(move |provider| async move { provider.create_policy(&yaml).await })
+            .await
     }
 
     pub async fn get_policy(
         &self,
         policy_id: &str,
     ) -> std::result::Result<Option<acp::Policy>, ProviderError> {
-        let Some(info) = self.provider.query_policy(policy_id).await? else {
+        let id = policy_id.to_owned();
+        let Some(info) = self
+            .remote(move |provider| async move { provider.query_policy(&id).await })
+            .await?
+        else {
             return Ok(None);
         };
 
@@ -188,11 +196,7 @@ impl VeraDocumentACP {
             .access_cache
             .as_ref()
             .map(|cache| cache.registration_generation());
-        let (is_registered, _owner) = self
-            .provider
-            .query_object_owner(policy_id, resource_name, doc_id)
-            .await
-            .map_err(provider_err)?;
+        let (is_registered, _owner) = self.object_owner(policy_id, resource_name, doc_id).await?;
         if let (Some(cache), Some(generation)) = (&self.access_cache, generation) {
             cache.remember_registration(
                 policy_id,
@@ -206,11 +210,49 @@ impl VeraDocumentACP {
     }
 
     async fn create_bearer_token(&self, did: &str) -> std::result::Result<String, acp::Error> {
-        let context = defra_core::RequestContext::bound_or_ambient(self.context.as_ref());
-        self.provider
-            .create_bearer_token_as(&context, did)
+        let context =
+            defra_core::RequestContext::bound_or_ambient(self.context.as_ref()).into_owned();
+        let did = did.to_owned();
+        self.remote(
+            move |provider| async move { provider.create_bearer_token_as(&context, &did).await },
+        )
+        .await
+        .map_err(provider_err)
+    }
+
+    async fn object_owner(
+        &self,
+        policy_id: &str,
+        resource_name: &str,
+        doc_id: &str,
+    ) -> std::result::Result<(bool, String), acp::Error> {
+        let [policy, resource, doc] = owned([policy_id, resource_name, doc_id]);
+        self.remote(move |provider| async move {
+            provider.query_object_owner(&policy, &resource, &doc).await
+        })
+        .await
+        .map_err(provider_err)
+    }
+
+    /// The provider round trip `call` makes, run where round trips run: a
+    /// call on a pool worker crosses to the network, whose reactor the
+    /// provider's client needs ([`inputs::Runtime::hand_off`]).
+    async fn remote<T, F, Fut>(&self, call: F) -> std::result::Result<T, ProviderError>
+    where
+        F: FnOnce(Arc<dyn VeraProvider>) -> Fut + MaybeSend + 'static,
+        Fut: Future<Output = std::result::Result<T, ProviderError>> + MaybeSend + 'static,
+        T: MaybeSend + 'static,
+    {
+        let provider = Arc::clone(&self.provider);
+        self.decisions
+            .runtime()
+            .hand_off(move || call(provider))
             .await
-            .map_err(provider_err)
+            .unwrap_or_else(|| {
+                Err(ProviderError::Unavailable(
+                    "the request did not complete; try again".into(),
+                ))
+            })
     }
 
     pub fn acp_light_client_status(
@@ -237,6 +279,12 @@ fn subject_to_actor_did(target: &Subject) -> Did {
         Subject::Entity(did) => Did::new_unchecked(did.to_string()),
         _ => Did::new_unchecked(String::new()),
     }
+}
+
+/// Borrowed arguments made owned, for a round trip that may cross to the
+/// network.
+fn owned<const N: usize>(parts: [&str; N]) -> [String; N] {
+    parts.map(str::to_owned)
 }
 
 fn provider_err(e: impl std::fmt::Display) -> acp::Error {
@@ -273,10 +321,14 @@ impl DocumentACP for VeraDocumentACP {
         doc_id: &str,
     ) -> Result<()> {
         let bearer_token = self.create_bearer_token(identity.as_str()).await?;
-        self.provider
-            .register_object(&bearer_token, policy_id, resource_name, doc_id)
-            .await
-            .map_err(provider_err)?;
+        let [policy, resource, doc] = owned([policy_id, resource_name, doc_id]);
+        self.remote(move |provider| async move {
+            provider
+                .register_object(&bearer_token, &policy, &resource, &doc)
+                .await
+        })
+        .await
+        .map_err(provider_err)?;
         self.invalidate_cached_access(policy_id);
         Ok(())
     }
@@ -287,11 +339,7 @@ impl DocumentACP for VeraDocumentACP {
         resource_name: &str,
         doc_id: &str,
     ) -> Result<bool> {
-        let (is_registered, _owner) = self
-            .provider
-            .query_object_owner(policy_id, resource_name, doc_id)
-            .await
-            .map_err(provider_err)?;
+        let (is_registered, _owner) = self.object_owner(policy_id, resource_name, doc_id).await?;
         Ok(is_registered)
     }
 
@@ -301,11 +349,7 @@ impl DocumentACP for VeraDocumentACP {
         resource_name: &str,
         doc_id: &str,
     ) -> Result<Option<Did>> {
-        let (is_registered, owner) = self
-            .provider
-            .query_object_owner(policy_id, resource_name, doc_id)
-            .await
-            .map_err(provider_err)?;
+        let (is_registered, owner) = self.object_owner(policy_id, resource_name, doc_id).await?;
 
         if !is_registered {
             return Ok(None);
@@ -400,16 +444,20 @@ impl DocumentACP for VeraDocumentACP {
             return Ok(None);
         };
 
-        self.provider
-            .create_access_decision(
-                policy_id,
-                resource_name,
-                object_id,
-                permission,
-                actor_did.as_str(),
-            )
-            .await
-            .map_err(provider_err)
+        let [policy, resource, object, permission, actor] = owned([
+            policy_id,
+            resource_name,
+            object_id,
+            permission,
+            actor_did.as_str(),
+        ]);
+        self.remote(move |provider| async move {
+            provider
+                .create_access_decision(&policy, &resource, &object, &permission, &actor)
+                .await
+        })
+        .await
+        .map_err(provider_err)
     }
 
     async fn add_actor_relationship(
@@ -424,16 +472,13 @@ impl DocumentACP for VeraDocumentACP {
     ) -> Result<bool> {
         let bearer_token = self.create_bearer_token(requestor.as_str()).await?;
         let subject = did_to_subject(target);
+        let [policy, resource, doc, relation] = owned([policy_id, resource_name, doc_id, relation]);
         let result = self
-            .provider
-            .set_relationship(
-                &bearer_token,
-                policy_id,
-                resource_name,
-                doc_id,
-                relation,
-                &subject,
-            )
+            .remote(move |provider| async move {
+                provider
+                    .set_relationship(&bearer_token, &policy, &resource, &doc, &relation, &subject)
+                    .await
+            })
             .await
             .map_err(provider_err)?;
 
@@ -454,16 +499,20 @@ impl DocumentACP for VeraDocumentACP {
     ) -> Result<bool> {
         let bearer_token = self.create_bearer_token(requestor.as_str()).await?;
         let subject = did_to_subject(target);
+        let [policy, resource, doc, relation] = owned([policy_id, resource_name, doc_id, relation]);
         let result = self
-            .provider
-            .delete_relationship(
-                &bearer_token,
-                policy_id,
-                resource_name,
-                doc_id,
-                relation,
-                &subject,
-            )
+            .remote(move |provider| async move {
+                provider
+                    .delete_relationship(
+                        &bearer_token,
+                        &policy,
+                        &resource,
+                        &doc,
+                        &relation,
+                        &subject,
+                    )
+                    .await
+            })
             .await
             .map_err(provider_err)?;
 
@@ -499,18 +548,16 @@ impl DocumentACP for VeraDocumentACP {
             Subject::EntitySet { .. } => {
                 let (kind, sr, so, srel) =
                     zanzibar::encode_subject(&target).map_err(acp::Error::from)?;
+                let [policy, resource, doc, relation] =
+                    owned([policy_id, resource_name, doc_id, relation]);
                 let result = self
-                    .provider
-                    .set_relationship_subject(
-                        policy_id,
-                        resource_name,
-                        doc_id,
-                        relation,
-                        kind,
-                        &sr,
-                        &so,
-                        &srel,
-                    )
+                    .remote(move |provider| async move {
+                        provider
+                            .set_relationship_subject(
+                                &policy, &resource, &doc, &relation, kind, &sr, &so, &srel,
+                            )
+                            .await
+                    })
                     .await
                     .map_err(provider_err)?;
                 self.invalidate_cached_access(policy_id);
@@ -547,18 +594,16 @@ impl DocumentACP for VeraDocumentACP {
             Subject::EntitySet { .. } => {
                 let (kind, sr, so, srel) =
                     zanzibar::encode_subject(&target).map_err(acp::Error::from)?;
+                let [policy, resource, doc, relation] =
+                    owned([policy_id, resource_name, doc_id, relation]);
                 let result = self
-                    .provider
-                    .delete_relationship_subject(
-                        policy_id,
-                        resource_name,
-                        doc_id,
-                        relation,
-                        kind,
-                        &sr,
-                        &so,
-                        &srel,
-                    )
+                    .remote(move |provider| async move {
+                        provider
+                            .delete_relationship_subject(
+                                &policy, &resource, &doc, &relation, kind, &sr, &so, &srel,
+                            )
+                            .await
+                    })
                     .await
                     .map_err(provider_err)?;
                 self.invalidate_cached_access(policy_id);
@@ -582,11 +627,8 @@ impl DocumentACP for VeraDocumentACP {
             return Ok(());
         }
 
-        let (_is_registered, owner_did) = self
-            .provider
-            .query_object_owner(policy_id, resource_name, doc_id)
-            .await
-            .map_err(provider_err)?;
+        let (_is_registered, owner_did) =
+            self.object_owner(policy_id, resource_name, doc_id).await?;
 
         if owner_did.is_empty() {
             return Ok(());
@@ -598,10 +640,14 @@ impl DocumentACP for VeraDocumentACP {
             .self_did()
             .unwrap_or_else(|| owner_did.clone());
         let bearer_token = self.create_bearer_token(&archive_did).await?;
-        self.provider
-            .archive_object(&bearer_token, policy_id, resource_name, doc_id)
-            .await
-            .map_err(provider_err)?;
+        let [policy, resource, doc] = owned([policy_id, resource_name, doc_id]);
+        self.remote(move |provider| async move {
+            provider
+                .archive_object(&bearer_token, &policy, &resource, &doc)
+                .await
+        })
+        .await
+        .map_err(provider_err)?;
 
         self.invalidate_cached_access(policy_id);
 

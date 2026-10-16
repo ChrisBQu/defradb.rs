@@ -189,6 +189,11 @@ where
         &self.inner.stats
     }
 
+    /// The runtime its round trips run on.
+    pub fn runtime(&self) -> &Runtime {
+        &self.inner.runtime
+    }
+
     /// The bytes the cache holds now.
     pub fn cache_bytes(&self) -> usize {
         self.inner.cache.bytes()

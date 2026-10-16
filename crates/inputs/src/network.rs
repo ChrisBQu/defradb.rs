@@ -2,10 +2,11 @@
 //! deadlines and retries read.
 
 use std::fmt;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use defra_core::thread_bounds::{MaybeBoxFuture, MaybeSendSync};
+use defra_core::thread_bounds::{MaybeBoxFuture, MaybeSend, MaybeSendSync};
 use workers::Clock;
 
 /// Where round trips run: network work spawned apart from the tasks that
@@ -174,6 +175,30 @@ impl Runtime {
 
     pub(crate) fn now(&self) -> u64 {
         self.clock.now_micros()
+    }
+
+    /// Runs the round trip `make` builds where round trips run, and hands
+    /// its output back: on the network when called on a pool worker (the
+    /// round trip needs a reactor the worker has none of), in place anywhere
+    /// else or inline. `None` when the network refused it (it is shutting
+    /// down) or it panicked.
+    pub async fn hand_off<F, Fut>(&self, make: F) -> Option<Fut::Output>
+    where
+        F: FnOnce() -> Fut + MaybeSend + 'static,
+        Fut: Future + MaybeSend + 'static,
+        Fut::Output: MaybeSend + 'static,
+    {
+        // A browser's one worker is the page's thread, which runs the event
+        // loop round trips need: nothing to cross.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(network) = self.network.as_ref().filter(|_| workers::on_worker()) {
+            let (done, output) = regolith::sync::unbounded();
+            network.spawn(Box::pin(async move {
+                let _ = done.try_send(make().await);
+            }));
+            return output.recv_async().await;
+        }
+        Some(make().await)
     }
 }
 
