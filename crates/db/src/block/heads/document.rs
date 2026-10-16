@@ -103,6 +103,9 @@ pub fn publication_key(head: &HeadstoreDocKey) -> Vec<u8> {
 /// arrived, and is held ahead until it does; that decision reads the parent's
 /// part of the set, so only an operand that names the parent (its own
 /// publication, or another child's) conflicts with it.
+///
+/// Returns whether this call published the head, so a block that heads several
+/// fields (an Immutable block) adds its other names to `write` only then.
 pub async fn publish(
     writer: &datastore::NamespaceView,
     set: &Set,
@@ -110,10 +113,10 @@ pub async fn publish(
     head: &HeadstoreDocKey,
     priority: u64,
     parents: &[Cid],
-) -> Result<()> {
+) -> Result<bool> {
     let entry = HeadstorePriorityKey::new(head.doc_short_id, priority, head.cid).bytes();
     if writer.get(&entry).await?.as_deref() == Some(PUBLISHED) {
-        return Ok(());
+        return Ok(false);
     }
     let mut held = Vec::new();
     for parent in parents {
@@ -131,7 +134,8 @@ pub async fn publish(
         writer.get_parts(&set_key(head.doc_short_id), &held).await?;
     }
     write.add(&name(&head.field_id, &head.cid), priority);
-    writer.set(&entry, PUBLISHED).await
+    writer.set(&entry, PUBLISHED).await?;
+    Ok(true)
 }
 
 /// Whether the head `cid` of the document was ever published: its block is

@@ -198,6 +198,18 @@ async fn a_deleted_document_stops_ranking() {
     );
 }
 
+#[tokio::test]
+async fn a_deleted_document_does_not_shorten_the_answer() {
+    let mut corpus = crate::support::Corpus::new(SEED ^ 0x223);
+    let vectors = corpus.clustered(400, DIMENSIONS, 8, 0.1);
+    let mut index = filled(8, 8, &vectors).await;
+    index.build().await.unwrap();
+
+    assert!(index.delete(NodeId(1)).await.unwrap());
+    let hits = index.search(vectors[0].as_slice(), 10, None).await.unwrap();
+    assert_eq!(hits.len(), 10, "a tombstone took a slot: {hits:?}");
+}
+
 /// `Admit` is trait-level, so it must work here exactly as it does for a
 /// graph, as long as every list is probed.
 #[tokio::test]
@@ -447,4 +459,16 @@ async fn live_count_at_least_agrees_with_live_count() {
             "target={target}, true_count={true_count}"
         );
     }
+}
+
+/// `nprobe = 0` scales the probe with the list count, as pg_vectorsearch does:
+/// `0.5·√nlist`, at least 10, never more lists than exist.
+#[test]
+fn a_zero_nprobe_is_derived_from_nlist() {
+    let derived = params(0, 0);
+    assert_eq!(derived.resolved_nprobe(1_385), 19);
+    assert_eq!(derived.resolved_nprobe(65_536), 128);
+    assert_eq!(derived.resolved_nprobe(400), 10, "the floor holds");
+    assert_eq!(derived.resolved_nprobe(4), 4, "never more lists than exist");
+    assert_eq!(params(0, 16).resolved_nprobe(1_385), 16, "explicit wins");
 }

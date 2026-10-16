@@ -62,9 +62,13 @@ pub struct CompositeMergeState {
     pub(crate) owned_field_cids: Vec<Cid>,
     pub(crate) linked_field_cids: Vec<Cid>,
     pub(crate) linked_encryption_cids: Vec<Cid>,
+    /// Fields of each linked Immutable block: their heads are the block.
+    pub(crate) immutable_block_fields: RapidHashMap<Cid, Vec<String>>,
     pub(crate) is_branchable: bool,
     /// The document's head set and stored value, read once for the block.
     pub(crate) reads: super::block_reads::BlockReads,
+    /// Unique-index collisions this merge resolved, published after commit.
+    pub(crate) unique_conflicts: Vec<events::UniqueIndexConflictData>,
 }
 
 enum CompositeMergePreparation {
@@ -556,7 +560,12 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                         error
                     ))
                 })?;
-                let mut committed_events = Vec::new();
+                // Resolved unique-index collisions go out ahead of the update.
+                let mut committed_events: Vec<Message> = state
+                    .unique_conflicts
+                    .drain(..)
+                    .map(Message::unique_index_conflict)
+                    .collect();
                 committed_events.push(Message::update(Update::new(
                     doc_id_str.to_string(),
                     *cid,
@@ -986,6 +995,11 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                     pending_events.push(PendingMergeEvent {
                         message: Message::update(update),
                     });
+                    for conflict in state.unique_conflicts.drain(..) {
+                        pending_events.push(PendingMergeEvent {
+                            message: Message::unique_index_conflict(conflict),
+                        });
+                    }
 
                     if !from_collection {
                         let merge_complete = MergeCompleteData {

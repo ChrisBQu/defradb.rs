@@ -1,6 +1,6 @@
 //! BitswapStore adapter for DefraBlockstore.
 //!
-//! This module implements the `Store` trait from iroh-bitswap
+//! This module implements the `Store` trait from the bitswap crate
 //! for our async `DefraBlockstore`. The trait methods are async, which maps
 //! directly to our async blockstore interface.
 //!
@@ -12,17 +12,17 @@
 use std::fmt::Debug;
 use std::sync::Arc;
 
+use ::bitswap::Block;
 use cid::Cid;
-use iroh_bitswap::Block;
 
 use blockstore::Blockstore;
 
 use super::store_trait::impl_bitswap_store;
 use crate::{Error, Result};
 
-/// Adapter that implements iroh_bitswap::Store for any `Blockstore`.
+/// Adapter that implements bitswap::Store for any `Blockstore`.
 ///
-/// The Store trait from iroh-bitswap uses async methods,
+/// The Store trait from the bitswap crate uses async methods,
 /// which maps directly to our async DefraBlockstore interface.
 ///
 /// # Thread Safety

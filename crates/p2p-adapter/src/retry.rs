@@ -128,6 +128,7 @@ async fn record_failure<S: storage::corekv::Store>(
                 &failure.collection_id,
                 failure.doc_id.is_empty(),
                 generation,
+                std::slice::from_ref(&failure.cid),
             )
             .await
             .map(|cleared| cleared.then_some(generation))

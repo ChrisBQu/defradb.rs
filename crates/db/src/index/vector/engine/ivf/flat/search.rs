@@ -26,12 +26,7 @@ impl<S: VectorNodeStore> IvfFlat<S> {
         let metric = self.metric();
 
         let centroids = self.trained_centroids(state).await?;
-        let lists = ivf::probe_lists(
-            query.as_slice(),
-            centroids,
-            self.params().nprobe as usize,
-            effort,
-        );
+        let lists = ivf::probe_lists(query.as_slice(), centroids, self.params().nprobe, effort);
 
         // A max-heap of size k: the worst of the current best is on top, so a
         // new candidate is one comparison and at most one pop, exactly as
@@ -55,8 +50,8 @@ impl<S: VectorNodeStore> IvfFlat<S> {
                 .await?;
         }
 
-        // A tombstoned document keeps its list entry, so liveness is checked
-        // once on the survivors rather than on every candidate.
+        // Delete drops the list entry, but a list written before it did can
+        // still name a tombstone, so the survivors are checked once more.
         let ranked: Vec<Ranked> = best.into_sorted_vec();
         let mut out = Vec::with_capacity(ranked.len());
         for candidate in ranked {

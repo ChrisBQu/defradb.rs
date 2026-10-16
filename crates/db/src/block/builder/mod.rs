@@ -11,6 +11,7 @@ mod batch_signing;
 mod build;
 pub mod collection;
 mod compute;
+mod immutable;
 mod write;
 
 pub(crate) use batch_signing::collect_on_commit;
@@ -22,6 +23,8 @@ pub use compute::{compute_document_blocks, insert_computed_blocks, ComputedBlock
 pub(crate) use write::inherited_encryption_policy;
 pub use write::{write_delete_block, write_document_blocks};
 pub(crate) use write::{write_delete_block_with_inputs, write_document_blocks_with_inputs};
+
+use immutable::{compute_immutable_block, immutable_field_names, immutable_for_pass};
 
 use bytes::Bytes;
 use rapidhash::{HashMapExt, RapidHashMap};
@@ -40,6 +43,7 @@ use defra_core::cid_encoding::cid_bytes;
 use defra_core::encryption::EncryptionConfig;
 use defra_core::signing::SigningConfig;
 use document::{DocID, Document, NormalValue};
+use schema::CollectionVersion;
 use storage::corekv::Key;
 use storage::keys::doc_id_index::DocRef;
 use storage::keys::headstore::HeadstorePriorityKey;
@@ -583,9 +587,10 @@ mod prepared_signature_tests {
             encrypt_fields: vec!["secret".into()],
         };
         let memo = query::prepared::PreparedInputMemo::default();
+        let schema = CollectionVersion::new("Users", "schema-v1", "users", vec![]);
         let error = compute_document_blocks_with_inputs(
             &doc,
-            "schema-v1",
+            &schema,
             identity,
             Some(&config),
             None,

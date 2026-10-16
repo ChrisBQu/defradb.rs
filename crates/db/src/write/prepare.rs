@@ -632,7 +632,7 @@ impl<S: Store + 'static> crate::AutoCommitMutator<S> {
             if let Some(signing_config) = signing_config {
                 let blocks = crate::block::builder::compute_document_blocks(
                     &doc,
-                    collection.version_id(),
+                    collection.schema(),
                     identity,
                     context.encryption(),
                     Some(signing_config),

@@ -294,7 +294,7 @@ pub async fn write_document_blocks(
     blockstore: &NamespaceView,
     headstore: &NamespaceView,
     doc: &Document,
-    schema_version_id: &str,
+    schema: &CollectionVersion,
     identity: DocStorageIdentity,
     modified_fields: Option<&rapidhash::RapidHashSet<String>>,
     encryption_config: Option<&EncryptionConfig>,
@@ -305,7 +305,7 @@ pub async fn write_document_blocks(
         blockstore,
         headstore,
         doc,
-        schema_version_id,
+        schema,
         identity,
         modified_fields,
         encryption_config,
@@ -327,7 +327,7 @@ pub(crate) async fn write_document_blocks_with_inputs(
     blockstore: &NamespaceView,
     headstore: &NamespaceView,
     doc: &Document,
-    schema_version_id: &str,
+    schema: &CollectionVersion,
     identity: DocStorageIdentity,
     modified_fields: Option<&rapidhash::RapidHashSet<String>>,
     encryption_config: Option<&EncryptionConfig>,
@@ -337,6 +337,8 @@ pub(crate) async fn write_document_blocks_with_inputs(
     prepared_inputs: Option<&query::prepared::PreparedInputMemo>,
     heads: Option<DocHeadsSnapshot>,
 ) -> Result<BlockResult, BuildError> {
+    let schema_version_id = schema.version_id.as_str();
+    let immutable_fields = immutable_field_names(schema);
     let doc_ref_bytes = identity.doc_ref_bytes();
 
     let mut field_links: Vec<DAGLink> = Vec::new();
@@ -384,14 +386,31 @@ pub(crate) async fn write_document_blocks_with_inputs(
 
     // The first signature this pass is missing; the pass goes on past it.
     let mut first_miss = None;
+    let (immutable_names, immutable) = if is_create {
+        immutable_for_pass(
+            doc,
+            schema,
+            encryption_config,
+            signing_config,
+            prepared_inputs,
+            &mut first_miss,
+        )?
+    } else {
+        Default::default()
+    };
     for (field_name, field_value) in doc.values() {
         if field_name == "_docID" {
             continue;
         }
 
+        // On update an immutable field is unchanged (validated before blocks
+        // are written), so it needs no block; on create it is in the
+        // Immutable block.
         let should_create_block = match modified_fields {
-            None => true,
-            Some(fields) => fields.contains(field_name),
+            None => !immutable_names.contains(field_name),
+            Some(fields) => {
+                fields.contains(field_name) && !immutable_fields.contains(field_name.as_str())
+            }
         };
 
         let field_head_entries = if is_create {
@@ -618,6 +637,30 @@ pub(crate) async fn write_document_blocks_with_inputs(
     // The composite links every field block, so it waits for all of them.
     if let Some(request) = first_miss {
         return Err(BuildError::NeedsInput(request));
+    }
+
+    if let Some(block) = immutable {
+        if let Some((sig_cid, sig_cbor)) = &block.signature {
+            blockstore
+                .set(&cid_bytes(sig_cid), sig_cbor)
+                .await
+                .map_err(|e| format!("Failed to store signature block: {}", e))?;
+        }
+        blockstore
+            .set(&cid_bytes(&block.cid), &block.bytes)
+            .await
+            .map_err(|e| format!("Failed to store immutable block: {}", e))?;
+        block.add_heads(&mut head_write);
+        headstore
+            .set(
+                &priority_index_key(identity.doc_short_id, 1, block.cid),
+                &[],
+            )
+            .await
+            .map_err(|e| format!("Failed to write immutable priority index: {}", e))?;
+        field_links.push(block.link());
+        field_cids.push(block.cid);
+        initial_field_cids.push(block.cid);
     }
 
     let composite_payload = CompositeDeltaPayload {

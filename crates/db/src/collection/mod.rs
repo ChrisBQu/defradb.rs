@@ -354,6 +354,12 @@ impl Collection {
         Arc::clone(&self.query_schema)
     }
 
+    /// The collection schema, shared: what a job computing on another worker
+    /// is handed.
+    pub(crate) fn shared_schema(&self) -> Arc<CollectionVersion> {
+        Arc::clone(&self.def)
+    }
+
     /// Check if an index exists on this collection.
     pub fn has_index(&self, name: &str) -> bool {
         self.def.indexes.iter().any(|idx| idx.name == name)

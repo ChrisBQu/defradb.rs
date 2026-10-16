@@ -289,6 +289,14 @@ impl<S: Store> crate::database::DB<S> {
         })
     }
 
+    /// Whether a downsample view reads this collection's commit history.
+    /// Each of its commits is a sample, so a re-written value is data.
+    pub(crate) fn is_downsample_source(&self, collection_name: &str) -> Result<bool> {
+        Ok(!self
+            .downsample_plans(None, Some(collection_name))?
+            .is_empty())
+    }
+
     pub(super) fn downsample_plans(
         &self,
         names_filter: Option<&RapidHashSet<String>>,

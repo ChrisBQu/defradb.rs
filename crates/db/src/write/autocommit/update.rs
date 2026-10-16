@@ -160,9 +160,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .store()
             .transact_retry(self.db.options().retry_options(), Box::new(attempt))
             .await;
-        let (doc, fields_modified, cid, block, col_data) = match result {
+        let (doc, fields_modified, commit) = match result {
             Ok(value) => *value
-                .downcast::<(Document, usize, Cid, Bytes, Option<(Cid, Bytes)>)>()
+                .downcast::<UpdateAttemptOutput>()
                 .map_err(|_| query::error::QueryError::execution("invalid update retry result"))?,
             Err(error) => match error.downcast_abort::<query::error::QueryError>() {
                 Ok(error) => return Err(error),
@@ -176,6 +176,9 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
 
         let mut doc = doc;
         doc.clear_write_preparation();
+        let Some((cid, block, col_data)) = commit else {
+            return Ok(UpdateResult::new(doc, fields_modified));
+        };
         let mut result = UpdateResult::with_commit(doc, fields_modified, cid, block);
         if let Some((col_cid, col_bytes)) = col_data {
             result.broadcast_cid = Some(col_cid);
@@ -188,7 +191,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         &self,
         retry: &mut dyn storage::corekv::RetryTxn,
         attempt: &UpdateRetryAttempt<S>,
-    ) -> query::error::Result<(Document, usize, Cid, Bytes, Option<(Cid, Bytes)>)> {
+    ) -> query::error::Result<UpdateAttemptOutput> {
         // A compare-and-set that finds the document changed lost a race the
         // caller asked for: report it with the reason the engine gave.
         let lost = retry.previous_conflict();
@@ -232,7 +235,8 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             |field| attempt.input.get_counter_delta(field).is_some(),
         );
         dependencies.extend(attempt.expected_fields.iter().flatten().cloned());
-        let fetcher = if attempt.expected.is_none() || attempt.expected_fields.is_some() {
+        let projected = attempt.expected.is_none() || attempt.expected_fields.is_some();
+        let fetcher = if projected {
             LensedDocFetcher::new_projected(
                 Arc::clone(&self.db),
                 txn,
@@ -274,7 +278,26 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 return Err(lost_race());
             }
         }
-        for field in &attempt.modified_fields {
+        // A field that already holds the written value needs no block: its
+        // LWW priority would only re-assert the current state. Counter inputs
+        // are deltas, an explicit encryption config re-keys every field, and a
+        // downsample source records every write as a sample. Only a field this
+        // attempt read is compared: that read is validated, so a concurrent
+        // change of the field conflicts and the comparison runs again.
+        let mut modified_fields = attempt.modified_fields.clone();
+        let downsample_source = self
+            .db
+            .is_downsample_source(&attempt.collection_name)
+            .map_err(|error| query::error::QueryError::execution(error.to_string()))?;
+        let unchanged_skips = attempt.context.encryption().is_none() && !downsample_source;
+        if unchanged_skips {
+            modified_fields.retain(|field| {
+                attempt.input.get_counter_delta(field).is_some()
+                    || (projected && !dependencies.contains(field))
+                    || attempt.input.get(field) != current_doc.get(field)
+            });
+        }
+        for field in &modified_fields {
             if let Some(delta) = attempt.input.get_counter_delta(field).cloned() {
                 current_doc.set_counter_delta(field.clone(), delta);
             } else if let Some(value) = attempt.input.get(field).cloned() {
@@ -288,6 +311,17 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             query::error::QueryError::execution("update transaction already consumed")
         })?;
         drop(fetcher);
+        if unchanged_skips && modified_fields.is_empty() {
+            // Nothing to write; the attempt still commits its reads, so a
+            // concurrent change of a compared field runs it again.
+            let (io, callbacks) = txn
+                .into_retry_attempt()
+                .map_err(|error| crate::error::commit_query_error(error.into()))?;
+            retry
+                .finish_attempt_io(io, callbacks)
+                .map_err(|error| crate::error::commit_query_error(error.into()))?;
+            return Ok((current_doc, 0, None));
+        }
 
         let datastore = txn.datastore().map_err(|error| {
             query::error::QueryError::execution(format!("failed to get datastore: {error}"))
@@ -312,7 +346,6 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                 other => query::error::QueryError::execution(other.to_string()),
             })?;
         current_doc.set_id(canonical_doc_id.clone());
-        let mut modified_fields = attempt.modified_fields.clone();
         let embedding_config = self.db.options().embedding_config();
         let inputs = attempt.prepared_inputs.clone().unwrap_or_default();
         let index_manager = IndexManager::from_indexes(
@@ -353,7 +386,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     &blockstore,
                     &headstore,
                     &current_doc,
-                    collection.version_id(),
+                    collection.schema(),
                     DocStorageIdentity::new(collection.resolved_root_id(), doc_short_id),
                     Some(&modified_fields),
                     attempt.context.encryption(),
@@ -443,6 +476,10 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         retry
             .finish_attempt_io(io, callbacks)
             .map_err(|error| crate::error::commit_query_error(error.into()))?;
-        Ok((doc, fields_modified, cid, block, col_data))
+        Ok((doc, fields_modified, Some((cid, block, col_data))))
     }
 }
+
+/// What an update attempt returns: the document, the count of fields it
+/// modified, and its commit (`None` when it wrote nothing).
+type UpdateAttemptOutput = (Document, usize, Option<(Cid, Bytes, Option<(Cid, Bytes)>)>);

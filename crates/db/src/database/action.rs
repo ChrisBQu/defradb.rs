@@ -382,7 +382,7 @@ pub(crate) async fn index_action_statuses(
         .collect())
 }
 
-async fn index_action_executions(
+pub(crate) async fn index_action_executions(
     systemstore: &datastore::NamespaceView,
     collection_id: &str,
 ) -> Result<RapidHashMap<u32, ActionExecution>> {

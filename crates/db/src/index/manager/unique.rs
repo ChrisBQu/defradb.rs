@@ -10,19 +10,6 @@ use storage::corekv::Key;
 use super::{IndexManager, IndexType};
 use crate::index::error::{Error, Result};
 
-/// How a live unique conflict was resolved during merge or index rebuild (#1111/#1308).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MergeConflictOutcome {
-    /// No conflict, or the stale-entry heal handled it.
-    Clean,
-    /// The incoming document won the deterministic pick and now holds the
-    /// unique entry; the previous holder is no longer indexed.
-    IncomingIndexed,
-    /// The existing holder won; the incoming document is persisted but not
-    /// indexed for the conflicting values.
-    IncomingUnindexed,
-}
-
 impl IndexManager {
     /// Save an index entry, healing stale unique conflicts (#1111/#700).
     ///
@@ -101,12 +88,12 @@ impl IndexManager {
         doc_short_id: u64,
         doc_id: &str,
         values: &[document::NormalValue],
-    ) -> std::result::Result<MergeConflictOutcome, storage::corekv::Error> {
+    ) -> std::result::Result<Option<events::UniqueIndexConflictData>, storage::corekv::Error> {
         match self
             .save_healing_stale_unique(datastore, index, doc_short_id, values)
             .await
         {
-            Ok(()) => Ok(MergeConflictOutcome::Clean),
+            Ok(()) => Ok(None),
             Err(storage::corekv::Error::UniqueConstraintViolation) => {
                 let IndexType::Unique(unique) = index else {
                     return Err(storage::corekv::Error::UniqueConstraintViolation);
@@ -132,7 +119,12 @@ impl IndexManager {
                         "unique index conflict: incoming document wins the \
                          deterministic pick; the previous holder is no longer indexed"
                     );
-                    Ok(MergeConflictOutcome::IncomingIndexed)
+                    Ok(Some(events::UniqueIndexConflictData {
+                        collection_id: self.collection_id.to_string(),
+                        index: index.description().name.clone(),
+                        winner_doc_id: doc_id.to_string(),
+                        unindexed_doc_id: holder_doc_id.to_string(),
+                    }))
                 } else {
                     tracing::error!(
                         collection_id = %self.collection_id,
@@ -142,7 +134,12 @@ impl IndexManager {
                         "unique index conflict: existing holder wins the \
                          deterministic pick; the incoming document is persisted unindexed"
                     );
-                    Ok(MergeConflictOutcome::IncomingUnindexed)
+                    Ok(Some(events::UniqueIndexConflictData {
+                        collection_id: self.collection_id.to_string(),
+                        index: index.description().name.clone(),
+                        winner_doc_id: holder_doc_id.to_string(),
+                        unindexed_doc_id: doc_id.to_string(),
+                    }))
                 }
             }
             Err(other) => Err(other),

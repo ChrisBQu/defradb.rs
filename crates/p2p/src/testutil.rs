@@ -2,9 +2,9 @@
 //!
 //! This module provides common test helpers and mocks used across unit and integration tests.
 
+use ::bitswap::Block;
 use bytes::Bytes;
 use cid::Cid;
-use iroh_bitswap::Block;
 use kovan_map::HopscotchMap;
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -14,7 +14,7 @@ use crate::{Error, Result};
 
 /// Mock BitswapStore for testing.
 ///
-/// A simple in-memory implementation of iroh_bitswap::Store that can be used
+/// A simple in-memory implementation of bitswap::Store that can be used
 /// in unit and integration tests without requiring a real blockstore.
 #[derive(Clone)]
 pub struct MockBitswapStore {
@@ -118,7 +118,7 @@ pub fn block_started_fetch() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iroh_bitswap::Store;
+    use ::bitswap::Store;
 
     #[tokio::test]
     async fn test_mock_store_basic_operations() {

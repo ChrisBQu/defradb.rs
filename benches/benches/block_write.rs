@@ -10,6 +10,7 @@
 //! pollute the measurement.
 
 use rapidhash::RapidHashSet;
+use schema::CollectionVersion;
 use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
@@ -21,6 +22,9 @@ use storage::{backends::RegolithStore, Store};
 mod common;
 
 const SCHEMA_VERSION_ID: &str = "bafyreihsneodeja4lfer5puptim3lkwvketyckrmkhfpgxm67ch5wenjwq";
+static COLLECTION: regolith::sync::Lazy<CollectionVersion> = regolith::sync::Lazy::new(|| {
+    CollectionVersion::new("Bench", SCHEMA_VERSION_ID, "col-bench", vec![])
+});
 const FIELD_COUNTS: [usize; 3] = [2, 8, 32];
 const VALUE_SIZES: [usize; 2] = [16, 1024];
 
@@ -78,7 +82,7 @@ fn bench_write_create(c: &mut Criterion) {
                                     blockstore,
                                     headstore,
                                     &doc,
-                                    SCHEMA_VERSION_ID,
+                                    &COLLECTION,
                                     DocStorageIdentity::new(1, 1),
                                     None,
                                     None,
@@ -119,7 +123,7 @@ fn bench_write_update(c: &mut Criterion) {
                                 &blockstore,
                                 &headstore,
                                 &doc,
-                                SCHEMA_VERSION_ID,
+                                &COLLECTION,
                                 DocStorageIdentity::new(1, 1),
                                 None,
                                 None,
@@ -144,7 +148,7 @@ fn bench_write_update(c: &mut Criterion) {
                                     blockstore,
                                     headstore,
                                     updated,
-                                    SCHEMA_VERSION_ID,
+                                    &COLLECTION,
                                     DocStorageIdentity::new(1, 1),
                                     Some(&fields),
                                     None,

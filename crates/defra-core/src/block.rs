@@ -14,7 +14,8 @@ use crate::{Error, Result};
 // Re-export delta payload types
 pub use crate::block_delta::{
     CollectionDefinitionDeltaPayload, CollectionDeltaPayload, CollectionSetDeltaPayload,
-    CompositeDeltaPayload, CounterDeltaPayload, FieldDefinitionDeltaPayload, LwwDeltaPayload,
+    CompositeDeltaPayload, CounterDeltaPayload, FieldDefinitionDeltaPayload, ImmutableDeltaPayload,
+    LwwDeltaPayload, IMMUTABLE_LINK_NAME,
 };
 
 // Re-export signature/encryption types
@@ -263,6 +264,10 @@ pub enum CrdtDelta {
     #[serde(rename = "composite")]
     Composite(CompositeDeltaPayload),
 
+    /// Immutable fields delta (Rust-only)
+    #[serde(rename = "immutable")]
+    Immutable(ImmutableDeltaPayload),
+
     /// Collection delta
     #[serde(rename = "collection")]
     Collection(CollectionDeltaPayload),
@@ -287,6 +292,7 @@ impl CrdtDelta {
             CrdtDelta::Lww(d) => d.priority,
             CrdtDelta::Counter(d) => d.priority,
             CrdtDelta::Composite(d) => d.priority,
+            CrdtDelta::Immutable(d) => d.priority,
             CrdtDelta::Collection(d) => d.priority,
             CrdtDelta::CollectionSet(d) => d.priority,
             CrdtDelta::FieldDefinition(d) => d.priority,
@@ -300,6 +306,7 @@ impl CrdtDelta {
             CrdtDelta::Lww(d) => d.priority = priority,
             CrdtDelta::Counter(d) => d.priority = priority,
             CrdtDelta::Composite(d) => d.priority = priority,
+            CrdtDelta::Immutable(d) => d.priority = priority,
             CrdtDelta::Collection(d) => d.priority = priority,
             CrdtDelta::CollectionSet(d) => d.priority = priority,
             CrdtDelta::FieldDefinition(d) => d.priority = priority,
@@ -316,6 +323,7 @@ impl CrdtDelta {
             CrdtDelta::Lww(d) => Some(&d.schema_version_id),
             CrdtDelta::Counter(d) => Some(&d.schema_version_id),
             CrdtDelta::Composite(d) => Some(&d.schema_version_id),
+            CrdtDelta::Immutable(d) => Some(&d.schema_version_id),
             CrdtDelta::Collection(d) => Some(&d.schema_version_id),
             CrdtDelta::CollectionSet(_) => None,
             CrdtDelta::FieldDefinition(_) => None,

@@ -5,9 +5,12 @@
 //! so no document is copied, each worker is handed its runs with one wake,
 //! and the results keep the documents' order.
 
+use std::sync::Arc;
+
 use defra_core::RequestContext;
 use document::Document;
 use query::prepared::PreparedInputMemo;
+use schema::CollectionVersion;
 
 use crate::block::builder::{
     compute_document_blocks_with_inputs, BuildError, ComputedBlocks, DocStorageIdentity,
@@ -34,7 +37,7 @@ pub(super) type Computed = (Document, Result<ComputedBlocks, BuildError>);
 pub(super) async fn compute_blocks(
     pool: Option<&workers::Pool>,
     docs: Vec<(Document, DocStorageIdentity)>,
-    schema: &str,
+    schema: &Arc<CollectionVersion>,
     context: &RequestContext,
     memo: Option<&PreparedInputMemo>,
 ) -> query::error::Result<Vec<Computed>> {
@@ -58,7 +61,7 @@ pub(super) async fn compute_blocks(
             here.push(run);
             continue;
         }
-        let (schema, context, memo) = (schema.to_owned(), context.clone(), memo.cloned());
+        let (schema, context, memo) = (Arc::clone(schema), context.clone(), memo.cloned());
         let job = move || async move { compute_run(run, &schema, &context, memo.as_ref()) };
         there.push((workers::Target::Worker(lane - 1), job));
     }
@@ -102,7 +105,7 @@ pub(super) async fn compute_blocks(
 
 fn compute_run(
     run: Vec<(Document, DocStorageIdentity)>,
-    schema: &str,
+    schema: &CollectionVersion,
     context: &RequestContext,
     memo: Option<&PreparedInputMemo>,
 ) -> Vec<Computed> {
@@ -151,7 +154,8 @@ mod tests {
     async fn computed_with(pool: &workers::Pool, count: usize) -> Vec<u64> {
         let context = RequestContext::ambient();
         let before = tasks(pool);
-        let computed = compute_blocks(Some(pool), documents(count), "schema", &context, None)
+        let schema = Arc::new(CollectionVersion::new("Users", "schema", "users", vec![]));
+        let computed = compute_blocks(Some(pool), documents(count), &schema, &context, None)
             .await
             .unwrap();
         let ran = tasks(pool)
@@ -163,7 +167,7 @@ mod tests {
         for ((doc, blocks), (expected_doc, identity)) in computed.iter().zip(documents(count)) {
             let expected = compute_document_blocks_with_inputs(
                 &expected_doc,
-                "schema",
+                &schema,
                 identity,
                 None,
                 None,

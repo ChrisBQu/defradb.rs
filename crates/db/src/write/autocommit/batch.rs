@@ -387,7 +387,6 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
             .map_err(|e| query::error::QueryError::execution(e.to_string()))?;
 
         let short_id = collection.resolved_root_id();
-        let schema_version_id = collection.version_id();
         let enc_config = context.encryption();
         let sign_config = context.signing();
 
@@ -423,7 +422,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 &blockstore,
                 &headstore,
                 &doc,
-                schema_version_id,
+                collection.schema(),
                 identity,
                 None,
                 enc_config,
@@ -573,7 +572,6 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
         .await?;
 
         let short_id = collection.resolved_root_id();
-        let schema_version_id = collection.version_id();
         let enc_config = context.encryption();
         let sign_config = context.signing();
 
@@ -598,7 +596,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 &blockstore,
                 &headstore,
                 &doc,
-                schema_version_id,
+                collection.schema(),
                 DocStorageIdentity::new(short_id, doc_short_id),
                 Some(&modified_fields),
                 enc_config,

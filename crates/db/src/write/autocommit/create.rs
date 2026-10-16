@@ -306,7 +306,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             .unwrap_or_else(|| {
                 compute_document_blocks_with_inputs(
                     &doc,
-                    &schema_version_id,
+                    collection.schema(),
                     identity,
                     context.encryption(),
                     context.signing(),
@@ -565,7 +565,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
         let (_collection_guard, collection) = self.guarded_collection(collection_name).await?;
 
         let short_id = collection.resolved_root_id();
-        let schema_version_id = collection.version_id().to_string();
+        let schema = collection.shared_schema();
 
         // === Phase 1: Prepare documents (sequential — embeddings are async/external) ===
         let mut prepared_docs: Vec<Document> = Vec::with_capacity(docs.len());
@@ -662,7 +662,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
                     .into_iter()
                     .zip(identities.iter().copied())
                     .collect(),
-                &schema_version_id,
+                &schema,
                 context,
                 self.prepared_inputs.as_ref(),
             )
@@ -695,7 +695,7 @@ impl<S: Store + 'static> AutoCommitMutator<S> {
             for (doc, identity) in prepared_docs.iter().zip(identities.iter()) {
                 match compute_document_blocks_with_inputs(
                     doc,
-                    &schema_version_id,
+                    &schema,
                     *identity,
                     context.encryption(),
                     context.signing(),

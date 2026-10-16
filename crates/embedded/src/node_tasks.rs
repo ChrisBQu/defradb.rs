@@ -76,6 +76,20 @@ where
                         &p2p::transport::PeerId::from(*peer_id),
                     )
                     .await;
+                    event_bus.publish(events::Message::peer_connection(
+                        events::PeerConnectionData {
+                            peer_id: peer_id.to_string(),
+                            connected: true,
+                        },
+                    ));
+                }
+                p2p::HostEvent::PeerDisconnected(peer_id) => {
+                    event_bus.publish(events::Message::peer_connection(
+                        events::PeerConnectionData {
+                            peer_id: peer_id.to_string(),
+                            connected: false,
+                        },
+                    ));
                 }
                 p2p::HostEvent::PeerSubscribed { peer_id, topic } => {
                     event_bus.publish(events::Message::topic_peer_event(

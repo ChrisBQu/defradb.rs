@@ -3,8 +3,8 @@ use crate::corekv::{
     Store, Txn, Writer,
 };
 use crate::keys::peerstore::{
-    ReplicatorIncarnationKey, ReplicatorKey, ReplicatorRetryCollectionKey, ReplicatorRetryDocIDKey,
-    ReplicatorRetryIDKey,
+    ReplicatorAckedHeadsKey, ReplicatorIncarnationKey, ReplicatorKey, ReplicatorRetryCollectionKey,
+    ReplicatorRetryDocIDKey, ReplicatorRetryIDKey,
 };
 use crate::namespace::{Namespace, NamespacedStore};
 use async_trait::async_trait;
@@ -103,6 +103,8 @@ enum PeerstoreRetryAttempt {
         peer_id: String,
         key: Vec<u8>,
         expected_generation: u64,
+        acked_key: Vec<u8>,
+        acked: Vec<u8>,
     },
     ClearPeer {
         peer_id: String,
@@ -126,6 +128,8 @@ impl RetryAttemptFn for PeerstoreRetryAttempt {
                     for prefix in [
                         ReplicatorRetryDocIDKey::peer_prefix(peer_id.as_str()),
                         ReplicatorRetryCollectionKey::peer_prefix(peer_id.as_str()),
+                        ReplicatorAckedHeadsKey::peer_prefix(peer_id.as_str(), false),
+                        ReplicatorAckedHeadsKey::peer_prefix(peer_id.as_str(), true),
                     ] {
                         let mut iter = io.iterator(IterOptions::new().with_prefix(prefix)).await?;
                         while let Some(pair) = iter.next().await? {
@@ -261,6 +265,8 @@ impl RetryAttemptFn for PeerstoreRetryAttempt {
                     peer_id,
                     key,
                     expected_generation,
+                    acked_key,
+                    acked,
                 } => {
                     let mut io = txn.begin_attempt_io()?;
                     if io
@@ -281,6 +287,11 @@ impl RetryAttemptFn for PeerstoreRetryAttempt {
                         return Ok(Box::new(false) as crate::corekv::RetryAttemptValue);
                     }
                     io.delete(key).await?;
+                    if acked.is_empty() {
+                        io.delete(acked_key).await?;
+                    } else {
+                        io.set(acked_key, acked).await?;
+                    }
 
                     // Completion and empty-schedule cleanup share this same
                     // transaction. A separate clear after ACK could otherwise
@@ -1281,12 +1292,18 @@ impl<S: Store> Peerstore<S> {
             &retry.collection_id,
             retry.is_collection_commit(),
             retry.generation,
+            &[],
         )
         .await
     }
 
     /// Remove one retry marker only if no newer registration replaced the
     /// generation observed before rederiving the scope.
+    ///
+    /// `acked_heads` are the verified-current heads the peer acknowledged; in
+    /// the same transaction they replace the scope's acknowledged record.
+    /// Empty means nothing was delivered (the document is gone or filtered
+    /// out) and clears it.
     pub async fn complete_retry_scope(
         &self,
         peer_id: &str,
@@ -1294,16 +1311,23 @@ impl<S: Store> Peerstore<S> {
         collection_id: &str,
         is_collection: bool,
         expected_generation: u64,
+        acked_heads: &[String],
     ) -> Result<bool> {
+        let scope_id = if is_collection { collection_id } else { doc_id };
         let key = if is_collection {
             ReplicatorRetryCollectionKey::new(peer_id, collection_id).bytes()
         } else {
             ReplicatorRetryDocIDKey::new(peer_id, doc_id).bytes()
         };
+        let acked_key = ReplicatorAckedHeadsKey::new(peer_id, scope_id, is_collection).bytes();
+        let mut acked = acked_heads.to_vec();
+        acked.sort_unstable();
         self.transact_conflicts(Box::new(PeerstoreRetryAttempt::CompleteMarker {
             peer_id: peer_id.to_owned(),
             key,
             expected_generation,
+            acked_key,
+            acked: acked.join("\n").into_bytes(),
         }))
         .await
     }
@@ -1323,6 +1347,34 @@ impl<S: Store> Peerstore<S> {
         decode_retry_marker_generation(&bytes)
             .map(Some)
             .ok_or_else(|| crate::corekv::Error::Other("invalid peer incarnation".into()))
+    }
+
+    /// The sorted heads `peer_id` last acknowledged for a scope, or `None`
+    /// while a marker for that scope is outstanding or nothing was recorded.
+    pub async fn acknowledged_heads(
+        &self,
+        peer_id: &str,
+        scope_id: &str,
+        is_collection: bool,
+    ) -> Result<Option<Vec<String>>> {
+        let marker = if is_collection {
+            ReplicatorRetryCollectionKey::new(peer_id, scope_id).bytes()
+        } else {
+            ReplicatorRetryDocIDKey::new(peer_id, scope_id).bytes()
+        };
+        let txn = self.store.new_txn(true).await?;
+        if txn.get(&marker).await?.is_some() {
+            return Ok(None);
+        }
+        let acked = txn
+            .get(&ReplicatorAckedHeadsKey::new(peer_id, scope_id, is_collection).bytes())
+            .await?;
+        Ok(acked.map(|bytes| {
+            String::from_utf8_lossy(&bytes)
+                .split('\n')
+                .map(str::to_string)
+                .collect()
+        }))
     }
 
     /// Get retry info bytes for a peer.

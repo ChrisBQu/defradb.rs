@@ -588,7 +588,7 @@ async fn forget_and_readd_preserves_marker_generation_fencing() {
         .unwrap();
     assert!(new_generation > old_generation);
     assert!(!peerstore
-        .complete_retry_scope(peer_id, "doc", "collection", false, old_generation)
+        .complete_retry_scope(peer_id, "doc", "collection", false, old_generation, &[])
         .await
         .unwrap());
     let markers = peerstore.get_retry_documents(peer_id).await.unwrap();
@@ -646,7 +646,7 @@ async fn concurrent_scope_registrations_get_distinct_generations() {
     assert!(current == first || current == second);
     let stale = if current == first { second } else { first };
     assert!(!peerstore
-        .complete_retry_scope("peer", "doc", "collection", false, stale)
+        .complete_retry_scope("peer", "doc", "collection", false, stale, &[])
         .await
         .unwrap());
 }
@@ -787,7 +787,7 @@ async fn stale_ack_cannot_erase_a_concurrent_dirty_registration() {
     let ack_store = Peerstore::new(store.clone());
     let update_store = Peerstore::new(store);
     let (ack, update) = tokio::join!(
-        ack_store.complete_retry_scope("peer", "doc", "collection", false, old_generation),
+        ack_store.complete_retry_scope("peer", "doc", "collection", false, old_generation, &[]),
         update_store.observe_push_head_with_generation("peer", "doc", "collection"),
     );
     let _ = ack.unwrap();

@@ -476,6 +476,10 @@ async fn push_existing_docs_with_config_and_allowlist<S: Store + 'static, T: P2P
                         &collection_id,
                         false,
                         marker_generation,
+                        &current_heads
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>(),
                     )
                     .await
                     .map_err(|error| format!("failed to clear replay marker: {error}"))?;
@@ -723,6 +727,7 @@ pub async fn retry_doc<S: Store + 'static, T: P2PTransport>(
                     collection_id,
                     false,
                     marker_generation,
+                    &[],
                 )
                 .await
                 .map_err(|error| format!("failed to clear filtered retry marker: {error}"))?;

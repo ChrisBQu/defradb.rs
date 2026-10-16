@@ -35,13 +35,23 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                 if !state.linked_field_cids.contains(&link.link) {
                     continue;
                 }
-                let head = HeadstoreDocKey::new(context.doc_short_id, &link.name, link.link);
-                crate::block::heads::document::publish(
+                // An Immutable block is the head of every field it carries, so
+                // a peer holding one of them as mutable chains its update to it.
+                let names: Vec<&str> = match state.immutable_block_fields.get(&link.link) {
+                    Some(fields) => fields.iter().map(String::as_str).collect(),
+                    None => vec![link.name.as_str()],
+                };
+                let Some((first, others)) = names.split_first() else {
+                    continue;
+                };
+                let priority = state.field_block_priorities[&link.link];
+                let head = HeadstoreDocKey::new(context.doc_short_id, *first, link.link);
+                let published = crate::block::heads::document::publish(
                     headstore,
                     set,
                     &mut write,
                     &head,
-                    state.field_block_priorities[&link.link],
+                    priority,
                     state
                         .field_block_heads
                         .get(&link.name)
@@ -50,6 +60,14 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                 )
                 .await
                 .map_err(storage_error)?;
+                if published {
+                    for other in others {
+                        write.add(
+                            &crate::block::heads::document::name(other, &link.link),
+                            priority,
+                        );
+                    }
+                }
             }
         }
         crate::block::heads::document::commit(headstore, context.doc_short_id, &write)

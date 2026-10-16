@@ -192,6 +192,27 @@ impl<S: storage::corekv::Store + 'static> SchemaOps for DbSchemaOps<S> {
         Ok(created)
     }
 
+    async fn ensure_ordinary_index(
+        &self,
+        context: &RequestContext,
+        collection: &str,
+        name: &str,
+        fields: Vec<schema::IndexedFieldDescription>,
+    ) -> Result<schema::IndexDescription> {
+        self.database
+            .check_node_access_as(context, acp::nac::NodePermission::IndexCreate)
+            .await
+            .map_err(Error::from)?;
+        self.database
+            .check_node_access_as(context, acp::nac::NodePermission::IndexList)
+            .await
+            .map_err(Error::from)?;
+        self.database
+            .ensure_ordinary_index(collection, name, fields)
+            .await
+            .map_err(Error::from)
+    }
+
     async fn add_view(
         &self,
         context: &RequestContext,

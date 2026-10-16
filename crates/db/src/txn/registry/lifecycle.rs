@@ -156,11 +156,10 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
             .map_err(|error| unavailable(error, handle))?
             .finish(id, &caller(context), move |owned| {
                 Box::pin(async move {
-                    owned.commit().await.map_err(|error| {
-                        TransactionError::execution(format!(
-                            "commit error for transaction '{label}': {error}"
-                        ))
-                    })
+                    owned
+                        .commit()
+                        .await
+                        .map_err(|error| commit_error(&label, error))
                 })
             })
             .await
@@ -196,5 +195,15 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
             })
             .await
             .map_err(|error| unavailable(error, handle))?
+    }
+}
+
+/// A commit that lost a write conflict is a typed, retryable conflict.
+fn commit_error(handle: &str, error: crate::error::Error) -> TransactionError {
+    let message = format!("commit error for transaction '{handle}': {error}");
+    if error.is_txn_conflict() {
+        TransactionError::conflict(message)
+    } else {
+        TransactionError::execution(message)
     }
 }

@@ -88,6 +88,13 @@ trait SchemaOps: Send + Sync {
         context: &RequestContext,
         sdl: &str,
     ) -> Result<Vec<CollectionVersion>>;
+    async fn ensure_ordinary_index(
+        &self,
+        context: &RequestContext,
+        collection: &str,
+        name: &str,
+        fields: Vec<schema::IndexedFieldDescription>,
+    ) -> Result<schema::IndexDescription>;
     async fn add_view(
         &self,
         context: &RequestContext,
@@ -199,6 +206,10 @@ pub struct EmbeddedNode {
     transaction_stats: Option<storage::TransactionStatsHandle>,
     #[cfg(feature = "http")]
     txn_cleanup_task: kovan_queue::seg_queue::SegQueue<workers::Background>,
+    /// Vector index rebuild and downsample view refresh, as the CLI and the
+    /// `embedded` node run them. Each holds the database open until aborted.
+    #[cfg(not(target_arch = "wasm32"))]
+    background_tasks: BackgroundTasks,
     #[cfg(feature = "p2p")]
     p2p_ops: Option<Arc<dyn defra_http::P2POperations>>,
     #[cfg(feature = "p2p")]
@@ -224,6 +235,33 @@ where
         let database = Arc::clone(&database);
         Box::pin(async move { database.close().await })
     })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct BackgroundTasks(kovan_queue::seg_queue::SegQueue<workers::Background>);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl BackgroundTasks {
+    fn new(tasks: impl IntoIterator<Item = workers::Background>) -> Self {
+        let queue = kovan_queue::seg_queue::SegQueue::new();
+        for task in tasks {
+            queue.push(task);
+        }
+        Self(queue)
+    }
+
+    fn take(&self) -> impl Iterator<Item = workers::Background> + '_ {
+        std::iter::from_fn(|| self.0.pop())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for BackgroundTasks {
+    fn drop(&mut self) {
+        for task in self.take() {
+            task.abort();
+        }
+    }
 }
 
 #[cfg(feature = "http")]
@@ -430,6 +468,24 @@ impl EmbeddedNode {
             .await
     }
 
+    /// Ensure a named nonunique ordinary index, preserving the collection's
+    /// version and documents. Readiness is reported only after backfill; an
+    /// existing unfinished or failed backfill returns an error.
+    pub async fn ensure_ordinary_index(
+        &self,
+        collection: &str,
+        name: &str,
+        fields: Vec<schema::IndexedFieldDescription>,
+    ) -> Result<schema::IndexDescription> {
+        let (ops, context) = (Arc::clone(&self.schema_ops), self.node_context());
+        let (collection, name) = (collection.to_owned(), name.to_owned());
+        self.on_pool(move || async move {
+            ops.ensure_ordinary_index(&context, &collection, &name, fields)
+                .await
+        })
+        .await
+    }
+
     /// Create a materialized view from a source query and target SDL.
     ///
     /// `source_query` format: `"SourceType { field1 field2 ... }"`
@@ -545,6 +601,18 @@ impl EmbeddedNode {
     /// historical revision. Subscribe before the initial query to avoid gaps.
     pub fn subscribe_document_changes(&self) -> events::DocumentChangeSubscription {
         self.event_bus.subscribe_document_changes()
+    }
+
+    /// [`Self::subscribe_document_changes`] limited to the given collections,
+    /// identified by [`CollectionVersion::collection_id`], which is stable
+    /// across schema versions. Updates elsewhere neither wake the subscription
+    /// nor push it into `resync_required`.
+    pub fn subscribe_collection_changes(
+        &self,
+        collection_ids: impl IntoIterator<Item = String>,
+    ) -> events::DocumentChangeSubscription {
+        self.event_bus
+            .subscribe_collection_changes(collection_ids.into_iter().collect())
     }
 
     /// Begin a manually finalized transaction. Dropping its handle does not
@@ -776,6 +844,13 @@ impl EmbeddedNode {
         #[cfg(feature = "http")]
         if let Some(task) = self.txn_cleanup_task.pop() {
             task.abort();
+            let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        for task in self.background_tasks.take() {
+            task.abort();
+            // An aborted task keeps the database open until it is next polled.
             let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
         }
 
@@ -1795,6 +1870,13 @@ impl NodeBuilder {
             policy_lookup,
             event_bus.clone(),
         ));
+        // Started last: nothing after this point fails, so a failed build
+        // never leaves a task holding the store open.
+        #[cfg(not(target_arch = "wasm32"))]
+        let background_tasks = BackgroundTasks::new([
+            database.clone().start_vector_rebuild_task(),
+            database.clone().start_downsample_task(),
+        ]);
         let block_ops: Arc<dyn BlockOps> = Arc::new(db_impls::DbBlockOps::new(
             database,
             document_acp.clone(),
@@ -1828,6 +1910,8 @@ impl NodeBuilder {
             transaction_stats,
             #[cfg(feature = "http")]
             txn_cleanup_task: single_slot(txn_cleanup_task),
+            #[cfg(not(target_arch = "wasm32"))]
+            background_tasks,
             #[cfg(feature = "p2p")]
             p2p_ops,
             #[cfg(feature = "p2p")]

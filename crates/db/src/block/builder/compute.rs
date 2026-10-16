@@ -28,14 +28,14 @@ pub struct ComputedBlocks {
 /// Accumulates all (key, value) pairs instead of writing to storage.
 pub fn compute_document_blocks(
     doc: &Document,
-    schema_version_id: &str,
+    schema: &CollectionVersion,
     identity: DocStorageIdentity,
     encryption_config: Option<&EncryptionConfig>,
     signing_config: Option<&SigningConfig>,
 ) -> Result<ComputedBlocks, String> {
     compute_document_blocks_with_inputs(
         doc,
-        schema_version_id,
+        schema,
         identity,
         encryption_config,
         signing_config,
@@ -46,12 +46,13 @@ pub fn compute_document_blocks(
 
 pub(crate) fn compute_document_blocks_with_inputs(
     doc: &Document,
-    schema_version_id: &str,
+    schema: &CollectionVersion,
     identity: DocStorageIdentity,
     encryption_config: Option<&EncryptionConfig>,
     signing_config: Option<&SigningConfig>,
     prepared_inputs: Option<&query::prepared::PreparedInputMemo>,
 ) -> Result<ComputedBlocks, BuildError> {
+    let schema_version_id = schema.version_id.as_str();
     let doc_ref_bytes = identity.doc_ref_bytes();
 
     let field_count = doc
@@ -73,8 +74,17 @@ pub(crate) fn compute_document_blocks_with_inputs(
                            // every field's missing input is asked for in one wave.
     let mut first_miss = None;
 
+    let (immutable_names, immutable) = immutable_for_pass(
+        doc,
+        schema,
+        encryption_config,
+        signing_config,
+        prepared_inputs,
+        &mut first_miss,
+    )?;
+
     for (field_name, field_value) in doc.values() {
-        if field_name == "_docID" {
+        if field_name == "_docID" || immutable_names.contains(field_name) {
             continue;
         }
 
@@ -254,6 +264,20 @@ pub(crate) fn compute_document_blocks_with_inputs(
     // The composite links every field block, so it waits for all of them.
     if let Some(request) = first_miss {
         return Err(BuildError::NeedsInput(request));
+    }
+
+    if let Some(block) = immutable {
+        if let Some((sig_cid, sig_cbor)) = block.signature.clone() {
+            blockstore_entries.push((cid_bytes(&sig_cid), sig_cbor));
+        }
+        blockstore_entries.push((cid_bytes(&block.cid), block.bytes.clone()));
+        block.add_heads(&mut head_write);
+        headstore_entries.push((
+            priority_index_key(identity.doc_short_id, priority, block.cid),
+            vec![],
+        ));
+        field_links.push(block.link());
+        field_cids.push(block.cid);
     }
 
     // Composite encryption CID for doc-level encryption

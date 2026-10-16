@@ -23,7 +23,6 @@ mod rebuild;
 mod unique;
 pub use index_type::IndexType;
 use storage::keys::IndexIDSequenceKey;
-pub use unique::MergeConflictOutcome;
 
 pub mod doc_source;
 pub use doc_source::{DocumentSource, SliceSource};
@@ -546,29 +545,32 @@ impl IndexManager {
         doc: &Document,
         doc_short_id: u64,
         schema: &CollectionVersion,
-    ) -> Result<()> {
+    ) -> Result<Vec<events::UniqueIndexConflictData>> {
         require_doc_short_id(doc_short_id)?;
         let doc_id = doc
             .id()
             .ok_or_else(|| Error::InvalidDocument("document must have an ID".to_string()))?
             .to_string();
         let mut mutable_datastore = datastore.clone();
+        let mut conflicts = Vec::new();
         for index in self.indexes.values() {
             let value_sets = self.extract_index_values(doc, index.description(), schema)?;
             for values in &value_sets {
-                self.save_resolving_unique_conflict(
-                    &mut mutable_datastore,
-                    systemstore,
-                    index,
-                    doc_short_id,
-                    &doc_id,
-                    values,
-                )
-                .await
-                .map_err(Error::Storage)?;
+                conflicts.extend(
+                    self.save_resolving_unique_conflict(
+                        &mut mutable_datastore,
+                        systemstore,
+                        index,
+                        doc_short_id,
+                        &doc_id,
+                        values,
+                    )
+                    .await
+                    .map_err(Error::Storage)?,
+                );
             }
         }
-        Ok(())
+        Ok(conflicts)
     }
 
     /// Merge-path variant of [`Self::on_document_update`]: resolves live
@@ -581,13 +583,14 @@ impl IndexManager {
         new_doc: &Document,
         doc_short_id: u64,
         schema: &CollectionVersion,
-    ) -> Result<()> {
+    ) -> Result<Vec<events::UniqueIndexConflictData>> {
         require_doc_short_id(doc_short_id)?;
         let doc_id = new_doc
             .id()
             .ok_or_else(|| Error::InvalidDocument("document must have an ID".to_string()))?
             .to_string();
         let mut mutable_datastore = datastore.clone();
+        let mut conflicts = Vec::new();
         for index in self.indexes.values() {
             let old_value_sets = self.extract_index_values(old_doc, index.description(), schema)?;
             let new_value_sets = self.extract_index_values(new_doc, index.description(), schema)?;
@@ -599,20 +602,22 @@ impl IndexManager {
                         .map_err(Error::Storage)?;
                 }
                 for new_values in &new_value_sets {
-                    self.save_resolving_unique_conflict(
-                        &mut mutable_datastore,
-                        systemstore,
-                        index,
-                        doc_short_id,
-                        &doc_id,
-                        new_values,
-                    )
-                    .await
-                    .map_err(Error::Storage)?;
+                    conflicts.extend(
+                        self.save_resolving_unique_conflict(
+                            &mut mutable_datastore,
+                            systemstore,
+                            index,
+                            doc_short_id,
+                            &doc_id,
+                            new_values,
+                        )
+                        .await
+                        .map_err(Error::Storage)?,
+                    );
                 }
             }
         }
-        Ok(())
+        Ok(conflicts)
     }
 
     /// Update indexes when a document is created.
