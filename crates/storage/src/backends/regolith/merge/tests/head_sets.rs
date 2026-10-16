@@ -5,6 +5,7 @@ use regolith::testing::proptest::prelude::*;
 use regolith::MergeOperator;
 
 use crate::corekv::Store;
+use crate::merge::head_set::part;
 use crate::merge::head_set::{Set, Write};
 use crate::merge::DefraMergeOperator;
 use crate::RegolithStore;
@@ -314,4 +315,65 @@ async fn a_transaction_reads_the_set_it_merged_into() {
         .unwrap();
     let read = txn.get_parts(b"h/hd/set", &[]).await.unwrap().unwrap();
     assert_eq!(live(&Set::read(&read).unwrap()), [(b"b".to_vec(), 2)]);
+}
+
+/// An operand touches the part of every name it holds and of no other name;
+/// an id that is no name's part is touched by every operand.
+#[test]
+fn an_operand_touches_the_parts_of_the_names_it_holds() {
+    let operand = block(&[b"p"], &[b"q"], (b"c", 2)).operand();
+    let held = [b"p".as_slice(), b"q", b"c"].map(part);
+    for name in held {
+        assert!(DefraMergeOperator.touches(b"set", &operand, &[name]));
+    }
+    let other = part(b"other");
+    assert!(!held.contains(&other), "these names hash to distinct parts");
+    assert!(!DefraMergeOperator.touches(b"set", &operand, &[other]));
+    assert!(DefraMergeOperator.touches(b"set", &operand, &[7, other]));
+}
+
+/// The law, with the parts of names: what a fold touches is what its two
+/// operands touched.
+#[test]
+fn head_set_touches_by_name_obey_the_engine_contract() {
+    let parts = [b"a".as_slice(), b"b", b"c", b"field/cid-x", b"unwritten"]
+        .map(part)
+        .to_vec();
+    let checked = regolith::testing::check_touches(
+        &DefraMergeOperator,
+        Just(b"set".to_vec()),
+        operands(),
+        proptest::sample::subsequence(parts, 1..=3),
+    )
+    .unwrap();
+    assert!(checked.folds > 0);
+}
+
+/// A transaction that read one name's part commits past a merge that holds
+/// other names only, and is refused by one that holds its name.
+#[tokio::test]
+async fn a_read_of_one_names_part_meets_only_operands_that_hold_it() {
+    let theirs = [
+        (adds(&[(b"x", 1)]), false),
+        (adds(&[(b"p", 1)]), true),
+        (block(&[], &[b"p"], (b"y", 2)), true),
+    ];
+    for (write, refused) in theirs {
+        let store = RegolithStore::in_memory().unwrap();
+        let mut seed = store.new_txn(false).await.unwrap();
+        seed.merge(b"h/hd/set", &adds(&[(b"s", 1)]).operand())
+            .await
+            .unwrap();
+        seed.commit().await.unwrap();
+        let mut reader = store.new_txn(false).await.unwrap();
+        reader.get_parts(b"h/hd/set", &[part(b"p")]).await.unwrap();
+        reader
+            .merge(b"h/hd/set", &block(&[], &[b"p"], (b"c", 2)).operand())
+            .await
+            .unwrap();
+        let mut writer = store.new_txn(false).await.unwrap();
+        writer.merge(b"h/hd/set", &write.operand()).await.unwrap();
+        writer.commit().await.unwrap();
+        assert_eq!(reader.commit().await.is_err(), refused, "{write:?}");
+    }
 }

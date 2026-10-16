@@ -14,6 +14,7 @@ mod counter_merge_state;
 mod governance;
 mod head_failures;
 mod head_provider;
+mod head_publication;
 mod merge_dek_misses;
 mod merge_handler_composite_persist;
 mod merge_handler_se_merge;

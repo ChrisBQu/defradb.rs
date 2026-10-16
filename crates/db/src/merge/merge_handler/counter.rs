@@ -248,7 +248,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         let value = document::stored::add_counter(&field.name, kind, stored, &increment)
             .map_err(|e| MergeError::MergeFailed(e.to_string()))?;
         headstore
-            .set(&applied_key.bytes(), &[])
+            .set(&applied_key.bytes(), crate::block::heads::document::APPLIED)
             .await
             .map_err(|e| MergeError::Storage(e.to_string()))?;
         Ok(CounterMergeResult {
@@ -288,7 +288,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                 .await
                 .map_err(|e| MergeError::MergeFailed(e.to_string()))?;
             headstore
-                .set(&applied_key.bytes(), &[])
+                .set(&applied_key.bytes(), crate::block::heads::document::APPLIED)
                 .await
                 .map_err(|e| MergeError::Storage(e.to_string()))?;
         }

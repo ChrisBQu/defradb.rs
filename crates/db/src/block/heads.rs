@@ -7,9 +7,12 @@
 //! of one set never conflict, and a reader is one unvalidated point read
 //! (`get_parts(key, &[])`). A parent whose head has not arrived yet is held
 //! ahead until its own `add` consumes it; the writer chooses between
-//! `supersede` and `supersede_ahead` from a validated read of the parent's
-//! publication guard, so an ahead name is only ever written for a parent that
-//! is truly unpublished.
+//! `supersede` and `supersede_ahead` from what records the parent's
+//! publication, read so that the parent's publication committing meanwhile
+//! conflicts, so an ahead name is only ever written for a parent that is truly
+//! unpublished. A document head's record is its priority index entry, and a
+//! held parent is read by its part of the set ([`document::publish`]); a
+//! collection block's is a publication guard key.
 //!
 //! Documents are in [`document`]; the collection set and its publication
 //! guard are here.

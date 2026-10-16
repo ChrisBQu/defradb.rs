@@ -1,9 +1,10 @@
 use super::composite::{CompositeMergeContext, CompositeMergeState};
 use super::*;
-use storage::corekv::Key;
-use storage::keys::headstore::{HeadstoreDocKey, HeadstorePriorityKey};
+use storage::keys::headstore::HeadstoreDocKey;
 
 impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
+    /// Publish the composite and each field block it merged into the
+    /// document's head set, in one operand.
     pub(crate) async fn update_heads(
         &self,
         headstore: &NamespaceView,
@@ -28,32 +29,19 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
         )
         .await
         .map_err(storage_error)?;
-        headstore
-            .set(
-                &HeadstorePriorityKey::new(
-                    context.doc_short_id,
-                    context.payload.priority,
-                    *context.cid,
-                )
-                .bytes(),
-                &[],
-            )
-            .await
-            .map_err(|e| MergeError::Storage(e.to_string()))?;
 
         if let Some(links) = &context.block.links {
             for link in links {
                 if !state.linked_field_cids.contains(&link.link) {
                     continue;
                 }
-                let priority = state.field_block_priorities[&link.link];
                 let head = HeadstoreDocKey::new(context.doc_short_id, &link.name, link.link);
                 crate::block::heads::document::publish(
                     headstore,
                     set,
                     &mut write,
                     &head,
-                    priority,
+                    state.field_block_priorities[&link.link],
                     state
                         .field_block_heads
                         .get(&link.name)
@@ -61,15 +49,7 @@ impl<S: Store, B: blockstore::Blockstore> DbMergeHandler<S, B> {
                         .unwrap_or_default(),
                 )
                 .await
-                .map_err(|e| MergeError::Storage(e.to_string()))?;
-                headstore
-                    .set(
-                        &HeadstorePriorityKey::new(context.doc_short_id, priority, link.link)
-                            .bytes(),
-                        &[],
-                    )
-                    .await
-                    .map_err(|e| MergeError::Storage(e.to_string()))?;
+                .map_err(storage_error)?;
             }
         }
         crate::block::heads::document::commit(headstore, context.doc_short_id, &write)

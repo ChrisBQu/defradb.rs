@@ -127,12 +127,14 @@ static FAMILIES: [Family; 14] = [
     // by blind merges (`keys::HeadstoreDocSetKey`, `keys::HeadstoreColSetKey`,
     // `db::block::heads`), and the guards that record a collection block's
     // publication (`keys::HeadstoreColPublishedKey`). Ordinary: a merge is
-    // blind at every class, and the set is read without parts.
+    // blind at every class, and a set is read without parts, or by the parts
+    // of the names a publication decides on.
     family(b"h/hd/", &[], Class::Ordinary),
     family(b"h/hc/", &[], Class::Ordinary),
     family(b"h/rc/", &[], Class::Ordinary),
-    // A document's commit priority index (`keys::HeadstorePriorityKey`), and
-    // the guards that record its heads' publication.
+    // A document's commit priority index (`keys::HeadstorePriorityKey`), whose
+    // entry also records a head's publication, and the guards an earlier
+    // layout wrote for that, which the head-set migration drops at open.
     family(b"h/p/", &[Part::DocShortId], Class::Ordinary),
     family(b"h/r/", &[Part::DocShortId], Class::Ordinary),
     // A collection's document values, deletion markers and schema versions

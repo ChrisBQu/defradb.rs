@@ -3,9 +3,9 @@
 \* crates/db/src/block/heads/document.rs and builder/collection.rs over the
 \* regolith-backed store in crates/storage/src/backends/regolith.
 \*
-\* Document publication guards h/r correspond to this model's committed set:
-\* a block publishes its head at most once, even after pruning. These ordinary
-\* keys are distinct from h/p counter application and survive reclamation.
+\* A document head's publication is recorded by its priority index entry
+\* (h/p, empty value), not by a guard key: a block publishes its head at most
+\* once, even after it is superseded. HeadPublication.tla models that protocol.
 \*
 \* THE MECHANISM. A collection's head set is the set of blocks in its DAG that no
 \* other block names as a parent. `write_collection_block` maintains it by:

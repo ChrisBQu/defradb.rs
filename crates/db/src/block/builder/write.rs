@@ -590,17 +590,8 @@ pub(crate) async fn write_document_blocks_with_inputs(
             for old_head in &field_head_entries {
                 head_write.supersede(&doc_heads::name(field_name, old_head));
             }
-            let guard = doc_heads::add_head(
-                &mut head_write,
-                identity.doc_short_id,
-                field_name,
-                &field_cid,
-                field_priority,
-            );
-            headstore
-                .set(&guard, &[])
-                .await
-                .map_err(|e| e.to_string())?;
+            head_write.add(&doc_heads::name(field_name, &field_cid), field_priority);
+
             headstore
                 .set(
                     &priority_index_key(identity.doc_short_id, field_priority, field_cid),
@@ -685,17 +676,8 @@ pub(crate) async fn write_document_blocks_with_inputs(
     for old_head in &composite_heads {
         head_write.supersede(&doc_heads::name("C", old_head));
     }
-    let guard = doc_heads::add_head(
-        &mut head_write,
-        identity.doc_short_id,
-        "C",
-        &composite_cid,
-        composite_priority,
-    );
-    headstore
-        .set(&guard, &[])
-        .await
-        .map_err(|e| e.to_string())?;
+    head_write.add(&doc_heads::name("C", &composite_cid), composite_priority);
+
     headstore
         .set(
             &priority_index_key(identity.doc_short_id, composite_priority, composite_cid),
@@ -822,11 +804,8 @@ pub(crate) async fn write_delete_block_with_inputs(
     for old_head in &composite_heads {
         head_write.supersede(&doc_heads::name("C", old_head));
     }
-    let guard = doc_heads::add_head(&mut head_write, doc_short_id, "C", &composite_cid, priority);
-    headstore
-        .set(&guard, &[])
-        .await
-        .map_err(|e| e.to_string())?;
+    head_write.add(&doc_heads::name("C", &composite_cid), priority);
+
     headstore
         .set(
             &priority_index_key(doc_short_id, priority, composite_cid),

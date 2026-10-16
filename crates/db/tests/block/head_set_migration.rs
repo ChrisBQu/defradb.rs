@@ -131,3 +131,56 @@ async fn legacy_heads_and_markers_open_as_the_same_live_heads() {
         assert_eq!(count(&store, &[b"/d/", b"/ds/", b"/c/", b"/cs/"]).await, 0);
     }
 }
+
+/// A store the earlier run stamped, still holding document publication
+/// guards, opens with the guards and the earlier stamp gone and its heads
+/// unchanged; a second open finds nothing to do.
+#[tokio::test]
+async fn guards_an_earlier_run_left_go_at_open() {
+    let store = Arc::new(RegolithStore::in_memory().unwrap());
+    let (parent, child) = (cid(b"guarded parent"), cid(b"guarded child"));
+    {
+        let seed = DB::from_arc(store.clone()).unwrap();
+        let txn = seed.new_txn(false).await.unwrap();
+        let headstore = txn.headstore().unwrap();
+        let mut write = storage::merge::head_set::Write::default();
+        write.add(&document::name("name", &parent), 1);
+        write.supersede(&document::name("name", &parent));
+        write.add(&document::name("name", &child), 2);
+        document::commit(&headstore, DOC, &write).await.unwrap();
+        for cid in [parent, child] {
+            let head = HeadstoreDocKey::new(DOC, "name", cid);
+            headstore
+                .set(&document::publication_key(&head), &[])
+                .await
+                .unwrap();
+        }
+        drop(headstore);
+        txn.systemstore()
+            .unwrap()
+            .set(b"/migration/head-sets/v1", &[])
+            .await
+            .unwrap();
+        txn.commit().await.unwrap();
+    }
+    assert_eq!(count(&store, &[b"/r/"]).await, 2);
+
+    for open in 0..2 {
+        let db = DB::open_from_arc(store.clone()).await.unwrap();
+        let txn = db.new_txn(true).await.unwrap();
+        let headstore = txn.headstore().unwrap();
+        let live: Vec<_> = document::load(&headstore, DOC)
+            .await
+            .unwrap()
+            .live()
+            .map(|(name, priority)| (name.to_vec(), priority))
+            .collect();
+        assert_eq!(live, [(document::name("name", &child), 2)], "open {open}");
+        drop(headstore);
+        let systemstore = txn.systemstore().unwrap();
+        assert!(!systemstore.has(b"/migration/head-sets/v1").await.unwrap());
+        drop(systemstore);
+        txn.discard().unwrap();
+        assert_eq!(count(&store, &[b"/r/"]).await, 0, "open {open}");
+    }
+}

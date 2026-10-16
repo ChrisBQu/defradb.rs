@@ -70,6 +70,19 @@ pub const PROPERTIES: &[Property] = &[
         tiers: &[Behavioral],
     },
     Property {
+        // A replicated block is published into its document's head set once:
+        // its priority index entry records the publication, so a replay never
+        // makes a superseded head live again, and a parent held ahead is read
+        // by its own part of the set, so the parent's concurrent publication
+        // (and nothing unrelated) refuses that decision. No guard key exists.
+        family: "Concurrent collection-head transitions",
+        name: "INV_LiveExact / INV_AheadExact / INV_NoUnrelatedAbort — document head publication without guard keys",
+        axis: Tla,
+        anchor: "crates/db/src/block/heads/document.rs publish/was_published; crates/storage/src/backends/regolith/merge/head_set.rs part/touches; crates/db/tests/block/document_heads.rs, crates/db/tests/merge/head_publication.rs",
+        model_ref: "MC_HeadPublication_Green.cfg (GREEN) / MC_HeadPublication_Red_{NoRecord,OwnUnvalidated,NoPartRead,WholeSet}.cfg (RED)",
+        tiers: &[Contract],
+    },
+    Property {
         // The algebra the temporal model rests on: every key a writer writes
         // names that writer, so two writers cannot collide (disjointness), and
         // the eager strategy demonstrably does collide (non-vacuity). Appending

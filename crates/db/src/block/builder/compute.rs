@@ -238,16 +238,10 @@ pub(crate) fn compute_document_blocks_with_inputs(
 
         blockstore_entries.push((field_cid.to_bytes(), field_block_bytes.into()));
 
-        headstore_entries.push((
-            crate::block::heads::document::add_head(
-                &mut head_write,
-                identity.doc_short_id,
-                field_name,
-                &field_cid,
-                priority,
-            ),
-            vec![],
-        ));
+        head_write.add(
+            &crate::block::heads::document::name(field_name, &field_cid),
+            priority,
+        );
         headstore_entries.push((
             priority_index_key(identity.doc_short_id, priority, field_cid),
             vec![],
@@ -316,16 +310,10 @@ pub(crate) fn compute_document_blocks_with_inputs(
 
     blockstore_entries.push((composite_cid.to_bytes(), composite_bytes.clone().into()));
 
-    headstore_entries.push((
-        crate::block::heads::document::add_head(
-            &mut head_write,
-            identity.doc_short_id,
-            "C",
-            &composite_cid,
-            priority,
-        ),
-        vec![],
-    ));
+    head_write.add(
+        &crate::block::heads::document::name("C", &composite_cid),
+        priority,
+    );
     headstore_entries.push((
         priority_index_key(identity.doc_short_id, priority, composite_cid),
         vec![],

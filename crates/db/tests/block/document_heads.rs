@@ -5,6 +5,10 @@ use storage::keys::headstore::HeadstoreDocKey;
 use storage::merge::head_set::Write;
 use storage::RegolithStore;
 
+use db::block::heads::document::{APPLIED, PUBLISHED};
+use defra_core::block::{Block, CompositeDeltaPayload, CrdtDelta};
+use storage::keys::headstore::HeadstorePriorityKey;
+
 const DOC: u64 = 47; // The binary short ID contains a slash.
 fn cid(value: &[u8]) -> Cid {
     defra_core::block::generate_cid_from_bytes(value).unwrap()
@@ -377,4 +381,227 @@ async fn holding_a_parent_ahead_conflicts_with_its_publication() {
     let view = txn.headstore().unwrap();
     assert_eq!(live(&view).await, vec![child]);
     assert_eq!(ahead(&view).await, 0);
+}
+
+fn sorted(mut cids: Vec<Cid>) -> Vec<Cid> {
+    cids.sort_by_cached_key(Cid::to_string);
+    cids
+}
+
+/// A block at `priority`, stored as a replicated block is before it is
+/// published.
+async fn stored_block(db: &db::DB<RegolithStore>, seed: &str, priority: u64) -> Cid {
+    let bytes = Block::new(
+        CrdtDelta::Composite(CompositeDeltaPayload {
+            schema_version_id: seed.to_string(),
+            priority,
+            status: 1,
+        }),
+        vec![],
+        vec![],
+    )
+    .to_dag_cbor()
+    .unwrap();
+    let cid = defra_core::block::generate_cid_from_bytes(&bytes).unwrap();
+    let txn = db.new_txn(false).await.unwrap();
+    txn.blockstore()
+        .unwrap()
+        .set(&cid.to_bytes(), &bytes)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+    cid
+}
+
+/// Two publications of one head race a child that supersedes it. The head's
+/// priority index entry is read validated, so the later publication cannot
+/// commit once the first has, and its retry leaves the head superseded.
+#[tokio::test]
+async fn a_replay_racing_its_childs_supersede_conflicts_and_never_resurrects() {
+    let db = db::DB::new(RegolithStore::in_memory().unwrap()).unwrap();
+    let (parent, child) = (cid(b"raced parent"), cid(b"raced child"));
+    let first = db.new_txn(false).await.unwrap();
+    let replay = db.new_txn(false).await.unwrap();
+    publish_head(&first, parent, 1, &[]).await;
+    publish_head(&replay, parent, 1, &[]).await;
+    first.commit().await.unwrap();
+    let txn = db.new_txn(false).await.unwrap();
+    publish_head(&txn, child, 2, &[parent]).await;
+    txn.commit().await.unwrap();
+    assert!(
+        replay.commit().await.is_err(),
+        "a replay that found no record cannot commit after the head was published"
+    );
+
+    let retry = db.new_txn(false).await.unwrap();
+    publish_head(&retry, parent, 1, &[]).await;
+    retry.commit().await.unwrap();
+    let txn = db.new_txn(true).await.unwrap();
+    let view = txn.headstore().unwrap();
+    assert_eq!(live(&view).await, vec![child]);
+    assert_eq!(ahead(&view).await, 0);
+}
+
+/// A child holds its parent ahead while the parent is published and a sibling
+/// supersedes it. The hold read the parent's part of the set, which both of
+/// those operands touch, so it cannot commit; its retry finds the parent
+/// published and supersedes it, and no name stays ahead.
+#[tokio::test]
+async fn a_hold_on_a_parent_published_and_superseded_meanwhile_conflicts() {
+    let db = db::DB::new(RegolithStore::in_memory().unwrap()).unwrap();
+    let parent = stored_block(&db, "held parent", 1).await;
+    let (early, late) = (cid(b"early child"), cid(b"late sibling"));
+    let held = db.new_txn(false).await.unwrap();
+    publish_head(&held, early, 2, &[parent]).await;
+    for (head, priority, parents) in [(parent, 1, &[][..]), (late, 2, &[parent][..])] {
+        let txn = db.new_txn(false).await.unwrap();
+        publish_head(&txn, head, priority, parents).await;
+        txn.commit().await.unwrap();
+    }
+    assert!(
+        held.commit().await.is_err(),
+        "a hold on a parent published since cannot commit"
+    );
+
+    let retry = db.new_txn(false).await.unwrap();
+    publish_head(&retry, early, 2, &[parent]).await;
+    retry.commit().await.unwrap();
+    let txn = db.new_txn(true).await.unwrap();
+    let view = txn.headstore().unwrap();
+    assert_eq!(live(&view).await, sorted(vec![early, late]));
+    assert_eq!(ahead(&view).await, 0);
+}
+
+/// A child holding its parent ahead commits past an unrelated head published
+/// meanwhile: the hold read only the parent's part of the set. The set holds
+/// a value first, since a read that found no set decided on its absence,
+/// which any merge into it ends.
+#[tokio::test]
+async fn an_unrelated_publication_does_not_turn_away_a_hold() {
+    let db = db::DB::new(RegolithStore::in_memory().unwrap()).unwrap();
+    let (seed, parent, child, other) = (
+        cid(b"seed head"),
+        cid(b"missing parent"),
+        cid(b"holding child"),
+        cid(b"unrelated head"),
+    );
+    let txn = db.new_txn(false).await.unwrap();
+    publish_head(&txn, seed, 1, &[]).await;
+    txn.commit().await.unwrap();
+    let held = db.new_txn(false).await.unwrap();
+    publish_head(&held, child, 2, &[parent]).await;
+    let txn = db.new_txn(false).await.unwrap();
+    publish_head(&txn, other, 1, &[]).await;
+    txn.commit().await.unwrap();
+    held.commit()
+        .await
+        .expect("an operand that names other heads does not touch the parent's part");
+
+    let txn = db.new_txn(true).await.unwrap();
+    let view = txn.headstore().unwrap();
+    assert_eq!(live(&view).await, sorted(vec![seed, child, other]));
+    assert_eq!(ahead(&view).await, 1);
+}
+
+/// A late sibling of a parent published and superseded before it began: the
+/// parent's stored block and priority index entry say it was published, so
+/// the sibling supersedes it and holds nothing ahead.
+#[tokio::test]
+async fn a_late_sibling_of_a_superseded_parent_holds_nothing_ahead() {
+    let db = db::DB::new(RegolithStore::in_memory().unwrap()).unwrap();
+    let parent = stored_block(&db, "published parent", 1).await;
+    let (first, second) = (cid(b"first child"), cid(b"second child"));
+    for (head, priority, parents) in [
+        (parent, 1, &[][..]),
+        (first, 2, &[parent][..]),
+        (second, 2, &[parent][..]),
+    ] {
+        let txn = db.new_txn(false).await.unwrap();
+        publish_head(&txn, head, priority, parents).await;
+        txn.commit().await.unwrap();
+    }
+    let txn = db.new_txn(true).await.unwrap();
+    let view = txn.headstore().unwrap();
+    assert_eq!(live(&view).await, sorted(vec![first, second]));
+    assert_eq!(ahead(&view).await, 0);
+}
+
+/// A counter merged on its own leaves its priority index entry saying the
+/// delta was applied, not that the head was published: the composite that
+/// links it still publishes the head, and the entry then says so.
+#[tokio::test]
+async fn a_counter_applied_before_its_head_is_still_published() {
+    let db = db::DB::new(RegolithStore::in_memory().unwrap()).unwrap();
+    let field = cid(b"counter block");
+    let entry = HeadstorePriorityKey::new(DOC, 1, field).bytes();
+    let txn = db.new_txn(false).await.unwrap();
+    txn.headstore().unwrap().set(&entry, APPLIED).await.unwrap();
+    txn.commit().await.unwrap();
+    let txn = db.new_txn(false).await.unwrap();
+    publish_head(&txn, field, 1, &[]).await;
+    txn.commit().await.unwrap();
+
+    let txn = db.new_txn(true).await.unwrap();
+    let view = txn.headstore().unwrap();
+    assert_eq!(live(&view).await, vec![field]);
+    assert_eq!(view.get(&entry).await.unwrap().as_deref(), Some(PUBLISHED));
+}
+
+/// No write path stores a publication guard: local creates and updates and a
+/// replicated publication record a head's publication in its priority index
+/// entry alone.
+#[tokio::test]
+async fn no_write_path_stores_a_publication_guard() {
+    use query::mutator::DocMutator;
+    let db = std::sync::Arc::new(db::DB::new(RegolithStore::in_memory().unwrap()).unwrap());
+    db.create_collection(schema::CollectionVersion::new(
+        "Guarded",
+        "guarded-v1",
+        "col-guarded",
+        vec![
+            schema::FieldDescription::new("1", "_docID", schema::FieldKind::doc_id()),
+            schema::FieldDescription::new("2", "value", schema::FieldKind::int()),
+        ],
+    ))
+    .await
+    .unwrap();
+    let autocommit = db::AutoCommitMutator::new(db.clone());
+    let doc_id = autocommit
+        .create(
+            "Guarded",
+            document::Document::from_json_str(r#"{"value": 0}"#).unwrap(),
+        )
+        .await
+        .unwrap()
+        .doc_id;
+    for value in 1..=3 {
+        let mut doc = autocommit
+            .get_for_update("Guarded", &doc_id)
+            .await
+            .unwrap()
+            .unwrap();
+        doc.set("value", document::NormalValue::Int(value));
+        autocommit
+            .update(
+                "Guarded",
+                doc,
+                rapidhash::RapidHashSet::from_iter(["value".to_string()]),
+            )
+            .await
+            .unwrap();
+    }
+    let (parent, child) = (cid(b"replicated parent"), cid(b"replicated child"));
+    let txn = db.new_txn(false).await.unwrap();
+    publish_head(&txn, parent, 1, &[]).await;
+    publish_head(&txn, child, 2, &[parent]).await;
+    txn.commit().await.unwrap();
+
+    let txn = db.new_txn(true).await.unwrap();
+    let view = txn.headstore().unwrap();
+    let mut guards = view
+        .iterator(IterOptions::new().with_prefix(b"/r/".to_vec()))
+        .await
+        .unwrap();
+    assert!(guards.next().await.unwrap().is_none(), "a guard was stored");
+    guards.close().await.unwrap();
 }

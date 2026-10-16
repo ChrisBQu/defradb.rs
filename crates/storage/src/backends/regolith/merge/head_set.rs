@@ -23,6 +23,12 @@
 //! unfolded run. Operands and values name their names in ascending byte order
 //! and nothing else, so a fold is one walk over two sorted lists and a value
 //! is canonical. Malformed bytes make every function here answer `None`.
+//!
+//! Each name's state is one part of the value ([`part`]): an operand touches
+//! exactly the names it holds, so a reader that decided on some names reads
+//! their parts and is refused at commit only by an operand that holds one of
+//! them. A fold holds the union of the names of what it folds (no composition
+//! of these entries is the identity), so the answer survives folding.
 use std::collections::BTreeMap;
 
 use super::{decode, encode, HEAD_SET, HEAD_SET_STATE};
@@ -309,6 +315,27 @@ pub(super) fn fold(left: &[u8], right: &[u8]) -> Option<Vec<u8>> {
         }
     }
     Some(encode_operand(folded.into_iter()))
+}
+
+/// The flag every name's part carries. An id without it is no name's part.
+const NAME_PART: u32 = 1 << 31;
+
+/// The part of a set that is `name`'s state, to read by parts: a hash of the
+/// name with `NAME_PART` set. Two names may share a part, which only makes
+/// a read of one refused by the other's operands too.
+pub fn part(name: &[u8]) -> u32 {
+    NAME_PART | rapidhash::v3::rapidhash_v3(name) as u32
+}
+
+/// Whether the operand `body` touches one of `parts`: whether it holds a name
+/// whose part is one of them. No parts, an id that is no name's part, or
+/// malformed bytes: true.
+pub(super) fn touches(body: &[u8], parts: &[u32]) -> bool {
+    if parts.is_empty() || parts.iter().any(|id| id & NAME_PART == 0) {
+        return true;
+    }
+    operand_entries(body)
+        .is_none_or(|entries| entries.iter().any(|(name, _)| parts.contains(&part(name))))
 }
 
 /// What one writer does to one set: build it, take its operand, and merge

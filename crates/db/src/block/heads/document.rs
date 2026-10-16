@@ -6,23 +6,38 @@
 //! layout from the set and its callers read the live heads unchanged: live
 //! heads only, in head-key order, with seek and reverse.
 //!
-//! A head is published once, behind its publication guard (`h/r/`), which
-//! survives the head being superseded: it is what tells a parent that was
-//! published from one whose block has not arrived.
+//! A head is published once. Its priority index entry (`h/p/`), which every
+//! publication writes, records that with an empty value ([`PUBLISHED`]) and
+//! survives the head being superseded: it is what keeps a replay from making
+//! a superseded head live again, and what tells a parent that was published
+//! from one whose block has not arrived. A parent held ahead is read by its
+//! part of the set, so the parent's publication racing the hold conflicts
+//! through the set's own key. No other key records a publication.
 
 use async_trait::async_trait;
 use cid::Cid;
+use defra_core::block::Block;
 use std::collections::VecDeque;
 use storage::corekv::{Error, IterOptions, Iterator, Key, KvPair, Reader, Result};
 use storage::keys::doc_id_index::decode_doc_short_id_prefix;
-use storage::keys::headstore::{HeadstoreDocKey, HeadstoreDocSetKey};
-use storage::merge::head_set::{Set, Write};
+use storage::keys::headstore::{HeadstoreDocKey, HeadstoreDocSetKey, HeadstorePriorityKey};
+use storage::merge::head_set::{part, Set, Write};
+use storage::namespace::Namespace;
 
 use super::{merge_set, read_set};
 use crate::block::builder::encode_priority_varint;
 
 const HEADS: &[u8] = b"/d/";
-const PUBLISHED: &[u8] = b"/r/";
+const GUARDS: &[u8] = b"/r/";
+
+/// The value of a head's priority index entry once the head is published:
+/// empty, as every publication writes it.
+pub const PUBLISHED: &[u8] = &[];
+
+/// The value of a priority index entry whose counter delta was applied before
+/// its head was published (a counter merged on its own, ahead of the composite
+/// that links it): the delta is applied, and the head is not published.
+pub const APPLIED: &[u8] = b"a";
 
 /// The name of a head in its document's set.
 pub fn name(field: &str, cid: &Cid) -> Vec<u8> {
@@ -64,41 +79,24 @@ pub async fn commit(
     merge_set(writer, &set_key(doc_short_id), write).await
 }
 
-/// The publication guards of every head of one document.
-pub fn document_publications(doc_short_id: u64) -> Vec<u8> {
-    let prefix = HeadstoreDocKey::document_prefix(doc_short_id);
-    [PUBLISHED, &prefix[HEADS.len()..]].concat()
-}
-
-/// Durable publication identity, separate from CRDT application: a standalone
-/// counter can be applied before its composite publishes the field head.
-/// This guard survives the head being superseded so replay cannot resurrect a
-/// parent.
+/// The key of a head's publication guard in the earlier layout, which the
+/// head-set migration reads and then drops.
 pub fn publication_key(head: &HeadstoreDocKey) -> Vec<u8> {
-    [PUBLISHED, &head.bytes()[HEADS.len()..]].concat()
-}
-
-/// Add `cid` to `write` as a head of `field` at `priority`, and return the key
-/// of its publication guard ([`publication_key`]): the CID is formatted once
-/// for both, the name being the bytes the head key has after its document.
-pub fn add_head(
-    write: &mut Write,
-    doc_short_id: u64,
-    field: &str,
-    cid: &Cid,
-    priority: u64,
-) -> Vec<u8> {
-    let name = name(field, cid);
-    write.add(&name, priority);
-    let document = HeadstoreDocKey::document_prefix(doc_short_id);
-    [PUBLISHED, &document[HEADS.len()..], &name].concat()
+    [GUARDS, &head.bytes()[HEADS.len()..]].concat()
 }
 
 /// Publish a replicated head once, into `write`: it becomes a head at
 /// `priority` and each of `parents` stops being one. `set` is the document's
-/// set as the caller read it. A parent live in `set` or with a publication
-/// guard is superseded; any other has not arrived, and is held ahead until it
-/// does. The guard reads are validated.
+/// set as the caller read it, in the same transaction.
+///
+/// A head whose priority index entry says it is published is left alone. That
+/// read is validated, so a publication of the same head committing meanwhile
+/// conflicts: two publications of one head never both add it, and neither can
+/// undo a child that superseded it in between. A parent live in `set`, or
+/// published since (`was_published`), is superseded. Any other has not
+/// arrived, and is held ahead until it does; that decision reads the parent's
+/// part of the set, so only an operand that names the parent (its own
+/// publication, or another child's) conflicts with it.
 pub async fn publish(
     writer: &datastore::NamespaceView,
     set: &Set,
@@ -107,21 +105,50 @@ pub async fn publish(
     priority: u64,
     parents: &[Cid],
 ) -> Result<()> {
-    let recorded = publication_key(head);
-    if writer.has(&recorded).await? {
+    let entry = HeadstorePriorityKey::new(head.doc_short_id, priority, head.cid).bytes();
+    if writer.get(&entry).await?.as_deref() == Some(PUBLISHED) {
         return Ok(());
     }
+    let mut held = Vec::new();
     for parent in parents {
         let name = name(&head.field_id, parent);
-        let parent_head = HeadstoreDocKey::new(head.doc_short_id, &head.field_id, *parent);
-        if set.is_live(&name) || writer.has(&publication_key(&parent_head)).await? {
+        if set.is_live(&name) || was_published(writer, head.doc_short_id, parent).await? {
             write.supersede(&name);
         } else {
+            held.push(part(&name));
             write.supersede_ahead(&name);
         }
     }
+    if !held.is_empty() {
+        held.sort_unstable();
+        held.dedup();
+        writer.get_parts(&set_key(head.doc_short_id), &held).await?;
+    }
     write.add(&name(&head.field_id, &head.cid), priority);
-    writer.set(&recorded, &[]).await
+    writer.set(&entry, PUBLISHED).await
+}
+
+/// Whether the head `cid` of the document was ever published: its block is
+/// stored, and the priority index entry at the block's own priority says so.
+/// Not validated: once published, a head stays published, and a publication
+/// committing after this read names `cid`, which the part read in [`publish`]
+/// meets.
+async fn was_published(
+    writer: &datastore::NamespaceView,
+    doc_short_id: u64,
+    cid: &Cid,
+) -> Result<bool> {
+    let Some(bytes) = writer
+        .sibling(Namespace::Blockstore)
+        .get(&cid.to_bytes())
+        .await?
+    else {
+        return Ok(false);
+    };
+    let block = Block::from_dag_cbor(&bytes)
+        .map_err(|error| Error::Other(format!("a stored block does not decode: {error}")))?;
+    let entry = HeadstorePriorityKey::new(doc_short_id, block.delta.priority(), *cid).bytes();
+    Ok(writer.get_parts(&entry, &[]).await?.as_deref() == Some(PUBLISHED))
 }
 
 /// The live heads of the documents `options` names, as head keys with their
@@ -300,34 +327,6 @@ impl Iterator for LiveHeads {
         match &self.source {
             Source::One(..) => true,
             Source::Many(sets) => sets.is_valid(),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// [`add_head`] adds the head [`name`] names, and hands back the guard
-    /// [`publication_key`] gives its head key, for short IDs whose encoding
-    /// spans one byte, a `/` byte and several bytes.
-    #[test]
-    fn add_head_adds_the_named_head_and_returns_its_publication_key() {
-        let cid: Cid = "bafyreih7c4pdkyvosses56rmyomakxvicn4cehjrw3w3mmk57iagt6f4sq"
-            .parse()
-            .unwrap();
-        for doc_short_id in [0, 1, 0x2f, 127, 128, 300, u64::MAX] {
-            for field in ["C", "name", "field_15"] {
-                let mut write = Write::default();
-                let guard = add_head(&mut write, doc_short_id, field, &cid, 7);
-                assert_eq!(
-                    guard,
-                    publication_key(&HeadstoreDocKey::new(doc_short_id, field, cid))
-                );
-                let mut expected = Write::default();
-                expected.add(&name(field, &cid), 7);
-                assert_eq!(write.operand(), expected.operand());
-            }
         }
     }
 }

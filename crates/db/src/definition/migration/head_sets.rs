@@ -5,19 +5,24 @@
 //! (`/d/{doc}/{field}/{cid}`) and a parent was superseded by a marker a child
 //! wrote (`/ds/{doc}/{field}/{parent}/{child}`); a collection's were `/c/` and
 //! `/cs/`. This reads that layout and writes the same live heads as head-set
-//! merges (`block::heads`), then deletes the old keys, in four phases of
+//! merges (`block::heads`), then deletes the old keys, in five phases of
 //! bounded batches: document markers, collection markers, document heads,
-//! collection heads. Markers go first so that every head still stored when the
-//! head phases run is live.
+//! collection heads, document publication guards. Markers go first so that
+//! every head still stored when the head phases run is live.
 //!
 //! A marker whose parent head is stored supersedes it: the head goes, and a
 //! publication guard records that it was published. A marker whose parent
 //! head is gone is dropped when the parent was published (its guard, or for a
 //! collection a merged block, says so) and held ahead otherwise, to be
-//! consumed when its parent arrives. Each batch is one transaction that
-//! writes the new set values and deletes the old keys it read, so a run that
-//! stops partway resumes where the deletes ended, and a second run finds
-//! nothing. A stamp makes later opens one point read.
+//! consumed when its parent arrives. A document head's publication is
+//! recorded by its priority index entry (`block::heads::document::publish`),
+//! which every publication writes and the priority index backfill fills in,
+//! so the document guards (`/r/`), this run's and any an earlier one left, go
+//! last. Each batch is one transaction that writes the new set values and
+//! deletes the old keys it read, so a run that stops partway resumes where the
+//! deletes ended, and a second run finds nothing. A stamp makes later opens
+//! one point read; a store stamped by the run before the guards phase existed
+//! runs again, and only that phase finds keys.
 
 use std::collections::BTreeMap;
 
@@ -34,7 +39,9 @@ use crate::block::heads::document;
 use crate::database::DB;
 use crate::error::{Error, Result};
 
-const MIGRATION_MARKER: &[u8] = b"/migration/head-sets/v1";
+const MIGRATION_MARKER: &[u8] = b"/migration/head-sets/v2";
+/// The stamp of the run before the guards phase, removed with the new stamp.
+const EARLIER_MARKER: &[u8] = b"/migration/head-sets/v1";
 /// Keys one batch may read.
 const BATCH_KEYS: usize = 512;
 
@@ -45,14 +52,16 @@ enum Phase {
     CollectionMarkers,
     DocumentHeads,
     CollectionHeads,
+    DocumentGuards,
 }
 
 impl Phase {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 5] = [
         Self::DocumentMarkers,
         Self::CollectionMarkers,
         Self::DocumentHeads,
         Self::CollectionHeads,
+        Self::DocumentGuards,
     ];
 
     fn prefix(self) -> &'static [u8] {
@@ -61,6 +70,7 @@ impl Phase {
             Self::CollectionMarkers => b"/cs/",
             Self::DocumentHeads => b"/d/",
             Self::CollectionHeads => b"/c/",
+            Self::DocumentGuards => b"/r/",
         }
     }
 }
@@ -99,10 +109,23 @@ impl<S: Store> DB<S> {
             }
         }
         let txn = self.new_txn(false).await?;
-        txn.systemstore()?
+        let systemstore = txn.systemstore()?;
+        systemstore
             .set(MIGRATION_MARKER, &[])
             .await
             .map_err(Error::Storage)?;
+        // A fresh store never had the earlier stamp: no tombstone for it.
+        if systemstore
+            .has(EARLIER_MARKER)
+            .await
+            .map_err(Error::Storage)?
+        {
+            systemstore
+                .delete(EARLIER_MARKER)
+                .await
+                .map_err(Error::Storage)?;
+        }
+        drop(systemstore);
         txn.commit().await?;
         if moved > 0 {
             tracing::info!(keys = moved, "moved head sets to merged values");
@@ -234,10 +257,6 @@ async fn move_key(
                 &document::name(&head.field_id, &head.cid),
                 decode_priority_varint(&pair.value),
             );
-            headstore
-                .set(&document::publication_key(&head), &[])
-                .await
-                .map_err(Error::Storage)?;
             Ok(true)
         }
         Phase::CollectionHeads => {
@@ -257,6 +276,8 @@ async fn move_key(
                 .map_err(Error::Storage)?;
             Ok(true)
         }
+        // Every guard goes: the priority index entry records the publication.
+        Phase::DocumentGuards => Ok(true),
     }
 }
 

@@ -323,11 +323,6 @@ impl<S: Store> crate::database::DB<S> {
                     .map_err(Error::Storage)?;
                 delete_prefix(
                     &headstore,
-                    crate::block::heads::document::document_publications(doc_short_id),
-                )
-                .await?;
-                delete_prefix(
-                    &headstore,
                     HeadstorePriorityKey::document_prefix(doc_short_id),
                 )
                 .await?;
