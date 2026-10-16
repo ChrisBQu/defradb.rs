@@ -142,23 +142,23 @@ async fn committed_batch_wakes_state_reader_once_and_preserves_raw_order() {
     assert_eq!(raw.dropped_count(), 0);
 }
 
-#[test]
-fn subscription_registration_cannot_escape_close() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn subscription_registration_cannot_escape_close() {
     for _ in 0..100 {
         let bus = std::sync::Arc::new(ChannelBus::new());
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let barrier = std::sync::Arc::new(regolith::sync::Barrier::new(2));
         let registering_bus = bus.clone();
         let registering_barrier = barrier.clone();
-        let thread = std::thread::spawn(move || {
-            registering_barrier.wait();
+        let thread = tokio::spawn(async move {
+            registering_barrier.wait().await;
             (
                 registering_bus.subscribe(&[EventName::Update]),
                 registering_bus.subscribe_document_changes(),
             )
         });
-        barrier.wait();
+        barrier.wait().await;
         bus.close();
-        let (mut raw, mut changes) = thread.join().unwrap();
+        let (mut raw, mut changes) = thread.await.unwrap();
         assert!(matches!(
             raw.try_recv(),
             Err(events::TryRecvError::Disconnected)
