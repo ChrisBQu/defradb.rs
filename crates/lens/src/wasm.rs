@@ -7,7 +7,8 @@
 //! reclaimed (the lock-free map frees removed entries in batches). Resource limits (memory, CPU
 //! fuel, epoch interruption, concurrent calls) are opt-in via
 //! `WasmSandboxConfig`; the engine, its ticks, its calls and the limits live
-//! in the `engine` module.
+//! in the `engine` module. A store builds its engine when it first needs one,
+//! so a database that registers no lens builds none (`shared_engine`).
 
 use async_trait::async_trait;
 use futures::{StreamExt, TryStreamExt};
@@ -20,17 +21,18 @@ use wasmtime::Module;
 
 use tracing::{debug, info};
 
-use crate::engine::{
-    CompiledModule, LensEngine, Pipeline, ThreadTicks, TickSource, WasmSandboxConfig,
-};
+use crate::engine::{CompiledModule, Pipeline, ThreadTicks, TickSource, WasmSandboxConfig};
 use crate::store::{first_output, LensDocResultStream, LensDocStream, TransformId, TransformStore};
 use crate::{Error, LensConfig, LensDoc, LensModule, Result};
+use shared_engine::SharedEngine;
+
+mod shared_engine;
 
 /// WASM-based transform store.
 ///
 /// Manages compiled WASM modules and executes transforms.
 pub struct WasmTransformStore {
-    engine: LensEngine,
+    engine: SharedEngine,
     modules: HopscotchMap<TransformId, Pipeline, RandomState>,
     configs: HopscotchMap<TransformId, LensConfig, RandomState>,
 }
@@ -47,16 +49,18 @@ impl WasmTransformStore {
     /// Create a WASM transform store with optional sandboxing. A thread of its
     /// own advances the epoch when the sandbox sets a deadline.
     pub fn with_sandbox(sandbox: Option<WasmSandboxConfig>) -> Result<Self> {
-        Self::with_tick_source(sandbox, &ThreadTicks)
+        Self::with_tick_source(sandbox, ThreadTicks)
     }
 
-    /// Create a WASM transform store whose epoch `ticks` advances.
-    pub fn with_tick_source(
-        sandbox: Option<WasmSandboxConfig>,
-        ticks: &dyn TickSource,
-    ) -> Result<Self> {
+    /// Create a WASM transform store whose epoch `ticks` advances. The
+    /// sandbox is checked now; the engine is built by the first lens the
+    /// store registers.
+    pub fn with_tick_source<T>(sandbox: Option<WasmSandboxConfig>, ticks: T) -> Result<Self>
+    where
+        T: TickSource + 'static,
+    {
         Ok(Self {
-            engine: LensEngine::new(sandbox, ticks)?,
+            engine: SharedEngine::new(sandbox, ticks)?,
             modules: HopscotchMap::with_hasher(RandomState::default()),
             configs: HopscotchMap::with_hasher(RandomState::default()),
         })
@@ -80,7 +84,7 @@ impl WasmTransformStore {
             let clean_path = path_str.strip_prefix("file://").unwrap_or(path_str);
             Self::validate_wasm_path(clean_path)?;
             let path = Path::new(clean_path);
-            Module::from_file(self.engine.engine(), path).map_err(|e| {
+            Module::from_file(self.engine.get()?.engine(), path).map_err(|e| {
                 Error::WasmLoad(format!(
                     "failed to load WASM from {}: {}",
                     path.display(),
@@ -88,7 +92,7 @@ impl WasmTransformStore {
                 ))
             })
         } else if let Some(ref bytes) = lens.module {
-            Module::new(self.engine.engine(), bytes)
+            Module::new(self.engine.get()?.engine(), bytes)
                 .map_err(|e| Error::WasmLoad(format!("failed to load WASM from bytes: {}", e)))
         } else {
             Err(Error::InvalidConfig(
@@ -102,7 +106,7 @@ impl WasmTransformStore {
         lenses
             .iter()
             .map(|lens| {
-                let pre = self.engine.prepare(&self.load_module(lens)?)?;
+                let pre = self.engine.get()?.prepare(&self.load_module(lens)?)?;
                 Ok(CompiledModule::new(pre, params(lens)?, lens.inverse))
             })
             .collect::<Result<Vec<_>>>()
@@ -146,8 +150,9 @@ impl WasmTransformStore {
         inverse: bool,
     ) -> Result<Vec<serde_json::Value>> {
         let pipeline = self.pipeline(id)?;
-        let permit = self.engine.permit(pipeline.len()).await;
-        self.engine
+        let engine = self.engine.get()?;
+        let permit = engine.permit(pipeline.len()).await;
+        engine
             .call(pipeline, futures::stream::iter(values), inverse, permit)
             .try_collect()
             .await
@@ -165,6 +170,7 @@ impl WasmTransformStore {
         debug!(transform_id = %id, modules = pipeline.len(), inverse, "Starting a streaming lens call");
         Ok(Box::pin(
             self.engine
+                .get()?
                 .call(pipeline, docs, inverse, None)
                 .map(|value| value.and_then(into_doc)),
         ))
@@ -298,9 +304,9 @@ impl TransformStore for WasmTransformStore {
         inverse: bool,
     ) -> Result<LensDoc> {
         let pipeline = self.pipeline(id)?;
-        let permit = self.engine.permit(pipeline.len()).await;
-        let output = self
-            .engine
+        let engine = self.engine.get()?;
+        let permit = engine.permit(pipeline.len()).await;
+        let output = engine
             .call(pipeline, futures::stream::iter([doc]), inverse, permit)
             .map(|value| value.and_then(into_doc));
         first_output(output).await

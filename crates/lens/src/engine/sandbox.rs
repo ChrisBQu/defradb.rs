@@ -3,6 +3,14 @@
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
+use regolith::sync::{Lazy, Semaphore};
+
+use crate::{Error, Result};
+
+/// The cores of this process, read once: every database opened reads them.
+static CORES: Lazy<usize> =
+    Lazy::new(|| std::thread::available_parallelism().map_or(1, NonZeroUsize::get));
+
 /// Opt-in resource limits for WASM execution.
 ///
 /// All fields are optional. When `None`, the corresponding limit is not applied,
@@ -53,9 +61,41 @@ impl WasmSandboxConfig {
             fuel_budget: Some(1_000_000),
             epoch_deadline_ticks: Some(2),
             epoch_tick_period: Some(Duration::from_millis(100)),
-            max_concurrent_calls: Some(
-                std::thread::available_parallelism().map_or(1, NonZeroUsize::get),
-            ),
+            max_concurrent_calls: Some(*CORES),
         }
+    }
+
+    /// Refuses limits an engine cannot run under: an epoch deadline without
+    /// a positive tick period, or a call bound outside the permits a
+    /// semaphore holds. A store checks them when it is made, before it
+    /// builds the engine they configure.
+    pub(crate) fn validate(&self) -> Result<()> {
+        match (self.epoch_deadline_ticks, self.epoch_tick_period) {
+            (Some(_), Some(period)) if period.is_zero() => {
+                return Err(Error::InvalidConfig(
+                    "WASM epoch tick period must be greater than zero".into(),
+                ));
+            }
+            (Some(_), None) => {
+                return Err(Error::InvalidConfig(
+                    "WASM epoch interruption requires an epoch tick period".into(),
+                ));
+            }
+            _ => {}
+        }
+        match self.max_concurrent_calls {
+            Some(max) if max == 0 || max > Semaphore::MAX_PERMITS => {
+                Err(Error::InvalidConfig(format!(
+                    "max_concurrent_calls must be between 1 and {}",
+                    Semaphore::MAX_PERMITS
+                )))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// The period the engine's epoch ticks at, when calls have a deadline.
+    pub(crate) fn tick_period(&self) -> Option<Duration> {
+        self.epoch_deadline_ticks.and(self.epoch_tick_period)
     }
 }

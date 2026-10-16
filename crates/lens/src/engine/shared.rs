@@ -9,7 +9,7 @@ use serde::Serialize;
 use wasmtime::{Config, Engine, InstancePre, Linker, Module};
 
 use super::call::{self, CallData, CallStream, Pipeline};
-use super::clock::{EpochTick, TickSource};
+use super::clock::{EpochTick, TickSource, Ticking};
 use super::sandbox::WasmSandboxConfig;
 use crate::{Error, Result};
 
@@ -28,8 +28,8 @@ pub(crate) struct LensEngine {
     sandbox: Option<WasmSandboxConfig>,
     linker: Arc<Linker<CallData>>,
     calls: Option<Calls>,
-    /// Held, never read: the ticks run while any clone holds them.
-    _ticks: Option<Arc<dyn Send + Sync>>,
+    /// The ticks run while any clone holds them.
+    ticks: Option<Arc<dyn Ticking>>,
 }
 
 /// The permits of calls run to completion, and how many there are.
@@ -51,6 +51,7 @@ impl LensEngine {
             config.macos_use_mach_ports(false);
         }
         if let Some(ref sb) = sandbox {
+            sb.validate()?;
             if sb.fuel_budget.is_some() {
                 config.consume_fuel(true);
             }
@@ -60,39 +61,17 @@ impl LensEngine {
         }
         let engine = Engine::new(&config)
             .map_err(|e| Error::WasmLoad(format!("failed to create WASM engine: {}", e)))?;
-        let ticks = match sandbox.as_ref() {
-            Some(sb) => match (sb.epoch_deadline_ticks, sb.epoch_tick_period) {
-                (Some(_), Some(period)) if period.is_zero() => {
-                    return Err(Error::InvalidConfig(
-                        "WASM epoch tick period must be greater than zero".into(),
-                    ));
-                }
-                (Some(_), Some(period)) => {
-                    let guard = ticks.start(EpochTick(engine.clone()), period)?;
-                    Some(Arc::from(guard))
-                }
-                (Some(_), None) => {
-                    return Err(Error::InvalidConfig(
-                        "WASM epoch interruption requires an epoch tick period".into(),
-                    ));
-                }
-                _ => None,
-            },
+        let ticks = match sandbox.as_ref().and_then(WasmSandboxConfig::tick_period) {
+            Some(period) => Some(Arc::from(ticks.start(EpochTick(engine.clone()), period)?)),
             None => None,
         };
-        let calls = match sandbox.as_ref().and_then(|sb| sb.max_concurrent_calls) {
-            Some(max) if max == 0 || max > Semaphore::MAX_PERMITS => {
-                return Err(Error::InvalidConfig(format!(
-                    "max_concurrent_calls must be between 1 and {}",
-                    Semaphore::MAX_PERMITS
-                )));
-            }
-            Some(max) => Some(Calls {
+        let calls = sandbox
+            .as_ref()
+            .and_then(|sb| sb.max_concurrent_calls)
+            .map(|max| Calls {
                 permits: Arc::new(Semaphore::new(max)),
                 max,
-            }),
-            None => None,
-        };
+            });
         let linker = Arc::new(call::linker(&engine)?);
 
         Ok(Self {
@@ -100,7 +79,7 @@ impl LensEngine {
             sandbox,
             linker,
             calls,
-            _ticks: ticks,
+            ticks,
         })
     }
 
@@ -152,10 +131,15 @@ impl LensEngine {
         call::start(self, pipeline, input, inverse, permit)
     }
 
+    /// Starts the ticks a call needs, where they start on demand.
+    pub(crate) fn ticking(&self) -> Result<()> {
+        self.ticks.as_ref().map_or(Ok(()), |ticks| ticks.calling())
+    }
+
     /// A handle that shows whether the ticks still run, for tests of their
     /// lifetime.
     #[cfg(test)]
-    pub(crate) fn ticks_handle(&self) -> Option<std::sync::Weak<dyn Send + Sync>> {
-        self._ticks.as_ref().map(Arc::downgrade)
+    pub(crate) fn ticks_handle(&self) -> Option<std::sync::Weak<dyn Ticking>> {
+        self.ticks.as_ref().map(Arc::downgrade)
     }
 }

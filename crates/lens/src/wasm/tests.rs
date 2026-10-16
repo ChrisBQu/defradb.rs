@@ -27,6 +27,40 @@ fn test_wasm_store_with_sandbox() {
 }
 
 #[test]
+fn a_store_builds_its_engine_with_its_first_lens() {
+    let store = WasmTransformStore::with_sandbox(Some(WasmSandboxConfig::restrictive())).unwrap();
+    let local = store.empty_with_shared_engine();
+    assert!(block_on(store.list()).unwrap().is_empty());
+    assert!(!store.has_transform(&TransformId::new("missing")));
+    assert!(
+        !store.engine.is_built(),
+        "a store with no lens builds no engine"
+    );
+
+    block_on(local.add(identity_config())).unwrap();
+    assert!(
+        store.engine.is_built(),
+        "the first lens builds the engine every isolated store shares"
+    );
+}
+
+#[test]
+fn a_store_refuses_limits_it_cannot_run_when_it_is_made() {
+    let mut sandbox = WasmSandboxConfig::restrictive();
+    sandbox.epoch_tick_period = Some(std::time::Duration::ZERO);
+    assert!(matches!(
+        WasmTransformStore::with_sandbox(Some(sandbox)),
+        Err(Error::InvalidConfig(_))
+    ));
+    let mut sandbox = WasmSandboxConfig::restrictive();
+    sandbox.max_concurrent_calls = Some(0);
+    assert!(matches!(
+        WasmTransformStore::with_sandbox(Some(sandbox)),
+        Err(Error::InvalidConfig(_))
+    ));
+}
+
+#[test]
 fn an_isolated_store_shares_the_engine_and_its_clock() {
     let base = WasmTransformStore::with_sandbox(Some(WasmSandboxConfig::restrictive())).unwrap();
     let local = base.empty_with_shared_engine();

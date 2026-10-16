@@ -41,6 +41,7 @@ where
     S: Stream + Send + 'static,
     S::Item: Serialize + Send,
 {
+    let ticking = engine.ticking();
     let modules = pipeline.len();
     let (feed, mut documents) = channel();
     let mut work: Vec<Work> = Vec::with_capacity(modules + 1);
@@ -64,6 +65,7 @@ where
 
     CallStream {
         work: Some(Box::pin(async move {
+            ticking?;
             futures::future::try_join_all(work).await.map(drop)
         })),
         output: Box::pin(futures::stream::unfold(documents, receive)),

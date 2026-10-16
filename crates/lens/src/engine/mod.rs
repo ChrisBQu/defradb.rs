@@ -40,7 +40,7 @@ pub(crate) use call::{CompiledModule, Pipeline};
 #[cfg(feature = "wasmtime-runtime")]
 pub(crate) use clock::ThreadTicks;
 #[cfg(feature = "wasmtime-runtime")]
-pub use clock::{EpochTick, PoolTicks, TickGuard, TickSource};
+pub use clock::{EpochTick, PoolTicks, TickGuard, TickSource, Ticking};
 #[cfg(feature = "wasmtime-runtime")]
 pub use sandbox::WasmSandboxConfig;
 #[cfg(feature = "wasmtime-runtime")]
@@ -62,7 +62,7 @@ pub fn default_store() -> Result<Arc<dyn TransformStore>> {
 pub fn default_store_on(pool: &workers::Pool) -> Result<Arc<dyn TransformStore>> {
     let store = crate::WasmTransformStore::with_tick_source(
         Some(WasmSandboxConfig::restrictive()),
-        &PoolTicks(pool.clone()),
+        PoolTicks(pool.clone()),
     )?;
     Ok(Arc::new(store))
 }
