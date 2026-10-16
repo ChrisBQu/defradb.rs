@@ -53,9 +53,6 @@ use crate::p2p::P2PRuntime;
 /// ```
 #[wasm_bindgen]
 pub struct DefraClient {
-    /// The page's one worker, driven by the browser's event loop: the
-    /// store's I/O completes on its queue and the database's jobs run on it.
-    pool: workers::Pool,
     db: Option<Arc<DB<RegolithStore>>>,
     runner: Option<WasmRunner>,
     pub(crate) event_bus: Arc<events::ChannelBus>,
@@ -287,7 +284,6 @@ impl DefraClient {
         };
 
         Ok(Self {
-            pool,
             db: Some(db),
             runner: Some(runner),
             event_bus,
@@ -472,8 +468,8 @@ impl DefraClient {
             }
         }
 
-        // Its last tasks finish as the event loop drives them; then it stops.
-        self.pool.shutdown();
+        // The page's pool is not this client's to stop: every client on the
+        // page shares its one worker, which lives as long as the page.
         self.closed = true;
         Ok(())
     }

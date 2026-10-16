@@ -58,6 +58,8 @@ mod page {
 
     thread_local! {
         static DRIVER: RefCell<Option<workers::Driver>> = const { RefCell::new(None) };
+        /// The page's pool, handed to every client on the page.
+        static POOL: RefCell<Option<workers::Pool>> = const { RefCell::new(None) };
         static SCHEDULED: Cell<bool> = const { Cell::new(false) };
     }
 
@@ -114,7 +116,17 @@ mod page {
         }
     }
 
+    /// The page's one worker serves every client on the page: a pool already
+    /// running is shared, and only one that has stopped is replaced.
     pub(super) fn start(config: workers::Config) -> Result<workers::Pool, workers::Error> {
+        let running = DRIVER.with(|driver| driver.borrow().as_ref().is_some_and(|d| !d.finished()));
+        if running {
+            if let Some(pool) = POOL.with(|pool| pool.borrow().clone()) {
+                return Ok(pool);
+            }
+        }
+        // A stopped driver lets go of the page's thread before a new one starts.
+        DRIVER.with(|driver| drop(driver.borrow_mut().take()));
         let clock = config.clock.clone().unwrap_or_else(|| {
             let clock: Arc<dyn workers::Clock> =
                 Arc::new(PageClock(n0_future::time::Instant::now()));
@@ -126,6 +138,7 @@ mod page {
         };
         let (pool, driver) = workers::Pool::driven(config, Waker::from(Arc::new(PageWake)))?;
         DRIVER.with(|slot| *slot.borrow_mut() = Some(driver));
+        POOL.with(|slot| *slot.borrow_mut() = Some(pool.clone()));
         schedule();
         Ok(pool)
     }

@@ -39,6 +39,7 @@ impl Blocking {
         name: &str,
         placer: Arc<Placer>,
     ) -> Result<Arc<Blocking>, Error> {
+        let queue = queue.min(Semaphore::MAX_PERMITS);
         let blocking = Arc::new(Blocking {
             jobs: ArrayQueue::new(queue),
             room: Semaphore::new(queue),

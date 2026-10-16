@@ -184,6 +184,10 @@ impl WorkerShared {
         items: usize,
         bytes: usize,
     ) -> WorkerShared {
+        // A semaphore holds at most `MAX_PERMITS`, which is far smaller on a
+        // 32-bit target (wasm32): a budget past it is the same as no budget.
+        let items = items.min(Semaphore::MAX_PERMITS);
+        let bytes = bytes.min(Semaphore::MAX_PERMITS);
         WorkerShared {
             id,
             signal,
