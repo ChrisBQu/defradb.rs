@@ -487,10 +487,13 @@ where
             flight.record(Answer { result, trip });
             settled.push((key, flight));
         }
+        // Out of the map before anyone wakes: a caller that has its answer
+        // and asks again starts a fresh flight, and never joins this settled
+        // one for an answer that may not be kept (a decision with no state).
         for (key, flight) in settled {
-            flight.release();
             self.flights
                 .remove_if(&key, |current| Arc::ptr_eq(current, &flight));
+            flight.release();
         }
     }
 
