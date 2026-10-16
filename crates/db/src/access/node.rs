@@ -49,6 +49,7 @@ impl<S: Store> NodeAccessChecker for DbNodeAccessChecker<S> {
 /// `checker` serving the request `context` serves: its context-free
 /// [`NodeAccessChecker::check_node_access`] checks the identity acting in
 /// `context`.
+#[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
 pub fn bound_node_access_checker(
     checker: std::sync::Arc<dyn NodeAccessChecker>,
     context: RequestContext,

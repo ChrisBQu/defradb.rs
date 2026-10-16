@@ -1,4 +1,6 @@
-use crate::{Error, Result};
+#[cfg(feature = "vera")]
+use crate::Error;
+use crate::Result;
 use std::sync::Arc;
 
 pub(crate) enum Persistence {
@@ -17,7 +19,7 @@ pub(crate) async fn create_document_acp<S>(
     store: Arc<S>,
     _persistence: Persistence,
     config: &crate::DocumentAcpConfig,
-    network: Option<&edge::Edge>,
+    #[cfg_attr(not(feature = "vera"), allow(unused_variables))] network: Option<&edge::Edge>,
 ) -> Result<DocumentAcpSetup>
 where
     S: storage::corekv::Store + 'static,

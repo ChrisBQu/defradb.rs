@@ -515,7 +515,7 @@ where
     peer_config.sync = sync_config;
     let replicator_push_options = ReplicatorPushOptionsState::default();
     peer_config.replicator_push_options = Some(replicator_push_options.clone());
-    let peer = IrohPeer::start(store.clone(), database, event_bus, peer_config)
+    let peer = IrohPeer::start(store.clone(), database.clone(), event_bus, peer_config)
         .await
         .map_err(Error::IrohStart)?;
 

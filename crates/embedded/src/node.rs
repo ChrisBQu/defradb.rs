@@ -741,10 +741,10 @@ where
     // A transport runs on the network runtime the config names, or on the
     // process's own, started on first use, when it names none; a node
     // without networking needs none.
-    let edge = match (&config.transport, &config.edge) {
-        (TransportConfig::None, _) => None,
-        (_, Some(edge)) => Some(edge.clone()),
-        (_, None) => Some(edge::on_demand().map_err(Error::NetworkStart)?.clone()),
+    let edge = match &config.edge {
+        _ if matches!(config.transport, TransportConfig::None) => None,
+        Some(edge) => Some(edge.clone()),
+        None => Some(edge::on_demand().map_err(Error::NetworkStart)?.clone()),
     };
     let p2p_setup: Result<Option<crate::node_p2p::P2PSetup>> =
         match (&config.transport, edge.as_ref()) {
@@ -775,8 +775,10 @@ where
             )
             .await
             .map(Some),
-            // A node without a transport, the only one with no runtime here.
-            (TransportConfig::None, _) | (_, None) => Ok(None),
+            (TransportConfig::None, _) => Ok(None),
+            // A transport always has a runtime here.
+            #[cfg(any(feature = "libp2p", feature = "iroh"))]
+            (_, None) => Ok(None),
         };
     let mut p2p_setup = match p2p_setup {
         Ok(setup) => setup,

@@ -86,6 +86,7 @@ impl<S: Store + 'static> TransactionContext for DbTransactionContext<S> {
         Some(Arc::new(TxnCollectionProvider::new(self.db.clone(), &txn)))
     }
 
+    #[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
     fn acp_registration_projection(&self) -> Option<Arc<AcpRegistrationProjection>> {
         Some(
             self.txn
