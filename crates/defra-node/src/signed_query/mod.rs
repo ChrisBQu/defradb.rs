@@ -31,11 +31,7 @@ pub(super) async fn execute_with_signing_context(
     edge.spawn(context.mirror(async move {
         match txn_handle {
             Some(txn_handle) => executor.execute_in_txn(request, &txn_handle).await,
-            // Route the whole query before its first deadline is created.
-            // This task is on Edge's Tokio runtime, not a `workers` worker,
-            // so calling the runner's preparation path here would borrow
-            // the process default pool instead of the node's pool.
-            None => executor.execute(request).await,
+            None => super::execute_autocommit_request(executor.as_ref(), request).await,
         }
     }))
     .await

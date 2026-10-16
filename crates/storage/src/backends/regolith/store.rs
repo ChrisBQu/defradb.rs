@@ -283,7 +283,7 @@ impl Store for RegolithStore {
             Arc::clone(&self.inner.event_order),
             mode,
             #[cfg(not(target_arch = "wasm32"))]
-            self.inner.io.blocking_pool(),
+            self.inner.io.owner_pool(),
         )?;
         Ok(Box::new(txn))
     }

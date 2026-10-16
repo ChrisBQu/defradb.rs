@@ -101,7 +101,7 @@ pub(super) async fn transact(
     if let Some(latest) = baton.pop().and_then(|held| held.latest) {
         if committed {
             #[cfg(not(target_arch = "wasm32"))]
-            let post_commit_pool = io.blocking_pool();
+            let post_commit_pool = io.owner_pool();
             #[cfg(not(target_arch = "wasm32"))]
             latest.committed(post_commit_pool.as_ref()).await;
             #[cfg(target_arch = "wasm32")]
