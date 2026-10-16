@@ -28,6 +28,10 @@ pub enum TransactionError {
     #[error("transaction error: {0}")]
     Execution(String),
 
+    /// The commit lost a write conflict; re-running the transaction may succeed.
+    #[error("transaction conflict: {0}")]
+    Conflict(String),
+
     /// The transaction registry lock is poisoned (indicates a panic elsewhere).
     #[error("lock poisoned: {0}")]
     LockPoisoned(String),
@@ -54,6 +58,11 @@ impl TransactionError {
         Self::Execution(msg.into())
     }
 
+    /// Create a write-conflict error.
+    pub fn conflict(msg: impl Into<String>) -> Self {
+        Self::Conflict(msg.into())
+    }
+
     /// Create a lock poisoned error.
     pub fn lock_poisoned(msg: impl Into<String>) -> Self {
         Self::LockPoisoned(msg.into())
@@ -72,6 +81,7 @@ impl TransactionError {
     /// - `NotSupported`: Not retryable - transactions aren't available in this config.
     /// - `Execution`: Retryable - transient storage errors that may succeed on retry
     ///   with a new transaction.
+    /// - `Conflict`: Retryable - another commit won a write conflict.
     /// - `LockPoisoned`: Not retryable - indicates a panic occurred and the system
     ///   may be in a corrupted state.
     pub fn is_retryable(&self) -> bool {
@@ -80,6 +90,7 @@ impl TransactionError {
             Self::AlreadyFinalized(_) => false,
             Self::NotSupported(_) => false,
             Self::Execution(_) => true,
+            Self::Conflict(_) => true,
             Self::LockPoisoned(_) => false,
         }
     }
