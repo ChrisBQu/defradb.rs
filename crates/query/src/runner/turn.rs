@@ -9,12 +9,14 @@
 //! never fetched there: the statement ends undone, the edge fetches the
 //! input, and submits the request again with the input in its memo.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use identity::Did;
 
 use crate::error::{QueryError, TransactionError};
 use crate::executor::{GqlWarning, QueryRequest, QueryResponse, QueryResponseError};
+use crate::mutator::DocMutator;
 use crate::prepared::{PreparedInputMemo, PreparedInputRequest};
 use crate::query_parse::{parse_request_with_limits, validate_parsed_operation, ParsedOperation};
 use crate::txn::{txn_job, TransactionRegistry, TxnJob, TxnTurn};
@@ -27,8 +29,9 @@ pub(super) enum Turned {
     /// It answered.
     Done(QueryResponse),
     /// Its statement needs a remote input, and was undone: fetch the input
-    /// and run the request again.
-    NeedsInput(PreparedInputRequest),
+    /// and run the request again. The transaction's mutator comes along to
+    /// fetch it with when the runner has none of its own.
+    NeedsInput(PreparedInputRequest, Option<Arc<dyn DocMutator>>),
 }
 
 fn parse_error(message: String) -> QueryResponse {
@@ -77,11 +80,11 @@ where
             let job = txn_job(move |turn| {
                 Box::pin(async move { runner.run_turn(turn, attempt, memo).await })
             });
-            let input = match submit(job).await? {
+            let (input, txn_mutator) = match submit(job).await? {
                 Turned::Done(response) => return Ok(response),
-                Turned::NeedsInput(input) => input,
+                Turned::NeedsInput(input, txn_mutator) => (input, txn_mutator),
             };
-            let Some(resolver) = self.mutator.clone() else {
+            let Some(resolver) = self.mutator.clone().or(txn_mutator) else {
                 return Ok(QueryResponse::error(QueryResponseError::from_query_error(
                     QueryError::NeedsInput(input),
                 )));
@@ -285,7 +288,9 @@ where
                 extensions: None,
             }
             .with_warnings(warnings),
-            Err(QueryError::NeedsInput(input)) => return Ok(Turned::NeedsInput(input)),
+            Err(QueryError::NeedsInput(input)) => {
+                return Ok(Turned::NeedsInput(input, txn_ctx.doc_mutator()))
+            }
             Err(error) => {
                 tracing::debug!(
                     txn_id = txn_ctx.id(),
