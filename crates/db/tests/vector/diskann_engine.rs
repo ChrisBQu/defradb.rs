@@ -3,7 +3,7 @@
 //! Recall thresholds hold for the synthetic clustered corpus below; like the
 //! IVF-PQ gate, they catch regressions rather than predict a real corpus.
 
-use std::collections::HashSet;
+use rapidhash::RapidHashSet;
 
 use db::index::vector::engine::ann::VectorIndexEngine;
 use db::index::vector::engine::diskann::codec;
@@ -53,7 +53,7 @@ pub async fn built(vectors: &[Vec<f32>]) -> DiskAnn<MemoryNodeStore> {
 pub async fn recall(
     index: &DiskAnn<MemoryNodeStore>,
     vectors: &[Vec<f32>],
-    live: &HashSet<u64>,
+    live: &RapidHashSet<u64>,
     queries: &[Vec<f32>],
 ) -> f64 {
     let mut flat = Flat::new(MemoryNodeStore::new(), Metric::Cosine);
@@ -78,7 +78,7 @@ pub async fn recall(
     hit as f64 / total as f64
 }
 
-pub fn all(count: usize) -> HashSet<u64> {
+pub fn all(count: usize) -> RapidHashSet<u64> {
     (1..=count as u64).collect()
 }
 

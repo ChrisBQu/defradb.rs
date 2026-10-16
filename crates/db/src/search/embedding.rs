@@ -1,5 +1,5 @@
+use crate::error::{Error, Result as DbResult};
 use crate::search::EmbeddingClientConfig;
-use anyhow::{anyhow, bail, Result as AnyhowResult};
 use document::{Document, NormalValue};
 use rapidhash::RapidHashSet;
 use schema::VectorEmbeddingDescription;
@@ -249,7 +249,7 @@ pub async fn embed_text(
     embedding_config: &EmbeddingClientConfig,
     text: &str,
     model: Option<&str>,
-) -> AnyhowResult<Vec<f64>> {
+) -> DbResult<Vec<f64>> {
     embed_text_with_provider(embedding_config, "openai", text, model).await
 }
 
@@ -259,10 +259,10 @@ pub async fn embed_text_with_provider(
     provider: &str,
     text: &str,
     model: Option<&str>,
-) -> AnyhowResult<Vec<f64>> {
+) -> DbResult<Vec<f64>> {
     let url = embedding_config.url.trim();
     if url.is_empty() {
-        bail!("embedding URL is empty");
+        return Err(Error::other("embedding URL is empty"));
     }
 
     let resolved_model = model
@@ -272,7 +272,7 @@ pub async fn embed_text_with_provider(
             let default_model = embedding_config.model.trim();
             (!default_model.is_empty()).then_some(default_model)
         })
-        .ok_or_else(|| anyhow!("embedding model is empty"))?;
+        .ok_or_else(|| Error::other("embedding model is empty"))?;
 
     let vector = call_embedding(
         provider,
@@ -282,7 +282,7 @@ pub async fn embed_text_with_provider(
         text,
     )
     .await
-    .map_err(|err| anyhow!(err.to_string()))?;
+    .map_err(|err| Error::other(err.to_string()))?;
     Ok(vector)
 }
 

@@ -4,6 +4,7 @@ use bytes::Bytes;
 use db::AutoCommitMutator;
 use db::DB;
 use futures::StreamExt;
+use kovan::AtomOption;
 use kovan_map::HopscotchMap;
 use lens::LensConfig;
 use lens::LensDocResultStream;
@@ -41,7 +42,7 @@ struct SetVerifiedStore {
     /// when it cannot run; zero for none.
     fail_call: AtomicUsize,
     verified_value: Option<serde_json::Value>,
-    before_transform: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    before_transform: AtomOption<Box<dyn Fn() + Send + Sync>>,
 }
 
 /// The set of transform ids a test double has registered.
@@ -100,9 +101,8 @@ impl TransformStore for SetVerifiedStore {
         if self.fail_call.load(Ordering::SeqCst) == call {
             return Err(lens::Error::Pipeline("the lens cannot run".to_string()));
         }
-        let hook = self.before_transform.lock().unwrap().take();
-        if let Some(hook) = hook {
-            hook();
+        if let Some(hook) = self.before_transform.take() {
+            (*hook)();
         }
         let value = self
             .verified_value
@@ -1281,9 +1281,11 @@ async fn eager_materialization_retries_from_the_concurrent_document() {
     .unwrap();
     let writer_db = db.clone();
     let writer_id = doc_id.clone();
-    *transforms.before_transform.lock().unwrap() = Some(Box::new(move || {
+    transforms.before_transform.store_some(Box::new(move || {
         // Commit from another thread after the materializer read the old
         // document, but before it writes the transformed value.
+        let writer_db = writer_db.clone();
+        let writer_id = writer_id.clone();
         std::thread::spawn(move || {
             futures::executor::block_on(async move {
                 let collection = writer_db.get_collection("Users").unwrap().unwrap();

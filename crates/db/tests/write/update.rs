@@ -2,6 +2,7 @@ use db::DB;
 use db::{AutoCommitMutator, DbDocFetcher, DbDocMutator};
 use document::Document;
 use document::NormalValue;
+use kovan::AtomOption;
 use query::mutator::DocMutator;
 use query::planner::index_selection::{IndexScanParams, IndexScanType};
 use query::runner::DocFetcher;
@@ -376,7 +377,7 @@ async fn conditional_update_of_concurrently_deleted_document_returns_conflict() 
 /// storage-level writer can, and pins the old read-before-begin race.
 struct ChangeBeforeBegin {
     inner: RegolithStore,
-    pending: std::sync::Mutex<Option<(Vec<u8>, Vec<u8>)>>,
+    pending: AtomOption<(Vec<u8>, Vec<u8>)>,
 }
 
 impl storage::corekv::private::Sealed for ChangeBeforeBegin {}
@@ -391,7 +392,7 @@ impl storage::corekv::Store for ChangeBeforeBegin {
         let pending = if readonly {
             None
         } else {
-            self.pending.lock().unwrap().take()
+            self.pending.take().map(|pending| (*pending).clone())
         };
         if let Some((key, value)) = pending {
             let mut change = self.inner.new_txn(false).await?;
@@ -407,7 +408,7 @@ impl storage::corekv::Store for ChangeBeforeBegin {
         attempt: storage::corekv::RetryAttempt,
     ) -> std::result::Result<storage::corekv::RetryAttemptValue, storage::corekv::RetryAttemptError>
     {
-        let pending = self.pending.lock().unwrap().take();
+        let pending = self.pending.take().map(|pending| (*pending).clone());
         if let Some((key, value)) = pending {
             let mut change = self.inner.new_txn(false).await?;
             change.set(&key, &value).await?;
@@ -425,7 +426,7 @@ impl storage::corekv::Store for ChangeBeforeBegin {
 async fn update_reads_fresh_values_in_the_transaction_that_writes_them() {
     let store = Arc::new(ChangeBeforeBegin {
         inner: RegolithStore::in_memory().unwrap(),
-        pending: std::sync::Mutex::new(None),
+        pending: AtomOption::none(),
     });
     let db = Arc::new(DB::open_from_arc(store.clone()).await.unwrap());
     db.create_collection(test_collection()).await.unwrap();
@@ -449,7 +450,7 @@ async fn update_reads_fresh_values_in_the_transaction_that_writes_them() {
     key.extend(collection.doc_key(short_id));
     let mut external = created.document.clone();
     external.set("left", 7_i64);
-    *store.pending.lock().unwrap() = Some((key, external.to_cbor().unwrap()));
+    store.pending.store_some((key, external.to_cbor().unwrap()));
     let mut patch = created.document;
     patch.set("right", 9_i64);
     mutator
@@ -463,5 +464,5 @@ async fn update_reads_fresh_values_in_the_transaction_that_writes_them() {
         .unwrap();
     assert_eq!(result.get("left"), Some(&NormalValue::Int(7)));
     assert_eq!(result.get("right"), Some(&NormalValue::Int(9)));
-    assert!(store.pending.lock().unwrap().is_none());
+    assert!(store.pending.is_none());
 }

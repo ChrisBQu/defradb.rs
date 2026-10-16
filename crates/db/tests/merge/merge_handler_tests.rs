@@ -2697,7 +2697,7 @@ enum StubKmsResponse {
 struct StubKms {
     response: StubKmsResponse,
     calls: std::sync::atomic::AtomicUsize,
-    contexts: std::sync::Mutex<Vec<(Option<String>, Option<String>)>>,
+    contexts: kovan::Atom<Vec<(Option<String>, Option<String>)>>,
 }
 
 impl StubKms {
@@ -2705,7 +2705,7 @@ impl StubKms {
         Self {
             response: StubKmsResponse::Key(key),
             calls: std::sync::atomic::AtomicUsize::new(0),
-            contexts: std::sync::Mutex::new(Vec::new()),
+            contexts: kovan::Atom::new(Vec::new()),
         }
     }
 
@@ -2713,7 +2713,7 @@ impl StubKms {
         Self {
             response: StubKmsResponse::AccessDenied,
             calls: std::sync::atomic::AtomicUsize::new(0),
-            contexts: std::sync::Mutex::new(Vec::new()),
+            contexts: kovan::Atom::new(Vec::new()),
         }
     }
 
@@ -2721,7 +2721,7 @@ impl StubKms {
         Self {
             response: StubKmsResponse::UnavailableThenKey(key),
             calls: std::sync::atomic::AtomicUsize::new(0),
-            contexts: std::sync::Mutex::new(Vec::new()),
+            contexts: kovan::Atom::new(Vec::new()),
         }
     }
 }
@@ -2733,10 +2733,15 @@ impl kms::KmsService for StubKms {
         context: &kms::RequestContext,
         cids: &[kms::EncryptionCid],
     ) -> kms::Result<kms::KeyResults> {
-        self.contexts.lock().unwrap().push((
+        let recorded = (
             context.user_identity().map(ToString::to_string),
             context.explicit_replay_capability().map(str::to_owned),
-        ));
+        );
+        self.contexts.rcu(|contexts| {
+            let mut next = contexts.clone();
+            next.push(recorded.clone());
+            next
+        });
         let (results, tx) = kms::KeyResults::new(cids.len().max(1));
         let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         match &self.response {
@@ -3112,7 +3117,7 @@ async fn batch_merge_prepares_deks_outside_attempts_per_authorization_context() 
         2,
         "the same encryption CID must be fetched separately for each block authorization context"
     );
-    let recorded = kms.contexts.lock().unwrap();
+    let recorded = kms.contexts.load();
     assert!(recorded.contains(&(Some(contexts[0].0.into()), Some(contexts[0].1.into()))));
     assert!(recorded.contains(&(Some(contexts[1].0.into()), Some(contexts[1].1.into()))));
 }

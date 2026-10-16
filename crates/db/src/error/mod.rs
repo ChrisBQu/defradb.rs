@@ -157,6 +157,10 @@ impl From<crate::index::Error> for Error {
 }
 
 impl Error {
+    pub fn other(message: impl Into<String>) -> Self {
+        Self::Other(message.into())
+    }
+
     pub fn is_txn_retry_exhausted(&self) -> bool {
         matches!(
             self,

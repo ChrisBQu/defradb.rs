@@ -15,7 +15,7 @@
 use rapidhash::{HashMapExt, RapidHashMap};
 use std::cmp::Ordering;
 
-use anyhow::{anyhow, bail, Result};
+use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value as JsonValue};
 
@@ -190,7 +190,7 @@ pub async fn hybrid_search_dense<E: query::QueryExecutor + ?Sized>(
             let default_model = embedding_config.model.trim();
             (!default_model.is_empty()).then_some(default_model.to_string())
         })
-        .ok_or_else(|| anyhow!("dense-search request is missing an embedding model"))?;
+        .ok_or_else(|| Error::other("dense-search request is missing an embedding model"))?;
     let mut request_config = embedding_config.clone();
     if let Some(url) = &request.embedding_url {
         request_config.url.clone_from(url);
@@ -256,12 +256,12 @@ pub fn require_query_success(response: query::QueryResponse, context: &str) -> R
             .map(|error| error.message)
             .collect::<Vec<_>>()
             .join("; ");
-        bail!("{} failed: {}", context, messages);
+        return Err(Error::other(format!("{} failed: {}", context, messages)));
     }
 
     response
         .data
-        .ok_or_else(|| anyhow!("{} returned no data", context))
+        .ok_or_else(|| Error::other(format!("{} returned no data", context)))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -281,17 +281,17 @@ impl RankedOrder {
 
 fn validate_request(request: &DenseHybridSearchRequest) -> Result<()> {
     if request.query_text.trim().is_empty() {
-        bail!("query_text must not be empty");
+        return Err(Error::other("query_text must not be empty"));
     }
     if request.limit == 0 {
-        bail!("limit must be greater than zero");
+        return Err(Error::other("limit must be greater than zero"));
     }
 
     validate_graphql_name(&request.collection_name, "collection_name")?;
     validate_graphql_name(&request.vector_field, "vector_field")?;
 
     if request.fulltext_fields.is_empty() {
-        bail!("fulltext_fields must not be empty");
+        return Err(Error::other("fulltext_fields must not be empty"));
     }
     for field in &request.fulltext_fields {
         validate_graphql_field_path(field, "fulltext_fields")?;
@@ -303,7 +303,9 @@ fn validate_request(request: &DenseHybridSearchRequest) -> Result<()> {
 
     if let Some(filter) = request.filter.as_ref() {
         let JsonValue::Object(_) = filter else {
-            bail!("filter must be a JSON object matching DefraDB GraphQL filter syntax");
+            return Err(Error::other(
+                "filter must be a JSON object matching DefraDB GraphQL filter syntax",
+            ));
         };
         validate_graphql_input_keys(filter, "filter")?;
     }
@@ -314,20 +316,24 @@ fn validate_request(request: &DenseHybridSearchRequest) -> Result<()> {
 fn validate_graphql_name(name: &str, context: &str) -> Result<()> {
     let mut chars = name.chars();
     let Some(first) = chars.next() else {
-        bail!("{context} must not be empty");
+        return Err(Error::other(format!("{context} must not be empty")));
     };
     if !(first == '_' || first.is_ascii_alphabetic()) {
-        bail!("{context} must start with a letter or underscore: {name}");
+        return Err(Error::other(format!(
+            "{context} must start with a letter or underscore: {name}"
+        )));
     }
     if !chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric()) {
-        bail!("{context} contains an invalid GraphQL identifier: {name}");
+        return Err(Error::other(format!(
+            "{context} contains an invalid GraphQL identifier: {name}"
+        )));
     }
     Ok(())
 }
 
 fn validate_graphql_field_path(path: &str, context: &str) -> Result<()> {
     if path.is_empty() {
-        bail!("{context} must not be empty");
+        return Err(Error::other(format!("{context} must not be empty")));
     }
     for segment in path.split('.') {
         validate_graphql_name(segment, context)?;
@@ -464,7 +470,7 @@ fn parse_hits(data: &JsonValue, collection_name: &str) -> Result<Vec<DenseHybrid
     let items = data
         .get(collection_name)
         .and_then(JsonValue::as_array)
-        .ok_or_else(|| anyhow!("missing {} array in {}", collection_name, data))?;
+        .ok_or_else(|| Error::other(format!("missing {} array in {}", collection_name, data)))?;
 
     items
         .iter()
@@ -472,11 +478,11 @@ fn parse_hits(data: &JsonValue, collection_name: &str) -> Result<Vec<DenseHybrid
             let mut fields = item
                 .as_object()
                 .cloned()
-                .ok_or_else(|| anyhow!("expected object item in {}", item))?;
+                .ok_or_else(|| Error::other(format!("expected object item in {}", item)))?;
             let doc_id = fields
                 .remove("_docID")
                 .and_then(|value| value.as_str().map(ToOwned::to_owned))
-                .ok_or_else(|| anyhow!("missing _docID in {}", item))?;
+                .ok_or_else(|| Error::other(format!("missing _docID in {}", item)))?;
             let bm25_score = fields
                 .remove(BM25_ALIAS)
                 .and_then(|value| value.as_f64())

@@ -1,14 +1,29 @@
 use super::*;
 use acp::{DocumentPermission, Identity};
 use identity::Did;
+use regolith::sync::Atom;
 use schema::{CollectionVersion, FieldDescription, FieldKind, PolicyDescription};
-use std::sync::Mutex;
 
 const DID: &str = "did:key:autocommit-hook-test";
 const TOKEN: &str = "bearer-captured-when-staged";
 
 #[derive(Default)]
-struct TokenObserver(Mutex<Vec<Option<String>>>);
+struct TokenObserver(Atom<Vec<Option<String>>>);
+
+impl TokenObserver {
+    fn record(&self) {
+        let token = defra_core::signing::get_request_bearer_token(DID);
+        self.0.rcu(|seen| {
+            let mut next = seen.clone();
+            next.push(token.clone());
+            next
+        });
+    }
+
+    fn seen(&self) -> Vec<Option<String>> {
+        self.0.load_clone()
+    }
+}
 
 #[async_trait]
 impl acp::DocumentACP for TokenObserver {
@@ -20,10 +35,7 @@ impl acp::DocumentACP for TokenObserver {
         _doc_id: &str,
     ) -> acp::Result<()> {
         assert_eq!(identity.as_str(), DID);
-        self.0
-            .lock()
-            .unwrap()
-            .push(defra_core::signing::get_request_bearer_token(DID));
+        self.record();
         Ok(())
     }
 
@@ -33,10 +45,7 @@ impl acp::DocumentACP for TokenObserver {
         _resource_name: &str,
         _doc_id: &str,
     ) -> acp::Result<bool> {
-        self.0
-            .lock()
-            .unwrap()
-            .push(defra_core::signing::get_request_bearer_token(DID));
+        self.record();
         Ok(false)
     }
 
@@ -83,10 +92,7 @@ impl acp::DocumentACP for TokenObserver {
         _resource_name: &str,
         _doc_id: &str,
     ) -> acp::Result<()> {
-        self.0
-            .lock()
-            .unwrap()
-            .push(defra_core::signing::get_request_bearer_token(DID));
+        self.record();
         Ok(())
     }
 }
@@ -142,7 +148,7 @@ async fn deferred_registration_hook_uses_bearer_captured_before_commit() {
     assert_eq!(defra_core::signing::get_request_bearer_token(DID), None);
     txn.commit().await.unwrap();
     assert_eq!(
-        *observer.0.lock().unwrap(),
+        observer.seen(),
         vec![Some(TOKEN.to_string()), Some(TOKEN.to_string())]
     );
     assert_eq!(defra_core::signing::get_request_bearer_token(DID), None);
@@ -178,7 +184,7 @@ async fn create_retry_callback_uses_bearer_captured_before_commit() {
     assert_eq!(defra_core::signing::get_request_bearer_token(DID), None);
     callback().await.unwrap();
     assert_eq!(defra_core::signing::get_request_bearer_token(DID), None);
-    let observed = observer.0.lock().unwrap().clone();
+    let observed = observer.seen();
     assert_eq!(
         observed,
         vec![Some(TOKEN.to_string()), Some(TOKEN.to_string())]
@@ -223,6 +229,6 @@ async fn deferred_unregistration_hook_uses_bearer_captured_before_commit() {
 
     assert_eq!(defra_core::signing::get_request_bearer_token(DID), None);
     txn.commit().await.unwrap();
-    assert_eq!(*observer.0.lock().unwrap(), vec![Some(TOKEN.to_string())]);
+    assert_eq!(observer.seen(), vec![Some(TOKEN.to_string())]);
     assert_eq!(defra_core::signing::get_request_bearer_token(DID), None);
 }

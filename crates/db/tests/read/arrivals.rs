@@ -134,7 +134,7 @@ async fn concurrent_autocommit_arrivals_are_contiguous() {
             AutoCommitMutator::new(db).create("Users", doc).await
         });
     }
-    let mut ids = std::collections::HashSet::new();
+    let mut ids = rapidhash::RapidHashSet::default();
     while let Some(created) = creates.join_next().await {
         ids.insert(created.unwrap().unwrap().doc_id.to_string());
     }
