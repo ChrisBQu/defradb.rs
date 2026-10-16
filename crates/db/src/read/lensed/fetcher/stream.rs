@@ -44,7 +44,11 @@ impl<S: Store + 'static> DocStream for LensedDocStream<S> {
     }
 
     async fn close(&mut self) -> query::error::Result<()> {
-        self.inner.close().await
+        let closed = self.inner.close().await;
+        // A closed stream no longer holds its transaction, so the fetcher
+        // that opened it can give the transaction back.
+        self.fetcher.release_txn();
+        closed
     }
 }
 
