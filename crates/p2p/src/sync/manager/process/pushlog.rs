@@ -81,7 +81,9 @@ impl<B: Blockstore + 'static> SyncManager<B> {
     /// # Flow
     ///
     /// 1. Parse CID from the message
-    /// 2. Claim one CID owner or nack/suppress a duplicate without waiting
+    /// 2. Claim one CID owner, or join the owner's processing: a duplicate
+    ///    waits for it (bounded), then acks a durable block or processes its
+    ///    own copy under the guard (`join.rs`)
     /// 3. Check if already merged
     /// 4. Store block in blockstore (marked as unmerged)
     /// 5. Durably register the root for the receiver retry clock, which emits
@@ -153,37 +155,13 @@ impl<B: Blockstore + 'static> SyncManager<B> {
 
         let _guard = match self.process_queue.try_acquire_nowait(&cid) {
             Some(guard) => guard,
-            None => {
-                self.diagnostics.record_single_flight_suppressed();
-                tracing::debug!(
-                    cid = %cid,
-                    sender_peer = ?sender_peer,
-                    explicit_replay = explicit_replay_authorization.is_some(),
-                    "Suppressing PushLog while the same CID is already being processed"
-                );
-
-                if self.is_pending_dag_recovery_registered(&cid) {
-                    return Ok(());
-                }
-
-                match self
-                    .blockstore
-                    .is_merged(&cid)
-                    .await
-                    .map_err(Error::from_blockstore)
-                {
-                    Ok(true) => {
-                        self.diagnostics.record_already_merged_fast_path();
-                        return Ok(());
-                    }
-                    Ok(false) => {
-                        return Err(Error::PushLogInFlight {
-                            cid: cid.to_string(),
-                        });
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
+            None => match self
+                .join_in_flight(&cid, sender_peer, explicit_replay_authorization.is_some())
+                .await?
+            {
+                Some(guard) => guard,
+                None => return Ok(()),
+            },
         };
 
         self.process_block_inner(
@@ -784,7 +762,7 @@ impl<B: Blockstore + 'static> SyncManager<B> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use std::sync::Arc;
     use std::time::Duration;
@@ -805,14 +783,14 @@ mod tests {
     use crate::sync::{PeerStateTracker, SyncConfig};
 
     /// Holds each registration until the test releases it.
-    struct BlockingPendingDagStore {
+    pub(crate) struct BlockingPendingDagStore {
         inner: PendingDagStore<RegolithStore>,
-        register_entered: Notify,
-        register_release: Notify,
+        pub(crate) register_entered: Notify,
+        pub(crate) register_release: Notify,
     }
 
     impl BlockingPendingDagStore {
-        fn new(store: Arc<RegolithStore>) -> Self {
+        pub(crate) fn new(store: Arc<RegolithStore>) -> Self {
             Self {
                 inner: PendingDagStore::new(store),
                 register_entered: Notify::new(),
@@ -875,7 +853,7 @@ mod tests {
         }
     }
 
-    fn create_lww_block(field_name: &str) -> (Cid, Vec<u8>) {
+    pub(crate) fn create_lww_block(field_name: &str) -> (Cid, Vec<u8>) {
         let block = Block::new(
             CrdtDelta::Lww(LwwDeltaPayload {
                 field_name: field_name.to_string(),
@@ -891,7 +869,11 @@ mod tests {
         (cid, bytes)
     }
 
-    fn create_composite_block(_doc_id: &str, field_name: &str, field_cid: Cid) -> (Cid, Vec<u8>) {
+    pub(crate) fn create_composite_block(
+        _doc_id: &str,
+        field_name: &str,
+        field_cid: Cid,
+    ) -> (Cid, Vec<u8>) {
         let block = Block::new(
             CrdtDelta::Composite(CompositeDeltaPayload {
                 schema_version_id: "schema1".to_string(),
@@ -924,7 +906,7 @@ mod tests {
         (cid, bytes)
     }
 
-    fn make_broadcast(
+    pub(crate) fn make_broadcast(
         doc_id: &str,
         cid: Cid,
         block: Vec<u8>,

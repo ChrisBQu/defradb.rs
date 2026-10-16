@@ -23,3 +23,9 @@ lean_lib Conformance where
 
 @[default_target]
 lean_lib HeadSet where
+
+@[default_target]
+lean_lib SingleFlight where
+
+@[default_target]
+lean_lib CommitFence where

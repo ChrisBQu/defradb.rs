@@ -233,6 +233,26 @@ pub const PROPERTIES: &[Property] = &[
         tiers: &[Boundary],
     },
     Property {
+        // A second PushLog for a CID already being processed joins that
+        // processing instead of being nacked: it waits, bounded by a deadline,
+        // looks again once the owner lets go, and either acks a block already
+        // merged or registered, or takes the guard and processes its own copy.
+        family: "Sync ownership transfer (head hint / receiver pull)",
+        name: "INV_SuccessImpliesDurable / INV_OneProcessor / LIVE_EveryJoinEnds: same-CID PushLog joins the in-flight owner",
+        axis: Tla,
+        anchor: "crates/p2p/src/sync/manager/process/pushlog.rs process_pushlog_with_provider_evidence, join_in_flight; crates/p2p/src/sync/queue.rs ProcessQueue::try_acquire",
+        model_ref: "MC_PushLogJoin_{Green,Red_NoRecheck,Red_NoGuard,Red_NoDeadline}.cfg",
+        tiers: &[Boundary],
+    },
+    Property {
+        family: "Sync ownership transfer (head hint / receiver pull)",
+        name: "acquire_exclusive / join_acks_only_durable / join_processes_only_unowned: the CID guard is exclusive and a join acks only a safe block",
+        axis: Lean,
+        anchor: "crates/p2p/src/sync/queue.rs ProcessQueue::try_acquire, release_sync; crates/p2p/src/sync/manager/process/pushlog.rs join_in_flight",
+        model_ref: "SingleFlight.Join (lake build)",
+        tiers: &[Boundary],
+    },
+    Property {
         family: "Multi-instance claim",
         name: "INV_EventualUnique — claim CAS converges to a single winner",
         axis: Tla,
@@ -353,6 +373,28 @@ pub const PROPERTIES: &[Property] = &[
         anchor: "crates/db/src/merge/merge_handler/counter.rs; crates/db/src/write/doc.rs; crates/db/tests/merge/merge_handler_tests.rs; crates/db txn registry",
         model_ref: "MC_TxnRegistry_Green.cfg / MC_TwoStoreCounter_Green.cfg / MC_MixedFieldMaterialization_Green.cfg",
         tiers: &[Behavioral, Boundary],
+    },
+    Property {
+        // A commit handed to its transaction's owner still lands after its
+        // caller stops waiting. The caller raises the database's fence count
+        // and swaps the commit's state word; the owner swaps it once it is
+        // finished, and whichever swap loses lowers the count. Every new
+        // transaction and read waits in DB::new_txn while the count is above
+        // zero, so it sees the commit.
+        family: "Transaction & merge-queue concurrency",
+        name: "INV_ReaderSeesCancelledCommit / INV_NeverNegative / INV_UncancelledUntouched / INV_SettledExact / LIVE_NoFenceLeak / LIVE_ReaderProceeds: a cancelled commit is fenced until it lands",
+        axis: Tla,
+        anchor: "crates/db/src/txn/fence.rs CommitFences, Fence::abandon, Fence::finish; crates/db/src/txn/owner/mod.rs Owners::finish, AbandonOnDrop; crates/db/src/txn/owner/actor.rs own; crates/db/src/database/mod.rs DB::new_txn",
+        model_ref: "MC_CommitFence_{Green,Red_RaiseAfterSwap,Red_OwnerNoSwap,Red_ReaderNoWait,Red_ForgetFailed,Red_UndoNoWake}.cfg",
+        tiers: &[Boundary],
+    },
+    Property {
+        family: "Transaction & merge-queue concurrency",
+        name: "exactly_one_wins / one_lowering_per_raise / caller_win_means_owner_lowers / uncancelled_owner_wins: the two swaps settle each fence once",
+        axis: Lean,
+        anchor: "crates/db/src/txn/fence.rs Fence::abandon, Fence::finish",
+        model_ref: "CommitFence.Swap (lake build)",
+        tiers: &[Boundary],
     },
     Property {
         // `partition::convergence_delete_update_race_preserves_tombstone`

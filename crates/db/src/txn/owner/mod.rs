@@ -25,7 +25,6 @@ mod table;
 mod tests;
 
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -38,6 +37,8 @@ use workers::{Pool, Submit};
 
 use actor::Message;
 use table::{Entry, Table};
+
+use crate::txn::fence::{CommitFences, Fence, Landing};
 
 pub(crate) use id::TxnId;
 
@@ -95,6 +96,8 @@ where
     #[cfg(not(target_family = "wasm"))]
     pool: Pool,
     shared: Arc<Shared<T, K>>,
+    /// Where a commit whose caller stops waiting is fenced until it lands.
+    fences: Arc<CommitFences>,
 }
 
 impl<T, K> Owners<T, K>
@@ -102,23 +105,33 @@ where
     T: MaybeSend + 'static,
     K: Clone + PartialEq + Send + Sync + 'static,
 {
-    /// The transactions of a registry on the workers of `pool`.
+    /// The transactions of a registry on the workers of `pool`, their
+    /// commits fenced in `fences` when a caller stops waiting.
     #[cfg(not(target_family = "wasm"))]
-    pub(crate) fn new(pool: Pool) -> Self {
+    pub(crate) fn fenced(pool: Pool, fences: Arc<CommitFences>) -> Self {
         let tables = (0..pool.workers()).map(|_| Table::new()).collect();
         Self {
             pool,
             shared: Arc::new(Shared { tables }),
+            fences,
         }
+    }
+
+    /// The transactions of a registry on the workers of `pool`, with fences
+    /// of their own.
+    #[cfg(all(test, not(target_family = "wasm")))]
+    pub(crate) fn new(pool: Pool) -> Self {
+        Self::fenced(pool, Arc::default())
     }
 
     /// The transactions of a registry on the page's one worker.
     #[cfg(target_family = "wasm")]
-    pub(crate) fn here() -> Self {
+    pub(crate) fn here(fences: Arc<CommitFences>) -> Self {
         Self {
             shared: Arc::new(Shared {
                 tables: Box::new([Table::new()]),
             }),
+            fences,
         }
     }
 
@@ -261,7 +274,9 @@ where
     /// end, find no transaction. A caller whose `key` does not own it is told
     /// it does not exist, and the transaction stays. A caller that stops
     /// waiting before the end begins abandons the transaction instead: it
-    /// ends unfinished.
+    /// ends unfinished. One that stops waiting later cannot undo the end:
+    /// it fences it, so every transaction and read that begins afterwards
+    /// waits for it to land.
     pub(crate) async fn finish<R, L>(&self, id: TxnId, key: &K, last: L) -> Result<R, Unavailable>
     where
         R: MaybeSend + 'static,
@@ -272,10 +287,10 @@ where
             return Err(Unavailable::NotFound);
         }
         let entry = table.take(id).ok_or(Unavailable::NotFound)?;
-        let cancelled = Arc::new(AtomicBool::new(false));
+        let fence = Fence::new(&self.fences);
         let abandon_on_drop = AbandonOnDrop {
             idle: Arc::clone(&entry.idle),
-            cancelled: Some(Arc::clone(&cancelled)),
+            fence: Some(Arc::clone(&fence)),
         };
         let (reply, answer) = unbounded();
         let queued = entry.mailbox.try_send(Message::Finish {
@@ -284,8 +299,11 @@ where
                     let _ = reply.try_send(last(txn).await);
                 })
             }),
-            cancelled,
+            fence: Landing::new(fence),
         });
+        // Not kept while waiting: a message its owner never takes is then
+        // dropped with the channel, and its reply and fence with it.
+        drop(entry);
         let ended = match queued {
             Ok(()) => answer.recv_async().await.ok_or(Unavailable::NotFound),
             Err(_) => Err(Unavailable::NotFound),
@@ -382,13 +400,14 @@ where
 }
 
 /// While a finish waits: if its caller stops waiting, the transaction is
-/// abandoned instead of finished, and dropped at once while still idle.
+/// abandoned instead of finished, and dropped at once while still idle; an
+/// end the owner already began is fenced until it is done.
 struct AbandonOnDrop<T>
 where
     T: 'static,
 {
     idle: Arc<ArrayQueue<T>>,
-    cancelled: Option<Arc<AtomicBool>>,
+    fence: Option<Arc<Fence>>,
 }
 
 impl<T> AbandonOnDrop<T>
@@ -397,7 +416,7 @@ where
 {
     /// The finish got its answer: nothing to abandon.
     fn disarm(mut self) {
-        self.cancelled = None;
+        self.fence = None;
     }
 }
 
@@ -406,10 +425,10 @@ where
     T: 'static,
 {
     fn drop(&mut self) {
-        let Some(cancelled) = self.cancelled.take() else {
+        let Some(fence) = self.fence.take() else {
             return;
         };
-        cancelled.store(true, Ordering::Release);
+        fence.abandon();
         drop(self.idle.pop());
     }
 }

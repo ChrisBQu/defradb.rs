@@ -99,6 +99,16 @@ RUNS=(
   "MC_DocumentMaterialization_Green.cfg DocumentMaterialization.tla GREEN" # deletion marker is componentwise/absorbing
   "MC_PushLogAdmission_Green.cfg MC_PushLogAdmission_Common.tla GREEN" # #1088 W1: capacity overflow nacks -> success implies registered-or-merged + all docs merge
   "MC_PushLogAdmission_Red_SuccessOnFull.cfg MC_PushLogAdmission_Common.tla RED" # fa4a84f7 regression: overflow drops registration but acks success (INV_SuccessImpliesRegisteredOrMerged)
+  "MC_PushLogJoin_Green.cfg PushLogJoin.tla GREEN" # same-CID PushLog joins the in-flight owner: success implies durable, one processor, every join ends
+  "MC_PushLogJoin_Red_NoRecheck.cfg PushLogJoin.tla RED" # waiter acks when the owner lets go without looking again (INV_SuccessImpliesDurable)
+  "MC_PushLogJoin_Red_NoGuard.cfg PushLogJoin.tla RED" # waiter processes its copy without the CID guard (INV_OneProcessor)
+  "MC_PushLogJoin_Red_NoDeadline.cfg PushLogJoin.tla RED" # waiter waits on a stuck owner with no deadline (LIVE_EveryJoinEnds)
+  "MC_CommitFence_Green.cfg CommitFence.tla GREEN" # a commit whose caller stopped waiting is seen by every later reader; the count is exact and clears, readers wake
+  "MC_CommitFence_Red_RaiseAfterSwap.cfg CommitFence.tla RED" # caller raises after its swap: the count dips and a reader slips past (INV_ReaderSeesCancelledCommit)
+  "MC_CommitFence_Red_OwnerNoSwap.cfg CommitFence.tla RED" # owner lowers without its swap: double lowering (INV_NeverNegative)
+  "MC_CommitFence_Red_ReaderNoWait.cfg CommitFence.tla RED" # reader skips the fence and misses the landing commit (INV_ReaderSeesCancelledCommit)
+  "MC_CommitFence_Red_ForgetFailed.cfg CommitFence.tla RED" # owner forgets a failed commit's fence: it leaks (LIVE_NoFenceLeak)
+  "MC_CommitFence_Red_UndoNoWake.cfg CommitFence.tla RED" # caller's undo reaches zero without a wake: a reader sleeps forever (LIVE_ReaderProceeds)
   "MC_PushBacklog_Green.cfg MC_PushBacklog_Common.tla GREEN" # #1099: bounded queue + fixed workers + per-peer cap -> all bounds hold, healthy peers progress
   "MC_PushBacklog_Red_SpawnPerItem.cfg MC_PushBacklog_Common.tla RED" # current main: task spawned per (write,peer) before the semaphore -> resident work unbounded (INV_QueueBounded)
   "MC_PushBacklog_Red_PermitLeak.cfg MC_PushBacklog_Common.tla RED" # completing job keeps its worker slot -> pool decays (INV_PermitConservation)

@@ -13,6 +13,7 @@
 //! This matches Go's architecture where p2p calls db.Merge().
 
 mod bitswap;
+mod join;
 mod pending_dag;
 mod pushlog;
 

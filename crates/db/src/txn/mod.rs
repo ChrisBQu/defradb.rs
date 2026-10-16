@@ -17,6 +17,7 @@ use storage::keys::systemstore::{CollectionKey, CollectionNameKey};
 
 mod catalog;
 pub mod context;
+pub(crate) mod fence;
 pub(crate) mod held;
 pub(crate) mod lenses;
 pub(crate) mod owner;

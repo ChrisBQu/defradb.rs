@@ -13,7 +13,6 @@
 //! rollback takes the entry out of the table before it is queued, so a
 //! request either is queued before the end or finds nothing.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -23,6 +22,7 @@ use regolith::sync::{ArrayQueue, UnboundedReceiver, UnboundedSender};
 use web_time::Instant;
 
 use super::{Shared, TxnId};
+use crate::txn::fence::Landing;
 
 /// A request's work on the transaction.
 #[cfg(not(target_family = "wasm"))]
@@ -42,11 +42,10 @@ pub(super) enum Message<T> {
     /// A request.
     Run(Work<T>),
     /// The transaction's end: commit or rollback. A caller that stopped
-    /// waiting before its end began (`cancelled`) gets an abandon instead.
-    Finish {
-        last: Last<T>,
-        cancelled: Arc<AtomicBool>,
-    },
+    /// waiting before its end began gets an abandon instead. Dropping the
+    /// `fence`, once the end is done or the message is dropped unrun, lets
+    /// go of what a caller that stopped waiting fenced.
+    Finish { last: Last<T>, fence: Landing },
     /// The caller let go of the transaction without finishing it.
     Abandon,
     /// End the transaction if no request has finished for at least
@@ -81,17 +80,23 @@ pub(super) async fn own<T, K>(
     T: 'static,
     K: Clone + PartialEq + 'static,
 {
+    let _drain = Drain(&mailbox);
     let mut active = Instant::now();
     // Out of the table, then emptied: a request is sent on this worker, so
     // it is queued before this or finds no transaction. A message left in the
     // mailbox would keep its reply open until kovan reclaims the channel, so
     // each is dropped here and its sender hears the transaction is gone.
+    // Says whether this task took the entry out of the table.
     let leave = || {
-        if let Some(shared) = shared.upgrade() {
-            shared.tables[worker].take(id);
-        }
+        let took = shared
+            .upgrade()
+            .is_some_and(|shared| shared.tables[worker].take(id).is_some());
         while mailbox.try_recv().is_some() {}
+        took
     };
+    // Whether the loop ended on the message of whoever took the entry out of
+    // the table: a commit, a rollback or an abandon.
+    let mut taker_seen = false;
     while let Some(message) = mailbox.recv_async().await {
         match message {
             Message::Run(work) => {
@@ -100,16 +105,23 @@ pub(super) async fn own<T, K>(
                 let _ = idle.push(txn);
                 active = Instant::now();
             }
-            Message::Finish { last, cancelled } => {
-                if cancelled.load(Ordering::Acquire) {
+            Message::Finish { last, fence } => {
+                taker_seen = true;
+                if fence.abandoned() {
                     break;
                 }
                 let Some(txn) = idle.pop() else { break };
                 leave();
                 last(txn).await;
+                // Landed or failed: only now may what began after its caller
+                // stopped waiting go ahead.
+                drop(fence);
                 return;
             }
-            Message::Abandon => break,
+            Message::Abandon => {
+                taker_seen = true;
+                break;
+            }
             Message::Expire { max_idle, reply } => {
                 let stale = active.elapsed() >= max_idle;
                 if let Some(reply) = reply {
@@ -124,5 +136,30 @@ pub(super) async fn own<T, K>(
     // Ended before the mailbox empties, so a request still queued behind the
     // end is told "not found" only once the transaction is already gone.
     drop(idle.pop());
-    leave();
+    if !leave() && !taker_seen {
+        // Whoever took the entry sends its end right after taking it: it is
+        // dropped here, so its reply and its commit's fence are let go now,
+        // not when the channel is reclaimed.
+        while let Some(message) = mailbox.recv_async().await {
+            if matches!(message, Message::Finish { .. } | Message::Abandon) {
+                break;
+            }
+        }
+    }
+}
+
+/// Empties the mailbox when the task ends, however it ends: a worker that
+/// stops drops the task mid-wait, and each message still queued lets go of
+/// its reply and its commit's fence then, not when the channel is reclaimed.
+struct Drain<'mailbox, T>(&'mailbox UnboundedReceiver<Message<T>>)
+where
+    T: 'static;
+
+impl<T> Drop for Drain<'_, T>
+where
+    T: 'static,
+{
+    fn drop(&mut self) {
+        while self.0.try_recv().is_some() {}
+    }
 }

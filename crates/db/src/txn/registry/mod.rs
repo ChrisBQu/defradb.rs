@@ -30,6 +30,7 @@ use storage::corekv::{IterOptions, Key, Store};
 use crate::collection::Collection;
 use crate::database::DB;
 use crate::error::{Error, Result};
+use crate::txn::fence::CommitFences;
 use crate::txn::owner::{Owners, TxnId, Unavailable};
 
 mod blocks;
@@ -125,8 +126,8 @@ impl<S: Store + 'static> DbTransactionRegistry<S> {
         broadcaster: Option<Arc<dyn crate::event::emission::TxnBroadcaster>>,
     ) -> Self {
         Self {
+            owners: owners_on(pool, db.commit_fences()),
             db,
-            owners: owners_on(pool),
             broadcaster,
         }
     }
@@ -218,6 +219,7 @@ fn pool_of<S: Store>(db: &DB<S>) -> std::result::Result<workers::Pool, workers::
 #[cfg(not(target_family = "wasm"))]
 fn owners_on<T, K>(
     pool: std::result::Result<workers::Pool, workers::Error>,
+    fences: &Arc<CommitFences>,
 ) -> std::result::Result<Owners<T, K>, workers::Error>
 where
     T: defra_core::thread_bounds::MaybeSend + 'static,
@@ -226,17 +228,18 @@ where
     if let Err(error) = &pool {
         tracing::error!(%error, "no worker can own transactions; every transaction request will fail");
     }
-    pool.map(Owners::new)
+    pool.map(|pool| Owners::fenced(pool, Arc::clone(fences)))
 }
 
 /// The page's one worker owns every transaction, whichever pool drives it.
 #[cfg(target_family = "wasm")]
 fn owners_on<T, K>(
     _pool: std::result::Result<workers::Pool, workers::Error>,
+    fences: &Arc<CommitFences>,
 ) -> std::result::Result<Owners<T, K>, workers::Error>
 where
     T: 'static,
     K: Clone + PartialEq + Send + Sync + 'static,
 {
-    Ok(Owners::here())
+    Ok(Owners::here(Arc::clone(fences)))
 }
