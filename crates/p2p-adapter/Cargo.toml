@@ -40,6 +40,7 @@ chrono = { version = "0.4", features = ["serde"] }
 cid.workspace = true
 hex.workspace = true
 kovan.workspace = true
+regolith.workspace = true
 kovan-map.workspace = true
 kovan-queue.workspace = true
 n0-future.workspace = true

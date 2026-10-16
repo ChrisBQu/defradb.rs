@@ -44,7 +44,7 @@ fn cache_lifetime_starts_before_the_check_completes() {
     let cache = AccessCache::new(Duration::from_secs(60));
     let pending = PendingDecision {
         entry: Arc::new(CachedDecision {
-            allowed: OnceLock::new(),
+            allowed: OnceCell::new(),
             cached_at: Instant::now() - Duration::from_secs(61),
             pending: AtomicUsize::new(1),
         }),

@@ -2,7 +2,9 @@ use kovan_map::HopscotchMap;
 use kovan_queue::seg_queue::SegQueue;
 use rapidhash::fast::RandomState;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+
+use regolith::sync::OnceCell;
 use std::time::{Duration, Instant};
 
 /// The bytes cached decisions may take, counted by their keys.
@@ -29,7 +31,7 @@ struct CacheKey {
 }
 
 struct CachedDecision {
-    allowed: OnceLock<bool>,
+    allowed: OnceCell<bool>,
     cached_at: Instant,
     pending: AtomicUsize,
 }
@@ -306,7 +308,7 @@ impl AccessCache {
         let key = cache_key(actor_did, policy_id, resource, doc_id, permission);
         let entry = loop {
             let fresh = Arc::new(CachedDecision {
-                allowed: OnceLock::new(),
+                allowed: OnceCell::new(),
                 cached_at: Instant::now(),
                 pending: AtomicUsize::new(0),
             });

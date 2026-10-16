@@ -1,11 +1,11 @@
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use cosmrs::crypto::secp256k1::SigningKey;
 use cosmrs::tx::{Body, Fee, SignDoc, SignerInfo};
 use cosmrs::{AccountId, Any, Coin};
 use kovan_map::HopscotchMap;
 use rapidhash::fast::RandomState;
-use regolith::sync::Mutex as AsyncMutex;
+use regolith::sync::{Lazy, Mutex as AsyncMutex};
 
 use super::client::VeraClient;
 
@@ -232,11 +232,10 @@ fn is_sequence_mismatch(message: &str) -> bool {
 }
 
 fn sequence_state(client: &VeraClient, address: &str) -> Arc<AsyncMutex<SequenceState>> {
-    static STATES: OnceLock<HopscotchMap<String, Arc<AsyncMutex<SequenceState>>, RandomState>> =
-        OnceLock::new();
+    static STATES: Lazy<HopscotchMap<String, Arc<AsyncMutex<SequenceState>>, RandomState>> =
+        Lazy::new(|| HopscotchMap::with_hasher(RandomState::default()));
 
-    let states = STATES.get_or_init(|| HopscotchMap::with_hasher(RandomState::default()));
-    states.get_or_insert(
+    STATES.get_or_insert(
         client.sequence_cache_key(address),
         Arc::new(AsyncMutex::new(SequenceState::default())),
     )

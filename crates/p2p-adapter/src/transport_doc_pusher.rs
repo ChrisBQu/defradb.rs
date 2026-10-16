@@ -107,7 +107,7 @@ pub struct DbTransportDocPusher<S: storage::corekv::Store, T: P2PTransport> {
     transport: T,
     car_authority: p2p::sync::HeadHintCarAuthority,
     retry_schedule: storage::stores::RetrySchedule,
-    document_acp: std::sync::OnceLock<Arc<dyn acp::DocumentACP>>,
+    document_acp: regolith::sync::OnceCell<Arc<dyn acp::DocumentACP>>,
 }
 
 impl<S: storage::corekv::Store + 'static, T: P2PTransport> DbTransportDocPusher<S, T> {
@@ -121,7 +121,7 @@ impl<S: storage::corekv::Store + 'static, T: P2PTransport> DbTransportDocPusher<
             transport,
             car_authority,
             retry_schedule: storage::stores::RetrySchedule::default(),
-            document_acp: std::sync::OnceLock::new(),
+            document_acp: regolith::sync::OnceCell::new(),
         }
     }
 
