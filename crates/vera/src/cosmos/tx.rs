@@ -5,7 +5,7 @@ use cosmrs::tx::{Body, Fee, SignDoc, SignerInfo};
 use cosmrs::{AccountId, Any, Coin};
 use kovan_map::HopscotchMap;
 use rapidhash::fast::RandomState;
-use tokio::sync::Mutex as AsyncMutex;
+use regolith::sync::Mutex as AsyncMutex;
 
 use super::client::VeraClient;
 

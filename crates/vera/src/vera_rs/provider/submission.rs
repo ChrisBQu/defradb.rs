@@ -1,6 +1,6 @@
 use crate::vera_rs::client::ClientError;
 use alloy_primitives::Bytes;
-use tokio::sync::OwnedMutexGuard;
+use regolith::sync::OwnedMutexGuard;
 use vera_domain::{ExecutionReceipt, NativeTx};
 
 use super::{NativeWorker, ProviderError, VeraRsProvider, ACP_ADDRESS};

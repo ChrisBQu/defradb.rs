@@ -68,6 +68,7 @@ sha2.workspace = true
 
 # Hashing
 rapidhash.workspace = true
+regolith.workspace = true
 
 # Base64 for bearer token
 base64.workspace = true
