@@ -329,7 +329,11 @@ impl EmbeddedNode {
         let Some(node_identity_did) = self.node_identity_did.as_deref() else {
             return match txn_handle {
                 Some(handle) => self.runner.execute_in_txn(request, &handle).await,
-                None => execute_autocommit_request(self.runner.as_ref(), request).await,
+                // Run the complete request through the node's pooled
+                // executor. In particular, query deadlines must start on
+                // this node's worker instead of borrowing the process
+                // default pool, which another node may be shutting down.
+                None => self.runner.execute(request).await,
             };
         };
 
@@ -891,6 +895,7 @@ impl EmbeddedNode {
     }
 }
 
+#[cfg(test)]
 async fn execute_autocommit_request(
     executor: &dyn QueryExecutor,
     request: QueryRequest,
@@ -910,6 +915,7 @@ async fn execute_autocommit_request(
     execute_prepared_request_resolving_inputs(executor, request, prepared).await
 }
 
+#[cfg(test)]
 async fn execute_prepared_request_resolving_inputs(
     executor: &dyn QueryExecutor,
     request: QueryRequest,

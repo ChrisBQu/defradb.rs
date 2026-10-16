@@ -1178,6 +1178,31 @@ async fn coding_session_embedding_fixture_supports_hybrid_rank_comparison() {
 }
 
 #[tokio::test]
+async fn query_preparation_uses_its_node_pool_after_the_default_node_stops() {
+    let node = crate::EmbeddedNode::builder().build().await.unwrap();
+    let default_node = crate::EmbeddedNode::builder().build().await.unwrap();
+    let pool = node.pool.as_ref().expect("embedded node pool");
+
+    // The second node replaces `node` as the process default. After it
+    // shuts down, a query on `node` must still prepare on `node`'s pool.
+    default_node.shutdown().await;
+
+    let before: u64 = pool.stats().workers.iter().map(|worker| worker.tasks).sum();
+    let response = node.execute("{ invalid").await;
+    assert!(
+        response.has_errors(),
+        "the malformed query should be rejected"
+    );
+    let after: u64 = pool.stats().workers.iter().map(|worker| worker.tasks).sum();
+
+    assert!(
+        after > before,
+        "query preparation did not run on the node's worker pool"
+    );
+    node.shutdown().await;
+}
+
+#[tokio::test]
 async fn coding_session_embedding_fixture_supports_query_text_hybrid_search_api() {
     let server = MockEmbeddingServer::start().await;
 
