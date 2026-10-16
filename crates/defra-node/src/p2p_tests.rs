@@ -2334,7 +2334,11 @@ async fn assert_replicator_acknowledges_current_heads(schema: &str, collection: 
     let unknown = node0
         .p2p()
         .expect("node0 p2p")
-        .replication_acknowledged("not-a-replicator", collection, &[doc_id.clone()])
+        .replication_acknowledged(
+            "not-a-replicator",
+            collection,
+            std::slice::from_ref(&doc_id),
+        )
         .await
         .expect("query unknown peer");
     assert_eq!(unknown, [false]);
