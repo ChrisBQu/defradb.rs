@@ -225,6 +225,30 @@ Disjoint parts of one document never conflict. A read that validates more than i
 - Events and in-memory state follow the commit order through `CommitReceipt.seq`. A `seq` is never persisted across
   `drop_all` or a restore.
 
+### Execution boundaries to preserve
+
+- Preserve the embedded autocommit owner in
+  [`execute_autocommit_request`](crates/defra-node/src/lib.rs) and its signed
+  caller in [`signed_query`](crates/defra-node/src/signed_query/mod.rs).
+  `prepare_request` and `resolve_retry_input` run on the caller, outside database
+  workers; `execute_prepared` routes the database attempt. Replacing this sequence
+  with `PooledExecutor::execute` moves remote preparation onto a database worker.
+  The placement contract is in [`PooledExecutor`](crates/query/src/pooled/mod.rs);
+  the one-preparation/one-attempt regression is in
+  [`request_preparation_tests`](crates/defra-node/src/request_preparation_tests.rs).
+- Preserve the worker-local commit path in
+  [`WorkerIo`](crates/storage/src/backends/regolith/worker_io/mod.rs) and
+  [`RegolithTxn::commit`](crates/storage/src/backends/regolith/transaction.rs).
+  A cache-only transaction commits with `commit_nowait`; its I/O queue completes
+  the ticket. Do not move commit validation to `Pool::spawn_blocking`, call
+  blocking `Transaction::commit` on a database worker, or move the transaction to
+  another executor to hide a cache miss. `WouldBlock::Io` requires a Regolith
+  asynchronous mechanism with the transaction's ownership intact. A missing
+  mechanism belongs in Regolith; preserve its regression rather than add an
+  adapter retry or blocking fallback. Regolith's owning contracts are
+  [`commit_nowait`](https://github.com/sourcenetwork/regolith/blob/main/src/transaction/nowait.rs)
+  and [`transact_async`](https://github.com/sourcenetwork/regolith/blob/main/src/transaction/retry.rs).
+
 ### Synchronization: regolith sync, lock-free first
 
 - Synchronization comes from `regolith::sync`. Never `std::sync::{Mutex, RwLock, Condvar, Barrier, OnceLock, LazyLock}`,
