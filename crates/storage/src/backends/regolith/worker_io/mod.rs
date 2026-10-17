@@ -130,11 +130,6 @@ impl StoreIo {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(super) fn owner_pool(&self) -> Option<workers::Pool> {
-        self.pool.clone()
-    }
-
     /// A queue of the caller's own to drive, idle: one kept from an earlier
     /// call, or a new one on `db`.
     pub(super) fn own_queue(&self, db: &OptimisticTransactionDb) -> IoQueue {

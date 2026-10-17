@@ -8,8 +8,8 @@
 //! other end; each callback runs once, and the other end's are dropped unrun.
 //!
 //! After a commit, in this order: the hooks ([`OnCommit::OrderedAsync`]) are
-//! awaited and the events ([`OnCommit::Ordered`]) dispatched through the stream
-//! in commit-receipt order before completion; then the async
+//! awaited and the events ([`OnCommit::Ordered`]) handed to the stream that
+//! sends every commit's events out in commit-receipt order; then the async
 //! callbacks are awaited and the sync ones run. After any other end the
 //! async callbacks come first too: awaited after a failed commit, spawned
 //! after a discard or a drop, whose caller cannot await. Each kind keeps its
@@ -58,7 +58,7 @@ pub enum OnCommit {
     /// Awaited once the commit is durable.
     Async(AsyncTxnCallback),
     /// An event: sent out with every commit's events, in commit-receipt
-    /// order, before commit completion returns.
+    /// order.
     Ordered(TxnCallback),
     /// A hook: awaited before this commit's events go out, which holds back
     /// the events of every later commit until it finishes.

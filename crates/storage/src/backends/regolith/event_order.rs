@@ -36,7 +36,7 @@ use std::sync::atomic::{self, AtomicU64};
 use std::sync::Arc;
 
 use rapidhash::fast::RapidHashMap;
-use regolith::sync::{Latch, Notify, SegQueue};
+use regolith::sync::SegQueue;
 use regolith::Transaction;
 use telemetry::StorageEvent;
 
@@ -65,7 +65,6 @@ enum Work {
 pub(crate) struct EventOrder {
     next_token: AtomicU64,
     life: Arc<SegQueue<Life>>,
-    changed: Arc<Notify>,
     work: SegQueue<Work>,
     /// Holds the one `Drainer` while nobody drains.
     drainer: SegQueue<Box<Drainer>>,
@@ -78,7 +77,6 @@ impl Default for EventOrder {
         Self {
             next_token: AtomicU64::new(0),
             life: Arc::new(SegQueue::new()),
-            changed: Arc::new(Notify::new()),
             work: SegQueue::new(),
             drainer,
         }
@@ -91,32 +89,20 @@ impl EventOrder {
     pub(super) fn bind(
         self: &Arc<Self>,
         txn: &mut Transaction,
-        mut events: Vec<Event>,
+        events: Vec<Event>,
         hooks: bool,
     ) -> Binding {
         let token = self.next_token.fetch_add(1, atomic::Ordering::Relaxed);
         self.life.push(Life::Begin(token));
         let life = Arc::clone(&self.life);
-        let changed = Arc::clone(&self.changed);
-        txn.on_commit(move |receipt| {
-            life.push(Life::Committed(token, receipt.seq()));
-            changed.notify_waiters();
-        });
+        txn.on_commit(move |receipt| life.push(Life::Committed(token, receipt.seq())));
         let life = Arc::clone(&self.life);
-        let changed = Arc::clone(&self.changed);
-        txn.on_abort(move |_| {
-            life.push(Life::Aborted(token));
-            changed.notify_waiters();
-        });
-        let published = Arc::new(Latch::new(1));
-        let done = Arc::clone(&published);
-        events.push(Box::new(move || done.count_down()));
+        txn.on_abort(move |_| life.push(Life::Aborted(token)));
         Binding {
             order: Arc::clone(self),
             token,
             events: Some(events),
             hooks,
-            published,
         }
     }
 
@@ -161,17 +147,9 @@ pub(super) struct Binding {
     token: u64,
     events: Option<Vec<Event>>,
     hooks: bool,
-    published: Arc<Latch>,
 }
 
 impl Binding {
-    pub(super) fn publication(&self) -> Publication {
-        Publication {
-            order: Arc::clone(&self.order),
-            done: Arc::clone(&self.published),
-        }
-    }
-
     /// The owner knows whether regolith committed. A commit that did hands
     /// its events over; with hooks they wait for [`HooksRunning::done`].
     pub(super) fn hand_over(mut self, committed: bool) -> Option<HooksRunning> {
@@ -186,39 +164,6 @@ impl Binding {
             token: self.token,
             done: false,
         })
-    }
-}
-
-/// Commit completion includes its ordered cache updates, even when another
-/// transaction's owner drains them. Cancellation must not remove that work.
-pub(super) struct Publication {
-    order: Arc<EventOrder>,
-    done: Arc<Latch>,
-}
-
-impl Publication {
-    pub(super) async fn wait(self) {
-        use std::future::{poll_fn, Future};
-        use std::task::Poll;
-
-        let mut done = std::pin::pin!(self.done.wait());
-        loop {
-            let mut changed = std::pin::pin!(self.order.changed.notified());
-            self.order.drain();
-            let published = poll_fn(|cx| {
-                if done.as_mut().poll(cx).is_ready() {
-                    Poll::Ready(true)
-                } else if changed.as_mut().poll(cx).is_ready() {
-                    Poll::Ready(false)
-                } else {
-                    Poll::Pending
-                }
-            })
-            .await;
-            if published {
-                return;
-            }
-        }
     }
 }
 

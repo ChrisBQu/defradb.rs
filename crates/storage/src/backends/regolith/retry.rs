@@ -100,12 +100,7 @@ pub(super) async fn transact(
     let committed = outcome.is_ok();
     if let Some(latest) = baton.pop().and_then(|held| held.latest) {
         if committed {
-            #[cfg(not(target_arch = "wasm32"))]
-            let post_commit_pool = io.owner_pool();
-            #[cfg(not(target_arch = "wasm32"))]
-            latest.committed(post_commit_pool.as_ref()).await;
-            #[cfg(target_arch = "wasm32")]
-            latest.committed(None).await;
+            latest.committed().await;
         } else {
             latest.failed().await;
         }
@@ -541,12 +536,10 @@ mod retry_order_tests {
         regular
             .on_commit(OnCommit::Ordered(Box::new(move || out.push(2))))
             .unwrap();
-        let mut commit = std::pin::pin!(regular.commit());
-        assert!(futures::poll!(&mut commit).is_pending());
+        regular.commit().await.unwrap();
         assert!(events.is_empty());
         release.notify_one();
         retry_task.await.unwrap();
-        commit.await.unwrap();
         assert_eq!(
             std::iter::from_fn(|| events.pop()).collect::<Vec<_>>(),
             vec![1, 2]

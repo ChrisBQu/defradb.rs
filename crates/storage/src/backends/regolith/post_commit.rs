@@ -57,98 +57,13 @@ impl PostCommit {
     /// The commit is durable: its hooks run (a failure is reported, never
     /// returned), its events go out in receipt order, and its other commit
     /// callbacks run.
-    pub(super) async fn committed(self, pool: Option<&workers::Pool>) {
-        #[cfg(target_arch = "wasm32")]
-        let _ = pool;
-
-        // With no ordered work there is no publication wait to outlive its
-        // caller, so keep the ordinary callback path in place.
-        if self.binding.is_none() {
-            self.committed.run().await;
-            return;
-        }
-
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            // Once durable, an ordered publication may wait behind another
-            // commit. Keep this future owned by a worker if its caller drops
-            // the completion while it waits.
-            let owner = Arc::new(regolith::sync::ArrayQueue::new(1));
-            let _ = owner.push(self);
-            let task_owner = Arc::clone(&owner);
-            let completion = workers::spawn(pool, "storage::post_commit", move || async move {
-                let work = task_owner.pop();
-                if let Some(work) = work {
-                    let outcome = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
-                        work.committed_ordered(),
-                    ))
-                    .await;
-                    if let Err(panic) = outcome {
-                        report(
-                            StorageEvent::PostCommitCallbackPanicked,
-                            &super::event_order::panic_message(panic.as_ref()),
-                        );
-                    }
-                }
-            });
-            match completion {
-                Ok(completion) => {
-                    if let Err(error) = completion.await {
-                        tracing::error!(%error, "durable post-commit owner did not finish");
-                    }
-                }
-                Err(error) => {
-                    tracing::error!(%error, "could not start durable post-commit owner; running inline");
-                    let work = owner.pop();
-                    if let Some(work) = work {
-                        let outcome = futures::FutureExt::catch_unwind(
-                            std::panic::AssertUnwindSafe(work.committed_ordered()),
-                        )
-                        .await;
-                        if let Err(panic) = outcome {
-                            report(
-                                StorageEvent::PostCommitCallbackPanicked,
-                                &super::event_order::panic_message(panic.as_ref()),
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            if workers::on_worker() {
-                // On the page worker the completion itself is polled by the
-                // owner's task, which keeps ordered callbacks alive if its
-                // original caller is cancelled.
-                match workers::spawn_local(self.committed_ordered()) {
-                    Ok(completion) => {
-                        if let Err(error) = completion.await {
-                            tracing::error!(%error, "durable post-commit owner did not finish");
-                        }
-                    }
-                    Err(error) => {
-                        tracing::error!(%error, "could not start durable post-commit owner")
-                    }
-                }
-            } else {
-                self.committed_ordered().await;
-            }
-        }
-    }
-
-    async fn committed_ordered(self) {
-        let publication = self.binding.as_ref().map(Binding::publication);
+    pub(super) async fn committed(self) {
         let running = self.binding.and_then(|binding| binding.hand_over(true));
         if let Some(running) = running {
             for hook in self.hooks {
                 run_hook(hook()).await;
             }
             running.done();
-        }
-        if let Some(publication) = publication {
-            publication.wait().await;
         }
         self.committed.run().await;
     }
@@ -230,162 +145,6 @@ mod post_commit_tests {
 
     fn failing_hook() -> CommitHook {
         Box::new(|| Box::pin(async { Err("the registration was refused".to_string()) }))
-    }
-
-    #[tokio::test]
-    async fn commit_completion_waits_until_its_ordered_events_are_visible() {
-        let db =
-            regolith::OptimisticTransactionDb::open("commit-events", regolith::Options::memory())
-                .unwrap();
-        let order = Arc::new(super::EventOrder::default());
-        let out = Out::default();
-        let mut earlier = db.begin(&regolith::TxnOptions::new());
-        earlier.put(b"earlier", b"v").unwrap();
-        let held = order.bind(&mut earlier, vec![out.event(1)], false);
-        earlier.commit().unwrap();
-
-        let mut later = db.begin(&regolith::TxnOptions::new());
-        later.put(b"later", b"v").unwrap();
-        let mut callbacks = TxnCallbacks::default();
-        callbacks
-            .on_commit(OnCommit::Ordered(out.event(2)))
-            .unwrap();
-        let work = super::PostCommit::bind(&order, &mut later, callbacks);
-        later.commit().unwrap();
-        let mut completion = std::pin::pin!(work.committed_ordered());
-        assert!(futures::poll!(&mut completion).is_pending());
-        assert!(out.get().is_empty());
-        held.hand_over(true);
-        completion.await;
-        assert_eq!(out.get(), vec![1, 2]);
-    }
-
-    #[tokio::test]
-    async fn a_late_native_outcome_wakes_publication_after_its_owner_was_cancelled() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        struct Wakes(AtomicUsize);
-        impl futures::task::ArcWake for Wakes {
-            fn wake_by_ref(wakes: &Arc<Self>) {
-                wakes.0.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-
-        let db = regolith::OptimisticTransactionDb::open(
-            "cancelled-publication",
-            regolith::Options::memory(),
-        )
-        .unwrap();
-        let order = Arc::new(super::EventOrder::default());
-        let out = Out::default();
-        let mut detached = db.begin(&regolith::TxnOptions::new());
-        detached.put(b"detached", b"v").unwrap();
-        let cancelled = order.bind(&mut detached, vec![out.event(2)], false);
-        drop(cancelled);
-
-        let mut later = db.begin(&regolith::TxnOptions::new());
-        later.put(b"later", b"v").unwrap();
-        let mut callbacks = TxnCallbacks::default();
-        callbacks
-            .on_commit(OnCommit::Ordered(out.event(1)))
-            .unwrap();
-        let work = super::PostCommit::bind(&order, &mut later, callbacks);
-        later.commit().unwrap();
-        let mut completion = std::pin::pin!(work.committed_ordered());
-        let wakes = Arc::new(Wakes(AtomicUsize::new(0)));
-        let waker = futures::task::waker(Arc::clone(&wakes));
-        let mut context = std::task::Context::from_waker(&waker);
-        assert!(std::future::Future::poll(completion.as_mut(), &mut context).is_pending());
-        let before = wakes.0.load(Ordering::SeqCst);
-        detached.commit().unwrap();
-        assert!(wakes.0.load(Ordering::SeqCst) > before);
-        completion.await;
-        assert_eq!(out.get(), vec![1, 2]);
-    }
-
-    #[tokio::test]
-    async fn cancellation_while_waiting_for_publication_keeps_committed_callbacks_owned() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::time::Duration;
-
-        let pool =
-            workers::Pool::start(crate::with_worker_io(workers::Config::unplaced(2))).unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let store = RegolithStore::open_with_options(
-            dir.path(),
-            crate::RegolithStoreOptions::default().placed_on(&pool),
-        )
-        .unwrap();
-        let out = Out::default();
-        let first_entered = Arc::new(Signal::new());
-        let release_first = Arc::new(Signal::new());
-
-        let first_store = store.clone();
-        let first_out = out.clone();
-        let first_entered_task = Arc::clone(&first_entered);
-        let first_release_task = Arc::clone(&release_first);
-        let first = tokio::spawn(async move {
-            let mut txn = first_store.new_txn(false).await.unwrap();
-            txn.set(b"first", b"durable").await.unwrap();
-            txn.on_commit(OnCommit::OrderedAsync(Box::new(move || {
-                Box::pin(async move {
-                    first_entered_task.set();
-                    first_release_task.wait().await;
-                    Ok(())
-                })
-            })))
-            .unwrap();
-            txn.on_commit(OnCommit::Ordered(first_out.event(1)))
-                .unwrap();
-            txn.commit().await.unwrap();
-        });
-        tokio::time::timeout(Duration::from_secs(5), first_entered.wait())
-            .await
-            .unwrap();
-
-        let callbacks = Arc::new(AtomicUsize::new(0));
-        let second_entered = Arc::new(Signal::new());
-        let second_done = Arc::new(Signal::new());
-        let second_store = store.clone();
-        let second_out = out.clone();
-        let second_callbacks = Arc::clone(&callbacks);
-        let second_entered_task = Arc::clone(&second_entered);
-        let second_done_task = Arc::clone(&second_done);
-        let second = tokio::spawn(async move {
-            let mut txn = second_store.new_txn(false).await.unwrap();
-            txn.set(b"second", b"durable").await.unwrap();
-            txn.on_commit(OnCommit::OrderedAsync(Box::new(move || {
-                Box::pin(async move {
-                    second_entered_task.set();
-                    Ok(())
-                })
-            })))
-            .unwrap();
-            txn.on_commit(OnCommit::Ordered(second_out.event(2)))
-                .unwrap();
-            txn.on_commit(OnCommit::Sync(Box::new(move || {
-                second_callbacks.fetch_add(1, Ordering::SeqCst);
-                second_done_task.set();
-            })))
-            .unwrap();
-            txn.commit().await.unwrap();
-        });
-        tokio::time::timeout(Duration::from_secs(5), second_entered.wait())
-            .await
-            .unwrap();
-        assert!(out.get().is_empty());
-
-        second.abort();
-        let _ = second.await;
-        release_first.set();
-        first.await.unwrap();
-        tokio::time::timeout(Duration::from_secs(5), second_done.wait())
-            .await
-            .unwrap();
-
-        assert_eq!(out.get(), vec![1, 2]);
-        assert_eq!(callbacks.load(Ordering::SeqCst), 1);
-        workers::block_on(store.close()).unwrap().unwrap();
-        pool.shutdown_blocking().unwrap();
     }
 
     async fn read(store: &RegolithStore, key: &[u8]) -> Option<Vec<u8>> {
@@ -558,10 +317,10 @@ mod post_commit_tests {
             panic!("a subscriber panicked")
         })))
         .unwrap();
-        let later = tokio::spawn(async move { txn.commit().await });
+        txn.commit().await.unwrap();
+
         release.set();
         held.await.unwrap().unwrap();
-        later.await.unwrap().unwrap();
         assert!(telemetry::storage_event_count(StorageEvent::PostCommitEventPanicked) > before);
     }
 }

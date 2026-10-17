@@ -41,8 +41,6 @@ pub struct RegolithTxn {
     event_order: Arc<EventOrder>,
     savepoints: Vec<CallbackMark>,
     scoped_attempt: bool,
-    #[cfg(not(target_arch = "wasm32"))]
-    owner_pool: Option<workers::Pool>,
 }
 
 impl RegolithTxn {
@@ -66,8 +64,6 @@ impl RegolithTxn {
             savepoints: Vec::new(),
             event_order: Arc::new(EventOrder::default()),
             scoped_attempt: false,
-            #[cfg(not(target_arch = "wasm32"))]
-            owner_pool: None,
         })
     }
 
@@ -78,7 +74,6 @@ impl RegolithTxn {
         slot: TxnSlot,
         event_order: Arc<EventOrder>,
         mode: regolith::ReadMode,
-        #[cfg(not(target_arch = "wasm32"))] owner_pool: Option<workers::Pool>,
     ) -> Result<Self> {
         // On a pool the handle reads on a worker's queue, so a cache miss
         // suspends the task instead of the thread.
@@ -96,8 +91,6 @@ impl RegolithTxn {
             savepoints: Vec::new(),
             event_order,
             scoped_attempt: false,
-            #[cfg(not(target_arch = "wasm32"))]
-            owner_pool,
         })
     }
 
@@ -110,8 +103,6 @@ impl RegolithTxn {
             event_order: Arc::new(EventOrder::default()),
             savepoints: Vec::new(),
             scoped_attempt: true,
-            #[cfg(not(target_arch = "wasm32"))]
-            owner_pool: None,
         }
     }
 
@@ -379,21 +370,19 @@ impl Txn for RegolithTxn {
             return Ok(());
         };
         let work = PostCommit::bind(&self.event_order, &mut txn, callbacks);
-        #[cfg(not(target_arch = "wasm32"))]
-        let post_commit_pool = self.owner_pool.clone();
+        // A transaction on a worker's queue commits without waiting: the
+        // task awaits the ticket the worker's own queue completes. Anywhere
+        // else the commit syncs on the calling thread.
         let outcome = if txn.io_queue().is_some() {
-            txn.commit_nowait().await.map_err(map_txn_error)
+            txn.commit_nowait().await
         } else {
-            txn.commit().map_err(map_txn_error)
+            txn.commit()
         };
-        match outcome {
+        match outcome.map_err(map_txn_error) {
             // Durable from here on: what follows can be reported, never
             // turned into a failed write.
             Ok(_) => {
-                #[cfg(not(target_arch = "wasm32"))]
-                work.committed(post_commit_pool.as_ref()).await;
-                #[cfg(target_arch = "wasm32")]
-                work.committed(None).await;
+                work.committed().await;
                 Ok(())
             }
             Err(error) => {
