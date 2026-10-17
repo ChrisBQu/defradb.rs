@@ -3,10 +3,10 @@
 //! awaiting future holds nothing tied to one thread.
 //!
 //! On a worker the timer is a task of that worker, so it fires on the core
-//! that waits for it. Anywhere else it is a task of the process's default
-//! pool ([`default_pool`](crate::default_pool)). A timer whose waiter is gone
-//! ends at once, so a deadline that was met holds no task until it would
-//! have fired.
+//! that waits for it. Off-worker, [`delay_on`] uses its supplied pool or the
+//! process default ([`default_pool`](crate::default_pool)). A timer whose
+//! waiter is gone ends at once, so a deadline that was met holds no task
+//! until it would have fired.
 
 use std::future::{poll_fn, Future};
 use std::pin::{pin, Pin};
@@ -17,12 +17,19 @@ use std::time::Duration;
 use regolith::sync::Event;
 
 use super::detached::submit_now;
-use super::{default_pool, Submit, Target};
+use super::{default_pool, Pool, Submit, Target};
 use crate::{Completion, Error};
 
-/// Completes once `duration` has passed on the pool's clock. The [`Delay`]
-/// is `Send`, so a future that must be `Send` can await it.
+/// Completes once `duration` has passed on the default pool's clock. The
+/// [`Delay`] is `Send`, so a future that must be `Send` can await it.
 pub fn delay(duration: Duration) -> Result<Delay, Error> {
+    delay_on(None, duration)
+}
+
+/// A delay whose off-worker timer runs on `pool`; without one it uses the
+/// process default. On a worker, the timer always stays on that worker.
+#[must_use = "a delay does nothing unless awaited"]
+pub fn delay_on(pool: Option<&Pool>, duration: Duration) -> Result<Delay, Error> {
     let dropped = Arc::new(Event::new());
     let waiter_gone = Arc::clone(&dropped);
     let tick = move || async move {
@@ -49,7 +56,8 @@ pub fn delay(duration: Duration) -> Result<Delay, Error> {
             name: Some("workers::delay"),
             bytes: None,
         };
-        submit_now(&default_pool()?, Target::LeastLoaded, options, tick)?
+        let pool = pool.cloned().map(Ok).unwrap_or_else(default_pool)?;
+        submit_now(&pool, Target::LeastLoaded, options, tick)?
     };
     Ok(Delay { fired, dropped })
 }
@@ -76,6 +84,50 @@ impl Drop for Delay {
     }
 }
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use crate::{Config, Pool};
+
+    #[test]
+    fn configured_pool_keeps_off_worker_deadline_when_default_shuts_down() {
+        let unrelated_default = Pool::start(Config::unplaced(1)).unwrap();
+        assert!(unrelated_default.make_default());
+        let owner = Pool::start(Config::unplaced(1)).unwrap();
+        let release = Arc::new(Event::new());
+        let wait = Arc::clone(&release);
+        let result = crate::completion::block_on(async {
+            let mut timed = pin!(timeout_on(
+                Some(&owner),
+                Duration::from_secs(30),
+                async move {
+                    wait.wait().await;
+                    42
+                }
+            ));
+
+            poll_fn(|cx| match timed.as_mut().poll(cx) {
+                Poll::Pending => Poll::Ready(()),
+                Poll::Ready(_) => panic!("the gated future completed before release"),
+            })
+            .await;
+
+            unrelated_default.shutdown_blocking().unwrap();
+            poll_fn(|cx| match timed.as_mut().poll(cx) {
+                Poll::Pending => Poll::Ready(()),
+                Poll::Ready(_) => panic!("the owner timer ended with the unrelated pool"),
+            })
+            .await;
+            release.set();
+            timed.await.unwrap()
+        })
+        .unwrap();
+
+        assert_eq!(result, 42);
+        owner.shutdown_blocking().unwrap();
+    }
+}
+
 /// `future`'s output, or [`Error::TimedOut`] once `limit` passes first; the
 /// future is dropped then.
 ///
@@ -90,7 +142,20 @@ pub async fn timeout<F>(limit: Duration, future: F) -> Result<F::Output, Error>
 where
     F: Future,
 {
-    let mut deadline = pin!(delay(limit)?);
+    timeout_on(None, limit, future).await
+}
+
+/// `future`'s output, or why its deadline ended it first. The off-worker
+/// timer runs on `pool`; without one it uses the process default.
+pub async fn timeout_on<F>(
+    pool: Option<&Pool>,
+    limit: Duration,
+    future: F,
+) -> Result<F::Output, Error>
+where
+    F: Future,
+{
+    let mut deadline = pin!(delay_on(pool, limit)?);
     let mut future = pin!(future);
     poll_fn(|cx| {
         if let Poll::Ready(output) = future.as_mut().poll(cx) {
