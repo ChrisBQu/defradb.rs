@@ -156,11 +156,12 @@ async fn batch_update_with_current_values_writes_nothing() {
     let before = block_count(&db).await;
     let mutator =
         BatchMutator::new(Arc::clone(&db), Arc::new(db.new_txn(false).await.unwrap())).await;
-    let doc = mutator
+    let mut doc = mutator
         .get_for_update("Status", &doc_id)
         .await
         .unwrap()
         .unwrap();
+    doc.set_write_preparation(Arc::new(document::WritePreparation::new(1, 1)));
     let result = mutator
         .update("Status", doc, fields(&["state", "detail"]))
         .await
@@ -169,6 +170,7 @@ async fn batch_update_with_current_values_writes_nothing() {
 
     assert_eq!(result.fields_modified, 0);
     assert!(result.commit_cid.is_none());
+    assert!(result.document.write_preparation().is_none());
     assert_eq!(block_count(&db).await, before);
 }
 

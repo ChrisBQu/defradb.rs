@@ -561,6 +561,7 @@ impl<S: Store + 'static> DocMutator for BatchMutator<S> {
                 .await
                 .map_err(crate::error::commit_query_error)?
         {
+            doc.clear_write_preparation();
             return Ok(UpdateResult::new(doc, 0));
         }
 
