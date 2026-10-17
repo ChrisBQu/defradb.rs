@@ -4,10 +4,19 @@
 \* An explicit transaction lives on one worker, its owner. To commit it, the
 \* caller hands the commit to the owner and waits for the answer. The caller
 \* can stop waiting at any moment (its future is dropped: the client went
-\* away, a timeout fired). Stopping does not undo a commit the owner already
+\* away, a timeout fired). Stopping does not undo a commit that already
 \* began: that commit still lands, only a little later. The danger: a read or
 \* a new transaction that begins after the caller stopped could take its
 \* snapshot before the commit lands, and miss it.
+\*
+\* When does a commit begin? When it is handed over, if no request is running
+\* the transaction then. Otherwise it waits for that request and begins when
+\* the owner takes it; a caller that stops waiting before that abandons the
+\* transaction, and nothing lands. Example: a caller sends "commit" while
+\* another request still holds the transaction, then goes away; the owner,
+\* done with the request, finds the caller gone and discards the writes. A
+\* caller that sends "commit" to an idle transaction and goes away a moment
+\* later has not undone anything: the commit lands.
 \*
 \* The fix is a fence. The database keeps one count, `outstanding`: how many
 \* commits are still landing after their caller stopped waiting. Each commit
@@ -36,7 +45,11 @@
 \*      count - INV_SettledExact;
 \*   5. the count stays above zero for good (a leaked fence)
 \*      - LIVE_NoFenceLeak;
-\*   6. a reader waits forever - LIVE_ReaderProceeds.
+\*   6. a reader waits forever - LIVE_ReaderProceeds;
+\*   7. a commit that began when it was handed over is dropped because its
+\*      caller went away - INV_BegunEndRuns;
+\*   8. a commit whose caller went away before it began lands anyway
+\*      - INV_AbandonedEndDiscarded.
 \*
 \* Every way a commit can end is a path here: it lands, it fails, the owner
 \* shuts down (its request dropped unrun, or the commit dropped before it
@@ -53,14 +66,18 @@
 \*
 \*   | Model             | Rust                                                        |
 \*   |-------------------|-------------------------------------------------------------|
-\*   | Send              | owner/mod.rs Owners::finish: table.take, Fence::new,        |
-\*   |                   | mailbox.try_send(Message::Finish)                           |
+\*   | Send              | owner/mod.rs Owners::finish: table.take, begun from         |
+\*   |                   | idle.is_empty(), Fence::new, mailbox.try_send(Finish)       |
 \*   | DropEarly         | the finish future dropped before it ran: nothing handed over|
-\*   | Drop, CallerSwap, | owner/mod.rs AbandonOnDrop::drop -> fence.rs Fence::abandon:|
+\*   | Drop, CallerSwap, | owner/mod.rs FenceOnDrop::drop -> fence.rs Fence::abandon:  |
 \*   | Undo, UndoWake    | CommitFences::raise, compare_exchange(PENDING, ABANDONED),  |
 \*   |                   | on failure CommitFences::lower                              |
 \*   | Receive           | Owners::finish: answer.recv_async() returns, then disarm    |
-\*   | OwnerStart        | owner/actor.rs own, the Message::Finish arm: abandoned()    |
+\*   | OwnerStart        | owner/actor.rs own, the Message::Finish arm:                |
+\*   |                   | !begun && fence.abandoned()                                 |
+\*   | begunAtSend       | Message::Finish's begun: the idle slot was full at hand-off |
+\*   |                   | (Owners::run puts the transaction back before it answers)   |
+\*   | leftFirst         | that check true: the Finish arm breaks, the txn is dropped  |
 \*   | OwnerLand/Fail    | last(txn).await: OwnedTxn::commit or rollback, Ok or Err    |
 \*   | OwnerReply        | reply.try_send inside the registry's `last`                 |
 \*   | OwnerShutdown     | the Finish dropped unrun: the actor's drain when it ends    |
@@ -78,13 +95,16 @@
 \*   | ReaderWaits       | the wait in DB::new_txn (RED: none)                         |
 \*   | ResolveFailed     | Landing resolves on every end (RED: not on a failure)       |
 \*   | WakeOnUndo        | lower() wakes at zero on the caller's undo too (RED: not)   |
+\*   | RunBegun          | the Finish arm's `!begun` (RED: skips on abandoned() alone) |
+\*   | DropAbandoned     | the Finish arm's break (RED: commits the abandoned end)     |
 
 EXTENDS Integers, FiniteSets
 \* Integers gives numbers that can go below zero (so a RED run can show it);
 \* FiniteSets gives Cardinality, the size of a set.
 
-CONSTANTS NC, RaiseFirst, OwnerSwaps, ReaderWaits, ResolveFailed, WakeOnUndo
-\* NC is how many commits the model runs. The five switches are all TRUE in
+CONSTANTS NC, RaiseFirst, OwnerSwaps, ReaderWaits, ResolveFailed, WakeOnUndo,
+          RunBegun, DropAbandoned
+\* NC is how many commits the model runs. The seven switches are all TRUE in
 \* the real design; each RED configuration turns one off.
 
 ASSUME /\ NC \in 1..3
@@ -93,6 +113,8 @@ ASSUME /\ NC \in 1..3
        /\ ReaderWaits \in BOOLEAN
        /\ ResolveFailed \in BOOLEAN
        /\ WakeOnUndo \in BOOLEAN
+       /\ RunBegun \in BOOLEAN
+       /\ DropAbandoned \in BOOLEAN
 \* A small number of commits, and each switch either on or off.
 
 Commits == 1..NC
@@ -131,7 +153,7 @@ ReaderStates == {"before", "fast", "arm", "check", "wait", "done"}
 \*   done   - it took its snapshot.
 
 VARIABLES callerPc, ownerPc, state, sent, answered, landed, net,
-          outstanding, gen, rpc, rgen, seen, snap
+          outstanding, gen, rpc, rgen, seen, snap, begunAtSend, leftFirst
 \* callerPc    - where each caller is (CallerStates);
 \* ownerPc     - where the owner is with each commit (OwnerStates);
 \* state       - each commit's state word: "pending", "abandoned" or "done";
@@ -146,10 +168,14 @@ VARIABLES callerPc, ownerPc, state, sent, answered, landed, net,
 \* rgen        - the generation the reader noted before its last look;
 \* seen        - the commits whose callers had fully stopped waiting when
 \*               the reader began: the reader must see each one that lands;
-\* snap        - the commits the reader's snapshot holds.
+\* snap        - the commits the reader's snapshot holds;
+\* begunAtSend - whether each commit began when it was handed over (no
+\*               request was running the transaction then);
+\* leftFirst   - whether the owner found each commit's caller gone before
+\*               the commit began, and so abandoned it.
 
 vars == <<callerPc, ownerPc, state, sent, answered, landed, net,
-          outstanding, gen, rpc, rgen, seen, snap>>
+          outstanding, gen, rpc, rgen, seen, snap, begunAtSend, leftFirst>>
 \* Every variable, for "nothing else changes" and for fairness.
 
 Init == /\ callerPc = [c \in Commits |-> "idle"]
@@ -165,6 +191,8 @@ Init == /\ callerPc = [c \in Commits |-> "idle"]
         /\ rgen = 0
         /\ seen = {}
         /\ snap = {}
+        /\ begunAtSend = [c \in Commits |-> FALSE]
+        /\ leftFirst = [c \in Commits |-> FALSE]
 \* At the start nothing was handed over, every state word is pending, the
 \* count is zero, and the reader has not begun.
 
@@ -177,13 +205,15 @@ Send(c) == /\ callerPc[c] = "idle"
            /\ callerPc' = [callerPc EXCEPT ![c] = "waiting"]
            /\ ownerPc' = [ownerPc EXCEPT ![c] = "queued"]
            /\ sent' = [sent EXCEPT ![c] = TRUE]
-           /\ UNCHANGED <<state, answered, landed, net, outstanding, gen, rpc, rgen, seen, snap>>
+           /\ \E idle \in BOOLEAN : begunAtSend' = [begunAtSend EXCEPT ![c] = idle]
+           /\ UNCHANGED <<state, answered, landed, net, outstanding, gen, rpc, rgen, seen, snap, leftFirst>>
 \* The caller hands its commit to the owner: it now waits, and the commit
-\* sits in the owner's mailbox.
+\* sits in the owner's mailbox. Either no request was running the
+\* transaction (the commit has begun) or one was (it waits for it).
 
 DropEarly(c) == /\ callerPc[c] = "idle"
                 /\ callerPc' = [callerPc EXCEPT ![c] = "gone"]
-                /\ UNCHANGED <<ownerPc, state, sent, answered, landed, net, outstanding, gen, rpc, rgen, seen, snap>>
+                /\ UNCHANGED <<ownerPc, state, sent, answered, landed, net, outstanding, gen, rpc, rgen, seen, snap, begunAtSend, leftFirst>>
 \* The caller stops before it handed anything over: no commit exists, so
 \* there is nothing to fence.
 
@@ -200,8 +230,8 @@ Drop(c) == /\ callerPc[c] = "waiting"
                                  /\ callerPc' = [callerPc EXCEPT ![c] = "late"]
                             ELSE /\ callerPc' = [callerPc EXCEPT ![c] = "gone"]
                                  /\ UNCHANGED state
-                      /\ UNCHANGED <<net, outstanding>>
-           /\ UNCHANGED <<ownerPc, sent, answered, landed, gen, rpc, rgen, seen, snap>>
+                      /\ UNCHANGED <<net, outstanding, begunAtSend, leftFirst>>
+           /\ UNCHANGED <<ownerPc, sent, answered, landed, gen, rpc, rgen, seen, snap, begunAtSend, leftFirst>>
 \* The caller stops waiting after it handed the commit over (the answer may
 \* even be on its way already). In the real design it raises the count
 \* first. In the RED order it swaps first; if the owner was done, it simply
@@ -213,7 +243,7 @@ CallerSwap(c) == /\ callerPc[c] = "raised"
                             /\ callerPc' = [callerPc EXCEPT ![c] = "gone"]
                        ELSE /\ callerPc' = [callerPc EXCEPT ![c] = "undo"]
                             /\ UNCHANGED state
-                 /\ UNCHANGED <<ownerPc, sent, answered, landed, net, outstanding, gen, rpc, rgen, seen, snap>>
+                 /\ UNCHANGED <<ownerPc, sent, answered, landed, net, outstanding, gen, rpc, rgen, seen, snap, begunAtSend, leftFirst>>
 \* The caller's one swap, pending -> abandoned. If it wins, the owner now
 \* owes the lowering and the caller is gone. If the owner was done first,
 \* the caller must take its own raise back.
@@ -222,7 +252,7 @@ LateRaise(c) == /\ callerPc[c] = "late"
                 /\ outstanding' = outstanding + 1
                 /\ net' = [net EXCEPT ![c] = @ + 1]
                 /\ callerPc' = [callerPc EXCEPT ![c] = "gone"]
-                /\ UNCHANGED <<ownerPc, state, sent, answered, landed, gen, rpc, rgen, seen, snap>>
+                /\ UNCHANGED <<ownerPc, state, sent, answered, landed, gen, rpc, rgen, seen, snap, begunAtSend, leftFirst>>
 \* RED only: the raise that comes after the swap, possibly after the owner
 \* already lowered the count for this very commit.
 
@@ -231,46 +261,51 @@ Undo(c) == /\ callerPc[c] = "undo"
            /\ net' = [net EXCEPT ![c] = @ - 1]
            /\ callerPc' = [callerPc EXCEPT ![c] =
                               IF outstanding = 1 /\ WakeOnUndo THEN "unotify" ELSE "gone"]
-           /\ UNCHANGED <<ownerPc, state, sent, answered, landed, gen, rpc, rgen, seen, snap>>
+           /\ UNCHANGED <<ownerPc, state, sent, answered, landed, gen, rpc, rgen, seen, snap, begunAtSend, leftFirst>>
 \* The caller takes its raise back. If that brings the count to zero, it
 \* wakes the waiters next (the RED switch forgets that wake).
 
 UndoWake(c) == /\ callerPc[c] = "unotify"
                /\ gen' = gen + 1
                /\ callerPc' = [callerPc EXCEPT ![c] = "gone"]
-               /\ UNCHANGED <<ownerPc, state, sent, answered, landed, net, outstanding, rpc, rgen, seen, snap>>
+               /\ UNCHANGED <<ownerPc, state, sent, answered, landed, net, outstanding, rpc, rgen, seen, snap, begunAtSend, leftFirst>>
 \* The caller's wake: the generation moves, so every sleeping reader looks
 \* again.
 
 Receive(c) == /\ callerPc[c] = "waiting"
               /\ answered[c]
               /\ callerPc' = [callerPc EXCEPT ![c] = "replied"]
-              /\ UNCHANGED <<ownerPc, state, sent, answered, landed, net, outstanding, gen, rpc, rgen, seen, snap>>
+              /\ UNCHANGED <<ownerPc, state, sent, answered, landed, net, outstanding, gen, rpc, rgen, seen, snap, begunAtSend, leftFirst>>
 \* The caller gets its answer and stops guarding: from now on it never
 \* touches the count.
 
 \* ----------------------------------------------------------------- owner
 
 OwnerStart(c) == /\ ownerPc[c] = "queued"
-                 /\ IF state[c] = "abandoned"
-                       THEN /\ ownerPc' = [ownerPc EXCEPT ![c] = "swap"]
-                            /\ answered' = [answered EXCEPT ![c] = TRUE]
-                       ELSE /\ ownerPc' = [ownerPc EXCEPT ![c] = "running"]
-                            /\ UNCHANGED answered
-                 /\ UNCHANGED <<callerPc, state, sent, landed, net, outstanding, gen, rpc, rgen, seen, snap>>
-\* The owner takes the commit from its mailbox. If the caller had left
-\* already, it abandons the transaction instead of committing it (nothing
-\* lands) and goes straight to its swap; otherwise it starts committing.
+                 /\ LET gone == state[c] = "abandoned" /\ (~begunAtSend[c] \/ ~RunBegun)
+                    IN /\ leftFirst' = [leftFirst EXCEPT ![c] = gone]
+                       /\ IF gone /\ DropAbandoned
+                             THEN /\ ownerPc' = [ownerPc EXCEPT ![c] = "swap"]
+                                  /\ answered' = [answered EXCEPT ![c] = TRUE]
+                             ELSE /\ ownerPc' = [ownerPc EXCEPT ![c] = "running"]
+                                  /\ UNCHANGED answered
+                 /\ UNCHANGED <<callerPc, state, sent, landed, net, outstanding, gen, rpc, rgen, seen, snap, begunAtSend>>
+\* The owner takes the commit from its mailbox. A commit that had not begun
+\* begins now, unless its caller had already left: then the owner abandons
+\* the transaction instead (nothing lands) and goes straight to its swap. A
+\* commit that began when it was handed over runs whatever its caller did.
+\* (RED RunBegun forgets when it began and abandons it too; RED
+\* DropAbandoned commits an abandoned one anyway.)
 
 OwnerLand(c) == /\ ownerPc[c] = "running"
                 /\ landed' = [landed EXCEPT ![c] = TRUE]
                 /\ ownerPc' = [ownerPc EXCEPT ![c] = "landed"]
-                /\ UNCHANGED <<callerPc, state, sent, answered, net, outstanding, gen, rpc, rgen, seen, snap>>
+                /\ UNCHANGED <<callerPc, state, sent, answered, net, outstanding, gen, rpc, rgen, seen, snap, begunAtSend, leftFirst>>
 \* The commit lands: every snapshot taken from now on holds it.
 
 OwnerFail(c) == /\ ownerPc[c] = "running"
                 /\ ownerPc' = [ownerPc EXCEPT ![c] = "failed"]
-                /\ UNCHANGED <<callerPc, state, sent, answered, landed, net, outstanding, gen, rpc, rgen, seen, snap>>
+                /\ UNCHANGED <<callerPc, state, sent, answered, landed, net, outstanding, gen, rpc, rgen, seen, snap, begunAtSend, leftFirst>>
 \* The commit fails (a conflict, a storage error): it never lands.
 
 OwnerReply(c) == /\ ownerPc[c] \in {"landed", "failed"}
@@ -278,14 +313,14 @@ OwnerReply(c) == /\ ownerPc[c] \in {"landed", "failed"}
                  /\ ownerPc' = [ownerPc EXCEPT ![c] =
                                    IF ownerPc[c] = "failed" /\ ~ResolveFailed
                                       THEN "resolved" ELSE "swap"]
-                 /\ UNCHANGED <<callerPc, state, sent, landed, net, outstanding, gen, rpc, rgen, seen, snap>>
+                 /\ UNCHANGED <<callerPc, state, sent, landed, net, outstanding, gen, rpc, rgen, seen, snap, begunAtSend, leftFirst>>
 \* The owner sends the answer, then is finished with the commit and goes to
 \* its swap. (The RED switch skips the swap for a failed commit.)
 
 OwnerShutdown(c) == /\ ownerPc[c] \in {"queued", "running"}
                     /\ answered' = [answered EXCEPT ![c] = TRUE]
                     /\ ownerPc' = [ownerPc EXCEPT ![c] = "swap"]
-                    /\ UNCHANGED <<callerPc, state, sent, landed, net, outstanding, gen, rpc, rgen, seen, snap>>
+                    /\ UNCHANGED <<callerPc, state, sent, landed, net, outstanding, gen, rpc, rgen, seen, snap, begunAtSend, leftFirst>>
 \* The owner goes away before the commit landed: the request is dropped
 \* unrun, or the commit is dropped mid-way. Nothing lands, the caller hears
 \* "not found", and the dropped request still does its swap.
@@ -300,7 +335,7 @@ OwnerSwap(c) == /\ ownerPc[c] = "swap"
                       ELSE \* RED: no swap; mark done and always lower.
                            /\ state' = [state EXCEPT ![c] = "done"]
                            /\ ownerPc' = [ownerPc EXCEPT ![c] = "dec"]
-                /\ UNCHANGED <<callerPc, sent, answered, landed, net, outstanding, gen, rpc, rgen, seen, snap>>
+                /\ UNCHANGED <<callerPc, sent, answered, landed, net, outstanding, gen, rpc, rgen, seen, snap, begunAtSend, leftFirst>>
 \* The owner's one swap, pending -> done. If it wins, the caller never
 \* raised for good and the owner is done. If the caller had left, the owner
 \* owes the lowering. The RED switch lowers every time, swap or not.
@@ -309,14 +344,14 @@ OwnerDec(c) == /\ ownerPc[c] = "dec"
                /\ outstanding' = outstanding - 1
                /\ net' = [net EXCEPT ![c] = @ - 1]
                /\ ownerPc' = [ownerPc EXCEPT ![c] = IF outstanding = 1 THEN "notify" ELSE "resolved"]
-               /\ UNCHANGED <<callerPc, state, sent, answered, landed, gen, rpc, rgen, seen, snap>>
+               /\ UNCHANGED <<callerPc, state, sent, answered, landed, gen, rpc, rgen, seen, snap, begunAtSend, leftFirst>>
 \* The owner lowers the count; if that brings it to zero, it wakes the
 \* waiters next.
 
 OwnerWake(c) == /\ ownerPc[c] = "notify"
                 /\ gen' = gen + 1
                 /\ ownerPc' = [ownerPc EXCEPT ![c] = "resolved"]
-                /\ UNCHANGED <<callerPc, state, sent, answered, landed, net, outstanding, rpc, rgen, seen, snap>>
+                /\ UNCHANGED <<callerPc, state, sent, answered, landed, net, outstanding, rpc, rgen, seen, snap, begunAtSend, leftFirst>>
 \* The owner's wake: the generation moves, so every sleeping reader looks
 \* again.
 
@@ -329,7 +364,7 @@ ReaderBegin == /\ rpc = "before"
                           /\ UNCHANGED snap
                      ELSE /\ rpc' = "done"
                           /\ snap' = Landed
-               /\ UNCHANGED <<callerPc, ownerPc, state, sent, answered, landed, net, outstanding, gen, rgen>>
+               /\ UNCHANGED <<callerPc, ownerPc, state, sent, answered, landed, net, outstanding, gen, rgen, begunAtSend, leftFirst>>
 \* The reader begins, at any moment. It notes which callers had fully
 \* stopped waiting by then: their commits are the ones it must see. The RED
 \* switch takes the snapshot at once, with no look at the count.
@@ -340,13 +375,13 @@ ReaderFast == /\ rpc = "fast"
                          /\ snap' = Landed
                     ELSE /\ rpc' = "arm"
                          /\ UNCHANGED snap
-              /\ UNCHANGED <<callerPc, ownerPc, state, sent, answered, landed, net, outstanding, gen, rgen, seen>>
+              /\ UNCHANGED <<callerPc, ownerPc, state, sent, answered, landed, net, outstanding, gen, rgen, seen, begunAtSend, leftFirst>>
 \* The one look of the fast path: zero means take the snapshot now.
 
 ReaderArm == /\ rpc = "arm"
              /\ rgen' = gen
              /\ rpc' = "check"
-             /\ UNCHANGED <<callerPc, ownerPc, state, sent, answered, landed, net, outstanding, gen, seen, snap>>
+             /\ UNCHANGED <<callerPc, ownerPc, state, sent, answered, landed, net, outstanding, gen, seen, snap, begunAtSend, leftFirst>>
 \* Before looking again, the reader notes the wake generation, so a wake
 \* that comes after this moment is never lost.
 
@@ -356,13 +391,13 @@ ReaderCheck == /\ rpc = "check"
                           /\ snap' = Landed
                      ELSE /\ rpc' = "wait"
                           /\ UNCHANGED snap
-               /\ UNCHANGED <<callerPc, ownerPc, state, sent, answered, landed, net, outstanding, gen, rgen, seen>>
+               /\ UNCHANGED <<callerPc, ownerPc, state, sent, answered, landed, net, outstanding, gen, rgen, seen, begunAtSend, leftFirst>>
 \* The second look: zero means go; otherwise sleep.
 
 ReaderWake == /\ rpc = "wait"
               /\ gen # rgen
               /\ rpc' = "arm"
-              /\ UNCHANGED <<callerPc, ownerPc, state, sent, answered, landed, net, outstanding, gen, rgen, seen, snap>>
+              /\ UNCHANGED <<callerPc, ownerPc, state, sent, answered, landed, net, outstanding, gen, rgen, seen, snap, begunAtSend, leftFirst>>
 \* A sleeping reader wakes only when the generation moved past the one it
 \* noted, then notes the new one and looks again.
 
@@ -408,6 +443,8 @@ TypeOK == /\ callerPc \in [Commits -> CallerStates]
           /\ rgen \in 0..(2 * NC)
           /\ seen \subseteq Commits
           /\ snap \subseteq Commits
+          /\ begunAtSend \in [Commits -> BOOLEAN]
+          /\ leftFirst \in [Commits -> BOOLEAN]
 \* Every variable holds a value of the expected kind (a negative count is
 \* allowed here so the RED runs can show it under its own name).
 
@@ -432,6 +469,14 @@ Settled(c) == callerPc[c] \in {"gone", "replied"} /\ ownerPc[c] \in {"none", "re
 INV_SettledExact == \A c \in Commits : Settled(c) => net[c] = 0
 \* Promise: once both sides are done with a commit, it holds no part of the
 \* count: every raise was matched by exactly one lowering.
+
+INV_BegunEndRuns == \A c \in Commits : begunAtSend[c] => ~leftFirst[c]
+\* Promise: a commit that began when it was handed over is never abandoned
+\* because its caller went away; it runs, and lands unless it fails.
+
+INV_AbandonedEndDiscarded == \A c \in Commits : leftFirst[c] => ~landed[c]
+\* Promise: a commit whose caller went away before it began never lands: the
+\* transaction is abandoned and its writes are discarded.
 
 LIVE_NoFenceLeak == <>[](outstanding = 0)
 \* Promise: the count comes back to zero and stays there once every commit

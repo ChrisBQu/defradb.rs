@@ -24,12 +24,16 @@ use web_time::Instant;
 use super::{Shared, TxnId};
 use crate::txn::fence::Landing;
 
-/// A request's work on the transaction.
+/// A request's work on the transaction, given it by value: it puts the
+/// transaction back in its idle slot before its answer goes out.
 #[cfg(not(target_family = "wasm"))]
-pub(super) type Work<T> = Box<dyn for<'t> FnOnce(&'t mut T) -> LocalBoxFuture<'t, ()> + Send>;
-/// A request's work on the transaction.
+pub(super) type Work<T> =
+    Box<dyn for<'slot> FnOnce(T, &'slot ArrayQueue<T>) -> LocalBoxFuture<'slot, ()> + Send>;
+/// A request's work on the transaction, given it by value: it puts the
+/// transaction back in its idle slot before its answer goes out.
 #[cfg(target_family = "wasm")]
-pub(super) type Work<T> = Box<dyn for<'t> FnOnce(&'t mut T) -> LocalBoxFuture<'t, ()>>;
+pub(super) type Work<T> =
+    Box<dyn for<'slot> FnOnce(T, &'slot ArrayQueue<T>) -> LocalBoxFuture<'slot, ()>>;
 
 /// The work that ends the transaction, given it by value.
 #[cfg(not(target_family = "wasm"))]
@@ -41,11 +45,17 @@ pub(super) type Last<T> = Box<dyn FnOnce(T) -> LocalBoxFuture<'static, ()>>;
 pub(super) enum Message<T> {
     /// A request.
     Run(Work<T>),
-    /// The transaction's end: commit or rollback. A caller that stopped
-    /// waiting before its end began gets an abandon instead. Dropping the
+    /// The transaction's end: commit or rollback. `begun` says it began when
+    /// it was handed over, no request running the transaction then; one that
+    /// had to wait for a request begins when the owner takes it, and a caller
+    /// that stopped waiting before that gets an abandon instead. Dropping the
     /// `fence`, once the end is done or the message is dropped unrun, lets
     /// go of what a caller that stopped waiting fenced.
-    Finish { last: Last<T>, fence: Landing },
+    Finish {
+        last: Last<T>,
+        fence: Landing,
+        begun: bool,
+    },
     /// The caller let go of the transaction without finishing it.
     Abandon,
     /// End the transaction if no request has finished for at least
@@ -56,10 +66,12 @@ pub(super) enum Message<T> {
     },
 }
 
-/// A request's work, its signature fixed for every lifetime of the borrow.
+/// A request's work, its signature fixed for every lifetime of the slot.
 pub(super) fn work<T, F>(work: F) -> Work<T>
 where
-    F: for<'t> FnOnce(&'t mut T) -> LocalBoxFuture<'t, ()> + MaybeSend + 'static,
+    F: for<'slot> FnOnce(T, &'slot ArrayQueue<T>) -> LocalBoxFuture<'slot, ()>
+        + MaybeSend
+        + 'static,
 {
     Box::new(work)
 }
@@ -100,14 +112,13 @@ pub(super) async fn own<T, K>(
     while let Some(message) = mailbox.recv_async().await {
         match message {
             Message::Run(work) => {
-                let Some(mut txn) = idle.pop() else { break };
-                work(&mut txn).await;
-                let _ = idle.push(txn);
+                let Some(txn) = idle.pop() else { break };
+                work(txn, &idle).await;
                 active = Instant::now();
             }
-            Message::Finish { last, fence } => {
+            Message::Finish { last, fence, begun } => {
                 taker_seen = true;
-                if fence.abandoned() {
+                if !begun && fence.abandoned() {
                     break;
                 }
                 let Some(txn) = idle.pop() else { break };

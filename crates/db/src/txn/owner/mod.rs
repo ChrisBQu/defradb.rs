@@ -259,9 +259,13 @@ where
             return Err(Unavailable::NotFound);
         }
         self.send(id, "txn.request", move |reply| {
-            Message::Run(actor::work(move |txn| {
+            Message::Run(actor::work(move |mut txn, idle| {
                 Box::pin(async move {
-                    let _ = reply.try_send(work(txn).await);
+                    let answer = work(&mut txn).await;
+                    // Idle again before the answer goes out, so a caller
+                    // that has it finds no request running (`finish`).
+                    let _ = idle.push(txn);
+                    let _ = reply.try_send(answer);
                 })
             }))
         })
@@ -272,9 +276,11 @@ where
     /// request for it that arrived earlier. The transaction leaves the table
     /// before this first waits, so requests that arrive later, and a racing
     /// end, find no transaction. A caller whose `key` does not own it is told
-    /// it does not exist, and the transaction stays. A caller that stops
-    /// waiting before the end begins abandons the transaction instead: it
-    /// ends unfinished. One that stops waiting later cannot undo the end:
+    /// it does not exist, and the transaction stays. The end begins when it
+    /// is handed over, unless a request is running the transaction then; it
+    /// begins once its owner takes it, after that request. A caller that
+    /// stops waiting before the end begins abandons the transaction instead:
+    /// it ends unfinished. One that stops waiting later cannot undo the end:
     /// it fences it, so every transaction and read that begins afterwards
     /// waits for it to land.
     pub(crate) async fn finish<R, L>(&self, id: TxnId, key: &K, last: L) -> Result<R, Unavailable>
@@ -287,11 +293,11 @@ where
             return Err(Unavailable::NotFound);
         }
         let entry = table.take(id).ok_or(Unavailable::NotFound)?;
+        // A request puts the transaction back before it answers, so the slot
+        // is empty only while a request this end waits for is still running.
+        let begun = !entry.idle.is_empty();
         let fence = Fence::new(&self.fences);
-        let abandon_on_drop = AbandonOnDrop {
-            idle: Arc::clone(&entry.idle),
-            fence: Some(Arc::clone(&fence)),
-        };
+        let fence_on_drop = FenceOnDrop(Some(Arc::clone(&fence)));
         let (reply, answer) = unbounded();
         let queued = entry.mailbox.try_send(Message::Finish {
             last: Box::new(move |txn| {
@@ -300,6 +306,7 @@ where
                 })
             }),
             fence: Landing::new(fence),
+            begun,
         });
         // Not kept while waiting: a message its owner never takes is then
         // dropped with the channel, and its reply and fence with it.
@@ -308,7 +315,7 @@ where
             Ok(()) => answer.recv_async().await.ok_or(Unavailable::NotFound),
             Err(_) => Err(Unavailable::NotFound),
         };
-        abandon_on_drop.disarm();
+        fence_on_drop.disarm();
         ended
     }
 
@@ -399,37 +406,22 @@ where
     }
 }
 
-/// While a finish waits: if its caller stops waiting, the transaction is
-/// abandoned instead of finished, and dropped at once while still idle; an
-/// end the owner already began is fenced until it is done.
-struct AbandonOnDrop<T>
-where
-    T: 'static,
-{
-    idle: Arc<ArrayQueue<T>>,
-    fence: Option<Arc<Fence>>,
-}
+/// While a finish waits: a caller that stops waiting fences the end it handed
+/// over until the owner is done with it, and abandons it if it had not begun.
+struct FenceOnDrop(Option<Arc<Fence>>);
 
-impl<T> AbandonOnDrop<T>
-where
-    T: 'static,
-{
-    /// The finish got its answer: nothing to abandon.
+impl FenceOnDrop {
+    /// The finish got its answer: nothing is fenced.
     fn disarm(mut self) {
-        self.fence = None;
+        self.0 = None;
     }
 }
 
-impl<T> Drop for AbandonOnDrop<T>
-where
-    T: 'static,
-{
+impl Drop for FenceOnDrop {
     fn drop(&mut self) {
-        let Some(fence) = self.fence.take() else {
-            return;
-        };
-        fence.abandon();
-        drop(self.idle.pop());
+        if let Some(fence) = self.0.take() {
+            fence.abandon();
+        }
     }
 }
 
