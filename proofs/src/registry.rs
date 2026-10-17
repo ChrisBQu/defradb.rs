@@ -340,6 +340,20 @@ pub const PROPERTIES: &[Property] = &[
         tiers: &[Boundary],
     },
     Property {
+        // Registrations of one document that race each write their own owner
+        // key, so only the commit can refuse all but one. The deciding prefix
+        // scan is a validated scan: a registration that commits under the
+        // prefix after another's snapshot makes the other conflict, and it
+        // returns false. The sentinel byte it replaces never conflicted on
+        // regolith, which commits a write that leaves a key as it was.
+        family: "ACP soundness + revocation + dual-path commits",
+        name: "INV_OneOwner / INV_WinnersOwn / INV_SomeoneWins: racing registrations of one document leave exactly one owner",
+        axis: Tla,
+        anchor: "crates/acp/src/persistent.rs PersistentAcpStore::register_doc_atomic, delete_doc_tuples; crates/acp/src/store.rs AcpStore::register_doc_atomic",
+        model_ref: "MC_RegisterDocOnce_{Green,Red_NoValidation,Red_Sentinel}.cfg",
+        tiers: &[Boundary],
+    },
+    Property {
         family: "Storage transaction validation",
         name: "Validated point reads reject crossing writes",
         axis: Tla,
