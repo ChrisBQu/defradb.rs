@@ -47,3 +47,6 @@ lean_lib SchemaPublication where
 
 @[default_target]
 lean_lib PeerConnection where
+
+@[default_target]
+lean_lib ByteBudget where
