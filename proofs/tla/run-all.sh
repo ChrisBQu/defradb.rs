@@ -119,6 +119,18 @@ RUNS=(
   "MC_CommitFence_Red_UndoNoWake.cfg CommitFence.tla RED" # caller's undo reaches zero without a wake: a reader sleeps forever (LIVE_ReaderProceeds)
   "MC_CommitFence_Red_SkipBegun.cfg CommitFence.tla RED" # owner abandons a commit that began at hand-off once its caller left (INV_BegunEndRuns)
   "MC_CommitFence_Red_RunAbandoned.cfg CommitFence.tla RED" # owner commits an end whose caller left before it began (INV_AbandonedEndDiscarded)
+  "MC_EngineTickers_Green.cfg EngineTickers.tla GREEN" # two reads race the close of one export: each count reaches the total once, the total and the mark never go back, every call ends
+  "MC_EngineTickers_Green_TwoSources.cfg EngineTickers.tla GREEN" # one read walks two exports while both close: the same promises across the map
+  "MC_EngineTickers_Red_Backward.cfg EngineTickers.tla RED" # loop runs while now != seen: a stale reading swaps the mark back and takes the total back (PROP_TotalNeverBack)
+  "MC_EngineTickers_Red_BlindStore.cfg EngineTickers.tla RED" # plain store instead of the compare-and-swap: two publishers add one count twice (INV_NeverOvercount)
+  "MC_EngineTickers_Red_GiveUp.cfg EngineTickers.tla RED" # publish gives up after a lost swap: the close leaves its last count unclaimed (INV_ClosedComplete)
+  "MC_EngineTickers_Red_StaleSeen.cfg EngineTickers.tla RED" # a lost swap keeps its old seen mark: the close spins forever (LIVE_EveryCallEnds)
+  "MC_EngineTickers_Red_RemoveFirst.cfg EngineTickers.tla RED" # the close leaves the map before it publishes: the export is gone with a count unclaimed (INV_LeftClaimed)
+  "MC_EngineTickers_Red_WeakClose.cfg EngineTickers.tla RED" # the close reaches the statistics through the weak handle: the store let go first and its last count is lost (INV_ClosedComplete)
+  "MC_EngineTickers_Red_Reset.cfg EngineTickers.tla RED" # contract broken, exported statistics reset: a count below the old mark is never added (INV_QuiescentExact)
+  "MC_EngineTickers_Red_SharedStats.cfg EngineTickers.tla RED" # contract broken, two exports of one statistics: one count is added twice (INV_NeverOvercount)
+  "MC_EngineTickers_Red_CountAfterClose.cfg EngineTickers.tla RED" # contract broken, the engine counts after its guard dropped: that count never reaches the total (INV_QuiescentExact)
+  "MC_EngineTickers_Finding_ClaimGap.cfg EngineTickers.tla RED" # finding, no planted bug: a read that claimed but has not added lets a closed export leave the map with its count not yet in the total (INV_LeftInTotals)
   "MC_PushBacklog_Green.cfg MC_PushBacklog_Common.tla GREEN" # #1099: bounded queue + fixed workers + per-peer cap -> all bounds hold, healthy peers progress
   "MC_PushBacklog_Red_SpawnPerItem.cfg MC_PushBacklog_Common.tla RED" # current main: task spawned per (write,peer) before the semaphore -> resident work unbounded (INV_QueueBounded)
   "MC_PushBacklog_Red_PermitLeak.cfg MC_PushBacklog_Common.tla RED" # completing job keeps its worker slot -> pool decays (INV_PermitConservation)
