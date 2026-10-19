@@ -35,3 +35,6 @@ lean_lib EngineTickers where
 
 @[default_target]
 lean_lib CpuLedger where
+
+@[default_target]
+lean_lib DefaultPool where
