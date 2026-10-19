@@ -131,6 +131,16 @@ RUNS=(
   "MC_EngineTickers_Red_SharedStats.cfg EngineTickers.tla RED" # contract broken, two exports of one statistics: one count is added twice (INV_NeverOvercount)
   "MC_EngineTickers_Red_CountAfterClose.cfg EngineTickers.tla RED" # contract broken, the engine counts after its guard dropped: that count never reaches the total (INV_QuiescentExact)
   "MC_EngineTickers_Finding_ClaimGap.cfg EngineTickers.tla RED" # finding, no planted bug: a read that claimed but has not added lets a closed export leave the map with its count not yet in the total (INV_LeftInTotals)
+  "MC_CpuLedger_Green.cfg CpuLedger.tla GREEN" # placed pools claim CPUs alone all or nothing, or share counted; no two alone on one CPU, counters exact, every start ends
+  "MC_CpuLedger_Red_SplitTake.cfg CpuLedger.tla RED" # claim alone looks then adds in two steps: two pools take one CPU alone (INV_AloneTakesDisjoint)
+  "MC_CpuLedger_Red_NoRollback.cfg CpuLedger.tla RED" # failed claim returns without giving back what it took (INV_AllOrNothing)
+  "MC_CpuLedger_Red_ReleaseLoser.cfg CpuLedger.tla RED" # rollback also gives back the CPU it lost on: a held CPU reads free (INV_HeldNeverFree)
+  "MC_CpuLedger_Red_ShareUncounted.cfg CpuLedger.tla RED" # a sharing pool takes no hold: a claim alone wins its CPU (INV_TakenAlone)
+  "MC_CpuLedger_Red_NoAttemptCap.cfg CpuLedger.tla RED" # reserve claims alone forever: a start never ends (LIVE_StartEnds)
+  "MC_CpuLedger_Red_ReleaseEarly.cfg CpuLedger.tla RED" # caller drops the hold while its threads run: two alone pools on one CPU (INV_AloneRunsAlone)
+  "MC_CpuLedger_Red_RunOutsideHold.cfg CpuLedger.tla RED" # caller runs a thread on a CPU its hold does not cover (INV_AloneRunsAlone)
+  "MC_CpuLedger_Red_DoubleRelease.cfg CpuLedger.tla RED" # caller gives its hold back twice: a counter drops below its holders (INV_CountExact)
+  "MC_CpuLedger_Red_ForgetHold.cfg CpuLedger.tla RED" # caller never gives its hold back: CPUs stay held after every pool is gone (INV_DoneLeavesNothing)
   "MC_PushBacklog_Green.cfg MC_PushBacklog_Common.tla GREEN" # #1099: bounded queue + fixed workers + per-peer cap -> all bounds hold, healthy peers progress
   "MC_PushBacklog_Red_SpawnPerItem.cfg MC_PushBacklog_Common.tla RED" # current main: task spawned per (write,peer) before the semaphore -> resident work unbounded (INV_QueueBounded)
   "MC_PushBacklog_Red_PermitLeak.cfg MC_PushBacklog_Common.tla RED" # completing job keeps its worker slot -> pool decays (INV_PermitConservation)

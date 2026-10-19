@@ -452,6 +452,29 @@ pub const PROPERTIES: &[Property] = &[
         tiers: &[Boundary],
     },
     Property {
+        // A placed pool claims its CPUs in the process's ledger, one counter
+        // per CPU: alone, moving each counter from 0 to 1 with one
+        // compare-and-swap and giving back what it took when one CPU is
+        // held; or shared, adding one whatever the counter was. After its
+        // capped claims alone fail it shares and says so. Its Hold gives back
+        // exactly what it raised once the pool and every thread placed
+        // through it are gone.
+        family: "Worker pool CPU ledger",
+        name: "INV_AloneTakesDisjoint / INV_AloneRunsAlone / INV_TakenAlone / INV_AllOrNothing / INV_HeldNeverFree / INV_CountExact / INV_DoneLeavesNothing / LIVE_StartEnds: placed pools never share a CPU unless one of them says it shares",
+        axis: Tla,
+        anchor: "crates/workers/src/ledger.rs Ledger::hold, Ledger::share, Hold::drop; crates/workers/src/placement/reserve.rs reserve, shared; crates/workers/src/pool/placer.rs Placer::holding; crates/workers/src/pool/start.rs Pool::start_in",
+        model_ref: "MC_CpuLedger_{Green,Red_SplitTake,Red_NoRollback,Red_ReleaseLoser,Red_ShareUncounted,Red_NoAttemptCap,Red_ReleaseEarly,Red_RunOutsideHold,Red_DoubleRelease,Red_ForgetHold}.cfg",
+        tiers: &[Boundary],
+    },
+    Property {
+        family: "Worker pool CPU ledger",
+        name: "hold_all_or_nothing / rollback_restores / hold_won_alone / hold_step / share_step / release_alone_step / release_shared_step: a claim alone takes all or nothing, the counters stay exact, Holds claimed alone stay apart",
+        axis: Lean,
+        anchor: "crates/workers/src/ledger.rs Ledger::hold, Ledger::share, Hold::drop",
+        model_ref: "CpuLedger.{Hold,Count,Exclusive} (lake build)",
+        tiers: &[Boundary],
+    },
+    Property {
         // `partition::convergence_delete_update_race_preserves_tombstone`
         // partitions a replicated doc, deletes on one side, updates a mutable field
         // on the other, then heals and asserts the merged materialized view stays

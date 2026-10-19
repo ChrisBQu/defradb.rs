@@ -38,6 +38,7 @@ pub const MODELED_FAMILIES: &[&str] = &[
     "Collection schema-version OCC",
     "Explicit transaction statement atomicity",
     "Engine ticker export",
+    "Worker pool CPU ledger",
 ];
 
 pub fn properties_for(family: &'static str) -> impl Iterator<Item = &'static Property> {
