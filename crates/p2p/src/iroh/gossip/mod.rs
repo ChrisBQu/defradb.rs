@@ -5,7 +5,6 @@ mod delivery;
 mod driver;
 mod frame;
 mod inbox;
-mod mailbox;
 
 use std::collections::BTreeSet;
 use std::net::SocketAddr;

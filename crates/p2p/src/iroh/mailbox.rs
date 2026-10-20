@@ -55,6 +55,17 @@ where
         }
     }
 
+    /// Waits for room, then queues `item`.
+    pub(super) async fn push(&self, item: T) {
+        match &self.lane {
+            Lane::Bounded(tx, _) => tx.send_async(item).await,
+            Lane::Unbounded(tx, _) => {
+                let _ = tx.try_send(item);
+            }
+        }
+        self.wake.notify_one();
+    }
+
     /// Queues `item` if there is room, or hands it back.
     pub(super) fn try_push(&self, item: T) -> Result<(), T> {
         match &self.lane {
