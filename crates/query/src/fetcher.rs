@@ -78,6 +78,7 @@ pub struct IndexScanResult {
     doc_ids: Vec<String>,
     /// Raw number of index entries fetched (before deduplication)
     raw_fetches: u64,
+    doc_short_ids: Option<Vec<u64>>,
 }
 
 impl IndexScanResult {
@@ -87,6 +88,7 @@ impl IndexScanResult {
         Self {
             doc_ids,
             raw_fetches,
+            doc_short_ids: None,
         }
     }
 
@@ -97,7 +99,22 @@ impl IndexScanResult {
         Self {
             doc_ids,
             raw_fetches,
+            doc_short_ids: None,
         }
+    }
+
+    pub fn with_doc_short_ids(mut self, ids: Vec<u64>) -> Result<Self> {
+        if ids.len() != self.doc_ids.len() {
+            return Err(crate::error::QueryError::execution(
+                "index physical IDs do not match public IDs",
+            ));
+        }
+        self.doc_short_ids = Some(ids);
+        Ok(self)
+    }
+
+    pub fn doc_short_ids(&self) -> Option<&[u64]> {
+        self.doc_short_ids.as_deref()
     }
 
     /// Get the deduplicated document IDs.
