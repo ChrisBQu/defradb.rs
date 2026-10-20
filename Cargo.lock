@@ -6980,8 +6980,7 @@ dependencies = [
 [[package]]
 name = "kovan"
 version = "0.1.22"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7919a54a249fd585dba9436a09301f747d4f6ca16689c0cbb619301df1cbdf8f"
+source = "git+https://github.com/jackzampolin/kovan?rev=036173d0ca95a4684a54bee9142c77a51fece032#036173d0ca95a4684a54bee9142c77a51fece032"
 dependencies = [
  "once_cell",
  "portable-atomic",
@@ -7001,8 +7000,7 @@ dependencies = [
 [[package]]
 name = "kovan-map"
 version = "0.1.22"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee9fda66cc131f283a3237413de11ed4488ca1cc3599d9ca5de934e67dc6a031"
+source = "git+https://github.com/jackzampolin/kovan?rev=036173d0ca95a4684a54bee9142c77a51fece032#036173d0ca95a4684a54bee9142c77a51fece032"
 dependencies = [
  "foldhash 0.2.0",
  "kovan",
