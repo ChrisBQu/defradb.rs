@@ -302,6 +302,7 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
             .iter()
             .cloned()
             .collect::<rapidhash::RapidHashMap<_, _>>();
+        let physical_ids_unique = short_ids_by_public.len() == resolved.len();
         let mut doc_ids = resolved.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
         crate::read::index_tiebreak::apply_equal_key_doc_id_tie_break(
             &params.scan_type,
@@ -311,6 +312,12 @@ impl<S: Store + 'static> LensedDocFetcher<S> {
             &group_lens,
         );
 
+        if !physical_ids_unique {
+            return Ok(query::fetcher::IndexScanResult::with_raw_count(
+                doc_ids,
+                raw_fetches,
+            ));
+        }
         let ordered_short_ids = doc_ids.iter().map(|id| short_ids_by_public[id]).collect();
         query::fetcher::IndexScanResult::with_raw_count(doc_ids, raw_fetches)
             .with_doc_short_ids(ordered_short_ids)
