@@ -36,6 +36,7 @@ fn driver(dials: &Dials) -> (Driver<Dials>, Events) {
     let delivery = Delivery {
         event_tx,
         raw_topics: Arc::new(HopscotchMap::with_hasher(RandomState::default())),
+        records: crate::iroh::records::RecordsHandle::new(),
     };
     let driver = Driver::new(
         iroh::SecretKey::generate().public(),
@@ -177,4 +178,27 @@ async fn made_up_peers_never_keep_a_real_peers_address_out() {
     driver.learn(peer, &peer_data(&AddrInfo::default()));
     assert!(driver.learned.contains_key(&peer));
     assert_eq!(driver.learned.len(), MAX_LEARNED);
+}
+
+#[tokio::test]
+async fn a_join_hint_dials_the_advertisers_of_a_joined_topic_only() {
+    let dials = Dials::default();
+    let (mut driver, _events) = driver(&dials);
+    let peer = iroh::SecretKey::generate().public();
+    let hint = || Input::Hint {
+        topic: "t".into(),
+        peers: vec![peer],
+    };
+
+    assert!(driver.on_input(hint()).await.is_ok());
+    assert!(driver.drain().await.is_ok());
+    assert!(
+        dials.0.pop().is_none(),
+        "a topic we have not joined is left alone"
+    );
+
+    assert!(driver.on_input(Input::Join("t".into())).await.is_ok());
+    assert!(driver.on_input(hint()).await.is_ok());
+    assert!(driver.drain().await.is_ok());
+    assert_eq!(dials.0.pop(), Some(peer));
 }

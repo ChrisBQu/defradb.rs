@@ -24,6 +24,7 @@ use super::endpoint::{spawn_task, RawTopics, SpawnedTasks};
 use super::peer_map::endpoint_id_to_peer_id;
 use super::protocols;
 
+use crate::iroh::records::RecordsHandle;
 use delivery::Delivery;
 pub(super) use delivery::EventSender;
 use driver::Driver;
@@ -82,6 +83,11 @@ impl AddrInfo {
 enum Input {
     Join(String),
     Quit(String),
+    /// Peers known to hold a topic, to join it through.
+    Hint {
+        topic: String,
+        peers: Vec<EndpointId>,
+    },
     Publish {
         topic: String,
         payload: Bytes,
@@ -129,6 +135,7 @@ impl GossipHandle {
         network: N,
         event_tx: EventSender,
         raw_topics: RawTopics,
+        records: RecordsHandle,
         tasks: SpawnedTasks,
     ) where
         N: Network + defra_core::thread_bounds::MaybeSend + 'static,
@@ -136,6 +143,7 @@ impl GossipHandle {
         let delivery = Delivery {
             event_tx,
             raw_topics,
+            records,
         };
         let driver = Driver::new(
             me,
@@ -160,6 +168,11 @@ impl GossipHandle {
         }
         self.inbox.push(Input::Join(topic));
         true
+    }
+
+    /// Joins `topic` through `peers` too, if we are subscribed to it.
+    pub(super) fn hint(&self, topic: String, peers: Vec<EndpointId>) {
+        self.inbox.push(Input::Hint { topic, peers });
     }
 
     /// Returns `false` when not subscribed.
