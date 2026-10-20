@@ -15,6 +15,51 @@ use super::values::{
     normalize_for_index_field, wrap_value_for_json_path, wrap_values_for_json_path,
 };
 
+fn composite_range(
+    conditions: &[super::types::FieldCondition],
+    field: &schema::IndexedFieldDescription,
+    collection_fields: &[schema::FieldDescription],
+) -> Option<(Bound, Bound)> {
+    if collection_fields
+        .iter()
+        .find(|candidate| candidate.name == field.name)
+        .is_some_and(|candidate| {
+            candidate.kind.is_array()
+                || candidate
+                    .kind
+                    .as_scalar()
+                    .is_some_and(|kind| kind.base_kind() == ScalarKind::Json)
+        })
+    {
+        return None;
+    }
+    let mut lower = Bound::Unbounded;
+    let mut upper = Bound::Unbounded;
+    let mut found = false;
+    for condition in conditions.iter().filter(|condition| {
+        condition.field_name == field.name
+            && condition.array_op.is_none()
+            && condition.json_path.is_none()
+    }) {
+        let ConditionValue::Single(value) = &condition.value else {
+            continue;
+        };
+        let value = normalize_for_index_field(value.clone(), &field.name, collection_fields);
+        match condition.op {
+            FilterOp::Gt => lower = Bound::Exclusive(value),
+            FilterOp::Gte => lower = Bound::Inclusive(value),
+            FilterOp::Lt => upper = Bound::Exclusive(value),
+            FilterOp::Lte => upper = Bound::Inclusive(value),
+            _ => continue,
+        }
+        found = true;
+    }
+    if field.descending {
+        std::mem::swap(&mut lower, &mut upper);
+    }
+    found.then_some((lower, upper))
+}
+
 /// Convert a filter to index scan parameters.
 ///
 /// Returns None if the filter cannot use the index efficiently.
@@ -274,6 +319,19 @@ pub fn filter_to_index_scan(
             let mut values = vec![wrapped_value];
             values.extend(subsequent_eq_values);
             IndexScanType::ExactMatch { values }
+        } else if let Some((lower, upper)) = index
+            .fields
+            .get(1 + subsequent_eq_values.len())
+            .and_then(|field| composite_range(&conditions, field, collection_fields))
+        {
+            let mut prefix_values = vec![wrapped_value];
+            prefix_values.extend(subsequent_eq_values);
+            IndexScanType::RangeScan {
+                prefix_values,
+                lower,
+                upper,
+                reverse,
+            }
         } else if is_composite && !subsequent_eq_values.is_empty() {
             // Multiple consecutive fields matched but not all - use PrefixScan with all eq values
             let mut values = vec![wrapped_value];
