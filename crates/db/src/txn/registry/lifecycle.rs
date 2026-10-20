@@ -138,12 +138,15 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
     where
         T: MaybeSend + 'static,
     {
+        let queued = Instant::now();
         let db = self.db.clone();
         let scope = context.clone();
         self.owners()
             .map_err(|error| TransactionError::execution(error.to_string()))?
             .run_anywhere("txn.read", move || async move {
-                scope
+                report_slow_phase("read", "queue", queued);
+                let started = Instant::now();
+                let result = scope
                     .mirror(async move {
                         let txn = db.new_txn(true).await.map_err(|error| {
                             TransactionError::execution(format!("storage error: {}", error))
@@ -153,7 +156,9 @@ impl<S: Store + 'static> TransactionRegistry for DbTransactionRegistry<S> {
                             .map_err(|error| TransactionError::execution(error.to_string()))?;
                         within(timeout, job(&mut owned)).await
                     })
-                    .await
+                    .await;
+                report_slow_phase("read", "execute", started);
+                result
             })
             .await
             .map_err(|error| TransactionError::execution(error.to_string()))?
