@@ -56,3 +56,6 @@ lean_lib FetchStats where
 
 @[default_target]
 lean_lib GossipFrame where
+
+@[default_target]
+lean_lib ServiceRecord where
