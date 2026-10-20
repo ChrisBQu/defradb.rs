@@ -5,8 +5,15 @@
 
 use iroh::endpoint::{RecvStream, SendStream};
 
-/// The single ALPN every Defra protocol is multiplexed over.
-pub const ALPN_MUX: &[u8] = b"/defra-iroh/mux/0.1";
+/// The single ALPN every Defra protocol is multiplexed over, gossip included.
+pub const ALPN_MUX: &[u8] = b"/defra-iroh/mux/0.2";
+
+/// The mux before gossip moved onto it. Still accepted and offered, so older
+/// peers keep every protocol except gossip.
+pub const ALPN_MUX_V1: &[u8] = b"/defra-iroh/mux/0.1";
+
+/// Stream tag for the gossip stream, the only uni stream on a connection.
+pub const STREAM_GOSSIP: &[u8] = b"/defra-iroh/gossip/0.1";
 
 /// Stream tag for PushLog request-response.
 pub const STREAM_PUSHLOG: &[u8] = b"/defra-iroh/pushlog/0.1";
