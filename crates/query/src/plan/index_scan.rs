@@ -148,6 +148,15 @@ impl PlanNode for IndexScanNode {
         // If docs weren't provided and we have a fetcher, load documents via index
         if !self.docs_provided {
             if let Some(ref fetcher) = self.fetcher {
+                if let Some(stream) = fetcher
+                    .stream_index_scan(&self.collection.name, &self.index_params, self.show_deleted)
+                    .await?
+                {
+                    self.stream = Some(stream);
+                    self.index_fetches = 0;
+                    self.initialized = true;
+                    return Ok(());
+                }
                 // Use index scan to get document IDs
                 let scan_result = fetcher
                     .get_by_index_scan(&self.collection.name, &self.index_params)
@@ -204,7 +213,12 @@ impl PlanNode for IndexScanNode {
         self.exec_info.iterations += 1;
 
         if let Some(stream) = self.stream.as_mut() {
-            while let Some((document, deleted)) = stream.next().await? {
+            loop {
+                let next = stream.next().await?;
+                self.index_fetches = self.index_fetches.max(stream.index_fetches());
+                let Some((document, deleted)) = next else {
+                    break;
+                };
                 let doc =
                     document_to_plan_doc_with_status(&document, &self.document_mapping, deleted)?;
                 self.exec_info.docs_fetched += 1;

@@ -187,6 +187,17 @@ pub trait DocFetcher: MaybeSendSync {
         Ok(docs.into_iter().map(|d| (d, false)).collect())
     }
 
+    /// Stream ordered index candidates when supported. None retains the eager
+    /// path for scan types that require global deduplication or tie ordering.
+    async fn stream_index_scan(
+        &self,
+        _collection_name: &str,
+        _params: &IndexScanParams,
+        _show_deleted: bool,
+    ) -> Result<Option<Box<dyn DocStream>>> {
+        Ok(None)
+    }
+
     /// Stream named documents by short id, without scanning the collection.
     ///
     /// A stream rather than a `Vec` for the same reason
