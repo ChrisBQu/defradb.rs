@@ -7,7 +7,8 @@ use storage::index::Bound;
 use crate::mapper::{Filter, FilterOp, OrderBy};
 
 use super::conditions::{
-    can_be_ordered_by_index, can_use_index, extract_field_conditions, should_fallback_to_full_scan,
+    can_be_ordered_by_filtered_index, can_use_index, extract_field_conditions,
+    should_fallback_to_full_scan,
 };
 use super::types::{ConditionValue, IndexScanParams, IndexScanType, ScanValueFilter};
 use super::values::{
@@ -179,7 +180,7 @@ pub fn filter_to_index_scan(
 
     // Determine if we need to reverse the scan based on ordering
     let reverse = order_by
-        .map(|o| can_be_ordered_by_index(o, index))
+        .map(|o| can_be_ordered_by_filtered_index(o, index, filter))
         .map(|(can_order, needs_reverse)| can_order && needs_reverse)
         .unwrap_or(false);
 
@@ -427,7 +428,7 @@ pub fn filter_to_index_scan(
     // Only pass limit/offset if the index provides ordering
     // (otherwise the limit needs to be applied after sorting)
     let index_provides_ordering = order_by
-        .map(|o| can_be_ordered_by_index(o, index).0)
+        .map(|o| can_be_ordered_by_filtered_index(o, index, filter).0)
         .unwrap_or(false);
 
     Some(IndexScanParams {
