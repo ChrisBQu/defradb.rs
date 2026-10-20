@@ -1,5 +1,6 @@
-//! A stream is refused before its body is read when its tag is unknown or its
-//! message is larger than its tag allows, and reset when its body stalls.
+//! A stream is refused before its body is read when its tag is unknown, it is
+//! a reply nobody asked that peer for, or its message is larger than its tag
+//! allows; and reset when its body stalls.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -10,6 +11,7 @@ use super::inbound_budget::{InboundBudget, InboundDeadlines, InboundLease};
 use super::mux_tests::spawn_transport;
 use super::protocols;
 use super::services::Priority;
+use super::solicited::Solicited;
 use crate::transport::{InboundClassSnapshot, P2PTransport, PeerAddr, PeerId};
 
 const STOPPED: Duration = Duration::from_secs(5);
@@ -63,6 +65,17 @@ async fn open_stream(
 /// of `len`, and return the code our node stopped that stream with, if it did
 /// within `wait`.
 async fn stop_code_for(tag: &[u8], len: u32, wait: Duration) -> Option<u32> {
+    stop_code_after(tag, len, wait, false).await
+}
+
+/// Like `stop_code_for`, but when `after_se_query` our node first sends the
+/// bare peer an SE query, so a reply to it is solicited.
+async fn stop_code_after(
+    tag: &[u8],
+    len: u32,
+    wait: Duration,
+    after_se_query: bool,
+) -> Option<u32> {
     let bare = bare_endpoint().await;
     let bare_id = PeerId::new(bare.id().to_string());
     let bare_addr = *bare.addr().ip_addrs().next().expect("listener address");
@@ -72,6 +85,12 @@ async fn stop_code_for(tag: &[u8], len: u32, wait: Duration) -> Option<u32> {
         let bare = bare.clone();
         async move {
             let connection = bare.accept().await?.await.ok()?;
+            // Our node's request stream opens only after it expects the reply.
+            let _request = if after_se_query {
+                Some(connection.accept_bi().await.ok()?)
+            } else {
+                None
+            };
             let (mut send, _recv) = connection.open_bi().await.ok()?;
             open_stream(&mut send, &tag, len, Body::Nothing).await
         }
@@ -82,6 +101,14 @@ async fn stop_code_for(tag: &[u8], len: u32, wait: Duration) -> Option<u32> {
         .dial(&bare_id, vec![PeerAddr::new(bare_addr.to_string())])
         .await
         .expect("dial bare peer");
+    if after_se_query {
+        let request = crate::message::QuerySEArtifactsRequest::new("collection", vec![]);
+        let transport = transport.clone();
+        let bare_id = bare_id.clone();
+        n0_future::task::spawn(async move {
+            let _ = transport.send_se_query_request(&bare_id, request).await;
+        });
+    }
     let code = n0_future::time::timeout(wait, opener)
         .await
         .ok()
@@ -137,7 +164,15 @@ async fn admit_one(tag: &[u8], len: u32, body: Body, deadlines: InboundDeadlines
     let (_send, mut recv) = connection.accept_bi().await.expect("accept stream");
     let share = budget.peer_share(connection.remote_id());
     let peer_id = PeerId::new(connection.remote_id().to_string());
-    let lease = admit_stream(&mut recv, &budget, &share, &peer_id)
+    let solicited = Solicited::new();
+    let lease = admit_stream(
+        &mut recv,
+        &budget,
+        &share,
+        &solicited,
+        connection.remote_id(),
+        &peer_id,
+    )
         .await
         .map(|(_, payload, lease)| (payload, lease));
 
@@ -175,27 +210,41 @@ async fn an_oversized_message_is_stopped_before_its_body_is_read() {
 }
 
 #[tokio::test]
-async fn a_car_response_may_be_larger_than_a_general_message() {
-    let over_car_limit = protocols::MAX_CAR_SIZE as u32 + 1;
+async fn a_reply_nobody_asked_for_is_stopped_before_its_length_is_read() {
     assert_eq!(
-        stop_code_for(protocols::STREAM_CAR_RESP, over_car_limit, STOPPED).await,
-        Some(3)
+        stop_code_for(protocols::STREAM_SE_QUERY_RESP, 1, STOPPED).await,
+        Some(6)
     );
+}
 
-    let car_sized = protocols::MAX_MESSAGE_SIZE as u32 + 1;
+#[tokio::test]
+async fn a_reply_to_our_request_is_admitted() {
+    // Admitted, the node waits for a body that never comes instead of stopping.
+    assert_eq!(
+        stop_code_after(
+            protocols::STREAM_SE_QUERY_RESP,
+            1,
+            Duration::from_secs(1),
+            true,
+        )
+        .await,
+        None
+    );
+}
+
+#[tokio::test]
+async fn an_admitted_bulk_body_holds_its_room_until_the_lease_drops() {
+    let len = protocols::MAX_MESSAGE_SIZE as u32;
     let mut admitted = admit_one(
-        protocols::STREAM_CAR_RESP,
-        car_sized,
+        protocols::STREAM_CAR,
+        len,
         Body::Whole,
         InboundDeadlines::default(),
     )
     .await;
-    let (payload, lease) = admitted.lease.take().expect("a CAR-sized body is admitted");
-    assert_eq!(payload.len(), car_sized as usize);
-    assert_eq!(
-        admitted.class(Priority::Bulk).held_bytes,
-        car_sized as usize
-    );
+    let (payload, lease) = admitted.lease.take().expect("the body is admitted");
+    assert_eq!(payload.len(), len as usize);
+    assert_eq!(admitted.class(Priority::Bulk).held_bytes, len as usize);
 
     drop(lease);
     assert_eq!(admitted.class(Priority::Bulk).held_bytes, 0);
@@ -209,6 +258,15 @@ fn short_deadlines() -> InboundDeadlines {
         min_rate: 1000,
         max_body: Duration::from_secs(5),
     }
+}
+
+#[tokio::test]
+async fn a_car_reply_on_a_stream_of_its_own_is_an_unknown_tag() {
+    // Every peer sends CAR blocks back on the request's stream.
+    assert_eq!(
+        stop_code_for(b"/defra-iroh/car/0.1/resp", u32::MAX, STOPPED).await,
+        Some(2)
+    );
 }
 
 #[tokio::test]
