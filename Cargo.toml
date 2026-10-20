@@ -332,3 +332,5 @@ commonware-resolver = { git = "https://github.com/iverc/commonware-upstream", re
 commonware-macros = { git = "https://github.com/iverc/commonware-upstream", rev = "0ebcf164594621f2c82769eef7e9f3a21153055f" }
 commonware-glue = { git = "https://github.com/iverc/commonware-upstream", rev = "0ebcf164594621f2c82769eef7e9f3a21153055f" }
 commonware-stream = { git = "https://github.com/iverc/commonware-upstream", rev = "0ebcf164594621f2c82769eef7e9f3a21153055f" }
+
+regolith = { git = "https://github.com/sourcenetwork/regolith", rev = "92c07d327b4a6c1873a45ef8e20ddac62241b4e3" }
