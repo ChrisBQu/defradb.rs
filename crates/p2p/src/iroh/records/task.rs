@@ -13,7 +13,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use iroh::{EndpointId, SecretKey};
 use n0_future::time::{Duration, Instant};
-use rapidhash::{HashSetExt, RapidHashSet};
+use rapidhash::{HashMapExt, HashSetExt, RapidHashMap, RapidHashSet};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
@@ -195,6 +195,8 @@ pub struct Records<N> {
     /// What we offer changed since our record was signed.
     changed: bool,
     announced: Option<Instant>,
+    /// When we last asked peers who holds each collection.
+    asked_who: RapidHashMap<String, Instant>,
     book: Book,
     refresh: Refresh,
     /// Connected peers, in the order their pointers are looked up again.
@@ -219,6 +221,7 @@ where
             own_expires: 0,
             changed: false,
             announced: None,
+            asked_who: RapidHashMap::new(),
             book: Book::new(BOOK_CAPACITY),
             refresh: Refresh::new(),
             peers: VecDeque::new(),
@@ -270,7 +273,7 @@ where
                 let _ = reply.send(Ok(record));
             }
             Input::Providers { id, ask, reply } => {
-                let _ = reply.send(Ok(self.providers(&id, &ask, unix)));
+                let _ = reply.send(Ok(self.providers(&id, &ask, now, unix)));
             }
             Input::Replicators { id, reply } => {
                 let _ = reply.send(Ok(self.replicators(id.as_deref(), unix)));
@@ -410,7 +413,13 @@ where
             .collect()
     }
 
-    fn providers(&self, id: &str, ask: &[EndpointId], unix: u64) -> Vec<EndpointId> {
+    fn providers(
+        &mut self,
+        id: &str,
+        ask: &[EndpointId],
+        now: Instant,
+        unix: u64,
+    ) -> Vec<EndpointId> {
         let keys = self.keys(id);
         let mut ranked: Vec<(u8, EndpointId)> = Vec::new();
         for key in &keys {
@@ -426,7 +435,12 @@ where
                 }
             }
         }
-        if ranked.is_empty() {
+        let asked_lately = self
+            .asked_who
+            .get(id)
+            .is_some_and(|at| now.duration_since(*at) < ANNOUNCE_INTERVAL);
+        if ranked.is_empty() && !asked_lately && !ask.is_empty() {
+            self.asked_who.insert(id.to_string(), now);
             for peer in ask {
                 for key in &keys {
                     self.net

@@ -598,8 +598,20 @@ fn an_empty_lookup_asks_connected_peers_who_holds_the_collection() {
     let peer = SecretKey::generate().public();
 
     assert!(providers(&mut records, now, vec![peer]).is_empty());
+    let asked = net.take();
+    assert!(providers(&mut records, now + Duration::from_secs(1), vec![peer]).is_empty());
+    assert!(
+        net.take().is_empty(),
+        "asked once per interval, not once per lookup"
+    );
+    assert!(providers(&mut records, now + Duration::from_secs(31), vec![peer]).is_empty());
     assert_eq!(
-        net.take(),
+        net.take().len(),
+        2,
+        "asked again once the interval has passed"
+    );
+    assert_eq!(
+        asked,
         vec![
             Call::Send(
                 peer,
