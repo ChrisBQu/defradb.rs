@@ -10393,7 +10393,7 @@ dependencies = [
 [[package]]
 name = "regolith"
 version = "0.2.1"
-source = "git+https://github.com/sourcenetwork/regolith?rev=cba89a23a40ace24605489d98d9cef6b5a4770ff#cba89a23a40ace24605489d98d9cef6b5a4770ff"
+source = "git+https://github.com/sourcenetwork/regolith?rev=3c3607082c96c84c33a4afef0c7ceb981edfaf54#3c3607082c96c84c33a4afef0c7ceb981edfaf54"
 dependencies = [
  "aes-gcm-siv",
  "getrandom 0.4.3",
