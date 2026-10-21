@@ -155,8 +155,6 @@ pub async fn read_body(recv: &mut RecvStream, len: usize) -> crate::error::Resul
     Ok(payload)
 }
 
-/// Read a `len`-byte body, giving up once no bytes arrive for `idle`.
-/// `Ok(None)` means the sender stalled.
 /// Reads a stream to its end, as `RecvStream::read_to_end` does, calling
 /// `on_chunk` with the size of each chunk as it arrives.
 pub async fn read_to_end_observed<OnChunk>(
@@ -188,6 +186,8 @@ where
     Ok(chunks.concat())
 }
 
+/// Read a `len`-byte body, giving up once no bytes arrive for `idle`.
+/// `Ok(None)` means the sender stalled.
 pub async fn read_body_until_idle(
     recv: &mut RecvStream,
     len: usize,
