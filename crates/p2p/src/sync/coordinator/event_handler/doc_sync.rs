@@ -399,7 +399,9 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                     let diagnostics = diagnostics.clone();
 
                     async move {
-                        let Some(_claim) = limiter.claim_root(root_cid) else {
+                        let Some(_claim) =
+                            limiter.claim_root(root_cid, explicit_replicator_collections.clone())
+                        else {
                             tracing::debug!(cid = %root_cid, "DocSync DAG already being fetched");
                             return;
                         };

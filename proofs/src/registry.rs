@@ -687,7 +687,7 @@ pub const PROPERTIES: &[Property] = &[
         family: "Reply-driven DAG fetch",
         name: "INV_OneFetchPerRoot / INV_NoReplyLost",
         axis: Tla,
-        anchor: "crates/p2p/src/sync/coordinator/mod.rs DagFetchLimiter::claim_root, RootClaim; crates/p2p/src/sync/coordinator/event_handler/doc_sync.rs handle_doc_sync_reply; crates/p2p/src/sync/coordinator/event_handler/branchable_sync.rs handle_branchable_sync_reply",
+        anchor: "crates/p2p/src/sync/coordinator/mod.rs DagFetchLimiter::claim_root, RootKey, RootClaim; crates/p2p/src/sync/coordinator/event_handler/doc_sync.rs handle_doc_sync_reply; crates/p2p/src/sync/coordinator/event_handler/branchable_sync.rs handle_branchable_sync_reply",
         model_ref: "MC_RootSingleFlight_Green.cfg",
         tiers: &[Boundary],
     },

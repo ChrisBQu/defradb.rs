@@ -268,20 +268,25 @@ pub(crate) struct DagFetchLimiter {
     global: Arc<Semaphore>,
     per_peer: Arc<HopscotchMap<String, Arc<Semaphore>, rapidhash::fast::RandomState>>,
     peer_limit: usize,
-    /// Roots a reply-driven fetch is running for.
-    roots: Arc<HopscotchMap<cid::Cid, (), rapidhash::fast::RandomState>>,
+    /// Roots a reply-driven fetch is running for, with the trust it merges under.
+    roots: Arc<HopscotchMap<RootKey, (), rapidhash::fast::RandomState>>,
 }
+
+/// A root and the collections its fetch merges as an explicit replicator.
+/// A fetch merges with its replier's trust, so a reply waits only behind a
+/// fetch that carries the same trust.
+type RootKey = (cid::Cid, Vec<String>);
 
 /// Held while one fetch of a root runs; dropping it lets the next reply fetch.
 /// Model: proofs/tla/RootSingleFlight.tla.
 pub(crate) struct RootClaim {
-    roots: Arc<HopscotchMap<cid::Cid, (), rapidhash::fast::RandomState>>,
-    root: cid::Cid,
+    roots: Arc<HopscotchMap<RootKey, (), rapidhash::fast::RandomState>>,
+    key: RootKey,
 }
 
 impl Drop for RootClaim {
     fn drop(&mut self) {
-        self.roots.remove(&self.root);
+        self.roots.remove(&self.key);
     }
 }
 
@@ -305,16 +310,24 @@ impl DagFetchLimiter {
         }
     }
 
-    /// Claims `root` for one fetch, or `None` while another fetch holds it.
-    /// That fetch already tries every connected peer, so a reply that finds
-    /// the root claimed has nothing to add.
-    pub(crate) fn claim_root(&self, root: cid::Cid) -> Option<RootClaim> {
+    /// Claims `root` for one fetch trusted as an explicit replicator of
+    /// `trusted_collections`, or `None` while another fetch with that trust
+    /// holds it. That fetch already tries every connected peer, so a reply
+    /// that finds the claim held has nothing to add.
+    pub(crate) fn claim_root(
+        &self,
+        root: cid::Cid,
+        mut trusted_collections: Vec<String>,
+    ) -> Option<RootClaim> {
+        trusted_collections.sort_unstable();
+        trusted_collections.dedup();
+        let key = (root, trusted_collections);
         self.roots
-            .insert_if_absent(root, ())
+            .insert_if_absent(key.clone(), ())
             .is_none()
             .then(|| RootClaim {
                 roots: Arc::clone(&self.roots),
-                root,
+                key,
             })
     }
 
@@ -1289,21 +1302,46 @@ mod dag_fetch_limiter_tests {
         let root = cid::Cid::default();
         let other = cid::Cid::new_v1(0x71, cid::multihash::Multihash::default());
 
-        let claim = limiter.claim_root(root).expect("first claim");
+        let claim = limiter.claim_root(root, Vec::new()).expect("first claim");
         assert!(
-            limiter.claim_root(root).is_none(),
+            limiter.claim_root(root, Vec::new()).is_none(),
             "a second reply must not fetch"
         );
         assert!(
-            limiter.claim_root(other).is_some(),
+            limiter.claim_root(other, Vec::new()).is_some(),
             "other roots are independent"
         );
 
         drop(claim);
         assert!(
-            limiter.claim_root(root).is_some(),
+            limiter.claim_root(root, Vec::new()).is_some(),
             "the next reply fetches once the first fetch ends, failed or not"
         );
+    }
+
+    #[test]
+    fn a_trusted_reply_never_waits_behind_a_fetch_without_its_trust() {
+        let limiter = DagFetchLimiter::new(4);
+        let root = cid::Cid::default();
+        let trusted = || vec!["users".to_string(), "posts".to_string()];
+
+        let _plain = limiter.claim_root(root, Vec::new()).expect("plain claim");
+        let replicator = limiter
+            .claim_root(root, trusted())
+            .expect("a replicator's reply must fetch under its own trust");
+        assert!(
+            limiter
+                .claim_root(root, vec!["posts".into(), "users".into()])
+                .is_none(),
+            "a reply with the same trust waits behind the running fetch"
+        );
+        assert!(
+            limiter.claim_root(root, vec!["users".into()]).is_some(),
+            "a reply trusted for other collections fetches under that trust"
+        );
+
+        drop(replicator);
+        assert!(limiter.claim_root(root, trusted()).is_some());
     }
 
     #[tokio::test]
