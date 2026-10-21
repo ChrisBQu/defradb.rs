@@ -16,7 +16,7 @@ use super::endpoint::{
 };
 use super::gossip_heal;
 use super::inbound_budget::{
-    body_deadline, ConnectionShare, InboundBudget, InboundLease, ADMIT_DEADLINE, BODY_IDLE_DEADLINE,
+    body_deadline, InboundBudget, InboundLease, PeerShare, ADMIT_DEADLINE, BODY_IDLE_DEADLINE,
 };
 use super::peer_map::{endpoint_id_to_peer_id, SharedPeerMap};
 use super::protocols;
@@ -155,6 +155,7 @@ pub(super) async fn handle_incoming(
     // Spawn handler for this connection's streams
     let context = ConnectionStreamContext::new(
         resources,
+        remote_id,
         Arc::clone(pending_pushlog_replies),
         event_tx.clone(),
     );
@@ -172,12 +173,13 @@ pub(super) struct ConnectionStreamContext {
     node_identity: Option<Arc<identity::RawIdentity>>,
     spawned_tasks: SpawnedTasks,
     inbound_budget: Arc<InboundBudget>,
-    share: Arc<ConnectionShare>,
+    share: Arc<PeerShare>,
 }
 
 impl ConnectionStreamContext {
     pub(super) fn new(
         resources: &EndpointResources,
+        remote_id: EndpointId,
         pending_pushlog_replies: PendingPushLogReplies,
         event_tx: DispatchSender<TransportEvent<iroh::endpoint::SendStream>>,
     ) -> Self {
@@ -188,7 +190,7 @@ impl ConnectionStreamContext {
             node_identity: resources.node_identity.clone(),
             spawned_tasks: Arc::clone(&resources.spawned_tasks),
             inbound_budget: Arc::clone(&resources.inbound_budget),
-            share: Arc::new(resources.inbound_budget.connection_share()),
+            share: resources.inbound_budget.peer_share(remote_id),
         }
     }
 }
@@ -258,7 +260,7 @@ pub(super) async fn handle_connection_streams(
 async fn admit_stream(
     recv: &mut iroh::endpoint::RecvStream,
     budget: &InboundBudget,
-    share: &ConnectionShare,
+    share: &Arc<PeerShare>,
     peer_id: &PeerId,
 ) -> Option<(&'static Service, Vec<u8>, InboundLease)> {
     let tag = protocols::read_stream_tag(recv)

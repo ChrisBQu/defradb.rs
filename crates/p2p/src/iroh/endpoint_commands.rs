@@ -920,6 +920,7 @@ async fn handle_dial(
     // looking connected when it holds nothing.
     let stream_context = ConnectionStreamContext::new(
         &ctx.resources,
+        endpoint_id,
         Arc::clone(&ctx.pending_pushlog_replies),
         ctx.event_tx.clone(),
     );
