@@ -493,12 +493,16 @@ where
         }
     }
 
+    /// Keeps `peer`'s gossiped address. A full map makes room at random, so
+    /// made-up peers cannot keep real ones out for good.
     fn learn(&mut self, peer: EndpointId, data: &PeerData) {
-        if self.learned.len() >= MAX_LEARNED && !self.learned.contains_key(&peer) {
-            return;
-        }
         match postcard::from_bytes::<AddrInfo>(data.as_bytes()) {
             Ok(info) => {
+                if self.learned.len() >= MAX_LEARNED && !self.learned.contains_key(&peer) {
+                    if let Some(evicted) = self.learned.keys().copied().choose(&mut self.rng) {
+                        self.learned.remove(&evicted);
+                    }
+                }
                 self.learned.insert(peer, info.dial_hints());
             }
             Err(error) => {

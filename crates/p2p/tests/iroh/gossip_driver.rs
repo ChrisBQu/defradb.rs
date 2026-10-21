@@ -1,7 +1,8 @@
 //! The ownership guards of `proofs/tla/GossipOwnership.tla`, checked on the
 //! driver: gossip reaches a peer only over a live connection or a dial the
 //! endpoint admits, and forgetting a peer never closes its connection.
-//! A dial that lands on an older mux ends the gossip dial.
+//! Also the driver's own bookkeeping: a dial that lands on an older mux ends
+//! the gossip dial, and peers' gossiped addresses never fill up for good.
 
 use iroh::endpoint::Connection;
 use iroh_gossip::proto::{Command, InEvent};
@@ -158,4 +159,19 @@ async fn a_dial_that_lands_on_an_older_mux_ends_the_gossip_dial() {
     assert!(matches!(input, Input::DialFailed(p) if p == peer));
     assert!(driver.on_input(input).await.is_ok());
     assert!(!driver.peers.contains_key(&peer));
+}
+
+#[tokio::test]
+async fn made_up_peers_never_keep_a_real_peers_address_out() {
+    let dials = Dials::default();
+    let (mut driver, _events) = driver(&dials);
+    for _ in 0..MAX_LEARNED {
+        driver
+            .learned
+            .insert(iroh::SecretKey::generate().public(), Vec::new());
+    }
+    let peer = iroh::SecretKey::generate().public();
+    driver.learn(peer, &peer_data(&AddrInfo::default()));
+    assert!(driver.learned.contains_key(&peer));
+    assert_eq!(driver.learned.len(), MAX_LEARNED);
 }
