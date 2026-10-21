@@ -113,6 +113,21 @@ impl IrohTransport {
         rx.await.map_err(|_| Error::ChannelReceive)?
     }
 
+    /// Reply on the request's stream from the endpoint's task registry.
+    async fn reply_on_stream<T: serde::Serialize>(
+        &self,
+        send_stream: iroh::endpoint::SendStream,
+        reply: &T,
+    ) -> Result<()> {
+        let payload = super::protocols::encode(reply)?;
+        self.send_command(|reply| IrohCommand::ReplyOnStream {
+            send_stream,
+            payload,
+            reply,
+        })
+        .await
+    }
+
     /// Notify iroh that the surrounding network may have changed.
     pub async fn network_change(&self) -> Result<()> {
         self.send_command(|reply| IrohCommand::NetworkChange { reply })
@@ -381,12 +396,7 @@ impl P2PTransport for IrohTransport {
         send_stream: Self::ResponseToken,
         reply: PushLogReply,
     ) -> Result<()> {
-        self.send_command(|r| IrohCommand::SendPushLogResponse {
-            send_stream,
-            reply_msg: reply,
-            reply: r,
-        })
-        .await
+        self.reply_on_stream(send_stream, &reply).await
     }
 
     async fn send_two_stream_request(
@@ -469,12 +479,7 @@ impl P2PTransport for IrohTransport {
         send_stream: Self::ResponseToken,
         reply: DocSyncReply,
     ) -> Result<()> {
-        self.send_command(|r| IrohCommand::SendDocSyncResponseToken {
-            send_stream,
-            reply_msg: reply,
-            reply: r,
-        })
-        .await
+        self.reply_on_stream(send_stream, &reply).await
     }
 
     async fn send_branchable_sync_response_token(
@@ -482,12 +487,7 @@ impl P2PTransport for IrohTransport {
         send_stream: Self::ResponseToken,
         reply: BranchableSyncReply,
     ) -> Result<()> {
-        self.send_command(|r| IrohCommand::SendBranchableSyncResponseToken {
-            send_stream,
-            reply_msg: reply,
-            reply: r,
-        })
-        .await
+        self.reply_on_stream(send_stream, &reply).await
     }
 
     async fn send_car_response_token(
@@ -539,7 +539,7 @@ impl P2PTransport for IrohTransport {
         reply_msg: QuerySEArtifactsReply,
     ) -> Result<()> {
         if let Some(send_stream) = token {
-            return reply_on_stream(send_stream, &reply_msg).await;
+            return self.reply_on_stream(send_stream, &reply_msg).await;
         }
         self.send_command(|reply| IrohCommand::SendSEQueryResponse {
             peer_id: peer_id.clone(),
@@ -565,7 +565,7 @@ impl P2PTransport for IrohTransport {
         reply_msg: ManageReply,
     ) -> Result<()> {
         if let Some(send_stream) = token {
-            return reply_on_stream(send_stream, &reply_msg).await;
+            return self.reply_on_stream(send_stream, &reply_msg).await;
         }
         self.send_command(|reply| IrohCommand::SendManageResponse {
             peer_id: peer_id.clone(),
@@ -595,7 +595,7 @@ impl P2PTransport for IrohTransport {
         reply_msg: ManageQueryReply,
     ) -> Result<()> {
         if let Some(send_stream) = token {
-            return reply_on_stream(send_stream, &reply_msg).await;
+            return self.reply_on_stream(send_stream, &reply_msg).await;
         }
         self.send_command(|reply| IrohCommand::SendManageQueryResponse {
             peer_id: peer_id.clone(),
@@ -720,16 +720,6 @@ fn no_reply_stream(kind: &str) -> crate::error::Error {
     crate::error::Error::Transport(format!(
         "an Iroh {kind} reply goes on its request's stream, and this one has none"
     ))
-}
-
-async fn reply_on_stream<T>(mut send_stream: iroh::endpoint::SendStream, reply: &T) -> Result<()>
-where
-    T: serde::Serialize,
-{
-    super::protocols::write_message(&mut send_stream, reply).await?;
-    send_stream
-        .finish()
-        .map_err(|e| Error::Transport(format!("failed to finish stream: {e}")))
 }
 
 #[cfg(test)]

@@ -689,6 +689,29 @@ pub(super) async fn handle_reply_on_stream<Req, Reply, ToEvent>(
     }
 }
 
+/// Write an encoded reply on its request's stream and finish it. A requester
+/// that stops reading gets the stream reset once `deadline` passes, so the
+/// serving task does not wait on it for the connection's life.
+pub(super) async fn reply_on_stream(
+    mut send_stream: iroh::endpoint::SendStream,
+    payload: &[u8],
+    deadline: std::time::Duration,
+) -> crate::error::Result<()> {
+    let written = n0_future::time::timeout(
+        deadline,
+        protocols::write_payload(&mut send_stream, payload),
+    )
+    .await;
+    let Ok(written) = written else {
+        let _ = send_stream.reset(super::endpoint_streams::RESET_STALLED.into());
+        return Err(crate::error::Error::ResponseTimeout);
+    };
+    written?;
+    send_stream
+        .finish()
+        .map_err(|e| crate::error::Error::Transport(format!("failed to finish stream: {e}")))
+}
+
 /// Read a reply on its request's stream, stopping the stream when its length
 /// exceeds `max_message`, as admission does for a reply stream of its own.
 async fn read_reply<T: serde::de::DeserializeOwned>(
@@ -1254,6 +1277,44 @@ mod tests {
         assert!(summary.contains(&cid(b"a").to_string()));
         assert!(summary.contains(&cid(b"d").to_string()));
         assert!(summary.contains("+1 more"));
+    }
+
+    #[tokio::test]
+    async fn a_reply_the_requester_never_reads_is_reset_at_its_deadline() {
+        let requester = localhost_endpoint(vec![protocols::ALPN_MUX.to_vec()]).await;
+        let replier = localhost_endpoint(vec![protocols::ALPN_MUX.to_vec()]).await;
+        let replier_addr = replier.addr();
+        let accepted = n0_future::task::spawn({
+            let replier = replier.clone();
+            async move {
+                let connection = replier.accept().await.unwrap().await.unwrap();
+                let (send, mut recv) = connection.accept_bi().await.unwrap();
+                recv.read_exact(&mut [0u8]).await.unwrap();
+                (connection, send)
+            }
+        });
+        let connection = requester
+            .connect(replier_addr, protocols::ALPN_MUX)
+            .await
+            .unwrap();
+        let (mut request, mut reply) = connection.open_bi().await.unwrap();
+        request.write_all(&[0]).await.unwrap();
+        let (_replier_connection, send) = accepted.await.unwrap();
+
+        // Larger than any stream window, so the write waits on the requester.
+        let payload = vec![0u8; 2 * protocols::MAX_MESSAGE_SIZE];
+        let result = reply_on_stream(send, &payload, std::time::Duration::from_millis(200)).await;
+
+        assert!(matches!(result, Err(crate::error::Error::ResponseTimeout)));
+        let code =
+            n0_future::time::timeout(std::time::Duration::from_secs(5), reply.received_reset())
+                .await
+                .expect("reset reaches the requester")
+                .unwrap();
+        assert_eq!(
+            code.map(|code| code.into_inner()),
+            Some(u64::from(super::super::endpoint_streams::RESET_STALLED))
+        );
     }
 
     pub(super) async fn localhost_endpoint(alpns: Vec<Vec<u8>>) -> iroh::Endpoint {

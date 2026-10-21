@@ -232,14 +232,22 @@ pub async fn write_message<T: serde::Serialize>(
     send: &mut SendStream,
     value: &T,
 ) -> crate::error::Result<()> {
-    let payload =
-        defra_core::cbor::to_vec(value).map_err(|e| crate::error::Error::Codec(e.to_string()))?;
+    write_payload(send, &encode(value)?).await
+}
+
+/// Encode a CBOR message body.
+pub fn encode<T: serde::Serialize>(value: &T) -> crate::error::Result<Vec<u8>> {
+    defra_core::cbor::to_vec(value).map_err(|e| crate::error::Error::Codec(e.to_string()))
+}
+
+/// Write an encoded message body with its length prefix.
+pub async fn write_payload(send: &mut SendStream, payload: &[u8]) -> crate::error::Result<()> {
     let len = (payload.len() as u32).to_be_bytes();
 
     send.write_all(&len)
         .await
         .map_err(|e| crate::error::Error::Codec(format!("failed to write length: {}", e)))?;
-    send.write_all(&payload)
+    send.write_all(payload)
         .await
         .map_err(|e| crate::error::Error::Codec(format!("failed to write payload: {}", e)))?;
 

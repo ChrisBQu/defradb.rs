@@ -17,7 +17,8 @@ use super::endpoint::{peer_direct_addr, spawn_task, ActiveSync, EndpointResource
 use super::endpoint_rpc::{
     close_peer_connections, connect_mux, handle_block_sync, handle_car_request_response,
     handle_fire_and_forget, handle_reply_on_stream, handle_request_response,
-    handle_two_stream_request, remember_connection, BlockSyncResources,
+    handle_two_stream_request, remember_connection, reply_on_stream, BlockSyncResources,
+    REQUEST_RESPONSE_TIMEOUT,
 };
 use super::endpoint_streams::ConnectionStreamContext;
 use super::gossip::{AddrInfo, EventSender, Network};
@@ -201,21 +202,14 @@ pub(super) async fn handle_command(
         IrohCommand::TopicPeers { topic, reply } => {
             let _ = reply.send(Ok(gossip.topic_peers(&topic.to_string())));
         }
-        IrohCommand::SendPushLogResponse {
-            mut send_stream,
-            reply_msg,
+        IrohCommand::ReplyOnStream {
+            send_stream,
+            payload,
             reply,
         } => {
             let _ = spawn_task(spawned_tasks, async move {
-                let result = async {
-                    protocols::write_message(&mut send_stream, &reply_msg).await?;
-                    send_stream.finish().map_err(|e| {
-                        crate::error::Error::Transport(format!("failed to finish stream: {}", e))
-                    })?;
-                    Ok(())
-                }
-                .await;
-                let _ = reply.send(result);
+                let _ = reply
+                    .send(reply_on_stream(send_stream, &payload, REQUEST_RESPONSE_TIMEOUT).await);
             });
         }
         IrohCommand::SendTwoStreamRequest {
@@ -314,40 +308,6 @@ pub(super) async fn handle_command(
                         let _ = reply.send(Err(e));
                     }
                 }
-            });
-        }
-        IrohCommand::SendDocSyncResponseToken {
-            mut send_stream,
-            reply_msg,
-            reply,
-        } => {
-            let _ = spawn_task(spawned_tasks, async move {
-                let result = async {
-                    protocols::write_message(&mut send_stream, &reply_msg).await?;
-                    send_stream.finish().map_err(|e| {
-                        crate::error::Error::Transport(format!("failed to finish stream: {}", e))
-                    })?;
-                    Ok(())
-                }
-                .await;
-                let _ = reply.send(result);
-            });
-        }
-        IrohCommand::SendBranchableSyncResponseToken {
-            mut send_stream,
-            reply_msg,
-            reply,
-        } => {
-            let _ = spawn_task(spawned_tasks, async move {
-                let result = async {
-                    protocols::write_message(&mut send_stream, &reply_msg).await?;
-                    send_stream.finish().map_err(|e| {
-                        crate::error::Error::Transport(format!("failed to finish stream: {}", e))
-                    })?;
-                    Ok(())
-                }
-                .await;
-                let _ = reply.send(result);
             });
         }
         IrohCommand::SendCarRequest {

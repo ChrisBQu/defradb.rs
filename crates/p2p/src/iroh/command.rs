@@ -5,9 +5,9 @@ use iroh::endpoint::SendStream;
 use tokio::sync::oneshot;
 
 use crate::message::{
-    BranchableSyncReply, BranchableSyncRequest, DocSyncReply, DocSyncRequest, ManageQueryReply,
-    ManageQueryRequest, ManageReply, ManageRequest, PushLogBroadcast, PushLogReply, PushLogRequest,
-    PushSEArtifactsRequest, QuerySEArtifactsReply, QuerySEArtifactsRequest,
+    BranchableSyncRequest, DocSyncRequest, ManageQueryReply, ManageQueryRequest, ManageReply,
+    ManageRequest, PushLogBroadcast, PushLogReply, PushLogRequest, PushSEArtifactsRequest,
+    QuerySEArtifactsReply, QuerySEArtifactsRequest,
 };
 use crate::replicator::ReplicatorInfo;
 use crate::transport::{MessageId, PeerAddr, PeerId};
@@ -140,9 +140,10 @@ pub enum IrohCommand {
     },
 
     // Messaging
-    SendPushLogResponse {
+    /// Write an encoded reply on its request's stream and finish it.
+    ReplyOnStream {
         send_stream: SendStream,
-        reply_msg: PushLogReply,
+        payload: Vec<u8>,
         reply: oneshot::Sender<crate::error::Result<()>>,
     },
     SendTwoStreamRequest {
@@ -155,19 +156,9 @@ pub enum IrohCommand {
         request: DocSyncRequest,
         reply: oneshot::Sender<crate::error::Result<()>>,
     },
-    SendDocSyncResponseToken {
-        send_stream: SendStream,
-        reply_msg: DocSyncReply,
-        reply: oneshot::Sender<crate::error::Result<()>>,
-    },
     SendBranchableSyncRequest {
         peer_id: PeerId,
         request: BranchableSyncRequest,
-        reply: oneshot::Sender<crate::error::Result<()>>,
-    },
-    SendBranchableSyncResponseToken {
-        send_stream: SendStream,
-        reply_msg: BranchableSyncReply,
         reply: oneshot::Sender<crate::error::Result<()>>,
     },
     SendCarRequest {

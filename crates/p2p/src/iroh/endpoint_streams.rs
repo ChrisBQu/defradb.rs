@@ -28,7 +28,7 @@ const REFUSED_CONNECTION_CODE: u32 = 1;
 const RESET_UNKNOWN_SERVICE: u32 = 2;
 pub(super) const RESET_MESSAGE_TOO_LARGE: u32 = 3;
 const RESET_BUSY: u32 = 4;
-const RESET_STALLED: u32 = 5;
+pub(super) const RESET_STALLED: u32 = 5;
 const RESET_UNSOLICITED: u32 = 6;
 
 /// Handle an incoming QUIC connection.
