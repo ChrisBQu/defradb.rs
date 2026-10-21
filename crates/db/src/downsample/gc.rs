@@ -161,8 +161,14 @@ impl<S: Store + 'static> crate::database::DB<S> {
                     continue;
                 }
 
-                crate::block::cleanup::delete_owned_commit(&blockstore, &systemstore, &cid, doc_id)
-                    .await?;
+                crate::block::cleanup::delete_owned_commit(
+                    &blockstore,
+                    &systemstore,
+                    &cid,
+                    doc_id,
+                    &current_head_cids,
+                )
+                .await?;
             }
 
             Ok(())

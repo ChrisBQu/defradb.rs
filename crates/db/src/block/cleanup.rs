@@ -81,19 +81,21 @@ async fn remove_encryption_owner(
 
 /// Remove one document's ownership of a commit and its direct field blocks.
 /// History parents are deliberately retained; the caller chooses which
-/// priorities to prune.
+/// priorities to prune. A field block in `retained` is still a head of the
+/// document's DAG, so it keeps its owner and its bytes.
 pub async fn delete_owned_commit(
     blockstore: &NamespaceView,
     systemstore: &NamespaceView,
     cid: &Cid,
     doc_id: &str,
+    retained: &RapidHashSet<Cid>,
 ) -> Result<()> {
     let block = load_block(blockstore, cid).await?;
     let unowned = remove_owner(systemstore, cid, doc_id).await?;
 
     if let Some(block) = block {
         if let Some(links) = block.links {
-            for link in links {
+            for link in links.iter().filter(|link| !retained.contains(&link.link)) {
                 remove_leaf_owner(blockstore, systemstore, &link.link, doc_id, unowned).await?;
             }
         }

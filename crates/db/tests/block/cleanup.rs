@@ -6,6 +6,7 @@ use defra_core::CompositeDeltaPayload;
 use defra_core::CrdtDelta;
 use defra_core::DAGLink;
 use defra_core::LwwDeltaPayload;
+use rapidhash::{HashSetExt, RapidHashSet};
 use storage::corekv::Store;
 use storage::namespace::Namespace;
 use storage::RegolithStore;
@@ -44,9 +45,15 @@ fn deleting_one_owner_keeps_a_shared_block() {
                 .unwrap();
         }
 
-        delete_owned_commit(&blockstore, &systemstore, &cid, "doc-a")
-            .await
-            .unwrap();
+        delete_owned_commit(
+            &blockstore,
+            &systemstore,
+            &cid,
+            "doc-a",
+            &RapidHashSet::new(),
+        )
+        .await
+        .unwrap();
 
         assert!(blockstore.get(&cid.to_bytes()).await.unwrap().is_some());
         assert_eq!(
@@ -214,9 +221,15 @@ fn deleting_one_commit_owner_clears_child_ownership_but_keeps_shared_bytes() {
             }
         }
 
-        delete_owned_commit(&blockstore, &systemstore, &root_cid, "doc-a")
-            .await
-            .unwrap();
+        delete_owned_commit(
+            &blockstore,
+            &systemstore,
+            &root_cid,
+            "doc-a",
+            &RapidHashSet::new(),
+        )
+        .await
+        .unwrap();
 
         for cid in [root_cid, field_cid] {
             assert!(blockstore.get(&cid.to_bytes()).await.unwrap().is_some());
@@ -227,6 +240,71 @@ fn deleting_one_commit_owner_clears_child_ownership_but_keeps_shared_bytes() {
                 vec!["doc-b".to_string()]
             );
         }
+    })
+    .unwrap()
+}
+
+#[test]
+fn pruning_a_commit_keeps_a_field_block_that_is_still_a_head() {
+    workers::block_on(async {
+        let (blockstore, systemstore) = stores().await;
+        let field = Block::new(
+            CrdtDelta::Lww(LwwDeltaPayload {
+                field_name: "payload".to_string(),
+                schema_version_id: "v1".to_string(),
+                priority: 1,
+                data: vec![1],
+            }),
+            vec![],
+            vec![],
+        );
+        let field_cid = field.generate_cid().unwrap();
+        let root = Block::new(
+            CrdtDelta::Composite(CompositeDeltaPayload {
+                schema_version_id: "v1".to_string(),
+                priority: 1,
+                status: 1,
+            }),
+            vec![],
+            vec![DAGLink::new("payload", field_cid)],
+        );
+        let root_cid = root.generate_cid().unwrap();
+        for (cid, block) in [(field_cid, field), (root_cid, root)] {
+            blockstore
+                .set(&cid.to_bytes(), &block.to_dag_cbor().unwrap())
+                .await
+                .unwrap();
+            db::docid::map::set_block_doc_id_mapping(&systemstore, &cid.to_string(), "doc-a")
+                .await
+                .unwrap();
+        }
+
+        delete_owned_commit(
+            &blockstore,
+            &systemstore,
+            &root_cid,
+            "doc-a",
+            &RapidHashSet::from_iter([field_cid]),
+        )
+        .await
+        .unwrap();
+
+        assert!(blockstore
+            .get(&root_cid.to_bytes())
+            .await
+            .unwrap()
+            .is_none());
+        assert!(blockstore
+            .get(&field_cid.to_bytes())
+            .await
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            db::docid::map::get_doc_ids_for_block(&systemstore, &field_cid.to_string())
+                .await
+                .unwrap(),
+            vec!["doc-a".to_string()]
+        );
     })
     .unwrap()
 }

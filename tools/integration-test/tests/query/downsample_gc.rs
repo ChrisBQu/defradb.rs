@@ -3,7 +3,8 @@ use integration_test::{workspace_root, TestCluster};
 use serde_json::Value;
 use std::time::{Duration, Instant};
 
-const RAW_SCHEMA: &str = "type Metric { label: String  ts: DateTime  value: Int }";
+const RAW_SCHEMA: &str =
+    "type Metric { label: String  note: String @immutable  ts: DateTime  value: Int }";
 const ROLLUP2_SDL: &str = r#"
 type Metric2Rollup @downsample(interval: "1000ms", timeField: "ts", retention: "1400ms") {
   label: String
@@ -135,6 +136,18 @@ fn query_metric(client: &integration_test::DefraClient, doc_id: &str) -> Value {
     let rows = extract_rows(&data, "Metric");
     assert_eq!(rows.len(), 1, "expected a single Metric row");
     rows[0].clone()
+}
+
+fn note_commit_cids(client: &integration_test::DefraClient, filter: &str) -> Vec<String> {
+    let data = client
+        .query(&format!(
+            r#"query {{ _commits({filter}, filter: {{ fieldName: {{ _eq: "note" }} }}) {{ cid }} }}"#
+        ))
+        .expect("query note commits");
+    extract_rows(&data, "_commits")
+        .iter()
+        .map(|commit| commit["cid"].as_str().expect("cid").to_string())
+        .collect()
 }
 
 fn aggregate_commit_field(
@@ -281,7 +294,7 @@ async fn downsample_gc_test(cluster: TestCluster) {
 
     let create = client
         .query(&format!(
-            r#"mutation {{ add_Metric(input: {{label: "cpu", ts: "{}", value: 10}}) {{ _docID }} }}"#,
+            r#"mutation {{ add_Metric(input: {{label: "cpu", note: "host-a", ts: "{}", value: 10}}) {{ _docID }} }}"#,
             format_timestamp(t1)
         ))
         .expect("create metric");
@@ -358,7 +371,18 @@ async fn downsample_gc_test(cluster: TestCluster) {
     assert_eq!(rollup2_history["total"].as_i64(), Some(100));
     assert_eq!(rollup2_history["maxValue"].as_i64(), Some(70));
 
+    let doc_filter = format!(r#"docID: ["{source_doc_id}"]"#);
+    let note_cids = note_commit_cids(&client, &doc_filter);
+    assert_eq!(note_cids.len(), 1);
+
     run_view_gc(cluster.api_url(0), "Metric2Rollup").await;
+
+    assert_eq!(
+        note_commit_cids(&client, &format!(r#"cid: "{}""#, note_cids[0])),
+        note_cids,
+        "the immutable field's head block survives pruning of the commit that wrote it"
+    );
+    assert_eq!(note_commit_cids(&client, &doc_filter), note_cids);
 
     let raw_history_after_gc = aggregate_commit_field(&client, &source_doc_id, "value");
     assert_eq!(raw_history_after_gc["count"].as_i64(), Some(2));
