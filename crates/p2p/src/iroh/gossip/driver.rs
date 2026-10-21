@@ -28,8 +28,8 @@ use crate::transport::PeerAddr;
 use super::delivery::{Closed, Delivery};
 use super::frame::{read_gossip_frame, write_gossip_frame, ProtoMessage};
 use super::inbox::Inbox;
-use crate::iroh::mailbox::{Mailbox, Wake};
 use super::{protocols, spawn_task, topic_id, AddrInfo, Input, Network, SpawnedTasks, Subscribed};
+use crate::iroh::mailbox::{Mailbox, Wake};
 
 /// Messages queued for one peer's stream before more are dropped.
 const SEND_QUEUE: usize = 64;

@@ -10,8 +10,8 @@
 use iroh::EndpointId;
 
 use super::frame::ProtoMessage;
-use crate::iroh::mailbox::{Mailbox, Wake};
 use super::Input;
+use crate::iroh::mailbox::{Mailbox, Wake};
 
 pub(super) struct Inbox {
     control: Mailbox<Input>,
