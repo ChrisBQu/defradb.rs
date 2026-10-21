@@ -26,6 +26,7 @@ use crate::transport::{P2PTransport, PeerAddr, PeerId};
 struct ObservedLog {
     connections: AtomicUsize,
     tags: SegQueue<Vec<u8>>,
+    tag_read: tokio::sync::Notify,
 }
 
 /// The log drained once for assertions.
@@ -58,9 +59,15 @@ impl BarePeer {
     /// Waits until `count` streams have been read, since a request returns
     /// once it is written, before the peer reads it.
     async fn wait_for_streams(&self, count: usize) {
-        let deadline = n0_future::time::Instant::now() + Duration::from_secs(5);
-        while self.observed.tags.len() < count && n0_future::time::Instant::now() < deadline {
-            n0_future::time::sleep(Duration::from_millis(10)).await;
+        loop {
+            let tag_read = self.observed.tag_read.notified();
+            let read = self.observed.tags.len();
+            if read >= count {
+                return;
+            }
+            n0_future::time::timeout(Duration::from_secs(5), tag_read)
+                .await
+                .unwrap_or_else(|_| panic!("bare peer read {read} of {count} streams"));
         }
     }
 
@@ -115,7 +122,10 @@ async fn spawn_bare_peer() -> BarePeer {
                             // The node asks every new peer for its service
                             // record on its own; that is not a send under test.
                             Ok(tag) if tag == protocols::STREAM_SERVICE_RECORDS => {}
-                            Ok(tag) => observed.tags.push(tag),
+                            Ok(tag) => {
+                                observed.tags.push(tag);
+                                observed.tag_read.notify_waiters();
+                            }
                             Err(_) => break,
                         }
                         let _ = send.finish();
