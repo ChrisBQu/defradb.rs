@@ -2414,16 +2414,27 @@ async fn assert_replicator_acknowledges_current_heads(schema: &str, collection: 
         .await;
     assert!(response.errors.is_empty(), "{:?}", response.errors);
     wait_for_acknowledged(&node0, &peer1, collection, &doc_id).await;
-    let on_peer = node1
-        .execute(&format!(
-            r#"{{ {collection}(docID: "{doc_id}") {{ body }} }}"#
-        ))
-        .await;
-    assert_eq!(
-        on_peer.data.expect("data")[collection][0]["body"],
-        "second",
-        "acknowledged before the peer stored the current heads"
-    );
+    // PushLog acknowledges durable acceptance before the receiver merges the DAG.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let on_peer = node1
+            .execute(&format!(
+                r#"{{ {collection}(docID: "{doc_id}") {{ body }} }}"#
+            ))
+            .await;
+        assert!(on_peer.errors.is_empty(), "{:?}", on_peer.errors);
+        let data = on_peer.data.expect("data");
+        if data[collection][0]["body"] == "second" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "acknowledged heads were never materialized: {data:?}"
+        );
+        edge::testing::edge()
+            .sleep(Duration::from_millis(100))
+            .await;
+    }
 
     node0.shutdown().await;
     node1.shutdown().await;
