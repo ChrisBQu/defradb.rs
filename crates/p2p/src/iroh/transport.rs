@@ -1284,7 +1284,7 @@ mod tests {
                 {
                     return record;
                 }
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                n0_future::time::sleep(Duration::from_millis(50)).await;
             }
         })
         .await
