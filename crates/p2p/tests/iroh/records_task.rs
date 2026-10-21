@@ -493,3 +493,218 @@ fn a_collection_join_is_pointed_at_its_advertisers() {
         )]
     );
 }
+
+fn hold(records: &mut Records<FakeNet>, now: Instant, key: &SecretKey, services: Vec<Service>) {
+    let record = sign(
+        key,
+        &ServiceRecord {
+            node: *key.public().as_bytes(),
+            seq: 1,
+            expires_at: UNIX + 60,
+            services,
+        },
+    );
+    records.on_input(
+        Input::Message {
+            from: key.public(),
+            message: RecordsMessage::Records(vec![record]),
+        },
+        now,
+        UNIX,
+    );
+}
+
+fn holds_users(role: Role) -> Service {
+    Service::Collection {
+        key: CollectionKey::Plain("users".into()),
+        role,
+    }
+}
+
+fn providers(
+    records: &mut Records<FakeNet>,
+    now: Instant,
+    ask: Vec<EndpointId>,
+) -> Vec<EndpointId> {
+    let (reply, mut answer) = tokio::sync::oneshot::channel();
+    records.on_input(
+        Input::Providers {
+            id: "users".into(),
+            ask,
+            reply,
+        },
+        now,
+        UNIX,
+    );
+    answer
+        .try_recv()
+        .expect("answered at once")
+        .expect("lookup succeeds")
+}
+
+#[test]
+fn providers_come_replicas_first_then_archives_then_readers() {
+    let net = FakeNet::default();
+    let (mut records, now) = records_with(&net);
+    records.on_input(Input::Profile(profile(None, &["users"])), now, UNIX);
+    let (reader, archive, replica, other) = (
+        SecretKey::generate(),
+        SecretKey::generate(),
+        SecretKey::generate(),
+        SecretKey::generate(),
+    );
+    hold(&mut records, now, &reader, vec![holds_users(Role::Reader)]);
+    hold(
+        &mut records,
+        now,
+        &archive,
+        vec![holds_users(Role::Archive)],
+    );
+    hold(
+        &mut records,
+        now,
+        &replica,
+        vec![holds_users(Role::Replica)],
+    );
+    hold(
+        &mut records,
+        now,
+        &other,
+        vec![Service::Collection {
+            key: CollectionKey::Plain("posts".into()),
+            role: Role::Replica,
+        }],
+    );
+    net.take();
+
+    assert_eq!(
+        providers(&mut records, now, vec![other.public()]),
+        vec![replica.public(), archive.public(), reader.public()]
+    );
+    assert!(net.take().is_empty(), "a book with providers asks nobody");
+}
+
+#[test]
+fn an_empty_lookup_asks_connected_peers_who_holds_the_collection() {
+    let secret = NetworkSecret::new([5; 32]);
+    let net = FakeNet::default();
+    let (mut records, now) = records_with(&net);
+    records.on_input(
+        Input::Profile(profile(Some(secret.clone()), &[])),
+        now,
+        UNIX,
+    );
+    net.take();
+    let peer = SecretKey::generate().public();
+
+    assert!(providers(&mut records, now, vec![peer]).is_empty());
+    assert_eq!(
+        net.take(),
+        vec![
+            Call::Send(
+                peer,
+                RecordsMessage::Who {
+                    key: blind(&secret, "users")
+                }
+            ),
+            Call::Send(
+                peer,
+                RecordsMessage::Who {
+                    key: CollectionKey::Plain("users".into())
+                }
+            ),
+        ]
+    );
+}
+
+#[test]
+fn a_who_query_is_answered_with_our_own_record_when_we_hold_the_key() {
+    let net = FakeNet::default();
+    let (mut records, now) = records_with(&net);
+    records.on_input(Input::Profile(profile(None, &["users"])), now, UNIX);
+    records.on_input(
+        Input::Collection {
+            id: "users".into(),
+            held: true,
+        },
+        now,
+        UNIX,
+    );
+    records.renew(now, UNIX);
+    let own = announced(&net.take())
+        .pop()
+        .expect("our record is announced");
+    let asker = SecretKey::generate().public();
+
+    records.on_input(
+        Input::Message {
+            from: asker,
+            message: RecordsMessage::Who {
+                key: CollectionKey::Plain("users".into()),
+            },
+        },
+        now,
+        UNIX,
+    );
+
+    let sent: Vec<ServiceRecord> = net
+        .take()
+        .into_iter()
+        .flat_map(|call| match call {
+            Call::Send(to, RecordsMessage::Records(records)) if to == asker => records,
+            _ => Vec::new(),
+        })
+        .map(|signed| verify(&signed, UNIX).expect("verifies"))
+        .collect();
+    assert_eq!(sent, vec![own]);
+}
+
+#[test]
+fn replicator_offers_list_only_nodes_that_offer_and_hold_the_collection() {
+    let net = FakeNet::default();
+    let (mut records, now) = records_with(&net);
+    records.on_input(Input::Profile(profile(None, &["users"])), now, UNIX);
+    let (offers, offers_elsewhere, holds_only) = (
+        SecretKey::generate(),
+        SecretKey::generate(),
+        SecretKey::generate(),
+    );
+    hold(
+        &mut records,
+        now,
+        &offers,
+        vec![Service::Replicator, holds_users(Role::Replica)],
+    );
+    hold(
+        &mut records,
+        now,
+        &offers_elsewhere,
+        vec![Service::Replicator],
+    );
+    hold(
+        &mut records,
+        now,
+        &holds_only,
+        vec![holds_users(Role::Replica)],
+    );
+
+    let lookup = |records: &mut Records<FakeNet>, id: Option<&str>| {
+        let (reply, mut answer) = tokio::sync::oneshot::channel();
+        records.on_input(
+            Input::Replicators {
+                id: id.map(str::to_owned),
+                reply,
+            },
+            now,
+            UNIX,
+        );
+        let mut nodes = answer.try_recv().expect("answered").expect("succeeds");
+        nodes.sort();
+        nodes
+    };
+
+    assert_eq!(lookup(&mut records, Some("users")), vec![offers.public()]);
+    let mut every = vec![offers.public(), offers_elsewhere.public()];
+    every.sort();
+    assert_eq!(lookup(&mut records, None), every);
+}

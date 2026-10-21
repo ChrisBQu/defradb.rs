@@ -26,6 +26,7 @@ use crate::QueryId;
 
 use super::command::IrohCommand;
 use super::endpoint_config::AdmissionAuthority;
+use super::peer_map::endpoint_id_to_peer_id;
 use super::records::{ServiceProfile, ServiceRecord};
 
 /// Iroh-backed P2P transport.
@@ -47,6 +48,19 @@ impl IrohTransport {
     pub async fn service_record(&self, peer_id: PeerId) -> Result<Option<ServiceRecord>> {
         self.send_command(|reply| IrohCommand::ServiceRecord { peer_id, reply })
             .await
+    }
+
+    /// Nodes whose service record offers to be a replicator, and holds
+    /// `collection_id` when given, so an operator can pick one. Nothing here
+    /// adds a replicator.
+    pub async fn replicator_offers(&self, collection_id: Option<String>) -> Result<Vec<PeerId>> {
+        let nodes = self
+            .send_command(|reply| IrohCommand::ReplicatorOffers {
+                collection_id,
+                reply,
+            })
+            .await?;
+        Ok(nodes.iter().map(endpoint_id_to_peer_id).collect())
     }
 
     /// Sets what this node advertises in its service record. Until it is
@@ -309,6 +323,16 @@ impl P2PTransport for IrohTransport {
     async fn connected_peers(&self) -> Result<Vec<PeerId>> {
         self.send_command(|reply| IrohCommand::ConnectedPeers { reply })
             .await
+    }
+
+    async fn collection_providers(&self, collection_id: &str) -> Result<Vec<PeerId>> {
+        let nodes = self
+            .send_command(|reply| IrohCommand::CollectionProviders {
+                collection_id: collection_id.to_string(),
+                reply,
+            })
+            .await?;
+        Ok(nodes.iter().map(endpoint_id_to_peer_id).collect())
     }
 
     async fn inbound_budget(&self) -> Result<Vec<crate::transport::InboundClassSnapshot>> {

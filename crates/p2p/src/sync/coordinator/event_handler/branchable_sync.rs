@@ -304,11 +304,12 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                         tracing::debug!(cid = %root_cid, "Branchable DAG already being fetched");
                         return;
                     };
-                    let alternate_providers =
-                        super::super::dag_fetcher::connected_alternate_providers(
-                            &transport, &root_cid,
-                        )
-                        .await;
+                    let alternate_providers = super::super::dag_fetcher::alternate_providers(
+                        &transport,
+                        &root_cid,
+                        &collection_id,
+                    )
+                    .await;
                     super::super::dag_fetcher::poll_fetch_dag(
                         transport,
                         blockstore,

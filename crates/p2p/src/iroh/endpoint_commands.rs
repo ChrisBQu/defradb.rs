@@ -165,6 +165,36 @@ pub(super) async fn handle_command(
                 let _ = reply.send(Err(error));
             }
         },
+        IrohCommand::CollectionProviders {
+            collection_id,
+            reply,
+        } => {
+            let ask = peer_map
+                .connected_peers()
+                .iter()
+                .filter_map(|peer| parse_endpoint_id(peer).ok())
+                .collect();
+            resources
+                .records
+                .push_change(RecordsInput::Providers {
+                    id: collection_id,
+                    ask,
+                    reply,
+                })
+                .await;
+        }
+        IrohCommand::ReplicatorOffers {
+            collection_id,
+            reply,
+        } => {
+            resources
+                .records
+                .push_change(RecordsInput::Replicators {
+                    id: collection_id,
+                    reply,
+                })
+                .await;
+        }
         IrohCommand::Subscribe { topic, reply } => {
             let joined = gossip.subscribe(topic.to_string());
             held_collection(resources, &topic, true).await;

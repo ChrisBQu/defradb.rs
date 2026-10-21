@@ -316,11 +316,12 @@ async fn no_provider_is_connected<T: P2PTransport>(
 /// itself, so it degrades to source-peer-only fetching — with a WARN trace,
 /// because a silently empty alternates list is indistinguishable from a
 /// healthy but sparsely connected node.
-pub(crate) async fn connected_alternate_providers<T: P2PTransport>(
+pub(crate) async fn alternate_providers<T: P2PTransport>(
     transport: &T,
     root_cid: &Cid,
+    collection_id: &str,
 ) -> Vec<PeerId> {
-    match transport.connected_peers().await {
+    let mut providers = match transport.connected_peers().await {
         Ok(peers) => peers,
         Err(e) => {
             warn!(
@@ -329,6 +330,30 @@ pub(crate) async fn connected_alternate_providers<T: P2PTransport>(
                 "Failed to list connected peers for DAG fetch alternates; fetching from source peer only"
             );
             Vec::new()
+        }
+    };
+    add_collection_providers(transport, collection_id, &mut providers).await;
+    providers
+}
+
+/// Appends the peers whose service record says they hold `collection_id`,
+/// after the ones already listed: the rotation tries them in order, so a
+/// node we would have to dial is asked only once the others fail.
+pub(crate) async fn add_collection_providers<T: P2PTransport>(
+    transport: &T,
+    collection_id: &str,
+    providers: &mut Vec<PeerId>,
+) {
+    if collection_id.is_empty() {
+        return;
+    }
+    for peer in transport
+        .collection_providers(collection_id)
+        .await
+        .unwrap_or_default()
+    {
+        if !providers.contains(&peer) {
+            providers.push(peer);
         }
     }
 }

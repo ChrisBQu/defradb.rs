@@ -42,6 +42,8 @@ const BOOK_CAPACITY: usize = 4096;
 const RESOLVES_PER_TICK: usize = 4;
 /// Peers a collection join is pointed at.
 const JOIN_HINTS: usize = 8;
+/// Nodes a providers lookup returns.
+const MAX_PROVIDERS: usize = 8;
 const INBOX_CAPACITY: usize = 1024;
 
 /// What this node offers besides the collections it subscribes to.
@@ -107,6 +109,19 @@ pub enum Input {
     Lookup {
         node: EndpointId,
         reply: Reply<Option<ServiceRecord>>,
+    },
+    /// Nodes whose live record holds collection `id`, replicas first, then
+    /// archives, then readers. When the book has none, `ask` is asked who
+    /// holds it, so a later lookup can find them.
+    Providers {
+        id: String,
+        ask: Vec<EndpointId>,
+        reply: Reply<Vec<EndpointId>>,
+    },
+    /// Nodes that offer to be a replicator, holding collection `id` when given.
+    Replicators {
+        id: Option<String>,
+        reply: Reply<Vec<EndpointId>>,
     },
 }
 
@@ -254,6 +269,12 @@ where
                 };
                 let _ = reply.send(Ok(record));
             }
+            Input::Providers { id, ask, reply } => {
+                let _ = reply.send(Ok(self.providers(&id, &ask, unix)));
+            }
+            Input::Replicators { id, reply } => {
+                let _ = reply.send(Ok(self.replicators(id.as_deref(), unix)));
+            }
             Input::Pointer { node, pointer } => {
                 // A peer with no readable pointer is asked only while we hold
                 // nothing live for it.
@@ -342,11 +363,20 @@ where
                 }
             }
             RecordsMessage::Who { key } => {
-                let records: Vec<SignedRecord> = self
-                    .book
-                    .who(&key, unix, MAX_REPLY_RECORDS)
-                    .iter()
-                    .filter_map(|node| self.book.signed(node, unix).cloned())
+                let own = self
+                    .own
+                    .as_ref()
+                    .filter(|own| verify(own, unix).is_ok_and(|record| holds(&record, &key)));
+                let records: Vec<SignedRecord> = own
+                    .cloned()
+                    .into_iter()
+                    .chain(
+                        self.book
+                            .who(&key, unix, MAX_REPLY_RECORDS)
+                            .iter()
+                            .filter_map(|node| self.book.signed(node, unix).cloned()),
+                    )
+                    .take(MAX_REPLY_RECORDS)
                     .collect();
                 if !records.is_empty() {
                     self.net.send(from, RecordsMessage::Records(records));
@@ -366,19 +396,70 @@ where
         }
     }
 
-    /// Points the join of collection `id` at nodes that advertise it, under
-    /// its blinded key and its plain one (a peer may have made it public).
-    fn hint_join(&mut self, id: String, unix: u64) {
-        let mut peers = Vec::new();
+    /// Collection `id`'s keys: blinded, then plain (a peer may have made it
+    /// public).
+    fn keys(&self, id: &str) -> Vec<CollectionKey> {
         let secret = self
             .profile
             .as_ref()
             .and_then(|profile| profile.secret.as_ref());
-        let keys = secret
-            .map(|secret| blind(secret, &id))
+        secret
+            .map(|secret| blind(secret, id))
             .into_iter()
-            .chain([CollectionKey::Plain(id.clone())]);
-        for key in keys {
+            .chain([CollectionKey::Plain(id.to_string())])
+            .collect()
+    }
+
+    fn providers(&self, id: &str, ask: &[EndpointId], unix: u64) -> Vec<EndpointId> {
+        let keys = self.keys(id);
+        let mut ranked: Vec<(u8, EndpointId)> = Vec::new();
+        for key in &keys {
+            for node in self.book.who(key, unix, BOOK_CAPACITY) {
+                let role = self
+                    .book
+                    .live(&node, unix)
+                    .and_then(|record| role_of(record, key));
+                if let Some(role) = role {
+                    if node != self.me && !ranked.iter().any(|(_, seen)| *seen == node) {
+                        ranked.push((rank(role), node));
+                    }
+                }
+            }
+        }
+        if ranked.is_empty() {
+            for peer in ask {
+                for key in &keys {
+                    self.net
+                        .send(*peer, RecordsMessage::Who { key: key.clone() });
+                }
+            }
+        }
+        ranked.sort_by_key(|(rank, _)| *rank);
+        ranked
+            .into_iter()
+            .take(MAX_PROVIDERS)
+            .map(|(_, node)| node)
+            .collect()
+    }
+
+    fn replicators(&self, id: Option<&str>, unix: u64) -> Vec<EndpointId> {
+        let keys = id.map(|id| self.keys(id));
+        self.book
+            .live_records(unix)
+            .filter(|record| record.services.contains(&Service::Replicator))
+            .filter(|record| {
+                keys.as_ref()
+                    .is_none_or(|keys| keys.iter().any(|key| holds(record, key)))
+            })
+            .filter_map(|record| EndpointId::from_bytes(&record.node).ok())
+            .filter(|node| *node != self.me)
+            .collect()
+    }
+
+    /// Points the join of collection `id` at nodes that advertise it.
+    fn hint_join(&mut self, id: String, unix: u64) {
+        let mut peers = Vec::new();
+        for key in self.keys(&id) {
             for node in self.book.who(&key, unix, JOIN_HINTS) {
                 if node != self.me && !peers.contains(&node) && peers.len() < JOIN_HINTS {
                     peers.push(node);
@@ -442,4 +523,26 @@ fn unix_millis() -> u64 {
     web_time::SystemTime::now()
         .duration_since(web_time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_millis() as u64)
+}
+
+/// The role `record` holds collection `key` in, if it holds it.
+fn role_of(record: &ServiceRecord, key: &CollectionKey) -> Option<Role> {
+    record.services.iter().find_map(|service| match service {
+        Service::Collection { key: held, role } if held == key => Some(*role),
+        _ => None,
+    })
+}
+
+fn holds(record: &ServiceRecord, key: &CollectionKey) -> bool {
+    role_of(record, key).is_some()
+}
+
+/// Replicas keep a collection current; archives may lag; readers hold only
+/// what they read.
+fn rank(role: Role) -> u8 {
+    match role {
+        Role::Replica => 0,
+        Role::Archive => 1,
+        Role::Reader => 2,
+    }
 }

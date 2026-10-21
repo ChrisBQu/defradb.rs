@@ -97,6 +97,18 @@ pub enum IrohCommand {
         reply: Reply<Option<super::records::ServiceRecord>>,
     },
 
+    /// Nodes whose service record holds a collection, best first.
+    CollectionProviders {
+        collection_id: String,
+        reply: oneshot::Sender<crate::error::Result<Vec<iroh::EndpointId>>>,
+    },
+
+    /// Nodes whose service record offers to be a replicator.
+    ReplicatorOffers {
+        collection_id: Option<String>,
+        reply: oneshot::Sender<crate::error::Result<Vec<iroh::EndpointId>>>,
+    },
+
     // PubSub
     Subscribe {
         topic: crate::topics::DefraTopic,

@@ -363,6 +363,12 @@ pub trait P2PTransport: Clone + Send + Sync + 'static {
 
     async fn connected_peers(&self) -> Result<Vec<PeerId>>;
 
+    /// Peers that say they hold `collection_id`, connected or not, best
+    /// first, for transports that read service records.
+    async fn collection_providers(&self, _collection_id: &str) -> Result<Vec<PeerId>> {
+        Ok(Vec::new())
+    }
+
     /// Inbound byte budget use per class, for transports that admit message
     /// bodies against one.
     async fn inbound_budget(&self) -> Result<Vec<InboundClassSnapshot>> {

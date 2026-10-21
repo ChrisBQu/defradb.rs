@@ -1542,7 +1542,7 @@ async fn poll_fetch_dag_completes_from_source_when_peer_listing_fails() {
     );
     transport.set_fail_connected_peers();
 
-    let alternate_providers = connected_alternate_providers(&transport, &root_cid).await;
+    let alternate_providers = alternate_providers(&transport, &root_cid, "").await;
     assert!(
         alternate_providers.is_empty(),
         "transport failure must degrade to no alternates"

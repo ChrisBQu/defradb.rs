@@ -90,6 +90,14 @@ impl Book {
             .collect()
     }
 
+    /// Every live record we hold.
+    pub fn live_records(&self, now: u64) -> impl Iterator<Item = &ServiceRecord> {
+        self.held
+            .values()
+            .map(|held| &held.record)
+            .filter(move |record| now < record.expires_at)
+    }
+
     /// Whether `pointer` names a newer record than the live one we hold.
     pub fn is_behind(&self, node: &EndpointId, pointer: &Pointer, now: u64) -> bool {
         match self.live(node, now) {
