@@ -255,7 +255,7 @@ pub(super) async fn handle_connection_streams(
 /// Read a stream's tag and length, then wait for room for its body. Resets
 /// the stream instead when the tag is unknown, the message is too large for
 /// its tag, or no room frees up before the deadline.
-async fn admit_stream(
+pub(super) async fn admit_stream(
     recv: &mut iroh::endpoint::RecvStream,
     budget: &InboundBudget,
     share: &Arc<PeerShare>,
@@ -301,6 +301,8 @@ async fn admit_stream(
     .ok()?;
     let Some(payload) = payload else {
         debug!(peer_id = %peer_id, len, "Message body stopped arriving");
+        // Free the room before the sender can see the reset.
+        drop(lease);
         let _ = recv.stop(RESET_STALLED.into());
         return None;
     };
