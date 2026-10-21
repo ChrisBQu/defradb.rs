@@ -119,7 +119,10 @@ async fn forgetting_a_peer_leaves_its_connection_open() {
 
     driver.forget(peer);
     assert!(driver.peers[&peer].writer.is_none());
-    tokio::task::yield_now().await;
+    let done = tokio::time::timeout(Duration::from_secs(10), driver.io.inbox.next())
+        .await
+        .expect("the writer reports it is done");
+    assert!(matches!(done, Some(Input::WriterDone { peer: p, .. }) if p == peer));
     assert!(connection.close_reason().is_none());
 }
 
