@@ -18,6 +18,7 @@ use super::fetch_stats::{selected_path_rtt, FetchOutcome, FetchStats, FetchTimer
 use super::gossip::GossipHandle;
 use super::peer_map::{parse_endpoint_id, SharedPeerMap};
 use super::protocols;
+use super::services;
 
 /// One shared connection per peer, keyed by endpoint alone: every protocol is
 /// multiplexed over [`protocols::ALPN_MUX`], so identity is the whole key.
@@ -614,13 +615,15 @@ async fn send_one_way_message<T: serde::Serialize>(
 
 /// Send a request whose reply is emitted as a transport event, and report on
 /// `sent` once the request is written. On mux 0.2 the reply comes back on the
-/// request's stream and is read here; an older peer opens a reply stream of
-/// its own, which admission checks against the expected replies.
+/// request's stream and is read here, within `reply_tag`'s size limit; an
+/// older peer opens a `reply_tag` stream of its own, which admission checks
+/// against the expected replies.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_reply_on_stream<Req, Reply, ToEvent>(
     endpoint: &Endpoint,
     peer_id: PeerId,
     tag: &[u8],
+    reply_tag: &[u8],
     request: &Req,
     direct_addr: Option<std::net::SocketAddr>,
     cache: &ConnectionCache,
@@ -659,9 +662,12 @@ pub(super) async fn handle_reply_on_stream<Req, Reply, ToEvent>(
         return;
     }
 
+    let max_message = services::lookup(reply_tag)
+        .expect("every reply tag is a service")
+        .max_message;
     let reply = n0_future::time::timeout(
         REQUEST_RESPONSE_TIMEOUT,
-        protocols::read_message::<Reply>(&mut recv, protocols::MAX_MESSAGE_SIZE),
+        read_reply::<Reply>(&mut recv, max_message),
     )
     .await
     .map_err(|_| crate::error::Error::ResponseTimeout)
@@ -681,6 +687,22 @@ pub(super) async fn handle_reply_on_stream<Req, Reply, ToEvent>(
             debug!(peer_id = %peer_id, stream_tag = %String::from_utf8_lossy(tag), error = %error, "No reply on the request stream");
         }
     }
+}
+
+/// Read a reply on its request's stream, stopping the stream when its length
+/// exceeds `max_message`, as admission does for a reply stream of its own.
+async fn read_reply<T: serde::de::DeserializeOwned>(
+    recv: &mut iroh::endpoint::RecvStream,
+    max_message: usize,
+) -> crate::error::Result<T> {
+    let len = protocols::read_length(recv).await?;
+    if len > max_message {
+        let _ = recv.stop(super::endpoint_streams::RESET_MESSAGE_TOO_LARGE.into());
+        return Err(crate::error::Error::Codec(format!(
+            "reply too large: {len} bytes exceeds limit of {max_message} bytes"
+        )));
+    }
+    protocols::decode(protocols::read_body(recv, len).await?)
 }
 
 /// Send a message without expecting a response.

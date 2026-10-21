@@ -335,3 +335,60 @@ async fn a_body_that_trickles_in_is_stopped_and_frees_its_room() {
     );
     assert_eq!(control.held_bytes, 0, "its room was given back");
 }
+
+#[tokio::test]
+async fn an_oversized_manage_reply_on_its_request_stream_is_stopped() {
+    let bare = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+        .relay_mode(iroh::RelayMode::Disabled)
+        .alpns(vec![protocols::ALPN_MUX.to_vec()])
+        .bind_addr("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+        .expect("bind addr")
+        .bind()
+        .await
+        .expect("bind endpoint");
+    let bare_id = PeerId::new(bare.id().to_string());
+    let bare_addr = *bare.addr().ip_addrs().next().expect("listener address");
+
+    let replier = n0_future::task::spawn({
+        let bare = bare.clone();
+        async move {
+            let connection = bare.accept().await?.await.ok()?;
+            loop {
+                let (mut send, mut recv) = connection.accept_bi().await.ok()?;
+                if protocols::read_stream_tag(&mut recv).await.ok()? != protocols::STREAM_MANAGE_REQ
+                {
+                    continue;
+                }
+                let too_large = protocols::MAX_MANAGE_MSG_SIZE as u32 + 1;
+                send.write_all(&too_large.to_be_bytes()).await.ok()?;
+                let code = send.stopped().await.ok()??;
+                return Some(u32::try_from(code.into_inner()).expect("small stop code"));
+            }
+        }
+    });
+
+    let (transport, endpoint_task) = spawn_transport().await;
+    transport
+        .dial(&bare_id, vec![PeerAddr::new(bare_addr.to_string())])
+        .await
+        .expect("dial bare peer");
+    let request = crate::message::ManageRequest::new(
+        crate::message::ManageMutateOp::ReplicatorDelete {
+            addresses: Vec::new(),
+            collection_ids: Vec::new(),
+        },
+        Vec::new(),
+    );
+    transport
+        .send_manage_request(&bare_id, request)
+        .await
+        .expect("manage request");
+    let code = n0_future::time::timeout(STOPPED, replier)
+        .await
+        .ok()
+        .and_then(|replied| replied.expect("replier task"));
+
+    transport.shutdown().await.unwrap();
+    endpoint_task.await.unwrap();
+    assert_eq!(code, Some(3));
+}
