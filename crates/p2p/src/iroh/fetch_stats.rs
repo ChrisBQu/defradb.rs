@@ -58,7 +58,7 @@ impl FetchStats {
         }
         FetchTimer {
             counters,
-            first_byte: None,
+            delivery: None,
             bytes: 0,
             rtt: None,
         }
@@ -155,7 +155,8 @@ impl PeerCounters {
 #[derive(Debug)]
 pub struct FetchTimer {
     counters: Option<Arc<PeerCounters>>,
-    first_byte: Option<Instant>,
+    /// When the first and the latest response bytes arrived.
+    delivery: Option<(Instant, Instant)>,
     bytes: u64,
     rtt: Option<Duration>,
 }
@@ -163,7 +164,8 @@ pub struct FetchTimer {
 impl FetchTimer {
     /// `len` more response bytes arrived.
     pub fn received(&mut self, len: usize) {
-        self.first_byte.get_or_insert_with(Instant::now);
+        let now = Instant::now();
+        self.delivery.get_or_insert((now, now)).1 = now;
         let len = len as u64;
         self.bytes = self.bytes.saturating_add(len);
         if let Some(counters) = &self.counters {
@@ -181,8 +183,8 @@ impl FetchTimer {
             return;
         };
         let rate = self
-            .first_byte
-            .map(|first| first.elapsed())
+            .delivery
+            .map(|(first, last)| last - first)
             .filter(|window| *window >= MIN_RATE_WINDOW)
             .map(|window| {
                 let rate = u128::from(self.bytes) * 1_000_000 / window.as_micros();
@@ -275,6 +277,17 @@ mod tests {
         let snapshot = only(&stats);
         assert_eq!((snapshot.in_flight, snapshot.in_flight_bytes), (0, 0));
         assert_eq!(snapshot.fetches, 0);
+    }
+
+    #[test]
+    fn the_rate_window_ends_at_the_last_byte_not_at_finish() {
+        let stats = FetchStats::default();
+        let mut timer = stats.start(&peer("a"));
+        timer.received(1_000);
+        let now = Instant::now();
+        timer.delivery = Some((now - Duration::from_secs(3), now - Duration::from_secs(2)));
+        timer.finish(FetchOutcome::Success);
+        assert_eq!(only(&stats).delivery_rate_bytes_per_sec, 1_000);
     }
 
     #[test]
