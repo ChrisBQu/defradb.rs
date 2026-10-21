@@ -7,7 +7,8 @@
 \* Who acts: the owner publishing records, the discovery gossip topic
 \* carrying them (it may lose or reorder them), the owner's pkarr pointer
 \* that names its newest sequence number, the reader querying the owner when
-\* its pointer is ahead, and time making old records expire.
+\* its pointer is ahead (on every connected peer's turn in a rotation, not
+\* only when it connects), and time making old records expire.
 \*
 \* What must never happen: an older record replaces a newer one, or the
 \* reader picks a peer from an expired record. What must always happen: the
@@ -20,6 +21,7 @@
 \*   book.rs      Book::offer     (a record replaces a lower seq or an expired one, and is never expired)
 \*   book.rs      Book::live      (an expired record is never handed out)
 \*   refresh.rs   Refresh::check  (query the owner when its pointer is ahead of the book)
+\*   task.rs      Records::rotate (the lookup that enables Query keeps recurring)
 \*   task.rs      Records::renew  (Publish and UpdatePointer: a higher seq, then its pointer)
 \*   task.rs      Records::on_input, Input::Pointer and RecordsMessage::Records (Query, Deliver)
 EXTENDS Naturals
@@ -28,13 +30,14 @@ CONSTANTS
   MaxSeq,       \* how many records the owner publishes in the run
   SeqMode,      \* "Increasing" (a record must beat the book's seq) | "Any" (the last one in wins)
   ChooseMode,   \* "CheckExpiry" (an expired record is never used) | "NoCheck"
-  RefreshMode   \* "QueryOnStale" (a pointer ahead of the book triggers a query) | "GossipOnly"
+  RefreshMode   \* "QueryOnStale" (a pointer ahead of the book triggers a query, again and again)
+                \* | "QueryOnConnect" (only the lookup made when the peer connects) | "GossipOnly"
 
 \* The owner publishes at least one record.
 ASSUME MaxSeq \in Nat \ {0}
 ASSUME SeqMode \in {"Increasing", "Any"}
 ASSUME ChooseMode \in {"CheckExpiry", "NoCheck"}
-ASSUME RefreshMode \in {"QueryOnStale", "GossipOnly"}
+ASSUME RefreshMode \in {"QueryOnStale", "QueryOnConnect", "GossipOnly"}
 
 \* Sequence numbers the owner may sign; 0 means "no record".
 Seqs == 1..MaxSeq
@@ -46,9 +49,10 @@ VARIABLES
   book,          \* the reader's copy of the owner's record (0 when it has none)
   highest,       \* the highest seq the reader has ever accepted
   expired,       \* records whose expiry time has passed
-  choseExpired   \* the reader once picked a peer from an expired record
+  choseExpired,  \* the reader once picked a peer from an expired record
+  queried        \* the reader has queried the owner at least once
 
-vars == <<latest, pointer, inflight, book, highest, expired, choseExpired>>
+vars == <<latest, pointer, inflight, book, highest, expired, choseExpired, queried>>
 
 TypeOK ==
   /\ latest \in 0..MaxSeq
@@ -58,6 +62,7 @@ TypeOK ==
   /\ highest \in 0..MaxSeq
   /\ expired \subseteq Seqs
   /\ choseExpired \in BOOLEAN
+  /\ queried \in BOOLEAN
 
 \* Nothing is published, carried, kept or expired yet.
 Init ==
@@ -68,6 +73,7 @@ Init ==
   /\ highest = 0
   /\ expired = {}
   /\ choseExpired = FALSE
+  /\ queried = FALSE
 
 \* The reader takes record s, if the book's rule lets it. A record must not
 \* have expired, and (when sequence numbers are checked) must be newer than
@@ -86,33 +92,35 @@ Publish ==
   /\ latest < MaxSeq
   /\ latest' = latest + 1
   /\ inflight' = inflight \cup {latest + 1}
-  /\ UNCHANGED <<pointer, book, highest, expired, choseExpired>>
+  /\ UNCHANGED <<pointer, book, highest, expired, choseExpired, queried>>
 
 \* The owner's pkarr pointer catches up with its newest record.
 UpdatePointer ==
   /\ pointer < latest
   /\ pointer' = latest
-  /\ UNCHANGED <<latest, inflight, book, highest, expired, choseExpired>>
+  /\ UNCHANGED <<latest, inflight, book, highest, expired, choseExpired, queried>>
 
 \* The topic delivers one announcement it carries, in any order.
 Deliver(s) ==
   /\ s \in inflight
   /\ inflight' = inflight \ {s}
   /\ Offer(s)
-  /\ UNCHANGED <<latest, pointer, expired, choseExpired>>
+  /\ UNCHANGED <<latest, pointer, expired, choseExpired, queried>>
 
 \* The topic loses one announcement. Nothing promises gossip delivers.
 Lose(s) ==
   /\ s \in inflight
   /\ inflight' = inflight \ {s}
-  /\ UNCHANGED <<latest, pointer, book, highest, expired, choseExpired>>
+  /\ UNCHANGED <<latest, pointer, book, highest, expired, choseExpired, queried>>
 
 \* The reader sees the pointer ahead of its book (or its copy expired) and
-\* asks the owner directly, which answers with its newest record.
+\* asks the owner directly, which answers with its newest record. Looking
+\* the pointer up only when the peer connects allows one query at most.
 Query ==
-  /\ RefreshMode = "QueryOnStale"
+  /\ RefreshMode = "QueryOnStale" \/ (RefreshMode = "QueryOnConnect" /\ ~queried)
   /\ pointer > book \/ book \in expired
   /\ Offer(latest)
+  /\ queried' = TRUE
   /\ UNCHANGED <<latest, pointer, inflight, expired, choseExpired>>
 
 \* An old record's expiry time passes. The owner refreshes its newest record
@@ -123,7 +131,7 @@ Expire(s) ==
   /\ s \notin expired
   /\ \A t \in 1..(s - 1) : t \in expired
   /\ expired' = expired \cup {s}
-  /\ UNCHANGED <<latest, pointer, inflight, book, highest, choseExpired>>
+  /\ UNCHANGED <<latest, pointer, inflight, book, highest, choseExpired, queried>>
 
 \* The reader picks a peer from its copy of the record. With the expiry
 \* check it refuses an expired copy; without it, it may use one.
@@ -131,7 +139,7 @@ Choose ==
   /\ book # 0
   /\ ChooseMode = "NoCheck" \/ book \notin expired
   /\ choseExpired' = (choseExpired \/ book \in expired)
-  /\ UNCHANGED <<latest, pointer, inflight, book, highest, expired>>
+  /\ UNCHANGED <<latest, pointer, inflight, book, highest, expired, queried>>
 
 Next ==
   \/ Publish

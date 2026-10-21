@@ -3,9 +3,11 @@
 //! It signs our record when what we offer changes or before it expires,
 //! points to it from pkarr, announces it on the discovery topic, answers
 //! peers asking for records, and asks a peer for its record when the peer's
-//! pointer is ahead of our copy. It never dials: every send goes through the
+//! pointer is ahead of our copy, looking connected peers' pointers up again
+//! in rotation so a lost announcement is still recovered. It never dials: every send goes through the
 //! endpoint's admission-checked paths.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -36,6 +38,8 @@ const TICK: Duration = Duration::from_secs(10);
 pub const MAX_REPLY_RECORDS: usize = 16;
 /// Other nodes' records we keep.
 const BOOK_CAPACITY: usize = 4096;
+/// Connected peers whose pointers are looked up again, one batch per tick.
+const RESOLVES_PER_TICK: usize = 4;
 /// Peers a collection join is pointed at.
 const JOIN_HINTS: usize = 8;
 const INBOX_CAPACITY: usize = 1024;
@@ -92,6 +96,8 @@ pub enum Input {
         message: RecordsMessage,
     },
     Connected(EndpointId),
+    /// Our last connection to the peer closed.
+    Disconnected(EndpointId),
     /// `None` when the peer publishes no pointer we can read.
     Pointer {
         node: EndpointId,
@@ -158,6 +164,7 @@ impl RecordsHandle {
                 records.on_input(input, now, unix_now());
             }
             records.renew(now, unix_now());
+            records.rotate(now);
         }
     }
 }
@@ -175,6 +182,10 @@ pub struct Records<N> {
     announced: Option<Instant>,
     book: Book,
     refresh: Refresh,
+    /// Connected peers, in the order their pointers are looked up again.
+    peers: VecDeque<EndpointId>,
+    connected: RapidHashSet<EndpointId>,
+    rotated: Option<Instant>,
     net: N,
 }
 
@@ -195,6 +206,9 @@ where
             announced: None,
             book: Book::new(BOOK_CAPACITY),
             refresh: Refresh::new(),
+            peers: VecDeque::new(),
+            connected: RapidHashSet::new(),
+            rotated: None,
             net,
         }
     }
@@ -221,7 +235,17 @@ where
                 Err(_) => debug!("undecodable service record announcement"),
             },
             Input::Message { from, message } => self.on_message(from, message, unix),
-            Input::Connected(peer) => self.net.resolve(peer),
+            Input::Connected(peer) => {
+                self.net.resolve(peer);
+                if self.connected.len() < BOOK_CAPACITY && self.connected.insert(peer) {
+                    self.peers.push_back(peer);
+                }
+            }
+            Input::Disconnected(peer) => {
+                if self.connected.remove(&peer) {
+                    self.peers.retain(|known| *known != peer);
+                }
+            }
             Input::Lookup { node, reply } => {
                 let record = if node == self.me {
                     self.own.as_ref().and_then(|own| verify(own, unix).ok())
@@ -282,6 +306,25 @@ where
         self.own_expires = expires_at;
         self.changed = false;
         self.announced = Some(now);
+    }
+
+    /// Looks up the next few connected peers' pointers, once per tick. An
+    /// announcement gossip lost is then still recovered on a long-lived
+    /// connection (`ServiceRecords.tla`, `LIVE_NewestReached`).
+    pub fn rotate(&mut self, now: Instant) {
+        if self
+            .rotated
+            .is_some_and(|last| now.duration_since(last) < TICK)
+        {
+            return;
+        }
+        self.rotated = Some(now);
+        for _ in 0..RESOLVES_PER_TICK.min(self.peers.len()) {
+            if let Some(peer) = self.peers.pop_front() {
+                self.net.resolve(peer);
+                self.peers.push_back(peer);
+            }
+        }
     }
 
     fn on_message(&mut self, from: EndpointId, message: RecordsMessage, unix: u64) {

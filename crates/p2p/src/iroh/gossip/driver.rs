@@ -493,6 +493,7 @@ where
             .is_some_and(|entry| !entry.dialing && entry.live_connection().is_none());
         if unreachable {
             self.peers.remove(&peer);
+            self.delivery.disconnected(peer);
             self.queued.push_back(InEvent::PeerDisconnected(peer));
         }
     }

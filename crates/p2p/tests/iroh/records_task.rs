@@ -357,6 +357,32 @@ fn a_peer_is_asked_when_its_pointer_is_ahead_and_only_once_per_interval() {
 }
 
 #[test]
+fn connected_peers_are_looked_up_again_in_rotation_until_they_leave() {
+    let net = FakeNet::default();
+    let (mut records, now) = records_with(&net);
+    let peers: Vec<EndpointId> = (0..6).map(|_| SecretKey::generate().public()).collect();
+    for peer in &peers {
+        records.on_input(Input::Connected(*peer), now, UNIX);
+    }
+    records.on_input(Input::Connected(peers[0]), now, UNIX);
+    net.take();
+
+    records.rotate(now);
+    let first: Vec<Call> = peers[..4].iter().map(|peer| Call::Resolve(*peer)).collect();
+    assert_eq!(net.take(), first);
+    records.rotate(now + Duration::from_secs(9));
+    assert!(net.take().is_empty());
+
+    records.on_input(Input::Disconnected(peers[5]), now, UNIX);
+    records.rotate(now + Duration::from_secs(10));
+    let second: Vec<Call> = [peers[4], peers[0], peers[1], peers[2]]
+        .iter()
+        .map(|peer| Call::Resolve(*peer))
+        .collect();
+    assert_eq!(net.take(), second);
+}
+
+#[test]
 fn a_peer_without_a_pointer_is_asked_only_while_we_hold_nothing_for_it() {
     let net = FakeNet::default();
     let (mut records, now) = records_with(&net);

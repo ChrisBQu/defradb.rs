@@ -29,6 +29,11 @@ impl Delivery {
         self.records.push(RecordsInput::Connected(peer));
     }
 
+    /// `peer` has no connection left.
+    pub(super) fn disconnected(&self, peer: EndpointId) {
+        self.records.push(RecordsInput::Disconnected(peer));
+    }
+
     pub(super) async fn neighbor(
         &self,
         topic: &str,
