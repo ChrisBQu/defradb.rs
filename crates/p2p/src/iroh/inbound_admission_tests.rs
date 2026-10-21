@@ -175,8 +175,8 @@ async fn admit_one(tag: &[u8], len: u32, body: Body, deadlines: InboundDeadlines
         connection.remote_id(),
         &peer_id,
     )
-        .await
-        .map(|(_, payload, lease)| (payload, lease));
+    .await
+    .map(|(_, payload, lease)| (payload, lease));
 
     let stop_code = if lease.is_some() {
         None
