@@ -48,6 +48,22 @@ use Tier::{Behavioral, Boundary, Contract};
 
 pub const PROPERTIES: &[Property] = &[
     Property {
+        family: "Peer connection observation",
+        name: "NoSpuriousDenial — queued lifecycle notification cannot hide a connected peer",
+        axis: Tla,
+        anchor: "crates/p2p/src/sync/coordinator/authorizer.rs RuntimeAuthorizer::peer_connected; access_tests.rs live_connection_allows_pull_before_lifecycle_notification_without_granting_push",
+        model_ref: "MC_PeerConnection_Green.cfg / MC_PeerConnection_Red_StaleObservation.cfg",
+        tiers: &[Contract],
+    },
+    Property {
+        family: "Peer connection observation",
+        name: "PeerConnection.live_is_connected / connection_does_not_grant_push",
+        axis: Lean,
+        anchor: "crates/p2p/src/sync/coordinator/authorizer.rs RuntimeAuthorizer::peer_connected",
+        model_ref: "PeerConnection.lean",
+        tiers: &[Contract],
+    },
+    Property {
         family: "Schema publication completion",
         name: "VisibleBeforeReply — committed schemas are published before their callers resume",
         axis: Tla,

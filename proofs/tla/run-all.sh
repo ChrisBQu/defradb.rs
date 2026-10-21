@@ -7,6 +7,8 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 
 # rows: <cfg> <module> <GREEN|RED>
 RUNS=(
+  "MC_PeerConnection_Green.cfg PeerConnection.tla GREEN"
+  "MC_PeerConnection_Red_StaleObservation.cfg PeerConnection.tla RED"
   "MC_SchemaPublication_Green.cfg SchemaPublication.tla GREEN"
   "MC_SchemaPublication_Red_EarlyReply.cfg SchemaPublication.tla RED"
   "MC_RetryPreparedInputs_Green.cfg RetryPreparedInputs.tla GREEN" # exact-context external answer survives commit retry

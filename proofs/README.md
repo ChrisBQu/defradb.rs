@@ -50,6 +50,7 @@ section is the **diff**: what is proven vs. the accepted gap.
 | Retry input and marker fencing | TLA+ | db, query, storage |
 | Collection schema-version OCC | TLA+ | db |
 | Schema publication completion | TLA+ / Lean | storage, db |
+| Peer connection observation | TLA+ / Lean | p2p |
 | Explicit transaction statement atomicity | TLA+ | query, db, storage |
 | Engine ticker export | TLA+ & Lean | telemetry, storage |
 | Worker pool CPU ledger | TLA+ & Lean | workers |

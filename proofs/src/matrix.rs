@@ -38,6 +38,7 @@ pub const MODELED_FAMILIES: &[&str] = &[
     "Retry input and marker fencing",
     "Collection schema-version OCC",
     "Schema publication completion",
+    "Peer connection observation",
     "Explicit transaction statement atomicity",
     "Engine ticker export",
     "Worker pool CPU ledger",
