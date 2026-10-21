@@ -308,3 +308,73 @@ fn pruning_a_commit_keeps_a_field_block_that_is_still_a_head() {
     })
     .unwrap()
 }
+
+#[test]
+fn pruning_a_commit_keeps_an_encryption_block_a_retained_commit_inherits() {
+    workers::block_on(async {
+        let (blockstore, systemstore) = stores().await;
+        let encryption_cid = Block::new(
+            CrdtDelta::Lww(LwwDeltaPayload {
+                field_name: "_encryption".to_string(),
+                schema_version_id: "v1".to_string(),
+                priority: 1,
+                data: vec![9],
+            }),
+            vec![],
+            vec![],
+        )
+        .generate_cid()
+        .unwrap();
+        let commit = |priority, heads| {
+            Block::new_with_options(
+                CrdtDelta::Composite(CompositeDeltaPayload {
+                    schema_version_id: "v1".to_string(),
+                    priority,
+                    status: 1,
+                }),
+                heads,
+                vec![],
+                Some(encryption_cid),
+                None,
+            )
+        };
+        let old = commit(1, vec![]);
+        let old_cid = old.generate_cid().unwrap();
+        let head = commit(2, vec![old_cid]);
+        let head_cid = head.generate_cid().unwrap();
+        blockstore
+            .set(&encryption_cid.to_bytes(), &[9])
+            .await
+            .unwrap();
+        for (cid, bytes) in [
+            (old_cid, old.to_dag_cbor().unwrap()),
+            (head_cid, head.to_dag_cbor().unwrap()),
+        ] {
+            blockstore.set(&cid.to_bytes(), &bytes).await.unwrap();
+        }
+        for cid in [encryption_cid, old_cid, head_cid] {
+            db::docid::map::set_block_doc_id_mapping(&systemstore, &cid.to_string(), "doc-a")
+                .await
+                .unwrap();
+        }
+
+        let retained = referenced_blocks(&blockstore, [head_cid]).await.unwrap();
+        delete_owned_commit(&blockstore, &systemstore, &old_cid, "doc-a", &retained)
+            .await
+            .unwrap();
+
+        assert!(blockstore.get(&old_cid.to_bytes()).await.unwrap().is_none());
+        assert!(blockstore
+            .get(&encryption_cid.to_bytes())
+            .await
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            db::docid::map::get_doc_ids_for_block(&systemstore, &encryption_cid.to_string())
+                .await
+                .unwrap(),
+            vec!["doc-a".to_string()]
+        );
+    })
+    .unwrap()
+}
