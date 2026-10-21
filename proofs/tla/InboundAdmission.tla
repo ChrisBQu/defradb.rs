@@ -20,7 +20,7 @@
 \*
 \* Code it models (crates/p2p/src):
 \*   iroh/endpoint_streams.rs  admit_stream               (tag, length, admit, body read until idle and a total deadline)
-\*   iroh/inbound_budget.rs    body_deadline              (idle deadline plus length over the minimum rate)
+\*   iroh/inbound_budget.rs    InboundDeadlines::body     (idle deadline plus length over the minimum rate, capped)
 \*   iroh/inbound_budget.rs    InboundBudget::admit       (class budget + peer share)
 \*   iroh/inbound_budget.rs    InboundBudget::peer_share  (one share for every connection of a peer)
 \*   sync/dispatch_queue.rs    dispatch_queue             (one queue per dispatch lane)

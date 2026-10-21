@@ -15,9 +15,7 @@ use super::endpoint::{
     spawn_task, EndpointResources, PendingPushLogReplies, SpawnedTasks, SubscriptionSenders,
 };
 use super::gossip_heal;
-use super::inbound_budget::{
-    body_deadline, InboundBudget, InboundLease, PeerShare, ADMIT_DEADLINE, BODY_IDLE_DEADLINE,
-};
+use super::inbound_budget::{InboundBudget, InboundLease, PeerShare};
 use super::peer_map::{endpoint_id_to_peer_id, SharedPeerMap};
 use super::protocols;
 use super::services::{self, Service};
@@ -282,8 +280,9 @@ async fn admit_stream(
         let _ = recv.stop(RESET_MESSAGE_TOO_LARGE.into());
         return None;
     }
+    let deadlines = budget.deadlines();
     let Ok(lease) = budget
-        .admit(share, service.priority, len, ADMIT_DEADLINE)
+        .admit(share, service.priority, len, deadlines.admit)
         .await
     else {
         debug!(peer_id = %peer_id, len, class = service.priority.name(), "No inbound room before the deadline");
@@ -293,8 +292,8 @@ async fn admit_stream(
     // The idle deadline catches a sender that stops; the total deadline catches
     // one that trickles bytes to keep its lease.
     let payload = n0_future::time::timeout(
-        body_deadline(len),
-        protocols::read_body_until_idle(recv, len, BODY_IDLE_DEADLINE),
+        deadlines.body(len),
+        protocols::read_body_until_idle(recv, len, deadlines.idle),
     )
     .await
     .unwrap_or(Ok(None))

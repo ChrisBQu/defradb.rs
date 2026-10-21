@@ -35,30 +35,51 @@ const fn permits_for(len: usize) -> usize {
     len.div_ceil(PERMIT_BYTES)
 }
 
-/// How long a stream waits for room before it is reset.
-pub const ADMIT_DEADLINE: Duration = Duration::from_secs(5);
+/// How long a stream may wait for room, and how long its body may take.
+#[derive(Debug, Clone, Copy)]
+pub struct InboundDeadlines {
+    /// How long a stream waits for room before it is reset.
+    pub admit: Duration,
+    /// How long a body may go without a single byte arriving. A sender that
+    /// stalls is reset so it cannot hold its room.
+    pub idle: Duration,
+    /// The slowest average rate, in bytes per second, at which a body may
+    /// arrive. A sender that trickles bytes often enough to dodge the idle
+    /// deadline still has to meet it, or it would hold its room for as long
+    /// as it likes.
+    pub min_rate: usize,
+    /// The longest any body may take, so the largest bodies cannot hold a
+    /// class for the length over the minimum rate.
+    pub max_body: Duration,
+}
 
-/// How long a body may go without a single byte arriving. A sender that
-/// stalls is reset so it cannot hold its room.
-pub const BODY_IDLE_DEADLINE: Duration = Duration::from_secs(10);
+impl Default for InboundDeadlines {
+    fn default() -> Self {
+        Self {
+            admit: Duration::from_secs(5),
+            idle: Duration::from_secs(10),
+            min_rate: 32 * 1024,
+            max_body: Duration::from_secs(120),
+        }
+    }
+}
 
-/// The slowest average rate, in bytes per second, at which a body may arrive.
-/// A sender that trickles bytes often enough to dodge the idle deadline still
-/// has to meet it, or it would hold its room for as long as it likes.
-const MIN_BODY_RATE: usize = 32 * 1024;
-
-/// The longest a `len`-byte body may take to arrive in full: the idle
-/// deadline plus the time it needs at the slowest accepted rate.
-pub fn body_deadline(len: usize) -> Duration {
-    let at_minimum_rate =
-        Duration::from_millis((len as u64).saturating_mul(1000) / MIN_BODY_RATE as u64);
-    BODY_IDLE_DEADLINE + at_minimum_rate
+impl InboundDeadlines {
+    /// The longest a `len`-byte body may take to arrive in full: the idle
+    /// deadline plus the time it needs at the slowest accepted rate, and never
+    /// more than `max_body`.
+    pub fn body(&self, len: usize) -> Duration {
+        let at_minimum_rate =
+            Duration::from_millis((len as u64).saturating_mul(1000) / self.min_rate as u64);
+        (self.idle + at_minimum_rate).min(self.max_body)
+    }
 }
 
 /// The node-wide inbound byte budgets.
 #[derive(Debug)]
 pub struct InboundBudget {
     classes: [ClassBudget; 4],
+    deadlines: InboundDeadlines,
     /// Each peer's share, alive while any of its connections or leases is.
     peers: Atom<RapidHashMap<EndpointId, Weak<PeerShare>>>,
 }
@@ -107,17 +128,26 @@ impl Drop for InboundLease {
 
 impl Default for InboundBudget {
     fn default() -> Self {
+        Self::with_deadlines(InboundDeadlines::default())
+    }
+}
+
+impl InboundBudget {
+    pub fn with_deadlines(deadlines: InboundDeadlines) -> Self {
         Self {
             classes: BUDGET_BYTES.map(|capacity| ClassBudget {
                 room: Arc::new(Semaphore::new(permits_for(capacity))),
                 stats: Arc::default(),
             }),
+            deadlines,
             peers: Atom::default(),
         }
     }
-}
 
-impl InboundBudget {
+    pub fn deadlines(&self) -> InboundDeadlines {
+        self.deadlines
+    }
+
     /// The share of `peer`, half of each class budget: the one its other
     /// connections or held bodies already use, or a fresh one.
     pub fn peer_share(&self, peer: EndpointId) -> Arc<PeerShare> {
@@ -230,12 +260,15 @@ mod tests {
     }
 
     #[test]
-    fn a_body_deadline_grows_with_the_declared_length() {
-        assert_eq!(body_deadline(0), BODY_IDLE_DEADLINE);
+    fn a_body_deadline_grows_with_the_declared_length_up_to_a_ceiling() {
+        let deadlines = InboundDeadlines::default();
+        assert_eq!(deadlines.body(0), deadlines.idle);
         assert_eq!(
-            body_deadline(MIN_BODY_RATE * 30),
-            BODY_IDLE_DEADLINE + Duration::from_secs(30)
+            deadlines.body(deadlines.min_rate * 30),
+            deadlines.idle + Duration::from_secs(30)
         );
+        let largest = SERVICES.iter().map(|service| service.max_message).max();
+        assert_eq!(deadlines.body(largest.unwrap()), deadlines.max_body);
     }
 
     #[test]

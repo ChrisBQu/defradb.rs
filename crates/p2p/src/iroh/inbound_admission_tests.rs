@@ -111,7 +111,7 @@ async fn a_car_response_may_be_larger_than_a_general_message() {
 
 #[tokio::test]
 async fn a_body_that_never_arrives_is_stopped_and_frees_its_room() {
-    let deadline = super::inbound_budget::BODY_IDLE_DEADLINE;
+    let deadline = super::inbound_budget::InboundDeadlines::default().idle;
     assert_eq!(
         stop_code_for(protocols::STREAM_IDENTITY, 1, deadline + STOPPED).await,
         Some(5)
@@ -120,14 +120,15 @@ async fn a_body_that_never_arrives_is_stopped_and_frees_its_room() {
 
 #[tokio::test]
 async fn a_body_that_trickles_in_is_stopped_and_frees_its_room() {
-    let idle = super::inbound_budget::BODY_IDLE_DEADLINE;
+    let deadlines = super::inbound_budget::InboundDeadlines::default();
+    let idle = deadlines.idle;
     let len = 1000;
     assert!(Duration::from_secs(2) < idle);
     assert_eq!(
         stop_code_for_trickle(
             protocols::STREAM_IDENTITY,
             len,
-            super::inbound_budget::body_deadline(len as usize) + STOPPED,
+            deadlines.body(len as usize) + STOPPED,
             Some(Duration::from_secs(2)),
         )
         .await,
