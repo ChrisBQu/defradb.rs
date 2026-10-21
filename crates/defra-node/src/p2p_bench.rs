@@ -680,16 +680,20 @@ async fn measure_pull_from_providers(providers: usize) -> ProviderPull {
 
 /// Measures whether pulling from more providers costs more bytes than the history is
 /// worth: each block sync asks every provider for the same CAR and keeps the first.
-#[tokio::test(flavor = "multi_thread")]
+#[test]
 #[ignore = "benchmark: spins up several networked nodes per provider count"]
-async fn bench_pull_from_providers() {
-    println!("pull of a {PROVIDER_HISTORY_DEPTH}-update history from N providers");
-    for &providers in PROVIDER_COUNTS {
-        let pull = measure_pull_from_providers(providers).await;
-        let total: u64 = pull.bytes.iter().sum();
-        println!(
-            "providers={providers} elapsed={:>9.2?} total_bytes={total:>9} bytes={:?} fetches={:?}",
-            pull.elapsed, pull.bytes, pull.fetches
-        );
-    }
+fn bench_pull_from_providers() {
+    edge::testing::edge()
+        .block_on(async {
+            println!("pull of a {PROVIDER_HISTORY_DEPTH}-update history from N providers");
+            for &providers in PROVIDER_COUNTS {
+                let pull = measure_pull_from_providers(providers).await;
+                let total: u64 = pull.bytes.iter().sum();
+                println!(
+                    "providers={providers} elapsed={:>9.2?} total_bytes={total:>9} bytes={:?} fetches={:?}",
+                    pull.elapsed, pull.bytes, pull.fetches
+                );
+            }
+        })
+        .unwrap()
 }
