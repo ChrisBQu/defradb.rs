@@ -41,3 +41,9 @@ lean_lib DefaultPool where
 
 @[default_target]
 lean_lib DiskAnnCodes where
+
+@[default_target]
+lean_lib SchemaPublication where
+
+@[default_target]
+lean_lib PeerConnection where
