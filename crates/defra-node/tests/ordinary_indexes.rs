@@ -132,8 +132,9 @@ fn ordered_index_stream_stops_after_passing_residual_rows() {
     .unwrap()
 }
 
-#[tokio::test]
-async fn ordered_prefix_sorts_only_the_boundary_tie_group() {
+#[test]
+fn ordered_prefix_sorts_only_the_boundary_tie_group() {
+    workers::block_on(async {
     let node = EmbeddedNode::builder().build().await.unwrap();
     node.add_schema("type TieEntry @index(fields: [\"scope\", \"seq\"], unique: true) { scope: String seq: Int rank: Int }")
         .await.unwrap();
@@ -178,10 +179,13 @@ async fn ordered_prefix_sorts_only_the_boundary_tie_group() {
         assert!(fetched <= 6, "page must not materialize 122 rows: {plan}");
     }
     node.shutdown().await;
+    })
+    .unwrap()
 }
 
-#[tokio::test]
-async fn partial_index_order_keeps_residual_filter_and_page_offset() {
+#[test]
+fn partial_index_order_keeps_residual_filter_and_page_offset() {
+    workers::block_on(async {
     let node = EmbeddedNode::builder().build().await.unwrap();
     node.add_schema("type TiePage @index(fields: [\"scope\", \"seq\"]) { scope: String @index seq: Int rank: Int keep: Boolean }").await.unwrap();
     let input = (0..120)
@@ -218,4 +222,6 @@ async fn partial_index_order_keeps_residual_filter_and_page_offset() {
         "must finish two matching tie groups: {plan}"
     );
     node.shutdown().await;
+    })
+    .unwrap()
 }
