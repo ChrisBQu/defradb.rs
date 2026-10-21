@@ -2200,10 +2200,11 @@ fn allow_p2p_peer_authorizes_a_peer_refused_by_the_allowlist() {
             let p2p_b = node_b.p2p().expect("node_b p2p");
             let peer_a = p2p_a.local_peer_id().await.expect("node_a peer id");
 
-            p2p_a
-                .connect_peer(&addr_b)
-                .await
-                .expect("dial reaches node_b");
+            // An inbound allowlist refusal may surface as a timed-out dial
+            // rather than an established outbound connection. The property
+            // under test is that node_b never admits this peer before the
+            // runtime allow call below.
+            let _refused_dial = p2p_a.connect_peer(&addr_b).await;
 
             let deadline = Instant::now() + Duration::from_millis(500);
             while Instant::now() < deadline {
