@@ -25,16 +25,18 @@ impl Refresh {
         }
     }
 
-    /// Whether to query `node` now, given the pointer it publishes. Records
-    /// the ask, so a node is asked at most once per interval.
+    /// Whether to query `node` now (`unix` seconds for the book), given the
+    /// pointer it publishes. Records the ask, so a node is asked at most once
+    /// per interval.
     pub fn check(
         &mut self,
         book: &Book,
         node: EndpointId,
         pointer: &Pointer,
         now: Instant,
+        unix: u64,
     ) -> bool {
-        if !book.is_behind(&node, pointer) {
+        if !book.is_behind(&node, pointer, unix) {
             return false;
         }
         if self

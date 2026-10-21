@@ -7,12 +7,16 @@ it before keeping it: the body must be small enough, the signature must be
 the sender's, it must not have expired, it must not claim to stay valid for
 too long, and it must not list too many services or overlong names. The
 book keeps one record per node, and a record only replaces one with a lower
-sequence number.
+sequence number or one that has expired: an expired record counts as none,
+so a node whose sequence number went back (its clock was corrected) is not
+refused once its old record runs out.
 
 What must never happen:
 * a record that breaks any limit is accepted (`validate_sound`), or a record
   that keeps every limit is refused (`validate_complete`);
-* the book steps back to a lower sequence number (`offer_never_lowers`);
+* the book steps back from a live record to a lower sequence number
+  (`offer_never_lowers`);
+* an expired record keeps out a valid one (`offer_replaces_expired`);
 * the book takes a record that fails validation (`offer_keeps_only_valid`);
 * an expired record is handed out (`live_not_expired`).
 
@@ -103,17 +107,26 @@ theorem validate_complete (l : Limits) (now : Nat) (r : Record)
   simp only [validate, Bool.and_eq_true, decide_eq_true_eq, List.all_eq_true]
   exact ⟨⟨⟨⟨⟨hb, hs⟩, he⟩, ht⟩, hn⟩, hall⟩
 
+-- What the book hands out for a node: its record, only while unexpired.
+def live (now : Nat) (held : Option Record) : Option Record :=
+  held.filter (fun r => decide (now < r.expiresAt))
+
 -- The book's slot for one node: take the new record only if it passes and
--- is newer than what the slot holds; otherwise keep what is there.
+-- is newer than the live record the slot holds; otherwise keep what is there.
 def offer (l : Limits) (now : Nat) (held : Option Record) (r : Record) : Option Record :=
-  if validate l now r = true ∧ held.all (fun old => old.seq < r.seq) = true then some r
+  if validate l now r = true ∧ (live now held).all (fun old => old.seq < r.seq) = true then some r
   else held
 
--- Promise: offering a record never lowers the slot's sequence number.
-theorem offer_never_lowers (l : Limits) (now : Nat) (old r : Record) :
-    -- Whatever is offered, the slot still holds a record at least as new.
+-- Promise: offering a record never lowers the sequence number of a live slot.
+theorem offer_never_lowers (l : Limits) (now : Nat) (old r : Record)
+    -- Given the slot's record has not expired,
+    (hlive : now < old.expiresAt) :
+    -- whatever is offered, the slot still holds a record at least as new.
     ∃ kept, offer l now (some old) r = some kept ∧ old.seq ≤ kept.seq := by
+  have hl : live now (some old) = some old := by
+    simp only [live, Option.filter_some, decide_eq_true_eq, hlive, ↓reduceIte]
   unfold offer
+  rw [hl]
   -- The record is taken only when it is newer;
   by_cases h : validate l now r = true ∧ (some old).all (fun o => o.seq < r.seq) = true
   · simp only [h, and_self, ↓reduceIte, Option.some.injEq, exists_eq_left']
@@ -121,6 +134,19 @@ theorem offer_never_lowers (l : Limits) (now : Nat) (old r : Record) :
     omega
   -- otherwise the old record stays.
   · simp only [h, ↓reduceIte, Option.some.injEq, exists_eq_left', Nat.le_refl]
+
+-- Promise: an expired record never keeps out a valid one, whatever its seq.
+theorem offer_replaces_expired (l : Limits) (now : Nat) (old r : Record)
+    -- Given the slot's record has expired and the offered one passes,
+    (hexp : old.expiresAt ≤ now) (hv : validate l now r = true) :
+    -- the slot takes the offered record.
+    offer l now (some old) r = some r := by
+  have hl : live now (some old) = none := by
+    simp only [live, Option.filter_some, decide_eq_true_eq]
+    split <;> first | rfl | omega
+  unfold offer
+  rw [hl]
+  simp only [hv, Option.all_none, and_self, ↓reduceIte]
 
 -- Promise: whatever the slot holds after an offer is either the record it
 -- held before or a record that passed validation.
@@ -137,10 +163,6 @@ theorem offer_keeps_only_valid (l : Limits) (now : Nat) (held : Option Record) (
     exact Or.inr hok.1
   -- Not taken: the slot is unchanged.
   · exact Or.inl h
-
--- What the book hands out for a node: its record, only while unexpired.
-def live (now : Nat) (held : Option Record) : Option Record :=
-  held.filter (fun r => decide (now < r.expiresAt))
 
 -- Promise: a record the book hands out has not expired.
 theorem live_not_expired (now : Nat) (held : Option Record) (r : Record)

@@ -238,7 +238,7 @@ where
                     None if self.book.live(&node, unix).is_none() => Pointer { seq: 0, hash: 0 },
                     None => return,
                 };
-                if node != self.me && self.refresh.check(&self.book, node, &pointer, now) {
+                if node != self.me && self.refresh.check(&self.book, node, &pointer, now, unix) {
                     self.net.send(
                         node,
                         RecordsMessage::Ask {

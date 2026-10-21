@@ -22,7 +22,7 @@ struct Held {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Offered {
     Taken,
-    /// We already hold this node's record at an equal or higher seq.
+    /// We already hold this node's live record at an equal or higher seq.
     Stale,
     /// The book is full of live records. Records are self-signed and node
     /// keys are free, so an unsolicited record never displaces a live one.
@@ -38,15 +38,14 @@ impl Book {
         }
     }
 
-    /// Keeps `signed` if it is valid at `now` and newer than what we hold
-    /// for its node. A full book drops expired records to make room.
+    /// Keeps `signed` if it is valid at `now` and newer than the live record
+    /// we hold for its node. A full book drops expired records to make room.
     pub fn offer(&mut self, signed: SignedRecord, now: u64) -> Result<Offered, Rejection> {
         let record = verify(&signed, now)?;
         let node = EndpointId::from_bytes(&record.node).map_err(|_| Rejection::BadSignature)?;
         if self
-            .held
-            .get(&node)
-            .is_some_and(|old| old.record.seq >= record.seq)
+            .live(&node, now)
+            .is_some_and(|old| old.seq >= record.seq)
         {
             return Ok(Offered::Stale);
         }
@@ -91,10 +90,10 @@ impl Book {
             .collect()
     }
 
-    /// Whether `pointer` names a newer record than the one we hold.
-    pub fn is_behind(&self, node: &EndpointId, pointer: &Pointer) -> bool {
-        match self.held.get(node) {
-            Some(held) => pointer.seq > held.record.seq,
+    /// Whether `pointer` names a newer record than the live one we hold.
+    pub fn is_behind(&self, node: &EndpointId, pointer: &Pointer, now: u64) -> bool {
+        match self.live(node, now) {
+            Some(record) => pointer.seq > record.seq,
             None => true,
         }
     }

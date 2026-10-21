@@ -17,7 +17,7 @@
 \* record per number, so the number says which record it is.
 \*
 \* Code it models (crates/p2p/src/iroh/records):
-\*   book.rs      Book::offer     (a record replaces only a lower seq, never an expired one)
+\*   book.rs      Book::offer     (a record replaces a lower seq or an expired one, and is never expired)
 \*   book.rs      Book::live      (an expired record is never handed out)
 \*   refresh.rs   Refresh::check  (query the owner when its pointer is ahead of the book)
 \*   task.rs      Records::renew  (Publish and UpdatePointer: a higher seq, then its pointer)
@@ -71,10 +71,11 @@ Init ==
 
 \* The reader takes record s, if the book's rule lets it. A record must not
 \* have expired, and (when sequence numbers are checked) must be newer than
-\* the copy the reader already has.
+\* the copy the reader already has, unless that copy has expired: an expired
+\* copy counts as none, so an owner whose seq went back is not shut out.
 Offer(s) ==
   IF /\ s \notin expired
-     /\ SeqMode = "Any" \/ s > book
+     /\ SeqMode = "Any" \/ s > book \/ book \in expired
   THEN /\ book' = s
        \* Remember the highest seq ever accepted, to catch a step backwards.
        /\ highest' = IF s > highest THEN s ELSE highest
@@ -106,19 +107,21 @@ Lose(s) ==
   /\ inflight' = inflight \ {s}
   /\ UNCHANGED <<latest, pointer, book, highest, expired, choseExpired>>
 
-\* The reader sees the pointer ahead of its book and asks the owner directly,
-\* which answers with its newest record.
+\* The reader sees the pointer ahead of its book (or its copy expired) and
+\* asks the owner directly, which answers with its newest record.
 Query ==
   /\ RefreshMode = "QueryOnStale"
-  /\ pointer > book
+  /\ pointer > book \/ book \in expired
   /\ Offer(latest)
   /\ UNCHANGED <<latest, pointer, inflight, expired, choseExpired>>
 
 \* An old record's expiry time passes. The owner refreshes its newest record
-\* before it expires, so only records it has replaced run out.
+\* before it expires, so only records it has replaced run out, in the order
+\* it signed them.
 Expire(s) ==
   /\ s < latest
   /\ s \notin expired
+  /\ \A t \in 1..(s - 1) : t \in expired
   /\ expired' = expired \cup {s}
   /\ UNCHANGED <<latest, pointer, inflight, book, highest, choseExpired>>
 

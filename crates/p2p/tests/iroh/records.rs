@@ -233,6 +233,26 @@ fn a_full_book_of_live_records_refuses_newcomers() {
 }
 
 #[test]
+fn an_expired_record_no_longer_holds_back_its_node() {
+    let key = SecretKey::generate();
+    let node = key.public();
+    let mut book = Book::new(8);
+    book.offer(record(&key, 5, NOW + 60, vec![]), NOW).unwrap();
+
+    assert!(!book.is_behind(&node, &Pointer { seq: 0, hash: 0 }, NOW + 59));
+    assert!(book.is_behind(&node, &Pointer { seq: 0, hash: 0 }, NOW + 60));
+    assert_eq!(
+        book.offer(record(&key, 3, NOW + 120, vec![]), NOW + 59),
+        Ok(Offered::Stale)
+    );
+    assert_eq!(
+        book.offer(record(&key, 3, NOW + 120, vec![]), NOW + 60),
+        Ok(Offered::Taken)
+    );
+    assert_eq!(book.live(&node, NOW + 60).unwrap().seq, 3);
+}
+
+#[test]
 fn a_pointer_reads_back_as_printed() {
     let pointer = Pointer {
         seq: 0x1234,
@@ -264,12 +284,12 @@ fn the_book_is_behind_only_a_higher_seq() {
     let key = SecretKey::generate();
     let node = key.public();
     let mut book = Book::new(8);
-    assert!(book.is_behind(&node, &Pointer { seq: 0, hash: 0 }));
+    assert!(book.is_behind(&node, &Pointer { seq: 0, hash: 0 }, NOW));
 
     book.offer(record(&key, 5, NOW + 60, vec![]), NOW).unwrap();
 
-    assert!(!book.is_behind(&node, &Pointer { seq: 5, hash: 1 }));
-    assert!(book.is_behind(&node, &Pointer { seq: 6, hash: 0 }));
+    assert!(!book.is_behind(&node, &Pointer { seq: 5, hash: 1 }, NOW));
+    assert!(book.is_behind(&node, &Pointer { seq: 6, hash: 0 }, NOW));
 }
 
 #[test]
@@ -329,8 +349,8 @@ fn a_node_is_asked_once_per_interval_and_only_when_behind() {
     let current = Pointer { seq: 5, hash: 0 };
     let newer = Pointer { seq: 6, hash: 0 };
 
-    assert!(!refresh.check(&book, node, &current, start));
-    assert!(refresh.check(&book, node, &newer, start));
-    assert!(!refresh.check(&book, node, &newer, start + Duration::from_secs(29)));
-    assert!(refresh.check(&book, node, &newer, start + Duration::from_secs(30)));
+    assert!(!refresh.check(&book, node, &current, start, NOW));
+    assert!(refresh.check(&book, node, &newer, start, NOW));
+    assert!(!refresh.check(&book, node, &newer, start + Duration::from_secs(29), NOW));
+    assert!(refresh.check(&book, node, &newer, start + Duration::from_secs(30), NOW));
 }
