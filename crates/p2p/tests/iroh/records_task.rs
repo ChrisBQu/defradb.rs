@@ -720,3 +720,34 @@ fn replicator_offers_list_only_nodes_that_offer_and_hold_the_collection() {
     every.sort();
     assert_eq!(lookup(&mut records, None), every);
 }
+
+#[tokio::test]
+async fn changes_queue_past_a_full_hint_lane_and_come_out_first() {
+    let handle = RecordsHandle::new();
+    let peer = SecretKey::generate().public();
+    // No task reads the handle, so hints fill their lane and the rest drop.
+    for _ in 0..2048 {
+        handle.push(Input::Connected(peer));
+    }
+    // A change never waits for room, however many queue behind the hints.
+    for n in 0..2048 {
+        handle.push_change(Input::Collection {
+            id: n.to_string(),
+            held: true,
+        });
+    }
+
+    for n in 0..2048 {
+        match n0_future::time::timeout(Duration::from_secs(5), handle.next()).await {
+            Ok(Some(Input::Collection { id, held: true })) => assert_eq!(id, n.to_string()),
+            _ => panic!("change {n} was not read first"),
+        }
+    }
+    let mut hints = 0;
+    handle.close();
+    while let Some(input) = handle.next().await {
+        assert!(matches!(input, Input::Connected(p) if p == peer));
+        hints += 1;
+    }
+    assert!(hints < 2048, "a full hint lane drops what does not fit");
+}

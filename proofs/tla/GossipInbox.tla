@@ -22,6 +22,8 @@
 \*   gossip/driver.rs         Driver::emit   (waits for room on the event lane)
 \*   gossip/mod.rs            GossipHandle::publish  (never waits)
 \*   endpoint_commands.rs     handle_command (Publish answered inline)
+\* The records task takes its inputs the same way, so this model checks it too:
+\*   records/task.rs          RecordsHandle::push_change, push, next  (two lanes)
 EXTENDS Naturals
 
 CONSTANTS

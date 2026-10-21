@@ -150,17 +150,13 @@ pub(super) async fn handle_command(
         IrohCommand::SetServiceProfile { profile, reply } => {
             resources
                 .records
-                .push_change(RecordsInput::Profile(profile))
-                .await;
+                .push_change(RecordsInput::Profile(profile));
             let _ = reply.send(Ok(()));
         }
         IrohCommand::ServiceRecord { peer_id, reply } => match parse_endpoint_id(&peer_id) {
-            Ok(node) => {
-                resources
-                    .records
-                    .push_change(RecordsInput::Lookup { node, reply })
-                    .await
-            }
+            Ok(node) => resources
+                .records
+                .push_change(RecordsInput::Lookup { node, reply }),
             Err(error) => {
                 let _ = reply.send(Err(error));
             }
@@ -174,35 +170,29 @@ pub(super) async fn handle_command(
                 .iter()
                 .filter_map(|peer| parse_endpoint_id(peer).ok())
                 .collect();
-            resources
-                .records
-                .push_change(RecordsInput::Providers {
-                    id: collection_id,
-                    ask,
-                    reply,
-                })
-                .await;
+            resources.records.push_change(RecordsInput::Providers {
+                id: collection_id,
+                ask,
+                reply,
+            });
         }
         IrohCommand::ReplicatorOffers {
             collection_id,
             reply,
         } => {
-            resources
-                .records
-                .push_change(RecordsInput::Replicators {
-                    id: collection_id,
-                    reply,
-                })
-                .await;
+            resources.records.push_change(RecordsInput::Replicators {
+                id: collection_id,
+                reply,
+            });
         }
         IrohCommand::Subscribe { topic, reply } => {
             let joined = gossip.subscribe(topic.to_string());
-            held_collection(resources, &topic, true).await;
+            held_collection(resources, &topic, true);
             let _ = reply.send(Ok(joined));
         }
         IrohCommand::Unsubscribe { topic, reply } => {
             let left = gossip.unsubscribe(topic.to_string());
-            held_collection(resources, &topic, false).await;
+            held_collection(resources, &topic, false);
             let _ = reply.send(Ok(left));
         }
         IrohCommand::Publish { topic, msg, reply } => {
@@ -815,19 +805,12 @@ fn handle_deny_peer(peer_id: PeerId, resources: &EndpointResources) -> crate::er
 
 /// Tells the records task about a collection we start or stop holding, so
 /// our record advertises it and its join is pointed at other holders.
-async fn held_collection(
-    resources: &EndpointResources,
-    topic: &crate::topics::DefraTopic,
-    held: bool,
-) {
+fn held_collection(resources: &EndpointResources, topic: &crate::topics::DefraTopic, held: bool) {
     if let crate::topics::DefraTopic::Collection(id) = topic {
-        resources
-            .records
-            .push_change(RecordsInput::Collection {
-                id: id.clone(),
-                held,
-            })
-            .await;
+        resources.records.push_change(RecordsInput::Collection {
+            id: id.clone(),
+            held,
+        });
     }
 }
 
