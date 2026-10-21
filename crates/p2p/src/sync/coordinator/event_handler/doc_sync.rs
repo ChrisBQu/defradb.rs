@@ -410,10 +410,11 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                             doc_id = %doc_id,
                             "Fetching DocSync DAG"
                         );
-                        let alternate_providers = super::super::dag_fetcher::alternate_providers(
-                            &transport, &root_cid, "",
-                        )
-                        .await;
+                        let alternate_providers =
+                            super::super::dag_fetcher::connected_alternate_providers(
+                                &transport, &root_cid,
+                            )
+                            .await;
                         super::super::dag_fetcher::poll_fetch_dag(
                             transport,
                             blockstore,

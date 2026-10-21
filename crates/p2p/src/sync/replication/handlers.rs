@@ -137,6 +137,7 @@ where
         crate::sync::coordinator::dag_fetcher::add_collection_providers(
             &transport,
             &collection_id,
+            &source_peer,
             &mut alternate_providers,
         )
         .await;

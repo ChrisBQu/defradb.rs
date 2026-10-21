@@ -308,6 +308,7 @@ impl<B: Blockstore + 'static, T: P2PTransport> SyncCoordinator<B, T> {
                         &transport,
                         &root_cid,
                         &collection_id,
+                        &source_peer,
                     )
                     .await;
                     super::super::dag_fetcher::poll_fetch_dag(
