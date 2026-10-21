@@ -49,6 +49,7 @@ pub const MODELED_FAMILIES: &[&str] = &[
     "Gossip connection ownership",
     "Iroh service records",
     "Iroh solicited replies",
+    "Reply-driven DAG fetch",
 ];
 
 pub fn properties_for(family: &'static str) -> impl Iterator<Item = &'static Property> {
