@@ -440,6 +440,8 @@ where
             .get(id)
             .is_some_and(|at| now.duration_since(*at) < ANNOUNCE_INTERVAL);
         if ranked.is_empty() && !asked_lately && !ask.is_empty() {
+            self.asked_who
+                .retain(|_, at| now.duration_since(*at) < ANNOUNCE_INTERVAL);
             self.asked_who.insert(id.to_string(), now);
             for peer in ask {
                 for key in &keys {
