@@ -13,6 +13,9 @@ use crate::replicator::ReplicatorInfo;
 use crate::transport::{MessageId, PeerAddr, PeerId};
 use crate::QueryId;
 
+/// Where the endpoint answers a command.
+pub type Reply<T> = oneshot::Sender<crate::error::Result<T>>;
+
 /// Commands from the transport facade to the background endpoint.
 #[non_exhaustive]
 pub enum IrohCommand {
@@ -91,7 +94,7 @@ pub enum IrohCommand {
     /// The live service record we hold for a peer, or our own.
     ServiceRecord {
         peer_id: PeerId,
-        reply: oneshot::Sender<crate::error::Result<Option<super::records::ServiceRecord>>>,
+        reply: Reply<Option<super::records::ServiceRecord>>,
     },
 
     // PubSub

@@ -15,13 +15,13 @@ use iroh::{EndpointId, SecretKey};
 use n0_future::time::{Duration, Instant};
 use rapidhash::{HashSetExt, RapidHashSet};
 use serde::{Deserialize, Serialize};
-use tokio::sync::oneshot;
 use tracing::{debug, warn};
 
 use super::{
     advertised_key, blind, sign, verify, Book, CollectionKey, NetworkSecret, Pointer, Refresh,
     Role, Service, ServiceRecord, SignedRecord, MAX_RECORD_BYTES, MAX_SERVICES,
 };
+use crate::iroh::command::Reply;
 use crate::iroh::mailbox::{Mailbox, Wake};
 
 /// The gossip topic records are announced on.
@@ -106,7 +106,7 @@ pub enum Input {
     /// The live record we hold for `node`, ours included.
     Lookup {
         node: EndpointId,
-        reply: oneshot::Sender<crate::error::Result<Option<ServiceRecord>>>,
+        reply: Reply<Option<ServiceRecord>>,
     },
 }
 
