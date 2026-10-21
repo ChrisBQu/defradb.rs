@@ -653,9 +653,9 @@ pub const PROPERTIES: &[Property] = &[
     },
     Property {
         family: "Gossip connection ownership",
-        name: "INV_RevokedHasNoGossip / INV_PathOnLiveConnection / INV_GossipNeverClosesShared / LIVE_HealthyReached",
+        name: "INV_RevokedHasNoGossip / INV_PathOnLiveConnection / INV_GossipNeverClosesShared / LIVE_HealthyReached / LIVE_AskAnswered",
         axis: Tla,
-        anchor: "crates/p2p/src/iroh/gossip/driver.rs Driver::send, Driver::connected, Driver::forget; crates/p2p/src/iroh/endpoint_rpc.rs connect_with_cache; crates/p2p/src/iroh/endpoint_commands.rs handle_deny_peer",
+        anchor: "crates/p2p/src/iroh/gossip/driver.rs Driver::send, Driver::connected, Driver::forget; crates/p2p/src/iroh/gossip/mod.rs GossipHandle::connected; crates/p2p/src/iroh/endpoint_rpc.rs connect_with_cache; crates/p2p/src/iroh/endpoint_commands.rs handle_deny_peer",
         model_ref: "MC_GossipOwnership_Green.cfg",
         tiers: &[Boundary],
     },

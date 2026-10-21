@@ -1,12 +1,14 @@
 //! The ownership guards of `proofs/tla/GossipOwnership.tla`, checked on the
 //! driver: gossip reaches a peer only over a live connection or a dial the
 //! endpoint admits, and forgetting a peer never closes its connection.
+//! A dial that lands on an older mux ends the gossip dial.
 
 use iroh::endpoint::Connection;
 use iroh_gossip::proto::{Command, InEvent};
 use rapidhash::fast::RandomState;
 use regolith::sync::{HopscotchMap, SegQueue};
 
+use super::super::GossipHandle;
 use super::*;
 use crate::iroh::task_registry::TaskRegistry;
 use crate::sync::DispatchReceiver;
@@ -48,7 +50,10 @@ fn driver(dials: &Dials) -> (Driver<Dials>, Events) {
 async fn endpoint() -> iroh::Endpoint {
     iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
         .relay_mode(iroh::RelayMode::Disabled)
-        .alpns(vec![protocols::ALPN_MUX.to_vec()])
+        .alpns(vec![
+            protocols::ALPN_MUX.to_vec(),
+            protocols::ALPN_MUX_V1.to_vec(),
+        ])
         .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
         .expect("bind addr")
         .bind()
@@ -58,16 +63,17 @@ async fn endpoint() -> iroh::Endpoint {
 
 /// A live mux connection, with both endpoints and the far side kept open.
 async fn connection() -> (Connection, Connection, [iroh::Endpoint; 2]) {
+    connection_on(protocols::ALPN_MUX).await
+}
+
+async fn connection_on(alpn: &[u8]) -> (Connection, Connection, [iroh::Endpoint; 2]) {
     let server = endpoint().await;
     let client = endpoint().await;
     let accept = n0_future::task::spawn({
         let server = server.clone();
         async move { server.accept().await.unwrap().await.unwrap() }
     });
-    let connection = client
-        .connect(server.addr(), protocols::ALPN_MUX)
-        .await
-        .expect("connect");
+    let connection = client.connect(server.addr(), alpn).await.expect("connect");
     let far_side = accept.await.unwrap();
     (connection, far_side, [server, client])
 }
@@ -129,4 +135,27 @@ async fn a_closed_connection_is_never_gossiped_on() {
     gossip_to(&mut driver, peer).await;
     assert!(driver.peers[&peer].writer.is_none());
     assert_eq!(dials.0.pop(), Some(peer));
+}
+
+#[tokio::test]
+async fn a_dial_that_lands_on_an_older_mux_ends_the_gossip_dial() {
+    let dials = Dials::default();
+    let (mut driver, _events) = driver(&dials);
+    let (connection, _far_side, _endpoints) = connection_on(protocols::ALPN_MUX_V1).await;
+    let peer = connection.remote_id();
+    gossip_to(&mut driver, peer).await;
+    assert!(driver.peers[&peer].dialing);
+
+    let handle = GossipHandle {
+        inbox: Arc::clone(&driver.io.inbox),
+        subscribed: Arc::new(HopscotchMap::with_hasher(RandomState::default())),
+    };
+    handle.connected(peer, &connection);
+    let input = tokio::time::timeout(Duration::from_secs(10), driver.io.inbox.next())
+        .await
+        .expect("the gossip dial is answered")
+        .expect("an input");
+    assert!(matches!(input, Input::DialFailed(p) if p == peer));
+    assert!(driver.on_input(input).await.is_ok());
+    assert!(!driver.peers.contains_key(&peer));
 }

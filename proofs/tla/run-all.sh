@@ -238,6 +238,8 @@ RUNS=(
   "MC_GossipOwnership_Red_NoRecheck.cfg MC_GossipOwnership_Common.tla RED" # no admission check after connecting: a revoke during the dial is missed (INV_RevokedHasNoGossip)
   "MC_GossipOwnership_Red_GossipCloses.cfg MC_GossipOwnership_Common.tla RED" # forgetting a peer closes the shared connection (INV_GossipNeverClosesShared)
   "MC_GossipOwnership_Red_ForgetForever.cfg MC_GossipOwnership_Common.tla RED" # gossip may drop the healthy peer forever: it is never reached (LIVE_HealthyReached)
+  "MC_GossipOwnership_Green_Legacy.cfg MC_GossipOwnership_Common.tla GREEN" # a dial that lands on the older mux answers gossip's ask as a failure
+  "MC_GossipOwnership_Red_SilentLegacy.cfg MC_GossipOwnership_Common.tla RED" # an older-mux connection is dropped silently: gossip waits on the peer forever (LIVE_AskAnswered)
   "MC_GossipInbox_Green.cfg GossipInbox.tla GREEN" # control input never waits and received gossip is dropped when full: every endpoint request is answered
   "MC_GossipInbox_Red_Shared.cfg GossipInbox.tla RED" # one bounded inbox: peers fill it while the driver waits on events, the endpoint loop stalls (LIVE_RequestAnswered)
   "MC_GossipInbox_Red_LossyShared.cfg GossipInbox.tla RED" # received dropped when full but control waits in the same queue: same stall (LIVE_RequestAnswered)

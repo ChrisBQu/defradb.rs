@@ -6,4 +6,6 @@ EXTENDS GossipOwnership
 \* The network may drop a connection once.
 mcPeers == {"h", "r"}
 mcRevocable == {"r"}
+\* Peer r may also run the older mux, in the configs that say so.
+mcLegacy == {"r"}
 ====

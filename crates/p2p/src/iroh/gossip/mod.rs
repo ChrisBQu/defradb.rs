@@ -197,11 +197,14 @@ impl GossipHandle {
     }
 
     /// An admitted connection to `peer` is open. Only peers on the current
-    /// mux ALPN gossip; older peers keep every other protocol.
+    /// mux ALPN gossip; older peers keep every other protocol, and to gossip
+    /// a connection to one is a failed dial.
     pub(super) fn connected(&self, peer: EndpointId, connection: &Connection) {
         if connection.alpn() == protocols::ALPN_MUX {
             let connection = connection.clone();
             self.inbox.push(Input::Connected { peer, connection });
+        } else {
+            self.dial_failed(peer);
         }
     }
 
