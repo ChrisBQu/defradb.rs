@@ -207,7 +207,7 @@ fn a_full_book_drops_expired_records_first() {
 }
 
 #[test]
-fn a_full_book_drops_the_record_that_expires_soonest() {
+fn a_full_book_of_live_records_refuses_newcomers() {
     let soon = SecretKey::generate();
     let late = SecretKey::generate();
     let newcomer = SecretKey::generate();
@@ -217,12 +217,19 @@ fn a_full_book_drops_the_record_that_expires_soonest() {
     book.offer(record(&soon, 1, NOW + 300, vec![]), NOW)
         .unwrap();
 
-    book.offer(record(&newcomer, 1, NOW + 600, vec![]), NOW)
-        .unwrap();
+    assert_eq!(
+        book.offer(record(&newcomer, 1, NOW + 600, vec![]), NOW),
+        Ok(Offered::Full)
+    );
+    assert_eq!(
+        book.offer(record(&soon, 2, NOW + 600, vec![]), NOW),
+        Ok(Offered::Taken)
+    );
 
     assert_eq!(book.len(), 2);
-    assert!(book.live(&soon.public(), NOW).is_none());
-    assert!(book.live(&newcomer.public(), NOW).is_some());
+    assert!(book.live(&newcomer.public(), NOW).is_none());
+    assert_eq!(book.live(&soon.public(), NOW).unwrap().seq, 2);
+    assert!(book.live(&late.public(), NOW).is_some());
 }
 
 #[test]

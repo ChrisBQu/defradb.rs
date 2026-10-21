@@ -34,8 +34,10 @@ pub const MAX_RECORD_BYTES: usize = 3072;
 pub const MAX_SERVICES: usize = 64;
 /// The longest name: a custom service, a relay URL or a plain collection id.
 pub const MAX_NAME_BYTES: usize = 128;
-/// The furthest into the future a record may expire, in seconds.
-pub const MAX_TTL_SECS: u64 = 24 * 60 * 60;
+/// The furthest into the future a record may expire, in seconds: the hour
+/// a node signs for, plus an hour of clock skew. Records filling a book
+/// then hold it no longer than an honest record would.
+pub const MAX_TTL_SECS: u64 = 2 * 60 * 60;
 
 /// What a node says it offers, signed by that node.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

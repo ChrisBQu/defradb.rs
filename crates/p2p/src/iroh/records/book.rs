@@ -24,6 +24,9 @@ pub enum Offered {
     Taken,
     /// We already hold this node's record at an equal or higher seq.
     Stale,
+    /// The book is full of live records. Records are self-signed and node
+    /// keys are free, so an unsolicited record never displaces a live one.
+    Full,
 }
 
 impl Book {
@@ -36,8 +39,7 @@ impl Book {
     }
 
     /// Keeps `signed` if it is valid at `now` and newer than what we hold
-    /// for its node. A full book first drops expired records, then the one
-    /// that expires soonest.
+    /// for its node. A full book drops expired records to make room.
     pub fn offer(&mut self, signed: SignedRecord, now: u64) -> Result<Offered, Rejection> {
         let record = verify(&signed, now)?;
         let node = EndpointId::from_bytes(&record.node).map_err(|_| Rejection::BadSignature)?;
@@ -50,7 +52,10 @@ impl Book {
         }
         self.remove(&node);
         if self.held.len() >= self.capacity {
-            self.make_room(now);
+            self.drop_expired(now);
+        }
+        if self.held.len() >= self.capacity {
+            return Ok(Offered::Full);
         }
         for key in collection_keys(&record) {
             self.by_key.entry(key.encode()).or_default().insert(node);
@@ -99,7 +104,7 @@ impl Book {
         self.held.len()
     }
 
-    fn make_room(&mut self, now: u64) {
+    fn drop_expired(&mut self, now: u64) {
         let expired: Vec<EndpointId> = self
             .held
             .iter()
@@ -108,17 +113,6 @@ impl Book {
             .collect();
         for node in &expired {
             self.remove(node);
-        }
-        if self.held.len() < self.capacity {
-            return;
-        }
-        let soonest = self
-            .held
-            .iter()
-            .min_by_key(|(_, held)| held.record.expires_at)
-            .map(|(node, _)| *node);
-        if let Some(node) = soonest {
-            self.remove(&node);
         }
     }
 
