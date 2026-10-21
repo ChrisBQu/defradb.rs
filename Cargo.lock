@@ -27,7 +27,6 @@ dependencies = [
  "storage",
  "tempfile",
  "thiserror 2.0.21",
- "tokio",
  "tracing",
  "workers",
  "zanzibar 0.5.0",
@@ -2021,12 +2020,12 @@ dependencies = [
  "cid",
  "crypto",
  "defra-core",
+ "futures",
  "multihash",
  "multihash-codetable",
  "sha2 0.10.9",
  "storage",
  "thiserror 2.0.21",
- "tokio",
  "tracing",
  "workers",
 ]
@@ -3341,8 +3340,8 @@ dependencies = [
  "serde_json",
  "storage",
  "thiserror 2.0.21",
- "tokio",
  "tracing",
+ "workers",
 ]
 
 [[package]]
@@ -3812,8 +3811,8 @@ dependencies = [
  "regolith 0.2.1",
  "storage",
  "thiserror 2.0.21",
- "tokio",
  "tracing",
+ "workers",
 ]
 
 [[package]]
@@ -3930,6 +3929,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "workers",
  "zeroize",
 ]
 
@@ -4777,8 +4777,8 @@ dependencies = [
  "rapidhash",
  "regolith 0.2.1",
  "thiserror 2.0.21",
- "tokio",
  "tracing",
+ "workers",
 ]
 
 [[package]]
@@ -6022,8 +6022,8 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
- "tokio",
  "web-time",
+ "workers",
 ]
 
 [[package]]
@@ -6973,6 +6973,7 @@ dependencies = [
  "tracing",
  "uuid",
  "vera",
+ "workers",
  "x25519-dalek 2.0.1",
  "zeroize",
 ]
@@ -7078,7 +7079,6 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.21",
- "tokio",
  "tracing",
  "wasmtime",
  "workers",
@@ -15302,8 +15302,8 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
- "tokio",
  "tracing",
+ "workers",
 ]
 
 [[package]]
