@@ -402,7 +402,7 @@ async fn connect_with_cache(
         )));
     }
 
-    cache.gossip.connected(endpoint_id, &connection).await;
+    cache.gossip.connected(endpoint_id, &connection);
     Ok(connection)
 }
 

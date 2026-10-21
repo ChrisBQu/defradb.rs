@@ -38,7 +38,7 @@ fn driver(dials: &Dials) -> (Driver<Dials>, Events) {
         iroh::SecretKey::generate().public(),
         dials.clone(),
         delivery,
-        Arc::new(Mailbox::new(16, Wake::default())),
+        Arc::new(Inbox::new(16)),
         Arc::new(HopscotchMap::with_hasher(RandomState::default())),
         Arc::new(TaskRegistry::default()),
     );

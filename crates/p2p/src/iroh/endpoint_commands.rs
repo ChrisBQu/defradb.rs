@@ -152,17 +152,15 @@ pub(super) async fn handle_command(
             });
         }
         IrohCommand::Subscribe { topic, reply } => {
-            let _ = reply.send(Ok(gossip.subscribe(topic.to_string()).await));
+            let _ = reply.send(Ok(gossip.subscribe(topic.to_string())));
         }
         IrohCommand::Unsubscribe { topic, reply } => {
-            let _ = reply.send(Ok(gossip.unsubscribe(topic.to_string()).await));
+            let _ = reply.send(Ok(gossip.unsubscribe(topic.to_string())));
         }
         IrohCommand::Publish { topic, msg, reply } => {
             let result = match msg.encode_gossip_payload() {
                 Ok(payload) => {
-                    gossip
-                        .publish(topic.to_string(), Bytes::from(payload), false)
-                        .await;
+                    gossip.publish(topic.to_string(), Bytes::from(payload), false);
                     Ok(MessageId::new(uuid::Uuid::new_v4().to_string()))
                 }
                 Err(error) => Err(crate::error::Error::CborSerialization(error.to_string())),
@@ -176,11 +174,11 @@ pub(super) async fn handle_command(
         IrohCommand::SubscribeRaw { topic, reply } => {
             // Raw first, so the topic is never delivered as a decoded PushLog.
             raw_topics.insert_if_absent(topic.clone(), ());
-            let _ = reply.send(Ok(gossip.subscribe(topic).await));
+            let _ = reply.send(Ok(gossip.subscribe(topic)));
         }
         IrohCommand::PublishRaw { topic, data, reply } => {
             // A KMS reply: a broadcast before any neighbour joins is lost (#976).
-            gossip.publish(topic, Bytes::from(data), true).await;
+            gossip.publish(topic, Bytes::from(data), true);
             let _ = reply.send(Ok(MessageId::new(uuid::Uuid::new_v4().to_string())));
         }
         IrohCommand::TopicPeers { topic, reply } => {
@@ -744,7 +742,7 @@ impl Network for GossipDialer {
             let peer_id = endpoint_id_to_peer_id(&peer);
             if let Err(error) = handle_dial(ctx, &peer_id, addrs).await {
                 debug!(%peer_id, %error, "Gossip dial failed");
-                gossip.dial_failed(peer).await;
+                gossip.dial_failed(peer);
             }
         });
     }
@@ -836,10 +834,7 @@ async fn handle_dial(
     }
 
     if admitted {
-        ctx.resources
-            .gossip
-            .connected(endpoint_id, &connection)
-            .await;
+        ctx.resources.gossip.connected(endpoint_id, &connection);
     }
 
     // Keep connection alive by spawning a handler for incoming streams.

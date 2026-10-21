@@ -4,6 +4,7 @@
 mod delivery;
 mod driver;
 mod frame;
+mod inbox;
 mod mailbox;
 
 use std::collections::BTreeSet;
@@ -28,10 +29,10 @@ use delivery::Delivery;
 pub(super) use delivery::EventSender;
 use driver::Driver;
 use frame::ProtoMessage;
-use mailbox::{Mailbox, Wake};
+use inbox::Inbox;
 
-/// Inputs the driver may hold before senders wait.
-const INBOX_CAPACITY: usize = 1024;
+/// Messages from peers the driver may hold before more are dropped.
+const RECEIVED_CAPACITY: usize = 1024;
 
 type Neighbors = Arc<HopscotchMap<EndpointId, (), RandomState>>;
 
@@ -109,7 +110,7 @@ enum Input {
 /// The endpoint's handle to the gossip driver.
 #[derive(Clone)]
 pub(super) struct GossipHandle {
-    inbox: Arc<Mailbox<Input>>,
+    inbox: Arc<Inbox>,
     subscribed: Subscribed,
 }
 
@@ -117,7 +118,7 @@ impl GossipHandle {
     /// A handle whose driver has not been started.
     pub(super) fn new() -> Self {
         Self {
-            inbox: Arc::new(Mailbox::new(INBOX_CAPACITY, Wake::default())),
+            inbox: Arc::new(Inbox::new(RECEIVED_CAPACITY)),
             subscribed: Arc::new(HopscotchMap::with_hasher(RandomState::default())),
         }
     }
@@ -149,7 +150,7 @@ impl GossipHandle {
     }
 
     /// Returns `false` when already subscribed.
-    pub(super) async fn subscribe(&self, topic: String) -> bool {
+    pub(super) fn subscribe(&self, topic: String) -> bool {
         let neighbors = Arc::new(HopscotchMap::with_hasher(RandomState::default()));
         if self
             .subscribed
@@ -158,29 +159,29 @@ impl GossipHandle {
         {
             return false;
         }
-        self.inbox.push(Input::Join(topic)).await;
+        self.inbox.push(Input::Join(topic));
         true
     }
 
     /// Returns `false` when not subscribed.
-    pub(super) async fn unsubscribe(&self, topic: String) -> bool {
+    pub(super) fn unsubscribe(&self, topic: String) -> bool {
         if self.subscribed.remove(&topic).is_none() {
             return false;
         }
-        self.inbox.push(Input::Quit(topic)).await;
+        self.inbox.push(Input::Quit(topic));
         true
     }
 
     /// Broadcasts on `topic`, joining it for the broadcast if we are not
     /// subscribed. `wait_for_neighbor` holds such a broadcast until a
     /// neighbour joins (briefly), for a reply that must not reach nobody.
-    pub(super) async fn publish(&self, topic: String, payload: Bytes, wait_for_neighbor: bool) {
+    pub(super) fn publish(&self, topic: String, payload: Bytes, wait_for_neighbor: bool) {
         let input = Input::Publish {
             topic,
             payload,
             wait_for_neighbor,
         };
-        self.inbox.push(input).await;
+        self.inbox.push(input);
     }
 
     pub(super) fn topic_peers(&self, topic: &str) -> Vec<PeerId> {
@@ -197,15 +198,15 @@ impl GossipHandle {
 
     /// An admitted connection to `peer` is open. Only peers on the current
     /// mux ALPN gossip; older peers keep every other protocol.
-    pub(super) async fn connected(&self, peer: EndpointId, connection: &Connection) {
+    pub(super) fn connected(&self, peer: EndpointId, connection: &Connection) {
         if connection.alpn() == protocols::ALPN_MUX {
             let connection = connection.clone();
-            self.inbox.push(Input::Connected { peer, connection }).await;
+            self.inbox.push(Input::Connected { peer, connection });
         }
     }
 
-    pub(super) async fn dial_failed(&self, peer: EndpointId) {
-        self.inbox.push(Input::DialFailed(peer)).await;
+    pub(super) fn dial_failed(&self, peer: EndpointId) {
+        self.inbox.push(Input::DialFailed(peer));
     }
 
     pub(super) fn close(&self) {

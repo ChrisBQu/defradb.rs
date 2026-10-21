@@ -1,4 +1,4 @@
-//! A bounded queue its one reader waits on through a [`Notify`].
+//! A queue its one reader waits on through a [`Notify`].
 //!
 //! kovan's `recv_async` leaves a waiter behind each time it is polled and
 //! not ready, which a loop that also waits on timers does constantly. A
@@ -8,7 +8,9 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use regolith::sync::{bounded, BoundedReceiver, BoundedSender, Notify};
+use regolith::sync::{
+    bounded, unbounded, BoundedReceiver, BoundedSender, Notify, UnboundedReceiver, UnboundedSender,
+};
 
 /// Wakes a reader that may wait on several mailboxes at once.
 pub(super) type Wake = Arc<Notify>;
@@ -17,10 +19,17 @@ pub(super) struct Mailbox<T>
 where
     T: 'static,
 {
-    tx: BoundedSender<T>,
-    rx: BoundedReceiver<T>,
+    lane: Lane<T>,
     wake: Wake,
     closed: AtomicBool,
+}
+
+enum Lane<T>
+where
+    T: 'static,
+{
+    Bounded(BoundedSender<T>, BoundedReceiver<T>),
+    Unbounded(UnboundedSender<T>, UnboundedReceiver<T>),
 }
 
 impl<T> Mailbox<T>
@@ -29,29 +38,38 @@ where
 {
     pub(super) fn new(capacity: usize, wake: Wake) -> Self {
         let (tx, rx) = bounded(capacity);
+        Self::with_lane(Lane::Bounded(tx, rx), wake)
+    }
+
+    /// A mailbox that always has room, so pushing never waits.
+    pub(super) fn unbounded(wake: Wake) -> Self {
+        let (tx, rx) = unbounded();
+        Self::with_lane(Lane::Unbounded(tx, rx), wake)
+    }
+
+    fn with_lane(lane: Lane<T>, wake: Wake) -> Self {
         Self {
-            tx,
-            rx,
+            lane,
             wake,
             closed: AtomicBool::new(false),
         }
     }
 
-    /// Waits for room, then queues `item`.
-    pub(super) async fn push(&self, item: T) {
-        self.tx.send_async(item).await;
-        self.wake.notify_one();
-    }
-
     /// Queues `item` if there is room, or hands it back.
     pub(super) fn try_push(&self, item: T) -> Result<(), T> {
-        self.tx.try_send(item)?;
+        match &self.lane {
+            Lane::Bounded(tx, _) => tx.try_send(item)?,
+            Lane::Unbounded(tx, _) => tx.try_send(item)?,
+        }
         self.wake.notify_one();
         Ok(())
     }
 
     pub(super) fn pop(&self) -> Option<T> {
-        self.rx.try_recv()
+        match &self.lane {
+            Lane::Bounded(_, rx) => rx.try_recv(),
+            Lane::Unbounded(_, rx) => rx.try_recv(),
+        }
     }
 
     /// Tells the reader no more items will come.
@@ -88,7 +106,7 @@ mod tests {
     #[tokio::test]
     async fn items_queued_before_close_are_still_read() {
         let mailbox = Mailbox::new(2, Wake::default());
-        mailbox.push(1).await;
+        mailbox.try_push(1).unwrap();
         mailbox.close();
         assert_eq!(mailbox.next().await, Some(1));
         assert_eq!(mailbox.next().await, None);
@@ -99,5 +117,14 @@ mod tests {
         let mailbox = Mailbox::new(1, Wake::default());
         mailbox.try_push(1).unwrap();
         assert_eq!(mailbox.try_push(2), Err(2));
+    }
+
+    #[test]
+    fn an_unbounded_mailbox_always_has_room() {
+        let mailbox = Mailbox::unbounded(Wake::default());
+        for item in 0..4096 {
+            mailbox.try_push(item).unwrap();
+        }
+        assert_eq!(mailbox.pop(), Some(0));
     }
 }

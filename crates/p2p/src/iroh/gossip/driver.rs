@@ -27,6 +27,7 @@ use crate::transport::PeerAddr;
 
 use super::delivery::{Closed, Delivery};
 use super::frame::{read_gossip_frame, write_gossip_frame, ProtoMessage};
+use super::inbox::Inbox;
 use super::mailbox::{Mailbox, Wake};
 use super::{protocols, spawn_task, topic_id, AddrInfo, Input, Network, SpawnedTasks, Subscribed};
 
@@ -73,7 +74,7 @@ pub(super) struct Driver<N> {
 
 /// What spawned stream tasks need.
 struct Io {
-    inbox: Arc<Mailbox<Input>>,
+    inbox: Arc<Inbox>,
     tasks: SpawnedTasks,
     limit: usize,
     next_writer: u64,
@@ -129,7 +130,7 @@ where
         me: EndpointId,
         network: N,
         delivery: Delivery,
-        inbox: Arc<Mailbox<Input>>,
+        inbox: Arc<Inbox>,
         subscribed: Subscribed,
         tasks: SpawnedTasks,
     ) -> Self {
@@ -519,7 +520,7 @@ impl Io {
             if let Err(error) = write_stream(&connection, &stream_queue, limit).await {
                 debug!(peer = %peer.fmt_short(), %error, "Gossip stream to peer ended");
             }
-            inbox.push(Input::WriterDone { peer, writer: id }).await;
+            inbox.push(Input::WriterDone { peer, writer: id });
         });
         Writer { id, queue }
     }
@@ -540,7 +541,7 @@ impl Io {
                 });
             }
             let connection = connection.stable_id();
-            inbox.push(Input::Closed { peer, connection }).await;
+            inbox.push(Input::Closed { peer, connection });
         });
     }
 }
@@ -565,7 +566,7 @@ async fn write_stream(
 async fn read_stream(
     peer: EndpointId,
     recv: &mut RecvStream,
-    inbox: &Mailbox<Input>,
+    inbox: &Inbox,
     limit: usize,
 ) -> Result<()> {
     let tag = protocols::read_stream_tag(recv).await?;
@@ -574,7 +575,9 @@ async fn read_stream(
         return Err(Error::Codec("unknown uni stream tag".to_string()));
     }
     while let Some(message) = read_gossip_frame(recv, limit).await? {
-        inbox.push(Input::Received { peer, message }).await;
+        if !inbox.offer(peer, message) {
+            debug!(peer = %peer.fmt_short(), "Gossip inbox full; dropping a received message");
+        }
     }
     Ok(())
 }

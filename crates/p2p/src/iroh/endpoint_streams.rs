@@ -115,7 +115,7 @@ pub(super) async fn handle_incoming(
     }
 
     if admitted {
-        resources.gossip.connected(remote_id, &connection).await;
+        resources.gossip.connected(remote_id, &connection);
     }
 
     // Spawn handler for this connection's streams
