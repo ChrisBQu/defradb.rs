@@ -1,7 +1,8 @@
 //! Transport events queued by dispatch class, so a full class waits alone.
 //!
 //! One bounded lane per [`DispatchClass`]. Events leave in the order they were
-//! sent, as from a single queue. When the completion workers are busy, the
+//! sent, as from a single queue: an event whose send returned before another's
+//! began leaves first. Sends that overlap have no order between them. When the completion workers are busy, the
 //! dispatcher stops taking from the completion lane only; requests, recovery
 //! and inline events keep flowing past it.
 
@@ -209,11 +210,8 @@ where
     }
 
     fn take_next(&mut self, completion_open: bool) -> Option<Queued<E>> {
-        for (head, lane) in self.heads.iter_mut().zip(&self.lanes) {
-            if head.is_none() {
-                *head = lane.try_recv();
-            }
-        }
+        let lanes = &self.lanes;
+        fill_heads(&mut self.heads, |lane| lanes[lane].try_recv());
         let (_, oldest) = (0..LANES)
             .filter(|&lane| completion_open || lane != COMPLETION_LANE)
             .filter_map(|lane| Some((self.heads[lane].as_ref()?.0, lane)))
@@ -221,6 +219,25 @@ where
         let (_, queued) = self.heads[oldest].take()?;
         self.room[oldest].add_permits(1);
         Some(queued)
+    }
+}
+
+/// Takes each empty lane's oldest event, pass after pass, until a pass finds
+/// none. A lane looked at before an event arrived in it is looked at again
+/// after any later event is found, so an event sent before a head is a head
+/// too.
+fn fill_heads<T>(heads: &mut [Option<T>; LANES], mut poll: impl FnMut(usize) -> Option<T>) {
+    loop {
+        let mut found = false;
+        for (lane, head) in heads.iter_mut().enumerate() {
+            if head.is_none() {
+                *head = poll(lane);
+                found |= head.is_some();
+            }
+        }
+        if !found {
+            return;
+        }
     }
 }
 
@@ -347,6 +364,28 @@ mod tests {
         assert_eq!(rx.recv().await, Some(TestEvent::Completion(0)));
         assert_eq!(rx.recv().await, Some(TestEvent::Request(1)));
         assert_eq!(rx.recv().await, Some(TestEvent::Completion(2)));
+    }
+
+    #[test]
+    fn an_event_sent_into_a_lane_already_looked_at_is_still_a_head() {
+        let admission = lane(DispatchClass::Admission);
+        let completion = lane(DispatchClass::Completion);
+        let mut lanes: [std::collections::VecDeque<u64>; LANES] = Default::default();
+        let mut heads = [None; LANES];
+        let mut sent = false;
+        fill_heads(&mut heads, |polled| {
+            let head = lanes[polled].pop_front();
+            if polled == admission && !sent {
+                // Both sent after the admission lane was looked at and before
+                // the completion lane is.
+                lanes[admission].push_back(0);
+                lanes[completion].push_back(1);
+                sent = true;
+            }
+            head
+        });
+        assert_eq!(heads[admission], Some(0));
+        assert_eq!(heads[completion], Some(1));
     }
 
     #[tokio::test]
