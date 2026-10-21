@@ -16,10 +16,10 @@ use crate::transport::{InboundClassSnapshot, P2PTransport, PeerAddr, PeerId};
 
 const STOPPED: Duration = Duration::from_secs(5);
 
-async fn bare_endpoint() -> iroh::Endpoint {
+async fn bare_endpoint(alpn: &[u8]) -> iroh::Endpoint {
     iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
         .relay_mode(iroh::RelayMode::Disabled)
-        .alpns(vec![protocols::ALPN_MUX.to_vec()])
+        .alpns(vec![alpn.to_vec()])
         .bind_addr("127.0.0.1:0".parse::<SocketAddr>().unwrap())
         .expect("bind addr")
         .bind()
@@ -65,18 +65,19 @@ async fn open_stream(
 /// of `len`, and return the code our node stopped that stream with, if it did
 /// within `wait`.
 async fn stop_code_for(tag: &[u8], len: u32, wait: Duration) -> Option<u32> {
-    stop_code_after(tag, len, wait, false).await
+    stop_code_after(tag, len, wait, false, protocols::ALPN_MUX).await
 }
 
-/// Like `stop_code_for`, but when `after_se_query` our node first sends the
-/// bare peer an SE query, so a reply to it is solicited.
+/// Like `stop_code_for`, but the bare peer speaks `alpn`, and when
+/// `after_se_query` our node first sends it an SE query.
 async fn stop_code_after(
     tag: &[u8],
     len: u32,
     wait: Duration,
     after_se_query: bool,
+    alpn: &[u8],
 ) -> Option<u32> {
-    let bare = bare_endpoint().await;
+    let bare = bare_endpoint(alpn).await;
     let bare_id = PeerId::new(bare.id().to_string());
     let bare_addr = *bare.addr().ip_addrs().next().expect("listener address");
 
@@ -139,8 +140,8 @@ impl Admitted {
 /// Run `admit_stream` against one stream opened with `tag`, `len` and `body`,
 /// under `deadlines`.
 async fn admit_one(tag: &[u8], len: u32, body: Body, deadlines: InboundDeadlines) -> Admitted {
-    let listener = bare_endpoint().await;
-    let opener = bare_endpoint().await;
+    let listener = bare_endpoint(protocols::ALPN_MUX).await;
+    let opener = bare_endpoint(protocols::ALPN_MUX).await;
     let budget = Arc::new(InboundBudget::with_deadlines(deadlines));
 
     let tag = tag.to_vec();
@@ -170,6 +171,7 @@ async fn admit_one(tag: &[u8], len: u32, body: Body, deadlines: InboundDeadlines
         &budget,
         &share,
         &solicited,
+        connection.alpn() == protocols::ALPN_MUX,
         connection.remote_id(),
         &peer_id,
     )
@@ -218,7 +220,7 @@ async fn a_reply_nobody_asked_for_is_stopped_before_its_length_is_read() {
 }
 
 #[tokio::test]
-async fn a_reply_to_our_request_is_admitted() {
+async fn an_older_peers_reply_to_our_request_is_admitted() {
     // Admitted, the node waits for a body that never comes instead of stopping.
     assert_eq!(
         stop_code_after(
@@ -226,9 +228,26 @@ async fn a_reply_to_our_request_is_admitted() {
             1,
             Duration::from_secs(1),
             true,
+            protocols::ALPN_MUX_V1,
         )
         .await,
         None
+    );
+}
+
+#[tokio::test]
+async fn on_mux_0_2_a_reply_stream_is_stopped_even_after_our_request() {
+    // A 0.2 peer replies on the request's stream, so this stream answers nothing.
+    assert_eq!(
+        stop_code_after(
+            protocols::STREAM_SE_QUERY_RESP,
+            1,
+            STOPPED,
+            true,
+            protocols::ALPN_MUX,
+        )
+        .await,
+        Some(6)
     );
 }
 
