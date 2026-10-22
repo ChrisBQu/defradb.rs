@@ -28,7 +28,7 @@ typed conflict. Two subtleties are deliberate:
 ## Full-text
 
 Tokenized, language-aware inverted indexes with BM25 scoring
-(`crates/storage/src/index/fulltext.rs`), synthesized from `@fulltext` schema directives
+([`crates/storage/src/index/fulltext.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/storage/src/index/fulltext.rs)), synthesized from `@fulltext` schema directives
 under internal names (`__fulltext__:{field}`). Corpus statistics (document counts, field
 lengths) are maintained as blind STATS merges (checked i128 deltas), so concurrent
 indexers commute. Query time scores with BM25 over the stored statistics.
@@ -42,7 +42,7 @@ quantization) and **SSG** (Satellite System Graph), plus **DiskANN**-style PQ-co
 resident graphs sharing code caches on the DB. Structural rules live in the merge
 operator: a blind addition can never raise a node's height or add a self-link, so graph
 maintenance never needs locks. Similarity queries route through the planner to the
-engine (`plan/similarity.rs`); HNSW advisory reads during maintenance are unvalidated
+engine ([`crates/query/src/plan/similarity.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/query/src/plan/similarity.rs)); HNSW advisory reads during maintenance are unvalidated
 part reads, so building never conflicts with querying.
 
 ## Lifecycle

@@ -4,7 +4,7 @@ defradb.rs speaks two P2P stacks, feature-gated in one crate (`crates/p2p`):
 
 - **iroh (QUIC)**: the default for `defra-node`, the CLI's `defra start`, the embedded
   and FFI nodes, and the browser. One background task owns all iroh state and is
-  commanded over a channel (`iroh/endpoint.rs`); every Defra protocol, including
+  commanded over a channel ([`crates/p2p/src/iroh/endpoint.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/p2p/src/iroh/endpoint.rs)); every Defra protocol, including
   gossip, is multiplexed over a single ALPN (with a v1 fallback), so there is one
   connection per peer, not one per subsystem. An optional self-hosted relay server
   exists for NAT traversal.
@@ -14,7 +14,7 @@ defradb.rs speaks two P2P stacks, feature-gated in one crate (`crates/p2p`):
 
 Both stacks sit behind the same adapter surface, so the sync mechanisms, the read gate
 and the security model are shared. All P2P runs on the edge runtime
-(`crates/defra-node/src/p2p_runtime.rs`).
+([`crates/defra-node/src/p2p_runtime.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/defra-node/src/p2p_runtime.rs)).
 
 ## Peer identity
 
@@ -22,13 +22,13 @@ A node has one peer key (Ed25519, from the keyring: name `peer-key`), shared acr
 transports; a node that predates the shared key keeps its existing identity. On iroh,
 the QUIC layer already authenticates the connection; on top of it, an optional Defra
 identity challenge binds the peer's Defra DID to the connection
-(`crates/p2p/src/peer_identity.rs`).
+([`crates/p2p/src/peer_identity.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/p2p/src/peer_identity.rs)).
 
 ## The read gate
 
 Replication carries data across a trust boundary, so it is gated: before a block is
 served or a DAG fetched, the same ACP read rules apply as for a local query
-(`crates/p2p/src/bitswap/read_gate.rs`, `crates/db/src/block/verify.rs`). A peer with a
+([`crates/p2p/src/bitswap/read_gate.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/p2p/src/bitswap/read_gate.rs), [`crates/db/src/block/verify.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/db/src/block/verify.rs)). A peer with a
 connection is not a peer with permission: document-level ACP remains the authoritative
 boundary, and replicated blocks are verified (CID integrity, signatures) before merge.
 

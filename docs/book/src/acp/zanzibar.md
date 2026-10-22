@@ -28,7 +28,7 @@ Three nouns:
 ## Evaluation
 
 The checker is a goal-tree search with cycle detection
-(`crates/zanzibar/src/engine/evaluate.rs`):
+([`crates/zanzibar/src/engine/evaluate.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/zanzibar/src/engine/evaluate.rs)):
 
 - `Union` short-circuits on true; `Intersection` short-circuits on false;
 - `Difference` requires the base to be *proven* true and the subtraction *proven*
@@ -40,7 +40,7 @@ The checker is a goal-tree search with cycle detection
 - batch checks share one cache (`check_many`).
 
 Policies are immutable once stored; the node keeps them in a lock-free policy snapshot
-(an `Atom`-swapped lookup table, `crates/acp/src/policy_cache.rs`) that reads never lock
+(an `Atom`-swapped lookup table, [`crates/acp/src/policy_cache.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/acp/src/policy_cache.rs)) that reads never lock
 to consult.
 
 ## Policy identity

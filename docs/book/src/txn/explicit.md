@@ -37,7 +37,7 @@ was requested, and "the caller left" must not mean "the write vanishes" or, wors
 `CommitFence` counts commits whose caller stopped waiting, and every new transaction
 waits while that count is above zero, so no new work starts until the abandoned
 commits have landed. The protocol has its own TLA+ model and a Lean proof of the
-counter swap (`CommitFence.tla`, `crates/db/src/txn/fence.rs`).
+counter swap ([`CommitFence.tla`](https://github.com/sourcenetwork/defradb.rs/blob/main/proofs/tla/CommitFence.tla), [`crates/db/src/txn/fence.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/db/src/txn/fence.rs)).
 
 ## Auto-commit vs explicit
 

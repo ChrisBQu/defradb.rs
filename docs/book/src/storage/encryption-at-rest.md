@@ -14,7 +14,7 @@ defradb.rs encrypts storage in two distinct places, and the difference matters:
 ## What the engine seals
 
 Every SST block, WAL record and manifest batch is sealed inside its existing frame with
-AES-256-GCM-SIV, the tag taking the place of the checksum (`regolith/src/engine/seal.rs`).
+AES-256-GCM-SIV, the tag taking the place of the checksum ([`regolith/src/engine/seal.rs`](https://github.com/sourcenetwork/regolith/blob/main/src/engine/seal.rs).
 Values are **plaintext inside the engine**: byte equality, value-validated reads,
 ContentAddressed same-bytes checks and merge operators all keep their meaning, because
 nothing above the file layer ever sees ciphertext. Disk (or OPFS) holds ciphertext only.
@@ -30,7 +30,7 @@ one-time rewrite migrates old stores at open
 ## Where keys come from
 
 defradb.rs implements regolith's `KeyProvider`
-(`crates/storage/src/backends/regolith/encryption.rs`):
+([`crates/storage/src/backends/regolith/encryption.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/storage/src/backends/regolith/encryption.rs)):
 
 - `current()` returns the active key id: the first 4 bytes of a domain-separated SHA-256
   of the key material.

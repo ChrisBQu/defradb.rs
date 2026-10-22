@@ -14,13 +14,13 @@ the provider record family has TLA+ and Lean proofs (see
 
 ## Admission: who may connect
 
-- **Allowlists** (`iroh/endpoint_config.rs`): `AcceptAll` (default) or an explicit
+- **Allowlists** ([`crates/p2p/src/iroh/endpoint_config.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/p2p/src/iroh/endpoint_config.rs)): `AcceptAll` (default) or an explicit
   endpoint set, mutable at runtime. Removing from the allowlist stops *new* admissions;
   **`PeerAdmission::revoke`** is the operation that actually bars a peer, and the
   admission authority makes revoke -> re-admit a lockstep state machine so a revoked
   peer cannot slip back in through a stale allowlist update.
 - **Peer identity challenges** (optional): bind the Defra identity to the connection.
-- **Inbound budgets** (`iroh/inbound_budget.rs`): concurrent inbound streams are
+- **Inbound budgets** ([`crates/p2p/src/iroh/inbound_budget.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/p2p/src/iroh/inbound_budget.rs)): concurrent inbound streams are
   bounded; excess is refused, not queued unboundedly.
 
 ## Trust and capability on the sync path
@@ -29,7 +29,7 @@ Replicator registration is outbound intent, not inbound permission: accepting Pu
 data requires membership/subscription and explicit-replay authorization for the
 content, and everything served crosses the read gate (ACP) and block verification. A
 separate capability regime governs *explicit replay* (re-broadcast of previously seen
-pushes), with its own revocation, modelled in `p2p/src/explicit_replay.rs`.
+pushes), with its own revocation, modelled in [`crates/p2p/src/explicit_replay.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/p2p/src/explicit_replay.rs).
 
 ## Budgets, end to end
 

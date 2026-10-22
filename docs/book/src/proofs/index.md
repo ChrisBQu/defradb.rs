@@ -1,7 +1,7 @@
 # Verification
 
 defradb.rs carries its correctness argument beside the code, in two tools
-(`proofs/README.md`):
+([`proofs/README.md`](https://github.com/sourcenetwork/defradb.rs/blob/main/proofs/README.md)):
 
 - **TLA+ / TLC** for temporal, distributed and concurrent behaviour: convergence,
   "eventually merges", safety under adversarial interleavings. 52 models live in
@@ -28,24 +28,24 @@ were checked against `regolith/proofs/tla/` and this repo's `proofs/tla/`.)
 
 ## What is modelled
 
-The coverage map in `proofs/README.md` lists 40 modelled families. Representative
+The coverage map in [`proofs/README.md`](https://github.com/sourcenetwork/defradb.rs/blob/main/proofs/README.md) lists 40 modelled families. Representative
 entries, by book chapter:
 
 | Mechanism (chapter) | Model |
 |---|---|
-| Key classes, validation, conflict rules ([Transactions](../txn/conflict-rules.md)) | `DefraKeyClassifier.tla`, storage transaction validation models |
-| Commit-ordered arrivals ([arrival journal](../documents/arrival-journal.md)) | `Arrivals.tla` (bound to the engine's commit-ordered append) |
-| Head sets ([head sets](../documents/head-sets.md)) | `HeadSet.tla`, `HeadPublication.tla` |
-| CRDT convergence ([CRDTs](../documents/crdt.md)) | `Convergence.tla` + the Lean merge-law family |
-| ACP: soundness, revocation, deferred overlay ([ACP](../acp/transactional.md)) | `Acp.tla`, `DeferredAcp.tla`, `Auth.tla` |
-| Owner registration exactly once | `RegisterDocOnce.tla` (cross-referenced from `persistent.rs`) |
-| Explicit transactions: statement atomicity, idle sweep ([explicit](../txn/explicit.md)) | statement atomicity + registry models, `CommitFence.tla` (with a Lean swap proof) |
-| Event order by receipt ([Events](../events/index.md)) | `EventOrder.tla` |
-| The worker pool ([Threading](../threading/pool.md)) | `DefaultPool.tla`, `CpuLedger.tla` (TLA+ and Lean) |
+| Key classes, validation, conflict rules ([Transactions](../txn/conflict-rules.md)) | [`DefraKeyClassifier.tla`](https://github.com/sourcenetwork/defradb.rs/blob/main/proofs/tla/DefraKeyClassifier.tla), storage transaction validation models |
+| Commit-ordered arrivals ([arrival journal](../documents/arrival-journal.md)) | [`Arrivals.tla`](https://github.com/sourcenetwork/defradb.rs/blob/main/proofs/tla/Arrivals.tla) (bound to the engine's commit-ordered append) |
+| Head sets ([head sets](../documents/head-sets.md)) | [`HeadSet.tla`](https://github.com/sourcenetwork/defradb.rs/blob/main/proofs/tla/HeadSet.tla), [`HeadPublication.tla`](https://github.com/sourcenetwork/defradb.rs/blob/main/proofs/tla/HeadPublication.tla) |
+| CRDT convergence ([CRDTs](../documents/crdt.md)) | [`Convergence.tla`](https://github.com/sourcenetwork/defradb.rs/blob/main/proofs/tla/Convergence.tla) + the Lean merge-law family |
+| ACP: soundness, revocation, deferred overlay ([ACP](../acp/transactional.md)) | [`Acp.tla`](https://github.com/sourcenetwork/defradb.rs/blob/main/proofs/tla/Acp.tla), [`DeferredAcp.tla`](https://github.com/sourcenetwork/defradb.rs/blob/main/proofs/tla/DeferredAcp.tla), [`Auth.tla`](https://github.com/sourcenetwork/defradb.rs/blob/main/proofs/tla/Auth.tla) |
+| Owner registration exactly once | [`RegisterDocOnce.tla`](https://github.com/sourcenetwork/defradb.rs/blob/main/proofs/tla/RegisterDocOnce.tla) (cross-referenced from [`crates/acp/src/zanzibar/store/persistent.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/acp/src/zanzibar/store/persistent.rs)) |
+| Explicit transactions: statement atomicity, idle sweep ([explicit](../txn/explicit.md)) | statement atomicity + registry models, [`CommitFence.tla`](https://github.com/sourcenetwork/defradb.rs/blob/main/proofs/tla/CommitFence.tla) (with a Lean swap proof) |
+| Event order by receipt ([Events](../events/index.md)) | [`EventOrder.tla`](https://github.com/sourcenetwork/defradb.rs/blob/main/proofs/tla/EventOrder.tla) |
+| The worker pool ([Threading](../threading/pool.md)) | [`DefaultPool.tla`](https://github.com/sourcenetwork/defradb.rs/blob/main/proofs/tla/DefaultPool.tla), [`CpuLedger.tla`](https://github.com/sourcenetwork/defradb.rs/blob/main/proofs/tla/CpuLedger.tla) (TLA+ and Lean) |
 | Lens epoch ticks | lens tick models |
-| KMS distribution and replay ([API](../api/index.md)) | `Kms.tla`, `EncryptedLwwReplay.tla` |
+| KMS distribution and replay ([API](../api/index.md)) | [`Kms.tla`](https://github.com/sourcenetwork/defradb.rs/blob/main/proofs/tla/Kms.tla), [`EncryptedLwwReplay.tla`](https://github.com/sourcenetwork/defradb.rs/blob/main/proofs/tla/EncryptedLwwReplay.tla) |
 | P2P: replication, providers, admission ([Replication](../p2p/sync.md)) | DAG convergence, replicator lifecycle, sync ownership, gossip, service-record and reply-driven-fetch families |
-| JWT issuer binding | `Jwt.tla` |
+| JWT issuer binding | [`Jwt.tla`](https://github.com/sourcenetwork/defradb.rs/blob/main/proofs/tla/Jwt.tla) |
 | Index maintenance, unique resolution ([Indexes](../query/indexes.md)) | index reconciliation + unique resolution models |
 
 ## The rules of engagement
@@ -61,7 +61,7 @@ entries, by book chapter:
 ## The honest gaps
 
 The coverage map also records the backlog: engine OCC is an implementation boundary;
-`HeadSet.tla` models derived head keys and scan/write conflicts, not
+[`HeadSet.tla`](https://github.com/sourcenetwork/defradb.rs/blob/main/proofs/tla/HeadSet.tla) models derived head keys and scan/write conflicts, not
 collection-version validation; remote ACP/Vera check paths, dynamic KMS policy
 changes, and cold read-time decryption remain audit gaps. The inventory says so in
 the same table as the coverage, because a proof map that hides its holes is a

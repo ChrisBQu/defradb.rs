@@ -36,7 +36,7 @@
 - [Querying](./query/index.md)
   - [The GraphQL pipeline](./query/pipeline.md)
   - [Indexes](./query/indexes.md)
-  - [History: `_commits` and time travel](./query/history.md)
+  - [History & Time Travel](./query/history.md)
 
 - [Access Control](./acp/index.md)
   - [The Zanzibar engine](./acp/zanzibar.md)

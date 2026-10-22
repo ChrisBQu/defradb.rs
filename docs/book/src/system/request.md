@@ -15,14 +15,14 @@ one tokio runtime, parses nothing about databases: it hands the request to a wor
 pool, routed once, here, at the edge. A mutation naming exactly one document goes to that
 document's core, so its writes and merges run one at a time; everything else goes to the
 least-loaded core
-(`crates/query/src/pooled/route.rs`, `crates/workers/src/pool/routing.rs`). No request
+([`crates/query/src/pooled/route.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/query/src/pooled/route.rs), [`crates/workers/src/pool/routing.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/workers/src/pool/routing.rs)). No request
 hops from core to core.
 
 ## 2. Prepare outside effects
 
 Before the transaction begins, the worker prepares everything with an effect outside it:
 KMS keys, embeddings, signatures, short IDs
-(`crates/query/src/runner/prepare.rs`). A transaction closure may run more than once, so
+([`crates/query/src/runner/prepare.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/query/src/runner/prepare.rs)). A transaction closure may run more than once, so
 anything with an outside effect must already be in hand. Remote inputs that depend on the
 transaction's own reads end the attempt, get resolved at the edge (single-flight, batched,
 cached), and the attempt re-runs with them memoized.

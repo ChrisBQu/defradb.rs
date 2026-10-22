@@ -9,7 +9,7 @@ Local commits broadcast as signed PushLog messages over gossip topics
 branchable sync and encryption-key distribution. A peer that receives a PushLog stores
 the blocks it carries, queues anything missing, and emits sync events; the DB-side
 merge runs on the pool, routed to the document's worker with the same key affinity as
-a local write (`crates/db/src/merge/pooled.rs`).
+a local write ([`crates/db/src/merge/pooled.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/db/src/merge/pooled.rs)).
 
 **Replicators** are registered outbound replay targets: a durable intent to push a
 collection's history to a specific peer, with filters (`replication-filter`). Push

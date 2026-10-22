@@ -35,7 +35,7 @@ do not even begin an engine transaction; they pin a snapshot.
 
 The same table, as code policy, lives in the repository's working agreement, and the
 mechanisms are exercised end to end in `crates/storage/src/backends/regolith/` and the
-collection read paths (`crates/db/src/collection/crud.rs`).
+collection read paths ([`crates/db/src/collection/crud.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/db/src/collection/crud.rs)).
 
 ## Where the value comes from
 

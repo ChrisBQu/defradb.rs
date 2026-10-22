@@ -26,13 +26,13 @@ The block builder (`crates/db/src/block/builder/`) computes, for one write:
 ## CIDs
 
 A CID is computed from the block's canonical bytes
-(`crates/defra-core/src/block.rs`). Identical bytes produce identical CIDs: that is why
+([`crates/defra-core/src/block.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/defra-core/src/block.rs)). Identical bytes produce identical CIDs: that is why
 two replicas that apply the same writes produce the same history, and why block writes
 are ContentAddressed and cannot conflict.
 
 ## Priorities
 
-Every CRDT delta carries a priority (a u64 varint, `crates/crdt/src/priority.rs`):
+Every CRDT delta carries a priority (a u64 varint, [`crates/crdt/src/priority.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/crdt/src/priority.rs)):
 create writes priority 1; an update writes the field's current max priority plus one;
 the composite writes the document's max plus one. Priorities are what order concurrent
 LWW writes deterministically without a coordinator: given two values, the higher
@@ -40,7 +40,7 @@ priority wins, and the merge algebra is proven convergent in Lean.
 
 ## Verification
 
-Replicated blocks are verified before merge (`crates/db/src/block/verify.rs`): the CID
+Replicated blocks are verified before merge ([`crates/db/src/block/verify.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/db/src/block/verify.rs)): the CID
 must match the bytes (content integrity), signatures must verify (including BLS-augmented
 batch signatures), and the read gate checks ACP before a block is even served. A
 document's DAG that fails verification is quarantined (the `PendingDagQuarantined` event
@@ -50,7 +50,7 @@ carries the forensics).
 
 History reads walk the DAG: `_commits` by CID or depth
 (`crates/db/src/read/commits/`), versioned (time-travel) reads walk from a target CID
-back to genesis and replay CRDT deltas forward (`crates/db/src/read/versioned.rs`). The
+back to genesis and replay CRDT deltas forward ([`crates/db/src/read/versioned.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/db/src/read/versioned.rs)). The
 [query chapter](../query/history.md) covers the API surface.
 
 > **Why blocks when there is a local value.** The local value is an index of "now"; the

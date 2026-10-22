@@ -11,7 +11,7 @@ and "sorted by DocID" is not an arrival order.
 ## The mechanism
 
 Each collection has a journal, stored as a **Log** under `s/arrival/`
-(`crates/db/src/event/arrivals.rs`):
+([`crates/db/src/event/arrivals.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/db/src/event/arrivals.rs)):
 
 - `/arrival/{collection}/head`: the number of rows,
 - `/arrival/{collection}/row/{cursor:020}`: one row per position, holding a DocID,

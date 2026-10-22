@@ -31,7 +31,7 @@ head sets, document part operands, and their `touches`), the arrival journal's l
 the conflict event listener, and the key provider for encryption at rest. regolith's
 mechanisms carry no downstream names; they are generic over exactly these traits. In the
 code the installed set is slightly larger than the diagram: a `PrefixExtractor`
-(`crates/storage/src/backends/regolith/prefix.rs`) for prefix bloom filters, and
+([`crates/storage/src/backends/regolith/prefix.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/storage/src/backends/regolith/prefix.rs)) for prefix bloom filters, and
 `TransactionHooks` for per-transaction telemetry.
 
 **regolith's DefraLevel mechanisms** are the transactional vocabulary: key classes, blind
