@@ -8,12 +8,12 @@
   --sn-green: #06b250;
   --sn-green-bright: #00c951;
   --sn-gradient: linear-gradient(90deg, #10cbff 0%, #17b6b0 45%, #06b250 100%);
-  --sn-gradient-soft: linear-gradient(135deg, rgba(16, 203, 255, 0.12), rgba(6, 178, 80, 0.12));
-  /* Subtle brand wash: stays dark, carries the blue-green gradient. */
+  --sn-gradient-soft: linear-gradient(135deg, rgba(16, 203, 255, 0.18), rgba(6, 178, 80, 0.18));
+  /* Brand wash: still dark, the blue-green gradient clearly present. */
   --sn-wash:
-    radial-gradient(1100px 700px at 88% -8%, rgba(16, 203, 255, 0.06), transparent 62%),
-    radial-gradient(1100px 750px at -8% 108%, rgba(6, 178, 80, 0.06), transparent 62%),
-    linear-gradient(160deg, rgba(16, 203, 255, 0.025) 0%, transparent 45%, rgba(6, 178, 80, 0.025) 100%);
+    radial-gradient(1200px 800px at 88% -10%, rgba(16, 203, 255, 0.16), transparent 60%),
+    radial-gradient(1200px 850px at -10% 110%, rgba(6, 178, 80, 0.16), transparent 60%),
+    linear-gradient(160deg, rgba(16, 203, 255, 0.07) 0%, transparent 45%, rgba(6, 178, 80, 0.07) 100%);
 }
 
 /* ---------- Page background: dark, with the subtle gradient wash ---------- */
@@ -168,7 +168,7 @@ table {
 .content .mermaid {
   display: flex;
   justify-content: center;
-  background: rgba(16, 203, 255, 0.04);
+  background: rgba(16, 203, 255, 0.07);
   border: 1px solid #253040;
   border-bottom: 3px solid transparent;
   border-image: linear-gradient(90deg, #10cbff, #06b250) 1;
@@ -194,7 +194,7 @@ table {
   border-bottom: 3px solid transparent;
   border-image: linear-gradient(90deg, #10cbff, #06b250) 1;
   padding: 0.75em;
-  background: rgba(16, 203, 255, 0.03);
+  background: rgba(16, 203, 255, 0.05);
   max-width: min(100%, 1100px);
 }
 .light .content p > img[src*="diagrams/"] {
