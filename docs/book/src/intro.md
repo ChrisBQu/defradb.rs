@@ -1,5 +1,7 @@
 # Introduction
 
+<img src="../diagrams/logo-defradb.svg" alt="DefraDB logo" class="defra-logo" />
+
 The Book of Defra is the developer guide to **defradb.rs**: the Rust implementation of
 [DefraDB](https://github.com/sourcenetwork), a local-first, source-available database built
 around three ideas:
