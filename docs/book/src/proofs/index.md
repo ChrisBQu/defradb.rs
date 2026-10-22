@@ -17,6 +17,15 @@ Some theorems need both halves: **DAG convergence** = (TLA+: every node eventual
 receives every delta under eventual connectivity) x (Lean: applying deltas in any
 order yields the same state). Neither half alone is convergence.
 
+## The map
+
+Every mechanism, in regolith and in defradb.rs, mapped to the models that cover it,
+under the names they ship with in each repo's proofs tree. (This map supersedes the
+migration-era sketch: several models were renamed as they landed, and the rows below
+were checked against `regolith/proofs/tla/` and this repo's `proofs/tla/`.)
+
+![Proofs map: mechanisms to models, regolith and defradb.rs](../diagrams/12-proofs-map.png)
+
 ## What is modelled
 
 The coverage map in `proofs/README.md` lists 40 modelled families. Representative
