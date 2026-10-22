@@ -663,7 +663,7 @@ pub const PROPERTIES: &[Property] = &[
         family: "Gossip connection ownership",
         name: "LIVE_RequestAnswered",
         axis: Tla,
-        anchor: "crates/p2p/src/iroh/gossip/inbox.rs Inbox::push, Inbox::offer, Inbox::next; crates/p2p/src/iroh/gossip/driver.rs read_stream, Driver::emit",
+        anchor: "crates/p2p/src/iroh/gossip/inbox.rs Inbox::push, Inbox::offer, Inbox::next; crates/p2p/src/iroh/gossip/driver.rs read_stream, Driver::emit; crates/p2p/src/iroh/records/task.rs RecordsHandle::push_change, RecordsHandle::push, RecordsHandle::next",
         model_ref: "MC_GossipInbox_Green.cfg",
         tiers: &[Boundary],
     },

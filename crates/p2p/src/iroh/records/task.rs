@@ -125,9 +125,15 @@ pub enum Input {
     },
 }
 
+/// The task's inputs in two lanes it waits on through one [`Wake`], the
+/// shape `proofs/tla/GossipInbox.tla` checks: changes to what we offer and
+/// lookups never wait, so the endpoint loop never waits on this task; hints
+/// from peers are dropped when their lane is full.
 #[derive(Clone)]
 pub struct RecordsHandle {
-    inbox: Arc<Mailbox<Input>>,
+    changes: Arc<Mailbox<Input>>,
+    hints: Arc<Mailbox<Input>>,
+    wake: Wake,
 }
 
 impl Default for RecordsHandle {
@@ -138,26 +144,49 @@ impl Default for RecordsHandle {
 
 impl RecordsHandle {
     pub fn new() -> Self {
+        let wake = Wake::default();
         Self {
-            inbox: Arc::new(Mailbox::new(INBOX_CAPACITY, Wake::default())),
+            changes: Arc::new(Mailbox::unbounded(wake.clone())),
+            hints: Arc::new(Mailbox::new(INBOX_CAPACITY, wake.clone())),
+            wake,
         }
     }
 
     /// Queues `input`, dropping it if the task is behind: every input is
     /// either repeated later (announcements, connections) or a hint.
     pub fn push(&self, input: Input) {
-        if self.inbox.try_push(input).is_err() {
+        if self.hints.try_push(input).is_err() {
             debug!("service records inbox full, input dropped");
         }
     }
 
-    /// Queues a change to what we offer, waiting for room: it must not be lost.
-    pub async fn push_change(&self, input: Input) {
-        self.inbox.push(input).await;
+    /// Queues a change to what we offer, or a lookup: neither is lost, and
+    /// queueing never waits.
+    pub fn push_change(&self, input: Input) {
+        let _ = self.changes.try_push(input);
     }
 
     pub fn close(&self) {
-        self.inbox.close();
+        self.changes.close();
+    }
+
+    /// The next input, changes first; `None` once closed and empty.
+    pub(super) async fn next(&self) -> Option<Input> {
+        loop {
+            // Read the flag before looking, so an input queued just before
+            // the close is still returned.
+            let closed = self.changes.is_closed();
+            if let Some(input) = self.changes.pop() {
+                return Some(input);
+            }
+            if let Some(input) = self.hints.pop() {
+                return Some(input);
+            }
+            if closed {
+                return None;
+            }
+            self.wake.notified().await;
+        }
     }
 
     /// Runs the task until the handle is closed.
@@ -168,7 +197,7 @@ impl RecordsHandle {
         let mut records = Records::new(key, net);
         loop {
             let input = tokio::select! {
-                input = self.inbox.next() => match input {
+                input = self.next() => match input {
                     Some(input) => Some(input),
                     None => break,
                 },

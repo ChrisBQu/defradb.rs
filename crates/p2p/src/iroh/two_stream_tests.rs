@@ -277,14 +277,14 @@ async fn concurrent_two_stream_fan_in_replies_on_request_streams() {
     }
     assert_eq!(peers.len(), SENDERS);
 
-    for (_, send_task) in &mut senders {
-        let reply = timeout(Duration::from_secs(1), send_task)
-            .await
-            .expect("fan-in two-stream reply timed out")
-            .unwrap()
-            .unwrap();
-        assert!(reply.err_message.is_none());
-    }
+    timeout(IO_TIMEOUT, async {
+        for (_, send_task) in &mut senders {
+            let reply = send_task.await.unwrap().unwrap();
+            assert!(reply.err_message.is_none());
+        }
+    })
+    .await
+    .expect("fan-in two-stream replies timed out");
 
     for (sender, _) in senders {
         sender.shutdown().await;
