@@ -1,0 +1,88 @@
+/* The Book of Defra: colour accents on top of the ayu theme.
+   Palette follows the diagram conventions:
+     blue #5aa7ff engine, green #6ee7a0 database, purple #b794f6 traits,
+     orange #ff9f43 races, yellow #ffe066 gates, grey #9aa4b2 boundaries. */
+
+html {
+  --defra-blue: #5aa7ff;
+  --defra-green: #6ee7a0;
+  --defra-purple: #b794f6;
+  --defra-orange: #ff9f43;
+  --defra-yellow: #ffe066;
+  --defra-grey: #9aa4b2;
+}
+
+/* Sidebar: coloured accent for the active chapter. */
+.chapter li.active > a,
+.chapter li a:hover {
+  border-left-color: var(--defra-blue);
+}
+
+/* Content headings: one accent colour per level. */
+.content h1 {
+  color: var(--defra-blue);
+  padding-bottom: 0.3em;
+  border-bottom: 2px solid #1e2a3a;
+}
+.content h2 {
+  color: var(--defra-green);
+  border-bottom: 1px solid #1e2a3a;
+  padding-bottom: 0.2em;
+}
+.content h3 { color: var(--defra-purple); }
+.content h4 { color: var(--defra-orange); }
+
+.light .content h1 { color: #1565c0; border-bottom-color: #d8e1ec; }
+.light .content h2 { color: #2e7d32; border-bottom-color: #d8e1ec; }
+.light .content h3 { color: #7b1fa2; }
+.light .content h4 { color: #c77700; }
+
+/* Inline code and links. */
+.content .headerlink:hover { color: var(--defra-yellow); }
+.content a { text-decoration-color: color-mix(in srgb, var(--defra-blue) 60%, transparent); }
+.content a:hover { color: var(--defra-blue); }
+
+/* Tables: readable headers with the blue accent. */
+table thead {
+  background: #1a2332;
+}
+.light table thead {
+  background: #eef3f9;
+}
+table thead th { color: var(--defra-blue); }
+
+/* Mermaid diagrams: framed, centred, scrollable when wide. */
+.content .mermaid {
+  display: flex;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid #232936;
+  border-radius: 8px;
+  padding: 1em;
+  margin: 1.5em auto;
+  overflow-x: auto;
+}
+.light .content .mermaid {
+  background: #fbfcfe;
+  border-color: #d8e1ec;
+}
+.content .mermaid svg { max-width: 100%; height: auto; }
+
+/* Callout-style blockquotes (used for "why" notes). */
+.content blockquote {
+  border-left: 4px solid var(--defra-yellow);
+  background: rgba(255, 224, 102, 0.05);
+  border-radius: 0 6px 6px 0;
+  padding: 0.6em 1em;
+  color: inherit;
+}
+.light .content blockquote {
+  background: #fffbea;
+}
+
+/* Code blocks: keep ayu's syntax colours, add a subtle border. */
+pre {
+  border: 1px solid #232936;
+  border-radius: 8px;
+}
+.light pre { border-color: #d8e1ec; }
