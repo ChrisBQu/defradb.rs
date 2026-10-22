@@ -3,9 +3,12 @@
 //! This module manages the lifecycle of node instances and their handles.
 //! Go code receives opaque usize handles that map to actual node state.
 
+mod handle;
+mod identity;
 mod p2p;
 mod policy_store;
 mod registry;
+mod txn;
 
 use std::sync::Arc;
 
@@ -16,13 +19,14 @@ use zeroize::Zeroizing;
 
 use blockstore::DefraBlockstore;
 
+pub use identity::{IdentityHandle, IdentityRegistry, IdentityState, IDENTITIES};
 pub use p2p::P2PState;
 pub use policy_store::PolicyStore;
 pub use registry::{
-    graphql_subscriptions, nodes, subscriptions, GraphQLSubscriptionRegistry,
-    GraphQLSubscriptionsAccess, NodeRegistry, NodesAccess, SubscriptionRegistry,
-    SubscriptionsAccess, GRAPHQL_SUBSCRIPTIONS, NODES, SUBSCRIPTIONS,
+    graphql_subscriptions, nodes, GraphQLSubscriptionRegistry, GraphQLSubscriptionsAccess,
+    NodeRegistry, NodesAccess, GRAPHQL_SUBSCRIPTIONS, NODES,
 };
+pub use txn::{TxnHandle, TxnRegistry, TxnState, TXNS};
 
 /// Storage backend enum for FFI nodes.
 ///
@@ -134,8 +138,9 @@ pub struct NodeState {
     /// Query parsing and filter evaluation limits configured for this node.
     pub query_limits: query::QueryLimits,
     /// Searchable encryption key (32-byte AES-256 key). Zeroized on drop.
-    /// Set via `set_se_encryption_key` FFI when SE is enabled in test config.
     pub se_encryption_key: AtomOption<Zeroizing<Vec<u8>>>,
+    /// The node's options as `defra_node_options` reports them, redacted.
+    pub options_json: serde_json::Value,
 }
 
 impl NodeState {
@@ -166,19 +171,7 @@ impl NodeState {
     }
 }
 
-/// State held for each FFI subscription.
-pub struct SubscriptionState {
-    /// The underlying events subscription, polled through a shared
-    /// reference (`try_take`): polls of one handle never wait on each other,
-    /// and each event goes to exactly one of them.
-    pub subscription: events::Subscription,
-    /// The node handle this subscription belongs to.
-    pub node_handle: NodeHandle,
-    /// Optional collection name filter (None = all collections).
-    pub collection_filter: Option<String>,
-}
-
-/// State held for each GraphQL subscription (used by poll_graphql_subscription).
+/// State held for each GraphQL subscription (read by `defra_subscription_poll`).
 ///
 /// Subscription queries are re-executed at **event time** (not poll time) to ensure
 /// the DB state matches the event. A background network service processes events as

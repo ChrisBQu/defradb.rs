@@ -76,12 +76,14 @@ async fn shutdown_libp2p_host(handle: &p2p::P2PHostHandle, host_task: tokio::tas
 }
 
 #[cfg(feature = "libp2p")]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn setup_libp2p<S>(
     store: Arc<S>,
     database: Arc<db::DB<S>>,
     event_bus: Arc<dyn events::Bus>,
     config: &Libp2pConfig,
     sync_config: SyncConfig,
+    retry_schedule: storage::stores::RetrySchedule,
     peer_keyring: Option<&crate::PeerKeyring>,
     edge: &edge::Edge,
 ) -> Result<P2PSetup>
@@ -94,13 +96,16 @@ where
 
     let max_txn_retries = database.options().max_txn_retries();
 
-    let listen_addr = config
-        .listen_addr
-        .parse()
-        .map_err(|source| Error::InvalidMultiaddr {
-            addr: config.listen_addr.clone(),
-            source,
-        })?;
+    let listen_addrs = config
+        .listen_addrs
+        .iter()
+        .map(|addr| {
+            addr.parse().map_err(|source| Error::InvalidMultiaddr {
+                addr: addr.clone(),
+                source,
+            })
+        })
+        .collect::<std::result::Result<Vec<_>, Error>>()?;
     let blockstore = Arc::new(
         EmbeddedBlockstore::new(store.clone(), true)
             .with_max_txn_retries(max_txn_retries)
@@ -123,7 +128,14 @@ where
         p2p::P2PHost::with_keypair_and_config_and_identity_and_serve_gate(
             p2p_keypair,
             bitswap_store,
-            p2p::P2PHostConfig::default(),
+            p2p::P2PHostConfig {
+                enable_pubsub: config.enable_pubsub,
+                enable_relay: config.enable_relay,
+                stream_timeout: config
+                    .stream_timeout_secs
+                    .unwrap_or(p2p::P2PHostConfig::default().stream_timeout),
+                ..Default::default()
+            },
             database.node_identity(),
             classifier.clone(),
             serve_acp.clone(),
@@ -134,9 +146,11 @@ where
         host.run().await;
     });
 
-    if let Err(error) = handle.listen(listen_addr).await {
-        shutdown_libp2p_host(&handle, host_task).await;
-        return Err(Error::Listen(error));
+    for listen_addr in listen_addrs {
+        if let Err(error) = handle.listen(listen_addr).await {
+            shutdown_libp2p_host(&handle, host_task).await;
+            return Err(Error::Listen(error));
+        }
     }
 
     for topic in [
@@ -277,6 +291,7 @@ where
     // The sender's retry state: its calls from the edge run on the pool.
     let retry_peers = Peerstore::new(store.clone())
         .with_max_txn_retries(max_txn_retries)
+        .with_retry_schedule(retry_schedule.clone())
         .placed_on(database.pool());
     let host_event_task = spawn_libp2p_event_handler(
         event_rx,
@@ -297,11 +312,14 @@ where
     let failure_recorder_task =
         defra_p2p_adapter::spawn_failure_recorder(retry_peers.clone(), failure_rx);
 
-    let doc_pusher_impl = Arc::new(DbTransportDocPusher::new(
-        database.clone(),
-        p2p::Libp2pTransport::new(handle.clone()),
-        coordinator.head_hint_car_authority(),
-    ));
+    let doc_pusher_impl = Arc::new(
+        DbTransportDocPusher::new(
+            database.clone(),
+            p2p::Libp2pTransport::new(handle.clone()),
+            coordinator.head_hint_car_authority(),
+        )
+        .with_retry_schedule(retry_schedule),
+    );
     let doc_pusher_for_acp = doc_pusher_impl.clone();
     // Its storage calls run on the database's worker pool.
     let doc_pusher: Arc<dyn TransportDocPusher> =
@@ -475,6 +493,7 @@ pub(crate) async fn setup_iroh<S>(
     event_bus: Arc<dyn events::Bus>,
     config: &crate::IrohConfig,
     sync_config: SyncConfig,
+    retry_schedule: storage::stores::RetrySchedule,
     node_identity: Option<Arc<identity::RawIdentity>>,
     document_acp: Arc<dyn acp::DocumentACP>,
     strict_replicated_doc_access: bool,
@@ -513,6 +532,7 @@ where
     );
     peer_config.strict_replicated_doc_access = strict_replicated_doc_access;
     peer_config.sync = sync_config;
+    peer_config.retry_schedule = retry_schedule.clone();
     let replicator_push_options = ReplicatorPushOptionsState::default();
     peer_config.replicator_push_options = Some(replicator_push_options.clone());
     let peer = IrohPeer::start(store.clone(), database.clone(), event_bus, peer_config)
@@ -545,6 +565,7 @@ where
         peer.replication.broadcast_mutator.clone();
     let retry_peers = Peerstore::new(store.clone())
         .with_max_txn_retries(max_txn_retries)
+        .with_retry_schedule(retry_schedule)
         .placed_on(database.pool());
     system.set_retry_replicators(Arc::new(move || {
         let peerstore = retry_peers.clone();

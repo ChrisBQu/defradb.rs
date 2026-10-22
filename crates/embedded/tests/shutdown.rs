@@ -96,7 +96,8 @@ async fn p2p_shutdown_releases_persistent_store() -> Result<()> {
         edge: Some(edge::testing::edge()),
         persistence: Persistence::Persistent,
         transport: TransportConfig::Libp2p(Libp2pConfig {
-            listen_addr: "/ip4/127.0.0.1/tcp/0".to_string(),
+            listen_addrs: vec!["/ip4/127.0.0.1/tcp/0".to_string()],
+            ..Default::default()
         }),
         ..Default::default()
     };
@@ -152,7 +153,8 @@ async fn failed_p2p_setup_releases_persistent_store() -> Result<()> {
         edge: Some(edge::testing::edge()),
         persistence: Persistence::Persistent,
         transport: TransportConfig::Libp2p(Libp2pConfig {
-            listen_addr: format!("/ip4/127.0.0.1/tcp/{port}"),
+            listen_addrs: vec![format!("/ip4/127.0.0.1/tcp/{port}")],
+            ..Default::default()
         }),
         ..Default::default()
     };

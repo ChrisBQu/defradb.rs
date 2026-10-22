@@ -33,7 +33,7 @@ fn is_graphql_name(name: &str) -> bool {
 /// caller append operations of its own. Anything that is not a GraphQL `Name`
 /// is refused here rather than escaped: a key that is not a `Name` cannot
 /// address a schema field, so nothing legitimate is being turned away.
-pub(super) fn json_to_graphql_input(value: &JsonValue) -> RestResult<String> {
+pub fn json_to_graphql_input(value: &JsonValue) -> RestResult<String> {
     Ok(match value {
         JsonValue::Null => "null".to_string(),
         JsonValue::Bool(b) => b.to_string(),
@@ -90,7 +90,7 @@ pub(super) fn build_count_query(collection: &str) -> String {
     )
 }
 
-pub(super) fn build_create_mutation(collection: &str, data: &JsonValue) -> RestResult<String> {
+pub fn build_create_mutation(collection: &str, data: &JsonValue) -> RestResult<String> {
     let graphql_data = json_to_graphql_input(data)?;
     Ok(format!(
         r#"mutation {{ add_{collection}(input: [{graphql_data}]) {{ _docID }} }}"#,
@@ -99,10 +99,7 @@ pub(super) fn build_create_mutation(collection: &str, data: &JsonValue) -> RestR
     ))
 }
 
-pub(super) fn build_create_many_mutation(
-    collection: &str,
-    docs: &[JsonValue],
-) -> RestResult<String> {
+pub fn build_create_many_mutation(collection: &str, docs: &[JsonValue]) -> RestResult<String> {
     let inputs = docs
         .iter()
         .map(json_to_graphql_input)
@@ -114,7 +111,27 @@ pub(super) fn build_create_many_mutation(
     ))
 }
 
-pub(super) fn build_update_mutation(
+/// [`build_create_many_mutation`] with Go's document encryption: `encrypt`
+/// encrypts every field, `encrypt_fields` only the fields it names.
+pub fn build_encrypted_create_many_mutation(
+    collection: &str,
+    docs: &[JsonValue],
+    encrypt: bool,
+    encrypt_fields: &[String],
+) -> RestResult<String> {
+    let inputs = docs
+        .iter()
+        .map(json_to_graphql_input)
+        .collect::<RestResult<Vec<_>>>()?;
+    let fields = json_to_graphql_input(&JsonValue::from(encrypt_fields.to_vec()))?;
+    Ok(format!(
+        r#"mutation {{ add_{collection}(input: [{inputs}], encrypt: {encrypt}, encryptFields: {fields}) {{ _docID }} }}"#,
+        collection = collection,
+        inputs = inputs.join(", "),
+    ))
+}
+
+pub fn build_update_mutation(
     collection: &str,
     doc_id: &str,
     patch: &JsonValue,
@@ -128,7 +145,7 @@ pub(super) fn build_update_mutation(
     ))
 }
 
-pub(super) fn build_delete_mutation(collection: &str, doc_id: &str) -> String {
+pub fn build_delete_mutation(collection: &str, doc_id: &str) -> String {
     format!(
         r#"mutation {{ delete_{collection}(docIDs: ["{doc_id}"]) {{ _docID }} }}"#,
         collection = collection,
@@ -136,10 +153,7 @@ pub(super) fn build_delete_mutation(collection: &str, doc_id: &str) -> String {
     )
 }
 
-pub(super) fn build_filtered_delete_mutation(
-    collection: &str,
-    filter: &JsonValue,
-) -> RestResult<String> {
+pub fn build_filtered_delete_mutation(collection: &str, filter: &JsonValue) -> RestResult<String> {
     Ok(format!(
         r#"mutation {{ delete_{collection}(filter: {filter}) {{ _docID }} }}"#,
         collection = collection,
@@ -147,7 +161,7 @@ pub(super) fn build_filtered_delete_mutation(
     ))
 }
 
-pub(super) fn build_filtered_update_mutation(
+pub fn build_filtered_update_mutation(
     collection: &str,
     filter: &JsonValue,
     updater: &JsonValue,

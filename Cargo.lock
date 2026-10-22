@@ -4880,6 +4880,7 @@ dependencies = [
  "db",
  "defra-core",
  "defra-http",
+ "defra-version",
  "document",
  "edge",
  "embedded",

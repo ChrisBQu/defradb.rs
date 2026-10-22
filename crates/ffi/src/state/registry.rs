@@ -5,9 +5,7 @@ use kovan_map::HopscotchMap;
 use kovan_queue::seg_queue::SegQueue;
 use rapidhash::fast::RandomState;
 
-use super::{
-    GraphQLSubscriptionState, NodeHandle, NodeState, SubscriptionHandle, SubscriptionState,
-};
+use super::{GraphQLSubscriptionState, NodeHandle, NodeState, SubscriptionHandle};
 
 /// A registered node: the single owning reference plus a borrowing handle.
 ///
@@ -23,7 +21,6 @@ struct NodeSlot {
 /// Global registry of active nodes.
 pub struct NodeRegistry {
     nodes: HopscotchMap<NodeHandle, Arc<NodeSlot>, RandomState>,
-    next_handle: AtomicUsize,
 }
 
 impl NodeRegistry {
@@ -31,13 +28,12 @@ impl NodeRegistry {
     fn new() -> Self {
         Self {
             nodes: HopscotchMap::with_hasher(RandomState::default()),
-            next_handle: AtomicUsize::new(1), // Start at 1, 0 is invalid
         }
     }
 
     /// Insert a new node state and return its handle.
     pub fn insert(&self, state: NodeState) -> NodeHandle {
-        let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
+        let handle = super::handle::next_handle();
         let state = Arc::new(state);
         let slot = NodeSlot {
             owner: SegQueue::new(),
@@ -103,61 +99,6 @@ pub fn nodes() -> &'static NodeRegistry {
     NODE_REGISTRY.get_or_init(NodeRegistry::new)
 }
 
-/// Global registry of active subscriptions.
-pub struct SubscriptionRegistry {
-    subscriptions: HopscotchMap<SubscriptionHandle, Arc<SubscriptionState>, RandomState>,
-    next_handle: AtomicUsize,
-}
-
-impl SubscriptionRegistry {
-    fn new() -> Self {
-        Self {
-            subscriptions: HopscotchMap::with_hasher(RandomState::default()),
-            next_handle: AtomicUsize::new(1),
-        }
-    }
-
-    /// Insert a new subscription state and return its handle.
-    pub fn insert(&self, state: SubscriptionState) -> SubscriptionHandle {
-        let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
-        self.subscriptions.insert(handle, Arc::new(state));
-        handle
-    }
-
-    /// Get a subscription state.
-    pub fn get(&self, handle: SubscriptionHandle) -> Option<Arc<SubscriptionState>> {
-        self.subscriptions.get(&handle)
-    }
-
-    /// Remove and return a subscription state.
-    pub fn remove(&self, handle: SubscriptionHandle) -> Option<Arc<SubscriptionState>> {
-        self.subscriptions.remove(&handle)
-    }
-
-    /// Remove all subscriptions for a given node handle.
-    pub fn remove_for_node(&self, node_handle: NodeHandle) -> Vec<Arc<SubscriptionState>> {
-        let handles_to_remove: Vec<SubscriptionHandle> = self
-            .subscriptions
-            .iter()
-            .filter(|(_, state)| state.node_handle == node_handle)
-            .map(|(handle, _)| handle)
-            .collect();
-
-        handles_to_remove
-            .into_iter()
-            .filter_map(|handle| self.subscriptions.remove(&handle))
-            .collect()
-    }
-}
-
-/// Global subscription registry singleton.
-static SUBSCRIPTION_REGISTRY: OnceLock<SubscriptionRegistry> = OnceLock::new();
-
-/// Access the global subscription registry.
-pub fn subscriptions() -> &'static SubscriptionRegistry {
-    SUBSCRIPTION_REGISTRY.get_or_init(SubscriptionRegistry::new)
-}
-
 /// Global registry of active GraphQL subscriptions.
 pub struct GraphQLSubscriptionRegistry {
     subscriptions: HopscotchMap<SubscriptionHandle, Arc<GraphQLSubscriptionState>, RandomState>,
@@ -213,30 +154,6 @@ pub fn graphql_subscriptions() -> &'static GraphQLSubscriptionRegistry {
     GRAPHQL_SUBSCRIPTION_REGISTRY.get_or_init(GraphQLSubscriptionRegistry::new)
 }
 
-/// Convenience wrapper for subscription registry access.
-pub struct SubscriptionsAccess;
-
-impl SubscriptionsAccess {
-    pub fn insert(&self, state: SubscriptionState) -> SubscriptionHandle {
-        subscriptions().insert(state)
-    }
-
-    pub fn get(&self, handle: SubscriptionHandle) -> Option<Arc<SubscriptionState>> {
-        subscriptions().get(handle)
-    }
-
-    pub fn remove(&self, handle: SubscriptionHandle) -> Option<Arc<SubscriptionState>> {
-        subscriptions().remove(handle)
-    }
-
-    pub fn remove_for_node(&self, node_handle: NodeHandle) -> Vec<Arc<SubscriptionState>> {
-        subscriptions().remove_for_node(node_handle)
-    }
-}
-
-/// Global SUBSCRIPTIONS accessor.
-pub static SUBSCRIPTIONS: SubscriptionsAccess = SubscriptionsAccess;
-
 /// Convenience wrapper for NODES access (backwards compatibility).
 pub struct NodesAccess;
 
@@ -250,6 +167,10 @@ impl NodesAccess {
         F: FnOnce(&NodeState) -> R,
     {
         nodes().get(handle, f)
+    }
+
+    pub fn contains(&self, handle: NodeHandle) -> bool {
+        nodes().contains(handle)
     }
 
     pub fn for_each<F>(&self, f: F)

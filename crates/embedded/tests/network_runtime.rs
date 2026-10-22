@@ -20,7 +20,8 @@ fn memory_store() -> Result<storage::RegolithStore> {
 
 fn libp2p() -> TransportConfig {
     TransportConfig::Libp2p(Libp2pConfig {
-        listen_addr: "/ip4/127.0.0.1/tcp/0".to_string(),
+        listen_addrs: vec!["/ip4/127.0.0.1/tcp/0".to_string()],
+        ..Default::default()
     })
 }
 

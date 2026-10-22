@@ -73,6 +73,7 @@ hex.workspace = true
 crypto = { path = "../crypto" }
 db = { path = "../db", default-features = false }
 defra-core = { path = "../defra-core" }
+defra-version = { path = "../defra-version" }
 defra-http = { path = "../http" }
 document = { path = "../document" }
 events = { path = "../events" }

@@ -3,13 +3,14 @@ use std::ffi::c_char;
 use acp::nac::NodePermission;
 use acp::StorePolicyOptions;
 
-use crate::helpers::{get_rt, require_c_str};
-use crate::nac_check::check_nac_for_node;
+use crate::helpers::get_rt;
 use crate::policy_yaml::{
     check_duplicate_yaml_keys, parse_policy_yaml, validate_policy_expressions,
 };
+use crate::request::Request;
 use crate::state::NODES;
-use crate::types::{c_str_to_string, FfiResult};
+use crate::target::go_string;
+use crate::types::DefraResult;
 use crate::{ffi_entry, try_ffi, ERR_INVALID_NODE_HANDLE};
 
 async fn publish_latest_document_update(
@@ -73,58 +74,61 @@ pub(crate) fn resolve_managing_relations(
 ///
 /// `policy` must be a valid null-terminated UTF-8 string containing
 /// the policy definition in YAML or JSON format.
+/// Adds the document access-control policy `policy` (YAML), created by the
+/// identity `identity_ptr` names, and answers with `{"PolicyID": ...}`.
+///
+/// # Safety
+///
+/// `policy` must be null or a valid null-terminated string.
 #[no_mangle]
-pub unsafe extern "C" fn add_dac_policy(
+pub unsafe extern "C" fn defra_acp_dac_policy_add(
     node_ptr: usize,
-    _identity_did: *const c_char,
+    identity_ptr: usize,
     policy: *const c_char,
-) -> FfiResult {
+) -> DefraResult {
     ffi_entry! {
-        try_ffi!(check_nac_for_node(
-            node_ptr,
-            _identity_did,
-            NodePermission::DacPolicyAdd
-        ));
+        let request = try_ffi!(Request::begin(node_ptr, identity_ptr, NodePermission::DacPolicyAdd));
+        let node_ptr = try_ffi!(request.require_node("policy add"));
 
-        let policy_str = try_ffi!(require_c_str(policy, "policy"));
+        let policy_str = go_string(policy);
 
-        let identity_str = c_str_to_string(_identity_did).unwrap_or_default();
+        let identity_str = request.identity.clone().unwrap_or_default();
 
         if identity_str.is_empty() {
-            return FfiResult::error("policy creator can not be empty");
+            return DefraResult::error("policy creator can not be empty");
         }
 
         // Check for empty/null policy data
         if policy_str.is_empty() {
-            return FfiResult::error("policy data can not be empty");
+            return DefraResult::error("policy data can not be empty");
         }
 
         // Step 1: Check for duplicate YAML map keys (Go rejects these via YAMLToJSONStrict)
         if let Err(e) = check_duplicate_yaml_keys(&policy_str) {
-            return FfiResult::error(e);
+            return DefraResult::error(e);
         }
 
         // Step 2: Parse the policy YAML
         let parsed = match parse_policy_yaml(&policy_str) {
             Ok(p) => p,
-            Err(e) => return FfiResult::error(e),
+            Err(e) => return DefraResult::error(e),
         };
 
         // Step 3: Validate name is present (Go's BasicRequirement)
         if parsed.name.is_empty() {
-            return FfiResult::error("name required");
+            return DefraResult::error("name required");
         }
 
         // Step 4: Validate permission expressions
         if let Err(e) = validate_policy_expressions(&parsed) {
-            return FfiResult::error(e);
+            return DefraResult::error(e);
         }
 
         // Step 5: Store policy - route through Vera when configured, else local
         #[cfg(feature = "vera")]
         let sh_acp = match NODES.get(node_ptr, |state| state.vera_acp.clone()) {
             Some(opt) => opt,
-            None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+            None => return DefraResult::error(ERR_INVALID_NODE_HANDLE),
         };
 
         #[cfg(feature = "vera")]
@@ -144,9 +148,9 @@ pub unsafe extern "C" fn add_dac_policy(
                     NODES.for_each(|state| {
                         state.policy_store.store_policy(&policy_id, &policy_str);
                     });
-                    FfiResult::success(serde_json::json!({ "PolicyID": policy_id }).to_string())
+                    DefraResult::success(serde_json::json!({ "PolicyID": policy_id }).to_string())
                 }
-                Err(e) => FfiResult::error(e),
+                Err(e) => DefraResult::error(e),
             };
         }
 
@@ -157,11 +161,11 @@ pub unsafe extern "C" fn add_dac_policy(
                 (state.policy_store.clone(), state.local_zanzibar_store.clone())
             }) {
                 Some(tuple) => tuple,
-                None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+                None => return DefraResult::error(ERR_INVALID_NODE_HANDLE),
             };
 
             let Some(local_zanzibar_store) = local_zanzibar_store else {
-                return FfiResult::error("local ACP backend is not available");
+                return DefraResult::error("local ACP backend is not available");
             };
 
             let counter_store = std::sync::Arc::clone(&local_zanzibar_store);
@@ -173,13 +177,13 @@ pub unsafe extern "C" fn add_dac_policy(
             }) {
                 Ok(counter) => counter,
                 Err(e) => {
-                    return FfiResult::error(format!("failed to advance policy counter: {}", e))
+                    return DefraResult::error(format!("failed to advance policy counter: {}", e))
                 }
             };
 
             let policy = match acp::policy_yaml::build_policy(&parsed, counter) {
                 Ok(policy) => policy,
-                Err(e) => return FfiResult::error(format!("invalid policy: {}", e)),
+                Err(e) => return DefraResult::error(format!("invalid policy: {}", e)),
             };
             let policy_id = policy.id.clone();
             policy_store.store_policy(&policy_id, &policy_str);
@@ -203,68 +207,12 @@ pub unsafe extern "C" fn add_dac_policy(
             });
 
             match result {
-                Ok(json) => FfiResult::success(json),
+                Ok(json) => DefraResult::success(json),
                 Err(e) => {
                     policy_store.remove_policy(&policy_id);
-                    FfiResult::error(e)
+                    DefraResult::error(e)
                 }
             }
-        }
-    }
-}
-
-/// Get a DAC policy by ID.
-///
-/// Returns a JSON object with the policy content, or null if not found.
-///
-/// # Safety
-///
-/// `policy_id` must be a valid null-terminated UTF-8 string.
-#[no_mangle]
-pub unsafe extern "C" fn get_dac_policy(node_ptr: usize, policy_id: *const c_char) -> FfiResult {
-    ffi_entry! {
-        let policy_id_str = try_ffi!(require_c_str(policy_id, "policy_id"));
-
-        let result = NODES
-            .get(node_ptr, |state| {
-                match state.policy_store.get_policy(&policy_id_str) {
-                    Some(policy) => serde_json::json!({
-                        "id": policy_id_str,
-                        "policy": policy
-                    })
-                    .to_string(),
-                    None => serde_json::json!(null).to_string(),
-                }
-            })
-            .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string());
-
-        match result {
-            Ok(json) => FfiResult::success(json),
-            Err(e) => FfiResult::error(e),
-        }
-    }
-}
-
-/// List all DAC policy IDs.
-///
-/// Returns a JSON array of policy IDs.
-///
-/// # Safety
-///
-/// No unsafe string parameters.
-#[no_mangle]
-pub extern "C" fn list_dac_policies(node_ptr: usize) -> FfiResult {
-    ffi_entry! {
-        let result = NODES
-            .get(node_ptr, |state| {
-                let ids = state.policy_store.list_policies();
-                serde_json::to_string(&ids).unwrap_or_else(|_| "[]".to_string())
-            })
-            .ok_or_else(|| ERR_INVALID_NODE_HANDLE.to_string());
-
-        match result {
-            Ok(json) => FfiResult::success(json),
-            Err(e) => FfiResult::error(e),
         }
     }
 }
@@ -284,32 +232,36 @@ pub extern "C" fn list_dac_policies(node_ptr: usize) -> FfiResult {
 /// # Safety
 ///
 /// All string parameters must be valid null-terminated UTF-8 strings.
+/// Adds the relation `relation` between `actor` and document `doc_id` of
+/// collection `collection`, as the identity `identity_ptr` names, and
+/// answers with the result as JSON.
+///
+/// # Safety
+///
+/// Every string must be null or a valid null-terminated string.
 #[no_mangle]
-pub unsafe extern "C" fn add_dac_actor_relationship(
+pub unsafe extern "C" fn defra_acp_dac_relationship_add(
     node_ptr: usize,
-    requestor_did: *const c_char,
-    target_did: *const c_char,
-    collection_id: *const c_char,
+    identity_ptr: usize,
+    collection: *const c_char,
     doc_id: *const c_char,
     relation: *const c_char,
-) -> FfiResult {
+    actor: *const c_char,
+) -> DefraResult {
     ffi_entry! {
         let rt = try_ffi!(get_rt());
-        try_ffi!(check_nac_for_node(
-            node_ptr,
-            requestor_did,
-            NodePermission::DacRelationAdd
-        ));
+        let request = try_ffi!(Request::begin(node_ptr, identity_ptr, NodePermission::DacRelationAdd));
+        let node_ptr = try_ffi!(request.require_node("document relationship changes"));
 
-        let requestor_str = try_ffi!(require_c_str(requestor_did, "requestor_did"));
-        let target_str = try_ffi!(require_c_str(target_did, "target_did"));
-        let collection_id_str = try_ffi!(require_c_str(collection_id, "collection_id"));
-        let doc_id_str = try_ffi!(require_c_str(doc_id, "doc_id"));
-        let relation_str = try_ffi!(require_c_str(relation, "relation"));
+        let requestor_str = request.identity.clone().unwrap_or_default();
+        let target_str = go_string(actor);
+        let collection_id_str = go_string(collection);
+        let doc_id_str = go_string(doc_id);
+        let relation_str = go_string(relation);
 
         // Go checks collection name first (via GetCollectionByName)
         if collection_id_str.is_empty() {
-            return FfiResult::error("collection name can't be empty");
+            return DefraResult::error("collection name can't be empty");
         }
 
         // Then validates remaining required arguments (matches Go bridge.go validation)
@@ -318,7 +270,7 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
             || doc_id_str.is_empty()
             || relation_str.is_empty()
         {
-            return FfiResult::error(
+            return DefraResult::error(
                 "missing a required argument needed to add doc actor relationship.",
             );
         }
@@ -333,7 +285,7 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
             )
         }) {
             Some(tuple) => tuple,
-            None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+            None => return DefraResult::error(ERR_INVALID_NODE_HANDLE),
         };
 
         // Resolve collection name -> policy resource_name and policy_id
@@ -346,14 +298,14 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
                     col.collection_id().to_string(),
                 ),
                 None => {
-                    return FfiResult::error("operation requires ACP, but collection has no policy");
+                    return DefraResult::error("operation requires ACP, but collection has no policy");
                 }
             },
             Ok(None) => {
-                return FfiResult::error(format!("collection '{}' does not exist", collection_id_str));
+                return DefraResult::error(format!("collection '{}' does not exist", collection_id_str));
             }
             Err(e) => {
-                return FfiResult::error(format!(
+                return DefraResult::error(format!(
                     "failed to get collection '{}': {}",
                     collection_id_str, e
                 ));
@@ -362,7 +314,7 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
 
         // Owner relation is immutable - cannot be added or removed
         if relation_str == "owner" {
-            return FfiResult::error("OPERATION_FORBIDDEN: cannot add owner relation");
+            return DefraResult::error("OPERATION_FORBIDDEN: cannot add owner relation");
         }
 
         let managing_relations = match resolve_managing_relations(
@@ -372,7 +324,7 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
             &relation_str,
         ) {
             Ok(r) => r,
-            Err(e) => return FfiResult::error(e),
+            Err(e) => return DefraResult::error(e),
         };
 
         let result = crate::helpers::block_on(rt, async {
@@ -415,8 +367,8 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
         });
 
         match result {
-            Ok(json) => FfiResult::success(json),
-            Err(e) => FfiResult::error(e),
+            Ok(json) => DefraResult::success(json),
+            Err(e) => DefraResult::error(e),
         }
     }
 }
@@ -433,32 +385,36 @@ pub unsafe extern "C" fn add_dac_actor_relationship(
 /// # Safety
 ///
 /// All string parameters must be valid null-terminated UTF-8 strings.
+/// Deletes the relation `relation` between `actor` and document `doc_id` of
+/// collection `collection`, as the identity `identity_ptr` names, and
+/// answers with the result as JSON.
+///
+/// # Safety
+///
+/// Every string must be null or a valid null-terminated string.
 #[no_mangle]
-pub unsafe extern "C" fn delete_dac_actor_relationship(
+pub unsafe extern "C" fn defra_acp_dac_relationship_delete(
     node_ptr: usize,
-    requestor_did: *const c_char,
-    target_did: *const c_char,
-    collection_id: *const c_char,
+    identity_ptr: usize,
+    collection: *const c_char,
     doc_id: *const c_char,
     relation: *const c_char,
-) -> FfiResult {
+    actor: *const c_char,
+) -> DefraResult {
     ffi_entry! {
         let rt = try_ffi!(get_rt());
-        try_ffi!(check_nac_for_node(
-            node_ptr,
-            requestor_did,
-            NodePermission::DacRelationDelete
-        ));
+        let request = try_ffi!(Request::begin(node_ptr, identity_ptr, NodePermission::DacRelationDelete));
+        let node_ptr = try_ffi!(request.require_node("document relationship changes"));
 
-        let requestor_str = try_ffi!(require_c_str(requestor_did, "requestor_did"));
-        let target_str = try_ffi!(require_c_str(target_did, "target_did"));
-        let collection_id_str = try_ffi!(require_c_str(collection_id, "collection_id"));
-        let doc_id_str = try_ffi!(require_c_str(doc_id, "doc_id"));
-        let relation_str = try_ffi!(require_c_str(relation, "relation"));
+        let requestor_str = request.identity.clone().unwrap_or_default();
+        let target_str = go_string(actor);
+        let collection_id_str = go_string(collection);
+        let doc_id_str = go_string(doc_id);
+        let relation_str = go_string(relation);
 
         // Go checks collection name first (via GetCollectionByName)
         if collection_id_str.is_empty() {
-            return FfiResult::error("collection name can't be empty");
+            return DefraResult::error("collection name can't be empty");
         }
 
         // Then validates remaining required arguments (matches Go bridge.go validation)
@@ -467,7 +423,7 @@ pub unsafe extern "C" fn delete_dac_actor_relationship(
             || doc_id_str.is_empty()
             || relation_str.is_empty()
         {
-            return FfiResult::error(
+            return DefraResult::error(
                 "missing a required argument needed to delete doc actor relationship.",
             );
         }
@@ -481,7 +437,7 @@ pub unsafe extern "C" fn delete_dac_actor_relationship(
             )
         }) {
             Some(tuple) => tuple,
-            None => return FfiResult::error(ERR_INVALID_NODE_HANDLE),
+            None => return DefraResult::error(ERR_INVALID_NODE_HANDLE),
         };
 
         // Resolve collection name -> policy resource_name and policy_id
@@ -489,14 +445,14 @@ pub unsafe extern "C" fn delete_dac_actor_relationship(
             Ok(Some(col)) => match col.schema().policy {
                 Some(ref policy) => (policy.resource_name.clone(), policy.id.clone()),
                 None => {
-                    return FfiResult::error("operation requires ACP, but collection has no policy");
+                    return DefraResult::error("operation requires ACP, but collection has no policy");
                 }
             },
             Ok(None) => {
-                return FfiResult::error(format!("collection '{}' does not exist", collection_id_str));
+                return DefraResult::error(format!("collection '{}' does not exist", collection_id_str));
             }
             Err(e) => {
-                return FfiResult::error(format!(
+                return DefraResult::error(format!(
                     "failed to get collection '{}': {}",
                     collection_id_str, e
                 ));
@@ -505,7 +461,7 @@ pub unsafe extern "C" fn delete_dac_actor_relationship(
 
         // Owner relation is immutable - cannot be added or removed
         if relation_str == "owner" {
-            return FfiResult::error("OPERATION_FORBIDDEN: cannot delete owner relation");
+            return DefraResult::error("OPERATION_FORBIDDEN: cannot delete owner relation");
         }
 
         let managing_relations = match resolve_managing_relations(
@@ -515,7 +471,7 @@ pub unsafe extern "C" fn delete_dac_actor_relationship(
             &relation_str,
         ) {
             Ok(r) => r,
-            Err(e) => return FfiResult::error(e),
+            Err(e) => return DefraResult::error(e),
         };
 
         let result = crate::helpers::block_on(rt, async {
@@ -548,253 +504,8 @@ pub unsafe extern "C" fn delete_dac_actor_relationship(
         });
 
         match result {
-            Ok(json) => FfiResult::success(json),
-            Err(e) => FfiResult::error(e),
+            Ok(json) => DefraResult::success(json),
+            Err(e) => DefraResult::error(e),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::node::{new_node, node_close};
-    use crate::types::NodeInitOptions;
-    use crate::{add_schema, exec_request};
-    use std::ffi::{CStr, CString};
-
-    fn ffi_value(result: &crate::types::FfiResult) -> String {
-        assert_eq!(result.status, 0, "expected success status");
-        unsafe { CStr::from_ptr(result.value).to_string_lossy().into_owned() }
-    }
-
-    fn extract_doc_id(payload: &str, field: &str) -> String {
-        let json: serde_json::Value = serde_json::from_str(payload).unwrap();
-        let data = &json["data"][field];
-        match data {
-            serde_json::Value::Array(items) => items[0]["_docID"].as_str().unwrap().to_string(),
-            serde_json::Value::Object(_) => data["_docID"].as_str().unwrap().to_string(),
-            other => panic!("unexpected GraphQL payload for {field}: {other}"),
-        }
-    }
-
-    fn test_did() -> &'static str {
-        "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
-    }
-
-    fn test_did2() -> &'static str {
-        "did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH"
-    }
-
-    #[test]
-    fn test_dac_actor_relationship_missing_collection_returns_error() {
-        assert!(crate::runtime::init_runtime());
-
-        let result = new_node(NodeInitOptions::default());
-        assert_eq!(result.status, 0, "new_node should succeed");
-        let node = result.node_ptr;
-
-        let requestor_did = CString::new(test_did()).unwrap();
-        let target_did = CString::new(test_did2()).unwrap();
-        let collection_id = CString::new("test-collection").unwrap();
-        let doc_id = CString::new("test-doc").unwrap();
-        let relation = CString::new("reader").unwrap();
-
-        let result = unsafe {
-            add_dac_actor_relationship(
-                node,
-                requestor_did.as_ptr(),
-                target_did.as_ptr(),
-                collection_id.as_ptr(),
-                doc_id.as_ptr(),
-                relation.as_ptr(),
-            )
-        };
-        assert_eq!(result.status, 1, "missing collection should be an error");
-        assert!(
-            result.value.is_null(),
-            "error result should not contain a value"
-        );
-        assert!(
-            !result.error.is_null(),
-            "error result should contain a message"
-        );
-        let error = unsafe { CStr::from_ptr(result.error).to_string_lossy() };
-        assert_eq!(error, "collection 'test-collection' does not exist");
-        unsafe { crate::types::defra_free_string(result.error) };
-
-        let close_result = node_close(node);
-        assert_eq!(close_result.status, 0, "node_close should succeed");
-    }
-
-    #[test]
-    fn test_local_dac_policy_is_enforced_via_ffi() {
-        assert!(crate::runtime::init_runtime());
-
-        let options = NodeInitOptions::default();
-        let result = new_node(options);
-        assert_eq!(result.status, 0, "new_node should succeed");
-        let node = result.node_ptr;
-
-        let owner_did = CString::new(test_did()).unwrap();
-        let viewer_did = CString::new(test_did2()).unwrap();
-        let policy_yaml = CString::new(
-            r#"
-name: Viewer Policy
-resources:
-  - name: users
-    relations:
-      - name: viewer
-      - name: editor
-      - name: remover
-    permissions:
-      - name: read
-        expr: viewer
-      - name: update
-        expr: editor
-      - name: delete
-        expr: remover
-"#,
-        )
-        .unwrap();
-
-        let add_policy_result =
-            unsafe { add_dac_policy(node, owner_did.as_ptr(), policy_yaml.as_ptr()) };
-        let add_policy_json = ffi_value(&add_policy_result);
-        let policy_id = serde_json::from_str::<serde_json::Value>(&add_policy_json).unwrap()
-            ["PolicyID"]
-            .as_str()
-            .unwrap()
-            .to_string();
-        unsafe { crate::types::defra_free_string(add_policy_result.value) };
-
-        let policy_id_c = CString::new(policy_id.clone()).unwrap();
-        let get_policy_result = unsafe { get_dac_policy(node, policy_id_c.as_ptr()) };
-        let get_policy_json = ffi_value(&get_policy_result);
-        assert!(get_policy_json.contains("Viewer Policy"));
-        unsafe { crate::types::defra_free_string(get_policy_result.value) };
-
-        let list_policy_result = list_dac_policies(node);
-        let list_policy_json = ffi_value(&list_policy_result);
-        assert!(list_policy_json.contains(&policy_id));
-        unsafe { crate::types::defra_free_string(list_policy_result.value) };
-
-        let sdl = CString::new(format!(
-            r#"type User @policy(id: "{policy_id}", resource: "users") {{ name: String }}"#
-        ))
-        .unwrap();
-        let schema_result = unsafe { add_schema(node, owner_did.as_ptr(), sdl.as_ptr()) };
-        assert_eq!(schema_result.status, 0, "add_schema should succeed");
-        if !schema_result.value.is_null() {
-            unsafe { crate::types::defra_free_string(schema_result.value) };
-        }
-
-        let add_doc =
-            CString::new(r#"mutation { add_User(input: {name: "Alice"}) { _docID name } }"#)
-                .unwrap();
-        let add_doc_result = unsafe {
-            exec_request(
-                node,
-                owner_did.as_ptr(),
-                add_doc.as_ptr(),
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null(),
-            )
-        };
-        let add_doc_json = ffi_value(&add_doc_result);
-        let doc_id = extract_doc_id(&add_doc_json, "add_User");
-        unsafe { crate::types::defra_free_string(add_doc_result.value) };
-
-        let read_query = CString::new(r#"{ User { _docID name } }"#).unwrap();
-        let denied_read_result = unsafe {
-            exec_request(
-                node,
-                viewer_did.as_ptr(),
-                read_query.as_ptr(),
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null(),
-            )
-        };
-        let denied_read_json = ffi_value(&denied_read_result);
-        assert!(
-            !denied_read_json.contains(&doc_id),
-            "viewer should not see protected documents before a relationship is granted"
-        );
-        unsafe { crate::types::defra_free_string(denied_read_result.value) };
-
-        let collection_id = CString::new("User").unwrap();
-        let doc_id_c = CString::new(doc_id.clone()).unwrap();
-        let relation = CString::new("viewer").unwrap();
-        let mut relationship_events = NODES
-            .get(node, |state| {
-                state.event_bus.subscribe(&[events::EventName::Update])
-            })
-            .unwrap();
-        let add_rel_result = unsafe {
-            add_dac_actor_relationship(
-                node,
-                owner_did.as_ptr(),
-                viewer_did.as_ptr(),
-                collection_id.as_ptr(),
-                doc_id_c.as_ptr(),
-                relation.as_ptr(),
-            )
-        };
-        let add_rel_json = ffi_value(&add_rel_result);
-        assert!(add_rel_json.contains(r#""added":true"#));
-        unsafe { crate::types::defra_free_string(add_rel_result.value) };
-
-        let message = relationship_events
-            .try_recv()
-            .expect("relationship update event");
-        let update = message.as_update().expect("document update");
-        assert_eq!(update.doc_id, doc_id);
-        assert!(!update.block.is_empty());
-        assert_eq!(
-            defra_core::block::generate_cid_from_bytes(&update.block).unwrap(),
-            update.cid
-        );
-
-        let allowed_read_result = unsafe {
-            exec_request(
-                node,
-                viewer_did.as_ptr(),
-                read_query.as_ptr(),
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null(),
-            )
-        };
-        let allowed_read_json = ffi_value(&allowed_read_result);
-        assert!(allowed_read_json.contains(&doc_id));
-        assert!(allowed_read_json.contains("Alice"));
-        unsafe { crate::types::defra_free_string(allowed_read_result.value) };
-
-        let update_mutation = CString::new(format!(
-            r#"mutation {{ update_User(docIDs: ["{doc_id}"], input: {{name: "Mallory"}}) {{ _docID name }} }}"#
-        ))
-        .unwrap();
-        let denied_update_result = unsafe {
-            exec_request(
-                node,
-                viewer_did.as_ptr(),
-                update_mutation.as_ptr(),
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null(),
-            )
-        };
-        let denied_update_json = ffi_value(&denied_update_result);
-        assert!(
-            denied_update_json.contains("permission denied")
-                || denied_update_json.contains("UNAUTHORIZED")
-                || denied_update_json.contains("errors"),
-            "viewer should not gain update access from a read-only relation: {denied_update_json}"
-        );
-        unsafe { crate::types::defra_free_string(denied_update_result.value) };
-
-        let close_result = node_close(node);
-        assert_eq!(close_result.status, 0, "node_close should succeed");
     }
 }
