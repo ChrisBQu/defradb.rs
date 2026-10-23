@@ -30,7 +30,8 @@ async fn build_and_stop(config: EmbeddedNodeConfig) -> Result<()> {
 #[cfg(feature = "libp2p")]
 fn libp2p() -> TransportConfig {
     TransportConfig::Libp2p(embedded::Libp2pConfig {
-        listen_addr: "/ip4/127.0.0.1/tcp/0".to_string(),
+        listen_addrs: vec!["/ip4/127.0.0.1/tcp/0".to_string()],
+        ..Default::default()
     })
 }
 
