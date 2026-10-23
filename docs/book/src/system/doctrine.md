@@ -22,7 +22,7 @@ remove coordination from defradb.rs, never add it.
 > engine already does, and the two copies drift. The history of this codebase includes a
 > shared transaction mutex, per-document write queues, an arrival guard, a batch gate and
 > eleven retry loops; all were deleted, one measured step at a time, and the engine's own
-> mechanisms replaced them. See [the appendix](../roadmap/migration.md).
+> mechanisms replaced them; the plan that deleted them, step by gated step, is recorded in the repository's docs.
 
 ## Pick the mechanism by what the decision depends on
 

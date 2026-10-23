@@ -64,5 +64,3 @@
 - [API Surfaces](./api/index.md)
 
 - [Verification](./proofs/index.md)
-
-- [Appendix: the regolith migration](./roadmap/migration.md)
