@@ -1,7 +1,11 @@
 name: book
 
-# Build the Book of Defra and deploy it to the gh-pages branch whenever the
-# book's sources change on main (merge or direct push), or on demand.
+# Build the Book of Defra and deploy it to the book/ directory of the gh-pages
+# branch whenever the book's sources change on main (merge or direct push), or
+# on demand. The perf workflow publishes the performance dashboard (index.html
+# and runs/) to the same branch with keep_files, so this job must never wipe
+# it: it publishes into book/ only, keeping every other path.
+# Served at https://sourcenetwork.github.io/defradb.rs/book/
 
 on:
   push:
@@ -56,11 +60,12 @@ jobs:
           mdbook build docs/book 2>&1 | tee /tmp/book-build.log
           ! grep -E "WARN.*\[output\.html\]|linking to non-existent" /tmp/book-build.log
 
-      - name: Deploy to gh-pages
+      - name: Deploy to gh-pages under book/
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: docs/book/book
           publish_branch: gh-pages
-          force_orphan: true
+          destination_dir: book
+          keep_files: true
           commit_message: "deploy: book of defra"
