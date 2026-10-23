@@ -38,6 +38,22 @@ pub struct ReplicatorInfoResponse {
     pub filters: ReplicationFilters,
 }
 
+impl From<crate::router::ReplicatorInfo> for ReplicatorInfoResponse {
+    fn from(r: crate::router::ReplicatorInfo) -> Self {
+        Self {
+            id: r.id,
+            // Go names one replicator's addresses in a list.
+            addresses: r.address.into_iter().collect(),
+            collection_ids: r.collections,
+            status: r.status.unwrap_or(0),
+            last_status_change: r
+                .last_status_change
+                .unwrap_or_else(|| "0001-01-01T00:00:00Z".to_string()),
+            filters: r.filters,
+        }
+    }
+}
+
 /// Request to add a replicator (Go-compatible format).
 #[derive(Debug, Clone, Deserialize)]
 pub struct ReplicatorRequest {
@@ -87,21 +103,7 @@ pub async fn list_replicators(
 
     let replicators = p2p.get_replicators().await.map_err(map_p2p_internal)?;
 
-    let response: Vec<ReplicatorInfoResponse> = replicators
-        .into_iter()
-        .map(|r| ReplicatorInfoResponse {
-            id: r.id,
-            // Convert single address to array (Go uses Addresses plural)
-            addresses: r.address.into_iter().collect(),
-            // Use collections as collection IDs
-            collection_ids: r.collections,
-            status: r.status.unwrap_or(0),
-            last_status_change: r
-                .last_status_change
-                .unwrap_or_else(|| "0001-01-01T00:00:00Z".to_string()),
-            filters: r.filters,
-        })
-        .collect();
+    let response: Vec<ReplicatorInfoResponse> = replicators.into_iter().map(Into::into).collect();
 
     Ok(Json(response))
 }

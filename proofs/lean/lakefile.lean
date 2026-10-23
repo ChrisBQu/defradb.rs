@@ -110,3 +110,6 @@ lean_lib DocumentPush where
 
 @[default_target]
 lean_lib SelectedCarAuthority where
+
+@[default_target]
+lean_lib RetrySchedule where
