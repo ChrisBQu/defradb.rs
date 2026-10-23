@@ -268,6 +268,23 @@ pub(crate) fn http_error_from_backend_message(message: String) -> HttpError {
     }
 }
 
+/// The answer to a request whose work on the worker pool did not finish: a
+/// retry while the pool shuts down, an internal error otherwise (a panic).
+pub(crate) fn pool_failure(route: &str, error: workers::Error) -> HttpError {
+    match error {
+        workers::Error::ShutDown => {
+            tracing::warn!(route, "a request did not run: the worker pool is shut down");
+            HttpError::ServiceUnavailable("the node is shutting down; try again".into())
+        }
+        error => {
+            tracing::error!(route, %error, "a request failed on the worker pool");
+            HttpError::Internal(
+                "the request failed on an internal error; see the node's log".into(),
+            )
+        }
+    }
+}
+
 impl From<DbError> for HttpError {
     fn from(err: DbError) -> Self {
         http_status_from_db_error(&err)
