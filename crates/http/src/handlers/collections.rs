@@ -225,8 +225,7 @@ pub async fn patch_collection(
     let patch_ops: serde_json::Value = serde_json::from_str(&patch_str)
         .map_err(|e| HttpError::BadRequest(format!("invalid patch JSON: {}", e)))?;
 
-    let name = db::definition::patch::json::patch_collection_name(&patch_ops)
-        .map_err(HttpError::BadRequest)?;
+    let name = extract_collection_name_from_patch(&patch_ops)?;
 
     if !state.dev_mode {
         if let Some(migration) = &body.migration {
@@ -242,6 +241,31 @@ pub async fn patch_collection(
         .map_err(http_error_from_backend_message)?;
 
     Ok(StatusCode::OK)
+}
+
+/// Extract the collection name from the first patch operation's path.
+/// Go patches use paths like "/Users/Fields/-" where "Users" is the collection name.
+fn extract_collection_name_from_patch(patch_ops: &serde_json::Value) -> Result<String, HttpError> {
+    let ops = patch_ops
+        .as_array()
+        .ok_or_else(|| HttpError::BadRequest("patch must be a JSON array".into()))?;
+
+    let first_op = ops
+        .first()
+        .ok_or_else(|| HttpError::BadRequest("patch array is empty".into()))?;
+
+    let path = first_op
+        .get("path")
+        .and_then(|p| p.as_str())
+        .ok_or_else(|| HttpError::BadRequest("first patch op missing 'path' field".into()))?;
+
+    // Path format: "/<CollectionName>/Fields/-" or "/<CollectionName>/..."
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let name = segments
+        .first()
+        .ok_or_else(|| HttpError::BadRequest("patch path has no collection name".into()))?;
+
+    Ok(name.to_string())
 }
 
 /// Set the active collection version.
