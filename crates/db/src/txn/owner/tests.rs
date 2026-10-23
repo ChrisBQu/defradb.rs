@@ -266,3 +266,14 @@ fn a_standalone_read_called_on_a_worker_runs_on_that_worker() {
     }
     pool.shutdown_blocking().unwrap();
 }
+
+#[test]
+fn a_standalone_read_called_off_the_workers_runs_on_one() {
+    let owners = Probes::new(pool(4));
+    let ran = block_on(owners.run_anywhere("read", || async {
+        workers::current_worker().map(|worker| worker.index)
+    }))
+    .unwrap()
+    .unwrap();
+    assert!(ran.is_some(), "the read runs on a worker of the pool");
+}
