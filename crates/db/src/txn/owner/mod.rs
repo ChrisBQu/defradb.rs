@@ -180,8 +180,7 @@ where
 
     /// Runs the work `make` builds outside every transaction (a standalone
     /// read) and gives back its output: in place when the caller is already
-    /// a worker, which the edge chose for the request, otherwise on the least
-    /// loaded worker.
+    /// a worker, otherwise on the least loaded worker.
     pub(crate) async fn run_anywhere<F, Fut>(
         &self,
         name: &'static str,
