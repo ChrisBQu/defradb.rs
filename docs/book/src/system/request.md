@@ -53,7 +53,7 @@ visible, with a receipt carrying the commit sequence
 
 ## 5. The conflict branch
 
-When the commit loses a race, regolith returns a `Conflict` with the key, both writes, and
+When the commit loses a race, [regolith](https://sourcenetwork.github.io/regolith/) returns a `Conflict` with the key, both writes, and
 their sequences; the event listener records telemetry; and `transact` re-runs the closure
 with the reason. Business logic decides what the reason means: re-decide on fresh data,
 report the lost race to the client, or turn it into a no-op

@@ -1,6 +1,6 @@
 # The Storage Engine
 
-defradb.rs stores everything in one engine: **regolith**, an LSM-transaction engine that
+defradb.rs stores everything in one engine: **[regolith](https://sourcenetwork.github.io/regolith/)**, an LSM-transaction engine that
 defradb.rs does not fork or wrap with adapters. It is opened directly, configured per
 target (server, embedded, wasm, memory), and extended through traits that defradb.rs
 implements (`crates/storage/src/backends/regolith/`).

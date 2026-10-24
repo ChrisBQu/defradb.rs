@@ -6,7 +6,7 @@ validated, whether identical bytes are the same write. This chapter is the compl
 
 ## The key classes
 
-regolith defines four behavioural classes; defradb.rs assigns each key family to one by
+[regolith](https://sourcenetwork.github.io/regolith/) defines four behavioural classes; defradb.rs assigns each key family to one by
 implementing `KeyClassifier` ([`crates/storage/src/backends/regolith/classifier.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/storage/src/backends/regolith/classifier.rs)):
 
 - **Ordinary**: last-writer-wins keys. A read of an Ordinary key inside a write

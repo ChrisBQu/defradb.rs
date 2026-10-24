@@ -5,7 +5,7 @@ pushes you towards. Three pressures, one conclusion.
 
 ## Pressure one: the engine completes I/O on the asking thread
 
-regolith's non-blocking API is built on per-thread `IoQueue`s: a `CacheOnly` read miss or
+[regolith](https://sourcenetwork.github.io/regolith/)'s non-blocking API is built on per-thread `IoQueue`s: a `CacheOnly` read miss or
 a pending commit ticket becomes a unit on the caller's own queue, and the completion
 arrives on that same queue. That design exists to make I/O wait-free for everyone else:
 a busy core is never woken to service someone else's completion, and no core ever waits

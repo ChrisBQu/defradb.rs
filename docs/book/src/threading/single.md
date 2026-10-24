@@ -11,7 +11,7 @@ whole system honest.
 
 One thread, one local executor running every task, one `IoQueue`:
 
-- A regolith call runs synchronous and inline on this thread.
+- A [regolith](https://sourcenetwork.github.io/regolith/) call runs synchronous and inline on this thread.
 - A call that completes, completes; the task continues.
 - A commit helps every earlier commit itself: with one committer there is no other
   thread to wait for, so the committer drives the commit pipeline's steps for the

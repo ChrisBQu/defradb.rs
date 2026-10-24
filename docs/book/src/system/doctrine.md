@@ -6,7 +6,7 @@ repository, written down for every contributor and checked in review.
 
 ## The engine owns the transaction
 
-regolith, run at `IsolationLevel::DefraLevel`, owns everything transactional: validation,
+[regolith](https://sourcenetwork.github.io/regolith/), run at `IsolationLevel::DefraLevel`, owns everything transactional: validation,
 conflicts and their reasons, retries, merges, commit-ordered append, ID allocation, the
 commit receipt, and encryption at rest. defradb.rs implements regolith's traits
 (`KeyClassifier`, `MergeOperator`, `LogLayout`, `EventListener`, `KeyProvider`,

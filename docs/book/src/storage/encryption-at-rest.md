@@ -6,7 +6,7 @@ defradb.rs encrypts storage in two distinct places, and the difference matters:
    values are sealed with fresh AES-256 keys delivered by the KMS; the encrypted payload
    becomes part of the block's CID. Covered with the [KMS](../api/index.md) and
    [blocks](../documents/blocks.md).
-2. **Encryption at rest** (engine-level): when at-rest keys are configured, regolith
+2. **Encryption at rest** (engine-level): when at-rest keys are configured, [regolith](https://sourcenetwork.github.io/regolith/)
    seals every file it writes, so a stolen data directory is ciphertext. Without
    configured keys the engine does not seal anything. This chapter.
 

@@ -3,7 +3,7 @@
 <img src="diagrams/logo-defradb.svg" alt="DefraDB logo" class="defra-logo" />
 
 The Book of Defra is the developer guide to **defradb.rs**: the Rust implementation of
-[DefraDB](https://github.com/sourcenetwork), a local-first, source-available database built
+[DefraDB](https://github.com/sourcenetwork/defradb.rs), a local-first, source-available database built
 around three ideas:
 
 1. **Documents as Merkle DAGs.** Every write produces content-addressed blocks (CIDs) linked
@@ -12,7 +12,7 @@ around three ideas:
 2. **Conflict-free replication.** Fields are CRDTs. Two nodes that apply the same set of
    blocks in any order converge to the same state; replication never needs a coordinator.
 3. **A real storage engine underneath.** defradb.rs does not run on an embedded KV library
-   with a mutex bolted on. It runs on **regolith**, an LSM engine with MVCC transactions,
+   with a mutex bolted on. It runs on **[regolith](https://sourcenetwork.github.io/regolith/)**, an LSM engine with MVCC transactions,
    server-side merges, commit-ordered logs, per-thread I/O queues, and encryption at rest.
    defradb.rs implements regolith's extension traits and keeps every business decision
    (queries, CRDT rules, access control, migrations) inside ordinary transactions.

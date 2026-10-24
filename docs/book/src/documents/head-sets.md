@@ -43,7 +43,7 @@ Branchable collections keep a collection-level head set (`h/hc/`), blind-merged 
 way, so a collection's published block set is itself a CRDT: replicas converge on the
 same set of collection blocks without coordination.
 
-> **Why sets instead of per-head keys.** The pre-regolith layout kept one key per head
+> **Why sets instead of per-head keys.** The pre-[regolith](https://sourcenetwork.github.io/regolith/) layout kept one key per head
 > and read before writing: every publication was a read-modify-write over a growing key
 > range, serialized by a lock, and a replicated parent arriving late was a special case.
 > The set encoding makes the whole update one commutative merge, makes "parent not here

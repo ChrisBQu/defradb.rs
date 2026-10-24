@@ -25,7 +25,7 @@ lives and dies on its core. The pool owns query planning, DAG block construction
 rules, index maintenance, ACP decisions, lens migrations, and the business logic that
 answers each conflict reason.
 
-**The trait implementations** are defradb.rs code that plugs into regolith's generic
+**The trait implementations** are defradb.rs code that plugs into [regolith](https://sourcenetwork.github.io/regolith/)'s generic
 mechanisms: the key classifier (one match on key prefixes), the merge operator (counters,
 head sets, document part operands, and their `touches`), the arrival journal's log layout,
 the conflict event listener, and the key provider for encryption at rest. regolith's

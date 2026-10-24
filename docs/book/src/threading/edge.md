@@ -35,7 +35,7 @@ starts one `EdgeRuntime` up front and passes it down.
 ## Shutdown
 
 One order, everywhere: stop accepting, drain in-flight requests with a deadline, stop
-the workers, close regolith, drop the runtime outside any async context.
+the workers, close [regolith](https://sourcenetwork.github.io/regolith/), drop the runtime outside any async context.
 
 ## Where the boundary sits
 

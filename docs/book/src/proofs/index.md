@@ -19,7 +19,7 @@ order yields the same state). Neither half alone is convergence.
 
 ## The map
 
-Every mechanism, in regolith and in defradb.rs, mapped to the models that cover it,
+Every mechanism, in [regolith](https://sourcenetwork.github.io/regolith/) and in defradb.rs, mapped to the models that cover it,
 under the names they ship with in each repo's proofs tree. (This map supersedes the
 migration-era sketch: several models were renamed as they landed, and the rows below
 were checked against `regolith/proofs/tla/` and this repo's `proofs/tla/`.)

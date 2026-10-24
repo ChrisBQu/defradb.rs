@@ -13,7 +13,7 @@ blocking threads) running a round:
 
 1. drain its inbox in batches,
 2. poll ready tasks (under `catch_unwind`, with heartbeats),
-3. poll its hook, which is the regolith `IoQueue` machinery,
+3. poll its hook, which is the [regolith](https://sourcenetwork.github.io/regolith/) `IoQueue` machinery,
 4. fire timers from its deadline queue (periodic jobs, the idle sweep).
 
 Tasks are spawned with `spawn_local` and never migrate: a waker from any thread puts

@@ -1,6 +1,6 @@
 # LSM structure: WAL, SSTs, compaction
 
-regolith is an LSM engine: writes land in a memtable protected by a WAL, memtables flush
+[regolith](https://sourcenetwork.github.io/regolith/) is an LSM engine: writes land in a memtable protected by a WAL, memtables flush
 to SST files, and compaction merges SSTs in the background. defradb.rs does not reimplement
 any of this; it configures it and reads its telemetry. This chapter is what a defradb.rs
 developer needs to know about what is underneath.

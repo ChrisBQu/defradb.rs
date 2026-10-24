@@ -22,7 +22,7 @@ the document as the once key. The engine assigns positions in commit order: noth
 conflicts, and a document appended twice (a local create racing a P2P merge of the same
 document) keeps exactly one row, because the once key is applied exactly once. Position
 keys are zero-padded to a fixed width (`{cursor:020}`, `crates/storage/src/backends/
-regolith/log_layout.rs`) so they sort in position order; the layout is frozen: a store
+[regolith](https://sourcenetwork.github.io/regolith/)/log_layout.rs`) so they sort in position order; the layout is frozen: a store
 keeps reading its journal across releases.
 
 ## The dense prefix

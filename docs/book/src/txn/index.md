@@ -1,7 +1,7 @@
 # Transactions
 
 Transactions are the centre of defradb.rs, and the centre of the centre is a division of
-labour: **regolith owns the machinery** (snapshots, validation, conflicts, retries,
+labour: **[regolith](https://sourcenetwork.github.io/regolith/) owns the machinery** (snapshots, validation, conflicts, retries,
 ordering, durability), **defradb.rs owns the meaning** (what each document write is, what
 each conflict means for the caller).
 

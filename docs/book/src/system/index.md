@@ -3,7 +3,7 @@
 This part is the map of the whole. Three chapters:
 
 - **Who owns what**: the layers, from the client over the network edge, through the
-  defradb.rs workers, down to regolith and the device. Read this first.
+  defradb.rs workers, down to [regolith](https://sourcenetwork.github.io/regolith/) and the device. Read this first.
 - **Design doctrine**: the invariants every change to defradb.rs must preserve, and the
   reasoning behind them. This is the "why" chapter.
 - **A request, end to end**: one GraphQL mutation traced from the client to durable,
