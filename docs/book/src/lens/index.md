@@ -41,8 +41,10 @@ documents whose version differs from the target; explicit transactions pin their
 chain (`PreparedLens`) so a multi-statement transaction sees one consistent transform.
 
 > **Why transform-on-read instead of rewrite-on-migrate.** A rewrite is a full-dataset
-> transaction: unbounded work, a fail window, and a rollback problem. Lenses make
-> migration O(new writes), keep every old version intact (time travel still works),
-> and let a bad migration be replaced (it is code, not data damage). The cost is
-> transform work per read of an old document, paid only by readers that actually read
-> old versions, and the epoch/fuel bounds keep that cost bounded per call.
+> transaction: unbounded work, a fail window, and a rollback problem. Lenses avoid the
+> rewrite entirely: setting a migration is metadata, every old version stays intact
+> (time travel still works), and a bad migration is replaced (it is code, not data
+> damage). The cost moves to the read path: each read of an old-version document
+> transforms it through the chain, and repeated reads repeat that work, bounded per
+> call by the epoch and fuel limits; an explicit backfill is the escape hatch when
+> read cost matters.

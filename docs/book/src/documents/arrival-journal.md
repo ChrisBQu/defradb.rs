@@ -48,7 +48,9 @@ The GraphQL system collection exposes the journal:
 }
 ```
 
-`after` must not exceed `head`; `limit` is clamped to 1024; the result carries `head`,
+At the GraphQL surface an omitted `limit` defaults to 256, and a `limit` of zero or
+above 1024 is rejected (as is a `docID` list longer than 1024); the lower-level database
+read clamps its page to the 1024 ceiling. The result carries `head`,
 the next cursor, and ACP-filtered entries (each entry's document is checked before it is
 returned). The client consumes a page, processes it, stores its cursor durably, and
 continues: the same discipline as a CDC log, minus a server-side session.

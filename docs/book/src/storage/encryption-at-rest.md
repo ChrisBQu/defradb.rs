@@ -6,18 +6,20 @@ defradb.rs encrypts storage in two distinct places, and the difference matters:
    values are sealed with fresh AES-256 keys delivered by the KMS; the encrypted payload
    becomes part of the block's CID. Covered with the [KMS](../api/index.md) and
    [blocks](../documents/blocks.md).
-2. **Encryption at rest** (engine-level): regolith seals every file it writes, so a stolen
-   data directory is ciphertext. This chapter.
+2. **Encryption at rest** (engine-level): when at-rest keys are configured, regolith
+   seals every file it writes, so a stolen data directory is ciphertext. Without
+   configured keys the engine does not seal anything. This chapter.
 
 ![Encryption at rest: what runs above the engine, and what the engine seals](../diagrams/15-encryption.png)
 
 ## What the engine seals
 
 Every SST block, WAL record and manifest batch is sealed inside its existing frame with
-AES-256-GCM-SIV, the tag taking the place of the checksum ([`regolith/src/engine/seal.rs`](https://github.com/sourcenetwork/regolith/blob/main/src/engine/seal.rs).
+AES-256-GCM-SIV, the tag taking the place of the checksum ([`regolith/src/engine/seal.rs`](https://github.com/sourcenetwork/regolith/blob/main/src/engine/seal.rs)).
 Values are **plaintext inside the engine**: byte equality, value-validated reads,
 ContentAddressed same-bytes checks and merge operators all keep their meaning, because
-nothing above the file layer ever sees ciphertext. Disk (or OPFS) holds ciphertext only.
+nothing above the file layer ever sees ciphertext. With keys configured, disk (or OPFS)
+holds ciphertext only; without them, files are plaintext.
 
 This is precisely why encryption lives *below* the mechanisms rather than above them. The
 diagram's upper half records the previous design, a per-value encrypting wrapper above the

@@ -12,7 +12,10 @@ The block builder (`crates/db/src/block/builder/`) computes, for one write:
   its priority, or a counter increment) and linking the field's previous heads.
 - **Encryption blocks**: when a field is encrypted, a separate `Encryption` block holds
   the fresh AES-256 key, and the field block links it. The block CID is computed over
-  the ciphertext, so the database cannot read the field without the KMS.
+  the ciphertext. With a KMS configured, the key is released through it (gated by its
+  policy); without one, the node reads the key from the `Encryption` block it stores
+  and decrypts locally, so field confidentiality against the operator exists only with
+  a KMS in the path.
 - **Signature blocks**: when signing is configured, a signature over the block (or a
   batch signature: a Merkle root over a set of CIDs, signed once per commit).
 - **Immutable blocks**: fields marked `@immutable` are frozen as plaintext blocks at
@@ -40,9 +43,10 @@ priority wins, and the merge algebra is proven convergent in Lean.
 
 ## Verification
 
-Replicated blocks are verified before merge ([`crates/db/src/block/verify.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/db/src/block/verify.rs)): the CID
-must match the bytes (content integrity), signatures must verify (including BLS-augmented
-batch signatures), and the read gate checks ACP before a block is even served. A
+Replicated blocks are checked before merge ([`crates/db/src/block/verify.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/db/src/block/verify.rs)): the CID
+must match the bytes (content integrity), and attached signatures are verified when
+present (including BLS-augmented batch signatures); unsigned blocks are supported. The
+read gate checks ACP before a block is even served. A
 document's DAG that fails verification is quarantined (the `PendingDagQuarantined` event
 carries the forensics).
 

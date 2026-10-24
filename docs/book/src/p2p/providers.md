@@ -27,7 +27,8 @@ the provider record family has TLA+ and Lean proofs (see
 
 Replicator registration is outbound intent, not inbound permission: accepting PushLog
 data requires membership/subscription and explicit-replay authorization for the
-content, and everything served crosses the read gate (ACP) and block verification. A
+content; gated serving crosses the read gate (ACP) and block checks, while an open
+access mode or an unfiltered registered replicator is served without them. A
 separate capability regime governs *explicit replay* (re-broadcast of previously seen
 pushes), with its own revocation, modelled in [`crates/p2p/src/explicit_replay.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/p2p/src/explicit_replay.rs).
 

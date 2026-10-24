@@ -11,8 +11,9 @@ The numbered steps below follow the diagram.
 ## 1. In, and routed at the edge
 
 The client sends the mutation over HTTP (or the embedded call path). The network edge, the
-one tokio runtime, parses nothing about databases: it hands the request to a worker of the
-pool, routed once, here, at the edge. A mutation naming exactly one document goes to that
+one tokio runtime, parses only what routing needs: which document (if exactly one) a
+mutation names. Everything else about the query is parsed and planned on a worker of
+the pool, routed once, here, at the edge. A mutation naming exactly one document goes to that
 document's core, so its writes and merges run one at a time; everything else goes to the
 least-loaded core
 ([`crates/query/src/pooled/route.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/query/src/pooled/route.rs), [`crates/workers/src/pool/routing.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/workers/src/pool/routing.rs)). No request
@@ -20,8 +21,9 @@ hops from core to core.
 
 ## 2. Prepare outside effects
 
-Before the transaction begins, the worker prepares everything with an effect outside it:
-KMS keys, embeddings, signatures, short IDs
+Before any database worker is involved, the caller (the edge task) prepares everything
+with an effect outside the transaction: KMS keys, embeddings, signatures, short IDs.
+Only then is the prepared work submitted to the pool
 ([`crates/query/src/runner/prepare.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/query/src/runner/prepare.rs)). A transaction closure may run more than once, so
 anything with an outside effect must already be in hand. Remote inputs that depend on the
 transaction's own reads end the attempt, get resolved at the edge (single-flight, batched,

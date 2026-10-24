@@ -1,8 +1,10 @@
 # CRDT types
 
-Conflict-free replicated data types are the reason replication needs no coordinator: any
-node can apply any subset of deltas, in any order, and converging to the same state is a
-theorem, not a hope. defradb.rs uses four.
+Conflict-free replicated data types are the reason replication needs no coordinator:
+nodes that have received the *same set* of deltas converge to the same state whatever
+order they applied them in, and that convergence is a theorem, not a hope. (Nodes with
+different subsets are simply behind; floating-point counters are the documented
+exception and are covered below.) defradb.rs uses four.
 
 ## LWW register
 

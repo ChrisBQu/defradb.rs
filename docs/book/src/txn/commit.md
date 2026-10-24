@@ -19,7 +19,7 @@ Transactions that arrive together commit together:
 3. **Assign in group order**: commit sequences, log positions (for appends), and ID
    allocations.
 4. **One WAL write for the whole group.**
-5. **One fsync**, as a claimable unit on every member's `IoQueue**: the first member core
+5. **One fsync**, as a claimable unit on every member's `IoQueue`: the first member core
    that polls between tasks claims the unit with one CAS and runs it; a member that would
    block instead (a pool-less caller) runs it as a blocking commit.
 6. **Publish visibility in order**; each member's completion is pushed to its own queue.

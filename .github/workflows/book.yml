@@ -67,5 +67,4 @@ jobs:
           publish_dir: docs/book/book
           publish_branch: gh-pages
           destination_dir: book
-          keep_files: true
           commit_message: "deploy: book of defra"

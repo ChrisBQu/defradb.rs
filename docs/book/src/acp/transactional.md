@@ -1,8 +1,10 @@
 # ACP inside the transaction
 
-The rule that makes ACP trustworthy: **every access decision runs in the transaction it
-authorizes, on the same snapshot as the data it gates**. Not a pre-check, not a cache
-consultation before the transaction: inside it, validated exactly like a data decision.
+The rule that makes local ACP trustworthy: **every access decision runs in the
+transaction it authorizes, on the same snapshot as the data it gates**. Not a pre-check,
+not a cache consultation before the transaction: inside it, validated exactly like a
+data decision. An external provider (Vera) cannot join a local transaction; its shape
+is the exception below.
 
 ![ACP: registration in the create transaction; a racing registration conflicts](../diagrams/14-acp.png)
 

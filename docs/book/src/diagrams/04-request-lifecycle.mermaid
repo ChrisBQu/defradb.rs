@@ -8,7 +8,7 @@ sequenceDiagram
 
     G->>N: GraphQL mutation, for example update a document
     N->>W: routed at the edge to the document's core, through its inbox
-    W->>W: prepare outside the retried closure: KMS keys, embeddings, short IDs
+    N->>N: prepare on the caller, before the pool: KMS keys, embeddings, short IDs
     W->>T: transact(policy, f) begins at a snapshot
     W->>T: get_parts(doc, parts the filter and the indexes use)
     W->>T: ACP check: validated reads of the tuples it relies on

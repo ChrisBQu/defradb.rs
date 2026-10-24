@@ -103,6 +103,8 @@ nav.chrome-nav {
 
 .content a { color: var(--sn-blue); }
 .content a:hover { color: var(--sn-green-bright); }
+.light .content a { color: var(--sn-blue-deep); }
+.light .content a:hover { color: #05803a; }
 .content .headerlink:hover { color: var(--sn-green-bright); }
 
 /* ---------- Tables: gradient header ---------- */

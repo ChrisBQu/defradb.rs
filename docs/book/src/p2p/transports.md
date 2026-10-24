@@ -26,11 +26,15 @@ identity challenge binds the peer's Defra DID to the connection
 
 ## The read gate
 
-Replication carries data across a trust boundary, so it is gated: before a block is
-served or a DAG fetched, the same ACP read rules apply as for a local query
-([`crates/p2p/src/bitswap/read_gate.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/p2p/src/bitswap/read_gate.rs), [`crates/db/src/block/verify.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/db/src/block/verify.rs)). A peer with a
-connection is not a peer with permission: document-level ACP remains the authoritative
-boundary, and replicated blocks are verified (CID integrity, signatures) before merge.
+Replication carries data across a trust boundary, and gated access applies the same
+ACP read rules as a local query before a block is served
+([`crates/p2p/src/bitswap/read_gate.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/p2p/src/bitswap/read_gate.rs), [`crates/db/src/block/verify.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/db/src/block/verify.rs)). Two
+deployment choices deliberately bypass the gate: an open Bitswap access mode serves
+without ACP checks, and a replicator registered for a collection without filters
+receives it; a filtered replicator's access is checked against its filters. A peer
+with a connection is not a peer with permission where the gate applies:
+document-level ACP remains the authoritative boundary, and replicated blocks are
+checked (CID integrity, attached signatures) before merge.
 
 > **Why one endpoint task.** A shared socket must have one owner. Endpoint state
 > scattered across tasks (each subsystem dialing its own connections) produces

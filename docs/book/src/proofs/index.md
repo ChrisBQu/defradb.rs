@@ -71,5 +71,7 @@ falsified map.
 > under reordering, no public ACP window, exactly-once registration, dense arrival
 > prefixes, no lost commit after a fence - are exactly the class testing cannot
 > establish: a test shows one interleaving is fine; a model checker shows all of them
-> are. And the RED configurations are the part that keeps the greens honest: a guard
+> are, within each model's configured bounds and assumptions (small bounded instances,
+assumed connectivity and fairness; a green run is not an unbounded deployment
+guarantee). And the RED configurations are the part that keeps the greens honest: a guard
 > that cannot be broken on purpose is a guard nobody understands.

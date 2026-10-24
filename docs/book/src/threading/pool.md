@@ -26,10 +26,15 @@ The target is chosen once, at the edge ([`crates/workers/src/pool/routing.rs`](h
 - **`Target::Worker(n)`**: an explicit transaction's owner. A transaction is begun on a
   worker and stays there for its whole life; its ID names the worker, so every request
   for it goes straight to that worker, one hop in, one out.
-- **`Target::Key(hash)`**: document affinity. One document's writes and merges run on
-  one worker, which runs *one keyed task per key at a time*, the rest waiting in
-  arrival order: two tasks for one document never interleave at an await, so they never
-  race. The GraphQL router sends a mutation naming exactly one document here
+- **`Target::Key(hash)`**: document affinity. The hash picks one worker, which runs
+  *one keyed task per key at a time*, the rest waiting in arrival order, so two keyed
+  tasks on that worker never interleave at an await. The guarantee is per worker,
+  not absolute: GraphQL and REST hash the collection by its name while a P2P merge
+  hashes it by its ID, so a local write and a merge of one document may run on
+  different workers, and while a home worker is stuck its keyed jobs move to a
+  fallback on the same node. Correctness never depends on the affinity; the engine
+  validates every commit wherever it runs. The GraphQL router sends a mutation naming
+  exactly one document here
   ([`crates/query/src/pooled/route.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/query/src/pooled/route.rs)); P2P merges use the same affinity
   ([`crates/db/src/merge/pooled.rs`](https://github.com/sourcenetwork/defradb.rs/blob/main/crates/db/src/merge/pooled.rs)).
 - **`Target::LeastLoaded`**: everything else (read-only queries, batch work), a
