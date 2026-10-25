@@ -7,6 +7,15 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 
 # rows: <cfg> <module> <GREEN|RED>
 RUNS=(
+  "MC_RootedAuthorization_Green.cfg RootedAuthorization.tla GREEN"
+  "MC_RootedAuthorization_Red_DuplicateOwner.cfg RootedAuthorization.tla RED"
+  "MC_RootedAuthorization_Red_LostResume.cfg RootedAuthorization.tla RED"
+  "MC_RootedAuthorization_Red_StaleEviction.cfg RootedAuthorization.tla RED"
+  "MC_RootedAuthorization_Red_OverReserve.cfg RootedAuthorization.tla RED"
+  "MC_RootedAuthorization_Red_Slots.cfg RootedAuthorization.tla RED"
+  "MC_RootedAuthorization_Red_ActiveBudget.cfg RootedAuthorization.tla RED"
+  "MC_RootedAuthorization_Red_CancelNoWake.cfg RootedAuthorization.tla RED"
+  "MC_RootedAuthorization_Red_UnreachedGrant.cfg RootedAuthorization.tla RED"
   "MC_HistoryDriver_Red_UnpacedRetry.cfg HistoryDriver.tla RED"
   "MC_HistoryDriver_Red_TimerDelay.cfg HistoryDriver.tla RED"
   "MC_HistoryDriver_Green.cfg HistoryDriver.tla GREEN"
