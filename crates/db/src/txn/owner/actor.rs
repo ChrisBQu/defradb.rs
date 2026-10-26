@@ -90,8 +90,8 @@ pub(super) async fn own<T, K>(
     mailbox: UnboundedReceiver<Message<T>>,
     shared: Weak<Shared<T, K>>,
 ) where
-    T: 'static,
-    K: Clone + PartialEq + 'static,
+    T: MaybeSend + 'static,
+    K: Clone + PartialEq + Send + 'static,
 {
     let _drain = Drain(&mailbox);
     let mut active = Instant::now();
