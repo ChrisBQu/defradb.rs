@@ -48,6 +48,22 @@ use Tier::{Behavioral, Boundary, Contract};
 
 pub const PROPERTIES: &[Property] = &[
     Property {
+        family: "HTTP router composition",
+        name: "WholeRouter / SingleConstructor / NoBypass / ForwardingPreserved",
+        axis: Tla,
+        anchor: "crates/http/src/server.rs Server::router, Server::serve; router_transform_tests::forwarding_filter_matches_executed_model; crates/defra-node/src/router_transform_tests.rs",
+        model_ref: "MC_HttpRouterComposition_{Green,Red_*}.cfg",
+        tiers: &[Boundary],
+    },
+    Property {
+        family: "HTTP router composition",
+        name: "configured_order / constructor_once / absent_preserves / forwarding_preserves / refuses_every_inner_status",
+        axis: Lean,
+        anchor: "crates/http/src/server.rs Server::router; router_transform_tests::forwarding_filter_matches_executed_model",
+        model_ref: "HttpRouterComposition (lake build)",
+        tiers: &[Boundary],
+    },
+    Property {
         family: "Peer connection observation",
         name: "ExplicitOnly / ExactAddress / RequestedPort / DefaultPreserved / UnavailableRefused",
         axis: Tla,
