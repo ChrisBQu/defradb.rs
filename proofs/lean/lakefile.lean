@@ -82,4 +82,7 @@ lean_lib WalkCutoff where
 lean_lib PqFourSums where
 
 @[default_target]
+lean_lib TextCrdt where
+
+@[default_target]
 lean_lib PendingCache where
