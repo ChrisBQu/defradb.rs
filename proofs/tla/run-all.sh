@@ -12,6 +12,8 @@ RUNS=(
   "MC_EndpointBind_Red_Address.cfg EndpointBind.tla RED"
   "MC_EndpointBind_Red_Port.cfg EndpointBind.tla RED"
   "MC_EndpointBind_Red_Defaults.cfg EndpointBind.tla RED"
+  "MC_EndpointBind_Red_MappingScope.cfg EndpointBind.tla RED"
+  "MC_EndpointBind_Red_MappingDefaults.cfg EndpointBind.tla RED"
   "MC_SelectiveCarCapacity_Green.cfg SelectiveCarCapacity.tla GREEN"
   "MC_SelectiveCarCapacity_Red_NoReclaim.cfg SelectiveCarCapacity.tla RED"
   "MC_SelectiveCarCapacity_Red_ActiveEviction.cfg SelectiveCarCapacity.tla RED"
