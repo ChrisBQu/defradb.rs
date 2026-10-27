@@ -433,17 +433,66 @@ fn a_first_replay_hint_seeds_the_missing_retry_schedule() {
 }
 
 #[derive(Clone)]
-struct ConnectedPeerTransport {
+pub(super) struct ConnectedPeerTransport {
     local: PeerId,
     remote: PeerId,
+    replies: Option<(bool, regolith::sync::BoundedSender<p2p::PushLogRequest>)>,
+    remove_on_reply: Option<Arc<storage::stores::Peerstore<storage::RegolithStore>>>,
+    require_selected_authority: Option<Arc<storage::stores::Peerstore<storage::RegolithStore>>>,
+    before_reply:
+        Option<Arc<dyn Fn(String) -> futures::future::BoxFuture<'static, ()> + Send + Sync>>,
+    retry_after_ms: Option<u64>,
 }
 
 impl ConnectedPeerTransport {
-    fn new(local: &str, remote: &str) -> Self {
+    pub(super) fn new(local: &str, remote: &str) -> Self {
         Self {
             local: PeerId::new(local.to_string()),
             remote: PeerId::new(remote.to_string()),
+            replies: None,
+            remove_on_reply: None,
+            require_selected_authority: None,
+            before_reply: None,
+            retry_after_ms: None,
         }
+    }
+
+    pub(super) fn with_replies(
+        mut self,
+        acknowledged: bool,
+        requests: regolith::sync::BoundedSender<p2p::PushLogRequest>,
+    ) -> Self {
+        self.replies = Some((acknowledged, requests));
+        self
+    }
+
+    pub(super) fn removing_subscription_on_reply(
+        mut self,
+        store: Arc<storage::stores::Peerstore<storage::RegolithStore>>,
+    ) -> Self {
+        self.remove_on_reply = Some(store);
+        self
+    }
+
+    pub(super) fn requiring_selected_authority(
+        mut self,
+        store: Arc<storage::stores::Peerstore<storage::RegolithStore>>,
+    ) -> Self {
+        self.require_selected_authority = Some(store);
+        self
+    }
+
+    pub(super) fn with_reply_hook(
+        mut self,
+        hook: Arc<dyn Fn(String) -> futures::future::BoxFuture<'static, ()> + Send + Sync>,
+    ) -> Self {
+        self.before_reply = Some(hook);
+        self
+    }
+
+    pub(super) fn with_retry_after(mut self, millis: u64) -> Self {
+        self.retry_after_ms = Some(millis);
+        self
     }
 }
 
@@ -530,9 +579,34 @@ impl p2p::P2PTransport for ConnectedPeerTransport {
     async fn send_two_stream_request(
         &self,
         _peer_id: &PeerId,
-        _req: p2p::PushLogRequest,
+        req: p2p::PushLogRequest,
     ) -> p2p::Result<PushLogReply> {
-        Err(unreachable_transport())
+        let Some((acknowledged, requests)) = &self.replies else {
+            return Err(unreachable_transport());
+        };
+        if let Some(store) = &self.require_selected_authority {
+            assert!(store
+                .selected_car_root_allowed(self.remote.as_str(), &req.cid)
+                .await
+                .unwrap());
+        }
+        let doc_id = req.doc_id.clone();
+        requests
+            .try_send(req)
+            .expect("bounded test request capture");
+        if let Some(hook) = &self.before_reply {
+            hook(doc_id).await;
+        }
+        if let Some(store) = &self.remove_on_reply {
+            store.delete_replicator(self.remote.as_str()).await.unwrap();
+        }
+        let mut reply = if *acknowledged {
+            PushLogReply::success("selected-transfer")
+        } else {
+            PushLogReply::error("selected-transfer", "receiver refused the head")
+        };
+        reply.retry_after_ms = self.retry_after_ms;
+        Ok(reply)
     }
 
     async fn send_two_stream_response(
