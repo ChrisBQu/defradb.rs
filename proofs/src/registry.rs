@@ -48,18 +48,34 @@ use Tier::{Behavioral, Boundary, Contract};
 
 pub const PROPERTIES: &[Property] = &[
     Property {
-        family: "Peer connection observation",
-        name: "ExplicitOnly / ExactAddress / RequestedPort / DefaultPreserved / UnavailableRefused",
+        family: "HTTP router composition",
+        name: "WholeRouter / SingleConstructor / NoBypass / ForwardingPreserved",
         axis: Tla,
-        anchor: "crates/p2p/src/iroh/endpoint_config.rs apply_bind_config; endpoint_config/bind_tests.rs native_bindings_match_executed_model",
+        anchor: "crates/http/src/server.rs Server::router, Server::serve; router_transform_tests::forwarding_filter_matches_executed_model; crates/defra-node/src/router_transform_tests.rs",
+        model_ref: "MC_HttpRouterComposition_{Green,Red_*}.cfg",
+        tiers: &[Boundary],
+    },
+    Property {
+        family: "HTTP router composition",
+        name: "configured_order / constructor_once / absent_preserves / forwarding_preserves / refuses_every_inner_status",
+        axis: Lean,
+        anchor: "crates/http/src/server.rs Server::router; router_transform_tests::forwarding_filter_matches_executed_model",
+        model_ref: "HttpRouterComposition (lake build)",
+        tiers: &[Boundary],
+    },
+    Property {
+        family: "Peer connection observation",
+        name: "ExplicitOnly / ExactAddress / RequestedPort / DefaultPreserved / UnavailableRefused / MappingScope / MappingDefaultsPreserved",
+        axis: Tla,
+        anchor: "crates/p2p/src/iroh/endpoint_config.rs apply_bind_config; endpoint_config/bind_tests.rs native_bindings_match_executed_model, native_port_mapping_configuration_matches_executed_model, loopback_endpoint_does_not_open_wildcard_gateway_discovery_listeners",
         model_ref: "MC_EndpointBind_{Green,Red_*}.cfg",
         tiers: &[Boundary],
     },
     Property {
         family: "Peer connection observation",
-        name: "EndpointBind.explicit_replaces / explicit_preserves / absent_preserves_defaults / port_only_preserves_dual_stack",
+        name: "EndpointBind.explicit_replaces / explicit_preserves / absent_preserves_defaults / port_only_preserves_dual_stack / specific_address_disables_mapping / absent_address_preserves_mapping / wildcard_preserves_mapping",
         axis: Lean,
-        anchor: "crates/p2p/src/iroh/endpoint_config.rs apply_bind_config; endpoint_config/bind_tests.rs model_cases",
+        anchor: "crates/p2p/src/iroh/endpoint_config.rs apply_bind_config; endpoint_config/bind_tests.rs model_cases, native_port_mapping_configuration_matches_executed_model",
         model_ref: "EndpointBind (lake build)",
         tiers: &[Boundary],
     },
@@ -209,7 +225,7 @@ pub const PROPERTIES: &[Property] = &[
     },
     Property {
         family: "ACP soundness + revocation + dual-path commits",
-        name: "Owner observations retain read gates and the transaction snapshot",
+        name: "Owner and visibility observations retain read gates and the transaction snapshot",
         axis: Tla,
         anchor: "crates/query/src/runner/owners.rs; crates/db/src/read/lensed/fetcher/mod.rs",
         model_ref: "MC_OwnerObservation_Green.cfg / MC_OwnerObservation_Red_*.cfg",
@@ -217,7 +233,7 @@ pub const PROPERTIES: &[Property] = &[
     },
     Property {
         family: "ACP soundness + revocation + dual-path commits",
-        name: "Acp.OwnerObservation.exact_snapshot and denied-owner noninterference",
+        name: "Acp.OwnerObservation.exact_snapshot, unreadable_observation_hidden and unregistered_read_keeps_visibility",
         axis: Lean,
         anchor: "crates/query/src/runner/owners.rs",
         model_ref: "Acp.OwnerObservation",
