@@ -115,6 +115,7 @@ fn model_cases(inputs: &[Value]) -> Vec<Case> {
 }
 
 #[test]
+#[ignore = "Requires Lean; run in the Lean Conformance job"]
 fn forwarding_filter_matches_executed_model() {
     let (caller, local_bearer, blocked_bearer) = caller();
     let (inputs, observed) = edge::testing::edge().block_on(async {
