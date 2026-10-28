@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run every TLA+ model and check its verdict against the expected red/green oracle.
-# Each run gets a unique -metadir (TLC's default scratch dir is per-second; a tight
-# loop would otherwise collide). Exits non-zero if any verdict does not match.
+# Each invocation gets private TLC state and output directories. Exits non-zero
+# if any verdict does not match, including a worker that fails to run TLC.
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
@@ -438,21 +438,57 @@ RUNS=(
   "MC_NodeShutdown_Red_FlushOnCaller.cfg NodeShutdown.tla RED" # refused flush runs the exporter join on the caller
 )
 
-fails=0; n=0
-for row in "${RUNS[@]}"; do
+parallelism="${TLA_JOBS:-4}"
+case "$parallelism" in
+  ''|*[!0-9]*) echo "TLA_JOBS must be a positive integer" >&2; exit 2 ;;
+esac
+if [ "$parallelism" -lt 1 ]; then
+  echo "TLA_JOBS must be a positive integer" >&2
+  exit 2
+fi
+if ! workdir=$(mktemp -d "${TMPDIR:-/tmp}/defra-tla.XXXXXX"); then
+  echo "Could not create TLA scratch directory" >&2
+  exit 1
+fi
+trap 'rm -rf "$workdir"' EXIT
+
+run_model() {
+  local index="$1" row="$2" cfg mod want out got
   read -r cfg mod want <<<"$row"
-  n=$((n+1))
-  out=$(./tools/tlc -metadir "states/run$n" -config "$cfg" "$mod" 2>&1)
+  mkdir -p "$workdir/java-$index"
+  out=$(TLA_JAVA_TMPDIR="$workdir/java-$index" ./tools/tlc -metadir "$workdir/state-$index" -config "$cfg" "$mod" 2>&1)
   # Here-strings, not pipes: `grep -q` stops at the first match, and under
   # pipefail the writer's broken pipe would turn a long trace into ERROR.
   if grep -q "No error has been found" <<<"$out"; then got=GREEN
   elif grep -qE "is violated|was violated|properties were violated|Deadlock reached|Deadlock" <<<"$out"; then got=RED
   else got=ERROR; fi
-  rm -rf "states/run$n"
-  if [ "$got" = "$want" ]; then printf "  ok   %-6s %-34s %s\n" "$got" "$cfg" "$mod"
-  else printf "  FAIL want=%s got=%s  %-30s %s\n" "$want" "$got" "$cfg" "$mod"; fails=$((fails+1)); fi
+  if [ "$got" = "$want" ]; then
+    printf "  ok   %-6s %-34s %s\n" "$got" "$cfg" "$mod"
+  else
+    printf "  FAIL want=%s got=%s  %-30s %s\n%s\n" "$want" "$got" "$cfg" "$mod" "$out"
+    return 1
+  fi
+}
+
+fails=0; n=0
+pids=(); indices=()
+finish_batch() {
+  local index
+  for index in "${!pids[@]}"; do
+    if ! wait "${pids[$index]}"; then fails=$((fails+1)); fi
+    cat "$workdir/${indices[$index]}.result"
+  done
+  pids=(); indices=()
+}
+
+for row in "${RUNS[@]}"; do
+  n=$((n+1))
+  run_model "$n" "$row" >"$workdir/$n.result" 2>&1 &
+  pids+=("$!"); indices+=("$n")
+  if [ "${#pids[@]}" -ge "$parallelism" ]; then finish_batch; fi
 done
+if [ "${#pids[@]}" -gt 0 ]; then finish_batch; fi
 
 echo "----"
 if [ "$fails" -eq 0 ]; then echo "all $n TLA+ runs matched their expected verdict"; else echo "$fails/$n MISMATCHED"; fi
-exit "$fails"
+exit "$((fails > 0))"
