@@ -225,7 +225,7 @@ pub const PROPERTIES: &[Property] = &[
     },
     Property {
         family: "ACP soundness + revocation + dual-path commits",
-        name: "Owner observations retain read gates and the transaction snapshot",
+        name: "Owner and visibility observations retain read gates and the transaction snapshot",
         axis: Tla,
         anchor: "crates/query/src/runner/owners.rs; crates/db/src/read/lensed/fetcher/mod.rs",
         model_ref: "MC_OwnerObservation_Green.cfg / MC_OwnerObservation_Red_*.cfg",
@@ -233,7 +233,7 @@ pub const PROPERTIES: &[Property] = &[
     },
     Property {
         family: "ACP soundness + revocation + dual-path commits",
-        name: "Acp.OwnerObservation.exact_snapshot and denied-owner noninterference",
+        name: "Acp.OwnerObservation.exact_snapshot, unreadable_observation_hidden and unregistered_read_keeps_visibility",
         axis: Lean,
         anchor: "crates/query/src/runner/owners.rs",
         model_ref: "Acp.OwnerObservation",
