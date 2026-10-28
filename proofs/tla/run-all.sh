@@ -7,6 +7,11 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 
 # rows: <cfg> <module> <GREEN|RED>
 RUNS=(
+  "MC_HttpRouterComposition_Green.cfg HttpRouterComposition.tla GREEN"
+  "MC_HttpRouterComposition_Red_Early.cfg HttpRouterComposition.tla RED"
+  "MC_HttpRouterComposition_Red_Fallback.cfg HttpRouterComposition.tla RED"
+  "MC_HttpRouterComposition_Red_Twice.cfg HttpRouterComposition.tla RED"
+  "MC_HttpRouterComposition_Red_Overdeny.cfg HttpRouterComposition.tla RED"
   "MC_EndpointBind_Green.cfg EndpointBind.tla GREEN"
   "MC_EndpointBind_Red_Retain.cfg EndpointBind.tla RED"
   "MC_EndpointBind_Red_Address.cfg EndpointBind.tla RED"
