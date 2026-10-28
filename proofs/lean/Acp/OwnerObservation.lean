@@ -37,7 +37,9 @@ structure Observation where
   owner : Option Nat -- Registration independently determines whether ownership is known.
   deriving DecidableEq, Repr
 
--- Both facts describe the same native read, not a new authorization decision.
+/-- Both facts describe a successful native read. The transaction owner rejects
+actor mismatches before returning any observation; this projection does not
+represent that error channel. -/
 def observation (e : Evidence) (snapshotOwner : Nat) : Observation :=
   ⟨readable e, observe e snapshotOwner⟩
 
@@ -69,8 +71,9 @@ theorem unregistered_hidden (e : Evidence) (owner : Nat) (h : e.registered = fal
 theorem unbound_hidden (e : Evidence) (owner : Nat) (h : e.bound = false) :
     observe e owner = none := by simp [observe, eligible, readable, h]
 
--- A denied read cannot be exposed as visible merely because its ID is known.
+-- A successful request cannot expose a denied read merely because its ID is known.
 theorem unreadable_observation_hidden (e : Evidence) (owner : Nat)
+    (_sameActor : e.sameActor = true)
     (h : readable e = false) : observation e owner = ⟨false, none⟩ := by
   simp [observation, observe, eligible, h]
 

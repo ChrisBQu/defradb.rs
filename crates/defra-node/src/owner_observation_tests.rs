@@ -142,6 +142,7 @@ fn owner_observation_keeps_the_row_snapshot_after_external_registration_changes(
             .await
             .unwrap();
         assert_eq!(before, after);
+        assert!(after[0].visible);
         assert_eq!(after[0].owner.as_ref().map(Did::as_str), Some(A));
         node.runner()
             .discard_txn_as(&context, &handle)
@@ -157,6 +158,18 @@ fn owner_observation_keeps_the_row_snapshot_after_external_registration_changes(
             .await
             .unwrap();
         assert_eq!(current[0].owner.as_ref().map(Did::as_str), Some(B));
+        assert!(current[0].visible);
+        let denied = node
+            .observe_document_owners_in_txn(
+                &next,
+                "Users",
+                std::slice::from_ref(&current[0].doc_id),
+                Some(Did::new(A).unwrap()),
+            )
+            .await
+            .unwrap();
+        assert!(!denied[0].visible);
+        assert!(denied[0].owner.is_none());
         node.runner()
             .discard_txn_as(&RequestContext::default(), &next)
             .await
@@ -247,6 +260,7 @@ fn owner_observation_does_not_treat_a_deleted_document_as_a_live_member() {
             .await
             .unwrap();
         assert!(result[0].owner.is_none());
+        assert!(!result[0].visible);
         node.runner()
             .discard_txn_as(&context, &handle)
             .await
