@@ -7,9 +7,9 @@ CONSTANT Fault
 \* The request chooses one relevant authorization/membership condition.
 Scenarios == {"allowed", "actor", "node", "app", "document", "member", "registered", "bound"}
 \* The live owner may change after the reader's transaction begins.
-VARIABLES scenario, phase, liveOwner, snapshotOwner, liveRegistered, snapshotRegistered, returned, observedOwner
+VARIABLES scenario, phase, liveOwner, snapshotOwner, liveRegistered, snapshotRegistered, returned, observedOwner, visible
 \* One tuple names every variable for stuttering.
-vars == <<scenario, phase, liveOwner, snapshotOwner, liveRegistered, snapshotRegistered, returned, observedOwner>>
+vars == <<scenario, phase, liveOwner, snapshotOwner, liveRegistered, snapshotRegistered, returned, observedOwner, visible>>
 \* Begin from a captured owner and no released result.
 Init == /\ scenario \in Scenarios
         /\ phase = "ready"
@@ -19,13 +19,14 @@ Init == /\ scenario \in Scenarios
         /\ liveRegistered = snapshotRegistered
         /\ returned = FALSE
         /\ observedOwner = 2
+        /\ visible = FALSE
 \* Another transaction changes ownership without changing our snapshot.
 ChangeOwner == /\ liveOwner = 0
                /\ liveOwner' = 1
-               /\ UNCHANGED <<scenario, phase, snapshotOwner, liveRegistered, snapshotRegistered, returned, observedOwner>>
+               /\ UNCHANGED <<scenario, phase, snapshotOwner, liveRegistered, snapshotRegistered, returned, observedOwner, visible>>
 \* Outside registration commits must not alter the captured view.
 ChangeRegistration == /\ liveRegistered' = ~liveRegistered
-                      /\ UNCHANGED <<scenario, phase, liveOwner, snapshotOwner, snapshotRegistered, returned, observedOwner>>
+                      /\ UNCHANGED <<scenario, phase, liveOwner, snapshotOwner, snapshotRegistered, returned, observedOwner, visible>>
 \* The ordinary read path owns authorization and live document membership.
 Readable == scenario \in {"allowed", "registered"} \/ scenario = Fault
 \* Registration is read from the same view as the document and owner.
@@ -37,6 +38,8 @@ Eligible == Readable /\ Registration
 Read == /\ phase = "ready"
         /\ phase' = "done"
         /\ returned' = Eligible
+        \* Public reads remain visible even when ownership is not registered.
+        /\ visible' = IF Fault = "visibility_registered" THEN Eligible ELSE Readable
         /\ observedOwner' = IF Eligible THEN
                 (IF Fault = "snapshot" THEN liveOwner ELSE snapshotOwner) ELSE 2
         /\ UNCHANGED <<scenario, liveOwner, snapshotOwner, liveRegistered, snapshotRegistered>>
@@ -50,4 +53,8 @@ NoUnauthorizedOwner == returned => scenario = "allowed"
 SameSnapshot == returned => observedOwner = snapshotOwner
 \* A concurrent registration or removal cannot add or hide a captured owner.
 SameRegistrationSnapshot == (phase = "done" /\ Readable) => (returned = snapshotRegistered)
+\* Read denial never exposes whether a hidden or missing document exists.
+NoUnauthorizedVisibility == visible => scenario \in {"allowed", "registered"}
+\* Unknown ownership must not be reported as failed read authorization.
+VisibilityMatchesRead == phase = "done" => visible = Readable
 =============================================================================
