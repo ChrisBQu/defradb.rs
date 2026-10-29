@@ -20,7 +20,8 @@ What must never happen:
   (`byIdentity_admits_iff`, `byIdentity_turns_away_stranger`);
 * the caller that began a transaction is turned away from it, in either mode
   (`admits_beginner`);
-* a registry that asks for no mode gets embedder mode (`default_is_byIdentity`).
+* a registry that asks for no mode lets every request in: the default must be
+  identity mode, never embedder mode (`default_is_byIdentity`).
 
 Rust anchors: `TxnOwnership` and `DbTransactionRegistry::caller` in
 `crates/db/src/txn/registry/mod.rs`, and `Table::admits` in
