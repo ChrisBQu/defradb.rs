@@ -65,7 +65,7 @@ fn only_the_context_that_began_a_transaction_reaches_it() {
 }
 
 /// An embedder registry serves every request, whatever identity it acts as
-/// (#2335), and runs each request's work as that request's own identity.
+/// and runs each request's work as that request's own identity.
 #[test]
 fn an_embedder_transaction_serves_every_identity_as_itself() {
     workers::block_on(async {
