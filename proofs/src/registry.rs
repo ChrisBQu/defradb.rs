@@ -256,6 +256,22 @@ pub const PROPERTIES: &[Property] = &[
         tiers: &[Contract],
     },
     Property {
+        family: "Peer connection observation",
+        name: "Reverse RPC reuses inbound and legacy paths; stale eviction cannot hide replacements from disconnect",
+        axis: Tla,
+        anchor: "crates/p2p/src/iroh/endpoint_streams.rs handle_incoming; endpoint_rpc.rs remember_connection, connect_with_cache and evict_connection; crates/p2p/tests/iroh/shared_connection.rs",
+        model_ref: "MC_SharedRpcConnection_{Green,Red_*}.cfg; MC_LegacyRpcCache_{Green,Red_*}.cfg; MC_RpcCacheEviction_{Green,Red_*}.cfg",
+        tiers: &[Contract],
+    },
+    Property {
+        family: "Peer connection observation",
+        name: "SharedRpc replacement identity, legacy reuse, modern preference, revoked refusal and stable-id eviction",
+        axis: Lean,
+        anchor: "crates/p2p/src/iroh/endpoint_rpc.rs remember_connection, connect_with_cache and evict_connection; endpoint_streams.rs handle_incoming",
+        model_ref: "PeerConnection.SharedRpc",
+        tiers: &[Contract],
+    },
+    Property {
         family: "Schema publication completion",
         name: "VisibleBeforeReply — committed schemas are published before their callers resume",
         axis: Tla,
@@ -1149,11 +1165,25 @@ pub const PROPERTIES: &[Property] = &[
         tiers: &[Boundary],
     },
     Property {
-        family: "Document create pipeline",
+        // Dropping an index while its backfill runs: the drop's commit takes
+        // the backfill record with it, a backfill failure is recorded only
+        // while the index is defined, entries go in pages after the
+        // definition commits, the drop retires the index's id so a new
+        // index never shares its keys, and a restart finishes an unfinished
+        // drop.
+        family: "Index drop during backfill",
+        name: "INV_NoRecordForGoneIndex / INV_NoOrphanEntries / INV_NewIndexIntact / LIVE_DropFinishes",
+        axis: Tla,
+        anchor: "crates/db/src/index/drop.rs DB::drop_index, DropIndexAttempt, DropPage, DB::remove_dropped_entries, DB::resume_index_drops; crates/db/src/index/manager/mod.rs index_id_floor; crates/db/src/index/backfill.rs BackfillPage::index, DB::backfill_index, FailBackfillAttempt, DB::resume_index_backfills",
+        model_ref: "MC_IndexDropBackfill_{Green,Red_KeepRecord,Red_BlindFail,Red_SameTxn,Red_Forget,Red_ReuseId}.cfg",
+        tiers: &[Boundary],
+    },
+    Property {
+        family: "Document write pipeline",
         name: "INV_NoStoreBeforeComposite / INV_NoMintInAttempt / INV_OneKeyPerField / INV_CommittedWhole",
         axis: Tla,
-        anchor: "crates/db/src/write/create.rs embed, identity, seed_identity, memo_identity, prepare_keys, compute, compute_many, persist; crates/db/src/write/autocommit/create.rs create_many_with_resolved_inputs, create_impl, run_create_attempt; crates/db/src/write/autocommit/batch.rs BatchMutator::create_as (with a memo); crates/db/src/write/doc.rs DbDocMutator::create_as, next_create_identity",
-        model_ref: "MC_CreatePipeline_{Green,Red_*}.cfg",
+        anchor: "crates/db/src/write/create.rs embed, identity, seed_identity, memo_identity, prepare_keys, compute, compute_many, persist; crates/db/src/write/autocommit/create.rs create_many_with_resolved_inputs, create_impl, run_create_attempt; crates/db/src/write/autocommit/batch.rs BatchMutator::create_as (with a memo); crates/db/src/write/doc.rs DbDocMutator::create_as, next_create_identity; crates/db/src/write/update.rs write_local, write_blocks; crates/db/src/write/autocommit/update.rs run_update_attempt; crates/db/src/write/autocommit/batch.rs BatchMutator::update_as (with a memo); crates/db/src/write/doc.rs DbDocMutator::update_as; crates/db/src/block/builder/write.rs build_document_blocks, encrypt_with_new_key",
+        model_ref: "MC_WritePipeline_{Green,Red_*}.cfg",
         tiers: &[Boundary],
     },
     Property {
