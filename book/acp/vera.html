@@ -36,7 +36,7 @@
             const path_to_root = "../";
             const default_light_theme = "ayu";
             const default_dark_theme = "ayu";
-            window.path_to_searchindex_js = "../searchindex-10cbb045.js";
+            window.path_to_searchindex_js = "../searchindex-f4fb5a6b.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-8198d451.js"></script>
@@ -276,9 +276,11 @@ one for each grant;</li>
 must not have expired and may expire at most <strong>600 seconds</strong> after the chain’s clock
 at execution, and the token may not outlive it. A request-bound delegation is therefore
 usable for at most ten minutes, and <code>request_delegation</code> issues none that lasts longer;</li>
-<li>the <strong>genesis identity</strong> of the deployment, which only the chain knows. The node
-checks everything else before it sends, and refuses a token bound to another command
-without sending it.</li>
+<li>the <strong>genesis identity</strong> of the deployment: the ID of its genesis block, which its
+first block names as its parent. The node checks all of this before it sends, and
+refuses a token bound to another command, or naming another genesis identity, without
+sending it. A provider that does not know the genesis identity leaves that one check to
+the chain.</li>
 </ul>
 <p>vera.rs keeps the outcome of an executed request under the actor and the operation
 identity until that identity expires. The same token sent again is answered with the
@@ -289,9 +291,21 @@ once, even when the relationship was changed in between.</p>
 gives the digest from the same bytes the node submits, so an actor inside the command is
 in the spelling the node sends. A document ID comes from the document’s content: the
 client that signs a create’s blocks (<code>ClientCreateSignatures::from_input</code>) has it before
-the node sees the write. The policy ID and the resource are the collection’s. The worker
-and the deployment are in the node’s light client status (<code>delegation</code>); the genesis
-identity is provisioned out of band, and is the parent of the deployment’s first block.</p>
+the node sees the write. The policy ID and the resource are the collection’s. The worker,
+the deployment and the genesis identity are the node’s delegation audience, in its light
+client status (<code>delegation</code>: <code>worker</code>, <code>deployment</code> and <code>genesis_id</code>, <code>0x</code> and 64
+hexadecimal digits), from <code>RemotePolicies::light_client_status</code> in process or
+<code>GET /api/v0/acp/status</code>. <code>RequestBinding::for_command</code> builds the binding from that
+audience, a command and a nonce, and <code>request_delegation</code> signs it.</p>
+<p>The vera.rs provider learns the genesis identity from its light client: it reads the
+deployment’s first block and checks its finality against the trusted consensus key, the
+trust every other read rests on, and takes that block’s parent. An embedded deployment
+is read the same way through its in-process transport, so a client of a node that serves
+no JSON-RPC learns it from the node all the same. Until the first block is proven (the
+node does not serve it, or did not answer yet) the audience has no <code>genesis_id</code>: the
+provider asks again at each new height, a request-bound delegation cannot be built from
+the audience, and one built otherwise is checked without it, by the chain only. A
+provider that is not vera.rs reports none.</p>
 <p>Where a one-request delegation is taken, and where not:</p>
 <ul>
 <li><strong>Taken</strong> beside a verified write
@@ -310,6 +324,91 @@ sent: one that expired since the write sends nothing.</li>
 </ul>
 <p>A command made as the write’s signer is signed by the node’s worker; the token is the
 signer’s authority for it, and the chain records the signer, not the node, as owner.</p>
+<h2 id="replicated-documents"><a class="header" href="#replicated-documents">Replicated documents</a></h2>
+<p>A replicated change merges on a node only if its verified signer holds the permission
+on that node’s provider when it merges: <code>delete</code> for a deletion, <code>update</code> otherwise.
+The document’s creator gets no exception. A refused change is parked rather than
+rejected for good (see “Parked refusals” below); only an unsigned change’s refusal is
+final. Under a remote provider every frame, the genesis included,
+is put back to be tried again (a retryable skip) until the provider holds the document
+and the node can read it. The node counts as able to read when its identity or its
+provider’s own actor (<code>DocumentACP::own_actor</code>) can; both are the same node.</p>
+<p><strong>A creator on another deployment.</strong> Such a creator cannot write on this node’s
+provider, so nobody would register the document here and it would never merge. An
+embedder can list collections whose replicated documents the receiving node registers
+itself:</p>
+<pre class="playground"><code class="language-rust"><span class="boring">#![allow(unused)]
+</span><span class="boring">fn main() {
+</span>let replicas = defra_node::ReplicaRegistration::new(["Note"], Arc::new(MyOwnership));
+let node = Node::builder().with_replica_registration(replicas) /* ... */;
+<span class="boring">}</span></code></pre>
+<p><code>ReplicaOwnership::is_own_actor</code> says whether a DID is one of this deployment’s own
+actors, and <code>creator_grants</code> names the relationships to grant on a document the node
+registers. They must give the creator <code>update</code> and <code>delete</code> under the collection’s
+policy (for example <code>writer</code> for the creator), and read for the deployment’s other
+nodes if they are to merge the document too. The setting is off by default, and has no
+effect on an unlisted collection or under a local provider.</p>
+<p>For a listed collection, a genesis whose verified signer is not one of the
+deployment’s own actors, of a document the provider does not hold, merges and records
+in the same transaction:</p>
+<ul>
+<li>an owed registration of the document as the provider’s own actor, sent with the
+node’s key;</li>
+<li>the embedder’s grants, staged as owed relationship changes made by that actor;</li>
+<li>a marker that ties them together as one unit.</li>
+</ul>
+<p>They are submitted after the commit, registration first, and again whenever a change to
+the document is put back while something is still owed. A genesis signed by one of the
+deployment’s own actors is never registered by a receiver: it waits for its creator’s
+own registration, as before.</p>
+<p>While the unit is owed:</p>
+<ul>
+<li>a change by anyone but the registering actor is put back while the registration
+itself is owed, because the provider has not seen it;</li>
+<li>a change by the creator is also put back while a grant of the unit is still owed.</li>
+</ul>
+<p>A grant the provider refuses is not “owed”: from then on the provider decides the
+creator.</p>
+<p><strong>Two receivers of one deployment.</strong> The provider takes the first registration. The
+second receiver is told the document is already registered. Its grants, which only the
+owner can give, are discarded with a note that the actor’s report shows. It then waits
+for the owner’s grants: the creator’s changes are put back there until the provider
+lets the creator update, and the marker is then dropped. A receiver that first sees the
+genesis after another registered it, while the creator cannot write yet, waits the same
+way. The creator is never refused on either node while the owner’s unit is owed. If the
+owner never grants it, the creator’s changes keep being put back on the other node and
+nothing is quarantined.</p>
+<p><strong>Deletes.</strong> A remote provider keeps the object when its document is deleted: a merged
+delete never unregisters, and a local delete leaves a registration that is still owed
+in place, so it lands. Otherwise the delete and the changes before it would wait for
+ever on every node that waits for the provider to hold the document. A document whose
+creator lost its last grant stays registered and refuses that creator.</p>
+<p><strong>Parked refusals.</strong> Under a remote provider, a signed change whose signer the
+provider refuses is parked by its document, because a later grant can change the
+answer. A change whose history holds a parked one is parked with it: it cannot merge
+before the change it builds on. A change on another branch is not held up.</p>
+<p>A parked change is tried again through the normal merge path, with a fresh decision:</p>
+<ul>
+<li>when this node changes the document’s relationships on the provider (a relationship
+set or deleted through the node, or an owed change or registration it settles);</li>
+<li>when the refused change itself merges, for what waits behind it;</li>
+<li>on the sweep, every 60 seconds and for at most 256 documents a pass. The sweep covers
+a grant made by another node of the deployment, which this node is not told about.</li>
+</ul>
+<p>The index holds at most 1,024 parked changes per document and 16,384 per node. It is
+in memory. A change past either bound, or parked before a restart, is not indexed: it
+stays unmerged and the replication layer tries it again on its own retry clock, as
+every retryable skip is. A revoked writer’s later change is refused and parked. It
+merges only if the writer is granted again.</p>
+<p><strong>Limits.</strong> Every merged change asks the provider for the document’s registration, the
+node’s read and the signer’s permission. These decisions are cached against the light
+client’s verified state, so a new chain revision misses the cache. A change parked on
+a grant that never comes is tried again by every sweep until a restart drops it from
+the index.</p>
+<p>The models are <code>proofs/tla/ReplicaRegistration.tla</code> and <code>proofs/tla/ParkedMerge.tla</code>;
+the gate’s classification, parked refusals included, is proved in
+<code>proofs/lean/ReplicaGate.lean</code>, and the bounded index parked changes wait in in
+<code>proofs/lean/DeferredMerges.lean</code>.</p>
 <h2 id="why-it-exists"><a class="header" href="#why-it-exists">Why it exists</a></h2>
 <p>Some deployments need authorization decisions that no single database node can make or
 forge: multi-party deployments where the policy is shared infrastructure, audits that
